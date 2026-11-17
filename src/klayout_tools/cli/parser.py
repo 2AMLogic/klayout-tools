@@ -3255,8 +3255,8 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     deck_parser = subparsers.add_parser(
         "deck",
         help="identify a built-in rule deck, resolve one to its release, "
-        "report the installed build's own deck coverage, or list the rule "
-        "values a deck enforces",
+        "report the installed build's own deck coverage, list the rule "
+        "values a deck enforces, or diff two deck revisions",
         description=(
             "Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, "
             "sg13g2). `hash` reports the `provenance.deck.content_hash` this "
@@ -3274,9 +3274,13 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
             "requires -- every rule's id, description, and threshold in "
             "micrometres, with the deck's content hash -- so pre-layout "
             "arithmetic can read a constant from the installed deck instead "
-            "of transcribing it out of a deck comment. Resolve-only: this "
-            "does not fetch, check out, or build a historical revision -- "
-            "install the reported version yourself to reproduce against it."
+            "of transcribing it out of a deck comment. `diff` compares two "
+            "saved `deck rules` reports rule by rule, so a pin bump can be "
+            "answered (added / removed / re-thresholded / enforcement "
+            "changed) offline instead of by hand-diffing two installs. "
+            "Resolve-only: this does not fetch, check out, or build a "
+            "historical revision -- install the reported version yourself "
+            "to reproduce against it."
         ),
     )
     deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
@@ -3477,6 +3481,73 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(devices_parser)
     devices_parser.set_defaults(func=deck_cmd.run_devices)
+
+    diff_parser = deck_sub.add_parser(
+        "diff",
+        help="compare two saved `deck rules` reports (or one against the "
+        "installed build) rule by rule: added / removed / changed rules, "
+        "enforcement moves, deck-level changes",
+        description=(
+            "Compare two saved `klt deck rules --format json` reports rule "
+            "by rule -- the offline answer to 'which rules changed, and in "
+            "which direction?' on every pin bump of "
+            "provenance.deck.content_hash (issue #5680). Each side is a "
+            "path to a saved report, or the literal `installed` for this "
+            "build's own table, so the common check needs one install: "
+            "`uvx --from klayout-tools==<old> klt deck rules --deck sky130 "
+            "--format json > old.json` then `klt deck diff --from old.json "
+            "--to installed`. Rules are matched by id, never by array "
+            "position (the rule table is in deck declaration order, not "
+            "sorted, so reordering is not a change). Report categories: "
+            "`added`/`removed` (ids on exactly one side), `changed` (only "
+            "the fields that moved, each with from/to), "
+            "`enforcement_changed` (a rule moving between `rules` and "
+            "`unmodeled_rules` in either direction -- the deck changed its "
+            "mind vs was never checked, never reported as added/removed), "
+            "`deck_level_changed` (nominal_dbu_um -- it rescales every "
+            "value_dbu -- marker_blind_layers, layer_table, "
+            "ambiguous_names, unresolved) and `not_comparable` (fields "
+            "only one side carries -- the expected cross-schema_version "
+            "hazard, listed rather than read as a change). Resolve-only "
+            "like every deck verb: this never fetches, checks out, or "
+            "installs the other revision -- save its report with uvx "
+            "yourself. Exit 0 when the sides are identical, 3 when any "
+            "difference is reported (report still on stdout, the `klt drc` "
+            "verdict-exit precedent -- gate a pin bump on the bare exit "
+            "code), 1 for an unreadable report or two different decks."
+        ),
+    )
+    diff_parser.add_argument(
+        "--from",
+        dest="from_side",
+        required=True,
+        help=(
+            "path to a saved `klt deck rules --format json` report (the "
+            "older side), or the literal 'installed' for this build's own "
+            "table"
+        ),
+    )
+    diff_parser.add_argument(
+        "--to",
+        dest="to_side",
+        required=True,
+        help=(
+            "path to a saved `klt deck rules --format json` report (the "
+            "newer side), or the literal 'installed' for this build's own "
+            "table"
+        ),
+    )
+    diff_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "deck name to resolve an 'installed' side for; defaults to the "
+            "other side's own deck field (only needed when both sides are "
+            "'installed')"
+        ),
+    )
+    _add_format_arg(diff_parser)
+    diff_parser.set_defaults(func=deck_cmd.run_diff)
 
 
 def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:

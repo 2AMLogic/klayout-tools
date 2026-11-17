@@ -7,8 +7,9 @@ or by `(name, version)`, against klayout-tools' own generated release
 history, issue #623), report this install's own deck content hash,
 structural device-class coverage, and release status directly, with no
 input layout needed (`info`, issue #1209), list the rule values a deck
-enforces (`rules`, issue #2308), or list the drawn-layer predicate set each
-of a deck's device classes is recognised by (`devices`, issue #2365).
+enforces (`rules`, issue #2308), list the drawn-layer predicate set each
+of a deck's device classes is recognised by (`devices`, issue #2365), or
+compare two deck revisions rule by rule (`diff`, issue #5680).
 
 ```
 klt deck hash    --deck <name>                              [--format text|json]
@@ -18,16 +19,20 @@ klt deck info    [--deck <name>]                             [--format text|json
 klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
 klt deck devices --deck <name> [--class <name>]              [--format text|json]
 klt deck path    --deck asap7                                [--format text|json]
+klt deck diff    --from <a.json|installed> --to <b.json|installed>
+                                                 [--deck <name>] [--format text|json]
 ```
 
-The five are complements: `hash` answers "which deck revision will this
+The verbs are complements: `hash` answers "which deck revision will this
 build use?" (issue #1202), `resolve` answers "which release shipped that
 revision?" (issue #623), `info` answers "what does this install
 actually recognise, right now, with no input layout at all?" (issue #1209),
 `rules` answers "what numbers does this deck actually enforce?" (issue
 #2308) — the pre-layout question `klt drc`, which needs a stream, cannot
-answer — and `devices` answers "what must a layout **draw** for one of those
-device classes to be recognised?" (issue #2365).
+answer — `devices` answers "what must a layout **draw** for one of those
+device classes to be recognised?" (issue #2365), and `diff` answers "which
+rules changed between two revisions, and in which direction?" (issue
+#5680).
 
 ## `klt deck hash`
 
@@ -647,6 +652,114 @@ class this deck does not declare":
   }
 }
 ```
+
+## `klt deck diff`
+
+Compare two saved `klt deck rules --format json` reports rule by rule —
+the offline answer to the question every pin bump of
+`provenance.deck.content_hash` raises: **which rules changed, and in which
+direction — added, removed, or re-thresholded?** (issue #5680). That
+direction decides whether a new DRC violation means "the layout was always
+wrong and the old deck did not check it" or "the deck changed its mind" —
+two findings with opposite responses, which a bare hash mismatch cannot
+distinguish.
+
+```
+klt deck diff --from <a.json> --to <b.json>            [--deck <name>] [--format text|json]
+klt deck diff --from <a.json> --to installed           [--format text|json]
+```
+
+Each side is a **path to a saved report**, or the literal `installed` for
+this build's own rule table — so the common check needs one install, not
+two:
+
+```bash
+# save the old release's rule table, then diff it against this build
+uvx --from "klayout-tools==0.6.0" klt deck rules --deck gf180mcu --format json > a.json
+klt deck diff --from a.json --to installed --format json
+echo $?   # 0 = identical, 3 = different: a CI pin-bump gate is a bare exit-code check
+```
+
+Like every deck verb this is resolve-only: it never fetches, checks out or
+installs the other revision (see
+[Resolve-only, not fetch-or-build](#resolve-only-not-fetch-or-build)) —
+save the other side's report with `uvx` yourself. No network access and no
+git history are required at runtime; the comparison is a pure function of
+the two reports.
+
+Rules are matched by `id`, never by array position: the rule table is in
+deck declaration order (not sorted), so reordering a deck module is not a
+change, and a textual `diff` of two reports is order-sensitive noise.
+
+### Report categories
+
+| Category | Meaning |
+|----------|---------|
+| `added` | rule ids present on exactly one side (of either side's `rules` or `unmodeled_rules`) |
+| `removed` | ids present only on the `--from` side |
+| `changed` | ids enforced on both sides; per id, **only the fields that actually moved**, each with its `from`/`to` value. Every per-rule field `deck rules` emits is compared: `description`, `check`, `layers`, `layer_refs`, `scope`, `value_um`, `value_dbu`, `limits`, `provenance` |
+| `enforcement_changed` | ids that moved between `rules` and `unmodeled_rules` in either direction (`from`/`to`: `enforced`/`unmodeled`). This is its own category deliberately: a rule the deck *stopped* enforcing must not read as `removed` — that would be indistinguishable from a deletion — and a rule it *started* enforcing must not read as `added`. It is the coverage-change signal: "the deck changed its mind" vs "was never checked" |
+| `deck_level_changed` | envelope-level fields that moved: `nominal_dbu_um` (it rescales every `value_dbu`), `marker_blind_layers`, `layer_table`, `ambiguous_names`, `unresolved` |
+| `not_comparable` | fields present on only one side — the expected hazard for a cross-revision tool, since a newer release may carry envelope or per-rule fields an older report predates. Listed (envelope fields, and per-rule `{id, field}` entries), **never** read as a rule change |
+
+Every category key is always present (an empty list/dict when empty), so
+"no differences" can be told apart from "never compared". `identity`
+records each side's `deck`, `content_hash` and `schema_version`; when both
+sides carry the same `content_hash`, `identity.same_revision` is `true` —
+reported explicitly rather than left to be inferred from an empty diff.
+`summary` carries the per-category counts plus the enforced and unmodeled
+rule counts on each side (the coverage denominator's meaning follows
+`klt deck info`/`klt drc` coverage: enforced rules of the deck).
+
+```json
+{
+  "schema_version": 1,
+  "status": "different",
+  "identity": {
+    "from": {"deck": "sky130", "content_hash": "sha256:…", "schema_version": 1},
+    "to": {"deck": "sky130", "content_hash": "sha256:…", "schema_version": 1},
+    "same_revision": false
+  },
+  "summary": {
+    "added": 1, "removed": 0, "changed": 2, "enforcement_changed": 1,
+    "deck_level_changed": 0, "not_comparable": 0,
+    "rules_enforced": {"from": 153, "to": 154},
+    "unmodeled_rules": {"from": 347, "to": 346},
+    "identical": false
+  },
+  "added": ["poly.width.2"],
+  "removed": [],
+  "changed": [
+    {"id": "poly.width.1", "fields": {"value_um": {"from": 0.15, "to": 0.3}}}
+  ],
+  "enforcement_changed": [
+    {"id": "poly.space.1", "from": "enforced", "to": "unmodeled"}
+  ],
+  "deck_level_changed": {},
+  "not_comparable": {"envelope_fields": [], "rule_fields": []}
+}
+```
+
+### Identity guards and exit codes
+
+- The two sides' `deck` fields must match: comparing `sky130` to `gf180mcu`
+  is a clean error (exit 1, standard envelope), not a diff reporting every
+  rule as changed.
+- An unreadable path, invalid JSON, or an input that is not a `deck rules`
+  report is exit 1 with the offending side named in `error.message`.
+- An `installed` side takes its deck name from `--deck` when given, else
+  from the other side's own `deck` field — so the one-install recipe above
+  needs no flag. Only `--from installed --to installed` (a trivially empty
+  diff) needs `--deck` to say which deck.
+
+| Exit | Meaning |
+|------|---------|
+| `0` | identical — every category empty |
+| `3` | different — any category non-empty, `not_comparable` included; the report is still on stdout (the `klt drc` verdict-exit precedent, [docs/json-contract.md](../json-contract.md#exit-codes)) |
+| `1` | application error — deck mismatch, unreadable/invalid input, unknown deck for an `installed` side |
+
+`status` is the verdict of record (`"identical"`/`"different"`); the exit
+code is the shortcut.
 
 ## The generated history table
 
