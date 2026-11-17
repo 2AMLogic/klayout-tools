@@ -27,6 +27,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   file is reported as missing. Additive: merges that used to fail now
   succeed; the merged output, template union, duplicate-cell check and cache
   paths are unchanged.
+- **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
+  changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
+  pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
+  reference pin with no layout counterpart, i.e. an *unlabelled* layout pin,
+  the shape a runset global like IHP sg13g2's `ignore_top_ports_mismatch`
+  exists to accept — is now disclosed with `severity: "warning"` instead of
+  `error`, so it no longer flips the wrapper's verdict to `mismatch`
+  (exit 3) on a compare the wrapped runset itself reports as PASS. The
+  finding stays listed in `mismatches[]` and `category_counts`, but
+  `error_count`/`category_error_counts` and the `status` now agree with the
+  engine's own grade; `counts.pins` still reports structural pin presence,
+  and a pin pair the comparer itself graded otherwise remains an error.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend
@@ -66,6 +78,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   `noise` now fails validation with the usual "alternative forms of a
   measurement" error instead of running; every other refusal and message is
   byte-identical. `klt sim`'s `schema_version` is unaffected.
+- **`klt sim`: an off-host report's `environment.engine_build` now describes
+  the worker, not the submitting client** (#5566, 2026-11-13): on an
+  `engine_host: "worker"` report (`--backend batch`/`remote`),
+  `environment.engine_version` has always been the worker's, while
+  `engine_build` was the submitter's own `ngspice --version` probe — so one
+  report could pair a worker-sourced version with a client-sourced banner
+  naming a different ngspice, and a consumer recording both emitted
+  self-contradicting simulator provenance. `engine_build` is now taken from
+  `environment.remote.worker_environment.simulator.version_banner` under the
+  same rule `ngspice_binary` uses (capture `"ok"`; a sharded run only when
+  every member agrees), with `binary_sha256: null` because the worker capture
+  carries no digest, and `probe`/`reason` explaining any missing banner rather
+  than falling back to the client's. The client's probe is kept verbatim under
+  the new `environment.client_engine_build`, present only on off-host reports.
+  This is the same correction #3110 made for `ngspice_binary` and is treated
+  as a bug fix against the already-documented `engine_host` contract, not a
+  new one — but it **changes what `environment.engine_build` means on an
+  off-host report**: a consumer that read it as the client's build must read
+  `client_engine_build` instead. Keys are otherwise unchanged;
+  `worker_environment.engine_build_comparison` still compares the worker's
+  banner with the client's probe, `engine_host: "local"` reports are
+  identical, `engine: "xyce"` keeps `engine_build: null`, and deck-list
+  reports gain no field. No `schema_version` bump (additive key; the
+  re-pointed field is a correction).
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
   (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
   is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
