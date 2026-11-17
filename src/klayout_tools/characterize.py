@@ -1,13 +1,13 @@
-"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of
-one standard cell at one PVT corner (issue #2502, split from #2498).
+"""Define ``klt characterize``: SPICE-driven NLDM timing characterization of one
+standard cell (or a batch) at one PVT corner (issue #2502, split from #2498).
 
 ``klt`` could already *consume* a Liberty model from three verbs
 (``synthesize``, ``place-and-route``, ``post_route_sta``, all through
 ``pdk_cells.resolve_liberty_for_cell_library``) and ``native/statime`` could
-*parse* one, but nothing in the tree produced one -- characterization was
-the last stage of the cell flow with no open answer. This module is that
-answer's first increment: one cell, one corner, delay and transition time
-only.
+*parse* one, but nothing in the tree produced one -- characterization was the
+last stage of the cell flow with no open answer. This module is that answer:
+one corner, delay, transition time, internal energy and -- for a sequential
+cell -- clock/enable-to-output and setup/hold constraint arcs.
 
 Pure library: :func:`run_characterize` returns plain Python data (a
 JSON-serialisable ``dict``) and never prints -- serialisation and
@@ -26,18 +26,18 @@ hand-rolled-simulation-grid pattern ``klt sim``'s corner matrix exists to
 replace; as written, a 7x7 grid of a two-input cell is a single-corner,
 single-unit ``local``-backend run.
 
-Scope of this increment -- what the emitted ``.lib`` deliberately does
-**not** contain (issue #2503 owns the first two):
+Scope -- what the emitted ``.lib`` deliberately does **not** contain:
 
-- no power/energy tables (``rise_power``/``fall_power``/``leakage_power``);
-- one cell per invocation (no multi-cell batch mode), and one corner per
-  invocation (no multi-corner ``.lib``);
-- no sequential-cell constraint arcs (``setup``/``hold``/``recovery``): a
-  cell whose output ``function`` references anything that is not a declared
-  input pin is refused with a named error, never characterized as if it were
-  combinational (see :mod:`klayout_tools.characterize_arcs`);
-- no ``when``-qualified arc/power splitting, no ``bus``/``bundle`` pins, no
-  input-pin (hidden) internal power.
+- one corner per invocation (no multi-corner ``.lib``);
+- no ``recovery``/``removal`` or async set/reset arcs, no ``ff``/``latch``
+  **state** groups, no latch time borrowing or min-pulse-width;
+- no ``when``-qualified splitting, ``bus``/``bundle`` pins or hidden input-pin power.
+
+Power/energy tables (issue #2503) and batch mode have since shipped. A sequential cell
+is characterized when it declares ``cell.clock_pin`` (edge-triggered: clock-to-output,
+issue #4755, and setup/hold for ``cell.constrained_pins``, issue #4756) or
+``cell.enable_pin`` (latch: transparent, enable-to-output and setup/hold arcs, issue
+#5521); with neither it is refused by name (see :mod:`klayout_tools.characterize_arcs`).
 
 Input **pin capacitance is measured** (issue #2512) -- one extra probe
 instance per input pin on the same deck, emitted as the pin's
@@ -102,8 +102,7 @@ from .characterize_sequential import (
 from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
 
-#: Version of this command's JSON response shape (per-command, per
-#: ``docs/json-contract.md``).
+#: Version of this command's JSON response shape (per ``docs/json-contract.md``).
 SCHEMA_VERSION = 1
 
 #: Name of the native extension whose Liberty reader the round-trip check
@@ -2131,6 +2130,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             "runtime_s": corner_entry["runtime_s"],
             "engine": environment.get("engine"),
             "engine_version": environment.get("engine_version"),
+            "engine_build": environment.get("engine_build"),
             "window": {
                 "settle_ns": window["rise_start_ns"],
                 "tran_step_ns": window["step_ns"],

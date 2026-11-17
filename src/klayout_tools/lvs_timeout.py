@@ -119,7 +119,7 @@ class heartbeat:
 def _child(conn: Any, run: Callable[[], bool]) -> None:
     try:
         conn.send(("ok", run()))
-    except BaseException as exc:  # noqa: BLE001 - relayed to the parent
+    except BaseException as exc:  # - relayed to the parent
         conn.send(("error", f"{type(exc).__name__}: {exc}"))
     finally:
         conn.close()

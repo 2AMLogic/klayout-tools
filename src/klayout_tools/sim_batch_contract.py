@@ -135,6 +135,32 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # 0380f2a05 corners.temperature_param, after v0.7.0; first in v0.8.0
     # (`git tag --contains 0380f2a05`).
     "corners.temperature_param": "0.8.0",
+    # 8d03a5bcb corners.options solver-tolerance axis (#3125); first in
+    # v0.8.0 (`git tag --contains 8d03a5bcb`). An older runner ignores the
+    # axis and runs every rung at the default tolerance; the post-run
+    # options_unsupported_worker echo check stays (#5645).
+    "corners.options": "0.8.0",
+    # 5c3247e18 options.nodeset per-point initial-guess hints (#3036); first
+    # in v0.8.0 (`git tag --contains 5c3247e18`). An older runner ignores
+    # the hints and solves without them; the post-run
+    # nodeset_unsupported_worker echo check stays (#5645).
+    "options.nodeset": "0.8.0",
+    # f281896c1 options.initial_conditions .ic/uic start states (#3881);
+    # first in v0.8.0 (`git tag --contains f281896c1`). An older runner
+    # ignores the start state; the post-run
+    # initial_conditions_unsupported_worker echo check stays (#5645).
+    "options.initial_conditions": "0.8.0",
+    # cb9ee89dd analysis_overrides per-corner analysis windows (#4970);
+    # first in v0.9.1 (`git tag --contains cb9ee89dd`). An older runner
+    # ignores the rules and runs the request's own analysis.args everywhere;
+    # the post-run analysis_overrides_unsupported_worker echo check stays
+    # (#5645).
+    "analysis_overrides": "0.9.1",
+    # c00898fc5 analysis.op_check metastable-op detection (#5077); first in
+    # v0.9.2 (`git tag --contains c00898fc5` -> v0.9.2 only). An older
+    # runner grades the corner without the metastability check; the post-run
+    # op_check_unsupported_worker echo check stays (#5645).
+    "analysis.op_check": "0.9.2",
     # 8296828c options.osdi_preload (#2534); first in v0.7.0.
     "options.osdi_preload": "0.7.0",
     # 07440b8f options.stage_model_inputs (#2668); first in v0.7.0.
@@ -262,6 +288,25 @@ JOB_CEILING_BASIS = "conservative_serial_bound"
 
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0
+
+#: Timeout for the **one** ``aws s3 cp --recursive`` that uploads a job's
+#: whole ``inputs/`` tree (issue #5539). Before #5539 each input had
+#: :data:`_BATCH_AWS_TIMEOUT_S` to itself; one call now covers the whole
+#: set, so the ceiling is doubled rather than kept at the per-object value.
+#:
+#: Why doubling, rather than ``inputs x 900 s``: the per-object cost that
+#: made the old loop slow was request latency and one ``aws`` process
+#: spawn each, both of which the single call pays once, and
+#: ``cp --recursive`` transfers concurrently (the CLI's own
+#: ``max_concurrent_requests``, 10 by default), so aggregate throughput is
+#: no worse than the serial loop's. The ceiling is a runaway guard, not a
+#: budget, and the payloads it has to cover are small: a deck grid's whole
+#: staged closure is a few MB (object *count*, not bytes, is what scaled),
+#: and the biggest single object any caller ships -- the source tarball of
+#: ``klt netlist`` / ``klt extract`` / ``klt signoff`` / ``klt
+#: place-and-route`` -- had 900 s to itself before and now has 1800 s,
+#: shared with at most one small request document.
+_BATCH_INPUTS_TIMEOUT_S = 1800.0
 
 #: Per-invocation timeout for one ``batch-fleet-provision.sh launch`` call.
 #: The script's own capacity-shortfall retry loop

@@ -145,6 +145,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from . import extract_dead_metal as _dead_metal
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
@@ -1590,6 +1591,7 @@ def run_extract(
     no_netlist: bool = False,
     substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
+    omit_dead_metal: bool = False,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -2787,6 +2789,10 @@ def run_extract(
     ``docs/cli/extract.md``'s "Dead metal" section. Always a list, empty when
     every metal/via shape joins a net.
 
+    ``omit_dead_metal`` (``--omit-dead-metal``, issue #5545) emits that list
+    as ``[]`` with ``dead_metal_omitted: True``, keeping the always-present
+    ``dead_metal_summary``. See :mod:`klayout_tools.extract_dead_metal`.
+
     ``matched_device_groups`` (issue #1018) is one entry per ``--matched-
     group`` declaration, in the order given -- see ``matched_device_groups``
     above ``run_extract``'s own parameter docstring for the full contract.
@@ -3024,6 +3030,9 @@ def run_extract(
         dotted_renames_out=dotted_renames,
     )
 
+    dead_metal_summary = _dead_metal.summarize_dead_metal(dead_metal)
+    dead_metal = _dead_metal.drop_dead_metal_rows(dead_metal, warnings, omit_dead_metal)
+
     # `--critical-net-pattern`/`--parasitics-net-pattern` (issue #2974): the
     # selectors were resolved against the extracted nets inside the call above.
     critical_nets_set, parasitics_nets_set = _adopt_resolved_net_selectors(
@@ -3244,6 +3253,8 @@ def run_extract(
         black_box_regions=black_box_regions,
         dbu_um=dbu_um,
         dead_metal=dead_metal,
+        dead_metal_omitted=omit_dead_metal,
+        dead_metal_summary=dead_metal_summary,
         deck=deck,
         deck_name=deck_name,
         deck_options=deck_options,
@@ -4021,8 +4032,9 @@ def rerun_extract_report(
     report -- while a block without the separate echoes, i.e. one produced
     by an earlier build of this unreleased feature or hand-edited, replays
     its ``declared`` union as ``--pins`` alone) -- when the committed report
-    carries a ``pin_renames`` block,
-    writing the fresh netlist to a private temp directory deleted afterward
+    carries a ``pin_renames`` block, plus ``--omit-dead-metal`` (issue #5545,
+    from its own ``dead_metal_omitted`` echo) -- writing the fresh netlist
+    to a private temp directory deleted afterward
     (issue #3061: the committed ``netlist_path`` file is never modified;
     ``netlist_sha256`` is still computed, and ``fresh.netlist_path`` reports
     the committed path so that field is not an incidental path difference).
@@ -4169,6 +4181,9 @@ def rerun_extract_report(
             tie_declared_pins=isinstance(
                 (committed.get("pin_renames") or {}).get("ties"), list
             ),
+            # Issue #5545: a flagged report must rerun flagged, else it
+            # drifts on its own omission. Absent/non-`true` runs unflagged.
+            omit_dead_metal=bool(committed.get("dead_metal_omitted")),
         )
     finally:
         if scratch_dir is not None:
@@ -10188,22 +10203,7 @@ def _extract_netlist(
         ],
     )
     if dead_metal:
-        cluster_word = "cluster" if len(dead_metal) == 1 else "clusters"
-        total_shapes = sum(entry["shapes"] for entry in dead_metal)
-        shape_word = "shape" if total_shapes == 1 else "shapes"
-        layers_str = ", ".join(
-            sorted({f"{entry['layer']}/{entry['datatype']}" for entry in dead_metal})
-        )
-        warnings.append(
-            f"{len(dead_metal)} routing-stack {cluster_word} ({total_shapes} "
-            f"{shape_word} on {layers_str}) join no extracted net -- no via "
-            "lands on this geometry and no same-layer wiring touches it, so "
-            "it is invisible to the extracted netlist and to every downstream "
-            "`klt lvs`/`klt sim` view; deliberate dead metal (artwork, fill) "
-            "is expected here, unexplained dead metal usually means the "
-            "connection you intended is missing -- see dead_metal[] for the "
-            "per-cluster layer/bbox/shape count."
-        )
+        warnings.append(_dead_metal.dead_metal_warning(dead_metal, omitted=False))
 
     # Parasitics geometry must be read *before* `l2n` (which owns the shape
     # database `polygons_of_net` reads) is garbage-collected below, so compute
@@ -10220,39 +10220,39 @@ def _extract_netlist(
             critical_nets, parasitics_nets = net_selectors.resolve(
                 circuit, deck, critical_nets, parasitics_nets
             )
-        parasitic_nets = _compute_parasitics(
-            l2n,
-            circuit,
-            layout.dbu,
-            deck,
-            parasitics_deck,
-            layer_index,
-            metal_index,
-            layout=layout,
-            top_cell=top_cell,
-            critical_nets=critical_nets,
-            parasitics_nets=parasitics_nets,
-            parasitics_top_cell_only=parasitics_top_cell_only,
-            resistance_graph=resistance_graph,
-            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            # Per-fragment square counting (issue #2359): `via_index` lets
-            # the parasitics pass read each net's own via landings back
-            # through `polygons_of_net`, so it can tell where current enters
-            # and leaves a conductor fragment. The device-interface half of
-            # that question is answered from the *drawn* layers, which
-            # `_compute_parasitics` re-reads off `layout`/`top_cell` itself
-            # -- deliberately not from this function's `poly`/`active`
-            # locals, which by this point have had the recognised device
-            # geometry (resistor bodies, gates) cut out of them and so no
-            # longer show where a conductor abuts a device at all.
-            via_index=via_index,
-            # Issue #3021: recognised MiM top-plate footprints, so the
-            # vertical-overlap pass does not charge coupling on top of the
-            # device's own capacitance inside them.
-            capacitor_top_regions=_recognised_capacitor_top_regions(
-                layout, top_cell, deck
-            ),
-        )
+        with stage("parasitics_compute"):
+            parasitic_nets = _compute_parasitics(
+                l2n,
+                circuit,
+                layout.dbu,
+                deck,
+                parasitics_deck,
+                layer_index,
+                metal_index,
+                layout=layout,
+                top_cell=top_cell,
+                critical_nets=critical_nets,
+                parasitics_nets=parasitics_nets,
+                parasitics_top_cell_only=parasitics_top_cell_only,
+                resistance_graph=resistance_graph,
+                resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                # Per-fragment square counting (issue #2359): `via_index` lets
+                # the parasitics pass read each net's own via landings back
+                # through `polygons_of_net`, so it can tell where current enters
+                # and leaves a conductor fragment. The device-interface half is
+                # answered from the *drawn* layers, which `_compute_parasitics`
+                # re-reads off `layout`/`top_cell` itself -- deliberately not
+                # from this function's `poly`/`active` locals, whose recognised
+                # device geometry (resistor bodies, gates) is already cut out,
+                # so they no longer show where a conductor abuts a device.
+                via_index=via_index,
+                # Issue #3021: recognised MiM top-plate footprints, so the
+                # vertical-overlap pass does not charge coupling on top of the
+                # device's own capacitance inside them.
+                capacitor_top_regions=_recognised_capacitor_top_regions(
+                    layout, top_cell, deck
+                ),
+            )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as
         # `parasitic_nets` immediately above -- `polygons_of_net` is a live

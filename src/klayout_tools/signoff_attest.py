@@ -67,12 +67,8 @@ from typing import Any
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_int, is_number
 from ._provenance import sha256_file
-from ._report_verify import (
-    VOLATILE_PROVENANCE_PATHS,
-    build_rerun_result,
-    load_committed_report,
-)
-from .build_identity import build_version
+from ._report_verify import load_committed_report
+from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
@@ -85,7 +81,10 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_drift import drift_result
 from .signoff_attest_input import input_binding
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -166,11 +165,6 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
-
-#: Volatile envelope paths ``--check`` excludes from drift: the producing
-#: build's version strings. A `klt` upgrade that attests byte-identical
-#: inputs with identical outcomes is not evidence drift.
-VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
 
 
 class AttestationError(SignoffError):
@@ -325,13 +319,17 @@ def _path_list(
 COMMAND_TIMEOUT_CEILING_S = 21600
 
 
-def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
+def _command_spec(
+    raw: Any, field: str, root: str, *, documented_argv: bool = False
+) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
     ``argv`` is run directly (never through a shell) with ``cwd`` resolved
     against the repository root. Optional ``local_only: true`` marks a check
     that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
-    it, ``--attest --check`` skips it and carries the committed outcome."""
+    it, ``--attest --check`` skips it and carries the committed outcome.
+    ``documented_argv`` enables the item-9 ``documented_argv`` disclosure
+    (:func:`item9.documented_spec`); elsewhere the key is refused."""
     if not isinstance(raw, Mapping):
         raise AttestationError(f"'{field}' must be an object with an 'argv' list")
     argv = raw.get("argv")
@@ -368,6 +366,7 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
                 f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
             )
         spec["timeout_s"] = timeout_s
+    spec.update(item9.documented_spec(raw, field, documented_argv))
     return spec
 
 
@@ -409,8 +408,11 @@ def _validated_inventory(
         inventory, bench_specs = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -698,17 +700,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 
 
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
-
-
 def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     """Compare the derived file and each recorded source against the digests
     the inventory recorded; no command is run. ``mismatches`` names every
@@ -837,6 +828,7 @@ def _command_check(
         check["error"] = error
     if spec.get("local_only"):
         check["local_only"] = True
+    check.update(item9.documented_fields(spec))
     return check
 
 
@@ -849,7 +841,8 @@ def _skipped_check(
     """A ``local_only`` command that ``--check`` did not run: the committed
     check with the same identity is carried through (its outcome is the
     attest-time one, never a result of this run) and marked ``skipped``. With
-    no committed counterpart the check is a failure -- nothing vouches for it."""
+    no committed counterpart the check is a failure -- nothing vouches for it.
+    The ``documented_argv`` disclosure is overlaid from the current spec."""
     for committed in committed_checks:
         if (
             committed.get("check") == "command"
@@ -857,7 +850,7 @@ def _skipped_check(
             and list(committed.get("argv") or []) == list(spec["argv"])
             and all(committed.get(key) == value for key, value in identity.items())
         ):
-            return {**committed, "local_only": True, "skipped": True}
+            return item9.carried_check(committed, spec)
     return {
         "check": "command",
         "role": role,
@@ -868,42 +861,8 @@ def _skipped_check(
         "passed": False,
         "local_only": True,
         "skipped": True,
+        **item9.documented_fields(spec),
     }
-
-
-def _pin_checks(pins: Any) -> list[dict[str, Any]]:
-    """Item 9's reproducibility pins: the PDK name + revision (or the explicit
-    ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
-    means "no PDK"), and at least one tool version. A missing or empty pin is
-    a failed check, not a malformed inventory -- the inventory is well-formed,
-    it just does not yet say how to reproduce the run."""
-    pins = pins if isinstance(pins, Mapping) else {}
-    pdk_value = item9.pdk_pin(pins.get("pdk"))
-    tools = pins.get("tools")
-    tools_value = None
-    if (
-        isinstance(tools, Mapping)
-        and tools
-        and all(
-            isinstance(key, str) and key and isinstance(value, str) and value
-            for key, value in tools.items()
-        )
-    ):
-        tools_value = {key: tools[key] for key in sorted(tools)}
-    return [
-        {
-            "check": "pin",
-            "role": "pdk",
-            "passed": pdk_value is not None,
-            "value": pdk_value,
-        },
-        {
-            "check": "pin",
-            "role": "tools",
-            "passed": tools_value is not None,
-            "value": tools_value,
-        },
-    ]
 
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
@@ -1028,8 +987,10 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
+        presence = normalized.get("presence", ())
         checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
+            _file_check(root, path, role, presence=path in presence)
+            for path in sorted(normalized[field])
         )
     if item == 1:
         for entry in normalized["derived"]:
@@ -1041,8 +1002,8 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
-        checks.extend(_pin_checks(normalized["pins"]))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
+        checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1110,7 +1071,7 @@ def build_attestation(
         },
         "provenance": {
             "klt_version": build_version(),
-            "klayout_version": None,
+            "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
             "input": prov,
@@ -1178,8 +1139,9 @@ def check_attestation(
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
     passing gate. Only the producing build's version strings are excluded
-    from the diff (:data:`VOLATILE_ATTESTATION_PATHS`); a change to the
-    inventory, to any inventoried file, to a check's outcome, or to the
+    from the diff
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
+    the inventory, to any inventoried file, to a check's outcome, or to the
     committed envelope itself is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
@@ -1192,7 +1154,7 @@ def check_attestation(
         inventory_path,
         committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)
 
 
 def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
@@ -1204,33 +1166,3 @@ def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
             "check the path"
         )
     return committed
-
-
-def _drift_result(
-    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
-) -> dict[str, Any]:
-    # ``skipped`` marks a local_only check this run did not execute; its
-    # (carried-through) outcome is the committed one, so it is reported beside
-    # the diff rather than as a difference from the committed envelope.
-    skipped = []
-    for check in fresh["attestation"]["checks"]:
-        if check.pop("skipped", False):
-            skipped.append(
-                {
-                    key: check[key]
-                    for key in ("role", "name", "target", "argv", "cwd", "passed")
-                    if key in check
-                }
-            )
-    result = build_rerun_result(
-        report_path=committed_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
-        mode="check",
-    )
-    fresh_payload = result.pop("fresh")
-    result["fresh_status"] = fresh_payload["status"]
-    result["skipped_checks"] = skipped
-    result["fresh"] = fresh_payload
-    return result

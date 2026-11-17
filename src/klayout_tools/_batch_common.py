@@ -16,6 +16,8 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
+from . import env_provenance
+
 # ``ExtractError``/``NetlistError`` share a ``code``/``job_id``/``details``
 # keyword shape that ``type[Exception]`` cannot express, so construction goes
 # through ``Any`` while the return type stays the caller's own class.
@@ -29,6 +31,30 @@ BATCH_POLL_TIMEOUT_CODE = "batch_poll_timeout"
 
 def _ctor(err_cls: type[_E]) -> Any:
     return err_cls
+
+
+def repo_relative_str(
+    path: str | os.PathLike[str],
+    *,
+    repo_root: str | os.PathLike[str] | None = None,
+) -> str:
+    """The plain-string counterpart of
+    ``env_provenance.repo_relative_path``: the repo-relative POSIX path
+    when ``path`` lies inside a repo, else the unchanged absolute path.
+
+    For a string-typed field that must not change shape (``environment
+    .remote.shard_map``, issue #5542): ``repo_relative_path``'s
+    ``{"path": null, "scope": "external"}`` answer would retype the field to
+    ``null``, so the absolute path is kept instead. Such a field honours the
+    committed-artifact rule only when the run's outdir lies inside a repo --
+    the caller documents that boundary; the stderr hints keep printing the
+    absolute path either way, since those are read at a terminal, not
+    committed.
+
+    Hosted here, not in ``env_provenance``, so that module stays within its
+    file-size ratchet ceiling (714 lines)."""
+    entry = env_provenance.repo_relative_path(path, repo_root=repo_root)
+    return entry["path"] if entry["path"] is not None else str(path)
 
 
 def make_job_id(kind: str) -> str:
@@ -148,7 +174,9 @@ def resumable(
 ) -> dict[str, Any] | None:
     """``environment`` plus the additive "incomplete, resumable" signal
     (issue #4856) when ``manifest`` (a shard manifest) still has shards that
-    were submitted but never launched; ``environment`` unchanged otherwise."""
+    were submitted but never launched; ``environment`` unchanged otherwise.
+    ``shard_map`` is repo-relative when the map lies inside a git repo
+    (issue #5542) -- the stderr hint keeps the absolute path."""
     count = manifest.unlaunched() if manifest is not None else 0
     if not count:
         return environment
@@ -156,7 +184,7 @@ def resumable(
         **(environment or {}),
         "unlaunched_shards": count,
         "resumable": True,
-        "shard_map": str(manifest.path),
+        "shard_map": repo_relative_str(manifest.path),
     }
 
 
@@ -167,13 +195,14 @@ def with_unrun_signal(
     corners that never ran (``lost_shard``, ``batch_job_interrupted``, ...;
     issue #5364): ``unrun_units`` (count), ``resumable: true`` and -- unless
     :func:`resumable` already set it -- ``shard_map`` (``state_path``, the
-    retained shard map or checkpoint). Returns ``(environment, hint_needed)``;
+    retained shard map or checkpoint, repo-relative when it lies inside a
+    git repo; issue #5542). Returns ``(environment, hint_needed)``;
     ``hint_needed`` is False when the unlaunched-shard hint already covers
     the rerun. Unchanged for ``unrun == 0`` or no retained state."""
     if not unrun or not state_path or environment is None:
         return environment, False
     out = {**environment, "unrun_units": unrun, "resumable": True}
-    out.setdefault("shard_map", state_path)
+    out.setdefault("shard_map", repo_relative_str(state_path))
     return out, "unlaunched_shards" not in environment
 
 
@@ -289,4 +318,145 @@ def job_failure(
     )
     return _ctor(err_cls)(
         f"{message} {no_fallback}", code=code, job_id=job_id, details=details or None
+    )
+
+
+# --------------------------------------------------------------------------- #
+# job.json: the shared command and spec assembler
+# --------------------------------------------------------------------------- #
+
+#: A ``$EDA_OUTPUT_DIR`` member, quoted for the runner's shell.
+_OUT = '"$EDA_OUTPUT_DIR/{}"'
+
+
+def build_job_command(
+    *,
+    tree_member: str,
+    run: str,
+    err_cls: type[_E],
+    stdout_target: str | None,
+    client_version: str | None = None,
+    version_check: str = "enforce",
+    preflight_extra: str = "",
+    extra_setup: Sequence[str] = (),
+    tree_root_subdir: str | None = None,
+    extra_tail: str = "",
+) -> str:
+    """One batch job's ``cmd``: the runner-version preflight, the shared setup
+    prologue, ``run``, and the exit-status tail.
+
+    Every byte of the result is the batch contract -- the fleet harness parses
+    it (``docs/schemas/batch-job-spec.schema.json``) -- so it is assembled
+    here once instead of per verb.
+
+    ``tree_member`` is the input tarball's ``inputs/`` name. The prologue
+    resolves ``$EDA_INPUT_DIR``/``$EDA_OUTPUT_DIR``, makes a scratch
+    directory, exports a fallback ``HOME`` (the runner can leave it unset,
+    which killed xschem's Tcl init outright -- commit ``bf3d1ae10``), unpacks
+    the tree and ``cd``s into it.
+
+    ``run`` is the per-verb inner command, already quoted. ``err_cls`` is the
+    calling module's error class, raised in place of the preflight's
+    ``SimError`` when the submitting client's version cannot be pinned, so
+    every verb emits ``docs/json-contract.md``'s error envelope rather than a
+    traceback. ``preflight_extra`` is appended to the preflight script (a
+    runner-capability gate).
+
+    ``extra_setup`` lines join the prologue just before ``cd "$w"`` (the
+    place-and-route unit-request install). ``tree_root_subdir`` records the
+    runner's scratch root in :data:`BATCH_TREE_ROOT_FILENAME` for
+    :func:`read_runner_roots` -- ``""`` for the tree root itself, a
+    tree-relative path for a stage directory under it, ``None`` to record
+    none. The filename comes from this module's constant, so the reader and
+    every writer can never name different files.
+
+    ``stdout_target`` is the ``$EDA_OUTPUT_DIR`` member ``run``'s stdout goes
+    to, with its stderr teed to ``stderr.log`` and the job exiting with
+    ``run``'s own status: ``report.json`` for a ``klt <verb>`` job. ``None``
+    -- only ``klt sim``'s multi-unit command, which redirects per unit and
+    publishes each unit's exit code -- emits neither the redirect nor the
+    status capture, and the job exits 0. ``extra_tail`` runs once the status
+    is captured, whether or not ``run`` succeeded (the place-and-route
+    artifact copy, the generator output publish); it needs a
+    ``stdout_target`` to run after, so a non-empty ``extra_tail`` paired
+    with ``stdout_target=None`` -- which would drop the tail silently --
+    raises ``ValueError``.
+    """
+    if extra_tail and stdout_target is None:
+        raise ValueError("extra_tail needs a stdout_target to run after")
+    from . import _provenance, sim_batch
+
+    version = (
+        client_version if client_version is not None else _provenance._klt_version()
+    )
+    try:
+        preflight = sim_batch._runner_preflight_script(
+            version, enforce=version_check == "enforce"
+        )
+    except Exception as exc:  # SimError: a client version unsafe to embed
+        raise _ctor(err_cls)(str(exc)) from exc
+    setup = [
+        'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
+        'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
+        'w=$(mktemp -d) && export HOME="${HOME:-$(mktemp -d)}"',
+        f'tar -xzf "$EDA_INPUT_DIR/{tree_member}" -C "$w"',
+        *extra_setup,
+        'cd "$w"',
+    ]
+    if tree_root_subdir is not None:
+        at = f"/{tree_root_subdir}" if tree_root_subdir else ""
+        setup.append(
+            f'printf \'%s\\n%s\\n\' "$w{at}" "$(pwd -P){at}" >'
+            + _OUT.format(BATCH_TREE_ROOT_FILENAME)
+        )
+    if stdout_target is None:
+        tail = "; exit 0"
+    else:
+        run += (
+            f" > {_OUT.format(stdout_target)}"
+            f" 2> >(tee {_OUT.format(sim_batch.BATCH_STDERR_FILENAME)} >&2)"
+        )
+        tail = "; rc=$?; wait $! 2>/dev/null"
+        tail += f"; {extra_tail}" if extra_tail else ""
+        tail += "; exit $rc"
+    return preflight + preflight_extra + " && ".join(setup) + " && " + run + tail
+
+
+def build_job_spec(
+    *,
+    cmd: str,
+    tool: str,
+    pdk_variant: str | None,
+    tree_member: str,
+    tree_label: str,
+    tarball_path: str,
+    timeout_s: float,
+    timeout_seconds: int | None = None,
+    extra_inputs: Sequence[Any] = (),
+) -> Any:
+    """One batch job as a ``sim_batch.BatchJobSpec``: ``cmd`` (from
+    :func:`build_job_command`), the input tree, and the job's wall-clock cap.
+
+    The cap defaults to :func:`job_timeout_seconds` -- ``timeout_s`` plus the
+    per-job overhead, so the inner ``timeout`` always fires before the
+    harness's outer one. Pass ``timeout_seconds`` only where ``timeout_s`` is
+    not an inner timeout for the headroom to protect.
+    """
+    from . import sim_batch
+
+    return sim_batch.BatchJobSpec(
+        cmd=cmd,
+        tool=tool,
+        pdk_variant=pdk_variant,
+        timeout_seconds=(
+            job_timeout_seconds(timeout_s)
+            if timeout_seconds is None
+            else timeout_seconds
+        ),
+        inputs=(
+            sim_batch.BatchJobInput(
+                name=tree_member, label=tree_label, local_path=tarball_path
+            ),
+            *extra_inputs,
+        ),
     )

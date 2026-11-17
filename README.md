@@ -46,7 +46,7 @@ an agent needs instead:
 
 ## Status
 
-Early alpha — [v0.9.1 is on PyPI](https://pypi.org/project/klayout-tools/);
+Early alpha — [v0.9.2 is on PyPI](https://pypi.org/project/klayout-tools/);
 `main` has 68 verbs (see [`docs/cli/`](docs/cli/) for the set). The
 pattern is proven (see the kicad-tools [gallery](https://kicad-tools.org) of
 boards designed end-to-end by agents); this repo is where it meets silicon.
@@ -68,6 +68,9 @@ pip install klayout-tools
 `klt` is now on `PATH`. Either install provides the `klayout` **Python
 module** only — `klt drc --engine klayout` additionally needs a system KLayout
 application with `klayout` on `PATH` (<https://www.klayout.de/build.html>).
+Engine-version compatibility (supported/tested `klayout` versions, and what
+happens below the `klayout>=0.30` floor):
+[Engine version compatibility](docs/design/klayout-engine-version-pin.md#engine-version-compatibility).
 For the latest development version, install from
 source instead:
 
@@ -113,6 +116,7 @@ for the version pins and the full contract.
 klt layers design.gds                    # enumerate layers, JSON out
 klt cells design.gds --top               # cell hierarchy
 klt drc design.gds --deck sky130        # run a DRC deck, structured results
+klt diff a.gds b.gds                     # same layout? order-insensitive compare for regenerate-and-compare gates (byte hashes drift across klt upgrades)
 klt precheck design.gds --grid-um 0.005  # off-grid/zero-area/naming hygiene checks
 klt ring-check design.gds --layers '[[22,0],[34,0]]'  # guard/tap ring is a closed annulus
 klt seam-check row.gds --tiling TILE --layer 68/20 --band 0,0,30,2  # abutting cells tile and the rail is continuous across seams
@@ -176,7 +180,7 @@ klt version --format json                # which build is this: version, commit,
 
 Every verb is documented in [`docs/cli/`](docs/cli/) (`klt yield-campaign`
 shares the `yield.md` / `yield-sensitivity.md` pages). The latest release is
-PyPI 0.9.1; `main` has 68 verbs, and the from-source install above tracks
+PyPI 0.9.2; `main` has 68 verbs, and the from-source install above tracks
 `main`, so it may be ahead of the release.
 
 ## Development
