@@ -291,10 +291,12 @@ def add_sim_parser(
             "request's own `options.resume` when given. For a `decks` "
             "request, skips each unit whose <outdir>/<id>/unit.json "
             "completion record still matches and verifies (local, "
-            "local-parallel, batch). With --batch-set, forwarded to every "
-            "request: a sharded request re-attaches to the shard jobs "
-            "recorded in its own directory and resubmits only the lost "
-            "ones. See docs/cli/sim.md."
+            "local-parallel, batch). On a sharded `batch` run, first "
+            "harvests the retained shard map (batch-shards.json): shards "
+            "whose jobs already finished are collected, and only the "
+            "unlaunched/unfinished/failed ones are submitted again. With "
+            "--batch-set, forwarded to every request the same way. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(

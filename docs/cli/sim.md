@@ -69,8 +69,12 @@ this document (and the code) win.
   whenever the bound truly exceeds the ceiling. No JSON field changes.
 - `--resume` — resume from a matching on-disk checkpoint, skipping corners a
   prior interrupted run of this same request already completed, overriding
-  the request's own `options.resume` when given. See "Wall-clock budget,
-  orphan safety, and resume" below.
+  the request's own `options.resume` when given. On a sharded `batch` run,
+  `--resume` first harvests the retained shard map: shards whose remote jobs
+  are already terminal (`done`) are collected and their units reused, and
+  only the unlaunched/unfinished/failed ones are submitted again (see
+  "Lost and interrupted shards are resumable too" below). See "Wall-clock
+  budget, orphan safety, and resume" below.
 - `--attach JOB_ID` — re-attach to an already-submitted `batch` job (the id
   `klt sim` prints on stderr at launch) instead of submitting a new one.
   Waits for it, bounded by `batch.poll_timeout_s`, and reports it without
@@ -905,6 +909,25 @@ identified by `corners[].diagnostics[].code`, not by `status` (it stays
 `error`). The client does not re-launch these itself; fleet `reconcile` owns
 that ([#5364](https://github.com/2AMLogic/klayout-tools/issues/5364)).
 
+**What `--resume` does with a retained shard map**
+([#5775](https://github.com/2AMLogic/klayout-tools/issues/5775)). Before the
+outstanding units are dispatched, `--resume` **harvests** the map: each
+recorded shard's `status.json` is read once, a shard whose remote job is
+already terminal (`done`) is collected through the plain attach machinery and
+its units are recorded into the run's checkpoint — counted in the
+`resume: reused N checkpointed corner(s)` summary and never re-billed. Shards
+the map records `submitted` (never launched), still `running`/`interrupted`,
+or terminally failed are *not* waited on or launched by the harvest; their
+units are re-dispatched as new jobs (an unlaunched recorded shard whose
+grouping is unchanged is launched under its recorded job id instead). A map
+written for a different request refuses with
+`error.code: "resume_fingerprint_mismatch"` rather than attaching stale
+results. `--attach <batch-shards.json> --collect-partial` remains the
+non-blocking form of the same read-once collect, and `--attach` (explicit)
+takes precedence when both are given; `--collect-partial` still requires
+`--attach <shard map>`. The two-command recovery (`--collect-partial`, then
+`--resume`) still works — `--resume` alone is now enough.
+
 **Retry contract, up front.** A launch refused for lack of Spot capacity is
 *not* retried unless you opt in: `batch.capacity_wait_s` defaults to `0` (one
 attempt), and the refusal then fails the request with
@@ -997,7 +1020,7 @@ field and is tracked with the `analysis_steps[]` equivalent in
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
 | `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
 | `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
-| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`; for a shard map, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
+| `batch.interrupted_grace_s` | number ≥ 0 | How long a job may stay **continuously** `interrupted` (Spot-reclaimed, waiting for 2am's scheduled `reconcile` to re-launch it) before polling stops early ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)). Defaults to `1800`; `0` disables the fail-fast, so an interrupted job is waited on until `poll_timeout_s`. Seeing `running` again resets the clock; an unreadable `status.json` neither starts nor resets it. On expiry every unit is reported with a `batch_job_interrupted` diagnostic (not `batch_poll_timeout`), and `environment.remote` carries `job_id`, `state: "interrupted"` and `interrupted_s`. The job may still be recoverable on the fleet — the client does not re-launch it (that would double-spend the shared fleet budget). The diagnostic `message` names the recovery command (re-run with the same `-o` and `--resume`, which also harvests the retained shard map; for the non-blocking form, `--attach <batch-shards.json> --collect-partial`, then `--resume`); the run exits 4 when every unit ended this way. A grace longer than `poll_timeout_s` never fires. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.runner_version_check` | `"enforce"` \| `"warn"` | Runner/client `klt` version-skew policy (default `"enforce"`), applied both to the pre-launch check against the AMI manifest's published runner version and to the runner-side preflight; see "Runner/client `klt` version skew" below. Any other value is rejected before any S3 write. |
 | `batch.capacity_wait_s` | number ≥ 0 | Wall-clock budget, per `launch` call, for waiting out a Spot **capacity refusal** or a fleet **concurrency-cap refusal** ([#2721](https://github.com/2AMLogic/klayout-tools/issues/2721)). Per `launch` call for a single job; one run-wide deadline for a sharded run ([#4018](https://github.com/2AMLogic/klayout-tools/issues/4018)). Defaults to `0`: one launch attempt, exactly as before. See "Capacity refusal and `batch_no_capacity`" below. A negative, non-finite, or non-numeric value is rejected before any S3 write. |
 | `batch.max_job_seconds` | number > 0 | The fleet's **whole-job ceiling** the one-job pre-submit check compares against ([#2833](https://github.com/2AMLogic/klayout-tools/issues/2833)). Resolution order: this field, then `$KLT_BATCH_MAX_JOB_SECONDS`, then `BATCH_MAX_JOB_SECONDS` in the `batch-fleet.env` beside the provision script, else `3600` (the harness's own fallback when its `MaxJobSeconds` tag is absent). The value used and its source are reported; see "Three budgets, and the fleet's whole-job ceiling" below. A present but non-positive, non-finite, or non-numeric value from any source is rejected before any S3 write. |
@@ -1484,8 +1507,8 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   request frees the slot sooner. The client never re-submits it mid-run (a
   later `--resume` does, above).
   To re-run only the units with no result, re-run the same set with the same
-  `-o` and `--resume` (or `--attach <batch-shards.json> --collect-partial`,
-  then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
+  `-o` and `--resume` (which also harvests the retained shard map, above; or
+  `--attach <batch-shards.json> --collect-partial`, then `--resume`). A request the *client* stopped (Ctrl-C/SIGTERM) carries
   `interrupted: true` in its `requests[]` entry (additive; present only when
   true), distinguishing it from a shard that really failed; its unfinished
   shards are `lost_shard` units.

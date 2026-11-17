@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --resume` harvests a retained shard map before dispatching**
+  (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
+  without `--resume` (issue #3896), but `--resume` only ever read
+  `checkpoint.json` -- which a run without `--resume` never writes -- so
+  resuming a partial sharded run reported `resume: reused 0 checkpointed
+  corner(s)` and re-submitted every shard as a new job, re-billing the units
+  that had already passed. `--resume` now harvests the map first: each
+  recorded shard's remote `status.json` is read once (never waited on, never
+  launched), a terminal shard is collected through the plain attach
+  machinery, and its units are recorded into the checkpoint and counted in
+  the `resume: reused N` summary; only unlaunched/unfinished/failed shards
+  are submitted again. A map written for a different request still refuses
+  with `error.code: "resume_fingerprint_mismatch"`. Shard map entries now
+  also record their ordered unit ids (`units`, additive), so a later harvest
+  or `--attach` can recover a job's units without re-deriving the partition
+  that minted it. `--resume` alone is now enough for the
+  `environment.remote.resumable: true` recovery the report advertises;
+  `--attach <map> --collect-partial` remains the non-blocking form.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the

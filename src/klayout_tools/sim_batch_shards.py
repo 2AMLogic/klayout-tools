@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
+from datetime import datetime, timezone
 from typing import Any
 
 from . import sim_batch
@@ -296,3 +298,184 @@ def attach_batch_shards(
         )
     except sim_batch.BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
+
+
+def _entry_unit_ids(
+    entry: dict[str, Any],
+    by_id: dict[str, Any],
+    partition: list[list[Any]],
+) -> list[str] | None:
+    """The ordered corner ids one shard map entry's job ran (issue #5775):
+    from the entry's own recorded ``units``, else -- a map written before
+    #5775 -- the one partition slice whose digest matches its recorded
+    ``units_sha256``. ``None`` when the grouping cannot be recovered."""
+    units = entry.get("units")
+    if isinstance(units, list) and all(
+        isinstance(unit, str) and unit in by_id for unit in units
+    ):
+        return list(units)
+    wanted = entry.get("units_sha256")
+    for points in partition:
+        if points and sim_batch._units_digest(points) == wanted:
+            return [point.corner_id for point in points]
+    return None
+
+
+def harvest_resume_shards(
+    *,
+    artifacts_dir: str,
+    config: sim_batch.BatchConfig,
+    corner_points: list[sim_batch.CornerPoint],
+    request: dict[str, Any],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    measurements_spec: list[dict[str, Any]],
+    request_dir: str | None,
+    fingerprint: str,
+    known: frozenset[str] | set[str],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """``--resume``'s harvest of a retained shard map (issue #5775): collect
+    the corners of every shard whose remote job is already terminal, so the
+    ordinary resume flow re-dispatches only what is genuinely outstanding.
+
+    One entry at a time -- read its remote ``status.json`` once, never wait,
+    never launch (a shard the map records ``submitted`` stays for the
+    dispatch, which launches it under the recorded id when the partition is
+    unchanged). A terminal entry is collected through the plain attach
+    machinery (:func:`sim_batch._run_batch_job` with ``attach=True``) and
+    marked ``collected`` in the map; anything else is left alone. Returns
+    ``(corners, engine_version)`` -- the corners a
+    :func:`sim._record_batch_checkpoint` filters and records (a terminally
+    *failed* shard returns unrun corners, which that filter leaves
+    outstanding); ``([], None)`` when there is no map or nothing new to
+    collect.
+
+    A map written for a different request refuses with
+    :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
+    stale results.
+    """
+    from .sim import SimError
+
+    path = os.path.join(artifacts_dir, sim_batch.BATCH_SHARDS_FILENAME)
+    if not os.path.isfile(path):
+        return [], None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        entries = [dict(entry) for entry in document["shards"]]
+        hosts = int(document["hosts"])
+        str(document["fingerprint"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SimError(
+            f"--resume: shard map {path} is unreadable ({exc}); delete it "
+            "or drop --resume",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        ) from exc
+    if not entries:
+        # A well-formed map listing no shards has nothing to attach, re-bill
+        # or refuse over -- an inert file, not a stale one.
+        return [], None
+    if document.get("fingerprint") != fingerprint:
+        raise mismatch_error(path, document, fingerprint, False)
+    mismatch = shard_map_mismatch(document, request)
+    if mismatch is not None:
+        raise SimError(
+            f"--resume: shard map {path} was submitted from a different "
+            f"request ({mismatch}); re-run with exactly the request the "
+            "shards were submitted from",
+            code=sim_batch.BATCH_SHARD_MANIFEST_CODE,
+        )
+    by_id = {point.corner_id: point for point in corner_points}
+    partition = sim_batch._shard_corner_points(corner_points, hosts)
+    corners_out: list[dict[str, Any]] = []
+    engine_version: str | None = None
+    collected_indexes: list[int] = []
+    for entry in sorted(entries, key=lambda entry: int(entry.get("index") or 0)):
+        unit_ids = _entry_unit_ids(entry, by_id, partition)
+        if unit_ids is None or all(unit in known for unit in unit_ids):
+            continue
+        if entry.get("state") == "submitted":
+            # Never launched: no results exist to harvest, and launching is
+            # the dispatch's decision (`launch_if_unlaunched`), never a
+            # harvest's (a shard the map says was submitted is launched, not
+            # re-minted, when the partition is unchanged).
+            continue
+        job_id = str(entry["job_id"])
+        try:
+            status = sim_batch._read_status(config, job_id, sim_batch._run_subprocess)
+        except Exception:  # an unreadable status is "unknown", never an error
+            status = None
+        if str((status or {}).get("state") or "unknown") not in (
+            sim_batch.BATCH_TERMINAL_STATES
+        ):
+            continue
+        points = [by_id[unit] for unit in unit_ids]
+        try:
+            corners, entry_engine_version, environment = sim_batch._run_batch_job(
+                config=config,
+                job_id=job_id,
+                corner_points=points,
+                netlist_path=netlist_path,
+                timeout_s=timeout_s,
+                keep_artifacts=keep_artifacts,
+                want_waveforms=want_waveforms,
+                artifacts_dir=artifacts_dir,
+                request=request,
+                measurements_spec=measurements_spec,
+                explicit_points=points,
+                request_dir=request_dir,
+                attach=True,
+            )
+        except sim_batch.BatchError as exc:
+            print(
+                f"klt sim: notice: --resume could not re-attach to shard "
+                f"job {job_id} ({exc}); its units stay outstanding",
+                file=sys.stderr,
+            )
+            continue
+        corners_out.extend(corners)
+        if entry_engine_version is not None:
+            engine_version = entry_engine_version
+        # Only a shard whose outputs were actually collected is marked
+        # collected -- exactly the fleet's own `_mark_collected` rule -- so a
+        # terminally failed job stays outstanding for the dispatch (its
+        # corners come back unrun and are filtered by the caller).
+        if environment is None or not environment.get("client_collected_at"):
+            continue
+        collected_indexes.append(int(entry.get("index") or 0))
+    if collected_indexes:
+        _mark_map_collected(path, document, collected_indexes)
+    if corners_out:
+        from .sim import _is_unrun_batch_corner
+
+        ran = sum(1 for corner in corners_out if not _is_unrun_batch_corner(corner))
+        if ran:
+            print(
+                f"klt sim: --resume harvested {ran} already-completed "
+                f"unit(s) from {len(collected_indexes)} shard(s) of {path}",
+                file=sys.stderr,
+            )
+    return corners_out, engine_version
+
+
+def _mark_map_collected(
+    path: str, document: dict[str, Any], indexes: list[int]
+) -> None:
+    """Stamp ``collected`` on the harvested map entries, exactly as the
+    fleet's own collect path would (issue #5775), so the map a resumed run
+    leaves behind does not list as outstanding a shard whose outputs this
+    run already took."""
+    wanted = set(indexes)
+    for entry in document.get("shards") or ():
+        if int(entry.get("index") or 0) not in wanted:
+            continue
+        order = ["pending", "submitted", "launching", "launched", "collected"]
+        current = str(entry.get("state") or "")
+        if current in order and order.index(current) >= order.index("collected"):
+            continue
+        entry["state"] = "collected"
+        if not entry.get("collected_at"):
+            entry["collected_at"] = datetime.now(timezone.utc).isoformat()
+    sim_batch._write_batch_receipt(path, document)

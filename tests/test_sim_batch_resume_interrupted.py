@@ -285,3 +285,211 @@ def test_resume_resubmits_a_single_unit_job_that_had_failed(tmp_path, monkeypatc
     assert len(_launches(runner)) == launches_before + 1
     assert environment["job_id"] != stuck
     assert not _codes(corners)
+
+
+# --------------------------------------------------------------------------- #
+# `--resume` harvests the retained shard map (issue #5775)
+# --------------------------------------------------------------------------- #
+
+
+def test_shard_map_records_each_shards_unit_ids(tmp_path, monkeypatch):
+    """Issue #5775: each map entry carries its ordered corner ids, so a
+    later harvest (or `--attach`) can recover what a job ran without
+    re-deriving the partition that minted it."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+
+    document = json.loads(manifest_path.read_text())
+    assert [entry["units"] for entry in document["shards"]] == [
+        ["tt/1.800V/0C", "tt/1.800V/1C"],
+        ["tt/1.800V/2C", "tt/1.800V/3C"],
+    ]
+
+
+def test_replanned_partition_does_not_reproduce_old_shards():
+    """The finding-4 measurement (issue #5775): a shrunken dispatch set
+    re-plans to *different* shard groupings -- even a contiguous suffix of
+    outstanding units regroups, because the split boundaries move -- so the
+    manifest's per-index digest gate cannot be what provides reuse. The
+    harvest (collect before planning) is."""
+    full = _corner_points(27)
+    from klayout_tools.sim_remote import _shard_corner_points
+
+    old_shards = [
+        [p.corner_id for p in points]
+        for points in _shard_corner_points(full, 14)
+        if points
+    ]
+    # Six outstanding units (a contiguous suffix, the friendliest case)...
+    outstanding = full[21:]
+    new_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(outstanding, 3)
+        if points
+    ]
+    # ...still regroup: no new shard equals an old one.
+    old_sets = [set(ids) for ids in old_shards]
+    assert not any(new in old_sets for new in new_shards)
+    # And a non-contiguous outstanding set regroups just the same.
+    scattered = [full[0], full[5], full[11]]
+    scattered_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(scattered, 2)
+        if points
+    ]
+    assert not any(new in old_sets for new in scattered_shards)
+
+
+def _harvest_run_fixture(tmp_path, monkeypatch, *, fail_second_shard):
+    """A run_sim-level sharded batch run over 4 units / 2 hosts against the
+    fake S3 transport, sharing one artifacts dir. The second shard's job
+    reports terminally failed when `fail_second_shard` (exit code 1), so the
+    first run ends partial: shard 0 collected, shard 1's units unrun."""
+    from test_sim_batch import (
+        _batch_request,
+        _FakeRunner,
+        _install_fake_batch_transport,
+        _sim_report,
+        _write_body,
+        _write_request,
+        uploaded_request_of,
+    )
+
+    runner = _FakeRunner()
+    runner.default = fake_completed(_status("done"))
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    submitted: list[list[str]] = []
+    shard_count = {"n": 0}
+    failed_jobs: set[str] = set()
+    inner = sb._run_subprocess
+
+    def _shard_status(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -") and any(
+            job in joined for job in failed_jobs
+        ):
+            return fake_completed(_status("failed", exit_code="1"))
+        return inner(argv, timeout_s)
+
+    def _register_shard_report(argv, timeout_s):
+        captured = uploaded_request_of(argv)
+        if captured is not None:
+            document, job_id = captured
+            ids = [
+                point.corner_id
+                for point in sim._corner_points_from_wire(document["_explicit_points"])
+            ]
+            runner.outputs_by_job[job_id] = {
+                "report.json": _sim_report(corner_ids=tuple(ids))
+            }
+            submitted.append(ids)
+            shard_count["n"] += 1
+            if fail_second_shard and shard_count["n"] == 2:
+                failed_jobs.add(job_id)
+        return _shard_status(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _register_shard_report)
+    _write_body(tmp_path)
+    request = _batch_request(
+        tmp_path,
+        corners={"supply_v": {"vdd": [1.6, 1.8, 2.0, 2.2]}, "temperature_c": [27]},
+    )
+    path = _write_request(tmp_path, request)
+    artifacts = tmp_path / "artifacts"
+
+    def run(**kwargs):
+        return sim.run_sim(str(path), artifacts_dir=str(artifacts), hosts=2, **kwargs)
+
+    return runner, run, submitted, artifacts
+
+
+def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, capsys):
+    """Issue #5775 end to end: a partial sharded run without `--resume`
+    writes no checkpoint, so the `--resume` rerun must harvest the retained
+    shard map -- reusing the collected shard's units, submitting only the
+    outstanding ones, and merging the full matrix back in order."""
+    runner, run, submitted, artifacts = _harvest_run_fixture(
+        tmp_path, monkeypatch, fail_second_shard=True
+    )
+    first = run()
+    ids = [c["corner_id"] for c in first["corners"]]
+    lost_ids = sorted(c["corner_id"] for c in first["corners"] if c["status"] != "pass")
+    assert first["status"] == "error"
+    assert len(lost_ids) == 2
+    manifest_path = artifacts / sb.BATCH_SHARDS_FILENAME
+    assert manifest_path.exists()
+    assert not (artifacts / "checkpoint.json").exists()
+    assert first["environment"]["remote"]["resumable"] is True
+    first_jobs = [
+        entry["job_id"] for entry in json.loads(manifest_path.read_text())["shards"]
+    ]
+    submitted.clear()
+    launches_before = len(_launches(runner))
+
+    second = run(resume=True)
+
+    # Only the two outstanding (unrun) units were submitted, as one 1-unit
+    # shard each under hosts=2; the collected shard's job was never
+    # re-submitted or re-launched.
+    assert sorted(map(tuple, submitted)) == [(unit,) for unit in lost_ids]
+    new_launches = _launches(runner)[launches_before:]
+    assert all(job not in " ".join(argv) for job in first_jobs for argv in new_launches)
+    assert [c["corner_id"] for c in second["corners"]] == ids
+    assert all(c["status"] == "pass" for c in second["corners"])
+    assert second["environment"]["resume"]["resumed_corners"] == 2
+    assert "harvested 2 already-completed unit(s) from 1 shard(s)" in (
+        capsys.readouterr().err
+    )
+    # The completed sweep leaves nothing to resume from.
+    assert not manifest_path.exists()
+    assert not (artifacts / "checkpoint.json").exists()
+
+
+def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """The all-done edge of the harvest (issue #5775): the first run ended
+    partial with the map retained, and by the time `--resume` runs every
+    recorded job is terminal -- so the harvest covers the whole matrix, the
+    dispatch set is empty, and the rerun is equivalent to a plain attach."""
+    from test_sim_batch import _status as _batch_status
+
+    runner, run, submitted, artifacts = _harvest_run_fixture(
+        tmp_path, monkeypatch, fail_second_shard=True
+    )
+    first = run()
+    ids = [c["corner_id"] for c in first["corners"]]
+    lost_ids = {c["corner_id"] for c in first["corners"] if c["status"] != "pass"}
+    assert len(lost_ids) == 2
+    manifest_path = artifacts / sb.BATCH_SHARDS_FILENAME
+    failed_job = next(
+        entry["job_id"]
+        for entry in json.loads(manifest_path.read_text())["shards"]
+        if entry["state"] != "collected"
+    )
+    # The interrupted shard's job later finished on the fleet (the fleet has
+    # no cancel): its status now reads done, persistently.
+    inner = sb._run_subprocess
+
+    def _finished(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -") and failed_job in joined:
+            return fake_completed(_batch_status("done"))
+        return inner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", _finished)
+    submitted.clear()
+    launches_before = len(_launches(runner))
+
+    second = run(resume=True)
+
+    assert submitted == []  # nothing left to dispatch
+    assert len(_launches(runner)) == launches_before
+    assert [c["corner_id"] for c in second["corners"]] == ids
+    assert all(c["status"] == "pass" for c in second["corners"])
+    assert second["environment"]["resume"]["resumed_corners"] == 4
+    assert "harvested 4 already-completed unit(s) from 2 shard(s)" in (
+        capsys.readouterr().err
+    )
+    assert not manifest_path.exists()
+    assert not (artifacts / "checkpoint.json").exists()

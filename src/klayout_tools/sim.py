@@ -2875,6 +2875,65 @@ def _record_batch_checkpoint(
             checkpoint.record(corner["corner_id"], corner, engine_version)
 
 
+def _harvest_resume_shard_map(
+    *,
+    artifacts_dir: str,
+    corner_points: list[CornerPoint],
+    request: dict[str, Any],
+    netlist_path: str,
+    timeout_s: float,
+    keep_artifacts: bool,
+    want_waveforms: bool,
+    measurements_spec: list[dict[str, Any]],
+    request_dir: str | None,
+    checkpoint: _Checkpoint,
+    pre_completed: dict[str, dict[str, Any]],
+) -> str | None:
+    """Issue #5775: a ``--resume`` batch run first harvests the retained
+    shard map (``<artifacts_dir>/batch-shards.json``), collecting every
+    shard whose remote job is already terminal so the dispatch that follows
+    covers only genuinely outstanding units. The harvested corners are
+    recorded into the live checkpoint (so an interrupted resumed run keeps
+    them) and merged into ``pre_completed`` (so ``dispatch_points`` shrinks
+    and the ``resume: reused N`` summary counts them). Returns the harvested
+    engine version, or ``None`` when nothing was harvested.
+
+    Without ``--resume`` a sharded run persists no checkpoint, so this -- not
+    ``checkpoint.json`` -- is what makes ``environment.remote.resumable:
+    true`` satisfiable by ``--resume`` alone.
+    """
+    from . import sim_batch, sim_batch_shards
+
+    config = sim_batch._resolve_batch_config(
+        request, corner_count=len(corner_points), timeout_s=timeout_s
+    )
+    corners, engine_version = sim_batch_shards.harvest_resume_shards(
+        artifacts_dir=artifacts_dir,
+        config=config,
+        corner_points=corner_points,
+        request=request,
+        netlist_path=netlist_path,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        measurements_spec=measurements_spec,
+        request_dir=request_dir,
+        fingerprint=checkpoint.fingerprint,
+        known=frozenset(pre_completed),
+    )
+    if not corners:
+        return None
+    _record_batch_checkpoint(checkpoint, "batch", corners, engine_version)
+    pre_completed.update(
+        {
+            corner["corner_id"]: corner
+            for corner in corners
+            if not _is_unrun_batch_corner(corner)
+        }
+    )
+    return engine_version
+
+
 def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
@@ -3845,6 +3904,42 @@ def _run_sim_corners(
         checkpoint_path, resume=bool(resume), **fingerprint_inputs
     )
 
+    # Issue #5775: a sharded batch run keeps its shard map even without
+    # `--resume` (issue #3896), so `--resume` harvests it *before* the
+    # dispatch set is computed -- collecting the shards whose remote jobs
+    # are already terminal and shrinking `dispatch_points` to what is
+    # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
+    # form), `--submit-only` (refused with `--resume` before any S3 write)
+    # and `--dry-run` (which must not touch S3 at all).
+    harvested_engine_version = (
+        _harvest_resume_shard_map(
+            artifacts_dir=artifacts_dir,
+            corner_points=corner_points,
+            request=request,
+            netlist_path=dispatch_netlist_path,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            measurements_spec=measurements_spec,
+            request_dir=request_dir,
+            checkpoint=checkpoint,
+            pre_completed=pre_completed,
+        )
+        if (
+            resume
+            and backend == "batch"
+            and checkpoint is not None
+            and not dry_run
+            and not submit_only
+            and attach_job_id is None
+        )
+        else None
+    )
+    if harvested_engine_version is not None and loaded_engine_version is None:
+        # An all-harvested rerun dispatches nothing, so the harvested jobs'
+        # engine version is the only one this report can carry.
+        loaded_engine_version = harvested_engine_version
+
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
@@ -4107,7 +4202,13 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1:
+    if not dispatch_points and backend in _OFFHOST_BACKENDS:
+        # Issue #5775: a resume whose checkpoint (or shard-map harvest)
+        # already covers every unit dispatches nothing -- equivalent to a
+        # plain attach, never an off-host backend's "hosts exceeds the
+        # units to dispatch" refusal over an empty fleet.
+        corners_new, backend_engine_version, remote_environment = [], None, None
+    elif hosts == 1:
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
