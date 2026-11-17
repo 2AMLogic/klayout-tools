@@ -17,12 +17,9 @@ Deliberately **not** shared with the liberty resolver:
   the plausible-looking-pass failure this resolver exists to prevent, so an
   ambiguous install (``find_pdk`` reported ``ambiguous_roots``) is a refusal,
   never a first-match guess;
-- every failure mode raises ``error_cls(msg, code=...)`` with a stable
-  ``error.code`` (the caller's error class must accept the ``code`` keyword
-  :class:`klayout_tools.functional_verification.FunctionalVerificationError`
-  defines), so the three refusals issue #5782 names are machine-tellable
-  apart: ``pdk_no_verilog_view``, ``pdk_ambiguous_install``, and the
-  ``pdk_cell_library_mismatch`` raised by the caller-side deck cross-check.
+- the caller's error class accepts the ``code`` keyword for the named
+  refusals below. When no PDK install resolves, the error carries the PDK
+  lookup message.
 
 Selection rule (open_pdks-wide by construction, not a sky130-specific list --
 the same convention posture ``pdk.py``'s ``_MACRO_VIEW_DIRS`` and
