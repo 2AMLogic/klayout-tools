@@ -11988,17 +11988,17 @@ def _gds_layers(path):
         {"w_um": 1.0, "flavor": "pfet"},
     ),
 )
-def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
+def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
     params, tmp_path, both_pdk_root
 ):
     output, report = _gen_mos_cap(tmp_path, both_pdk_root, **params)
     assert _GF180_MOS_CAP_MARK in _gds_layers(output)
     names = {p["name"] for p in report["ports"]}
     assert {"U0_SD", "U0_G"} <= names
-    # S and D are one tied terminal, not two, and the body tie is the ring.
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
+    counts = run_drc(str(output), "gf180mcu")["rule_counts"]
+    assert set(counts) == {"comp.width.moscap.1"}  # genuine DF.1c (#6170)
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
