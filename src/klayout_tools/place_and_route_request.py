@@ -529,14 +529,9 @@ _TRACK_KEYS = ("x_offset_um", "x_pitch_um", "y_offset_um", "y_pitch_um")
 
 
 def _validate_floorplan_tracks(tracks: Any) -> None:
-    """Issue #4088: validate ``request.floorplan.tracks``, the optional
-    ``make_tracks`` definitions that replace the bare ``make_tracks``
-    (which aborts on a tech LEF with a negative ``OFFSET``). A layer may
-    be named by several entries (issue #5671: OpenROAD's repeated
-    ``make_tracks`` on one layer accumulates track patterns, which is
-    how e.g. the ASAP7 7.5-track row is expressed); only a byte-identical
-    repeated entry -- same layer *and* all four numbers -- is an error,
-    since it is a transcription mistake and a no-op in OpenROAD."""
+    """Issue #4088/#5671: validate ``request.floorplan.tracks``, the per-layer
+    ``make_tracks`` definitions replacing the bare ``make_tracks`` (negative
+    ``OFFSET`` abort); a layer may repeat, only byte-identical entries error."""
 
     if not isinstance(tracks, list) or not tracks:
         raise PlaceAndRouteError(
@@ -562,20 +557,11 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
             if key.endswith("offset_um") and value < 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be >= 0")
-        identity = (
-            layer,
-            entry["x_offset_um"],
-            entry["x_pitch_um"],
-            entry["y_offset_um"],
-            entry["y_pitch_um"],
-        )
-        first = seen.get(identity)
-        if first is not None:
+        if (sig := (layer, *(entry[k] for k in _TRACK_KEYS))) in seen:
             raise PlaceAndRouteError(
-                f"{where} duplicates request.floorplan.tracks[{first}]: "
-                f"identical layer '{layer}' and offsets/pitches"
+                f"{where} duplicates request.floorplan.tracks[{seen[sig]}]"
             )
-        seen[identity] = index
+        seen[sig] = index
 
 
 def validate_tech_lef_track_offsets(
