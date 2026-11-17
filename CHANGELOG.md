@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
+  and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
+  2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
+  `Comp AND MOS_CAP_MK` via `DerivedLayer`'s `"sized_intersection"` AND,
+  `voltage_independent`): before it, a MOSCAP-marked `Comp` island below
+  1 um — e.g. `klt gen mos_array`'s own 0.42 um `w_um` floor — reported
+  `status: clean` with `166/5` listed under
+  `coverage.layers_in_stream_without_rules`, i.e. an undisclosed miss; the
+  marker now reads as a checked deck layer and the rule as covered.
+  `comp.width.mv.1` (`DF.1a_MV`) now excludes whole `Comp` polygons touching
+  the `mvsd` (210/0) / `mvpsd` (11/39) drain markers, matching the PDK
+  deck's `comp_56v.not(mvsd.or(mvpsd))` wherever the PDK's own LDMOS PCells
+  draw (the `nfet_10v0_asym` 0.22 um drain stripe was a confirmed false
+  positive); a marker-straddling polygon is dropped whole where the official
+  boolean clip would check its clipped remainder — a disclosed approximation,
+  the only shape this engine can give that rule. Verified against the native
+  runset (`--engine both`): curated/native now agree on the PCell
+  (`comp.enclosing.contact.1` x16 ↔ `CO.4` x16, a real finding — see
+  `docs/cli/drc.md`'s corrected waiver guidance; `DF.6_MV`/`PL.4_MV` remain
+  disclosed unmodeled), and `DF.1c` flags the same narrow MOSCAP fixture both
+  engines report. A consequence for `klt gen mos_array`: its MOSCAP-marked
+  devices now report the genuine `comp.width.moscap.1` finding (the native
+  deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
+  passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+
+
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -63,6 +89,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   warning now says its definition may live in the model library instead of
   implying the netlist alone was searched; without a model library the
   wording is unchanged.
+- **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
+  top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
+  sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
+  the PDK cell's own name; `null`: output flattened, no sub-cell remains) so
+  callers committing generated GDS can detect naming drift mechanically.
+  Sub-cell naming itself changed earlier (#4251) from KLayout's default
+  variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
+  `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
