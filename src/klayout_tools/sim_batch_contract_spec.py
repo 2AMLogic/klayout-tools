@@ -206,7 +206,7 @@ def _runner_gate_release(version: str) -> str | None:
 #: reject the key or silently search nothing, hence mandatory.
 #: ``mismatch_params`` (``monte_carlo.mismatch_scale`` on a PDK family whose
 #: sigmas are scanned out of the model libraries, #5486) landed after
-#: ``v0.9.1`` too, so ``0.9.2`` is its first release segment as well.
+#: ``v0.9.2``, so ``0.9.3`` is its first release segment.
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -253,7 +253,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
-    "mismatch_params": ((0, 9, 2), sim_mismatch_scale.wire_uses_scanned_cards),
+    "mismatch_params": ((0, 9, 3), sim_mismatch_scale.wire_uses_scanned_cards),
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a

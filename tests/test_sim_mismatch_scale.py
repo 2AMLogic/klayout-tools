@@ -16,6 +16,8 @@ import pytest
 from klayout_tools import sim, sim_mismatch_scale
 from klayout_tools.sim_batch_contract_spec import (
     _MANDATORY_RUNNER_FEATURES,
+    _RUNNER_REQUEST_FEATURES,
+    _missing_runner_features,
     _request_features,
 )
 
@@ -127,6 +129,23 @@ def test_scan_ignores_subcircuit_local_and_non_numeric_params(pdk_tree):
         "sg13g2_lv_nmos_dw_mm",
         "sg13g2_lv_pmos_delvto_mm",
     }
+
+
+def test_scan_ignores_subcircuit_local_params_inside_the_section(tmp_path):
+    """A ``.subckt`` defined *directly inside* the selected section is skipped
+    for the same reason as one reached via ``.include`` -- its ``*_mm`` params
+    are subcircuit-local defaults, not deck sigmas (#5504 review)."""
+    corner = tmp_path / "corner.lib"
+    corner.write_text(
+        ".lib mos_tt_mismatch\n"
+        ".param sg13g2_lv_nmos_delvto_mm = 0.0039\n"
+        ".subckt sg13_lv_nmos d g s b\n"
+        ".param sg13g2_lv_nmos_dw_mm = 4e-9\n"
+        ".ends\n"
+        ".endl mos_tt_mismatch\n"
+    )
+    resolved = _resolve(1, corner)
+    assert dict(resolved.cards) == {"sg13g2_lv_nmos_delvto_mm": 0.0039}
 
 
 def test_scan_follows_only_the_selected_section(pdk_tree):
@@ -327,6 +346,21 @@ def test_scanned_cards_are_a_mandatory_runner_feature(pdk_tree):
     assert sim_mismatch_scale.wire_uses_scanned_cards(wire)
     assert "mismatch_params" in _request_features(wire)
     assert "mismatch_params" in _MANDATORY_RUNNER_FEATURES
+
+
+def test_mismatch_params_floor_is_its_first_release_segment():
+    """``v0.9.2`` is released and ships no ``sim_mismatch_scale``: a runner
+    baked from it would pass a ``0.9.2`` floor and then hit an unhandled
+    ``KeyError: 'mismatch_param'`` on the wire (#5504 review). The floor is
+    the feature's first release segment, ``0.9.3``."""
+    assert _RUNNER_REQUEST_FEATURES["mismatch_params"][0] == (0, 9, 3)
+    assert _missing_runner_features(["mismatch_params"], "0.9.1") == [
+        "mismatch_params"
+    ]
+    assert _missing_runner_features(["mismatch_params"], "0.9.2") == [
+        "mismatch_params"
+    ]
+    assert _missing_runner_features(["mismatch_params"], "0.9.3.dev1") == []
 
 
 def test_a_switch_family_wire_does_not_claim_the_new_feature():

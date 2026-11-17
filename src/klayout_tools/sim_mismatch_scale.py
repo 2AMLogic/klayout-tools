@@ -333,17 +333,31 @@ def _walk_section(
     seen.add(key)
     lines = _logical_lines(_read(field, path))
     inside = False
+    depth = 0
     for line in lines:
         start = _LIB_START_RE.match(line)
         if start is not None and start.group(2) is None:
             # `.lib <section>` opens a named block of this same file.
             inside = start.group(1).lower() == section.lower()
+            depth = 0
             continue
         if _LIB_END_RE.match(line):
             inside = False
+            depth = 0
             continue
-        if inside:
-            _walk_line(field, path, line, found, seen)
+        if not inside:
+            continue
+        # `.subckt` bodies are skipped for the same reason as in `_walk_file`:
+        # a parameter declared there is subcircuit-local, not the deck sigma.
+        if _SUBCKT_RE.match(line):
+            depth += 1
+            continue
+        if _SUBCKT_END_RE.match(line):
+            depth = max(0, depth - 1)
+            continue
+        if depth:
+            continue
+        _walk_line(field, path, line, found, seen)
 
 
 def _walk_line(
