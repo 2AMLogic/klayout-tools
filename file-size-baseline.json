@@ -141,7 +141,7 @@
     },
     {
       "path": "scripts/fetch_ci_wall_clock_history.py",
-      "lines": 589
+      "lines": 563
     },
     {
       "path": "scripts/gallery_signals.py",
