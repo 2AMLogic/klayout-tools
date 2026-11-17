@@ -233,6 +233,7 @@ from typing import Any
 from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
+from ._engine_proc import run_in_group
 from ._jsonnum import is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
@@ -1396,12 +1397,12 @@ def run_synthesize(
     # is never the one executed.
     yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
 
-    # Issue #1973 Failure 1: strip any `signed` declaration `write_verilog`
-    # left in place (see `_strip_signed_qualifiers`); rewritten only when
-    # something changed, so a clean netlist's mtime is never touched.
+    # Issues #1973, #4872, #5594: drop `signed` qualifiers and host source dirs
+    # (absolute and repo-relative); rewritten only if changed (mtime kept).
     netlist_text = _read_produced_netlist(netlist_path)
-    rewrite_netlist(  # issue #4872: also drops host source dirs
-        netlist_path, netlist_text, _strip_signed_qualifiers(netlist_text), elab_sources
+    stripped = _strip_signed_qualifiers(netlist_text)
+    rewrite_netlist(
+        netlist_path, netlist_text, stripped, elab_sources, repo_root=repo_root
     )
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
@@ -2508,7 +2509,7 @@ def _abc_supports_dont_use() -> bool:
     right below.
     """
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-p", "help abc"],
             capture_output=True,
             text=True,
@@ -3095,45 +3096,45 @@ def _run_yosys(
     timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
-    """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
-    on any failure to run (missing binary, non-zero exit, or a run that
-    exceeds ``timeout_s`` -- default :data:`DEFAULT_YOSYS_TIMEOUT_S`, pass
-    ``None`` for no timeout).
+    """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
+    on any failure to run: missing binary, non-zero exit, or exceeding
+    ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
 
-    Never raises on a *successful* (exit 0) run -- the caller is responsible
-    for validating the declared output files actually appeared. Returns the
-    captured ``stdout`` log text on success -- Yosys's own ``Warning: ``
-    lines land on stdout, never stderr (verified live; matches
-    :func:`_synthesis_error_message`'s own stream-preference note for
-    ``ERROR:`` lines) -- so :func:`_compute_structural`/
-    :func:`_summarize_warnings` (issue #1588) can parse it without a second
-    Yosys invocation.
+    Never raises on a *successful* (exit 0) run; the caller validates that
+    the declared output files appeared. Returns the captured ``stdout`` log
+    text -- Yosys's own ``Warning: `` lines land on stdout, never stderr
+    (verified live; matches :func:`_synthesis_error_message`'s
+    stream-preference note for ``ERROR:`` lines) -- so
+    :func:`_compute_structural`/:func:`_summarize_warnings` (issue #1588)
+    can parse it without a second Yosys invocation.
 
     A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this is
-    what lets :func:`_measure_candidate` (issue #1775) treat one hung
-    arithmetic-architecture candidate's trial synthesis the same way it
-    already treats any other failed trial: disqualified, not fatal to the
-    rest of the ``"auto"`` sweep.
+    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung trial
+    synthesis without killing the rest of the ``"auto"`` sweep.
 
-    ``cwd`` (issue #1844) is passed straight through to
-    ``subprocess.run``'s own ``cwd``; ``script_path`` itself is always
-    given as an absolute path, so ``cwd`` never affects locating the script
-    -- it only matters for a script :func:`_write_script` wrote with any
-    relative-form embedded path (``repo_root`` given), which must be run
-    with ``cwd=<that same repo_root>`` to resolve correctly. The default
-    ``None`` reproduces the pre-#1844 behaviour exactly (subprocess's own
-    default: the invoking process's cwd), correct for every script that
-    embeds only absolute paths.
+    ``cwd`` (issue #1844) is passed straight through to ``subprocess.run``;
+    ``script_path`` is always absolute, so ``cwd`` only matters for a
+    script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must be run with ``cwd=<that same
+    repo_root>``. The default ``None`` reproduces the pre-#1844 behaviour
+    (subprocess's own default), correct for scripts embedding only
+    absolute paths.
+
+    The child env is a copy of ``os.environ`` with ``COLUMNS`` pinned to
+    4096, applied unconditionally (an inherited ``COLUMNS=80`` is exactly
+    the failing case), so the readline-wrapped ``source`` echo can never
+    wedge the abc handshake (issue #5780; see ``docs/cli/synthesize.md``).
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             ["yosys", "-s", script_path],
             capture_output=True,
             text=True,
             timeout=timeout_s,
             cwd=cwd,
+            env={**os.environ, "COLUMNS": "4096"},
         )
     except OSError as exc:
         _write_yosys_log(script_path, "", str(exc))
@@ -3158,11 +3159,9 @@ def _write_yosys_log(
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
-        return (
-            stream.decode("utf-8", errors="replace")
-            if isinstance(stream, bytes)
-            else stream or ""
-        )
+        if isinstance(stream, bytes):
+            return stream.decode("utf-8", errors="replace")
+        return stream or ""
 
     _write_text_file(
         os.path.splitext(script_path)[0] + ".log",

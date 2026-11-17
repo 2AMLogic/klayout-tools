@@ -66,7 +66,6 @@ the evidence is published at all. The fix belongs at the writer.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import platform
 import re
@@ -74,7 +73,9 @@ import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .env_provenance_walk import walk_lintable_string_fields
+from ._paths import _load_request_json
+from .env_provenance_scrub import scrub_payload
+from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
 __all__ = [
     "DEFAULT_HOST_ID_SALT",
@@ -95,6 +96,7 @@ __all__ = [
     "render_text_lines",
     "repo_relative_path",
     "scan_files",
+    "scrub_payload",
 ]
 
 #: ``klt env-provenance``'s own payload version (``docs/json-contract.md``).
@@ -537,13 +539,7 @@ def lint_envelope_files(
 
 
 def _load_json_envelope(path: str) -> Any:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except OSError as exc:
-        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
+    return _load_request_json(path, EnvironmentProvenanceError)
 
 
 # --------------------------------------------------------------------------- #
@@ -644,27 +640,11 @@ def _klayout_version() -> str | None:
     return resolve()
 
 
-def _string_values(value: Any) -> list[str]:
-    """Every string leaf in a nested payload -- what the self-check scans."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Mapping):
-        found: list[str] = []
-        for key, item in value.items():
-            found.extend(_string_values(key))
-            found.extend(_string_values(item))
-        return found
-    if isinstance(value, (list, tuple)):
-        found = []
-        for item in value:
-            found.extend(_string_values(item))
-        return found
-    return []
-
-
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
-    for value in _string_values(report):
+    # Unlike the old ``_string_values`` walk, ``walk_string_fields`` skips
+    # non-``str`` keys; safe here (JSON keys are strings, docs/json-contract.md).
+    for value in (text for _field, text in walk_string_fields(report, "")):
         leaks = find_leaks(value, extra_identifiers=identifiers)
         if leaks:
             kinds = ", ".join(sorted({leak["kind"] for leak in leaks}))
@@ -676,18 +656,18 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
-def render_path_field(entry: Mapping[str, Any] | None) -> str:
+def render_path_field(entry: Mapping[str, Any] | str | None) -> str:
     """Human-readable rendering of one :func:`repo_relative_path` entry.
 
-    Shared by :func:`render_text_lines` and any other ``--format text``
-    renderer that reports a normalised ``{path, scope}`` input field (e.g.
-    ``klt pex``/``klt sim``'s own ``layout``/``netlist``/``reference_netlist``/
-    ``request``/``schematic_netlist``/``checkpoint_path`` fields, issue
-    #1261) -- ``"repo"`` renders the repo-relative path itself, ``"external"``
-    renders ``<outside repo>`` (the absolute path is never rendered, even in
-    text mode), and anything else (``"absent"``, or a missing/malformed
-    entry) renders ``<unresolved>``.
+    Shared by :func:`render_text_lines` and any ``--format text`` renderer
+    of a normalised ``{path, scope}`` field (issue #1261): ``"repo"`` renders
+    the repo-relative path, ``"external"`` ``<outside repo>`` (never the
+    absolute path), anything else ``<unresolved>``; a bare ``str`` (a
+    request's own string echo) renders verbatim (issue #5666) so a schema
+    slip degrades to a less-informative line, never a traceback.
     """
+    if isinstance(entry, str):
+        return entry
     if not entry:
         return "<unresolved>"
     scope = entry.get("scope")

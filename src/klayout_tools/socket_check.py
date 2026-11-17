@@ -34,8 +34,6 @@ a violation.
 
 from __future__ import annotations
 
-import json
-import os
 import re
 from typing import Any
 
@@ -45,6 +43,7 @@ from ._check_result import skipped as _skipped
 from ._jsonnum import is_int, is_number
 from ._layout import cells_in_hierarchy, load_layout
 from ._layout import select_top_cells as _select_top_cells
+from ._paths import _load_request_json
 
 #: Every check name this module runs, in report order. ``power_ports``
 #: (issue #2839) is appended last, so the original three keep their
@@ -296,22 +295,7 @@ def _load_descriptor(path: str) -> dict[str, Any]:
     Raises :class:`SocketCheckError` for a missing/unreadable file, invalid
     JSON, a non-object top level, or any field that fails validation.
     """
-    if not os.path.exists(path):
-        raise SocketCheckError(f"socket descriptor not found: {path}")
-    if os.path.isdir(path):
-        raise SocketCheckError(f"socket descriptor is not a file: {path}")
-
-    try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except OSError as exc:
-        raise SocketCheckError(
-            f"could not read socket descriptor '{path}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise SocketCheckError(
-            f"socket descriptor '{path}' is not valid JSON: {exc}"
-        ) from exc
+    data = _load_request_json(path, SocketCheckError)
 
     if not isinstance(data, dict):
         raise SocketCheckError("socket descriptor must decode to a JSON object")

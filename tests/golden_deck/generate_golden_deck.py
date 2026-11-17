@@ -74,7 +74,7 @@ REPO_ROOT = GOLDEN_DECK_DIR.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from klayout_tools.decks import (  # noqa: E402
-    DrcRule,  # noqa: E402
+    DrcRule,
     gf180mcu,
     sg13cmos5l,
     sg13g2,

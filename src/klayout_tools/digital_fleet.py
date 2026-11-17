@@ -939,6 +939,6 @@ def rank_candidates(results: Sequence[CandidateResult]) -> list[CandidateResult]
     ranked = sorted(
         scoreable,
         key=lambda r: r.objective["value"],
-        reverse=reverse,  # type: ignore[index]
+        reverse=reverse,
     )
     return [*ranked, *unscoreable]

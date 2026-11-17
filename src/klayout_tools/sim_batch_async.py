@@ -327,13 +327,6 @@ def launch_prepared_job(
     }
 
 
-def _job_exists(
-    config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
-) -> bool:
-    """Whether ``job.json`` exists under this job's prefix."""
-    return _job_head(config, job_id, run) is not None
-
-
 def _job_head(
     config: BatchConfig, job_id: str, run: remote_transport.CommandRunner
 ) -> dict[str, Any] | None:
@@ -407,7 +400,7 @@ def _failed_job_exit_reason(
         if result.returncode != 0:
             return {}
         report = json.loads(result.stdout or "")
-    except Exception:  # noqa: BLE001 - best-effort enrichment
+    except Exception:  # - best-effort enrichment
         return {}
     return exit_reason_env(status, report) if isinstance(report, dict) else {}
 

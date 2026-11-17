@@ -31,11 +31,10 @@ fresh extraction into *verifying a previously committed* ``--format json``
 report still reproduces -- see ``docs/cli/extract.md``, "--check". The input
 path is read from the committed report itself unless the positional ``file``
 is also given (issue #2699), which then overrides it unconditionally. Cheap
-mode (default): re-hash the input/deck named in the report and compare
-against its own recorded ``content_hash`` values, no extraction engine re-run. Full
-mode (``--check
-<report> --rerun``): actually re-run the extraction the report describes
-and diff verdict-bearing fields. Both reuse ``status: "match"`` /
+mode (default): re-hash the input/deck named in the report and compare against
+its own recorded ``content_hash`` values, no extraction engine re-run. Full
+mode (``--check <report> --rerun``): actually re-run the extraction the report
+describes and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 ``"drifted"`` and the same 0/3 exit-code split described above (see
 ``klayout_tools._report_verify``).
 """
@@ -409,6 +408,7 @@ _REQUEST_FIELD_DESTS = {
         "device_models",
         "probes",
         "defer_resistor_fixed_offset",
+        "omit_dead_metal",
         "abstract_cells",
         "abstract_cell_lef",
         "subcircuit",
@@ -547,6 +547,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             ),
             "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
+            "omit_dead_metal": _bool("omit_dead_metal"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
             "subcircuit": _str("subcircuit"),
@@ -645,10 +646,12 @@ def run(args: argparse.Namespace) -> int:
             # correction), `run_extract`'s kwarg as "apply" (default `True`),
             # so the CLI default stays today's always-applied behavior.
             apply_resistor_fixed_offset=not args.defer_resistor_fixed_offset,
-            # `--deck-option` (issue #595): selects a caller-visible flavour
-            # of a shared-geometry device family (e.g. gf180mcu's
-            # `poly_res`). `None` when the flag was never given, unchanged
-            # from every call site that predates it.
+            # `--omit-dead-metal` (issue #5545): drops `dead_metal[]`'s
+            # per-cluster rows, keeps `dead_metal_summary`. `False` by default.
+            omit_dead_metal=args.omit_dead_metal,
+            # `--deck-option` (issue #595): selects a caller-visible flavour of a
+            # shared-geometry device family (e.g. gf180mcu's `poly_res`). `None` when
+            # the flag was never given, unchanged from every call site that predates it.
             deck_options=deck_options,
             # `--label-layer` (issue #2656): reads net/pin name text for one
             # label role off a different GDS purpose than this deck's own
@@ -666,34 +669,31 @@ def run(args: argparse.Namespace) -> int:
             # given, unchanged from every call site that predates them.
             abstract_cell_patterns=tuple(args.abstract_cells or ()),
             abstract_cell_lef_paths=tuple(args.abstract_cell_lef or ()),
-            # `--mom-net` (issue #798): cross-checks (and replaces) one
-            # net's --parasitics ground capacitance against `klt mom`.
-            # `None` when the flag was never given, unchanged from every
-            # call site that predates it.
+            # `--mom-net` (issue #798): cross-checks (and replaces) one net's
+            # --parasitics ground capacitance against `klt mom`. `None` when the flag
+            # was never given, unchanged from every call site that predates it.
             mom_net=args.mom_net,
             # `--spef` (issue #948): writes --parasitics's per-net R/C model
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
-            # `--substrate-spreading` (issue #2561): two-terminal closed-form
-            # estimate of the bulk resistance between this net's substrate
-            # taps. `None` when the flag was never given, unchanged from
-            # every call site that predates it.
+            # `--substrate-spreading` (issue #2561): two-terminal closed-form estimate
+            # of the bulk resistance between this net's substrate taps. `None` when the
+            # flag was never given, unchanged from every call site that predates it.
             substrate_spreading_net=args.substrate_spreading,
             # `--def-net-names` (issue #951): names routed nets from the DEF
             # net name their geometry carries as a GDS shape property instead
             # of from text labels. `False` when the flag was never given,
             # unchanged from every call site that predates it.
             def_net_names=args.def_net_names,
-            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the
-            # lateral (same-layer sidewall) coupling pass onto these net
-            # names. `None` when the flag was never given, unchanged from
-            # every call site that predates it.
+            # `--critical-net` (issue #976, Epic #709 Phase 2a): scopes the lateral
+            # (same-layer sidewall) coupling pass onto these net names. `None` when the
+            # flag was never given, unchanged from every call site that predates it.
             critical_nets=args.critical_nets,
-            # `--parasitics-net` (issue #1700): scopes --parasitics' per-net
-            # ground R/C pass onto these net names instead of measuring
-            # every net in the design. `None` when the flag was never given,
-            # unchanged from every call site that predates it.
+            # `--parasitics-net` (issue #1700): scopes --parasitics' per-net ground R/C
+            # pass onto these net names instead of measuring every net in the design.
+            # `None` when the flag was never given, unchanged from every call site that
+            # predates it.
             parasitics_nets=args.parasitics_nets,
             # Issue #2974: glob / all-nets selectors resolved against the
             # extracted nets. Defaults leave every earlier call unchanged.

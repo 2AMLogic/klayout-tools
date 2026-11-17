@@ -6,8 +6,8 @@ any MCP-SDK import: it walks the argparse registry built by
 per leaf verb (``klt_<verb>``, or ``klt_<verb>_<subcommand>`` for the nested
 verbs such as ``pdk``/``deck``/``wave``/``kb``), and executes a call by
 running ``klt <verb> ... --format json`` in a subprocess. The SDK-facing
-glue lives in :mod:`klayout_tools.mcp_server`, so this half is unit-testable
-without the optional ``[mcp]`` extra.
+glue lives in :mod:`.mcp_server`; the schemas served as MCP resources are in
+:mod:`.mcp_resources`. This half is unit-testable without the ``[mcp]`` extra.
 
 Design rules (see ``docs/guides/mcp-server.md``):
 
@@ -92,7 +92,7 @@ def _help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
         return ""
     try:
         return parser._get_formatter()._expand_help(action)
-    except Exception:  # noqa: BLE001 -- never let a malformed help string drop a tool
+    except Exception:  # -- never let a malformed help string drop a tool
         return str(action.help)
 
 

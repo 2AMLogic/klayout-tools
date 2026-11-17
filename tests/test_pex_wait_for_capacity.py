@@ -25,7 +25,7 @@ def _prepare(tmp_path):
 def test_run_pex_forwards_wait_for_capacity_to_every_run_sim(
     tmp_path,
     resistor_layout,
-    monkeypatch,  # noqa: F811
+    monkeypatch,
 ):
     """Reaches every `run_sim` leg (including 0); omitted, it is not passed."""
     import klayout_tools.pex as pex_module
@@ -61,7 +61,7 @@ def test_run_pex_refuses_bad_wait_for_capacity_before_io(
     tmp_path,
     resistor_layout,
     kwargs,
-    match,  # noqa: F811
+    match,
 ):
     """Refused before anything is extracted or simulated."""
     request = _prepare(tmp_path)

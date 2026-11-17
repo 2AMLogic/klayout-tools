@@ -402,7 +402,7 @@
       "required": ["class", "device_kind", "layout_devices", "reference_devices", "compared", "not_compared"],
       "properties": {
         "class": {"type": "string"},
-        "device_kind": {"enum": ["resistor", "capacitor"]},
+        "device_kind": {"enum": ["resistor", "capacitor", "mos"]},
         "layout_devices": {"type": "integer", "minimum": 0},
         "reference_devices": {"type": "integer", "minimum": 0},
         "compared": {"type": "array", "items": {"type": "string"}},
