@@ -809,7 +809,7 @@
     },
     {
       "path": "tests/test_drc.py",
-      "lines": 11048
+      "lines": 11042
     },
     {
       "path": "tests/test_drc_asap7_deck.py",
