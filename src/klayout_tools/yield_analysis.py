@@ -40,15 +40,14 @@ module of its own, so both inputs go through the same sim-report reader
 from __future__ import annotations
 
 import csv
-import gzip
 import hashlib
 import io
 import json
 import math
 import os
 from typing import Any
-from zlib import error as zerror
 
+from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_int, is_number
 from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
@@ -110,11 +109,9 @@ def _load_json(path: str, what: str) -> Any:
     if os.path.isdir(path):
         raise YieldError(f"not a file: {path}")
     try:
-        with open(path, "rb") as raw:
-            opener = gzip.open if raw.read(2) == b"\x1f\x8b" else open
-        with opener(path, "rt", encoding="utf-8") as f:
+        with open_text(path) as f:
             return json.load(f)
-    except (OSError, EOFError, zerror, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (*READ_ERRORS, json.JSONDecodeError) as exc:
         raise YieldError(f"could not read {what} '{path}': {exc}") from exc
 
 
