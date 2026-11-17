@@ -42,7 +42,9 @@ this document (and the code) win.
   `ceil(len(decks)/N)` balanced contiguous slices, one batch job each, merged
   into one report in request order, with a shard map (`batch-shards.json`,
   plus `deck_slices[]`) written to the artifacts dir and
-  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report.
+  `environment.remote.{split,shard_count,shard_map,shards[]}` in the report
+  (`shard_map` repo-relative when the map lies inside a git repo, absolute
+  otherwise, like every `shard_map` emission).
   A list that already fits submits one job and writes no shard map.
   `--submit-only` on a deck list that would split is refused with
   `error.code: "batch_decks_split_unsupported"`; run it blocking, then
@@ -885,7 +887,14 @@ or more shards submitted but never launched (typically a capacity or
 concurrency-cap refusal with `batch.capacity_wait_s` at its default `0`),
 `environment.remote` carries three additive fields, absent when every shard
 launched: `unlaunched_shards` (count), `resumable: true`, and `shard_map` (the
-`batch-shards.json` path). The affected corners still report `lost_shard` and
+`batch-shards.json` path, repo-relative when it lies inside a git repo and
+absolute otherwise -- the stderr hints keep the absolute path either way).
+Each unlaunched shard is also a `null` entry in `environment.remote.fleet[]`,
+at its own index (the shard map's shard order): a client collecting per-job
+metadata across `fleet[]` must skip the `null` slots, and read job identity
+and runner skew from the null-safe `job_ids` / `runner_compatibility`
+roll-ups, which omit the lost shards. The affected corners still report
+`lost_shard` and
 the exit code stays 4; the fields only let an unattended caller tell
 "incomplete, rerun with `--resume` and the same outdir" from a real failure
 ([#4856](https://github.com/2AMLogic/klayout-tools/issues/4856)). Unattended
@@ -897,8 +906,11 @@ any corner that never ran (`lost_shard`, `batch_job_failed`,
 `batch_job_timeout`, `batch_poll_timeout`, `batch_job_interrupted`) and klt kept
 state to resume from (the shard map, else the `--resume` checkpoint),
 `environment.remote` additionally carries `unrun_units` (count) and
-`resumable: true`, with `shard_map` naming the retained file, and stderr names
-the `--resume` rerun once. Absent when every unit ran. `unrun_units` counts
+`resumable: true`, with `shard_map` naming the retained file (repo-relative
+when it lies inside a git repo, absolute otherwise), and stderr names
+the `--resume` rerun once. Each affected shard is a `null` entry in
+`environment.remote.fleet[]` at its own index, as for unlaunched shards above.
+Absent when every unit ran. `unrun_units` counts
 every corner that never ran; `unlaunched_shards` (above) counts only shards that
 were never launched, so with both present `unrun_units` is the larger. A lost shard is
 identified by `corners[].diagnostics[].code`, not by `status` (it stays
@@ -1101,7 +1113,10 @@ a plain attach. Any other shard (`running`, `interrupted`, unreadable status,
 or one the map records as submitted but never launched, reported `unlaunched`)
 is not waited on and never launched: each of its units is `lost_shard`, and
 `environment.remote` carries `unfinished_shards[]` (`index`, `job_id`, last
-observed `state`), `resumable: true` and `shard_map`. The exit code is `4`
+observed `state`), `resumable: true` and `shard_map` (repo-relative when it
+lies inside a git repo, absolute otherwise). Each unfinished shard is a
+`null` entry in `fleet[]` at its own index, as for unlaunched and lost
+shards above. The exit code is `4`
 (incomplete). With every shard `done` the report equals a plain `--attach`;
 with none done every unit is lost. The map is changed only by collected state,
 so a later plain `--attach` (or `--resume`) still finishes the remaining
@@ -2068,13 +2083,15 @@ report a pass. Policy: **reject before simulating**.
   carries exactly one `batch_runner_version_mismatch` entry (severity
   `error`) with `runner_klt_version`, `client_klt_version`,
   `accepted_client_release` (the runner's major.minor) and a `message` stating
-  the remedy: submit from a client of that major.minor, or update the runner
-  image to the client's. It is additive (the per-unit diagnostics and
-  `environment.remote` fields above are unchanged), appears once even for
-  `hosts > 1`, and is not emitted for `match` / `unknown`, nor under
-  `runner_version_check: "warn"` when the run proceeded (that skew stays in
-  `environment.remote` only). It covers the case the pre-launch manifest check
-  cannot see (no manifest, or an entry without `klt_version`).
+  the remedy: submit from a client of that major.minor, update the runner
+  image to the client's, or set `batch.runner_version_check: "warn"` to run
+  anyway (under `warn` the runner-side gate is not applied, so the job is
+  submitted and runs despite the skew). It is additive (the per-unit
+  diagnostics and `environment.remote` fields above are unchanged), appears
+  once even for `hosts > 1`, and is not emitted for `match` / `unknown`, nor
+  under `runner_version_check: "warn"` when the run proceeded (that skew stays
+  in `environment.remote` only). It covers the case the pre-launch manifest
+  check cannot see (no manifest, or an entry without `klt_version`).
 - A single-job `environment.remote`, and each `environment.remote.fleet[]`
   entry of a sharded run (so mixed-version shards stay distinguishable), always
   carries `runner_klt_version` (the runner's own version, or `null` when it
@@ -2226,7 +2243,9 @@ reject (version/feature gate) instead of leaving the bare `job command exited
 87`. If the post-run runner identity shows a major.minor mismatch with the
 client (`environment.remote.runner_compatibility: "mismatch"`), the diagnostic
 also carries `runner_code: "batch_runner_version_mismatch"` and both klt
-versions. `--job-status` is a `status.json` passthrough only and never
+versions, and its message names the remedy: update the runner image, use a
+compatible client, or set `batch.runner_version_check: "warn"` to submit
+anyway. `--job-status` is a `status.json` passthrough only and never
 fetches outputs, so it can show just `job command exited 87`; read the full
 report for the cause.
 
@@ -3185,7 +3204,15 @@ not just equivalent.
   backend actually populates `environment.remote` (see "Remote backend"
   above) reports one `fleet[]` entry per host instead of a single block —
   each entry has the exact same fields as today's single-host block, or
-  `null` for a lost shard:
+  `null` for a lost shard — a shard that never returned a remote block,
+  whether it failed mid-run or was submitted but never launched (an
+  unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
+  see "Unlaunched shards are a resumable signal" above). The array is
+  positional: index *i* is shard *i*, in the shard map's order, so a client
+  collecting per-job metadata across `fleet[]` must skip the `null` slots
+  rather than dereference them, and read job identity and runner skew from
+  the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
+  `null` shards):
 
   ```json
   {
@@ -4004,15 +4031,24 @@ conditions, so a large transient keeps only the signals you named resident
 (and in the rawfile/waveform artifact) without editing the netlist.
 
 klt always adds every `v(x)`/`i(x)` (and derivative forms such as `vdb(x)`,
-`vm(a,b)`) referenced by a declared `measurements[].spice`, `measurements[].expr`
-or `crossings.signal`, so measurements stay correct. A measurement that names
-a vector *bare* (`out` rather than `v(out)`) is not detected — list it in
-`save_vectors` yourself. `save_vectors` and `save_mode: "netlist"` are mutually
-exclusive (an application error: the latter already suppresses the card the
-former rewrites), and `engine: "xyce"` refuses it like `save_mode`. Omitting it
-leaves the deck byte-identical. A changed `save_vectors` invalidates a
-`--resume` checkpoint. It rides the forwarded request document to
-`remote`/`batch` workers, so the worker image must include this implementation.
+`vm(a,b)`) referenced by a declared measurement, so measurements stay
+correct. Covered (issue #5559): the `measurements[].spice` and
+`measurements[].expr` text, `crossings.signal`, `step_resolution.signal`,
+the `settled` clock and `settled.mean.signal`/`settled.peak.signal`,
+`cycle_mean.signal` and `cycle_mean.align`, `energy.voltage` plus the
+implied `i(<energy.source>)`, `stress.a`/`stress.b` (bare node names, saved
+as `v(<node>)`), `snm.x`/`snm.y1`/`snm.y2`, `eye.signal`,
+`transfer.num`/`transfer.den`, and `tian` — its `tv`/`ti` selectors, or
+`v(<series_injection.load_node>)` and `i(<series_injection.source>)` for a
+series injection; the `analysis.passes` decks read the same `save` card. A
+measurement that names a vector *bare* (`out` rather than `v(out)`) is not
+detected — list it in `save_vectors` yourself. `save_vectors` and
+`save_mode: "netlist"` are mutually exclusive (an application error: the
+latter already suppresses the card the former rewrites), and
+`engine: "xyce"` refuses it like `save_mode`. Omitting it leaves the deck
+byte-identical. A changed `save_vectors` invalidates a `--resume`
+checkpoint. It rides the forwarded request document to `remote`/`batch`
+workers, so the worker image must include this implementation.
 
 ### Complex AC vectors: `options.complex_vectors` (issue #3337)
 
