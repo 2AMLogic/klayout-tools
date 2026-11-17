@@ -878,9 +878,11 @@ one:
 }
 ```
 
-The justification is that the destination is structurally incapable of
-carrying a modpath — no `specify` block, no output pin, so nothing the entry
-could annotate and no logic that observes the pin — and the exemption carries
+The justification is that the destination is a physical-only cell — no
+`specify` block, no output pin, so no timing content and no logic that
+observes the pin (the entry can still be the #5705 cap's annotated survivor
+when its instance is the net's last-declared load; the drop does not rest on
+"no modpath exists") — and the exemption carries
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*

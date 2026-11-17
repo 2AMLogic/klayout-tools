@@ -1252,25 +1252,34 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # inserted antenna diodes on top-level input bits could not pass the gate at
 # all.
 #
-# Reproduced live against Icarus 13.0 through this module, which pinned down
-# a condition the issue's own write-up does not state: the failure needs the
-# port bit's net to carry **more than one** `INTERCONNECT` entry. A bus-port
-# net whose only entry is the diode's own annotates cleanly even without this
-# pass (#1619's deferral is enough, since each port bit is its own net), but
-# the moment that net carries a second entry one of them fails -- exactly the
-# same-net poisoning #1619 shape (a) describes, which the deferral cannot
-# undo because both entries are on the one net it deferred. A real router
-# inserts one diode per violating pin, so a multi-load input bit collects
-# several of these.
+# Reproduced live against Icarus 13.0 through this module (not just read
+# off the issue), and re-measured with one-variable controls in issue
+# #5705: the deciding variable is the port bit's net's *physical fanout*
+# and the netlist's declaration order, not the `INTERCONNECT` entry
+# count -- `$sdf_annotate` creates at most one interconnect modpath per
+# bit-selected top-level port net, for the destination of the
+# **last-declared instance on that net**, and rejects every other load's
+# entry (`VPI error: Could not insert intermodpath!`). A bus-port net
+# whose only load is the diode annotates cleanly (fanout 1; #1619's
+# deferral is enough there, since each port bit is its own net), but a
+# real router inserts one diode per violating pin, so a multi-load input
+# bit collects several, and on a fanout-above-1 net every
+# non-last-declared load's entry fails regardless of entry count -- a
+# lone non-last-declared entry fails too. This is the shape (b) cap, not
+# the same-net entry-order poisoning #1619 shape (a) describes: verdicts
+# are deterministic across entry orders, and it is the *netlist*
+# declaration order that picks the survivor.
 #
 # What makes *this* subset of shape (b) different -- and what #2285's
 # docstring said was missing before the drop could be widened to a source-
-# side match at all -- is that the destination here is structurally
-# incapable of carrying a modpath: the diode model has no `specify` block
-# and no output port whatsoever (the no-`USE_POWER_PINS` variant is a module
-# with a single `input` and an empty body). There is no modpath the entry
-# could ever annotate, and no logic anywhere that observes the annotated
-# pin. The general shape (b) case -- a bit-selected-port source feeding an
+# side match at all -- is the destination: the diode model has no
+# `specify` block and no output port whatsoever (the no-`USE_POWER_PINS`
+# variant is a module with a single `input` and an empty body), so it has
+# no timing content of its own and no logic anywhere observes the pin --
+# whether the cap makes this entry the annotated survivor (in #2363's
+# two-diodes fixture the last-declared diode's entry is the one Icarus
+# accepts) or a rejected non-survivor. The general shape (b) case -- a
+# bit-selected-port source feeding an
 # ordinary `specify`-bearing standard cell -- is emphatically *not* covered
 # here: that destination has real modpaths, so dropping a NON-zero entry
 # would change simulated timing and it must keep failing loudly exactly as
@@ -1456,8 +1465,9 @@ def _sdf_interconnect_is_physical_only_droppable(
     removes an entry on (issue #2363).
 
     All three halves are load-bearing. The destination match is the
-    justification (no ``specify`` block and no output pin means no modpath
-    the entry could annotate and no logic that observes the pin); the
+    justification (no ``specify`` block and no output pin means no timing
+    content and no logic that observes the pin, whether or not the #5705
+    cap makes the entry the net's annotated survivor); the
     zero-delay test is what makes removing it provably unable to change
     simulated timing at any corner; and the bit-selected-input-port source
     match is what keeps the exemption pinned to the one shape #2363 actually

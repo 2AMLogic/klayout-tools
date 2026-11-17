@@ -2836,17 +2836,24 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike: #5705's
-        # one-modpath cap leaves it unannotated. Unlike the general shape (b)
-        # case (which stays failing, pinned by
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # fanout-above-1 port-bit net, #5705's one-modpath cap leaves every
+        # non-last-declared load's entry unannotated. Unlike the general
+        # shape (b) case (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
         # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so there is no modpath the
-        # entry could ever annotate. When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing, so
-        # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run. A non-zero-delay entry is left in
-        # place and still fails the diagnostic gate loudly.
+        # `specify` block and no output pin, so it has no timing content
+        # and no logic observes the pin -- the entry can still be the
+        # cap's annotated survivor when its instance is the net's
+        # last-declared load (in #2363's two-diodes fixture the
+        # last-declared diode's entry annotates and the first-declared one
+        # is rejected), so the drop does not rest on "no modpath exists".
+        # When such an entry is zero-delay at
+        # every corner, dropping it cannot change any simulated timing
+        # either way, so it is removed here and counted in
+        # `environment.sdf.dropped` instead of failing the run. A
+        # non-zero-delay entry is left in place and still fails the
+        # diagnostic gate loudly.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
