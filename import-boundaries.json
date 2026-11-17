@@ -675,6 +675,7 @@
         "klayout_tools._report_verify_exclude",
         "klayout_tools._report_verify_hints",
         "klayout_tools._spice_number",
+        "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
         "klayout_tools._text",
         "klayout_tools._unionfind",
@@ -739,6 +740,7 @@
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.asap7_bsimcmg",
+        "klayout_tools.device_multiplier_lint",
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_cmd",
         "klayout_tools.cli.sim_job_text",

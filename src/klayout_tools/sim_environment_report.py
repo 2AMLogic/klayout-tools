@@ -276,7 +276,13 @@ def device_multiplier_environment(
             netlist_staged_name="netlist.cir",
             roots=sim_staging.host_resolved_roots(request or {}),
         )
-        closure_paths = [item.source_path or item.local_path for item in staged.files]
+        closure_paths = []
+        for item in staged.files:
+            source = item.source_path or item.local_path
+            # stage_netlist always sets one of the two (source_path whenever
+            # content rewrote the file, local_path otherwise).
+            assert source is not None
+            closure_paths.append(source)
         not_scanned = [
             {"target": target, "reason": reason}
             for target, reason in staged.host_resolved_detail

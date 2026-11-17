@@ -129,60 +129,110 @@ def _lint(
     unverified: list[dict[str, str]] = []
     unevaluated: list[dict[str, str]] = []
     for card in instance_cards:
-        tokens = split_spice_tokens(card)
-        if not tokens or tokens[0][0].lower() != "x":
-            continue
-        params = _card_params(tokens)
-        if "m" not in params and "mult" not in params:
-            continue
-        target = _target_subckt(tokens)
-        subckt_text = subckts.get((target or "").lower())
-        if subckt_text is None:
+        _lint_card(card, subckts, findings, unverified, unevaluated)
+    return findings, unverified, unevaluated
+
+
+def _lint_card(
+    card: str,
+    subckts: dict[str, str],
+    findings: list[dict[str, Any]],
+    unverified: list[dict[str, str]],
+    unevaluated: list[dict[str, str]],
+) -> None:
+    """Fold one card's decision into the shared result lists: skip
+    non-instance and parameterless cards, note a checkable instance whose
+    subcircuit text is missing from the closure, else run the rule table
+    (only for a subcircuit that declares ``mult`` and never forwards it)."""
+    tokens = split_spice_tokens(card)
+    if not tokens or tokens[0][0].lower() != "x":
+        return
+    params = _card_params(tokens)
+    if "m" not in params and "mult" not in params:
+        return
+    target = _target_subckt(tokens)
+    subckt_text = subckts.get((target or "").lower())
+    if subckt_text is None:
+        if _pair_could_yield_finding(params):
             unverified.append({"instance": tokens[0], "subckt": target or ""})
-            continue
-        header, _, body = subckt_text.partition("\n")
-        if not _header_declares_mult(header) or _body_forwards_mult(body):
-            continue
-        m_raw = params.get("m")
-        mult_raw = params.get("mult")
-        m_value = _param_number(m_raw)
+        return
+    header, _, body = subckt_text.partition("\n")
+    if not _header_declares_mult(header) or _body_forwards_mult(body):
+        return
+    _compare_pair(tokens[0], target or "", params, findings, unevaluated)
+
+
+def _pair_could_yield_finding(params: dict[str, str]) -> bool:
+    """Could this ``m=``/``mult=`` pair yield a finding under the rule
+    table, whatever the subcircuit does? Pairs that are clean no matter
+    what -- no ``m=`` with ``mult=1``, or an equal ``m=N``/``mult=N``
+    pair -- cannot, so an instance whose subcircuit text is missing is
+    noted only when the pair is worth cross-checking. Without this gate
+    the note would fire on every sky130 run whose models come through
+    ``models.pdk`` rather than a netlist ``.include`` (the common case),
+    naming instances that are unconditionally clean."""
+    m_raw = params.get("m")
+    mult_raw = params.get("mult")
+    if m_raw is None:
         mult_value = _param_number(mult_raw)
-        for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
-            if raw is not None and value is None:
-                unevaluated.append({"instance": tokens[0], "param": name, "value": raw})
-        comparable = (m_raw is None or m_value is not None) and (
-            mult_raw is None or mult_value is not None
-        )
-        if not comparable:
-            continue
-        if m_raw is None:
-            if mult_value is not None and mult_value > 1:
-                findings.append(
-                    _finding(
-                        DRIVE_1X,
-                        tokens[0],
-                        target or "",
-                        m=None,
-                        mult=mult_raw,
-                        m_value=None,
-                        mult_value=mult_value,
-                    )
-                )
-            continue
-        effective = 1.0 if mult_value is None else mult_value
-        if m_value != effective:
+        return mult_value is not None and mult_value > 1
+    m_value = _param_number(m_raw)
+    mult_value = _param_number(mult_raw)
+    if m_value is None or (mult_raw is not None and mult_value is None):
+        # An expression value compares to nothing, so no finding can fire.
+        return False
+    return m_value != (1.0 if mult_value is None else mult_value)
+
+
+def _compare_pair(
+    instance: str,
+    subckt: str,
+    params: dict[str, str],
+    findings: list[dict[str, Any]],
+    unevaluated: list[dict[str, str]],
+) -> None:
+    """The rule table for one instance of a subcircuit that declares
+    ``mult`` but never forwards it to drive: disclose unevaluated values,
+    then flag a pair that disagrees."""
+    m_raw = params.get("m")
+    mult_raw = params.get("mult")
+    m_value = _param_number(m_raw)
+    mult_value = _param_number(mult_raw)
+    for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
+        if raw is not None and value is None:
+            unevaluated.append({"instance": instance, "param": name, "value": raw})
+    comparable = (m_raw is None or m_value is not None) and (
+        mult_raw is None or mult_value is not None
+    )
+    if not comparable:
+        return
+    if m_raw is None:
+        if mult_value is not None and mult_value > 1:
             findings.append(
                 _finding(
-                    DRIVE_MISMATCH_DISAGREEMENT,
-                    tokens[0],
-                    target or "",
-                    m=m_raw,
+                    DRIVE_1X,
+                    instance,
+                    subckt,
+                    m=None,
                     mult=mult_raw,
-                    m_value=m_value,
-                    mult_value=effective,
+                    m_value=None,
+                    mult_value=mult_value,
                 )
             )
-    return findings, unverified, unevaluated
+        return
+    effective = 1.0 if mult_value is None else mult_value
+    if m_value != effective:
+        findings.append(
+            _finding(
+                DRIVE_MISMATCH_DISAGREEMENT,
+                instance,
+                subckt,
+                m=m_raw,
+                mult=mult_raw,
+                m_value=m_value,
+                mult_value=effective,
+            )
+        )
 
 
 def _finding(
@@ -276,8 +326,10 @@ def _target_subckt(tokens: list[str]) -> str | None:
 
 
 def _header_declares_mult(header: str) -> bool:
-    """Does the ``.subckt`` header declare a ``mult`` parameter?"""
-    return "mult" in _card_params(header.split())
+    """Does the ``.subckt`` header declare a ``mult`` parameter? Uses the
+    shared tokenizer (not a bare ``split()``) so the spaced ``mult = 1``
+    spelling reads the same as ``mult=1``."""
+    return "mult" in _card_params(split_spice_tokens(header))
 
 
 def _body_forwards_mult(body: str) -> bool:
