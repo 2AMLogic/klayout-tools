@@ -1,7 +1,9 @@
 """``klt artifact put|get|verify|delete``: the fleet artifact-store client (issue
-#4063). The logic lives in :mod:`klayout_tools.artifact_store`; this module
-only maps arguments and emits through the shared envelope in :mod:`.output`
-(``docs/json-contract.md``, ``docs/cli/artifact.md``).
+#4063). The logic lives in :mod:`klayout_tools.artifact_objects` (put/get/
+delete), :mod:`klayout_tools.artifact_verify` (the verify closure) and
+:mod:`klayout_tools.artifact_verify_local` (``verify --local``); this module
+only maps arguments and emits through the shared envelope in
+:mod:`.output` (``docs/json-contract.md``, ``docs/cli/artifact.md``).
 
 No presigned URL ever reaches this module's output: the library keeps URLs
 in-process, and the payloads below carry digests, sizes, keys and manifest
@@ -14,10 +16,13 @@ Exit codes:
         ``message`` are in the error envelope), an unreachable broker, a
         malformed manifest, an unreadable input, or -- for get -- fetched
         bytes that did not re-hash to the manifest's digest and the key's
-        (nothing is written) -- ``output.ERROR_EXIT_CODE``
+        (nothing is written) -- ``output.ERROR_EXIT_CODE``. verify --local
+        adds: no entry resolved to a file (``nothing_verified``) and an
+        entry name that escapes the verify root (``name_escapes_root``).
     (delete: 0 - dry run reported, or objects deleted / already absent; 1 - a
         referenced object, a broker refusal or an unreachable broker.)
-    3 - verify only: ran, and at least one entry is missing or mismatched
+    3 - verify only: ran, and at least one checked entry is missing or
+        mismatched (broker-backed or --local)
 (2 is reserved for argparse usage errors.)
 """
 
@@ -28,7 +33,8 @@ import os
 import sys
 from typing import Any
 
-from .. import artifact_store as store
+from .. import artifact_objects as store
+from .. import artifact_verify_local as verify_local
 from .output import emit_error, emit_success
 
 #: verify ran and found a missing or mismatched entry.
@@ -146,6 +152,15 @@ def _print_get_text(payload: dict[str, Any]) -> None:
 
 
 def run_verify(args: argparse.Namespace) -> int:
+    if getattr(args, "local", False):
+        return _run_verify_local(args)
+    if getattr(args, "root", None):
+        return emit_error(
+            "artifact verify",
+            "--root applies to --local only",
+            args.format,
+            exit_code=2,
+        )
     try:
         client = store.resolve_broker(args.broker)
         report = store.verify_manifest(client, args.manifest)
@@ -156,9 +171,23 @@ def run_verify(args: argparse.Namespace) -> int:
     return 0 if report["status"] == "ok" else EXIT_VERIFY_FAILED
 
 
+def _run_verify_local(args: argparse.Namespace) -> int:
+    path, _, selector = args.manifest.partition("#")
+    try:
+        report = verify_local.verify_manifest_local(path, selector or None, args.root)
+    except store.ArtifactError as exc:
+        return _error("verify", exc, args.format)
+    payload = {"schema_version": 1, "manifest": path, **report}
+    emit_success(payload, args.format, _print_verify_text)
+    return 0 if report["status"] == "ok" else EXIT_VERIFY_FAILED
+
+
 def _print_verify_text(payload: dict[str, Any]) -> None:
     for result in payload["entries"]:
-        print(f"{result['status']:<14} {result['sha256']}  {result.get('name') or ''}")
+        line = f"{result['status']:<14} {result['sha256']}  {result.get('name') or ''}"
+        if payload.get("mode") == "local" and result.get("path"):
+            line += f"  ({result['path']})"
+        print(line)
     print(
         f"{payload['manifest']}: {payload['status']} "
         f"({payload['failed_count']} of {payload['entry_count']} failed)"

@@ -17,6 +17,7 @@ import jsonschema
 import klayout.db as kdb
 import pytest
 
+from golden_deck.generate_golden_deck import is_curated_topology_rule
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
@@ -32,6 +33,7 @@ from klayout_tools.drc import (
     rerun_drc_report,
     run_drc,
 )
+from test_drc_sg13g2_cut_containment import draw_cut_landings
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -4236,6 +4238,7 @@ def test_run_drc_two_shape_violation(
     )
     top.shapes(main).insert(kdb.Box(*box))
     top.shapes(other).insert(kdb.Box(*other_box))
+    draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -4408,6 +4411,7 @@ def test_run_drc_two_shape_clean(
     )
     top.shapes(main).insert(kdb.Box(*box))
     top.shapes(other).insert(kdb.Box(*other_box))
+    draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_clean.gds"
     layout.write(str(path))
 
@@ -6889,31 +6893,22 @@ def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
 # extension) already have full golden violate/clean coverage via
 # `tests/golden_deck/sg13g2/manifest.json` (parametrized by
 # `tests/test_golden_deck.py`, which also asserts their `provenance` is
-# populated). The 13 rules below (`gatpoly.separation.activ.1`,
-# `activ.enclosing.cont.1`, `gatpoly.enclosing.cont.1`,
-# `metal1.enclosing.via1.1`, `metal2.enclosing.via2.1`, plus issue #1243's
-# `metal3.enclosing.via3.1`, `metal4.enclosing.via4.1`,
-# `metal5.enclosing.topvia1.1`, `topmetal1.enclosing.topvia1.1`,
-# `topmetal1.enclosing.topvia2.1`, `topmetal2.enclosing.topvia2.1` and issue
-# #2581's `metal5.enclosing.mim.1`, `mim.enclosing.topvia1.1`) are
-# `enclosing`/`separation` checks, out of that manifest's width/space-only
-# scope (see its own README.md) -- mirroring how sky130/gf180mcu's own
-# enclosing/separation rules are hand-tested directly in this module (e.g.
-# the consolidated two-shape family's `met1.enclosing.via.1` row above).
+# populated). The 13 `enclosing`/`separation` rules below (the Cont pair,
+# the eight sg13g2 via/TopVia enclosures, and #2581's `metal5.enclosing.mim.1`/
+# `mim.enclosing.topvia1.1`) are out of that manifest's width/space-only
+# scope (see its own README.md) -- hand-tested directly in this module,
+# mirroring how sky130/gf180mcu's own enclosing/separation rules are.
 
 
 def test_run_drc_sg13g2_every_rule_has_provenance():
-    """Every one of sg13g2's 63 curated `DrcRule` entries carries a populated
-    `provenance` citation (issue #905's own acceptance criterion: "every
-    compiled rule cites its SG13G2 PDK source line", extended by issue #1243's
-    Metal3-TopMetal2 stack, issue #2581's 6.11 MIM group, issue #3787's pSD
-    group, issue #3571's NWell rules and issue #3585's NW.c/d/e/f* NWell
-    enclosure/space rules) -- not just the
-    36 width/space rules `tests/test_golden_deck.py`'s generic check already
-    covers."""
+    """Every one of sg13g2's 68 curated `DrcRule` entries carries a populated
+    `provenance` citation (issue #905 + its follow-ons #1243/#2581/#3787/
+    #3571/#3585), not just the 36 width/space golden-manifest rules; the five
+    #5916 curated topology assertions are exempt (`is_curated_topology_rule`:
+    no upstream rule to cite)."""
     deck = get_deck("sg13g2")
-    assert len(deck) == 63
-    for rule in deck:
+    assert len(deck) == 68
+    for rule in (r for r in deck if not is_curated_topology_rule(r)):
         assert rule.provenance is not None, f"sg13g2/{rule.id}: no provenance"
         assert rule.provenance.source_repo == "IHP-GmbH/IHP-Open-PDK"
         assert rule.provenance.source_path, f"sg13g2/{rule.id}: empty source_path"
@@ -7294,6 +7289,7 @@ def _sg13g2_cut_stack(
     layout.set_info(cut_layer, kdb.LayerInfo(cut[0], cut[1], cut_name))
     top.shapes(cond_layer).insert(conductor_box)
     top.shapes(cut_layer).insert(cut_box)
+    draw_cut_landings(layout, top, cut, conductor, cut_box)
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -7488,12 +7484,14 @@ def test_run_drc_sg13g2_fixed_size_cut_boundaries(
 ):
     """Each of sg13g2's newly-max-bounded cut/via rules is checked as a
     fixed size, mirroring `test_run_drc_gf180mcu_contact_fixed_size_boundaries`
-    (issue #2388)."""
+    (issue #2388). The cut's landings are drawn enclosing it so the #5916
+    containment rules stay quiet and only the width rule can fire."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
     top.shapes(cut).insert(cut_box)
+    draw_cut_landings(layout, top, layer, None, cut_box)
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -7841,7 +7839,9 @@ def test_run_drc_sg13g2_mim_rules_cite_the_6_11_mim_group():
     # implemented in the modular `5_1_nwell.drc`. Only NW.f1 / NW.f1.digibnd
     # (`nwell.space.pactiv.hv.1` and `nwell.space.pactiv.dig.1`) cite the modular deck.
     assert {
-        rule.id for rule in deck if "maximal" in (rule.provenance.source_path or "")
+        rule.id
+        for rule in deck
+        if rule.provenance and "maximal" in rule.provenance.source_path
     } == {
         "psd.width.1",  # #3787
         "psd.space.1",

@@ -63,7 +63,7 @@ def test_pdk_block_commit_only_when_present():
     shutil.which("git") is None or shutil.which("bash") is None,
     reason="git/bash not on PATH",
 )
-@pytest.mark.parametrize("script", ["fetch-pdks.sh", "fetch-ihp-sg13g2.sh"])
+@pytest.mark.parametrize("script", ["_install_common.sh"])
 def test_script_tarball_commit(tmp_path, script):
     repo = tmp_path / "repo"
     repo.mkdir()
