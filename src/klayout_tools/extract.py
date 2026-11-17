@@ -2250,6 +2250,16 @@ def run_extract(
                     # collide on one name -- see the "nets[]" schema note
                     # below).
                     "net_id": int,
+                    # Issue #5735: the net's numbering-independent structural
+                    # identity -- the `$anon<...>` token `_anonymous_net_name_map`
+                    # derives from the net's sorted `<device>.<terminal>`
+                    # attachment list, the same equivalence
+                    # `netlist_normalized_sha256` is defined by. `null` for a
+                    # named net (its "name" is already stable) and for an
+                    # anonymous net with zero device terminals. Stripped by
+                    # `_strip_net_id_and_rewrite_names`, so neither the digest
+                    # nor `--check --rerun` sees it.
+                    "structural_id": str | None,
                     # 0-based `.SUBCKT` port position (`None` if not a
                     # promoted pin) -- issue #1540.
                     "pin_index": int | None,
@@ -2440,6 +2450,31 @@ def run_extract(
     docstring for the full rationale. Purely additive -- every existing
     ``nets[]`` consumer that reads only ``name``/``pin``/``device_count`` is
     unaffected.
+
+    ``nets[].structural_id`` (issue #5735) is the net's stable,
+    numbering-independent handle: the ``$anon<...>`` token
+    :func:`_anonymous_net_name_map` derives from the net's own sorted
+    ``<device>.<terminal>`` attachment list -- the same structural identity
+    ``netlist_normalized_sha256`` (issue #3407) and ``--check --rerun``
+    already rewrite anonymous ``\\$<n>`` spellings to, now also emitted per
+    net so a testbench probing an unlabeled internal node can pin its
+    measurement to a token that survives a re-extraction. It is present on
+    every ``nets[]`` entry and ``null`` exactly when the net has no
+    derivable structural identity: a *named* net (its ``name`` is already
+    the stable handle) or an anonymous net with zero device terminals
+    (nothing to disambiguate by). Equal across two extractions that differ
+    only in anonymous-net numbering, different when the connectivity
+    actually differs -- exactly the equivalence
+    ``netlist_normalized_sha256`` is defined by, and no stronger promise:
+    the token is built from device *instance* names, which are themselves
+    KLayout-synthesized ``$<n>`` spellings whose cross-build stability is
+    asserted empirically, not contracted (see ``docs/cli/extract.md``'s
+    "Anonymous net numbering" section). ``--check --rerun`` strips the field
+    alongside ``net_id`` before diffing, so reports committed before the
+    field existed still verify ``match`` and ``netlist_normalized_sha256``
+    keeps its value. A consumer holding an older report maps an anonymous
+    net to the current one by joining the two reports on ``structural_id``
+    directly -- no ``devices[]`` re-derivation per re-extraction.
 
     ``device_classes`` is what the *deck* is structurally capable of
     recognising (:attr:`klayout_tools.decks.ExtractionDeck.device_classes`)
@@ -3882,6 +3917,12 @@ def _canonicalize_extract_report_for_rerun_diff(
       net object (see this module's own many "resolved by net_id, not by
       name" docstrings, e.g. :func:`_net_identity_name`,
       :func:`_mom_ground_entry_for_crosscheck`);
+    - every ``structural_id`` (issue #5735's per-net stable handle) is
+      stripped alongside it -- the identity is *derived* bookkeeping, the
+      same ``$anon<...>`` token the anonymous-name rewrite below already
+      recovers, so keeping it would shift
+      :func:`_normalized_netlist_sha256` and flag every pre-field committed
+      report as drifted;
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
       (that net's own sorted ``<device>.<terminal>`` attachment list), so
@@ -3955,15 +3996,20 @@ def _canonicalize_extract_report_for_rerun_diff(
 def _normalized_netlist_sha256(devices: list[Any], nets: list[Any]) -> str:
     """Issue #3407: SHA-256 hex digest of this run's flat ``devices[]`` /
     ``nets[]`` connectivity with KLayout's anonymous-net numbering
-    normalized away -- the same ``net_id`` strip, ``\\$<n>`` structural
-    rewrite and ``(name, attachment key)`` re-sort
+    normalized away -- the same ``net_id``/``structural_id`` strip,
+    ``\\$<n>`` structural rewrite and ``(name, attachment key)`` re-sort
     :func:`_canonicalize_extract_report_for_rerun_diff` applies, serialized
     as sorted-key compact JSON. Unlike ``netlist_sha256`` (the written
     ``.spice`` bytes, which embed the ``$N`` counter) it is stable across
     ``klayout`` builds that only renumber anonymous nets; any real
     connectivity, device-parameter or net-name change alters it. Covers the
     flat netlist only (not ``--subcircuit`` decks or parasitics output).
-    """
+
+    The ``structural_id`` strip (issue #5735) is what keeps this digest
+    byte-identical across the field's introduction: the assembler annotates
+    every ``nets[]`` entry with the field before this function is called,
+    and the canonicalization drops it again, so a digest pinned before the
+    field existed still verifies after it."""
     canonical = _canonicalize_extract_report_for_rerun_diff(
         {"devices": devices, "nets": nets}
     )
@@ -3993,17 +4039,26 @@ def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
 
 def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> Any:
     """Recursively rebuild ``value`` (a JSON-decoded report, or any nested
-    piece of one), dropping every ``net_id`` key and passing every string
-    leaf through :func:`_rewrite_net_name` -- the two bookkeeping
-    normalizations :func:`_canonicalize_extract_report_for_rerun_diff`
+    piece of one), dropping every ``net_id`` and ``structural_id`` key and
+    passing every string leaf through :func:`_rewrite_net_name` -- the
+    bookkeeping normalizations :func:`_canonicalize_extract_report_for_rerun_diff`
     applies report-wide rather than at a fixed set of paths, so a new report
     field carrying a net name or a ``net_id`` needs no separate registration
-    here to be covered."""
+    here to be covered.
+
+    ``structural_id`` (issue #5735) is stripped for the mirror-image reason
+    ``net_id`` is: it is *derived* bookkeeping -- the same ``$anon<...>``
+    identity the anonymous-name rewrite below already recovers from the
+    net's attachment list -- so leaving it in would (a) change
+    :func:`_normalized_netlist_sha256`'s digest and (b) make
+    ``--check --rerun`` report ``status: "drifted"`` for every report
+    committed before the field existed (the committed side carries no such
+    key, the fresh side always does)."""
     if isinstance(value, dict):
         return {
             key: _strip_net_id_and_rewrite_names(val, name_map)
             for key, val in value.items()
-            if key != "net_id"
+            if key not in ("net_id", "structural_id")
         }
     if isinstance(value, list):
         return [_strip_net_id_and_rewrite_names(item, name_map) for item in value]

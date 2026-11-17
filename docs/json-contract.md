@@ -301,6 +301,28 @@ meaning and value. A consumer must treat the key as optional. No field is
 removed, renamed or retyped, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "Terminal-aware resistance graph" section.
 
+**A *derived* per-entry identity field, present on every entry and
+`null` when not derivable, is additive the same way — flag-gated or not.**
+`klt extract` now annotates every `nets[]` entry with `structural_id`
+(issue #5735): the net's numbering-independent `$anon<...>` structural
+handle, the same identity `netlist_normalized_sha256` (issue #3407) and
+`--check --rerun` already derive to canonicalize anonymous `\$N` spellings,
+now emitted per net so a testbench probing an unlabeled internal node can
+address it across re-extractions. It is `null` exactly when no identity is
+derivable — a named net (its `name` is already stable) or an anonymous net
+with zero device terminals — so no consumer ever sees the member appear or
+disappear; its stability bound is exactly #3407's (equal across builds that
+only renumber anonymous nets, not a promise that device instance names are
+stable). Two constraints made this land without invalidating any committed
+evidence: `--check --rerun`'s canonicalization strips the field alongside
+`net_id` (it is *derived* bookkeeping — the same token the anonymous-name
+rewrite already recovers — so a report committed before the field existed
+must not diff against a fresh one on it), which also keeps
+`netlist_normalized_sha256` byte-identical across the field's introduction.
+No `schema_version` bump; recorded in `CHANGELOG.md` and documented in
+`docs/cli/extract.md`'s `nets[]` schema table and "Anonymous net numbering"
+section.
+
 **A new *qualifier* field next to an existing numeric field is additive — and
 is strictly preferable to retyping that field to `number | null`.** When an
 engine reports a sentinel instead of a measurement, the honest fix looks like

@@ -68,6 +68,7 @@ def assemble_extract_report(
     """Build the ``run_extract`` result dict (byte-identical to the inline code)."""
     from .extract import (
         SCHEMA_VERSION,
+        _anonymous_net_name_map,
         _build_metrics,
         _describe_device_models,
         _describe_label_layers,
@@ -83,6 +84,24 @@ def assemble_extract_report(
     # `klt pex` picks for its own `layout`. `netlist_path` below is an
     # *output* path and stays a plain string (see `SCHEMA_VERSION`).
     repo_root = env_provenance.repo_root_for(path)
+
+    # Additive per-net field (issue #5735): annotate every `nets[]` entry with
+    # `structural_id` -- the same `$anon<...>` structural identity
+    # `_anonymous_net_name_map` derives for `--check --rerun` and
+    # `netlist_normalized_sha256` (issue #3407), read here where both
+    # `devices` and `nets` are already in scope (the identity needs the
+    # assembled `devices[]` array, which `_build_nets` does not see).
+    # Present on every entry; `null` exactly when the net has no structural
+    # identity -- a named net (its `name` is already a stable handle) or an
+    # anonymous net no `devices[]` terminal touches. `_strip_net_id_and_rewrite_names`
+    # drops the key again, so the digest and `--check --rerun` are unaffected.
+    # Only the top-level `nets[]` entries are annotated; `parasitics.nets[]`
+    # is a different array built by a different stage and is untouched.
+    nets_name_map = _anonymous_net_name_map({"devices": devices, "nets": nets})
+    for net_entry in nets:
+        if isinstance(net_entry, dict):
+            net_entry["structural_id"] = nets_name_map.get(net_entry.get("name"))
+
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": env_provenance.repo_relative_path(path, repo_root=repo_root),
