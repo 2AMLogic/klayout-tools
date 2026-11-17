@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
-      "lines": 615
+      "lines": 613
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
