@@ -4,6 +4,7 @@ guard that refuses a release whose `klt-*-native` extra pin is not on PyPI."""
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -80,9 +81,24 @@ def test_publish_workflow_runs_the_guard_before_publishing():
     assert text.index("check_native_extras.py") < text.index("uv publish")
 
 
+def _job_block(text: str, job: str) -> str:
+    start = text.index(f"\n  {job}:\n") + 1
+    next_job = re.search(r"\n  [A-Za-z][A-Za-z0-9_-]*:\n", text[start:])
+    return text[start : start + next_job.start()] if next_job else text[start:]
+
+
 def test_publish_job_is_gated_on_the_guard_job_and_runs_no_repo_script():
     text = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text()
-    publish = text[text.index("\n  publish:\n") :]
+    publish = _job_block(text, "publish")
     assert "needs: [build, check-native-extras]" in publish
     assert "check_native_extras.py" not in publish
     assert "actions/checkout" not in publish
+
+
+def test_github_release_job_scopes_permissions_to_contents_write():
+    text = (REPO_ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    release = _job_block(text, "github-release")
+    assert "permissions:" in release
+    assert "contents: write" in release
+    assert "id-token" not in release
+    assert "environment:" not in release

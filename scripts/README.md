@@ -27,6 +27,7 @@ scripts/
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
   release_prep.py                # mechanical release edits for release.yml (#4920)
+  release_notes.py               # build the GitHub Release notes from a CHANGELOG section for publish.yml (#5861)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
   check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
