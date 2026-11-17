@@ -109,8 +109,7 @@ from .characterize_sequential import (
 from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
 
-#: Version of this command's JSON response shape (per-command, per
-#: ``docs/json-contract.md``).
+#: Version of this command's JSON response shape (per ``docs/json-contract.md``).
 SCHEMA_VERSION = 1
 
 #: Name of the native extension whose Liberty reader the round-trip check
@@ -2133,6 +2132,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             "runtime_s": corner_entry["runtime_s"],
             "engine": environment.get("engine"),
             "engine_version": environment.get("engine_version"),
+            "engine_build": environment.get("engine_build"),
             "window": {
                 "settle_ns": window["rise_start_ns"],
                 "tran_step_ns": window["step_ns"],

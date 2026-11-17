@@ -13,9 +13,10 @@
     },
     "artifact": {
       "kind": "verb",
-      "description": "`klt artifact` implementation: fleet artifact-store client (issue #4063) plus CLI adapter.",
+      "description": "`klt artifact` implementation: fleet artifact-store client (issues #4063, #5958) plus CLI adapter. `artifact_verify` is the stdlib-only, standalone-vendorable verify closure; `artifact_objects` is the put/get/delete side importing it.",
       "modules": [
-        "klayout_tools.artifact_store",
+        "klayout_tools.artifact_objects",
+        "klayout_tools.artifact_verify",
         "klayout_tools.cli.artifact_cmd"
       ]
     },
@@ -135,7 +136,9 @@
       "description": "`klt diff` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.diff_cmd",
-        "klayout_tools.layout_diff"
+        "klayout_tools.cli.parser_diff",
+        "klayout_tools.layout_diff",
+        "klayout_tools.layout_diff_flat"
       ]
     },
     "drc": {
@@ -147,13 +150,14 @@
         "klayout_tools.cli._drc_parser_args",
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
+        "klayout_tools._drc_edge_pair_hull",
         "klayout_tools.drc",
         "klayout_tools.drc_check_kinds",
         "klayout_tools.drc_crosscheck",
         "klayout_tools.drc_deck_includes",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
-      "klayout_tools.drc_layer_selection",
+        "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
         "klayout_tools.drc_klayout_launch",
         "klayout_tools.drc_klayout_list",
@@ -290,6 +294,7 @@
         "klayout_tools.functional_verification_mutation",
         "klayout_tools.functional_verification_mutation_proposals",
         "klayout_tools.functional_verification_mutation_variant",
+        "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
@@ -437,7 +442,8 @@
       "modules": [
         "klayout_tools.cli.lef_abstract_cmd",
         "klayout_tools.lef_abstract",
-        "klayout_tools.lef_abstract_no_layout"
+        "klayout_tools.lef_abstract_no_layout",
+        "klayout_tools.lef_abstract_resource"
       ]
     },
     "lvs": {
@@ -447,6 +453,7 @@
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
         "klayout_tools.lvs_combine",
+        "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
         "klayout_tools.lvs_finfet_power",
@@ -534,6 +541,7 @@
         "klayout_tools.decks.sg13g2_cont_grid",
         "klayout_tools.decks.sg13g2_runset_notes",
         "klayout_tools.decks.sg13g2_svaricap",
+        "klayout_tools.decks.sg13g2_unmodeled",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_unmodeled",
@@ -549,6 +557,7 @@
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
+        "klayout_tools.pdk_pcell_checks",
         "klayout_tools.pdk_stackup",
         "klayout_tools.pdk_store"
       ]
@@ -578,6 +587,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
@@ -587,6 +597,7 @@
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
+        "klayout_tools.place_and_route_rerun",
         "klayout_tools.place_and_route_power_audit",
         "klayout_tools.place_and_route_reports",
         "klayout_tools.place_and_route_request",
@@ -668,6 +679,8 @@
         "klayout_tools._check_result",
         "klayout_tools._devices",
         "klayout_tools._digest",
+        "klayout_tools._engine_proc",
+        "klayout_tools._git_tracked",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
@@ -724,6 +737,7 @@
         "klayout_tools.signoff_attest_text",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
+        "klayout_tools.signoff_drc_crosscheck",
         "klayout_tools.signoff_envelopes",
         "klayout_tools.signoff_evidence_pin",
         "klayout_tools.signoff_fleet",
@@ -738,7 +752,8 @@
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_runset",
-        "klayout_tools.signoff_sta_constraints"
+        "klayout_tools.signoff_sta_constraints",
+        "klayout_tools.signoff_yield_disclosure"
       ]
     },
     "sim": {
@@ -795,6 +810,7 @@
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
         "klayout_tools.sim_decks",
+        "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
         "klayout_tools.sim_echo_messages",
@@ -805,6 +821,7 @@
         "klayout_tools.sim_expr_hint",
         "klayout_tools.sim_eye",
         "klayout_tools.sim_forms",
+        "klayout_tools.sim_form_signals",
         "klayout_tools.sim_injected",
         "klayout_tools.sim_merge",
         "klayout_tools.sim_mismatch_declarations",
