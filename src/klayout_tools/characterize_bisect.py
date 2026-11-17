@@ -112,8 +112,11 @@ def _passes(
 
     A latch has to additionally still hold the captured level at the end of
     the run (:func:`_held_captured`, vacuously true for a flop). The two
-    never combine: ``async_pins`` requires ``clock_pin``, which a latch may
-    not declare.
+    never combine only because the request validator refuses ``async_pins``
+    beside ``enable_pin`` by name (``_resolve_latch`` in
+    :mod:`klayout_tools.characterize_sequential`) -- that guard is what lets
+    the ``removal`` branch above return before ``_held_captured``, not the
+    other way round.
     """
     if case.kind == "removal":
         return delay is None

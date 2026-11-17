@@ -29,15 +29,17 @@ single-unit ``local``-backend run.
 Scope -- what the emitted ``.lib`` deliberately does **not** contain:
 
 - one corner per invocation (no multi-corner ``.lib``);
-- no ``recovery``/``removal`` or async set/reset arcs, no ``ff``/``latch``
-  **state** groups, no latch time borrowing or min-pulse-width;
+- no ``ff``/``latch`` **state** groups, no latch time borrowing or
+  min-pulse-width;
 - no ``when``-qualified splitting, ``bus``/``bundle`` pins or hidden input-pin power.
 
 Power/energy tables (issue #2503) and batch mode have since shipped. A sequential cell
 is characterized when it declares ``cell.clock_pin`` (edge-triggered: clock-to-output,
 issue #4755, and setup/hold for ``cell.constrained_pins``, issue #4756) or
 ``cell.enable_pin`` (latch: transparent, enable-to-output and setup/hold arcs, issue
-#5521); with neither it is refused by name (see :mod:`klayout_tools.characterize_arcs`).
+#5521); ``cell.async_pins`` on a clocked cell adds async set/reset arcs and their
+``recovery``/``removal`` constraints (issue #5520); with neither it is refused by
+name (see :mod:`klayout_tools.characterize_arcs`).
 
 Input **pin capacitance is measured** (issue #2512) -- one extra probe
 instance per input pin on the same deck, emitted as the pin's

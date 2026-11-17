@@ -219,6 +219,18 @@ def test_clock_edge_does_not_apply_to_a_latch(tmp_path):
     _expect_error(tmp_path, request, "clock_edge does not apply to a latch")
 
 
+def test_async_pins_do_not_apply_to_a_latch(tmp_path):
+    """`async_pins` measures recovery/removal against the active clock edge;
+    a latch's enable is level-sensitive with no such edge, so the
+    combination is refused by name rather than mis-measured."""
+    request = _latch_request(tmp_path)
+    request["cell"]["pins"].append(
+        {"name": "R", "direction": "input", "capacitance_pf": 0.002}
+    )
+    request["cell"]["async_pins"] = [{"pin": "R", "kind": "clear", "active": "low"}]
+    _expect_error(tmp_path, request, "async_pins does not apply to a latch")
+
+
 @pytest.mark.parametrize(
     "level,opening,active",
     [("high", "rising_edge", True), ("low", "falling_edge", False)],

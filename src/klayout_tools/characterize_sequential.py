@@ -154,6 +154,9 @@ def resolve_async_pins(
     ``function`` naming it would make it part of the next state. Each is a
     named error (the ``function`` clash is caught in
     :func:`derive_sequential_arcs`, which is where the functions are parsed).
+    Beside ``enable_pin`` (a latch) the whole declaration is a contradiction
+    -- recovery/removal are measured against a clock edge -- and is refused
+    in :func:`_resolve_latch` before this function runs.
     """
     raw = spec.get("async_pins")
     if raw is None:
@@ -250,6 +253,14 @@ def _resolve_latch(
             f"by {where}.enable_level, and both of the enable's edges follow "
             "from it (opening = the edge onto the active level, closing = the "
             "edge away from it)"
+        )
+    if "async_pins" in spec:
+        raise SequentialSpecError(
+            f"{where}.async_pins does not apply to a latch: async set/reset "
+            "arcs and their recovery/removal constraints are measured against "
+            f"the active clock edge, and a latch declared by {where}."
+            "enable_pin is level-sensitive, with no single edge to recover "
+            "or remove against"
         )
     inputs = [pin["name"] for pin in pins if pin["direction"] == "input"]
     if enable_pin not in inputs:
