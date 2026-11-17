@@ -70,6 +70,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--require-build-match` fails the check (exit 3, `status: "drifted"`) when
   ENV's `provenance.klt_version` is from a different build. Report-only
   without the flag.
+- **Added** (#5684): `klt functional-verification` accepts
+  `request.options.from_synthesize` (`{"report", "netlist"}`) to re-simulate
+  the netlist a `klt synthesize` run produced. The netlist is re-hashed against
+  the report's `netlist_sha256` before any build and the run is refused (exit
+  1) on a mismatch, a missing hash, an unresolvable netlist, or an
+  `hdl_toplevel` mismatch. `sources` may be empty/omitted only with this key.
+  Additive `from_synthesize` response block; no `schema_version` bump.
+
 - **Changed** (#5583, additive-compatible — `klt stats` `schema_version`
   unchanged): `geometry_digest` is now opt-in via `klt stats
   --geometry-digest` and is `null` by default (text output `geometry_digest:

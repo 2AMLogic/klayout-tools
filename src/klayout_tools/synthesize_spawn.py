@@ -4,9 +4,10 @@ Issue #5798: a timed-out ``yosys -s`` run must die with its whole process
 group, so a hung ``yosys-abc`` grandchild cannot outlive the watchdog that
 killed its parent. Lives in its own module because
 ``klayout_tools.synthesize`` sits at its trusted per-file size-ratchet
-ceiling and cannot grow; this is a pure move of the seam
-``_run_yosys`` spawns every script run through, with no behaviour change
-(the same pure-move precedent as ``e39b08c``).
+ceiling and cannot grow (the same split precedent as ``e39b08c``). The
+seam is new behaviour, not a pure move: on platforms with process groups
+the child starts in its own session, which is what makes the group kill
+possible.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+from collections.abc import Mapping
 
 #: Whether this platform can kill a child's whole process group -- the
 #: orphan-prevention mechanism of issue #5798. ``os.killpg``/``os.getpgid``
@@ -44,6 +46,7 @@ def _spawn_yosys(
     *,
     timeout: float | None,
     cwd: str | None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run ``cmd`` to completion with both streams captured -- the seam
     ``synthesize._run_yosys`` spawns every ``yosys -s`` script run through
@@ -53,8 +56,11 @@ def _spawn_yosys(
     the child starts in its own session (``start_new_session=True``), so a
     timeout can SIGKILL the whole group -- Yosys runs ``yosys-abc`` as a
     grandchild, and a direct-child-only kill orphaned it. Otherwise this is
-    ``subprocess.run`` verbatim. The ``yosys -V`` and ``help abc``
-    capability probes spawn no abc child and never go through this seam.
+    ``subprocess.run`` verbatim. ``env`` is the child environment, applied
+    on both branches (``None`` inherits this process's environment) --
+    ``_run_yosys`` pins ``COLUMNS`` (issue #5780). The ``yosys -V`` and
+    ``help abc`` capability probes spawn no abc child and never go through
+    this seam.
 
     A raised ``subprocess.TimeoutExpired`` carries the drained
     stdout/stderr: ``communicate`` stops mid-read at the timeout, so after
@@ -65,7 +71,7 @@ def _spawn_yosys(
     """
     if not _CAN_KILL_PROCESS_GROUP:
         return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env
         )
     proc = subprocess.Popen(
         cmd,
@@ -74,6 +80,7 @@ def _spawn_yosys(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
+        env=env,
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)

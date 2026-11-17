@@ -3096,43 +3096,43 @@ def _run_yosys(
     timeout_s: float | None = ytimeout.UNSET,
     cwd: str | None = None,
 ) -> str:
-    """Invoke ``yosys -s <script_path>`` and raise :class:`SynthesizeError`
-    on any failure to run (missing binary, non-zero exit, or a run that
-    exceeds ``timeout_s`` -- default :data:`DEFAULT_YOSYS_TIMEOUT_S`, pass
-    ``None`` for no timeout).
+    """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
+    on any failure to run: missing binary, non-zero exit, or exceeding
+    ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
+    Never raises on a *successful* (exit 0) run; the caller validates that the
+    declared output files appeared. Returns the captured ``stdout`` log text --
+    Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
+    matches :func:`_synthesis_error_message`'s stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
+    (issue #1588) can parse it without a second Yosys invocation.
 
-    Never raises on a *successful* (exit 0) run -- the caller is responsible
-    for validating the declared output files actually appeared. Returns the
-    captured ``stdout`` log text on success -- Yosys's own ``Warning: ``
-    lines land on stdout, never stderr (verified live; matches
-    :func:`_synthesis_error_message`'s own stream-preference note for
-    ``ERROR:`` lines) -- so :func:`_compute_structural`/
-    :func:`_summarize_warnings` (issue #1588) can parse it without a second
-    Yosys invocation.
+    A timed-out run raises :class:`SynthesizeError` exactly like any other Yosys
+    failure (never a bare ``subprocess.TimeoutExpired``) -- this is what lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
+    architecture trial synthesis without killing the rest of the ``"auto"``
+    sweep. The kill takes the child's whole process group (issue #5798), so a
+    ``yosys-abc`` grandchild mid-``abc`` pass cannot outlive the watchdog that
+    ended its parent.
 
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this is
-    what lets :func:`_measure_candidate` (issue #1775) treat one hung
-    arithmetic-architecture candidate's trial synthesis the same way it
-    already treats any other failed trial: disqualified, not fatal to the
-    rest of the ``"auto"`` sweep. The kill takes the child's whole process
-    group (issue #5798), so a ``yosys-abc`` grandchild mid-``abc`` pass
-    cannot outlive the watchdog that ended its parent.
-
-    ``cwd`` (issue #1844) is passed straight through to the spawn's own
-    ``cwd``; ``script_path`` itself is always given as an absolute path,
-    so ``cwd`` never affects locating the script
-    -- it only matters for a script :func:`_write_script` wrote with any
-    relative-form embedded path (``repo_root`` given), which must be run
-    with ``cwd=<that same repo_root>`` to resolve correctly. The default
-    ``None`` reproduces the pre-#1844 behaviour exactly (subprocess's own
-    default: the invoking process's cwd), correct for every script that
-    embeds only absolute paths.
+    ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
+    ``script_path`` is always given as an absolute path, so ``cwd`` only matters
+    for a script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must run with ``cwd=<that same repo_root>`` to
+    resolve correctly. The default ``None`` reproduces the pre-#1844 behaviour
+    exactly (subprocess's own default: the invoking process's cwd), correct for
+    every script that embeds only absolute paths. The child env is a copy of
+    ``os.environ`` with ``COLUMNS`` pinned to 4096, applied unconditionally (an
+    inherited ``COLUMNS=80`` is exactly the failing case), so the readline-wrapped
+    ``source`` echo can never wedge the abc handshake (issue #5780; see
+    ``docs/cli/synthesize.md``).
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
         completed = _spawn_yosys(
-            ["yosys", "-s", script_path], timeout=timeout_s, cwd=cwd
+            ["yosys", "-s", script_path],
+            timeout=timeout_s,
+            cwd=cwd,
+            env={**os.environ, "COLUMNS": "4096"},
         )
     except OSError as exc:
         _write_yosys_log(script_path, "", str(exc))

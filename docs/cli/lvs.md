@@ -47,6 +47,13 @@ cleanly.
 - `--rerun` — full mode for `--check`: best-effort re-run of the compare the
   report describes, instead of only re-hashing its inputs. Requires
   `--check`.
+- `--deck NAME` — command-line spelling of the request's `layout.deck`
+  field (issue #5733): the curated extraction deck for inline layout
+  extraction, the same knob `klt extract --deck` sets. A clean error
+  (exit 1) when the request document already sets `layout.deck` — a flag
+  never silently overrides a request document. Never sets
+  `reference.deck` (the reference-netlist rewriting deck — a different
+  knob). Refused with `--check`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Engine
@@ -379,6 +386,11 @@ rule (a flag never silently overrides a request document), giving a flag
 together with the same request field, a flag with any other engine, a
 `--deck-var` without `=`, or either flag with `--check`, is an application
 error (exit 1). A relative `--deck-file` resolves against the current directory.
+
+The separate `--deck NAME` flag is unrelated to the runset: it is the
+command-line spelling of the request's `layout.deck` field (issue #5733,
+the inline-extraction deck convenience spelling) and never touches
+`deck_file`, `deck_vars` or `reference.deck`.
 
 #### sky130 runset recipe: xschem-exported netlists
 
