@@ -20,7 +20,11 @@ def check_label(check: Mapping[str, Any]) -> str:
 
 
 def _what_present(c: dict) -> str:
-    return f"{c['role']} {c['path']} present"
+    what = f"{c['role']} {c['path']} present"
+    benches = c.get("testbenches")
+    if benches:
+        what += f" (bench: {', '.join(benches)})"
+    return what
 
 
 def _what_stream_readable(c: dict) -> str:
