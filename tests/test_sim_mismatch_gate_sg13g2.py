@@ -195,6 +195,31 @@ def test_declaration_scan_ignores_parameters_named_only_in_a_comment():
     assert body == {"userblk": {"foo"}}
 
 
+def test_declaration_scan_reads_spaced_and_parenthesised_assignments():
+    # The scan tokenizes with the shared `split_spice_tokens` (issue #5912):
+    # every spelling of `name = value` declares `name`, and a parenthesised
+    # expression with spaces stays one token rather than shedding stray ones.
+    text = (
+        ".subckt blk a b w=(2 * 1u) l =1u mm_ok= 1 nf = 2\n"
+        ".param pd=(2 * 1u) ; tail\n"
+        ".ends\n"
+    )
+    assert decl.scan_declared_params(text, {}) == {
+        "blk": {"w", "l", "mm_ok", "nf", "pd"}
+    }
+
+
+def test_declaration_scan_still_counts_a_trailing_bare_equals():
+    # `split_spice_tokens` leaves a value-less trailing `=` as its own token
+    # (["w", "="]); `merge_equals` folds it back so `w =` still declares `w`.
+    # Pins the one input where the two differ, which is why `merge_equals`
+    # was kept when `split_tokens` was removed (issue #5912).
+    assert decl.merge_equals(["w", "="]) == ["w="]
+    assert decl.scan_declared_params(".subckt blk a b w =\n.ends\n", {}) == {
+        "blk": {"w"}
+    }
+
+
 def test_sg13g2_gates_a_subcircuit_declaring_mm_ok_in_a_body_param():
     text, _rows = gate.gate_netlist(
         SG13_NETLIST,

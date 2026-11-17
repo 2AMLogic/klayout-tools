@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._spice_tokens import split_spice_tokens
 from .sim_errors import SimError
 
 #: Caps on the model-library walk :func:`scan_library_declared_params` does,
@@ -32,37 +33,6 @@ from .sim_errors import SimError
 #: unbounded read. Mirrors the posture of the netlist closure's own limits.
 _MAX_LIB_FILES = 128
 _MAX_LIB_DEPTH = 16
-
-
-def split_tokens(line: str) -> list[str]:
-    """Whitespace split that keeps ``{...}`` and quoted expressions whole."""
-    tokens: list[str] = []
-    cur: list[str] = []
-    depth = 0
-    quote = ""
-    for ch in line:
-        if quote:
-            cur.append(ch)
-            if ch == quote:
-                quote = ""
-        elif ch in "'\"":
-            quote = ch
-            cur.append(ch)
-        elif ch == "{":
-            depth += 1
-            cur.append(ch)
-        elif ch == "}":
-            depth = max(0, depth - 1)
-            cur.append(ch)
-        elif ch.isspace() and depth == 0:
-            if cur:
-                tokens.append("".join(cur))
-                cur = []
-        else:
-            cur.append(ch)
-    if cur:
-        tokens.append("".join(cur))
-    return tokens
 
 
 def split_eol_comment(line: str) -> tuple[str, str]:
@@ -81,7 +51,7 @@ def split_eol_comment(line: str) -> tuple[str, str]:
     just as the spaced spelling does.
 
     Quoted text and ``{...}`` expressions are respected, as in
-    :func:`split_tokens`.
+    :func:`~klayout_tools._spice_tokens.split_spice_tokens`.
     """
     depth = 0
     quote = ""
@@ -189,13 +159,18 @@ def logical_lines(text: str) -> list[LogicalLine]:
 
 
 def merge_equals(tokens: list[str]) -> list[str]:
-    """Join the ``name = value`` / ``name= value`` / ``name =value`` spellings
-    of a parameter assignment into one ``name=value`` token.
+    """Fold a *trailing* bare ``=`` into the token before it (``["w", "="]``
+    -> ``["w="]``), and re-join any spaced assignment still left unmerged.
 
-    SPICE accepts whitespace around ``=``; :func:`split_tokens` does not,
-    so without this a spaced ``mm_ok = 0`` would read as three positional
-    tokens -- enough to mis-identify the subcircuit name on an instance line,
-    or to append a second, conflicting assignment. Applied only on the
+    ``tokens`` normally come from :func:`split_spice_tokens`, which already
+    joins the ``name = value`` / ``name= value`` / ``name =value`` spellings;
+    this is **not** a duplicate of that step. It differs on one input: a bare
+    ``=`` with nothing after it is left as its own token by the shared
+    tokenizer, but here it joins the preceding name so ``w =`` still counts
+    as a (value-less) assignment of ``w`` -- the long-standing reading of a
+    declaration and of the instance-parameter path (measured against the
+    shared tokenizer, issue #5912). Dropping this would change which
+    parameters a ``.subckt`` line is read as declaring. Applied only on the
     instance-parameter path (and when reading parameter *declarations*), so
     the wrapper path's byte-for-byte output is untouched.
     """
@@ -332,7 +307,7 @@ def _scan(
         if not _is_active(lib_stack, section):
             continue
         if low.startswith((".include", ".inc ")):
-            tokens = split_tokens(stripped)
+            tokens = split_spice_tokens(stripped)
             refs.follow(tokens[1] if len(tokens) >= 2 else None, None)
             continue
         _record_declaration(stripped, low, acc, subckt_stack)
@@ -385,7 +360,7 @@ def _track_lib_line(
         if lib_stack:
             lib_stack.pop()
         return
-    tokens = split_tokens(stripped)
+    tokens = split_spice_tokens(stripped)
     if len(tokens) >= 3:
         # `.lib <file> <section>` is a *reference*, not a definition.
         if _is_active(lib_stack, section):
@@ -401,7 +376,7 @@ def _record_declaration(
     """Record one ``.subckt`` header's or body ``.param``'s declared parameter
     names, and keep ``subckt_stack`` tracking which definition we are in."""
     if low.startswith(".subckt"):
-        tokens = merge_equals(split_tokens(stripped))
+        tokens = merge_equals(split_spice_tokens(stripped))
         name = tokens[1].lower() if len(tokens) >= 2 else ""
         subckt_stack.append(name)
         acc.setdefault(name, set()).update(_assigned_names(tokens[2:]))
@@ -409,7 +384,7 @@ def _record_declaration(
         if subckt_stack:
             subckt_stack.pop()
     elif low.startswith(".param") and subckt_stack:
-        tokens = merge_equals(split_tokens(stripped))
+        tokens = merge_equals(split_spice_tokens(stripped))
         acc.setdefault(subckt_stack[-1], set()).update(_assigned_names(tokens[1:]))
 
 
