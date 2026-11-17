@@ -20,6 +20,7 @@ import json
 
 import pytest
 
+from helpers.netlist_batch_fakes import _make_fake, _make_repo
 from klayout_tools.cli import main
 from klayout_tools.netlist import run_netlist
 from klayout_tools.netlist_instances import (
@@ -37,8 +38,6 @@ from test_netlist import (  # noqa: F401  (argv_log is a fixture)
 from test_netlist_batch import (  # noqa: F401  (some are used by name only)
     RUNNER_TREE,
     _argv,
-    _make_fake,
-    _make_repo,
     _runner_outputs,
     _status,
 )
