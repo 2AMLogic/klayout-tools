@@ -53,9 +53,11 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_ring_layout`), optionally enclosed by a well tie on PDK
         families whose curated deck checks one (see ``well_present``)."""
 
-        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
-        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        # The PCellDeclarationHelper stubs cannot see dynamically declared
+        # parameters, so annotate the contact geometry settings for mypy.
         mfg_grid_um: float
+        contact_fixed_size_um: float
+        gap_contact_enclosure_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -121,6 +123,12 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
+                "gap_contact_enclosure_um",
+                self.TypeDouble,
+                "Harness-resolved minimum Comp enclosure of contacts at the cut",
+                default=0.0,
+            )
+            self.param(
                 "add_well",
                 self.TypeBoolean,
                 "Enclose the ring in a well tie when the resolved PDK checks one",
@@ -172,6 +180,10 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_side,
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
+                gap_contact_enclosure_um=self.gap_contact_enclosure_um,
+                dbu=dbu,
+                mfg_grid_um=self.mfg_grid_um,
+                contact_fixed_size_um=self.contact_fixed_size_um,
             )
             gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
             _insert_ring(

@@ -141,7 +141,6 @@ from .gen_layer_params import (
     _mos_array_layer_params,
     _resistor_layer_params,
     _resistor_strip_layer_params,
-    _ring_layer_params,
 )
 from .gen_layer_params import (
     _MAX_METAL_RES_LEVEL as _MAX_METAL_RES_LEVEL,
@@ -331,6 +330,11 @@ from .gen_pcells import (
     _build_well_island_pcell,
 )
 from .gen_pdk_cell import _PDK_CELL_SPEC
+from .gen_ring_layout import (
+    _guard_ring_layer_params,
+    _ring_layout,
+    _validate_guard_ring_implant_gap,
+)
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
 
@@ -376,6 +380,7 @@ _HIDDEN_PARAMS = {
     "well_margin_resolved_um",
     "gate_pad_clearance_um",
     "ring_well_margin_um",
+    "gap_contact_enclosure_um",
     # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.
@@ -552,10 +557,9 @@ CONTACT_SIZE_UM = 0.22
 #: very PDKs this constant was validated against.
 from .gen_snap import (  # noqa: E402 -- re-exported
     _GRID_DBU_UM,
-    _clamp_span,
+    _snap_cut_box_dbu,
     _snap_offset_um,
     _snap_rect_box_um,
-    _snap_span,
     _snap_square_box_um,
 )
 
@@ -2435,56 +2439,6 @@ def _cap_parallel_layout(
 RING_SIDE_DIRECTIONS: dict[str, int] = {"N": 90, "S": 270, "E": 0, "W": 180}
 
 
-def _ring_gap_layout(
-    outer_w_um: float,
-    outer_h_um: float,
-    ring_w_um: float,
-    side: str,
-    gap_um: float,
-    gap_offset_um: float,
-) -> dict[str, Any]:
-    """One opening ("gap") cut through a ring's band on ``side`` (#434).
-
-    The opening spans the ring's full thickness on that side and ``gap_um``
-    along it, centred on the side's midpoint plus ``gap_offset_um`` (positive
-    is toward +x on ``"N"``/``"S"``, toward +y on ``"E"``/``"W"``). Exactly
-    *one* side may be cut (enforced by the per-generator validators), so the
-    ring stays a single connected C-shaped conductor -- two openings would
-    split it into two electrically separate arcs while its tap ports still
-    claimed one net.
-
-    Returns the cut ``box_um`` (subtracted from the ring by
-    :func:`_insert_ring`), the opening's centre (``x_um``/``y_um``, on the
-    ring's own centre line for that side, i.e. where a ``GAP_<side>`` port is
-    reported), its ``opening_um`` length, and the ``span_um`` interval it
-    covers along the side's axis.
-    """
-    half = gap_um / 2.0
-    if side in ("N", "S"):
-        cx = outer_w_um / 2.0 + gap_offset_um
-        cy = outer_h_um - ring_w_um / 2.0 if side == "N" else ring_w_um / 2.0
-        y0 = outer_h_um - ring_w_um if side == "N" else 0.0
-        y1 = outer_h_um if side == "N" else ring_w_um
-        box = (cx - half, y0, cx + half, y1)
-        span = (cx - half, cx + half)
-    else:
-        cy = outer_h_um / 2.0 + gap_offset_um
-        cx = outer_w_um - ring_w_um / 2.0 if side == "E" else ring_w_um / 2.0
-        x0 = outer_w_um - ring_w_um if side == "E" else 0.0
-        x1 = outer_w_um if side == "E" else ring_w_um
-        box = (x0, cy - half, x1, cy + half)
-        span = (cy - half, cy + half)
-
-    return {
-        "side": side,
-        "box_um": box,
-        "x_um": cx,
-        "y_um": cy,
-        "opening_um": gap_um,
-        "span_um": span,
-    }
-
-
 def _auto_ring_inner_size_um(info: dict[str, Any]) -> tuple[float, float]:
     """Inner (protected-area) size of the automatically-sized ring in a
     ``diff_pair``/``bjt_array`` layout dict -- the straight run available on
@@ -2496,114 +2450,6 @@ def _auto_ring_inner_size_um(info: dict[str, Any]) -> tuple[float, float]:
         return (0.0, 0.0)
     x0, y0, x1, y1 = ring["inner_box_um"]
     return (x1 - x0, y1 - y0)
-
-
-def _boxes_overlap(
-    a: tuple[float, float, float, float], b: tuple[float, float, float, float]
-) -> bool:
-    """Whether two axis-aligned boxes overlap with non-zero area (a shared
-    edge alone is not an overlap)."""
-    eps = 1e-9
-    return (
-        min(a[2], b[2]) - max(a[0], b[0]) > eps
-        and min(a[3], b[3]) - max(a[1], b[1]) > eps
-    )
-
-
-def _ring_layout(
-    inner_w_um: float,
-    inner_h_um: float,
-    ring_w_um: float,
-    contacts_per_side: int | tuple[int, int],
-    gap_side: str = "",
-    gap_um: float = 0.0,
-    gap_offset_um: float = 0.0,
-) -> dict[str, Any]:
-    """A tap/metal ring (drawn as an outer-box-minus-inner-box boolean, see
-    :func:`_insert_ring`, so it is always one unbroken polygon -- no
-    same-layer spacing violation between ring segments) around an
-    ``inner_w_um`` x ``inner_h_um`` protected area, with contacts evenly
-    spaced along each of the four sides.
-
-    ``contacts_per_side`` is either a single ``int`` -- the historical
-    behaviour, applied uniformly to all four sides -- or an ``(ns, ew)``
-    tuple: ``ns`` contacts on each of the N/S (top/bottom) sides, spaced
-    along ``inner_w_um``, and ``ew`` contacts on each of the E/W (left/
-    right) sides, spaced along ``inner_h_um``. A caller sizing a ring around
-    a strongly non-square inner region can then target an independent pitch
-    on each axis instead of having the achievable count capped by whichever
-    side is shorter (issue #685).
-
-    ``gap_side`` (``""`` = closed ring, the default) cuts one routing opening
-    through the ring on that side (#434) -- see :func:`_ring_gap_layout`. A
-    contact that would be clipped by the opening is dropped, and the side's
-    own tap port is dropped from ``ports`` when its midpoint falls inside the
-    opening (there is no metal left under it there); the ring stays one
-    connected conductor either way, so the remaining tap ports still describe
-    a single tap net.
-    """
-    outer_w = inner_w_um + 2 * ring_w_um
-    outer_h = inner_h_um + 2 * ring_w_um
-    contact_half = CONTACT_SIZE_UM / 2.0
-    contacts_ns, contacts_ew = (
-        contacts_per_side
-        if isinstance(contacts_per_side, tuple)
-        else (contacts_per_side, contacts_per_side)
-    )
-
-    gap = (
-        _ring_gap_layout(outer_w, outer_h, ring_w_um, gap_side, gap_um, gap_offset_um)
-        if gap_side
-        else None
-    )
-
-    centers: list[tuple[float, float]] = []
-    for i in range(contacts_ns):
-        t = (i + 1) / (contacts_ns + 1)
-        cx = ring_w_um + t * inner_w_um
-        centers.append((cx, outer_h - ring_w_um / 2.0))  # top
-        centers.append((cx, ring_w_um / 2.0))  # bottom
-    for i in range(contacts_ew):
-        t = (i + 1) / (contacts_ew + 1)
-        cy = ring_w_um + t * inner_h_um
-        centers.append((ring_w_um / 2.0, cy))  # left
-        centers.append((outer_w - ring_w_um / 2.0, cy))  # right
-
-    contact_boxes = [
-        _snap_square_box_um(cx, cy, contact_half, _GRID_DBU_UM) for (cx, cy) in centers
-    ]
-    if gap is not None:
-        contact_boxes = [
-            box for box in contact_boxes if not _boxes_overlap(box, gap["box_um"])
-        ]
-
-    ports = {
-        "N": (outer_w / 2.0, outer_h - ring_w_um / 2.0),
-        "S": (outer_w / 2.0, ring_w_um / 2.0),
-        "E": (outer_w - ring_w_um / 2.0, outer_h / 2.0),
-        "W": (ring_w_um / 2.0, outer_h / 2.0),
-    }
-    if gap is not None:
-        px, py = ports[gap["side"]]
-        along = px if gap["side"] in ("N", "S") else py
-        lo, hi = gap["span_um"]
-        if lo - 1e-9 <= along <= hi + 1e-9:
-            del ports[gap["side"]]
-
-    return {
-        "outer_w_um": outer_w,
-        "outer_h_um": outer_h,
-        "outer_box_um": (0.0, 0.0, outer_w, outer_h),
-        "inner_box_um": (
-            ring_w_um,
-            ring_w_um,
-            ring_w_um + inner_w_um,
-            ring_w_um + inner_h_um,
-        ),
-        "contact_boxes_um": contact_boxes,
-        "gap": gap,
-        "ports": ports,
-    }
 
 
 #: Order ``well_island`` prefers when picking which ring side carries its net
@@ -3410,9 +3256,7 @@ def _clamp_cut_boxes(
     import klayout.db as kdb
 
     fixed_dbu = int(round(fixed_size_um / dbu)) if fixed_size_um > 0.0 else 0
-    grid_dbu = int(round(mfg_grid_um / dbu)) if mfg_grid_um > 0.0 else 0
-    if grid_dbu < 2 or abs(grid_dbu * dbu - mfg_grid_um) > 1e-9:
-        grid_dbu = 0
+    grid_dbu = _ring_grid_dbu(mfg_grid_um, dbu)
     if fixed_dbu <= 0 and grid_dbu == 0:
         return
 
@@ -3420,9 +3264,11 @@ def _clamp_cut_boxes(
     boxes = [s for s in shapes.each() if s.is_box()]
     for shape in boxes:
         box = shape.box
-        left, right = _snap_span(*_clamp_span(box.left, box.right, fixed_dbu), grid_dbu)
-        bottom, top = _snap_span(*_clamp_span(box.bottom, box.top, fixed_dbu), grid_dbu)
-        new_box = kdb.Box(left, bottom, right, top)
+        new_box = kdb.Box(
+            *_snap_cut_box_dbu(
+                (box.left, box.bottom, box.right, box.top), fixed_dbu, grid_dbu
+            )
+        )
         if new_box != box:
             shape.box = new_box
 
@@ -3883,8 +3729,7 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     if output_dir and not os.path.isdir(output_dir):
         raise GenError(f"output directory does not exist: {output_dir}")
 
-    resolved_params = _resolve_params(spec, raw_params)
-    spec.validate(resolved_params)
+    resolved_params = _resolve_params(spec, raw_params, pdk_info)
     length_snap = (
         _res_array_snap_length(resolved_params, pdk_info)
         if generator_name == "res_array"
@@ -3947,8 +3792,10 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def _resolve_params(spec: _GeneratorSpec, raw_params: dict[str, Any]) -> dict[str, Any]:
-    """Merge ``raw_params`` onto the generator's declared PCell defaults.
+def _resolve_params(
+    spec: _GeneratorSpec, raw_params: dict[str, Any], pdk_info: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge and validate ``raw_params`` against the generator's PCell defaults.
 
     Every declared, non-hidden parameter ends up in the result: the request's
     value when given (type-checked against the PCell's declared type), the
@@ -3975,6 +3822,9 @@ def _resolve_params(spec: _GeneratorSpec, raw_params: dict[str, Any]) -> dict[st
             resolved[name] = pdecl.default
     if spec.name == "esd_device":
         _esd_device_resolve_total_width(raw_params, resolved)
+    if spec.name == "guard_ring":
+        _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
+    spec.validate(resolved)
     return resolved
 
 
@@ -4233,7 +4083,7 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
         dbu=0.001,
         validate=_guard_ring_validate,
         describe=_guard_ring_describe,
-        layer_params=_ring_layer_params,
+        layer_params=_guard_ring_layer_params,
     ),
     "well_island": _GeneratorSpec(
         name="well_island",

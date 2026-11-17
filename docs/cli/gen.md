@@ -1608,7 +1608,7 @@ and 4).
 | `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
-| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
+| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). With `ring_gap_side` set, the standalone GF180MCU minimum is `0.72` µm and the minimum on other families is `0.40` µm. Must be `0` for a closed ring. |
 | `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
 | `add_well`               | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
 
@@ -1658,7 +1658,12 @@ opening through the ring's band so a route can pass through it instead:
   through the well.
 - Any tap contact the opening would clip is dropped, and the side's own
   `TAP_*`/`COLL_*` port is not reported when its midpoint lands in the
-  opening (there is no metal left under it there).
+  opening (there is no metal left under it there). On standalone GF180MCU
+  guard rings, the snapped Comp opening needs at least 0.72 µm to leave
+  0.40 µm of Nplus or Pplus spacing after the implant extends 0.16 µm
+  past each cut face. The generator rejects narrower widths before writing
+  a layout and drops contacts that would have less than 0.07 µm of Comp
+  enclosure at either face after grid snapping.
 - The opening is reported as a `GAP_<side>` entry in `ports[]` on the layer a
   route would cross the ring on: `x_um`/`y_um` is the opening's centre on the
   ring's own centre line, **`width_um` is the opening's length along that
