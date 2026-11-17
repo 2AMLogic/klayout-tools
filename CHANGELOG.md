@@ -14,6 +14,14 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim --attach <batch-shards.json>` accepts a map written by a
+  `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
+  `--collect-partial` refused every `hosts != 1` request with "requires backend
+  'batch' with a single job", contradicting `--help`, and even once past that
+  gate a `hosts > 1` dispatch would have submitted a fresh fleet instead of
+  attaching. A shard map now attaches under any `hosts` (the shard count is read
+  from the map); a bare job id still requires `hosts = 1`. Additive: a call that
+  used to fail now succeeds.
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -24,6 +32,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+- **`klt functional-verification` reports name what they simulated** (#5771,
+  2026-11-17): the report recorded the engine, results and environment but not
+  the simulated files, so an RTL run and a gate-level run of the same testbench
+  module differed only in `real_time_s` jitter. `environment.sources` is a new
+  additive array -- one `{path, scope, sha256}` entry per resolved source, in
+  build order (the `options.from_synthesize` netlist first), on both the cocotb
+  and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
+  source outside the repo reads `{"path": null, "scope": "external"}` and never
+  leaks a host path. No `schema_version` bump.
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
   hand-maintained list of "every *other* exclusive form", and `transfer`'s
@@ -95,6 +112,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   contract, alongside the existing `$N` caveat (#1063). Additive; no
   `schema_version` bump.
 
+- **`klt sim` refuses capability-gated request fields before the grid runs,
+  not after** (#5645, 2026-11-16): five request fields whose only worker
+  guard was a post-run `*_unsupported_worker` echo check are now registered
+  in `REQUEST_FEATURE_MIN_RUNNER_VERSION` (all **mandatory**, mirroring their
+  echo checks' severity), so a submit against a fleet whose AMI-manifest
+  images predate the field is refused with `batch_runner_feature_unsupported`
+  before any S3 write or instance launch, `--dry-run` reports the refusal,
+  and the `remote` backend refuses pre-launch the same way:
+  `analysis.op_check` (minimum `0.9.2`), `analysis_overrides` (`0.9.1`),
+  `options.nodeset`, `options.initial_conditions`, `corners.options`
+  (`0.8.0`). Previously an old runner image ran the whole grid and the
+  result was then refused wholesale, with nothing reported -- and
+  `--dry-run` reported `status: valid`, because the registry had no row to
+  compare. The post-run echo checks stay unchanged as the backstop for an
+  unreadable manifest or disagreeing images. A new ratchet test
+  (`tests/test_sim_runner_feature_registry_coverage.py`) fails when a new
+  `*_UNSUPPORTED_WORKER_CODE` echo check lands without a registry row or a
+  reasoned waiver, so the next capability-gated field cannot repeat the gap.
+  No `schema_version` bump: the fields appear only as new values inside the
+  existing `runner_request_features.required` / `missing` arrays and as the
+  existing `batch_runner_feature_unsupported` error code.
 - **`klt mcp serve` serves the `docs/schemas/` JSON contract as MCP
   resources** (#5420, 2026-11-13): the server now advertises the resources
   capability and lists one resource per `docs/schemas/*.schema.json` at
@@ -141,6 +179,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/json-contract.md` and carries no bump of its own. `--format text`
   still prints a path (`<outside repo>` for an external input), never the
   envelope object.
+- **Changed** (#5666, emission-affecting, **no** `schema_version` bump): a
+  `klt lvs` report from `engine: "klayout-runset"` now emits `layout` as the
+  committable `{path, scope}` envelope `env_provenance.repo_relative_path()`
+  builds from the **resolved** layout path — the same file
+  `environment.layout_sha256` hashes (`{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` inside the invoking repo, `{"path": null, "scope":
+  "external"}` outside) — not the request's bare-string echo. No bump:
+  `docs/cli/lvs.md` already documents `layout` as an unconditional object at
+  `schema_version: 3`, so the string was the non-compliance and this is a
+  compliance fix. `reference` is unchanged and still the documented
+  bare-string echo. A newly produced report for an out-of-repo layout reads
+  `{"path": null, "scope": "external"}` and needs an explicit `--layout` to
+  `--rerun` (already-committed old reports still resolve: the committed-path
+  reader accepts the bare string). `--format text` (the default) no longer
+  crashes with an `AttributeError` on a runset report.
 
 - **`klt synthesize`'s `netlist_sha256` no longer depends on the build root
   or on `run_id`** (#5594, 2026-11-15): Yosys names function-derived nets
