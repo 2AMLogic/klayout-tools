@@ -72,12 +72,15 @@ REASON_UNMAPPED_RULES_RAN = "unmapped_rules_ran"
 #:
 #: Deliberately *not* mapped: curated ``comp.width.mv.1`` ↔ native
 #: ``DF.1a_MV``. That pair is a known, documented modelling divergence, not a
-#: verified equivalence -- the PDK deck's ``DF.1a_MV`` additionally excludes
-#: the LDMOS drain markers ``mvsd``/``mvpsd`` which the curated rule still
-#: checks (see the ``comp.width.mv.1`` entry in ``decks/gf180mcu.py``'s
-#: approximations list). Mapping it would make every gf180mcu layout with an
-#: LDMOS drift region report ``disagreement`` -- a false disagreement, the
-#: exact hazard the mapping's minimality exists to prevent.
+#: verified equivalence -- since #5719 both sides exclude the ``mvsd``/
+#: ``mvpsd``-marked LDMOS drains, but by different mechanisms: the PDK deck
+#: by boolean clip (``comp_56v.not(mvsd.or(mvpsd))``), the curated rule by
+#: ``DerivedLayer``'s whole-polygon context stage. The two therefore diverge
+#: on a polygon straddling a marker boundary (dropped whole here, clipped
+#: remainder there -- see the ``comp.width.mv.1`` entry in
+#: ``decks/gf180mcu.py``). That residual divergence is documented but
+#: unverified as an equivalence, and mapping an unverified pair is the exact
+#: hazard the mapping's minimality exists to prevent.
 RULE_MAPPING: dict[str, list[dict[str, Any]]] = {
     "gf180mcu": [
         {

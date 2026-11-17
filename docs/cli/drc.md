@@ -1719,10 +1719,14 @@ verified equivalence. It currently carries exactly one group, for `gf180mcu`:
 curated `comp.enclosing.contact.1` ↔ native `CO.4` (verified 2026-11-16, issue
 #5720: both engines flagged the same 16 contact-enclosure markers in the same
 cell, overlapping exactly). Deliberately *absent*: `comp.width.mv.1` ↔
-`DF.1a_MV` — the native rule additionally excludes the LDMOS drain markers
-`mvsd`/`mvpsd` that the curated rule still checks (a documented modelling
-divergence, see `decks/gf180mcu.py`), so pairing them would report a false
-`disagreement` on every layout with an LDMOS drift region. Every rule outside
+`DF.1a_MV` — since #5719 both sides exclude the `mvsd`/`mvpsd`-marked LDMOS
+drains, but by different mechanisms: the PDK deck by boolean clip
+(`comp_56v.not(mvsd.or(mvpsd))`), the curated rule by `DerivedLayer`'s
+whole-polygon context stage. The two therefore still diverge on a polygon
+straddling a marker boundary (dropped whole here, clipped remainder there —
+a documented modelling divergence, see `decks/gf180mcu.py`), so the pair is
+an unverified divergence, not the verified equivalence a mapping group
+requires. Every rule outside
 a group is `unmapped`, and an unmapped rule can never produce `agree_*` — so a
 real gf180mcu run still reports `not_comparable` (with the contact-enclosure
 group's own verdict under `groups`), and the per-engine reports remain the

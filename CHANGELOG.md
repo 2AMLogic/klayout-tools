@@ -24,9 +24,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   run: the same 16 contact-enclosure markers on both sides, overlapping
   exactly), so `groups` is non-empty and that pair's own verdict is reported.
   Curated `comp.width.mv.1` ↔ native `DF.1a_MV` stays deliberately unmapped:
-  the native rule additionally excludes the LDMOS drain markers `mvsd`/
-  `mvpsd` the curated rule still checks, so pairing them would manufacture a
-  false `disagreement`. The overall state is unchanged — an unmapped rule can
+  since #5719 both sides exclude the `mvsd`/`mvpsd`-marked LDMOS drains, but
+  by different mechanisms (the PDK deck's boolean clip
+  `comp_56v.not(mvsd.or(mvpsd))` vs. the curated `DerivedLayer`
+  whole-polygon context stage), so the two still diverge on a
+  marker-straddling polygon — a documented but unverified divergence, not a
+  verified equivalence. The overall state is unchanged — an unmapped rule can
   never produce `agree_*`, so a real gf180mcu run is still
   `not_comparable` — but a new optional `comparison.reason`
   (`mapping_empty` | `group_not_covered` | `unmapped_rules_ran`,
