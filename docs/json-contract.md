@@ -1347,10 +1347,18 @@ including why a hard pin was rejected).
 A caller committing `klt drc`/`klt lvs` output as evidence does not need to
 call `klt version` separately to detect drift: `provenance.klayout_version_mismatch`
 (previous section) carries the same comparison inline on every report, with
-a stderr warning when it is `true`. To reproduce the exact engine a
-committed report was generated against:
+a stderr warning when it is `true`. The warning prints the install command
+for *your* build — for a released install the version-pin form, for a clean
+dev checkout the git-commit form — derived from
+`klt version --format json`'s `reinstall_spec` field (issue #5601). To
+reproduce the exact engine a committed report was generated against:
 
 ```bash
+# released install (the warning prints this when klt itself came from a pin):
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# dev/git checkout:
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 ```

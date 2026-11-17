@@ -270,26 +270,34 @@ was rejected.
 
 ## Pinning the KLayout engine version
 
-Pinning `klayout-tools` to an exact git commit SHA does not, by itself, pin
-the `klayout` engine version that commit resolves —
+Pinning `klayout-tools` — to an exact git commit SHA *or* to a released
+version — does not, by itself, pin the `klayout` engine version it resolves —
 `pyproject.toml`'s `klayout>=0.30` dependency is an unbounded floor, so the
-same commit installed on different days can resolve different `klayout`
+same pin installed on different days can resolve different `klayout`
 versions, and DRC/LVS report internals (deck content hash, `rules_skipped`,
 `category_counts`) can shift alongside it even though the verdict itself
 does not (issue #1490).
 
 `klayout_version_expected` above is the reproduction target; the fix is
-`uv`'s own dependency override, no `klt`-specific flag needed:
+`uv`'s own dependency override, no `klt`-specific flag needed. Use the form
+matching how the build you are replacing was installed (`reinstall_spec`
+above already names it):
 
 ```bash
+# released install:
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# dev/git checkout:
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 ```
 
 `klt drc`/`klt lvs` reports compare the two fields automatically —
-`provenance.klayout_version_mismatch` — with a stderr warning on drift; see
-[`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine
-version" section.
+`provenance.klayout_version_mismatch` — with a stderr warning on drift whose
+remedy prints whichever of the two forms matches the running build (issue
+#5601); see [`../json-contract.md`](../json-contract.md)'s "Pinning the
+KLayout engine version" section.
 
 ## Gating a build before doing work
 
