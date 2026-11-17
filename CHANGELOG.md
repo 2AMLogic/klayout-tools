@@ -27,8 +27,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   measurement" error instead of running; every other refusal and message is
   byte-identical. `klt sim`'s `schema_version` is unaffected.
 - **`klt yield`: a damaged gzip input is an error envelope, not a traceback**
-  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream is
-  *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
+  (#5543, 2026-11-13): a gzip samples or `--limits` file whose deflate stream
+  is *corrupt* — as opposed to truncated, or carrying a bad CRC trailer, both
   of which already reported correctly — made `klt yield` print a raw
   `zlib.error` traceback and exit 1 with no JSON on either stream, breaking
   the error contract in [`docs/json-contract.md`](docs/json-contract.md) for a
