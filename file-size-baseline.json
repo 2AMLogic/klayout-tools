@@ -172,8 +172,8 @@
       "lines": 1010
     },
     {
-      "path": "src/klayout_tools/artifact_store.py",
-      "lines": 1025
+      "path": "src/klayout_tools/artifact_verify.py",
+      "lines": 745
     },
     {
       "path": "src/klayout_tools/characterize.py",
@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sg13g2.py",
-      "lines": 2948
+      "lines": 2941
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
@@ -345,7 +345,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3154
+      "lines": 3152
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -397,7 +397,7 @@
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
-      "lines": 1468
+      "lines": 1421
     },
     {
       "path": "src/klayout_tools/liberty_compare.py",
@@ -457,7 +457,7 @@
     },
     {
       "path": "src/klayout_tools/netlist.py",
-      "lines": 1067
+      "lines": 1066
     },
     {
       "path": "src/klayout_tools/netlist_batch.py",
@@ -505,7 +505,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3364
+      "lines": 3355
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -549,7 +549,7 @@
     },
     {
       "path": "src/klayout_tools/probit.py",
-      "lines": 838
+      "lines": 837
     },
     {
       "path": "src/klayout_tools/remote_fleet.py",
@@ -589,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12373
+      "lines": 12371
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2297
+      "lines": 2264
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_twoport.py",
-      "lines": 657
+      "lines": 651
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
@@ -657,7 +657,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4651
+      "lines": 4650
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
