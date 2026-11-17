@@ -569,6 +569,7 @@
       "description": "`klt place_and_route` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.place_and_route_cmd",
+        "klayout_tools.netlist_construct_scan",
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
@@ -1633,7 +1634,7 @@
     {
       "consumer": "synthesize",
       "exporter": "place_and_route",
-      "reason": "Issue #5074: synthesize_x_scan reuses the netlist x-constant scanner (the same regex and comment blanker klt place_and_route's pre-flight rejects on) so the synthesize warning and the P&R rejection cannot disagree; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: synthesize_x_scan reuses the netlist construct-scanner primitives (the shared netlist_construct_scan module, which lives in the place_and_route group next to its only in-repo rejecter) so the synthesize warnings and the P&R rejection cannot disagree."
     },
     {
       "consumer": "synthesize",
@@ -1809,15 +1810,21 @@
     },
     {
       "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.place_and_route_request",
+      "exporter": "klayout_tools.netlist_construct_scan",
       "symbol": "_NETLIST_X_CONSTANT_RE",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
     },
     {
       "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.place_and_route_request",
+      "exporter": "klayout_tools.netlist_construct_scan",
       "symbol": "_blank_verilog_comments",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_x_scan",
+      "exporter": "klayout_tools.netlist_construct_scan",
+      "symbol": "_NETLIST_BEHAVIOURAL_LATCH_RE",
+      "reason": "Issue #5792: reuses the exact behavioural-latch regex place_and_route's netlist pre-flight rejects on, so the synthesize-time warning and the P&R rejection cannot drift; lives in the shared netlist_construct_scan module (place_and_route group) alongside the other two scanner primitives."
     },
     {
       "consumer": "klayout_tools.characterize_osdi",

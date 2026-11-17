@@ -7,7 +7,7 @@ syntax error from a later stage."""
 
 from __future__ import annotations
 
-from .place_and_route_request import (
+from .netlist_construct_scan import (
     _NETLIST_BEHAVIOURAL_LATCH_RE,
     _NETLIST_X_CONSTANT_RE,
     _blank_verilog_comments,
@@ -32,7 +32,7 @@ def netlist_x_constant_warning(
     carries a bare ``x``-valued constant (``assign w = 24'hxxxxxx;``).
 
     ``klt place-and-route`` refuses such a netlist in its pre-flight (same
-    regex, shared from :mod:`place_and_route_request`), and re-running
+    regex, shared from :mod:`netlist_construct_scan`), and re-running
     ``klt synthesize`` cannot clear it once ``setundef -zero``/``hilomap``
     have already run -- so the user is told here, before P&R. Names the
     first few 1-based line numbers and the first offending line. Empty when
@@ -89,7 +89,7 @@ def netlist_behavioural_latch_warning(netlist_text: str) -> dict[str, str]:
     onto: ``dfflibmap`` maps flip-flops only, and ``latch_map`` (issue
     #4458) has no target to give it. OpenSTA's structural reader rejects the
     shape outright, so ``klt place-and-route`` refuses this netlist in its
-    pre-flight (same regex, shared from :mod:`place_and_route_request`) --
+    pre-flight (same regex, shared from :mod:`netlist_construct_scan`) --
     the caller is told here, before P&R. Names the first few 1-based line
     numbers and the first offending line. Empty when the netlist is clean
     (which is also the ``latch_map``-mapped shape: the mapped latch is a
@@ -119,3 +119,24 @@ def netlist_behavioural_latch_warning(netlist_text: str) -> dict[str, str]:
             "target, or remove the latch from the RTL."
         )
     }
+
+
+def netlist_warnings(
+    netlist_text: str,
+    *,
+    cell_library: str | None = None,
+    has_tie_cells: bool = True,
+) -> dict[str, str]:
+    """Both post-run netlist scans in one ``warnings`` splat (issues #5074,
+    #5792): :func:`netlist_x_constant_warning` plus
+    :func:`netlist_behavioural_latch_warning`, over one read of the written
+    netlist. ``run_synthesize`` is the only caller; the two functions stay
+    public for their own focused tests.
+    """
+    warnings = netlist_x_constant_warning(
+        netlist_text,
+        cell_library=cell_library,
+        has_tie_cells=has_tie_cells,
+    )
+    warnings.update(netlist_behavioural_latch_warning(netlist_text))
+    return warnings
