@@ -636,20 +636,20 @@ def environment_provenance(
 
 def _klt_version() -> str | None:
     from ._provenance import _klt_version as resolve
+
     return resolve()
 
 
 def _klayout_version() -> str | None:
     from ._provenance import _klayout_version as resolve
+
     return resolve()
 
 
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
-    # ``walk_string_fields`` ignores non-``str`` mapping keys where the old
-    # ``_string_values`` walk recursed into them; that narrowing is safe here
-    # because this payload is JSON-serialisable by contract
-    # (docs/json-contract.md), and JSON cannot carry a container as a key.
+    # Unlike the old ``_string_values`` walk, ``walk_string_fields`` skips
+    # non-``str`` keys; safe here (JSON keys are strings, docs/json-contract.md).
     for value in (text for _field, text in walk_string_fields(report, "")):
         leaks = find_leaks(value, extra_identifiers=identifiers)
         if leaks:
