@@ -377,12 +377,15 @@ def _landing_pad_conflict_reason(
         # ``side + spacing`` requirement below; exact for a like-sized
         # square neighbour.
         half_dbu = int(round(side_um / 2.0 / dbu))
-        pitch_dbu = int(
-            min(
-                (edge.euclidian_distance(centre) for edge in other_region.edges()),
-                default=0,
+        pitch_dbu = (
+            int(
+                min(
+                    (edge.euclidian_distance(centre) for edge in other_region.edges()),
+                    default=0,
+                )
             )
-        ) + half_dbu
+            + half_dbu
+        )
     else:
         pitch_dbu = 0
     pitch_um = pitch_dbu * dbu
