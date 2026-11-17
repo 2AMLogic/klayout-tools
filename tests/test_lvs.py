@@ -8342,6 +8342,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_file=None,
         deck_var=None,
         layout=None,
+        reference=None,
         progress=None,
         output=None,
     )
