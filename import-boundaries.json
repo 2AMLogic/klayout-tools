@@ -527,6 +527,7 @@
         "klayout_tools.netlist_normalize_scan",
         "klayout_tools.netlist_paths",
         "klayout_tools.netlist_pdk",
+        "klayout_tools.netlist_diff",
         "klayout_tools.netlist_port_order"
       ]
     },
@@ -598,6 +599,7 @@
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
+        "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
         "klayout_tools.place_and_route_groups",
@@ -745,6 +747,7 @@
         "klayout_tools.signoff_attest_build",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
+        "klayout_tools.signoff_attest_env",
         "klayout_tools.signoff_attest_gaprows",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item8",
@@ -943,6 +946,7 @@
         "klayout_tools._sta_sdc_check",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
+        "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups"
       ]
     },
