@@ -994,7 +994,7 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
         resolved_pins, pin_sources = resolve_pin_refs(
             normalized["pins"], root, _normalize_repo_path
         )
