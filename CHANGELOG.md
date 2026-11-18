@@ -40,6 +40,41 @@ not `klt --version`, if you need to detect this kind of drift. See
   `timing.stages.unsupported_devices` key (additive; no `schema_version`
   bump). A 4x-larger flat array now costs ~4x the recognition block instead
   of ~16x (`tests/test_extract_scaling.py`).
+
+- **`klt signoff --repin -o FILE` is now a usage error instead of a silent
+  no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
+  stdout and never created `FILE` — the one mode that dropped a flag the user
+  typed, while every other `klt signoff` mode honours `-o`. `-o`/`--output`
+  now joins `--fleet`, `--attest`, `--check` and `--describe-grader` among the
+  forms `--repin` refuses by name (exit `2`, before the manifest is read or
+  rewritten). `--repin` still writes no output file; the JSON envelope is on
+  stdout as before. The other report/attest inputs `--repin` ignores
+  (`--tiers-doc`, `--inventory`, `--input`, `--allow-generator-exec`,
+  `--generator-approvals`) are unchanged.
+
+- **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
+  entries** (#5527, 2026-11-13): after an attestation inventory changed,
+  `klt signoff --attest` regenerated the envelope but the manifest's pin
+  still named the old input hash, so the next `--manifest` run silently
+  graded the item `unmet`/`stale_evidence` — and the only fix was a hand
+  edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
+  pins in place from the evidence they name. It rewrites a pin **only** when
+  the grader re-derived the live hash from the artifact itself
+  (`input_verified: true`) — the gate is that flag, never the evidence
+  kind, so a `drc`/`lvs`/`extract`/`sim` pin is re-pinned too whenever its
+  artifact resolves. A stale pin it could not re-verify (for example a `drc`
+  report whose named layout does not resolve here, where the pin is the
+  manifest author's independent claim about which revision was checked) is
+  left intact and reported as skipped, and an entry that pins nothing is
+  never given a pin.
+  A manifest with nothing to re-pin is not written at all. The JSON payload
+  (`schema_version: 1`) lists one record per changed and per skipped entry;
+  `--repin` requires `--manifest` (not `-`) and is a usage error combined
+  with the envelope `<file>` arguments, `--fleet`, `--attest`, `--check` or
+  `--describe-grader`. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
+  section.
+
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
@@ -98,6 +133,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Behaviour change for consumers locating `klt synthesize` artifacts by
+  path: they moved from flat `.klt/synthesize/` to
+  `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
+  (#6228, 2026-11-17; the layout itself shipped with #2119): since #2119
+  each invocation exclusively creates its own directory beneath the request
+  file's `.klt/synthesize/`, so the artifacts that previously landed flat at
+  `<request-dir>/.klt/synthesize/<hdl_toplevel>_synth.v` and
+  `.klt/synthesize/synth_<hdl_toplevel>.ys` are now written at
+  `<request-dir>/.klt/synthesize/<run_id>/<same names>`. The response
+  carries that run's `run_id` (additively; a caller-supplied `run_id`
+  request key also exists and exclusively reserves the directory), and all
+  existing `{path, scope}` fields still point at this invocation's files —
+  including the `{"path": null, "scope": "external"}` shape an
+  out-of-repository request reports, where the artifacts are still at
+  `<request dir>/.klt/synthesize/<run_id>/`. A flow driver that resolves
+  its netlist by the old documented flat path now fails to find it, and one
+  that globs `.klt/synthesize/` newest-first can silently pick up a previous
+  run's netlist; resolve via the response's paths or `run_id` instead,
+  never by newest-mtime globbing. There is no mutable `latest` alias, by
+  design — it would reintroduce the cross-run ambiguity the per-invocation
+  isolation fixed; a pipeline that needs a stable path should set
+  `outputs.dir`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
+  "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
+  only; no `schema_version` bump.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
