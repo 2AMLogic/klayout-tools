@@ -52,6 +52,7 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
+    VOLATILE_PROVENANCE_PATHS,
     build_check_result,
     build_rerun_result,
     get_path,
@@ -2631,7 +2632,10 @@ def rerun_drc_report(
     :func:`klayout_tools._report_verify.diff_verdict_fields`, excluding
     :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
     (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
-    fields that legitimately vary between runs of identical inputs).
+    fields that legitimately vary between runs of identical inputs) plus,
+    for the klayout engine, the additive ``deck_output`` log (issue #6613)
+    -- execution evidence that may carry per-run text (timings, paths) and
+    must not render a faithful rerun ``"drifted"``.
     ``status: "drifted"`` names every other field that changed, including a
     changed ``violation_count``/``violations`` (the DRC-outcome-changed
     case) as well as a changed ``provenance.input.content_hash`` (the
@@ -2707,7 +2711,18 @@ def rerun_drc_report(
             tile=_recorded_tile(committed),
         )
 
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        # Issue #6613: the klayout engine's additive `deck_output` log is
+        # execution evidence, not a verdict -- a deck that echoes timings
+        # or per-run paths (the work-dir prefix is scrubbed, but not every
+        # volatile token is) must not render a faithful rerun "drifted".
+        # The path-keyed exclusion covers both a changed value and the
+        # fresh-grown key a pre-#6613 committed report lacks.
+        exclude=VOLATILE_PROVENANCE_PATHS | {("deck_output",)},
+    )
 
 
 def _attribute_to_instance(

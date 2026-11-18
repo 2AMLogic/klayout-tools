@@ -369,6 +369,49 @@ def _klayout_deck_error_detail(
     return "\n".join(head + kept)
 
 
+#: What the run's temporary work directory is recorded as in the additive
+#: ``deck_output`` evidence field (issue #6613). The real path is a fresh
+#: ``tempfile.mkdtemp`` per run and decks routinely echo the ``-rd
+#: report=...`` path klt handed them, so storing it verbatim would make
+#: otherwise identical evidence text differ on every invocation (and make
+#: ``--rerun`` of a committed report drift on it).
+_DECK_OUTPUT_WORKDIR_PLACEHOLDER = "<klt-drc-klayout-workdir>"
+
+
+def _klayout_deck_output(stdout: str | None, work_dir: str) -> dict[str, Any]:
+    """The additive ``deck_output`` field for a successful run (issue
+    #6613): the deck's own captured stdout -- per-rule progress lines, a
+    deck's own ``DRC RESULT: ...`` summary -- which the report previously
+    dropped entirely on success.
+
+    This is *evidence a human or downstream consumer can cite*, never a
+    status upgrade: a zero-finding, zero-category native-deck run stays
+    ``coverage_unknown`` (exit 4) with or without it, and klt parses
+    nothing out of the log.
+
+    Bounded by the same tail-keeping cap as deck-error detail
+    (:data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`, reused deliberately --
+    no new knob): a deck that logs a line per rule for thousands of rules
+    must not turn the JSON report into a multi-megabyte log, and the tail
+    is the part that carries a summary line. ``line_count`` is the line
+    count of the **whole** captured stdout, so when ``truncated`` is true a
+    consumer can tell exactly how many lines were dropped.
+
+    ``work_dir`` is replaced with :data:`_DECK_OUTPUT_WORKDIR_PLACEHOLDER`
+    before anything else, keeping the stored text deterministic across
+    runs of identical inputs.
+    """
+    text = (stdout or "").replace(work_dir, _DECK_OUTPUT_WORKDIR_PLACEHOLDER)
+    lines = text.splitlines()
+    if len(lines) <= _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:
+        return {"stdout": text, "truncated": False, "line_count": len(lines)}
+    return {
+        "stdout": "\n".join(lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]),
+        "truncated": True,
+        "line_count": len(lines),
+    }
+
+
 def _check_klayout_run(
     completed: subprocess.CompletedProcess[str],
     report_path: str,
@@ -1357,8 +1400,12 @@ def run_drc_klayout_engine(
     on a run that actually tolerated deck errors via ``allow_deck_errors``,
     a second additive ``engine_deck_errors`` field (issue #1941):
     ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
-    That key is omitted entirely otherwise, so an ordinary run's payload is
-    byte-identical to previous releases'. ``deck`` is
+    That key is omitted entirely otherwise. Since issue #6613, every run
+    that produced a report also carries the additive ``deck_output``
+    field: ``{"stdout": <deck's captured stdout, tail-capped and
+    work-dir-scrubbed>, "truncated": <bool>, "line_count": <int>}`` --
+    execution evidence to cite, never a verdict change (see
+    :func:`_klayout_deck_output`). ``deck`` is
     ``deck_file`` itself (there is no separate short deck *name* the way the
     curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
     arbitrary PDK-native script is identified by its own path).
@@ -1541,6 +1588,9 @@ def run_drc_klayout_engine(
         coverage_assertion = _evaluate_category_assertion(
             expected_rule_categories, rule_categories, deck_errored, expected_names
         )
+        # Issue #6613: built inside the `try` so the `work_dir` path can be
+        # scrubbed from the captured stdout before the temp dir goes away.
+        deck_output = _klayout_deck_output(completed.stdout, work_dir)
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -1602,6 +1652,11 @@ def run_drc_klayout_engine(
             if deck_errored
             else {}
         ),
+        # Additive (issue #6613): the deck's own captured stdout, kept as
+        # citable execution evidence on every successful run (tolerated
+        # deck errors included) -- bounded, work-dir-scrubbed, and never a
+        # status upgrade. See `_klayout_deck_output`.
+        "deck_output": deck_output,
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": violation_count,

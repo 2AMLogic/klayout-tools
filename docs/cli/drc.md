@@ -847,6 +847,24 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Deck stdout as additive evidence (issue #6613).** Every `--engine
+  klayout` run that produced a report carries the deck's own captured
+  stdout in the additive top-level `deck_output` field:
+  `{"stdout": "<text>", "truncated": <bool>, "line_count": <int>}`. A
+  PDK-native deck logs real execution evidence klt otherwise discarded on
+  success (gf180mcu's density deck logs each computed coverage ratio;
+  several decks end with a `DRC RESULT: ...` summary line). The log is
+  bounded: past 500 lines only the tail is stored, `truncated: true` is
+  set, and `line_count` keeps the *whole* stdout's line count (so exactly
+  `line_count - 500` lines were dropped). The run's temporary work
+  directory is scrubbed to `<klt-drc-klayout-workdir>` so otherwise
+  identical runs store identical text. **It never changes the verdict**:
+  klt parses nothing out of the log, a zero-finding, zero-category run is
+  still `coverage_unknown` (exit 4), and `--expect-rule-categories 0`
+  stays rejected (a count of zero certifies nothing -- see the coverage
+  contract). `--rerun` excludes the field from its diff, since a deck may
+  legitimately echo timings or per-run paths; treat the log as evidence a
+  human or downstream consumer cites, not a status upgrade.
 - **Opt-in rule-category assertion (issue #2697).** The conservative default
   above means a layout that is genuinely clean under its PDK's own deck can
   never earn `clean` on its own. A caller who knows how many unique rule
