@@ -158,33 +158,30 @@ def test_mos_array_gf180_mv_ring_enclosure_holds_across_padding_sweep(
     _assert_issue_6503_enclosures(layout, top)
 
 
-def test_mos_array_gf180_mv_ringless_marker_stays_core_anchored(
-    tmp_path, both_pdk_root
+@pytest.mark.parametrize("medium_voltage", [False, True])
+def test_mos_array_gf180_ringless_tap_well_margin_and_core_anchored_marker(
+    tmp_path, both_pdk_root, medium_voltage
 ):
-    """Without the guard ring the `Dualgate` marker keeps its pre-#6503
-    core-anchored box exactly: `voltage_flavor_mark_margin_um` (1.2um) past
-    the array footprint -- no ring, nothing new to enclose (issue #6503's
-    ringless-geometry-preserved criterion). The device Comp spans the
-    footprint's full extent on three sides (only the top grows past it for
-    the gate landing pad), so those three sides pin the box exactly."""
+    """Ringless MV tap pads also need DF.4d_MV's 0.16um Nwell enclosure;
+    the LV pads keep 0.15um. The MV marker keeps its pre-#6503 core box.
+    Device Comp spans the footprint on three sides (the gate landing pad
+    extends the top), so those sides pin the marker box exactly."""
     import klayout.db as kdb
 
     output = tmp_path / "issue_6503_ringless.gds"
+    params = {
+        k: v
+        for k, v in _ISSUE_6503_PARAMS.items()
+        if k
+        not in ("add_guard_ring", "ring_gap_side", "ring_gap_um", "ring_gap_offset_um")
+    }
+    if not medium_voltage:
+        params.pop("voltage_flavor")
     generate(
         {
             "generator": "mos_array",
             "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                k: v
-                for k, v in _ISSUE_6503_PARAMS.items()
-                if k
-                not in (
-                    "add_guard_ring",
-                    "ring_gap_side",
-                    "ring_gap_um",
-                    "ring_gap_offset_um",
-                )
-            },
+            "params": params,
             "options": {"output": str(output)},
         }
     )
@@ -192,7 +189,28 @@ def test_mos_array_gf180_mv_ringless_marker_stays_core_anchored(
     layout.read(str(output))
     top = layout.top_cells()[0]
     top.flatten(-1, True)
+    comp = kdb.Region(top.begin_shapes_rec(layout.layer(22, 0))).merged()
+    nplus = kdb.Region(top.begin_shapes_rec(layout.layer(32, 0))).merged()
+    pads = comp & nplus
+    assert pads.count() == 4  # NCOMP well ties, excluding the PCOMP device
+    nwell = kdb.Region(top.begin_shapes_rec(layout.layer(21, 0))).merged()
+    margin = int(round((0.16 if medium_voltage else 0.15) / layout.dbu))
+    # The pad well retains the ring-sized box: the north/south pads meet
+    # its nominal edge; east/west pad edges sit half a tap width inside.
+    expected_well = kdb.Box(
+        *(int(round(edge / layout.dbu)) for edge in (-1.22, -1.22, 2.77, 3.06))
+    )
+    if medium_voltage:
+        expected_well = expected_well.enlarged(int(round(0.01 / layout.dbu)))
+    assert nwell.bbox() == expected_well
+    assert pads.bbox().bottom - nwell.bbox().bottom == margin
+    assert nwell.bbox().top - pads.bbox().top == margin
+    assert (pads.sized(margin) - nwell).is_empty()
     dualgate = top.bbox_per_layer(layout.layer(55, 0))
+    if not medium_voltage:
+        assert dualgate.empty()
+        return
+    assert (pads - kdb.Region(dualgate)).is_empty()  # DF.4d_MV applies to these pads
     core = _gf180mcu_device_active_region(layout).bbox()
     expected = int(round(1.2 / layout.dbu))
     assert core.left - dualgate.left == expected
@@ -239,8 +257,8 @@ def test_mos_array_gf180_nfet_ring_mv_draws_no_well_but_encloses_ring(
     """The marker-past-ring growth is flavour-independent (the marker always
     is), while the ring's own well tie stays pfet-only: an nfet array with
     the marker and ring draws no Nwell at all yet still encloses the ring's
-    Comp by DV.6's 0.24um (issue #6503's non-pfet-preserved criterion --
-    nothing in the nfet path changed but the marker box)."""
+    Comp by 0.24um. This is a disclosed exception to issue #6503's non-pfet
+    preservation criterion: only the marker box changes."""
     import klayout.db as kdb
 
     output = tmp_path / "issue_6503_nfet.gds"

@@ -28,9 +28,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   `_insert_implant_ring` uses) by an MV-gated 0.16um margin, and the marker
   grows to enclose that same edge by `DV.6`'s 0.24um -- clearing
   `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` at every padding from 0.5 to 2.0um while
-  leaving ringless, non-medium-voltage, non-pfet, and non-gf180mcu arrays
-  byte-for-byte unchanged (`sky130`/`sg13g2`/`sg13cmos5l` resolve no ring
-  margin, and the 3.3V-only gf180mcu ring keeps its 0.15um default).
+  keeping non-medium-voltage and non-gf180mcu arrays unchanged.
+  Ringless MV pfet tap pads also need `DF.4d_MV`'s 0.16um well margin:
+  their well grows 0.01um per side, with pads and marker unchanged.
+  An nfet MV ring gets the marker growth too, and still draws no Nwell.
+  Other families resolve no ring margin; 3.3V-only gf180mcu rings and
+  tap pads keep their 0.15um default.
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
   stdout and never created `FILE` — the one mode that dropped a flag the user

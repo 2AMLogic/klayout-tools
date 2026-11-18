@@ -887,8 +887,11 @@ well is grown off that same snapped edge by an MV-gated 0.16 µm
 `gf180mcu.drc` runset's `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` and
 `nwell_OFFGRID` hold at every `ring_padding_um` — including the
 1.05–1.28 µm rule-swapping window a core-anchored marker used to produce.
-Other families, ring-less requests, and requests without `voltage_flavor`
-are unchanged.
+The same 0.16 µm well margin applies to ringless pfet tap pads: their
+NCOMP also lies under `Dualgate` and is subject to `DF.4d_MV`. Their well
+grows 0.01 µm per side; the core-anchored marker and the pads are unchanged.
+An nfet MV ring also gets the marker enclosure, but still draws no Nwell.
+Other families and requests without `voltage_flavor` are unchanged.
 
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own

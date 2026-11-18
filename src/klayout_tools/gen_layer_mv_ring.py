@@ -1,4 +1,4 @@
-"""Per-family margins that scope ``mos_array``'s auto tap ring to the
+"""Per-family margins that scope ``mos_array``'s auto tap ring and tap pads to the
 medium-voltage rules a ``voltage_flavor`` marker pulls in (issue #6503).
 
 Split out of ``gen_layer_params.py`` as that module's own satellite -- the
@@ -7,7 +7,7 @@ repo's monotonic file-size ratchet requires additive work to land in new
 files, never as growth to an already-baselined one.
 
 Why two tables rather than one: ``DF.4d_MV`` only holds the ``Comp`` the
-``Dualgate`` marker covers, so gf180mcu's ring well needs 0.16um exactly
+``Dualgate`` marker covers, so gf180mcu's ring/tap-pad well needs 0.16um exactly
 when the marker is drawn (a 3.3V-only ring keeps ``DF.4d_LV``'s 0.12um,
 cleared by the 0.15um default, byte-for-byte), while the marker's own
 enclosure of the ring is required whenever both are drawn at all.
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-#: Per-PDK-family nwell enclosure margin (um) of the n-tap guard ring when
+#: Per-PDK-family nwell enclosure margin (um) of the n-tap ring or pads when
 #: the ``voltage_flavor`` marker is *also* drawn (issue #6503) -- applied on
 #: top of ``_PDK_RING_WELL_MARGIN_UM`` only for a request whose marker
 #: actually resolves. ``0.0`` for a family absent here.
@@ -26,9 +26,9 @@ from typing import Any
 #: ("Min. (Nwell overlap of NCOMP) outside DNWELL", 0.16um) holds the
 #: ``Comp`` the ``Dualgate`` marker covers to the MV column, and a ``pfet``
 #: + ``medium_voltage`` array's marker covers the automatically-sized n-tap
-#: ring (see :data:`_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM`) -- so the ring's
-#: well needs 0.16um there, not the 0.15um default. Keyed apart from
-#: ``_PDK_RING_WELL_MARGIN_UM`` so the 3.3V-only array (whose ring only
+#: ring (see :data:`_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM`), or the ringless
+#: well-tie pads -- so their well needs 0.16um, not the 0.15um default.
+#: Keyed apart from ``_PDK_RING_WELL_MARGIN_UM`` so the 3.3V-only array (whose ring only
 #: needs ``DF.4d_LV``'s 0.12um, cleared by the 0.15um default) keeps its
 #: geometry byte-for-byte.
 _PDK_MV_RING_WELL_MARGIN_UM: dict[str, float] = {
@@ -37,7 +37,7 @@ _PDK_MV_RING_WELL_MARGIN_UM: dict[str, float] = {
 
 
 def _mv_ring_well_margin_um(family: str) -> float:
-    """Return ``family``'s medium-voltage n-tap ring nwell enclosure margin
+    """Return ``family``'s medium-voltage n-tap ring/pad nwell enclosure margin
     (see :data:`_PDK_MV_RING_WELL_MARGIN_UM`), or ``0.0``."""
     return _PDK_MV_RING_WELL_MARGIN_UM.get(family, 0.0)
 
@@ -80,8 +80,10 @@ def apply_mos_array_mv_ring_margins(
     ``voltage_flavor_ring_margin_um`` is always resolved (``0.0`` keeps
     every non-gf180mcu family's marker core-anchored); the ring well margin
     is raised to the MV value only when the marker actually resolved *and*
-    the ring role did too, so a ringless or 3.3V-only request's geometry is
-    untouched.
+    the ring role did too. GF180 also resolves that role for ringless tap
+    pads: their NCOMP lies under Dualgate and needs the same DF.4d_MV
+    enclosure. Both well consumers use 0.16um; 3.3V-only requests keep
+    their original margin. Ringless marker geometry is unchanged.
     """
     layer_params["voltage_flavor_ring_margin_um"] = _voltage_flavor_ring_margin_um(
         family
