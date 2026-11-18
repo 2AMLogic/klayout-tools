@@ -7,12 +7,13 @@ from klayout_tools.signoff import build_tier_report
 from test_signoff import (
     DRC_CLEAN_ENVELOPE,
     DRC_VIOLATIONS_ENVELOPE,
+    FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
     LVS_MATCH_POWER_MATCH_ENVELOPE,
     LVS_MISMATCH_ENVELOPE,
     SIM_PASS_ENVELOPE,
     _write,
 )
-from test_signoff_derived_rows import TWO_ROW_FAIL_SIM
+from test_signoff_derived_rows import _LIM, TWO_ROW_FAIL_SIM, _meas, _tagged_sim
 
 
 def _item(item_id, entry):
@@ -142,15 +143,19 @@ def test_layout_item2_single_entry_unchanged(tmp_path):
 # live beside the member-grading tests for size-ratchet room, not scope.
 
 
-def _failing_item5(entry, spec_rows):
+def _graded_item(item_id, entry, spec_rows):
     manifest = {
         "block": "lib",
         "kind": "analog",
-        "evidence": {"5": entry},
-        "spec_rows": {"5": spec_rows},
+        "evidence": {str(item_id): entry},
+        "spec_rows": {str(item_id): spec_rows},
     }
     report = build_tier_report(manifest)
-    return next(i for i in report["items"] if i["id"] == 5)
+    return next(i for i in report["items"] if i["id"] == item_id)
+
+
+def _failing_item5(entry, spec_rows):
+    return _graded_item(5, entry, spec_rows)
 
 
 def test_failing_stale_pinned_sim_credits_nothing(tmp_path):
@@ -198,3 +203,66 @@ def test_failing_unverifiable_pin_sim_credits_nothing(tmp_path):
     assert item["reason"] == "check_failed"
     assert item["detail"]["failed_rows"] == ["tdec"]
     assert item["detail"]["row_sources"] == {}
+
+
+# Issue #6027: the credit is for a citation the item *accepts*. A passing
+# tagged envelope of a kind the item rejects as `wrong_kind` grades
+# `unmet`/`wrong_kind` -- and must not leave its rows reading `derived`
+# (machine-checked) in `detail`, absent from both `failed_rows` and
+# `uncovered_rows`.
+
+
+def test_wrong_kind_sim_cited_for_item6_credits_nothing(tmp_path):
+    # Item 6 accepts only `yield`; `klt sim` is the one verb whose envelope
+    # carries `measurements[].spec_row`, so citing it here is a reachable
+    # manifest mistake.
+    sim = _write(tmp_path, "sim.json", _tagged_sim([_meas("t", "A", limits=_LIM)]))
+    item = _graded_item(6, [{"file": sim, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_wrong_kind_functional_verification_cited_for_item5_credits_nothing(tmp_path):
+    # Item 5 analog accepts `{sim, model-run}`, not `functional-verification`.
+    fv = _write(
+        tmp_path,
+        "fv.json",
+        {
+            **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
+            "measurements": [_meas("t", "A", limits=_LIM)],
+        },
+    )
+    item = _graded_item(5, [{"file": fv, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []
+
+
+def test_opt_in_model_run_cited_for_item6_credits_nothing(tmp_path):
+    # The opt-in downgrade (`_OPT_IN_KIND_ITEMS`) is a second route to
+    # `wrong_kind`: `model-run` is item 5 only, so item 6 refuses it.
+    model_run = _write(
+        tmp_path,
+        "model.json",
+        {
+            "schema_version": 1,
+            "kind": "model-run",
+            "status": "pass",
+            "method": "linear small-signal model, ideal supplies",
+            "measurements": [_meas("t", "A", limits=_LIM)],
+        },
+    )
+    item = _graded_item(6, [{"file": model_run, "rows": ["A"]}], [{"id": "A"}])
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["detail"]["failed_rows"] == ["A"]
+    assert item["detail"]["row_sources"] == {}
+    assert item["detail"]["uncovered_rows"] == []

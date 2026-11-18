@@ -6653,7 +6653,6 @@ def _build_tier_item(
             generator_exec=generator_exec,
             envelope_sink=sink,
         )
-        _remember_envelope(met_envelopes, spec, sink)
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
             if spec_status == "met"
@@ -6667,6 +6666,7 @@ def _build_tier_item(
             and spec_citation["kind"] not in allowed_kinds
         ):
             return "unmet", _REASON_WRONG_KIND, None, spec_detail
+        _remember_envelope(met_envelopes, spec, sink)  # not for wrong_kind (#6027)
         # Issue #5789: refuse an item 3 whose declared coverage disagrees.
         return _item3_coverage_verdict(
             item_id,

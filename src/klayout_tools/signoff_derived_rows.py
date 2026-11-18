@@ -185,7 +185,12 @@ def _remember_envelope(
 ) -> None:
     """Key the envelope a grading captured -- ``met``, or a ``check_failed``
     ``sim`` one (issue #6027) -- by ``spec``'s identity, for the
-    derived-row credit :func:`multi_row_info` computes."""
+    derived-row credit :func:`multi_row_info` computes.
+
+    The caller must invoke this only *after* the member's own
+    ``wrong_kind`` downgrades: a citation the item rejects as the wrong
+    kind is not evidence for any row, and :func:`multi_row_info` credits
+    derived rows from every non-``met`` member that has an entry here."""
     if sink:
         met_envelopes[id(spec)] = sink[0]
 
