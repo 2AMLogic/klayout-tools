@@ -121,7 +121,7 @@ import contextlib
 import fnmatch
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,7 +132,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
     explicit_deck_options,
-    sha256_file,
     version_drift_advisories,
 )
 from ._report_verify import (
@@ -144,7 +143,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
-from ._report_verify_hints import input_not_found_entry
+from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -2092,73 +2091,6 @@ def _finish_response(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str,
-    expected: str | None,
-    echoed: Any,
-    report_path: str,
-    override: str | None = None,
-    hasher: Callable[[str | None], str | None] = sha256_file,
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an
-    input path the committed report echoes back (``layout``/``reference``/
-    the runset ``deck_file``), with issue #2595's ``input_not_found``
-    diagnostic attached when that path does not name an existing file.
-
-    :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
-    "the file is not there" and (vacuously) for "no path was recorded", so a
-    plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
-    indistinguishable, to a reader, from a recorded hash that no longer
-    matches. That is exactly the confusing shape issue #2595 reported when a
-    committed request/report pair with *request-file-relative*
-    ``layout``/``reference`` paths is ``--check``ed from a different
-    directory.
-
-    This does **not** change where the path is resolved: ``--check`` still
-    anchors a relative echoed path to the current working directory, the
-    same convention ``klt drc --check``'s ``file`` field uses (re-anchoring
-    one verb and not the other would make the two silently disagree). It
-    only makes the failure legible, as an *additional*, optional key on the
-    entry -- ``expected``/``actual``/``match`` and the resulting ``status``
-    are byte-identical to before:
-
-    - ``path`` -- the echoed path verbatim, as the report recorded it.
-    - ``resolved`` -- the absolute path that was actually looked for.
-    - ``found_relative_to_report`` -- the absolute path the input *does*
-      occupy relative to the committed report's own directory, when it is
-      there; ``null`` otherwise (including for an echoed absolute path,
-      which has no report-relative candidate to try).
-
-    ``hasher`` is the recorded digest form: ``sha256_file`` (bare hex, default)
-    or ``content_hash`` (``sha256:``-prefixed; runset deck, issue #6223). Kept
-    local, not in ``hash_check``: ``klt drc --check`` needs it too (follow-up).
-
-    Issue #2659: ``echoed`` is resolved through
-    :func:`klayout_tools._report_verify.resolve_committed_path`, so the
-    ``{path, scope}`` object ``layout`` carries today is joined to the repo
-    root of the committed report's own directory -- which is precisely the
-    case the "known limitation" above describes, now *resolved* for the
-    layout side rather than merely diagnosed; ``reference`` too since #4984
-    (only a bare-string one keeps the cwd anchoring). An
-    entry naming no path at all (``scope: "external"``/``"absent"``, or a
-    report with no such field) resolves to ``None`` and renders exactly as
-    an absent one always has.
-    """
-    path = resolve_committed_path(echoed, report_path=report_path, override=override)
-    check = hash_check(field, expected, hasher(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report
-    )
-    return check
-
-
 def check_lvs_report(
     report_path: str, *, layout_path: str | None = None
 ) -> dict[str, Any]:
@@ -2202,14 +2134,14 @@ def check_lvs_report(
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
-        _input_hash_check(
+        input_hash_check(
             "environment.layout_sha256",
             get_path(committed, ("environment", "layout_sha256")),
             committed.get("layout"),
             report_path,
             override=layout_path,
         ),
-        _input_hash_check(
+        input_hash_check(
             "environment.reference_sha256",
             get_path(committed, ("environment", "reference_sha256")),
             committed.get("reference"),
@@ -2234,7 +2166,7 @@ def check_lvs_report(
         # Issue #2849: the PDK runset is an input too -- a changed runset
         # can change the verdict without moving the layout or reference.
         checks.append(
-            _input_hash_check(
+            input_hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
                 committed.get("deck_file"),
@@ -2921,39 +2853,38 @@ def _parse_layout_abstract_cells(
     ``--abstract-cell-lef`` (issue #620), forwarded to inline extraction so a
     mixed-level compare -- a transistor-level region next to placed cells
     extracted as pin-only black boxes -- runs as **one** ``klt lvs`` request
-    and keeps the deck-aware checks (``body_verification``) that need the
-    inline-extraction shape.
+    and keeps the deck-aware checks that need the inline-extraction shape.
 
     Same shape and validation as ``klt extract``'s request fields of the same
     names (``cli/extract_cmd.py``): each is a string or an array of strings
     (``fnmatch`` cell-name globs / LEF file paths, the latter resolved
     against the request document's directory). An empty array is a no-op,
-    as it is for ``klt extract``. ``abstract_cell_lef`` without a non-empty
-    ``abstract_cells`` is rejected, mirroring ``run_extract``'s own check (the
-    LEF is only ever a pin-resolution *fallback* for a matched cell type).
+    as it is for ``klt extract``. Inline-shape ``abstract_cell_lef`` without
+    a non-empty ``abstract_cells`` is rejected (the LEF only supplies pins
+    for a matched cell type; labels win per name, LEF-only pins merge, #3749).
 
-    **Extraction-only**, like ``layout.label_layers``: a non-empty value on
-    the pre-extracted ``layout.netlist`` shape is a clean :class:`LvsError`
-    -- that netlist's cells were already abstracted (or not) when it was
-    extracted, and silently accepting the field would read as "the
-    abstraction was applied".
+    ``abstract_cells`` is **extraction-only** (non-empty on the pre-extracted
+    ``layout.netlist`` shape is a clean :class:`LvsError` -- that netlist was
+    already abstracted or not at extraction time); ``abstract_cell_lef`` alone
+    is **disclosure-only** there (issue #5842): it only feeds
+    ``power_connectivity.excluded_pins`` (two-step disclosure).
     """
     patterns = _layout_str_list(layout_spec, "abstract_cells")
     lef_given = _layout_str_list(layout_spec, "abstract_cell_lef")
-    if (patterns or lef_given) and "netlist" in layout_spec:
-        given = "abstract_cells" if patterns else "abstract_cell_lef"
+    on_netlist = "netlist" in layout_spec
+    if patterns and on_netlist:
         raise LvsError(
-            f"request.layout.{given} applies only to inline extraction "
+            "request.layout.abstract_cells applies only to inline extraction "
             "(request.layout.file + request.layout.deck): a pre-extracted "
             "request.layout.netlist was already abstracted (or not) when it "
             "was extracted -- re-extract it with `klt extract "
             "--abstract-cells ...`, or give request.layout.file instead"
         )
-    if lef_given and not patterns:
+    if lef_given and not patterns and not on_netlist:
         raise LvsError(
             "request.layout.abstract_cell_lef was given but "
             "request.layout.abstract_cells is empty -- abstract_cell_lef only "
-            "has an effect as a pin-resolution fallback for a cell type "
+            "has an effect as a pin source for a cell type "
             "abstract_cells actually matches"
         )
     echo: dict[str, list[str]] = {}
@@ -2981,13 +2912,14 @@ def _layout_abstraction_echo(
     (``{"cell", "instance_count", "pin_count", "resolution_source",
     "lef_path"}``) -- an empty list when the patterns matched no instantiated
     cell, so "the glob matched nothing" is visible rather than silently
-    indistinguishable from a full abstraction. All three are omitted
-    entirely (not ``null``) when ``layout.abstract_cells`` was not given, so
-    every report from a request without it -- and every report committed
-    before it existed -- stays byte-identical.
+    indistinguishable from a full abstraction. All three are omitted entirely
+    (not ``null``) when ``layout.abstract_cells`` was not given, so reports
+    without it -- committed or new -- stay byte-identical.
     """
     if not abstraction.patterns:
-        return {}
+        # Issue #5842: LEF-only (disclosure-only, netlist shape) is echoed so
+        # `--check --rerun` replays it (no extraction ran, no abstracted_cells).
+        return dict(abstraction.echo)
     return {**abstraction.echo, "abstracted_cells": list(abstracted_cells)}
 
 
@@ -3219,8 +3151,8 @@ def _resolve_layout(
     ``layout.file`` shape -- every instantiated cell matching one of the
     patterns is extracted as a pin-only black box, exactly like ``klt extract
     --abstract-cells``. Already validated by
-    :func:`_parse_layout_abstract_cells` (which rejects it on the
-    ``layout.netlist`` shape, so it never reaches that branch). No PDK is
+    :func:`_parse_layout_abstract_cells` (which rejects ``abstract_cells`` on
+    the ``layout.netlist`` shape -- that shape runs no extraction). No PDK is
     resolved here (``klt lvs`` has no ``layout.pdk``), so an
     ``abstract_cell_lef`` port is probed the way ``klt extract
     --abstract-cell-lef`` probes it without ``--pdk``.
