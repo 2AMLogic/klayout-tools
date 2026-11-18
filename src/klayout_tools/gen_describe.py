@@ -32,13 +32,9 @@ one-way -- ``gen.py`` imports this module at its own module level, and
 nothing here imports ``gen`` at module level. The layout-math helpers these
 functions call (``_mos_array_layout``, ``_res_array_layout``,
 ``_cap_array_layout``, ``_ring_layout``, ``_diff_pair_layout``,
-``_bjt_array_layout``, ``_esd_device_layout``, ``_grid_snapped``,
-``_box_separation_um``, ``_parse_well_regions``, ``_well_box_um``,
-``_auto_ring_inner_size_um``) and the geometry constants they read stay in
-``gen.py`` and are imported back **lazily, at call time**, exactly the way
-``gen_pcells/*.py`` and ``gen_layer_params.py`` already do it. By the time
-any function here actually runs, ``gen`` has finished importing this module
-and is fully loaded, so the lazy import never raises.
+``_bjt_array_layout``, ``_esd_device_layout``) and the geometry constants
+are exposed by ``gen.py`` and imported **lazily, at call time**, following
+the convention in ``gen_pcells/*.py`` and ``gen_layer_params.py``.
 
 The PDK layer-parameter names below have no such cycle -- ``gen.py`` itself
 re-exports them from :mod:`klayout_tools.gen_layer_params`, so they are
@@ -91,6 +87,7 @@ from .gen_layer_params import (
     _tap_pads_wanted,
     mfg_grid_um,
 )
+from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
 from .gen_ring_ports import _ring_ports
 from .gen_voltage_flavor import _voltage_flavor_hints
 
@@ -1813,6 +1810,7 @@ def _guard_ring_describe(
 
     family = _pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    contact_layer = _PDK_ROLE_LAYERS[family]["contact"]
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
@@ -1821,6 +1819,10 @@ def _guard_ring_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        gap_contact_enclosure_um=_guard_ring_gap_contact_enclosure_um(family),
+        dbu=dbu,
+        mfg_grid_um=mfg_grid_um(family, contact_layer),
+        contact_fixed_size_um=_cut_fixed_size_um(family, contact_layer),
     )
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
@@ -1862,9 +1864,6 @@ def _guard_ring_describe(
     )
 
     return {
-        # The contacts actually drawn -- `2 * (contacts_ns + contacts_ew)`
-        # unless a ring opening (params.ring_gap_side) clipped one or more
-        # of them away.
         "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {
