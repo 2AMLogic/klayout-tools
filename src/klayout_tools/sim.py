@@ -3691,6 +3691,9 @@ def _run_sim_corners(
         pdk_root=pdk_root,
         timeout_s=timeout_s,
     )
+    netlist_digests = sim_env_report.NetlistDigests.capture(  # #5569: pre-dispatch
+        resolved.request, resolved.netlist_path, repo_root=resolved.repo_root
+    )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir
     backend = resolved.backend
@@ -4374,7 +4377,7 @@ def _run_sim_corners(
         "models_lib_sha256_scope": (
             "client" if remote_environment is not None else "local"
         ),
-        "netlist_sha256": sha256_file(netlist_path),
+        **netlist_digests.environment(attach_job_id, resume, remote_environment),
     }
     environment.update(
         param_file_environment(
@@ -4384,11 +4387,7 @@ def _run_sim_corners(
     )
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
-    environment.update(
-        sim_env_report.netlist_closure_environment(
-            request, netlist_path, repo_root=repo_root
-        )
-    )
+    environment.update(netlist_digests.closure)
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
@@ -4531,6 +4530,7 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
+    netlist_digests.pin_provenance_input(report["provenance"])
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     if top_diags := [
         d
