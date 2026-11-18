@@ -1244,6 +1244,16 @@ class belongs to `reference.deck` is refused with an error (exit 1) naming
 reported as a spurious `mismatch`. Add `layout.deck` to read it as a resistor
 device.
 
+**Inductor `X` cards (issue #6726).** `sg13g2`'s spiral inductor extracts as a
+three-terminal `inductor` device and writes `XD_$1 a b vsubs inductor PARAMS:`.
+With `layout.deck`/`reference.deck` set, such a card in a pre-extracted
+`layout.netlist` or a `reference.netlist` is read as a real device of that class
+(terminals `A`/`B`/`SUB`; `A`/`B` interchangeable) and compared in
+`counts.devices`; a card whose net count is not three is refused by the reader.
+IHP's own CDL writes the device as a model-bearing three-node `L` card, which
+KLayout's SPICE reader rejects before any recovery runs, so rewrite it as the
+`X` card above first. No parameters are compared.
+
 **`layout.deck`/`reference.deck` fixes this.** When a pre-extracted
 `layout.netlist` gives `layout.deck`, or `reference.netlist` gives
 `reference.deck` (any `reference.form`), `klt lvs` recognises an `X` card

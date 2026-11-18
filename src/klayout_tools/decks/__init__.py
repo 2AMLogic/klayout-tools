@@ -12,10 +12,9 @@ Deck data lives in per-PDK sibling modules (``sky130.py``, ``gf180mcu.py``);
 this module only aggregates them into a name -> deck registry.
 
 The domain dataclasses/exceptions themselves live in three sibling modules
-split out of this one (issue #1821), grouped by independent domain -- none
-of the three references either of the others, except that ``extraction.py``
-reuses ``rules.py``'s :class:`RuleProvenance` for its own devices'
-provenance fields:
+split out of this one (issue #1821), grouped by independent domain -- none of
+the three references either of the others, except that ``extraction.py`` reuses
+``rules.py``'s :class:`RuleProvenance` for its own devices' provenance fields:
 
 - :mod:`klayout_tools.decks.rules` -- the DRC rule domain
   (:class:`DerivedLayer`, :class:`RuleProvenance`, :class:`DrcRule`,
@@ -23,10 +22,9 @@ provenance fields:
 - :mod:`klayout_tools.decks.extraction` -- the extraction device domain
   (:class:`ResistorDevice`, :class:`ResistorFlavour`, :class:`MOSFlavour`,
   :class:`ExtractionDeck`, :class:`BipolarDevice`, :class:`TerminalRelation`,
-  :class:`CapacitorDevice`,
-  :class:`CapacitorFlavour`, :class:`MomCapacitorDevice`,
-  :class:`DiodeDevice`, :class:`LayerExpr`, :class:`SizeFilter`,
-  :class:`InvalidLabelLayerError`).
+  :class:`CapacitorDevice`, :class:`CapacitorFlavour`,
+  :class:`MomCapacitorDevice`, :class:`DiodeDevice`, :class:`InductorDevice`,
+  :class:`LayerExpr`, :class:`SizeFilter`, :class:`InvalidLabelLayerError`).
 - :mod:`klayout_tools.decks.parasitics` -- the parasitics domain
   (:class:`LayerRC`, :class:`CutRC`, :class:`ParasiticsDeck`,
   :class:`UnknownExtractionDeckError`, :class:`InvalidDeckOptionError`).
@@ -61,6 +59,7 @@ from .extraction import (
     UnmodelledDeviceFamily,
     UnsupportedDeviceMarker,
 )
+from .extraction_inductor import InductorDevice
 from .finfet import FinFETExtractionDeck, FinFETFlavour, FinFETPassiveCapacitor
 from .parasitics import (
     HIGH_CORNER,
@@ -100,6 +99,7 @@ __all__ = [
     "FinFETFlavour",
     "FinFETPassiveCapacitor",
     "HIGH_CORNER",
+    "InductorDevice",
     "InvalidDeckOptionError",
     "InvalidLabelLayerError",
     "LayerExpr",

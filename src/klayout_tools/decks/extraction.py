@@ -34,6 +34,7 @@ from itertools import chain
 from typing import Any
 
 from .._jsonnum import is_int
+from .extraction_inductor import InductorDevice
 from .rules import RuleProvenance
 
 
@@ -728,6 +729,9 @@ class ExtractionDeck:
     more than one entry (e.g. gf180mcu's n+/p-substrate and p+/Nwell
     junction flavours).
 
+    ``inductors`` (empty by default) declares spiral inductors recognised from
+    their marker/pin/text layers (issue #6726, :class:`InductorDevice`).
+
     ``nfet_provenance``/``pfet_provenance`` (issue #868) are machine-readable
     citations of the exact upstream PDK-LVS-deck source line each MOS
     recognition rule was transcribed from -- the device-recognition analogue
@@ -819,6 +823,7 @@ class ExtractionDeck:
     pfet_provenance: RuleProvenance | None = None
     capacitor_variants: tuple[CapacitorVariant, ...] = ()
     capacitor_variant_selected: str | None = None
+    inductors: tuple[InductorDevice, ...] = ()
 
     @property
     def unselected_capacitors(self) -> tuple[tuple[str, CapacitorDevice], ...]:
@@ -849,22 +854,12 @@ class ExtractionDeck:
         "what can be found" declaration).
 
         Every registered deck extracts two-terminal-well MOS (``"nfet"``,
-        ``"pfet"``); a deck that also declares one or more ``bipolars``
-        entries (#223) appends each entry's ``class_name`` (in declaration
-        order, deduplicated), and a deck that declares one or more
-        ``capacitors`` entries (#225) likewise appends each entry's ``name``
-        after that. Finally, a deck that declares one or more ``resistors``
-        entries (#222) appends the ``"resistor"`` role after those -- a single
-        role token regardless of how many drawn-resistor device classes the
-        deck declares. Last, a deck that declares one or more ``diodes``
-        entries (#542) appends each entry's ``name`` (in declaration order,
-        deduplicated) after that -- one token per declared junction-diode
-        flavour, matching how ``bipolars``/``capacitors`` name theirs. A deck
-        that declares one or more ``mom_capacitors`` entries (#1466) appends
-        each entry's ``name`` right after ``capacitors``' own -- the two
-        capacitor families are structurally distinct (see
-        :class:`MomCapacitorDevice`'s docstring) but share the same "device-
-        class role" position in this list.
+        ``"pfet"``), then one token per entry of each declared family
+        (first-declared order, deduplicated): ``bipolars`` (``class_name``,
+        #223), ``capacitors`` (#225), ``mom_capacitors`` (#1466, see
+        :class:`MomCapacitorDevice`), ``mos_capacitors``, a single
+        ``"resistor"`` role however many drawn-resistor classes are declared
+        (#222), ``diodes`` (#542) and ``inductors`` (#6726).
         """
         groups = (
             (bipolar.class_name for bipolar in self.bipolars),
@@ -873,6 +868,7 @@ class ExtractionDeck:
             (mos_capacitor.name for mos_capacitor in self.mos_capacitors),
             ("resistor",) if self.resistors else (),
             (diode.name for diode in self.diodes),
+            (inductor.name for inductor in self.inductors),
         )
         # `dict.fromkeys` keeps first-declared order and drops repeats.
         return tuple(dict.fromkeys(("nfet", "pfet", *chain.from_iterable(groups))))
@@ -1012,6 +1008,7 @@ class ExtractionDeck:
             layers.update(mos_capacitor.excludes)
         for mos_flavour in self.mos_flavours:
             layers.add(mos_flavour.marker)
+        layers.update(chain.from_iterable(i.recognition_layers for i in self.inductors))
         return frozenset(layers)
 
     @property
