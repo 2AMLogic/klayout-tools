@@ -8,7 +8,7 @@ from typing import Any
 def assemble_lvs_report(
     *,
     mismatches: Any,
-    omit_mismatches: bool,
+    omit_mismatches: bool = False,
     status: Any,
     engine: Any,
     engine_version: Any,
