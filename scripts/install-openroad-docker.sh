@@ -99,8 +99,9 @@ set -euo pipefail
 
 DEST_DIR="${1:-/usr/local/bin}"
 
-# Pinned image -- bump the digest and CHANGELOG.md together in the same change
-# if this is ever refreshed, exactly as install-yosys.sh/install-verilator.sh/
+# Pinned image -- bump the digest and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed, exactly as install-yosys.sh/install-verilator.sh/
 # install-magic.sh/install-icarus-verilog.sh/install-xyce.sh bump a pinned
 # version + asset checksum together. `openroad/orfs` publishes ONLY a moving
 # `:latest` tag (no versioned tags), so the digest is the only pin available --
@@ -116,7 +117,8 @@ DEST_DIR="${1:-/usr/local/bin}"
 # consulting the `:latest` tag at all. Re-pin with:
 #   docker pull --platform linux/amd64 openroad/orfs:latest
 #   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
-# then record the resulting `openroad -version` string below and in CHANGELOG.md.
+# then record the resulting `openroad -version` string below and in a
+# changelog fragment (`changelog.d/README.md`).
 ORFS_IMAGE_REPO="openroad/orfs"
 # Pinned 2026-09-25: the `:latest` image created 2026-08-24, whose bundled
 # binary reports `openroad -version` == 26Q3-1510-g6cb3f2b704. Multi-platform
