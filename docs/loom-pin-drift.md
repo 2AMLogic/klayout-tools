@@ -12,6 +12,50 @@ Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
 #1966: their frozen-timeline protection now lives in the pinned
 `scripts/claim-staleness.sh`. This page does not cover them.
 
+## Pin audit 2026-11-17 (#6236)
+
+All five pins made by the 2026-10-14 re-port (`d532f8e94`, 2am#4345) were
+re-audited against upstream tag `v0.19.1306` (`e7af83ea2`, the version
+`.loom/install-metadata.json` records). Method: the local delta and the
+upstream drift were separated by diffing the pinned files against both the
+re-port base and `v0.19.1306`, porting every upstream hunk that does not touch
+the protected delta. Every file below was **re-ported** (pin kept); none was
+unpinned, because each still carries its protected delta. Upstream issues for
+the four retained deltas do not exist yet and cannot be filed from this repo
+(the `rjwalters` owner gh token is invalid; `create-issue.sh` write-scope
+refuses cross-repo filing) — the filings are tracked in #6306.
+
+| Pinned file | Protected delta | Upstream drift found (v0.19.1306) | Disposition |
+|---|---|---|---|
+| `scripts/pr-worktree.sh` | #2020 post-worktree hook call | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
+| `scripts/claim-staleness.sh` (+ test) | #1966 frozen-timeline guard | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
+| `.claude/commands/loom/builder-pr.md` | #1674 quoted-keyword section; #2237 `--sweep-id` call site | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
+| `.loom/roles/builder-pr.md` | same as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
+| `scripts/sweep-lease-fence.sh` (+ test) | #2237 `--sweep-id` | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
+
+Notable findings:
+
+- The pinned `builder-pr.md` still taught `git commit --signoff` under a
+  `commit.signoff` knob; upstream's #13089 operator ruling (2026-10-25, no
+  role attests a DCO sign-off) had never arrived through the pin. Ported.
+- The pinned `pr-worktree.sh` carried the #10120 `live-output-attend` emitter
+  that upstream itself has since deleted; the re-port drops it (nothing else
+  in this tree referenced it).
+- `claim-staleness.sh`'s `_usage` uses an anchored `sed` range instead of
+  upstream's fixed line numbers — that is part of the #1966 delta (the local
+  header grew), kept.
+
+Verification: `test-claim-staleness.sh` 104/104 (was 102/103 before the T16
+alignment), `test-pr-worktree-post-hook.sh` 14/14,
+`test-pr-worktree-isolation.sh` 38/38, `test-sweep-lease-publish.sh` 81/81.
+After #6222 merged, `test-sweep-lease-fence.sh` passed 110/110 on the updated
+audit branch. This completes the #6236 fence drift check with the
+`LOOM_LEASE_HOST_ID` fix from #6108.
+
+Per-pin retirement conditions are unchanged and now also require the matching
+upstream issue from #6306 to exist and be resolved.
+
+
 ## `commands/loom/champion-epic.md`
 
 > **RETIRED 2026-10-15** (2AMLogic/2am#4345, operator ruling Q5 option 1).
