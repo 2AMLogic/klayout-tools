@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 
 #: Error codes (``error.code`` in the JSON envelope), documented in
 #: ``docs/cli/gen-compose.md``.
@@ -64,7 +64,7 @@ def parse_port_request(raw: Any, where: str) -> dict[str, Any]:
     for axis in ("x_um", "y_um"):
         if axis in raw:
             value = raw[axis]
-            if not is_number(value) or value != value or abs(value) == float("inf"):
+            if not is_finite_number(value):
                 raise _error(
                     f"{where}.request.{axis} must be a finite number", CODE_INVALID
                 )
