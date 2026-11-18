@@ -378,12 +378,23 @@ def test_limit_disagreement_listed_not_reconciled(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_gap_row_renders_even_when_cited(tmp_path):
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "not expressible",
+        {
+            "reason": "not expressible",
+            "rationale": {"file": "rationale.md", "content_hash": "sha256:" + "0" * 64},
+        },
+    ],
+    ids=["free-text", "justified"],
+)
+def test_gap_row_renders_even_when_cited(tmp_path, gap):
     a = _tagged_row_row(tmp_path, "a.json", limits=_LIM)
     (record,) = _records(
         _manifest(
             {"5": _cite(a, ["row"])},
-            spec_rows={"5": [{"id": "row", "gap": "not expressible"}]},
+            spec_rows={"5": [{"id": "row", "gap": gap}]},
         )
     )
     assert record["state"] == "gap"

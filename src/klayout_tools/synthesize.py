@@ -222,7 +222,6 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -234,7 +233,7 @@ from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._engine_proc import run_in_group
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -304,7 +303,7 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_x_scan import netlist_x_constant_warning
+from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1446,7 +1445,7 @@ def run_synthesize(
                 constr_inputs=_ABC_CONSTR_INPUTS,
             ),
             **_missing_timing_warning(abc_log_path, timing),
-            **netlist_x_constant_warning(
+            **netlist_warnings(
                 _read_produced_netlist(netlist_path),
                 cell_library=cell_library,
                 has_tie_cells=cell_library in _TIE_CELLS,
@@ -2456,12 +2455,7 @@ def _resolve_abc_constr_request(
     if not isinstance(driving_cell, str) or not driving_cell:
         raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
     load_ff = raw["load_ff"]
-    if (
-        isinstance(load_ff, bool)
-        or not isinstance(load_ff, (int, float))
-        or not math.isfinite(load_ff)
-        or load_ff <= 0
-    ):
+    if not is_finite_number(load_ff) or load_ff <= 0:
         raise SynthesizeError(
             f"{where}.load_ff must be a finite number greater than zero "
             f"(femtofarads), got {load_ff!r}"
@@ -3103,32 +3097,31 @@ def _run_yosys(
     """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
     on any failure to run: missing binary, non-zero exit, or exceeding
     ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
+    Never raises on a *successful* (exit 0) run; the caller validates that the
+    declared output files appeared. Returns the captured ``stdout`` log text --
+    Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
+    matches :func:`_synthesis_error_message`'s stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
+    (issue #1588) can parse it without a second Yosys invocation.
 
-    Never raises on a *successful* (exit 0) run; the caller validates that
-    the declared output files appeared. Returns the captured ``stdout`` log
-    text -- Yosys's own ``Warning: `` lines land on stdout, never stderr
-    (verified live; matches :func:`_synthesis_error_message`'s
-    stream-preference note for ``ERROR:`` lines) -- so
-    :func:`_compute_structural`/:func:`_summarize_warnings` (issue #1588)
-    can parse it without a second Yosys invocation.
+    A timed-out run raises :class:`SynthesizeError` exactly like any other Yosys
+    failure (never a bare ``subprocess.TimeoutExpired``) -- this is what lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
+    architecture trial synthesis without killing the rest of the ``"auto"``
+    sweep. The kill takes the child's whole process group (issue #5798), so a
+    ``yosys-abc`` grandchild cannot outlive the watchdog that ended its parent.
 
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this lets
-    :func:`_measure_candidate` (issue #1775) disqualify one hung trial
-    synthesis without killing the rest of the ``"auto"`` sweep.
-
-    ``cwd`` (issue #1844) is passed straight through to ``subprocess.run``;
-    ``script_path`` is always absolute, so ``cwd`` only matters for a
-    script :func:`_write_script` wrote with a relative-form embedded path
-    (``repo_root`` given), which must be run with ``cwd=<that same
-    repo_root>``. The default ``None`` reproduces the pre-#1844 behaviour
-    (subprocess's own default), correct for scripts embedding only
-    absolute paths.
-
-    The child env is a copy of ``os.environ`` with ``COLUMNS`` pinned to
-    4096, applied unconditionally (an inherited ``COLUMNS=80`` is exactly
-    the failing case), so the readline-wrapped ``source`` echo can never
-    wedge the abc handshake (issue #5780; see ``docs/cli/synthesize.md``).
+    ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
+    ``script_path`` is always given as an absolute path, so ``cwd`` only matters
+    for a script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must run with ``cwd=<that same repo_root>`` to
+    resolve correctly. The default ``None`` reproduces the pre-#1844 behaviour
+    exactly (subprocess's own default: the invoking process's cwd), correct for
+    every script that embeds only absolute paths. The child env is a copy of
+    ``os.environ`` with ``COLUMNS`` pinned to 4096, applied unconditionally (an
+    inherited ``COLUMNS=80`` is exactly the failing case), so the readline-wrapped
+    ``source`` echo can never wedge the abc handshake (issue #5780; see
+    ``docs/cli/synthesize.md``).
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
@@ -3147,7 +3140,8 @@ def _run_yosys(
         _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
             f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed"
+            f"'{script_path}') -- process killed (a run hung on yosys-abc's "
+            "stdout has its abc child killed with the whole process group)"
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)

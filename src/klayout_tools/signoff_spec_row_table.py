@@ -41,9 +41,9 @@ per-spec-row table"); the load-bearing rules:
   measurement declaring a different set is listed under an additive
   ``limit_disagreement`` -- the grader has no basis to pick a "true"
   limit.
-- **States**: ``graded``; ``gap`` (the declared ``gap`` string carried
-  as an explicit no-evidence record, never an omission -- a gap is never
-  covered, exactly as grading refuses it); ``no_evidence`` (no citation
+- **States**: ``graded``; ``gap`` (a free-text or justified gap reason in
+  an explicit no-evidence record; grading refuses citations for either
+  form); ``no_evidence`` (no citation
   names the row); ``unattributable`` (a citation names the row but its
   envelope carries no ``spec_row`` tags at all -- #3778's *asserted*
   coverage: the measurements cannot be attributed to a row, and guessing
@@ -79,12 +79,15 @@ def _members_rows_declared(
     members: list[tuple[dict[str, Any], list[str] | None]],
     spec_rows: list[dict[str, Any]] | None,
 ) -> bool:
-    """True unless a member names an undeclared (or declared-``gap``) row."""
+    """True unless a member names an undeclared (or declared-``gap`` --
+    either form, issue #5599) row."""
     if spec_rows is None:
         return True
     declared = {row["id"]: row for row in spec_rows}
     return all(
-        row_id in declared and declared[row_id]["gap"] is None
+        row_id in declared
+        and declared[row_id]["gap"] is None
+        and declared[row_id]["justified_gap"] is None
         for _, rows in members
         for row_id in rows or []
     )
@@ -422,7 +425,8 @@ def _emit_slot_records(
     partition-qualified slot marks its records with ``partition``."""
     records: list[dict[str, Any]] = []
     for row in rows:
-        gap = row.get("gap")
+        justified = row["justified_gap"]
+        gap = justified["reason"] if justified is not None else row["gap"]
         row_id = row["id"]
         state = per_row[row_id]
         if gap is not None:
