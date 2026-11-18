@@ -130,7 +130,9 @@
       "description": "`klt draw` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.draw_cmd",
-        "klayout_tools.draw"
+        "klayout_tools.draw",
+        "klayout_tools.draw_base",
+        "klayout_tools.draw_validation"
       ]
     },
     "diff": {

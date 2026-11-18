@@ -248,10 +248,6 @@
       "lines": 944
     },
     {
-      "path": "src/klayout_tools/draw.py",
-      "lines": 646
-    },
-    {
       "path": "src/klayout_tools/drc.py",
       "lines": 3735
     },
