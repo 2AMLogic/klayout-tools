@@ -71,6 +71,41 @@ not `klt --version`, if you need to detect this kind of drift. See
   `corners`, and no `environment.remote` instead of submitting a billed
   job, even without `--resume` (#6540).
 
+- **`klt drc --engine klayout`: `provenance.klayout_version` names the binary
+  that ran the deck, not klt's own pip wheel** (#5660, 2026-11-17): the
+  standalone `klayout` application `--engine klayout` launches and the
+  `klayout` wheel inside klt's own environment are separate installs, but the
+  envelope recorded the wheel's version for a deck the application ran -- so a
+  committed report misnamed its engine whenever the two diverged, and
+  `klayout_version_mismatch` fired (with a `--with klayout==` remedy that
+  cannot reproduce the run) on decks whose engine *was* the tested version.
+  The binary's own `-v` version is now probed exactly once per run and
+  recorded as `klayout_version` -- tracking `--klayout-binary`/
+  `$KLT_KLAYOUT_BINARY` -- with the mismatch advisory and its stderr warning
+  computed from that same value (the warning's remedy names the application,
+  not the wheel). The wheel's version survives as the additive
+  `provenance.klayout_module_version`, and `environment.klayout_binary`
+  (previously emitted only under an override) now records the resolved binary
+  on every `--engine klayout` run, as an absolute path where resolvable. A run
+  with no `--min-klayout-version` still probes but fails *soft*: an
+  unresolvable probe records `klayout_version: null` instead of failing; with
+  a floor declared, probe failures stay fatal exactly as before.
+  `--list-rule-categories --engine klayout` records the same fields.
+  `--engine curated`, `klt lvs` and every other provenance caller are
+  byte-identical (the wheel genuinely is the engine there), and `klt drc
+  --check` in cheap mode is unaffected (it compares content hashes only).
+  `klt drc --check --rerun` excludes both new fields
+  (`environment.klayout_binary`, a host-local path, and
+  `provenance.klayout_module_version`) from its drift diff, and -- because the
+  change also redefines the input of `provenance.klayout_version_mismatch`
+  (wheel before, binary after) -- reports that flag in `not_compared`, not as
+  drift, when the committed report predates the change. A report committed
+  before this change therefore still re-runs as `match`, including on a host
+  where the wheel and the binary disagree. Between two post-change reports
+  (and for `--engine curated`) the flag is compared as before. No
+  `schema_version` bump: both fields are additive and
+  `provenance`'s `$defs` block is `additionalProperties: true`.
+
 - **`klt extract --report-parasitics slim` slims the JSON `parasitics`
   report beside a `--spef` file** (#5816, 2026-11-17): `--spef` and the
   JSON report describe the same measurement twice — the SPEF's
