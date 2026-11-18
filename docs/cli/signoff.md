@@ -139,7 +139,7 @@ klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format t
   unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
   compressed, and `--check` reads these envelopes as plain JSON only —
   do not compress one by hand. Refused without
-  `--attest`/`--manifest`/`--fleet`, and together with `--check`.
+  `--attest`/`--manifest`/`--fleet`, and together with `--check` or `--repin`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
   and recompute everything else (issue #5209). See "Refreshing on a host
