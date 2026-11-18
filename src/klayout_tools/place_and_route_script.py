@@ -16,6 +16,7 @@ from typing import Any
 
 from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
+from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
@@ -56,20 +57,13 @@ _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
-    """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
-    spike section 5's ``constraints`` field) -- must run only **after** the
-    design is linked (``link_design``, or a ``read_db`` that already
-    restored a linked network): ``create_clock``'s own ``[get_ports ...]``
-    lookup raises ``STA-1570 No network has been linked`` otherwise
-    (confirmed live for issue #425's own worked example -- see
-    :func:`_stage_script_lines`'s call sites, never before ``link_design``).
-    """
+    """Create a clock after link_design/read_db resolves [get_ports] (#425)."""
     if clock_port is None:
         return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
     return [
         _UNIT_PIN_LINE,
-        f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]",
+        f"create_clock -name {_tcl_literal(clock_port)} "
+        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
     ]
 
 
@@ -160,15 +154,16 @@ def _io_delay_lines(
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
-            f"set klt_clock_port [get_ports {clock_port}]",
+            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_non_clock_inputs "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} -clock {clock_port} "
-            "$klt_non_clock_inputs",
+            f"set_input_delay {input_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
         ]
     if output_delay_ns is not None:
         lines.append(
-            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+            f"set_output_delay {output_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
 
@@ -1006,7 +1001,9 @@ def _stage_script_lines(
     # stages would make this verb's own `-metrics`/repair steps see a
     # different design than the floorplan did. Empty for every pre-#2635
     # request, leaving each stage script byte-identical.
-    macro_liberty_lines = [f"read_liberty {path}" for path in macro_liberty_paths or []]
+    macro_liberty_lines = [
+        f"read_liberty {_tcl_literal(path)}" for path in macro_liberty_paths or []
+    ]
     if stage == "floorplan":
         # `create_clock` (`_clock_lines`) must come after `link_design` --
         # see that helper's own docstring; `read_liberty` itself is read
@@ -1015,16 +1012,16 @@ def _stage_script_lines(
         # LEFs (issue #438) are read alongside the tech/cell LEF, before
         # `read_verilog` -- `link_design` needs every macro's physical view
         # already loaded to resolve the netlist's own macro instances.
-        lines = [f"read_liberty {liberty_path}"]
+        lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
         lines += macro_liberty_lines
         lines += [
-            f"read_lef {tech_lef}",
-            f"read_lef {cell_lef}",
+            f"read_lef {_tcl_literal(tech_lef)}",
+            f"read_lef {_tcl_literal(cell_lef)}",
         ]
-        lines += [f"read_lef {macro['lef']}" for macro in macros]
+        lines += [f"read_lef {_tcl_literal(macro['lef'])}" for macro in macros]
         lines += [
-            f"read_verilog {netlist_path}",
-            f"link_design {hdl_toplevel}",
+            f"read_verilog {_tcl_literal(netlist_path)}",
+            f"link_design {_tcl_literal(hdl_toplevel)}",
         ]
         lines += _clock_lines(clock_port, clock_period_ns)
         lines += _design_rule_constraint_lines(
@@ -1063,14 +1060,17 @@ def _stage_script_lines(
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
-        lines += [f"write_db {checkpoint_out}"]
+        lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
 
     assert checkpoint_in is not None  # every non-floorplan stage has a checkpoint
     # `read_db` already restores a linked network (built by the floorplan
     # stage's own `link_design`), so `create_clock` may safely follow
     # `read_liberty` directly here -- unlike the floorplan stage above.
-    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines = [
+        f"read_db {_tcl_literal(checkpoint_in)}",  # issue #5708
+        f"read_liberty {_tcl_literal(liberty_path)}",
+    ]
     lines += macro_liberty_lines
     # Issue #2378: `set_dont_use` must come after liberty is loaded and before
     # the first resizer-driven step (`global_placement -timing_driven`,
@@ -1353,7 +1353,7 @@ def _stage_script_lines(
         # out-of-band caller that already located it directly (as #785
         # intended) keeps working unmodified.
         place_def_path = os.path.join(output_dir, f"{hdl_toplevel}.place.def")
-        lines += [f"write_def {place_def_path}"]
+        lines += [f"write_def {_tcl_literal(place_def_path)}"]  # issue #5708
 
-    lines += [f"write_db {checkpoint_out}"]
+    lines += [f"write_db {_tcl_literal(checkpoint_out)}"]  # issue #5708
     return lines

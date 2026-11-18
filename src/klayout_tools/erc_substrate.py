@@ -33,7 +33,12 @@ from __future__ import annotations
 import itertools
 from typing import Any, NamedTuple
 
-from ._unionfind import UnionFind
+from .erc_substrate_bodies import (
+    _assign_bodies,
+    _cluster_names,
+    _is_drawn_well,
+    _isolation_box_region,
+)
 
 #: ``erc_coverage.checked`` id for the substrate-path work.
 SUBSTRATE_WORK_ID = "erc.supply_short.substrate"
@@ -105,137 +110,6 @@ def isolation_missing(
     ]
 
 
-def _is_drawn_well(tie: dict[str, Any]) -> bool:
-    """A tie naming a drawn ``well_layer`` taps that well; any other form
-    (``well_boxes`` / ``well_complement_of``) taps the substrate."""
-    return bool(
-        tie["well_layer"] and not tie["well_boxes"] and not tie["well_complement_of"]
-    )
-
-
-def _tie_bodies(
-    tie: dict[str, Any], islands: list[Any], box_region: Any = None
-) -> list[tuple[tuple[str, str], Any]]:
-    """``[(body_key, tap_sites_in_body), ...]`` for one tie.
-
-    ``body_key`` is ``(kind, id)``: a well body is keyed by its merged
-    polygon's bounding box, the substrate by ``vsubs`` / ``vsubs_iso<n>``.
-    """
-    import klayout.db as kdb
-
-    from .erc_islands import partition_region_by_islands
-
-    sites = tie["tap_region"]
-    bodies: list[tuple[tuple[str, str], Any]] = []
-    if _is_drawn_well(tie):
-        for well_poly in tie["well_region"].merged().each():
-            here = sites.interacting(kdb.Region(well_poly))
-            if not here.is_empty():
-                box = well_poly.bbox()
-                key = f"{box.left},{box.bottom},{box.right},{box.top}"
-                bodies.append((("well", key), here))
-        return bodies
-    outside = sites
-    if box_region is not None and not box_region.is_empty():
-        from .erc_islands import sorted_islands
-
-        box_islands = sorted_islands(box_region)
-        outside, per_box = partition_region_by_islands(sites, box_islands)
-        for box, part in zip(box_islands, per_box, strict=True):
-            if not part.is_empty():
-                b = box.bbox()
-                bodies.append(
-                    (
-                        (
-                            "substrate",
-                            f"isolation_box[{b.left},{b.bottom},{b.right},{b.top}]",
-                        ),
-                        part,
-                    )
-                )
-    outside, per_island = partition_region_by_islands(outside, islands)
-    if not outside.is_empty():
-        bodies.append((("substrate", "vsubs"), outside))
-    for index, part in enumerate(per_island):
-        if not part.is_empty():
-            bodies.append((("substrate", f"vsubs_iso{index}"), part))
-    return bodies
-
-
-def _cluster_names(tie_circuit: Any, declared: set[str]) -> dict[int, set[str]]:
-    """Declared net names labelled on each tie-graph cluster."""
-    names: dict[int, set[str]] = {}
-    for net in tie_circuit.each_net():
-        if net.cluster_id == 0:
-            continue
-        for label in net.expanded_name().split(","):
-            if label in declared:
-                names.setdefault(net.cluster_id, set()).add(label)
-    return names
-
-
-def _isolation_box_region(
-    layout: Any, tie_layers: list[dict[str, Any]], degenerate_ties: dict[str, str]
-) -> Any:
-    """Union of every live ``isolation_boxes`` assertion. It is about where the
-    *substrate* is isolated, so it applies to every tie's tap sites there, not
-    just the asserting tie's (tap geometry is net-agnostic)."""
-    import klayout.db as kdb
-
-    from .erc_well_regions import _boxes_region
-
-    region = kdb.Region()
-    for tie in tie_layers:
-        if tie["isolation_boxes"] and tie["name"] not in degenerate_ties:
-            region += _boxes_region(kdb, layout, tie["isolation_boxes"])
-    return region
-
-
-def _assign_bodies(
-    tie_l2n: Any,
-    tie_circuit: Any,
-    tie_layers: list[dict[str, Any]],
-    degenerate_ties: dict[str, str],
-    islands: list[Any],
-    names_by_cluster: dict[int, set[str]],
-    box_region: Any,
-) -> tuple[UnionFind, dict[tuple[str, str], dict[str, Any]]]:
-    """Union-find tie-graph clusters over the bodies their tap sites touch.
-
-    Returns ``(union_find, bodies)``; ``bodies[key]`` carries the attributed
-    ``ties``, the merged tap ``sites`` and the touching ``clusters``.
-    """
-    uf = UnionFind()
-    bodies: dict[tuple[str, str], dict[str, Any]] = {}
-    for tie in tie_layers:
-        if tie["name"] in degenerate_ties:
-            continue
-        tie_bodies = _tie_bodies(tie, islands, box_region)
-        for net in tie_circuit.each_net():
-            net_taps = tie_l2n.polygons_of_net(net, tie["tap_index"])
-            if net.cluster_id == 0 or net_taps.is_empty():
-                continue
-            for body_key, body_sites in tie_bodies:
-                if net_taps.interacting(body_sites).is_empty():
-                    continue
-                info = bodies.setdefault(
-                    body_key,
-                    {"ties": set(), "sites": body_sites.dup(), "clusters": set()},
-                )
-                # Attribute the tie only where its declared net is the one
-                # reaching this body (a tie's tap geometry is net-agnostic).
-                if tie["net"] in names_by_cluster.get(net.cluster_id, ()):
-                    info["ties"].add(tie["name"])
-                info["clusters"].add(net.cluster_id)
-                uf.union(("c", net.cluster_id), ("b", body_key))
-        for body_key, body_sites in tie_bodies:
-            if body_key in bodies:
-                bodies[body_key]["sites"] = (
-                    bodies[body_key]["sites"] + body_sites
-                ).merged()
-    return uf, bodies
-
-
 def _short_finding(
     a: str, b: str, body_key: tuple[str, str], info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -253,10 +127,36 @@ def _short_finding(
         bbox=_bbox_dict(info["sites"].bbox()),
     )
     finding["via"] = "substrate"
+    joins = [j for j in info["joins"] if j["net"] in (a, b)]
+    joins.sort(
+        key=lambda j: (
+            j["net"],
+            j["tie"],
+            j["bbox"]["left"],
+            j["bbox"]["bottom"],
+            j["bbox"]["right"],
+            j["bbox"]["top"],
+            j.get("well_box", -1),
+        )
+    )
+    seen: set[tuple[Any, ...]] = set()
+    deduped = []
+    for join in joins:
+        key = (
+            join["net"],
+            join["tie"],
+            tuple(sorted(join["bbox"].items())),
+            join.get("well_box"),
+        )
+        if key not in seen:
+            seen.add(key)
+            deduped.append(join)
     finding["body"] = {
         "kind": body_key[0],
         "id": body_key[1],
         "ties": sorted(info["ties"]),
+        # Issue #5745: name the tap sites that performed the merge, per side.
+        "joins": deduped,
     }
     return finding
 
@@ -272,6 +172,7 @@ def substrate_supply_shorts(
     nets_decl: list[dict[str, Any]],
     group_by_name: dict[str, int],
     metal_pairs: set[tuple[str, str]],
+    layout: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[tuple[str, str]]]:
     """Run the body-merge pass.
 
@@ -281,9 +182,18 @@ def substrate_supply_shorts(
     declared-name pair that shares a body-merged group (what satisfies a
     ``same_net_as`` declaration through the substrate path).
     """
+    import klayout.db as kdb
+
     kind_by_name = {decl["name"]: decl["kind"] for decl in nets_decl}
     supplies = {name for name, kind in kind_by_name.items() if kind == "supply"}
     names_by_cluster = _cluster_names(tie_circuit, set(kind_by_name))
+    # Issue #5745: every drawn-well tie's well region, in one place. Taps
+    # inside them tap the well, never the substrate, whatever a substrate
+    # assertion asserts over that area.
+    wells = kdb.Region()
+    for tie in tie_layers:
+        if _is_drawn_well(tie):
+            wells += tie["well_region"]
     uf, bodies = _assign_bodies(
         tie_l2n,
         tie_circuit,
@@ -292,6 +202,8 @@ def substrate_supply_shorts(
         islands,
         names_by_cluster,
         box_region,
+        wells,
+        layout,
     )
 
     group_names: dict[Any, set[str]] = {}
@@ -434,6 +346,7 @@ def run_substrate_pass(
             nets_decl, _declared_same_net_pairs(nets_decl)
         ),
         metal_pairs=metal_pairs,
+        layout=layout,
     )
     erc_findings.extend(findings)
     joins: list[dict[str, Any]] = []

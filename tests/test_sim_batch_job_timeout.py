@@ -109,7 +109,8 @@ def _run_stated(
 
 @pytest.mark.parametrize(
     "raw",
-    [0, -1, -3400.0, float("nan"), float("inf"), float("-inf"), "3400", [3400]],
+    [0, -1, -3400.0, float("nan"), float("inf"), float("-inf"), "3400", [3400]]
+    + [True, False],
 )
 def test_invalid_job_timeout_s_is_rejected(tmp_path, raw):
     """The same-shaped SimError as the other ``batch.*`` resolvers, before
