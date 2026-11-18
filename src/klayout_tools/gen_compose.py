@@ -186,7 +186,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import gen_compose_port_request as _pr
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int
 from ._layout import write_layout
 from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
@@ -1189,8 +1189,8 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         port = dict(raw_port)
         x_um, y_um = raw_port.get("x_um"), raw_port.get("y_um")
-        has_x = is_number(x_um)
-        has_y = is_number(y_um)
+        has_x = is_finite_number(x_um)
+        has_y = is_finite_number(y_um)
         if (x_um is not None or y_um is not None) and not (has_x and has_y):
             raise GenComposeError(
                 f"{at} (name '{name}') must declare both x_um and y_um as "
@@ -1543,10 +1543,10 @@ def _parse_drc_hints(drc_hints: Any) -> tuple[str | None, float, float | None]:
     if isinstance(candidate, str) and candidate:
         matched_group_id = candidate
     spacing = drc_hints.get("min_spacing_um")
-    if is_number(spacing):
+    if is_finite_number(spacing):
         min_spacing_um = max(0.0, float(spacing))
     clearance = drc_hints.get("foreign_clearance_um")
-    if is_number(clearance):
+    if is_finite_number(clearance):
         foreign_clearance_um = max(0.0, float(clearance))
     return matched_group_id, min_spacing_um, foreign_clearance_um
 
@@ -1726,7 +1726,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         return value
 
     def _positive_number(value: Any, field: str) -> float:
-        if not is_number(value) or value <= 0:
+        if not is_finite_number(value) or value <= 0:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive number when "
                 "strategy is 'array'"
@@ -1875,7 +1875,7 @@ def _parse_placement(
         return strategy, order, 0.0, None, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
-    if not is_number(spacing_um):
+    if not is_finite_number(spacing_um):
         raise GenComposeError("request.placement.spacing_um must be a number")
     spacing_um = float(spacing_um)
     if spacing_um < 0:
@@ -1967,7 +1967,7 @@ def parse_waypoints_um(
         if (
             not isinstance(waypoint, list)
             or len(waypoint) not in (2, 3)
-            or any(not is_number(v) for v in waypoint[:2])
+            or any(not is_finite_number(v) for v in waypoint[:2])
         ):
             raise GenComposeError(
                 f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers "
@@ -2910,7 +2910,7 @@ def _snap_port_to_grid(
     direction = int(port.get("direction_deg", 0)) % 360
     tangential = "y" if direction in (0, 180) else "x"
     width = port.get("width_um")
-    half = float(width) / 2.0 if is_number(width) else None
+    half = float(width) / 2.0 if is_finite_number(width) else None
     new_port = dict(port)
     for axis in ("x", "y"):
         composed = float(port[f"{axis}_um"]) + offset[axis]
@@ -2958,9 +2958,9 @@ def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
     landing-connectivity path tolerates rather than fails). ``bool`` is
     rejected explicitly because it is a subclass of ``int``."""
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_number(x_um):
+    if not is_finite_number(x_um):
         return None
-    if not is_number(y_um):
+    if not is_finite_number(y_um):
         return None
     return float(x_um), float(y_um)
 

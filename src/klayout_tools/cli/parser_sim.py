@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from . import sim_cmd
+from . import sim_check_cmd
 
 
 def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
@@ -119,10 +119,13 @@ def add_sim_parser(
         default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -418,4 +421,22 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
-    sim_parser.set_defaults(func=sim_cmd.run)
+    sim_parser.add_argument(
+        "--check",
+        dest="check",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "instead of simulating, re-verify a finished klt sim report's "
+            "environment.netlist_closure/netlist_identity against the working "
+            "tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 "
+            "unreadable report. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        help="with --check: directory to anchor scope=repo closure entries to",
+    )
+    sim_parser.set_defaults(func=sim_check_cmd.run)
