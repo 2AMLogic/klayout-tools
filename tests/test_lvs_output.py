@@ -332,7 +332,7 @@ def test_cli_lvs_reference_naming_a_missing_file_drifts_cleanly(
     assert "input_not_found" in checks["environment.reference_sha256"]
 
 
-def test_check_input_not_found_names_the_resolved_repo_root(tmp_path):
+def test_check_input_not_found_names_the_resolved_repo_root(tmp_path, monkeypatch):
     """Issue #5845: a repo-scoped echo that resolves to a missing file names
     the repo root `--check` anchored on (additive key)."""
     repo = tmp_path / "repo"
@@ -359,6 +359,14 @@ def test_check_input_not_found_names_the_resolved_repo_root(tmp_path):
     assert missing["resolved"] == str(repo / "ref.spice")
     # The layout check (which resolved) carries no diagnostic at all.
     assert "input_not_found" not in checks["environment.layout_sha256"]
+
+    # An explicit relative path resolves from the caller's cwd.
+    monkeypatch.chdir(tmp_path)
+    result = check_lvs_report(str(report), reference_path="missing.spice")
+    checks = {check["field"]: check for check in result["checks"]}
+    missing = checks["environment.reference_sha256"]["input_not_found"]
+    assert missing["resolved"] == str(tmp_path / "missing.spice")
+    assert missing["resolved_repo_root"] is None
 
 
 def test_check_text_renders_the_resolved_repo_root(tmp_path, capsys):

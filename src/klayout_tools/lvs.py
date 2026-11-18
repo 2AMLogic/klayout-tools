@@ -121,7 +121,7 @@ import contextlib
 import fnmatch
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,7 +132,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
     explicit_deck_options,
-    sha256_file,
     version_drift_advisories,
 )
 from ._report_verify import (
@@ -144,7 +143,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
-from ._report_verify_hints import input_not_found_entry
+from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -163,9 +162,7 @@ from .lvs_combine import (
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,  # noqa: F401
-    _parse_combine_devices,  # noqa: F401
     _parse_combine_devices_max_attempts,  # noqa: F401
-    _parse_combine_devices_per_circuit,  # noqa: F401
     _purge_emptied_nets,
     _resolve_combine_devices_per_circuit_targets,  # noqa: F401
     _series_fold_offset_absorbed_warnings,
@@ -181,33 +178,25 @@ from .lvs_finfet import (
     bulk_disclosures,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
-    prepare_finfet_request,  # noqa: F401
     reference_reader,
     sliced_reference_file,
 )
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,  # noqa: F401
-    _boundary_supply_nets,  # noqa: F401
-    _circuit_pin_names,  # noqa: F401
     _gate_level_power_pin_evidence,  # noqa: F401
     _gate_level_power_pin_evidence_detail,  # noqa: F401
     _gate_level_power_pin_names,  # noqa: F401
-    _instance_supply_nets,  # noqa: F401
     _is_power_only_circuit,  # noqa: F401
     _layout_supply_net_names,  # noqa: F401
     _name_or_none,  # noqa: F401
-    _power_only_pruned_mismatch,  # noqa: F401
     _prune_power_only_circuits,  # noqa: F401
-    _purge_named_circuits,  # noqa: F401
     _reference_power_only_masters,  # noqa: F401
     _reference_signal_pin_names,  # noqa: F401
     _subcircuit_parent_name,  # noqa: F401
     _subcircuit_ref_name,  # noqa: F401
-    _supply_net_spellings,  # noqa: F401
     _supply_pin_universe,  # noqa: F401
 )
-from .lvs_gate_level_convert import (  # noqa: F401
-    CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+from .lvs_gate_level_convert import (
     _convert_gate_level_reference,
     _gate_level_port_case_fold_warnings,
 )
@@ -224,7 +213,6 @@ from .lvs_mismatch import (
     _flavour_selection_warnings,
     _make_compare_logger,
     _mismatch,
-    _parse_parameter_tolerance,  # noqa: F401
     _sort_key,
     _SupplyPinUniverse,  # noqa: F401
     _terminal_names,
@@ -236,12 +224,6 @@ from .lvs_mos_options import (
     apply_ignore_mos_bulk,
     parse_ignore_mos_bulk,  # noqa: F401
 )
-from .lvs_netgen import (  # noqa: F401  (re-exported: klayout_tools.lvs.<name>)
-    _NETGEN_DEFAULT_TIMEOUT_S,
-    _resolve_netgen_binary,
-    _resolve_netgen_setup,
-    _run_netgen_lvs,
-)
 from .lvs_netgen_branch import _run_netgen_engine_branch
 from .lvs_pin_anchors import (
     _apply_top_level_pin_anchors,
@@ -251,7 +233,6 @@ from .lvs_pin_anchors import (
 from .lvs_power import (
     _body_verification_report,
     _body_verification_unchecked,
-    _parse_power_connectivity,  # noqa: F401
     _power_connectivity_report,
     _power_connectivity_unchecked,
     _well_layer_lef_pins,
@@ -261,12 +242,10 @@ from .lvs_reference_stage import _read_reference_stage
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
-from .lvs_supply import parse_supply_nets, supply_fragmentation_findings  # noqa: F401
 from .lvs_timeout import (
     COMPARE_TIMEOUT_CODE,
     CompareTimeout,
     heartbeat,
-    parse_compare_timeout,  # noqa: F401
     run_with_deadline,
 )
 from .netlist_capacitor_recovery import (
@@ -2092,80 +2071,14 @@ def _finish_response(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str,
-    expected: str | None,
-    echoed: Any,
-    report_path: str,
-    override: str | None = None,
-    hasher: Callable[[str | None], str | None] = sha256_file,
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an
-    input path the committed report echoes back (``layout``/``reference``/
-    the runset ``deck_file``), with issue #2595's ``input_not_found``
-    diagnostic attached when that path does not name an existing file.
-
-    :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
-    "the file is not there" and (vacuously) for "no path was recorded", so a
-    plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
-    indistinguishable from a recorded hash that no longer matches. That is
-    the confusing shape issue #2595 reported for a committed request/report
-    pair with *request-file-relative* paths ``--check``ed from elsewhere.
-
-    This does **not** change where the path is resolved: ``--check`` still
-    anchors a relative echoed path to the cwd, the same convention ``klt
-    drc --check``'s ``file`` field uses (re-anchoring one verb and not the
-    other would make the two silently disagree). It only makes the failure
-    legible, as an *additional* optional key -- ``expected``/``actual``/
-    ``match`` and ``status`` are byte-identical to before:
-
-    - ``path`` -- the echoed path verbatim, as the report recorded it.
-    - ``resolved`` -- the absolute path that was actually looked for.
-    - ``found_relative_to_report`` -- the absolute path the input *does*
-      occupy relative to the committed report's own directory, when it is
-      there; ``null`` otherwise (including for an echoed absolute path,
-      which has no report-relative candidate to try).
-    - ``resolved_repo_root`` -- the repo root a repo-scoped ``{path, scope}``
-      echo (issue #5845) was anchored on; ``null`` for a bare string (cwd).
-
-    ``hasher`` is the recorded digest form: ``sha256_file`` (bare hex, default)
-    or ``content_hash`` (``sha256:``-prefixed; runset deck, issue #6223). Kept
-    local, not in ``hash_check``: ``klt drc --check`` needs it too (follow-up).
-
-    Issue #2659: ``echoed`` is resolved through
-    :func:`klayout_tools._report_verify.resolve_committed_path`, so the
-    ``{path, scope}`` object ``layout`` carries is joined to the repo root
-    of the committed report's own directory -- precisely the case the
-    "known limitation" above describes, now *resolved* for the layout side
-    rather than merely diagnosed; ``reference`` too since #4984 (only a
-    bare-string one keeps the cwd anchoring). An entry naming no path at
-    all (``scope: "external"``/``"absent"``, or no such field) resolves to
-    ``None`` and renders exactly as an absent one always has.
-    """
-    path = resolve_committed_path(echoed, report_path=report_path, override=override)
-    check = hash_check(field, expected, hasher(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report, echoed=echoed
-    )
-    return check
-
-
 def check_lvs_report(
     report_path: str,
     *,
     layout_path: str | None = None,
     reference_path: str | None = None,
 ) -> dict[str, Any]:
-    """``klt lvs --check`` (cheap mode, issue #1106): verify a previously
-    committed ``klt lvs --format json`` report at ``report_path`` still
-    reproduces, without re-running the compare engine at all.
+    """Verify a committed ``klt lvs --format json`` report at ``report_path``
+    without re-running the compare engine (``klt lvs --check``, issue #1106).
 
     Reconciles all three hashes LVS's envelope carries (unlike ``klt drc``'s
     single input hash -- see this module's ``environment``/``provenance.deck``
@@ -2181,14 +2094,10 @@ def check_lvs_report(
     objects resolved against the report's own repo root (cwd-independent);
     only a pre-#4984 or ``klayout-runset`` report's bare ``reference``
     string stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
-    ``layout_path`` (issue #2699, ``--layout``) / ``reference_path``
-    (issue #5845, ``--reference``) override the recorded value
-    unconditionally (see
-    :func:`~klayout_tools._report_verify.resolve_committed_path`) -- how to
-    verify a report whose recorded input is external or mis-anchored.
+    ``--layout`` (#2699) and ``--reference`` (#5845) override their recorded
+    paths through :func:`~klayout_tools._report_verify.resolve_committed_path`.
 
-    Raises :class:`LvsError` for a missing/unparseable committed report --
-    never a traceback.
+    Raises :class:`LvsError` for a missing or unparseable committed report.
 
     The result additionally carries an ``advisories`` list (issue #1373):
     entries naming a ``provenance.klt_version``/``klayout_version`` that
@@ -2200,19 +2109,21 @@ def check_lvs_report(
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
-        _input_hash_check(
+        input_hash_check(
             "environment.layout_sha256",
             get_path(committed, ("environment", "layout_sha256")),
             committed.get("layout"),
             report_path,
             override=layout_path,
+            include_repo_root=True,
         ),
-        _input_hash_check(
+        input_hash_check(
             "environment.reference_sha256",
             get_path(committed, ("environment", "reference_sha256")),
             committed.get("reference"),
             report_path,
             override=reference_path,
+            include_repo_root=True,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
@@ -2233,12 +2144,13 @@ def check_lvs_report(
         # Issue #2849: the PDK runset is an input too -- a changed runset
         # can change the verdict without moving the layout or reference.
         checks.append(
-            _input_hash_check(
+            input_hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
                 committed.get("deck_file"),
                 report_path,
                 hasher=content_hash,
+                include_repo_root=True,
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)

@@ -56,7 +56,7 @@ from ..extract import (
     rerun_extract_report,
     run_extract,
 )
-from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE
+from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE, parse_device_params
 from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
@@ -342,19 +342,10 @@ def _parse_def_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
-#: Every top-level field a ``klt extract`` request document may carry (issue
-#: #1867), mapped to the argparse ``dest`` it stands in for -- one entry per
-#: flag this command accepts, plus the positional ``file``. Every field name
-#: is its ``dest`` verbatim (the repeatable flags already carry plural
-#: ``dest``s: ``--critical-net`` -> ``critical_nets``, ``--matched-group`` ->
-#: ``matched_groups``). ``tests/test_extract.py`` asserts this covers the
-#: subparser's whole flag surface, so a flag added later cannot silently
-#: become unreachable from the request form.
+#: Request document fields mapped to argparse destinations (issue #1867).
+#: ``tests/test_extract.py`` checks coverage against the subparser.
 _REQUEST_FIELD_DESTS = {
-    # `deck_vars` is the one request key whose argv dest differs from its own
-    # spelling (`--deck-var` accumulates into `deck_var`), so it is folded in
-    # explicitly below rather than through the identity comprehension.
-    **{"deck_vars": "deck_var"},
+    "deck_vars": "deck_var",
     **{
         name: name
         for name in (
@@ -370,6 +361,7 @@ _REQUEST_FIELD_DESTS = {
             "mom_net",
             "substrate_spreading",
             "spef",
+            "report_parasitics",
             "critical_nets",
             "parasitics_nets",
             "critical_net_patterns",
@@ -402,6 +394,7 @@ _REQUEST_FIELD_DESTS = {
             "deck_options",
             "label_layers",
             "device_models",
+            "device_params",
             "probes",
             "defer_resistor_fixed_offset",
             "omit_dead_metal",
@@ -504,6 +497,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "mom_net": _str("mom_net"),
             "substrate_spreading": _str("substrate_spreading"),
             "spef": _path("spef"),
+            "report_parasitics": (
+                _str("report_parasitics") if "report_parasitics" in request else "full"
+            ),
             "critical_nets": _str_list("critical_nets"),
             "parasitics_nets": _str_list("parasitics_nets"),
             "critical_net_patterns": _str_list("critical_net_patterns"),
@@ -558,6 +554,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--device-model",
                 error_cls=ExtractError,
             ),
+            "device_params": _str_list("device_params"),
             "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "omit_dead_metal": _bool("omit_dead_metal"),
@@ -715,6 +712,7 @@ def run(args: argparse.Namespace) -> int:
             # as a SPEF file at this path. `None` when the flag was never
             # given, unchanged from every call site that predates it.
             spef_output=args.spef,
+            report_parasitics=args.report_parasitics,
             # `--substrate-spreading` (issue #2561): two-terminal closed-form estimate
             # of the bulk resistance between this net's substrate taps. `None` when the
             # flag was never given, unchanged from every call site that predates it.
@@ -816,12 +814,13 @@ def run(args: argparse.Namespace) -> int:
             # `--hierarchical-cells` (issue #2722): opt-in hierarchical
             # `.SUBCKT` emission. `()` when the flag was never given.
             hierarchical_cells=hierarchical_cells,
-            # `--engine`/`--deck-file`/`--deck-var`/`--runset-timeout` (issue
-            # #5481): the PDK-runset engine. Defaults leave every call that
-            # predates them running the curated deck exactly as before.
+            # `--engine`/`--deck-file`/`--deck-var`/`--device-param`/
+            # `--runset-timeout` (issues #5481, #5513): the PDK-runset engine.
+            # Defaults leave every call that predates them unchanged.
             engine=args.engine,
             deck_file=args.deck_file,
             deck_vars=deck_vars,
+            device_params=parse_device_params(args.device_params),
             runset_timeout=args.runset_timeout,
         )
     except ExtractError as exc:
@@ -880,10 +879,7 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
         if not args.deck:
             raise ExtractError("argument --deck is required")
         request = extract_batch.argv_request(
-            {
-                **vars(args),
-                "deck_options": _parse_deck_options(args.deck_options),
-            }
+            {**vars(args), "deck_options": _parse_deck_options(args.deck_options)}
         )
         base_dir, output = os.getcwd(), args.output
     # The request document was not read when `run()` checked the argv engine,
