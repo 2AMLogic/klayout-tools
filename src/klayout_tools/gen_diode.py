@@ -117,6 +117,30 @@ def _diode_layout(
     }
 
 
+def diode_ports(
+    info: dict[str, Any], metal_layer: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The ``ANODE``/``CATHODE`` ports of a :func:`_diode_layout` result: each
+    terminal's li1 box centre, reported on ``metal_layer``."""
+    ports = []
+    for name, box, direction in (
+        ("ANODE", info["anode_li"], 90),
+        ("CATHODE", info["cathode_li"], 90),
+    ):
+        ports.append(
+            {
+                "name": name,
+                "net": None,
+                "layer": metal_layer,
+                "x_um": (box[0] + box[2]) / 2,
+                "y_um": (box[1] + box[3]) / 2,
+                "width_um": box[2] - box[0],
+                "direction_deg": direction,
+            }
+        )
+    return ports
+
+
 def _bbox(boxes: dict[str, list[Box]]) -> Box:
     every = [b for group in boxes.values() for b in group]
     return (
