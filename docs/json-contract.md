@@ -127,6 +127,17 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`measurements[].noise.top_n` (issue #5558) follows the same shape for a noise
+measurement's largest contributors. `value` stays the scalar the entry would
+return without `top_n` (graded, `monte_carlo`-aggregated and `limits`-checked
+unchanged); the ranked list rides an additive `contributors` member of the
+entry's `noise` object -- `[{name, value, mechanism}, ...]`, largest first --
+present only when `top_n` was requested and the list was computed. A
+`measurements[].noise.mechanism` entry already carries a `noise` object
+(issue #5553); `contributors` joins it, and an entry without `mechanism` gains a
+`noise` object holding only `contributors`. No `schema_version` bump. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Largest contributors (`noise.top_n`)".
+
 `measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
 a number (the midpoint of the converged bisection bracket) and is graded by
 `limits`, `monte_carlo` statistics and `klt yield` unchanged. The response

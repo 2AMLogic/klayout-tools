@@ -4999,6 +4999,7 @@ quantity instead; `klt sim` evaluates it against the spectrum:
 | `at_hz` | Spot density (per √Hz) at that frequency, interpolated between the two bracketing spectrum points -- in log-frequency for a `dec`/`oct` sweep, linearly for `lin`; exact on a grid point. |
 | `band_hz` | `[lo, hi]`: total rms over the band, `sqrt(∫ density² df)`, trapezoidal on the swept grid with the band edges interpolated in the squared density. |
 | `mechanism` | Optional. `"thermal"` or `"flicker"`: narrow the value to that share of the total rather than the whole spectrum. See "Per-mechanism shares" below. |
+| `top_n` | Optional. A positive integer: also return the `top_n` largest noise contributors by name, in an additive `noise.contributors` member. `value` is unchanged. See "Largest contributors" below. |
 
 Exactly one of `at_hz` / `band_hz`. The `noise1.` plot prefix is internal; it
 is never part of a request. The value is an ordinary
@@ -5067,7 +5068,9 @@ reported -- it is a sound *lower bound* on that mechanism -- so an incomplete
 decomposition can never pass silently into an evidence record.
 
 The same evidence rides an additive `noise` object on that
-`corners[].measurements[]` entry (present only for a `mechanism` entry):
+`corners[].measurements[]` entry (present on every `mechanism` entry; a
+`top_n` request adds a `contributors` member to it, and puts a `noise` object
+holding only `contributors` on a total entry -- see "Largest contributors"):
 
 ```json
 { "name": "thermal_rms", "value": 3.09e-05, "status": "pass",
@@ -5093,7 +5096,80 @@ Instead the corner's deck dumps ngspice's spectra plot to a rawfile beside its
 other artifacts and `klt` reduces it in Python inside the corner run, so only
 the scalar leaves the corner -- the `batch`/`remote` backends work with
 `options.keep_artifacts: false`, as for `cycle_mean`. A request with no
-`mechanism` entry emits a byte-identical deck and an unchanged report.
+`mechanism` (or `top_n`) entry emits a byte-identical deck and an unchanged
+report.
+
+### Largest contributors (`noise.top_n`)
+
+Issue [#5558](https://github.com/2AMLogic/klayout-tools/issues/5558). A
+`mechanism` share says the block is flicker-limited; a sizing decision needs
+the device. An optional `top_n` -- a positive integer, on either form and on
+either `at_hz` or `band_hz` -- returns the `top_n` largest noise generators by
+name:
+
+```json
+"measurements": [
+  { "name": "vn_band", "noise": { "quantity": "onoise", "band_hz": [100, 1e6], "top_n": 3 }, "unit": "V" }
+]
+```
+
+`value`, `status`, `margin` and grading are **exactly** what the same entry
+returns without `top_n` (with or without `mechanism`): the list is an
+additive sibling and never changes what the entry means, so `limits`, Monte
+Carlo statistics and `klt yield` are unaffected. The response gains one member,
+`noise.contributors` -- shown here for an entry without `mechanism`, where
+`noise` holds nothing else:
+
+```json
+{ "name": "vn_band", "value": 1.05258e-04, "unit": "V", "status": "pass", "margin": null,
+  "noise": { "contributors": [
+    { "name": "m1_1overf",     "value": 1.0340e-04, "mechanism": "flicker" },
+    { "name": "m1_id",         "value": 1.4866e-05, "mechanism": "thermal" },
+    { "name": "rload_thermal", "value": 1.2874e-05, "mechanism": "thermal" }
+  ] } }
+```
+
+On a `mechanism` entry the list joins the `noise` object described above
+(`mechanism`, `total`, `unclassified`, `residual_relative`,
+`unclassified_suffixes`), which is otherwise unchanged; a `mechanism` entry
+without `top_n` is byte-identical to before.
+
+| Field | Meaning |
+| ----- | ------- |
+| `name` | The leaf's ngspice vector name without its leading `onoise` and the one separator after it -- the flattened instance path plus generator, e.g. `m1_1overf`, `m.x1.mi_1overf`. Report output only; never parsed, split or normalised, and never accepted as request input. |
+| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (exactly for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
+| `mechanism` | `"thermal"`, `"flicker"`, or `null` for a generator the suffix table does not classify (gate leakage, junction shot noise). |
+
+- **Leaves, not device totals.** A device's total vector would hide which of
+  its generators dominates, so only individual generators are ranked.
+- **Order.** Largest `value` first; ties break by `name` ascending, so the
+  order never depends on rawfile order. Fewer generators than `top_n` returns
+  them all -- not an error.
+- **Zero-power generators are omitted.** sky130's `igb`/`igd`/`igs` are
+  emitted for every MOSFET and are identically zero at ordinary biases; a
+  generator whose reduced value is exactly `0.0` never pads the list.
+- **With `mechanism`**, only that mechanism's generators are ranked; without
+  it, all of them are, unclassified ones included (`mechanism: null`).
+- **No fraction or count fields.** A share is `value` over the entry's
+  `value` (or `noise.total`); derive it.
+
+The two refusals `mechanism` has apply to `top_n` as well, naming the entry:
+`quantity: "inoise"` (no per-contributor input-referred spectra exist), and
+`analysis.args` without the trailing `pts_per_summary` argument. A `top_n`
+that is not a positive integer (`0`, `-1`, `1.5`, `true`, `"3"`) is refused at
+validation. A total entry's `value` still comes from the total form's
+`let`/`print` path -- `top_n` only adds the rawfile dump and its reduction.
+
+If the spectra rawfile is missing or unreadable, a **total** entry keeps its
+`value` and `status`, omits `noise.contributors`, and the corner gains a
+`warning` diagnostic (`code: "measurement"`) whose message leads with
+`[noise_mechanism_rawfile_missing]` / `[noise_mechanism_unreadable]` -- never
+`status: "error"`, because the total was fine. A `mechanism` entry keeps its
+existing error behaviour.
+
+Limits: `analysis_steps[]`, `engine: "xyce"` and input-referred (`inoise`)
+contributors are not supported, for the reasons `mechanism` is not; there are
+no limits or grading on an individual contributor.
 
 ### Runner version
 
