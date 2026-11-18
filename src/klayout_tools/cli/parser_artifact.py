@@ -93,13 +93,16 @@ def add_artifact_parser(
         "get",
         help="fetch one object, writing it only if its sha256 verifies",
         description=(
-            "REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. "
+            "REF is a sha256 (stored under --repo), an artifact:<key> URI "
+            "(a manifest entry's `uri`), or MANIFEST[#SHA256|NAME]. "
             "The bytes are written only when their recomputed sha256 matches "
             "both the manifest's digest and the key's. `-o -` writes the "
             "verified bytes to stdout instead of a JSON envelope."
         ),
     )
-    get_parser.add_argument("ref", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]")
+    get_parser.add_argument(
+        "ref", metavar="REF", help="sha256, artifact:<key>, or MANIFEST[#SELECTOR]"
+    )
     get_parser.add_argument(
         "-o", "--output", required=True, help="destination file, or - for stdout"
     )
@@ -154,16 +157,20 @@ def add_artifact_parser(
         "delete",
         help="delete stored objects through the broker (dry run unless --yes)",
         description=(
-            "REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for "
-            "`get`. Without --yes only `stat` is called and nothing is "
-            "deleted. Each --keep MANIFEST protects the objects it names: a "
+            "REF is a sha256 (under --repo), an artifact:<key> URI or "
+            "MANIFEST[#SELECTOR], as for `get`. Without --yes only `stat` is "
+            "called and nothing is deleted. Each --keep MANIFEST protects the "
+            "objects it names: a "
             "referenced target refuses the whole batch unless "
             "--force-referenced. An absent object is success. The broker "
             "decides whether the caller may delete."
         ),
     )
     delete_parser.add_argument(
-        "refs", nargs="+", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]"
+        "refs",
+        nargs="+",
+        metavar="REF",
+        help="sha256, artifact:<key>, or MANIFEST[#SELECTOR]",
     )
     delete_parser.add_argument(
         "--keep",
