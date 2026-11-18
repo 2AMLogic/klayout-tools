@@ -1545,7 +1545,13 @@ hint leads with that.
 `klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
 `manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
 to its JSON result and prints it in text mode; it is not written into the
-`--output` envelope. Paste it into the manifest to pin the attestation.
+`--output` envelope. Paste it into the manifest to pin the attestation, or let
+[`--repin`](#re-pinning-a-stale-hash---repin-issue-5527) write it there for you
+— after an inventory change, re-attesting alone leaves the manifest's old pin
+in place and the item grades `stale_evidence`. **`--attest --check` reporting
+`match` says nothing about the manifest pin**: it compares the committed
+envelope against the inventory and has no manifest in hand, so it can answer
+`match` while the manifest grade is already broken.
 
 What each item binds:
 
@@ -3314,6 +3320,92 @@ not pin the grading build (that is what `grading_ruleset_id` is for, below),
 and `--check` excludes the whole `build` block from its verdict precisely
 because two legitimate installs of the same commit disagree about it.
 
+### Re-pinning a stale hash: `--repin` (issue #5527)
+
+When an attestation inventory changes, `klt signoff --attest` regenerates the
+envelope correctly — but the manifest's pinned `content_hash` still names the
+**old** input hash, so the next `--manifest` run grades the item
+`unmet`/`stale_evidence`. Re-pinning was a hand edit of JSON, and forgetting
+it is a silent downgrade of a signoff verdict.
+
+`--repin` is the mechanical half of that step:
+
+```bash
+klt signoff --attest 9 --inventory attestation/item9-inventory.json \
+  -o attestation/item9-envelope.json
+klt signoff --repin --manifest manifest.json      # <- this
+klt signoff --manifest manifest.json              # item 9 is met again
+```
+
+It rewrites, in place, the `content_hash` of every evidence entry whose pin
+is stale **and** whose live hash this grader re-derived from the artifact
+itself. It renders no tier verdict: exit `0` means the pass ran, not that the
+block is T1. Re-grade with `--manifest` afterwards.
+
+**What it refuses to touch** is the point of the command, not a limitation:
+
+| Entry | What `--repin` does | Why |
+| ----- | ------------------- | --- |
+| Stale pin, `input_verified: true` | **Rewritten**, and reported | The new value is a hash this run computed from the artifact on disk, not a claim copied out of the evidence |
+| Stale pin, `input_verified` `false`/`null` | Left alone, reported as skipped (`input_not_verified`) | For `drc`/`lvs`/`extract`/`sim` the pin is the manifest author's *independent* claim about which revision was checked; copying the report's own say-so into the manifest would defeat the staleness gate the pin exists to be |
+| Pin cannot be compared for this kind | Left alone, skipped (`unverifiable_pin`) | There is no live hash to re-pin to |
+| Pinned entry whose evidence will not resolve | Left alone, skipped (`unresolved_evidence` / `invalid_evidence`) | Nothing was read, so nothing is known |
+| Entry that pins nothing (bare-string form, or no `content_hash`) | Left alone, **never given a pin**, not reported | `--repin` updates an existing claim; it does not manufacture one |
+
+A manifest with nothing to re-pin is **not written at all** — its bytes and
+mtime are untouched, so a no-op `--repin` cannot show up in a diff. A
+rewritten manifest is serialized as 2-space-indented JSON with a trailing
+newline, the shape every manifest in this repo already uses, so the diff is
+the changed `content_hash` lines and nothing else. A manifest stored in some
+other layout is normalized to that shape.
+
+`--repin` requires `--manifest FILE` and refuses `--manifest -`: stdin cannot
+be written back. It is mutually exclusive with the envelope `<file>`
+arguments and with `--fleet`, `--attest`, `--check` and `--describe-grader` —
+each a mode that renders or checks something, where `--repin` writes. All of
+those are usage errors (exit `2`). `--repo-root` applies as it does to
+`--manifest`, since the same input-artifact resolution decides
+`input_verified`.
+
+#### `--repin` JSON
+
+```bash
+$ klt signoff --repin --manifest manifest.json --format json
+{
+  "schema_version": 1,
+  "status": "repinned",
+  "manifest": "manifest.json",
+  "block": "example-current-mirror",
+  "changed_count": 1,
+  "skipped_count": 0,
+  "changed": [
+    {
+      "item": "9",
+      "index": null,
+      "file": "attestation/item9-envelope.json",
+      "old_content_hash": "sha256:e613d0…",
+      "new_content_hash": "sha256:334575…"
+    }
+  ],
+  "skipped": []
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `status` | `"repinned"` if any pin was rewritten, `"unchanged"` otherwise (the file was then not written) |
+| `manifest` | The manifest path, as given |
+| `block` | The manifest's `block`, echoed, or `null` |
+| `changed[]` | One record per rewritten pin: `item` (the evidence key verbatim, e.g. `"9"` or `"9.analog"`), `index` (position within a multi-citation list entry, else `null`), `file`, `old_content_hash`, `new_content_hash` |
+| `skipped[]` | One record per pinned entry that could not be confirmed fresh and was not rewritten: `item`, `index`, `file`, `reason` (`input_not_verified`, `unverifiable_pin`, `unresolved_evidence`, `invalid_evidence`) |
+
+For grouped item 11 citations, each record also includes `group_index`.
+Both positions are zero-based, with `index` locating the citation within
+that group.
+
+`--format text` prints the same outcome as a courtesy; the JSON is the
+contract.
+
 ### Identifying the grading build
 
 **A `klt` version string alone does not identify the grading build.** Three
@@ -4955,6 +5047,7 @@ distinguishable from "no samples document was ever named" (see
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
+| `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
 | `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
