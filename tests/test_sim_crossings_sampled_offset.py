@@ -102,10 +102,11 @@ def test_sampled_offset_resolves_level(
         assert outcome.times == pytest.approx([expected_time])
 
 
-def test_sampled_offset_out_of_range_is_a_measurement_error(tmp_path):
+@pytest.mark.parametrize("sample_at", [9.0, 3.0 + 1e-12])
+def test_sampled_offset_out_of_range_is_a_measurement_error(tmp_path, sample_at):
     _write_fall_raw(tmp_path / "crossings_0.raw")
     outcome = sim_crossings.extract_corner_crossings(
-        _sampled_spec(sample_at=9.0), str(tmp_path)
+        _sampled_spec(sample_at=sample_at), str(tmp_path)
     )[0]
     assert outcome.error is not None
     assert "sample_at" in outcome.error

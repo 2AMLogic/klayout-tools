@@ -81,6 +81,25 @@ def test_sample_at_at_the_declared_stop_survives_final_point_round_off(tmp_path)
     assert outcome.graded_value() == pytest.approx(2.1)
 
 
+@pytest.mark.parametrize(
+    ("args", "scale", "sample_at"),
+    [
+        ("V1 0.1 1 0.1", [0.1 + 1e-12, 1.0], 0.1),
+        ("V1 1 0.1 -0.1", [1.0 - 1e-12, 0.1], 1.0),
+    ],
+    ids=["ascending", "descending"],
+)
+def test_sample_at_declared_start_uses_first_measured_value(
+    tmp_path, args, scale, sample_at
+):
+    spec = _spec({"sample_at": sample_at, "fraction": 0.5}, edge="fall")
+    sim_crossings.validate_crossings_context(spec, {"kind": "dc", "args": args})
+    outcome = _run(tmp_path, spec, scale=scale, values=[4.0, 0.0])
+    assert outcome.error is None
+    assert outcome.report()["level"] == pytest.approx(2.0)
+    assert outcome.graded_value() == pytest.approx(0.55)
+
+
 def test_value_is_first_abscissa_and_count_stays_in_member(tmp_path):
     outcome = _run(
         tmp_path,
@@ -191,6 +210,7 @@ def test_fraction_level_is_refused_on_tran():
     "level",
     [
         {"sample_at": 1.0, "fraction": float("nan")},
+        {"sample_at": 1.0, "fraction": 10**400},
         {"sample_at": 1.0, "fraction": True},
         {"sample_at": 1.0, "fraction": 0.5, "offset": 0.1},
     ],

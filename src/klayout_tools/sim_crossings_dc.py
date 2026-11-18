@@ -28,7 +28,7 @@ import math
 from typing import Any
 
 from . import sim_supply_relative, sim_window
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 
 #: ``analysis.kind`` values a dc crossing is extracted for.
@@ -59,7 +59,7 @@ def is_fraction_level(level: Any) -> bool:
 def validate_fraction(name: Any, level: dict[str, Any]) -> None:
     """Shape-check the ``fraction`` of a ``{sample_at, fraction}`` level."""
     fraction = level["fraction"]
-    if not is_number(fraction) or not math.isfinite(fraction):
+    if not is_finite_number(fraction):
         raise SimError(
             f"measurement '{name}': crossings.level.fraction must be a finite "
             f"number (got {fraction!r})"
@@ -137,7 +137,12 @@ def resolve_sampled_level(
     count = min(len(scale), len(values))
     low = min(scale[:count], default=math.nan)
     high = max(scale[:count], default=math.nan)
-    slack = sim_window.EDGE_TOLERANCE * max(abs(high - low), abs(at), 1e-30)
+    # A dc sweep may round a declared endpoint just inside the requested range.
+    slack = (
+        sim_window.EDGE_TOLERANCE * max(abs(high - low), abs(at), 1e-30)
+        if sweep
+        else 0.0
+    )
     if count == 0 or not low - slack <= at <= high + slack:
         span = f"[{low!r}, {high!r}]" if count else "empty"
         unit, axis = ("", "swept") if sweep else (" s", "simulated time")
@@ -145,7 +150,6 @@ def resolve_sampled_level(
             f"measurement '{name}': crossings.level.sample_at ({at!r}{unit}) "
             f"is outside the {axis} range {span}{unit if count else ''}"
         )
-    sampled = values[count - 1]
     for index in range(1, count):
         lo, hi = sorted((scale[index - 1], scale[index]))
         if lo <= at <= hi:
@@ -153,6 +157,10 @@ def resolve_sampled_level(
             y0, y1 = values[index - 1], values[index]
             sampled = y1 if x1 == x0 else y0 + (y1 - y0) * (at - x0) / (x1 - x0)
             break
+    else:
+        # A single point or a dc endpoint just beyond the measured samples.
+        nearest = min(range(count), key=lambda i: abs(scale[i] - at))
+        sampled = values[nearest]
     if "fraction" in level:
         return sampled * float(level["fraction"])
     return sampled + float(level["offset"])
