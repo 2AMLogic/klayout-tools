@@ -214,6 +214,7 @@
         "klayout_tools.erc_spec",
         "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
+        "klayout_tools.erc_substrate_bodies",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
       ]
@@ -306,6 +307,7 @@
         "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_internal_bus",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
@@ -727,6 +729,7 @@
         "klayout_tools._spice_number",
         "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
+        "klayout_tools._tcl",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
@@ -835,6 +838,7 @@
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_reattach",
+        "klayout_tools.sim_batch_resume",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",

@@ -34,6 +34,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   An nfet MV ring gets the marker growth too, and still draws no Nwell.
   Other families resolve no ring margin; 3.3V-only gf180mcu rings and
   tap pads keep their 0.15um default.
+- **`klt sim --resume` harvests a retained shard map before dispatching**
+  (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
+  without `--resume` (issue #3896), but `--resume` only ever read
+  `checkpoint.json` -- which a run without `--resume` never writes -- so
+  resuming a partial sharded run reported `resume: reused 0 checkpointed
+  corner(s)` and re-submitted every shard as a new job, re-billing the units
+  that had already passed. `--resume` now harvests the map first: each
+  recorded shard's remote `status.json` is read once (never waited on, never
+  launched), a terminal shard is collected through the plain attach
+  machinery, and its units are recorded into the checkpoint and counted in
+  the `resume: reused N` summary; only unlaunched/unfinished/failed shards
+  are submitted again. A map written for a different request still refuses
+  with `error.code: "resume_fingerprint_mismatch"`. Shard map entries now
+  also record their ordered unit ids (`units`, additive), so a later harvest
+  or `--attach` can recover a job's units without re-deriving the partition
+  that minted it. `--resume` alone is now enough for the
+  `environment.remote.resumable: true` recovery the report advertises;
+  `--attach <map> --collect-partial` remains the non-blocking form.
+
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
   stdout and never created `FILE` — the one mode that dropped a flag the user
@@ -348,6 +367,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   warning now says its definition may live in the model library instead of
   implying the netlist alone was searched; without a model library the
   wording is unchanged.
+- **`klt signoff --attest 2 --check` re-checks the committed regeneration claim
+  without the flags** (#5572 / PR #5611, 2026-11-16): `provenance.regeneration`
+  is part of what `--check` compares, but the fresh envelope was built only from
+  its command-line arguments — so a flag-less `--check` of a committed item-2
+  envelope carrying a regeneration claim reported `drifted` (exit 3) on
+  `provenance.regeneration` unless `--generator` / `--regenerated-hash` (and
+  `--hash-kind` for a geometry claim) were retyped verbatim, meaning the claim
+  lived a second time outside the evidence chain and an item-2 envelope could
+  not be verified from the repo alone. A flag-less `--check` now adopts the
+  committed claim as recorded and reports `match` (exit 0). Passing any of the
+  three flags is unchanged and is now an explicit cross-check: a value
+  differing from the committed claim, or flags against a claim-less envelope,
+  still reports drift (exit 3). No JSON field is added, renamed or removed and
+  no `schema_version` changes; an envelope written by the previous version
+  re-checks clean without being re-attested. **Migration:** if your CI treated
+  exit 3 from a flag-less `--check` as "needs re-attest", a fresh repository no
+  longer triggers that; and if you worked around the old behaviour by copying
+  the committed hash into the `--check` invocation, that duplicate literal can
+  now be dropped.
 - **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
   top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
   sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
@@ -356,6 +394,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   Sub-cell naming itself changed earlier (#4251) from KLayout's default
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
+- **`klt erc`: a substrate assertion reaching over a drawn well can no longer
+  fabricate a `erc.supply_short`, and substrate shorts name the geometry that
+  performed the merge** (#5745, 2026-11-17): the substrate/well body-merge
+  pass attributed a tie's tap sites to bodies without asking where each site
+  physically was. A `ties[]` entry declaring the #2255 form
+  (`well_layer: null` + `well_boxes`) whose asserted region reached over a
+  *different* supply's drawn well captured that net's own well tap into the
+  shared `vsubs` body -- a tap inside a drawn well taps the well (junction-
+  isolated from the substrate), not the substrate -- so the union-find welded
+  the two supply clusters and reported a fabricated `erc.supply_short` via
+  `substrate` on inputs that grade clean. Non-drawn-well ties now subtract
+  every drawn-well tie's (selected) well region before attributing substrate
+  bodies, so the repro shape grades clean; drawn-well ties keep their own
+  sites by construction. Additively, every `erc.supply_short` via
+  `"substrate"` now carries `body.joins` -- one `{net, tie, bbox}` entry per
+  tap site that welded that net to the body, with `well_box` (0-based index
+  into that tie's `well_boxes`, lowest when several overlap) when the site
+  came from an assertion -- so a finding names its evidence instead of
+  inviting a pass/fail bisection. Existing fields are unchanged; a spec
+  without the repro shape grades byte-identically except for the new
+  `joins` key. `schema_version` is unaffected (additive, per
+  `docs/json-contract.md`); `provenance.klt_version` tells which build
+  graded a committed report.
 
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
