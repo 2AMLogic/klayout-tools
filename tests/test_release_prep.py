@@ -115,12 +115,15 @@ def test_cli_prepare_empty_section_exits_2(tmp_path: Path, capsys) -> None:
 
 def test_prepare_refuses_stale_anchor(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
-    (repo / "docs/cli/signoff.md").write_text(
-        "intro\n\nfirst ships in the first release after `v0.7.0`.\n"
-    )
+    stale = "intro\n\nfirst ships in the first release after `v0.7.0`.\n"
+    (repo / "docs/cli/signoff.md").write_text(stale)
     with pytest.raises(rp.PrepError, match=r"0\.7\.0") as excinfo:
         rp.prepare(repo, None, "2026-11-09")
     assert ":3:" in str(excinfo.value)  # names the offending line
+    # The refusal happens before any write: the tree is untouched (issue #6211).
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+    assert (repo / "CHANGELOG.md").read_text() == CHANGELOG
+    assert (repo / "docs/cli/signoff.md").read_text() == stale
 
 
 def test_prepare_leaves_newer_anchor_untouched(tmp_path: Path) -> None:

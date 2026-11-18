@@ -178,20 +178,23 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
         )
 
     # Compute every write up front so a refusal (e.g. an empty '## Unreleased'
-    # section, issue #6086) leaves the tree untouched, pyproject.toml unbumped.
+    # section, issue #6086, or a stale availability-note anchor, issue #5582)
+    # leaves the tree untouched, pyproject.toml unbumped.
     new_py_text = bump_pyproject(py_text, new)
     changelog_text = changelog.read_text(encoding="utf-8")
     new_log_text = add_changelog_heading(changelog_text, new, date)
+    # On an idempotent re-run `current == new`; the notes were already resolved.
+    new_signoff_text = None
+    if signoff.exists() and current != new:
+        new_signoff_text = update_signoff_notes(
+            signoff.read_text(encoding="utf-8"), current, new
+        )
+        check_signoff_note_anchors(new_signoff_text, current)
 
     pyproject.write_text(new_py_text, encoding="utf-8")
     changelog.write_text(new_log_text, encoding="utf-8")
-    # On an idempotent re-run `current == new`; the notes were already resolved.
-    if signoff.exists() and current != new:
-        signoff_text = update_signoff_notes(
-            signoff.read_text(encoding="utf-8"), current, new
-        )
-        check_signoff_note_anchors(signoff_text, current)
-        signoff.write_text(signoff_text, encoding="utf-8")
+    if new_signoff_text is not None:
+        signoff.write_text(new_signoff_text, encoding="utf-8")
     return {"previous": current, "version": new, "date": date}
 
 
