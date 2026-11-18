@@ -198,7 +198,6 @@ from .sim_batch_contract import (  # noqa: F401
     DEFAULT_INTERRUPTED_GRACE_S,
     DEFAULT_POLL_INTERVAL_S,
     FLEET_CONFIG_FILENAME,
-    FLEET_MAX_JOB_SECONDS_KEY,
     JOB_CEILING_BASIS,
     JOB_CEILING_CHECK_MODES,
     MAX_JOB_SECONDS_ENV,
@@ -206,7 +205,6 @@ from .sim_batch_contract import (  # noqa: F401
     PROVISION_SCRIPT_ENV,
     REGION_ENV,
     REQUEST_FEATURE_MIN_RUNNER_VERSION,
-    RUNNER_VERSION_CHECK_MODES,
     BatchClientInterrupted,
     BatchError,
     BatchJobInterrupted,
@@ -273,6 +271,15 @@ from .sim_batch_job_timeout import (
     _resolve_max_units_per_job,
     assess_caller_job_timeout,
     resolve_job_timeout_s,
+)
+from .sim_batch_knobs import (
+    _resolve_interrupted_grace_s,
+    _resolve_max_concurrent_jobs,
+    _resolve_max_job_seconds,
+    _resolve_runner_version_check,
+    _validate_batch_request_knobs,
+    resolve_capacity_retries,
+    resolve_capacity_wait_s,
 )
 
 # --------------------------------------------------------------------------- #
@@ -759,6 +766,15 @@ def dry_run_runner_check(
     ``max_units_per_job``, or one combined with ``job_ceiling_check:
     "enforce"``, is raised during config resolution and the ceiling/split
     plan built on that config must refuse the dry run like the submit does.
+    Every other request-only ``batch`` knob is validated *before* that
+    host-dependent resolution (issue #6437,
+    :func:`_validate_batch_request_knobs`): a malformed
+    ``job_ceiling_check``, ``max_concurrent_jobs``,
+    ``runner_version_check``, ``max_job_seconds``, ``capacity_wait_s``,
+    ``capacity_retries``, ``job_timeout_s`` or ``interrupted_grace_s``
+    refuses the dry run with the submit path's own message whether or not
+    this host can resolve a batch configuration, so the swallow below stays
+    for the host-dependent failures only.
     When ``runner_out`` is given it is filled with the published runner
     identity (``status``, ``client_klt_version``, ``images``) for ``match``,
     ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
@@ -773,6 +789,10 @@ def dry_run_runner_check(
     """
     from .sim import SimError
 
+    # Issue #6437: the request's own knobs refuse ahead of the host-dependent
+    # resolution, so a malformed `batch` block cannot dry-run clean on a host
+    # that happens to resolve no batch configuration.
+    _validate_batch_request_knobs(request.get("batch") or {})
     try:
         config = _resolve_batch_config(
             request, corner_count=corner_count, timeout_s=timeout_s
@@ -960,71 +980,6 @@ def _enforce_published_runner_features(
     )
 
 
-def _resolve_max_job_seconds(
-    batch_spec: dict[str, Any], fleet: dict[str, str]
-) -> tuple[float, str]:
-    """The fleet's whole-job ceiling and its provenance (issue #2833).
-
-    Resolution order: ``request.batch.max_job_seconds`` (``"request"``),
-    ``$KLT_BATCH_MAX_JOB_SECONDS`` (``"env"``), ``BATCH_MAX_JOB_SECONDS`` in
-    the ``batch-fleet.env`` beside the provision script (``"fleet_config"``,
-    the value 2am's ``launch`` tags the instance with), else
-    :data:`DEFAULT_BATCH_MAX_JOB_SECONDS` (``"default"``, the harness's own
-    fallback). A present but not positive-finite number is a SimError
-    naming its source, raised before any S3 write, never a silent fall
-    through to a less specific source.
-    """
-    from .sim import SimError
-
-    candidates: tuple[tuple[str, str, Any], ...] = (
-        ("request", "request.batch.max_job_seconds", batch_spec.get("max_job_seconds")),
-        ("env", f"${MAX_JOB_SECONDS_ENV}", os.environ.get(MAX_JOB_SECONDS_ENV)),
-        (
-            "fleet_config",
-            f"{FLEET_MAX_JOB_SECONDS_KEY} in {FLEET_CONFIG_FILENAME}",
-            fleet.get(FLEET_MAX_JOB_SECONDS_KEY),
-        ),
-    )
-    for source, label, raw in candidates:
-        if raw is None or (isinstance(raw, str) and not raw.strip()):
-            continue
-        value: Any = raw
-        if isinstance(raw, str):
-            try:
-                value = float(raw.strip())
-            except ValueError:
-                value = None
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-        ):
-            raise SimError(
-                f"{label} must be a positive number of seconds (got {raw!r})"
-            )
-        return float(value), source
-    return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
-
-
-def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
-    """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
-    bound on the shard jobs in flight at once, else
-    :class:`~klayout_tools.sim.SimError` before any S3 write."""
-    from .sim import SimError
-
-    value = batch_spec.get("max_concurrent_jobs")
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise SimError(
-            "request.batch.max_concurrent_jobs must be a positive integer "
-            f"(got {value!r})",
-            code=BATCH_MAX_CONCURRENT_CODE,
-        )
-    return value
-
-
 def _plan_job_split(assessment: dict[str, Any], config: BatchConfig) -> int:
     """The effective ``remote.hosts`` for an opted-in split (issue #3446).
 
@@ -1165,78 +1120,6 @@ def _enforce_job_ceiling(assessment: dict[str, Any]) -> None:
             code=BATCH_JOB_CEILING_CODE,
         )
     print(f"klt sim: warning: {warning}", file=sys.stderr)
-
-
-def _resolve_runner_version_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.runner_version_check``: ``"enforce"`` (default) or
-    ``"warn"``, else :class:`~klayout_tools.sim.SimError` before any S3 write."""
-    from .sim import SimError
-
-    value = batch_spec.get("runner_version_check", "enforce")
-    if value not in RUNNER_VERSION_CHECK_MODES:
-        raise SimError(
-            "request.batch.runner_version_check must be one of "
-            f"{', '.join(repr(m) for m in RUNNER_VERSION_CHECK_MODES)} "
-            f"(got {value!r})"
-        )
-    return value
-
-
-def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
-    """``request.batch.capacity_wait_s``: a finite, non-negative number of
-    seconds (default ``0``), else :class:`~klayout_tools.sim.SimError` --
-    raised from :func:`_resolve_batch_config`, i.e. before any S3 write.
-
-    A ``bool`` is refused even though it is an ``int`` subclass: ``true``
-    reading as "wait one second" is never what a request author meant.
-    """
-    from .sim import SimError
-
-    value = batch_spec.get("capacity_wait_s", 0)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise SimError(
-            "request.batch.capacity_wait_s must be a non-negative number of "
-            f"seconds (got {value!r})"
-        )
-    return float(value)
-
-
-def resolve_capacity_retries(batch_spec: dict[str, Any]) -> int:
-    """The ``--capacity-retries`` value for a sharded request (issue #5567):
-    a non-negative integer (default ``0``, off), else
-    :class:`~klayout_tools.sim.SimError`. A ``bool`` is refused."""
-    from .sim import SimError
-
-    value = batch_spec.get("capacity_retries", 0)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SimError(f"--capacity-retries must be >= 0 (got {value!r})")
-    return value
-
-
-def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
-    """``request.batch.interrupted_grace_s``: a finite, non-negative number of
-    seconds (default :data:`DEFAULT_INTERRUPTED_GRACE_S`; ``0`` disables the
-    fail-fast), else :class:`~klayout_tools.sim.SimError` -- raised before any
-    S3 write. A ``bool`` is refused, as for ``capacity_wait_s``."""
-    from .sim import SimError
-
-    value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise SimError(
-            "request.batch.interrupted_grace_s must be a non-negative number "
-            f"of seconds (got {value!r})"
-        )
-    return float(value)
 
 
 # --------------------------------------------------------------------------- #

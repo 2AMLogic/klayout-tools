@@ -261,8 +261,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
-- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
-  2026-11-17): the single-request batch dry run now reaches the same
+- **`klt sim --dry-run` validates every `request.batch` knob and runs the
+  batch ceiling/split plan** (#5674, 2026-11-17; widened by #6437,
+  2026-11-18): the single-request batch dry run now reaches the same
   `plan_batch_job` the submit path runs, so a request the fleet would
   refuse is refused by the dry run with the submit path's own
   `error.code` and message — `batch_max_units_per_job_invalid` for a
@@ -270,7 +271,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `job_ceiling_check: "enforce"` (both used to dry-run clean), and
   `batch_job_ceiling_exceeded` for a request whose bound exceeds
   `max_job_seconds` under `"enforce"` (never checked on this path at
-  all). The dry-run report gains an additive `job_ceiling` field — the
+  all). Since #6437 every remaining `request.batch` knob is validated
+  before the host-dependent configuration resolution, with the submit
+  path's own message: a malformed `batch.job_ceiling_check`,
+  `max_concurrent_jobs` (`batch_max_concurrent_jobs_invalid`),
+  `runner_version_check`, `max_job_seconds`, `capacity_wait_s`,
+  `capacity_retries`, `job_timeout_s` or `interrupted_grace_s` no longer
+  dry-runs clean (all used to report `status: "valid"` while the submit
+  path refused), and because a knob is the request's own defect it
+  refuses even on a host with no bucket and no provision script — only
+  the host-dependent failures still dry-run clean there (the #5449
+  posture). No new `error.code` values; existing codes and messages are
+  unchanged. The dry-run report gains an additive `job_ceiling` field — the
   `environment.remote.job_ceiling` name and shape, including
   `split`/`effective_hosts` when a split mode is active — present only
   when a batch configuration resolves on this host, so a configless host

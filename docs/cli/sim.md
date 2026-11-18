@@ -105,10 +105,11 @@ this document (and the code) win.
   simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
   Every pre-dispatch check a real run performs still runs (request shape,
   Monte Carlo spec, measurement forms, model/OSDI resolution, the
-  `stage_model_inputs` closure, the off-host PDK check and, on `batch`, the
-  whole-job ceiling/split plan
-  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674))), and a failure
-  exits 1 with the same message a real run gives. It then returns before
+  `stage_model_inputs` closure, the off-host PDK check and, on `batch`,
+  every `request.batch` knob and the whole-job ceiling/split plan
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674),
+  [#6437](https://github.com/2AMLogic/klayout-tools/issues/6437))), and a
+  failure exits 1 with the same message a real run gives. It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
   ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
   way ([#4543](https://github.com/2AMLogic/klayout-tools/issues/4543)): deck,
@@ -2526,8 +2527,17 @@ the packaged `data/` copy. See
   `batch_max_units_per_job_invalid` and an over-ceiling request behaves
   exactly as a submit would — refused under `"enforce"`, warned under the
   default `"warn"`, planned under `"split"` — and the assessment is
-  reported as `job_ceiling` (see the `--dry-run` flag above). A configless
-  host skips the plan too, staying dry-run clean.
+  reported as `job_ceiling` (see the `--dry-run` flag above). Since
+  [#6437](https://github.com/2AMLogic/klayout-tools/issues/6437) every
+  `request.batch` knob is validated before that host-dependent resolution,
+  with the submit path's own message: a malformed `job_ceiling_check`,
+  `max_concurrent_jobs` (refused as
+  `batch_max_concurrent_jobs_invalid`), `runner_version_check`,
+  `max_job_seconds`, `capacity_wait_s`, `capacity_retries`, `job_timeout_s`
+  or `interrupted_grace_s` no longer dry-runs clean, and a knob is the
+  request's own defect, so it refuses even on a host that resolves no
+  batch configuration. A configless host with a valid `batch` block skips
+  the plan too, staying dry-run clean.
   `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
   stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
