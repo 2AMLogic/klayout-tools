@@ -1,9 +1,7 @@
 """Electrical-check (``report_check_types``) markers and parsers for ``klt sta``.
 
 Split out of :mod:`klayout_tools.post_route_sta` (issues #3005, #5241) to keep
-that module under its file-size ceiling. ``post_route_sta`` re-imports every
-name here, so existing ``post_route_sta._parse_electrical_check`` etc.
-references keep working.
+that module under its file-size ceiling.
 """
 
 from __future__ import annotations

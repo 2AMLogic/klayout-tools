@@ -1,22 +1,68 @@
-"""``klt functional-verification`` argument parser (split out of ``parser.py``
-for the size ratchet, same as ``parser_netlist.py`` et al.)."""
+"""``klt functional-verification`` argument parser, split out of :mod:`parser`
+(per-file size ratchet) so the ``--mutations`` help example (issue #5679) could
+land without growing :mod:`parser` past its ceiling -- the same move
+:mod:`parser_sim` made for ``klt sim`` and :mod:`parser_artifact` for
+``klt artifact``. Parser-wide helpers are callables the caller passes in, so
+this module never imports :mod:`parser` back.
+
+The verb's logic lives in
+:mod:`klayout_tools.functional_verification_mutation_proposals` (the
+``<proposals>`` example and doc pointer re-used below) and
+:mod:`.functional_verification_cmd`; see
+docs/cli/functional-verification.md.
+"""
+
+from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Callable
 from typing import Any
 
+from ..functional_verification_mutation_proposals import (
+    MUTATION_PROPOSALS_EXAMPLE,
+    functional_verification_doc_location,
+)
 from . import functional_verification_cmd
+
+
+class _RawText(str):
+    """Marks help text :class:`_RawEpilogFormatter` must not re-wrap."""
+
+
+class _RawEpilogFormatter(argparse.HelpFormatter):
+    """Wrap ``description`` like the default formatter but keep an epilog
+    built from :class:`_RawText` verbatim (a JSON example loses its layout
+    under re-wrapping; ``RawDescriptionHelpFormatter`` would instead stop
+    wrapping the long description)."""
+
+    def _fill_text(self, text: str, width: int, indent: str) -> str:
+        if isinstance(text, _RawText):
+            return "".join(indent + line for line in text.splitlines(keepends=True))
+        return super()._fill_text(text, width, indent)
 
 
 def add_functional_verification_parser(
     subparsers: argparse._SubParsersAction,
+    _add_pdk_args: Callable[..., Any],
     _add_format_arg: Callable[..., Any],
 ) -> None:
     """Register the ``functional-verification`` verb: run a cocotb
-    regression against Icarus/Verilator.
+    regression against Icarus/Verilator. Issue #5782 added the
+    ``--pdk``/``--pdk-root`` args.
     """
+    doc_location = functional_verification_doc_location()
     functional_verification_parser = subparsers.add_parser(
         "functional-verification",
+        formatter_class=_RawEpilogFormatter,
+        epilog=_RawText(
+            "--mutations <proposals> example (every required field filled):\n"
+            + json.dumps(MUTATION_PROPOSALS_EXAMPLE, indent=2)
+            + "\n`index` is 1-based and unique; `scope` entries and `file` must "
+            "repeat a `request.sources` string exactly.\n"
+            "All validation errors are reported in one run.\n"
+            f"Full field table: {doc_location}"
+        ),
         help="run a cocotb regression against Icarus/Verilator",
         description=(
             "Run a cocotb testbench against RTL sources through Icarus "
@@ -73,7 +119,7 @@ def add_functional_verification_parser(
             "byte-exact source mutations to apply, one at a time, to an "
             "isolated build+test of the same <request>. Aborts with exit 1 "
             "if the request's own baseline run fails first -- see "
-            "docs/cli/functional-verification.md, '--mutations'"
+            f"{doc_location}, '--mutations' (example below)"
         ),
     )
     functional_verification_parser.add_argument(
@@ -87,6 +133,13 @@ def add_functional_verification_parser(
             "created if missing, relative paths resolve against the cwd. "
             "Request-relative source paths still resolve against the "
             "request's own directory (or the --base-dir override)"
+        ),
+    )
+    _add_pdk_args(
+        functional_verification_parser,
+        pdk_help=(
+            "PDK variant to resolve a request.pdk block's cell models from "
+            "(e.g. sky130A); overrides request.pdk.variant (issue #5782)"
         ),
     )
     _add_format_arg(functional_verification_parser)

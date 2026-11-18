@@ -100,7 +100,10 @@ def _check_identity(curated: dict[str, Any], native: dict[str, Any]) -> dict[str
         "layout_content_hash": c_hash,
         "pdk": c_prov.get("pdk"),
         "klt_version": c_prov.get("klt_version"),
+        # The curated engine is the pip wheel; the native engine is the
+        # standalone binary, whose own `-v` version can differ (#5660).
         "klayout_version": c_prov.get("klayout_version"),
+        "native_klayout_version": n_prov.get("klayout_version"),
         "curated_deck": c_prov.get("deck"),
         "native_deck": n_prov.get("deck"),
     }
