@@ -11963,15 +11963,15 @@ def _gds_layers(path):
 @pytest.mark.parametrize(
     "params",
     (
-        {"w_um": 1.0},
-        {"w_um": 0.22},  # LV COMP min width (DF.1a_LV)
-        {"w_um": 0.30, "voltage_flavor": "medium_voltage"},  # MV min (DF.1a_MV)
+        {"w_um": 1.0},  # DF.1c floor: the narrowest legal MOSCAP
+        {"w_um": 2.0},
+        {"w_um": 1.0, "voltage_flavor": "medium_voltage"},
         {"w_um": 1.0, "fingers": 3},
         {"w_um": 1.0, "rows": 2, "cols": 2, "dummy": 1},
         {"w_um": 1.0, "flavor": "pfet"},
     ),
 )
-def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
+def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
     params, tmp_path, both_pdk_root
 ):
     output, report = _gen_mos_cap(tmp_path, both_pdk_root, **params)
@@ -11980,8 +11980,9 @@ def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
     assert {"U0_SD", "U0_G"} <= names
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    counts = run_drc(str(output), "gf180mcu")["rule_counts"]
-    assert set(counts) == {"comp.width.moscap.1"}  # genuine DF.1c (#6170)
+    # Clean incl. DF.1c `comp.width.moscap.1` (#6170): the marker covers the
+    # unit devices only, so the 0.42 um guard ring is not under it.
+    assert run_drc(str(output), "gf180mcu")["rule_counts"] == {}
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
@@ -12012,12 +12013,11 @@ def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
 
 
 def test_mos_cap_rejects_width_below_deck_comp_rule(tmp_path, both_pdk_root):
-    with pytest.raises(GenError, match=r"comp\.width\.1"):
-        _gen_mos_cap(tmp_path, both_pdk_root, w_um=0.2)
-    with pytest.raises(GenError, match=r"comp\.width\.mv\.1"):
-        _gen_mos_cap(
-            tmp_path, both_pdk_root, w_um=0.25, voltage_flavor="medium_voltage"
-        )
+    """The channel is `w_um` wide, so DF.1c (1 um under the marker, #6170) is the
+    floor -- above DF.1a's 0.22 (LV) / 0.30 (MV)."""
+    for p in ({"w_um": 0.99}, {"w_um": 0.3, "voltage_flavor": "medium_voltage"}):
+        with pytest.raises(GenError, match=r"comp\.width\.moscap\.1"):
+            _gen_mos_cap(tmp_path, both_pdk_root, **p)
 
 
 def test_mos_cap_unsupported_pdk_family_is_a_clear_generror(tmp_path, both_pdk_root):

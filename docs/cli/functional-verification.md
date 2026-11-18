@@ -9,7 +9,8 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>] [--format text|json]
+klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>]
+                                [--pdk <variant>] [--pdk-root <root>] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -60,6 +61,11 @@ args.
 - `--mutations <proposals>` — optional, issue #1592: run mutation testing
   against the same `<request>` — see "Mutation testing: `--mutations`"
   below.
+- `--pdk <variant>` / `--pdk-root <root>` — optional, issue #5782: the PDK
+  install a `request.pdk` block's behavioural cell models resolve from —
+  see "Gate-level cell models: `request.pdk`" below. Each flag overrides the
+  corresponding `request.pdk` member (`variant`/`root`); the request block
+  itself supplies the required `cell_library`.
 
 ## Archived requests: `--base-dir`
 
@@ -465,6 +471,24 @@ directory -- the same convention `sources` and `testbench.module` already
 use -- for a cell library split across multiple files with `` `include ``
 directives.
 
+**The define policy a `request.pdk` block derives (issue #5782).** When the
+request carries a `pdk` block, the compile-time defines that select the
+PDK's own model branches are derived for you, and only when you did not set
+them yourself:
+
+- `FUNCTIONAL` is defined (with no value) **only when `options.sdf` is
+  omitted or `null`**. This selects the zero-delay behavioural branch for
+  a pre-CTS `klt synthesize` netlist without SDF. A request with SDF
+  elaborates the *timing* branch. See "SDF back-annotation" for the
+  rules on combining SDF with caller defines.
+- `USE_POWER_PINS` is **never** derived: a `klt synthesize` netlist carries
+  no power pins, so defining it is an elaboration error. It stays purely a
+  caller choice (a layout-extracted netlist with supply pins is exactly the
+  case that wants it).
+- Entries in `options.defines` always win over the derived values, and the
+  per-source `options.source_defines` hatch (issue #3290) is untouched --
+  a hard macro that needs its own scoped `FUNCTIONAL` keeps working.
+
 ## Reproducibility: `random_seed`
 
 cocotb's regression manager seeds its own `random` module per run and logs
@@ -569,8 +593,27 @@ place-and-route`](place-and-route.md)'s own `post_route_sdf` field
 
 ```json
 {
-  "sources": ["gcd_route.v", "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/primitives.v",
-              "/pdk/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"],
+  "sources": ["gcd_route.v"],
+  "hdl_toplevel": "gcd",
+  "testbench": { "module": "test_gcd" },
+  "pdk": { "variant": "sky130A", "cell_library": "sky130_fd_sc_hd" },
+  "options": { "sdf": { "file": ".klt/place-and-route/gcd_route.sdf", "corner": "typ" } }
+}
+```
+
+The `pdk` block (issue #5782) resolves the standard cell library's
+behavioural models from the installed PDK itself, so the committed request
+carries no host-specific PDK path. With `options.sdf` present the block
+derives **no** `FUNCTIONAL` define (the timing branch is what an SDF
+annotates); without one it derives `FUNCTIONAL` for the zero-delay
+gate-level run -- see "Gate-level cell models: `request.pdk`". The
+hand-written form the block replaces -- listing the model files by path
+with the defines spelled out -- still works unchanged:
+
+```json
+{
+  "sources": ["gcd_route.v", "<pdk-root>/sky130A/libs.ref/sky130_fd_sc_hd/verilog/primitives.v",
+              "<pdk-root>/sky130A/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"],
   "hdl_toplevel": "gcd",
   "testbench": { "module": "test_gcd" },
   "options": { "sdf": { "file": ".klt/place-and-route/gcd_route.sdf", "corner": "typ" } }
@@ -1393,6 +1436,17 @@ byte-exact shape:
 }
 ```
 
+**All validation errors are reported in one run** (issue #5679). Missing or
+mistyped fields on every `proposals[]` entry, a bad `scope`, a duplicate or
+non-positive `index` and a `scope` entry absent from `request.sources` are
+collected and raised together as one exit-1 error (each message's text is the
+same as when it was raised alone; several are joined with `; `). The
+scope-subset message also lists the `request.sources` strings actually
+available. `klt functional-verification --help` prints a complete example
+document; the same doc ships in the wheel as
+`klayout_tools/data/cli/functional-verification.md`, and `--help` prints the
+path that resolves on your install.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema` | string | Contract identifier + major version, matching this repo's request-side convention. Not validated. |
@@ -1554,6 +1608,10 @@ exactly.
 - **`options.from_synthesize` + `--mutations` together.** See above — the
   baseline would elaborate the synthesize netlist while every per-mutant build
   would not, so it is a request error.
+- **A `pdk` block (or `--pdk`/`--pdk-root`) + `--mutations` together.** The
+  same divergence, one layer down (issue #5782): the baseline resolves and
+  elaborates the block's cell models while every per-mutant build would not,
+  so it is a request error.
 
 ## `options.from_synthesize`: re-simulate what `klt synthesize` just produced
 
@@ -1570,9 +1628,9 @@ klt synthesize synth.json --format json > synth-report.json
   "hdl_toplevel": "gcd",
   "testbench": {"module": "test_gcd"},
   "options": {
-    "from_synthesize": {"report": "synth-report.json"},
-    "defines": {"FUNCTIONAL": "1"}
+    "from_synthesize": {"report": "synth-report.json"}
   },
+  "pdk": {"variant": "sky130A", "cell_library": "sky130_fd_sc_hd"},
   "sources": []
 }
 ```
@@ -1582,6 +1640,69 @@ and refuses (exit 1) on any mismatch — so re-running `klt synthesize` into a n
 run directory makes the *old* report's request fail instead of silently
 re-simulating the old netlist. For a report written outside a git repo
 (`netlist_path.scope: "external"`), add `"netlist": "<path>"`.
+
+## Gate-level cell models: `request.pdk`
+
+A gate-level re-simulation must compile the PDK's own behavioural standard-cell
+models ahead of the netlist, with the compile-time defines that select them.
+Hand-writing those model paths into `sources` works but is not portable: an
+absolute path breaks on any host whose PDK lives elsewhere, and a relative one
+breaks at any checkout depth but one. The `pdk` block (issue #5782) names the
+install and library instead, and the paths never enter the request:
+
+```json
+{
+  "sources": [],
+  "hdl_toplevel": "gcd",
+  "testbench": {"module": "test_gcd"},
+  "options": {"from_synthesize": {"report": "synth-report.json"}},
+  "pdk": {"variant": "sky130A", "cell_library": "sky130_fd_sc_hd"}
+}
+```
+
+`klt` resolves `<install>/libs.ref/<cell_library>/verilog/` on the same
+install `klt synthesize`/`klt place-and-route` resolve (`find_pdk`'s search
+order, or the pinned `root`/`--pdk-root`), prepends the models in dependency
+order (`primitives.v` before `<cell_library>.v`, when the library ships a
+`primitives.v` — gf180mcu's `gf180mcu_osu_sc_gp9t3v3` does not, and that is
+fine), and derives the `FUNCTIONAL` define policy described under
+"Compile-time defines, build args, and includes". Effective compile order is
+**`[verified netlist,] [primitives.v,] <cell_library>.v, ...request.sources`**
+— models always precede the testbench's own sources, and a model you already
+listed in `sources` compiles once, in its dependency-order position.
+`__blackbox*.v` siblings (sky130 ships two) are never selected: a blackbox
+has no behaviour. The resolved files appear in `environment.sources` like
+any other source.
+
+The CLI's `--pdk`/`--pdk-root` override `pdk.variant`/`pdk.root`
+respectively (the sibling-verb precedence); `cell_library` comes from the
+block alone, so the flags without a block are a request error rather than a
+silently-ignored flag. A relative `pdk.root` resolves against the request
+file's own directory, the same base every other path field uses.
+
+The verb reports four named refusals, each with exit 1 and its own
+`error.code`.
+
+- `pdk_no_verilog_view` — the resolved install's library ships no
+  `verilog/` view at all (real case: gf180mcuD's `gf180mcu_osu_sc_gp12t3v3`,
+  which has `lef`/`lib` and no simulation models), the library is absent
+  from the install, or the install ships no `libs_ref` asset.
+- `pdk_no_cell_models` — the `verilog/` view exists but ships no
+  `<cell_library>.v`.
+- `pdk_ambiguous_install` — the install search found the variant under more
+  than one root (the `~/.ciel` vs `~/.volare` case) and no explicit
+  `root`/`--pdk-root` pinned one. Resolving cell models from a *different*
+  install than synthesis timed against would be a plausible-looking pass on
+  somebody else's models, so this is never a first-match guess.
+- `pdk_cell_library_mismatch` — `options.from_synthesize` is also present,
+  and the report's `provenance.deck.name` (`<cell_library>__<corner>`) names
+  a different library than `pdk.cell_library`, so the netlist instantiates
+  cells the requested models do not define. Reports without a
+  `provenance.deck.name` skip the check rather than refuse on a guess.
+
+`pdk` combined with `--mutations` is not yet designed and is refused (the
+per-mutant builds do not resolve the block's models) — the same posture as
+`options.sdf`/`options.trace` with `--mutations`.
 
 ## Request
 
@@ -1626,7 +1747,10 @@ re-simulating the old netlist. For a report written outside a git repo
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field (`~` and `$VAR` expanded), and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `options.sdf.entries` | string | Optional, one of `"all"`/`"interconnect"`, default `"all"` (issue #2364). `"all"` annotates every delay entry the SDF carries. `"interconnect"` drops every non-`INTERCONNECT` delay entry (on a real `write_sdf` output, the `IOPATH` population) before annotation and reports the count as the `iopath_interconnect_only` `environment.sdf.dropped` class — the supported net-delay back-annotation configuration for a design whose post-route STA closes (see "SDF back-annotation"). Echoed as `environment.sdf.entries`. An unknown value is exit 1 rather than silently ignored. |
-| `options.from_synthesize` | object | Optional (issue #5684). `{"report": <path>, "netlist": <path>\|null}` — re-simulate the netlist a `klt synthesize` run produced. `report` (required, relative to the request) is that run's `--format json` report; the netlist is its `netlist_path`, resolved from the report's own location (`scope: "repo"`) and prepended to `sources`. `netlist`, when given, wins over the recorded path (relative to the request) and is **required** when the report records `scope: "external"` (a synthesize run outside any git repo). **The hash gate is a requirement, not a courtesy:** before any build the netlist is re-hashed and must equal the report's `netlist_sha256`, and the report's `hdl_toplevel` must equal the request's. A mismatch, a report with no `netlist_sha256`, an unresolvable netlist, or a bare-string/unknown-key value is exit 1 (never exit 3 — a netlist that failed the gate never ran) and names the expected and actual digests. The response gains a top-level `from_synthesize` block `{report, netlist, netlist_sha256, hash_check}` (paths as `{path, scope}` envelopes; additive, absent when unused). Cell-model auto-prepending is out of scope (#5782): supply the PDK's behavioural models and `FUNCTIONAL` define via `sources`/`options.defines`. |
+| `options.from_synthesize` | object | Optional (issue #5684). `{"report": <path>, "netlist": <path>\|null}` — re-simulate the netlist a `klt synthesize` run produced. `report` (required, relative to the request) is that run's `--format json` report; the netlist is its `netlist_path`, resolved from the report's own location (`scope: "repo"`) and prepended to `sources`. `netlist`, when given, wins over the recorded path (relative to the request) and is **required** when the report records `scope: "external"` (a synthesize run outside any git repo). **The hash gate is a requirement, not a courtesy:** before any build the netlist is re-hashed and must equal the report's `netlist_sha256`, and the report's `hdl_toplevel` must equal the request's. A mismatch, a report with no `netlist_sha256`, an unresolvable netlist, or a bare-string/unknown-key value is exit 1 (never exit 3 — a netlist that failed the gate never ran) and names the expected and actual digests. The response gains a top-level `from_synthesize` block `{report, netlist, netlist_sha256, hash_check}` (paths as `{path, scope}` envelopes; additive, absent when unused). Cell-model prepending via the `pdk` block lands beside this key rather than inside it (issue #5782) — a synthesize report carries no PDK install identity to resolve models from, so the request pins the install itself; see "Gate-level cell models: `request.pdk`". |
+| `pdk.cell_library` | string | Required when a `pdk` block is present (issue #5782). The standard-cell library whose behavioural Verilog models (`libs.ref/<cell_library>/verilog/`) are prepended to `sources` in dependency order — see "Gate-level cell models: `request.pdk`". |
+| `pdk.variant` | string \| null | Optional. PDK variant to resolve the install for (e.g. `sky130A`); `--pdk` overrides it. |
+| `pdk.root` | string \| null | Optional. Explicit install root, resolving against the request's own directory when relative (the same base every other path field uses); `--pdk-root` overrides it (resolved against the cwd, the sibling-verb convention). Pinning it is also the fix the `pdk_ambiguous_install` refusal's own message names. |
 | `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Not combinable with `options.sdf` or `--mutations` (exit 1). |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. Echoed verbatim as `environment.parameters` (`{}` when absent; issue #5697), so a stored envelope states which parameterization it is evidence for -- a parameterized DUT swept over several sizes produces reports that differ in this field, not only in log hashes. On `--mutations` runs the echo rides the baseline report the mutation envelope reuses. Whether a future `run_identity` digest (issue #2097) folds in `parameters` is explicitly left to that design's follow-up; nothing here changes it. |
@@ -1719,7 +1843,7 @@ block"), and `environment` is the contract's own reproducibility surface.
 | Code | Meaning |
 | --- | --- |
 | `0` | At least one test executed and every executed test passed (`status: "pass"`); skipped tests are allowed. |
-| `1` | Failed to run — bad request, a `request.requires_tools` entry that is unmet (`error.code` `missing_tool`; `error.unmet_tools` lists every unmet tool with what was wanted and what was found, and no build starts), unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript; the error envelope then also carries `error.sdf.dropped` — the same per-class `{count, reason[, arcs]}` shape the success path reports as `environment.sdf.dropped` — omitted when no class was dropped, so the fidelity accounting survives the refusal instead of having to be reconstructed from the outdir's intermediate SDFs), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
+| `1` | Failed to run — bad request, a `request.requires_tools` entry that is unmet (`error.code` `missing_tool`; `error.unmet_tools` lists every unmet tool with what was wanted and what was found, and no build starts), unresolvable RTL source or testbench module, a `pdk` block that cannot resolve cell models (`error.code` `pdk_no_verilog_view`, `pdk_no_cell_models`, `pdk_ambiguous_install`, or — against an `options.from_synthesize` report's deck — `pdk_cell_library_mismatch`; see "Gate-level cell models: `request.pdk`"), coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript; the error envelope then also carries `error.sdf.dropped` — the same per-class `{count, reason[, arcs]}` shape the success path reports as `environment.sdf.dropped` — omitted when no class was dropped, so the fidelity accounting survives the refusal instead of having to be reconstructed from the outdir's intermediate SDFs), `options.trace` requested but the run produced no waveform file, a bad `options.initial_state` (bad shape, `verilator`, a state element it cannot drive, an ambiguous clock), missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
