@@ -21,7 +21,7 @@ import pytest
 
 from klayout_tools import place_and_route
 from klayout_tools.extract import run_extract
-from klayout_tools.place_and_route_gds_merge import (
+from klayout_tools.place_and_route_pin_conductor import (
     _pin_conductor_map_entries,
     _stage_pin_conductor_layer_map,
 )
@@ -277,6 +277,7 @@ def test_merge_draws_the_pin_on_conductor_and_keeps_the_label_on_the_pin_layer(
     layout.read(kwargs["out_path"])
     top = layout.top_cell()
     net = _region(layout, top, _MET1_NET)
+    assert _region(layout, top, _MET1_PIN).bbox() == kdb.Box(500, 950, 1500, 1050)
     # The pin rectangle is conductor now, and one net with the routed wire.
     point = kdb.Region(kdb.Box(*_PIN_CENTRE, *_PIN_CENTRE).enlarged(1, 1))
     assert (point - net).is_empty()
@@ -363,3 +364,49 @@ def test_map_without_a_dual_purpose_layer_is_not_staged(tmp_path):
     info = place_and_route._merge_def_to_gds(**kwargs)
 
     assert info["pin_conductor"] == {"status": "unchanged", "layers": []}
+
+
+@pytest.mark.parametrize("fail_read", [False, True])
+def test_staged_map_is_removed_after_read_success_or_failure(
+    tmp_path, monkeypatch, fail_read
+):
+    staged_paths = []
+
+    def record_staging(map_path, staged_path):
+        staged_paths.append(Path(staged_path))
+        return _stage_pin_conductor_layer_map(map_path, staged_path)
+
+    monkeypatch.setattr(
+        "klayout_tools.place_and_route_gds_merge._stage_pin_conductor_layer_map",
+        record_staging,
+    )
+    kwargs = _build_fixture(tmp_path)
+    if fail_read:
+        Path(kwargs["def_path"]).unlink()
+        with pytest.raises(
+            place_and_route.PlaceAndRouteError, match="could not read DEF"
+        ):
+            place_and_route._merge_def_to_gds(**kwargs)
+    else:
+        place_and_route._merge_def_to_gds(**kwargs)
+    assert staged_paths
+    assert all(not path.parent.exists() for path in staged_paths)
+
+
+@pytest.mark.parametrize("combined_first", [False, True])
+def test_combined_and_separate_pin_entries_keep_both_geometries(
+    tmp_path, combined_first
+):
+    entries = ["met1 NET,PIN 68 20\n", "met1 PIN 68 16\n"]
+    if not combined_first:
+        entries.reverse()
+    kwargs = _build_fixture(
+        tmp_path, map_text="".join(entries) + "NAME met1/PIN 68 5\n"
+    )
+    place_and_route._merge_def_to_gds(**kwargs)
+    layout = kdb.Layout()
+    layout.read(kwargs["out_path"])
+    top = layout.top_cell()
+    pin = kdb.Region(kdb.Box(500, 950, 1500, 1050))
+    assert (pin - _region(layout, top, _MET1_NET)).is_empty()
+    assert (pin - _region(layout, top, _MET1_PIN)).is_empty()

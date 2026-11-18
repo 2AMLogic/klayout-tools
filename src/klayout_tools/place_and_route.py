@@ -2489,13 +2489,8 @@ def _run_single_corner(
         # "when is this populated" contract.
         "unrouted_def_path": unrouted_def_path,
         "gds_path": gds_path,
-        # Additive field (issue #1029): whether the DEF->GDS merge above
-        # actually applied a KLayout LEF/DEF layer-map file, and how it was
-        # resolved -- `resolve_klayout_layer_map` silently degrades to no map at
-        # all (`resolution: "none"`) when neither a variant-named nor a
-        # family-level map file exists, which previously left no trace in
-        # this response for a caller to notice. `null` unless
-        # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
+        # PDK source map and its resolution; null before route (#1029).
+        # No map means sequential default layer numbers, not PDK assignments.
         "layer_map": layer_map_info,
         # Additive field (issue #1488): what the DEF->GDS merge's own
         # single-pin net-name marker pass did, so a caller can tell an
@@ -2526,13 +2521,8 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
-        # Additive field (issue #5700): whether the DEF->GDS merge also drew
-        # each top-level DEF pin on its routing layer's *conductor* pair.
-        # `status` is `"staged"` (a derived layer map was applied; `layers[]`
-        # names each layer), `"unchanged"` (no layer declares NET and PIN
-        # purposes on separate lines) or `"skipped"` (`reason` says why).
-        # `layer_map` still names the PDK's own map. `null` unless
-        # `stage_reached` is `"route"`.
+        # Derived-map pin coverage on conductor; null before route (#5700).
+        # Status/layers/reason are documented in docs/cli/place-and-route.md.
         "pin_conductor": pin_conductor_info,
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined

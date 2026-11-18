@@ -65,6 +65,7 @@ from typing import Any
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
+from .place_and_route_pin_conductor import _stage_pin_conductor_layer_map
 from .place_and_route_via_pad import trim_via_pads
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
@@ -260,96 +261,6 @@ def _lef_net_layer_gds_map(map_path: str | None) -> dict[str, tuple[int, int]]:
     except OSError:
         return {}
     return mapping
-
-
-def _pin_conductor_map_entries(map_path: str | None) -> list[tuple[str, int, int]]:
-    """``[(<LEF layer>, <net GDS layer>, <net GDS datatype>), ...]`` for every
-    LEF layer whose KLayout layer map declares a ``NET`` purpose on one line
-    and a ``PIN`` purpose on a *different* line (issue #5700).
-
-    That shape makes KLayout's DEF reader draw a top-level ``PINS`` rectangle
-    on the pin-purpose ``(layer, datatype)`` only -- never on the conductor
-    pair an extraction deck connects -- so the pin's name label can sit on
-    bare, non-conductor geometry and name nothing. A layer whose single line
-    already lists both purposes (sky130: ``met1 LEFPIN,NET,SPNET,PIN,VIA 68
-    20``), or that declares only one of them, needs nothing and is skipped.
-
-    Returns ``[]`` for ``None`` or an unreadable/malformed file, matching
-    :func:`_lef_net_layer_gds_map`'s degrade-gracefully posture.
-    """
-    if map_path is None:
-        return []
-    net_pairs: dict[str, tuple[int, int]] = {}
-    pin_pairs: dict[str, tuple[int, int]] = {}
-    try:
-        with open(map_path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                parts = line.split("#", 1)[0].split()
-                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
-                    continue
-                purposes = parts[1].split(",")
-                try:
-                    pair = (int(parts[-2]), int(parts[-1]))
-                except ValueError:
-                    continue
-                if "NET" in purposes:
-                    net_pairs.setdefault(parts[0], pair)
-                    # One line covering both: the pin is already on conductor.
-                    if "PIN" in purposes:
-                        pin_pairs.setdefault(parts[0], pair)
-                elif "PIN" in purposes:
-                    pin_pairs.setdefault(parts[0], pair)
-    except OSError:
-        return []
-    return [
-        (layer, net_pair[0], net_pair[1])
-        for layer, net_pair in net_pairs.items()
-        if layer in pin_pairs and pin_pairs[layer] != net_pair
-    ]
-
-
-def _stage_pin_conductor_layer_map(
-    map_path: str | None, staged_path: str
-) -> dict[str, Any]:
-    """Write a derived copy of the layer map at ``staged_path`` that also
-    draws every top-level DEF pin on its layer's conductor pair (issue #5700).
-
-    The copy keeps every original line verbatim (the pin-purpose entries and
-    every ``NAME`` label entry included -- the deck still reads the name text
-    off the pin purpose) and appends one ``<layer> PIN <net_layer>
-    <net_datatype>`` line per layer from :func:`_pin_conductor_map_entries`.
-    KLayout then draws the pin rectangle on both pairs and the label only on
-    the pin purpose. The PDK's own file is never modified.
-
-    Returns ``{"status": "staged"|"unchanged"|"skipped", "layers": [...]}``;
-    only ``"staged"`` means ``staged_path`` was written and should be used.
-    """
-    if map_path is None:
-        return {"status": "skipped", "reason": "no layer map resolved", "layers": []}
-    entries = _pin_conductor_map_entries(map_path)
-    if not entries:
-        return {"status": "unchanged", "layers": []}
-    try:
-        with open(map_path, encoding="utf-8", errors="replace") as handle:
-            original = handle.read()
-        addition = "".join(
-            f"{layer} PIN {gds_layer} {gds_datatype}\n"
-            for layer, gds_layer, gds_datatype in entries
-        )
-        if original and not original.endswith("\n"):
-            original += "\n"
-        with open(staged_path, "w", encoding="utf-8") as handle:
-            handle.write(original + "# klt: top-level pins also drawn on conductor\n")
-            handle.write(addition)
-    except OSError as exc:
-        return {"status": "skipped", "reason": f"could not stage: {exc}", "layers": []}
-    return {
-        "status": "staged",
-        "layers": [
-            {"layer_name": layer, "layer": gds_layer, "datatype": gds_datatype}
-            for layer, gds_layer, gds_datatype in entries
-        ],
-    }
 
 
 def _box_is_inside_drawn_geometry(
@@ -594,8 +505,7 @@ def _merge_def_to_gds(
     the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
     :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
     (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
-    ``pin_conductor`` is :func:`_stage_pin_conductor_layer_map`'s report
-    (issue #5700), surfaced as the sibling ``pin_conductor`` response field.
+    ``pin_conductor`` reports derived-map staging (issue #5700).
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -623,38 +533,10 @@ def _merge_def_to_gds(
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    # Issue #5700: a map that declares NET and PIN purposes on separate lines
-    # draws a top-level DEF pin on the pin purpose only, leaving its name
-    # label on non-conductor geometry. Read the DEF through a derived map that
-    # also draws the pin on the conductor pair; `layer_map_path` (and so the
-    # reported `layer_map`) keeps naming the PDK's own file.
-    staging_dir = tempfile.TemporaryDirectory(prefix="klt-pin-conductor-")
-    pin_conductor_info = _stage_pin_conductor_layer_map(
-        layer_map_path, os.path.join(staging_dir.name, "layer.map")
-    )
-    if layer_map_path is not None:
-        lefdef_config.map_file = (
-            os.path.join(staging_dir.name, "layer.map")
-            if pin_conductor_info["status"] == "staged"
-            else layer_map_path
-        )
-
-    # Issue #1032: KLayout's DEF reader silently proceeds when the target
-    # layout DBU it is configured for does not match the DEF file's own
-    # declared `UNITS DISTANCE MICRONS` value, producing wrong/lossy
-    # via-cut geometry as a side effect (only a `Warning:` line, never a
-    # raised error). Left unset, `lefdef_config.dbu` inherits KLayout's
-    # compiled-in default (0.001, i.e. `DATABASE MICRONS 1000`), which
-    # happens to match sky130 but is wrong for any PDK whose own tech LEF
-    # declares a different `DATABASE MICRONS` value (e.g. gf180mcu's 2000).
-    # Resolve the tech LEF's own declared value and set the reader's target
-    # DBU to match; when the tech LEF doesn't declare one (or the
-    # regex-based parser can't extract it), fall back to KLayout's existing
-    # default DBU behavior -- `read_lef_header` never raises on malformed
-    # input, so `database_microns is None` is a normal, expected case here.
-    # Captured as the full header (not just `database_microns`) so the
-    # post-merge DIEAREA guard below can reuse its own `sites` entry rather
-    # than re-parsing `tech_lef` a second time.
+    # Match the tech LEF's DATABASE MICRONS to avoid lossy via geometry
+    # when KLayout's default DBU differs (e.g. gf180mcu uses 2000).
+    # A missing/malformed declaration keeps the reader default. Retain the
+    # full header for the DIEAREA guard's site-height check below (#1032).
     tech_lef_header = read_lef_header(tech_lef)
     database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
@@ -662,13 +544,23 @@ def _merge_def_to_gds(
 
     main_layout = kdb.Layout()
     try:
-        main_layout.read(def_path, opts)
+        # Keep the PDK map unchanged; the derived map lives only for the read.
+        with tempfile.TemporaryDirectory(prefix="klt-pin-conductor-") as tmp:
+            staged_path = os.path.join(tmp, "layer.map")
+            pin_conductor_info = _stage_pin_conductor_layer_map(
+                layer_map_path, staged_path
+            )
+            if layer_map_path is not None:
+                lefdef_config.map_file = (
+                    staged_path
+                    if pin_conductor_info["status"] == "staged"
+                    else layer_map_path
+                )
+            main_layout.read(def_path, opts)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise PlaceAndRouteError(
             f"could not read DEF '{def_path}' for GDS merge: {exc}"
         ) from exc
-    finally:
-        staging_dir.cleanup()
 
     top_cell = main_layout.cell(hdl_toplevel)
     if top_cell is None:

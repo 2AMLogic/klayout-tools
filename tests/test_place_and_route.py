@@ -8696,7 +8696,6 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
-        # Issue #5700: no layer map resolved, so nothing to stage.
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
@@ -9936,22 +9935,15 @@ def _write_li1_pin_def(path: Path) -> None:
     )
 
 
-def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path):
-    """Issue #2473, measured end to end through the real DEF->GDS merge: a
-    DEF `PINS` port declared on `li1` lands its rectangle on li1's
-    LEFPIN/PIN purpose (67/16) and its pin-name text on 67/5, with **no**
-    li1 conductor (67/20) under either -- so the label names no net and the
-    declared port promotes to no top-level pin at all (`pin_count: 0` here).
-
-    `klt extract --def-pins` now reports that as an `error`-severity
-    `def_pin_promotion` finding naming the offending layer/datatype and the
-    declared-vs-promoted disparity, instead of leaving it to a prose warning
-    nobody downstream reads: `klt drc` has no rule against a label over no
-    conductor, and `klt lvs` still reports `"match"` for a layout missing
-    top-level pins (see `tests/test_lvs.py`'s
-    `test_missing_top_level_pin_alone_still_reports_match`). The request-time
-    guard in `_validate_io` stops a *new* run from reaching this state; this
-    test covers a layout that already exists."""
+def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path, monkeypatch):
+    """Legacy layouts with li1 pins only on 67/16 must still report the
+    #2473 extraction error. Disable #5700's conductor staging to reproduce
+    that old merge output; keep the real geometry and diagnostic assertions.
+    """
+    monkeypatch.setattr(
+        "klayout_tools.place_and_route_gds_merge._stage_pin_conductor_layer_map",
+        lambda map_path, staged_path: {"status": "unchanged", "layers": []},
+    )
     inputs = _tie_cell_merge_inputs(tmp_path)
     def_path = tmp_path / "design.def"
     _write_li1_pin_def(def_path)
