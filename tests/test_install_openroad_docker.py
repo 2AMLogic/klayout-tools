@@ -27,6 +27,10 @@ def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     docker = stub_dir / "docker"
     docker.write_text(STUB)
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
+    # Keep host PDK discovery out of the recorded mounts, even with HOME unset.
+    klt = stub_dir / "klt"
+    klt.write_text("#!/bin/sh\nexit 1\n")
+    klt.chmod(klt.stat().st_mode | stat.S_IXUSR)
     dest = tmp_path / "dest"
     log = tmp_path / "argv.log"
     env = {
