@@ -125,6 +125,7 @@
 #   stale                  Idle >= threshold with no claimant activity -> reclaim.
 #   stale-bounded-fallback Stand-down streak >= cap AND claim age >= threshold
 #                          -> force-reclaim (livelock breaker).
+#   (Either stale state becomes `fresh` while the role's PR lease is live: #11947.)
 #   unknown                Timeline unavailable/unparseable -> FAIL SAFE, treat
 #                          exactly like `fresh`. Never stomp a claim on missing
 #                          data (incl. a failed ground-truth read, #1966).
@@ -395,6 +396,15 @@ if [[ -z "$CLAIM_STATE" ]]; then
     else
         CLAIM_STATE="fresh"
     fi
+
+    # #11947: a live PR lease outranks the idle/streak clocks (a holder waiting on CI
+    # renews it without activity markers). Only held-self/held-peer downgrades.
+    case "$LABEL" in loom:reviewing) LEASE_ROLE=judge ;; loom:treating) LEASE_ROLE=doctor ;; loom:curating) LEASE_ROLE=curator ;; *) LEASE_ROLE="" ;; esac
+    if [[ "$CLAIM_STATE" == stale* && -n "$LEASE_ROLE" ]]; then
+        # requires-daemon: lease optional   Without `lease pr check` (absent or older binary) the output has no PR_LEASE_STATE and the computed state stands.
+        LEASE_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" lease pr check "$NUMBER" --role "$LEASE_ROLE" 2>/dev/null || true)"
+        grep -Eq '^PR_LEASE_STATE=held-(self|peer)([[:space:]]|$)' <<<"$LEASE_OUT" && CLAIM_STATE="fresh"
+    fi
 fi
 
 # --- frozen-timeline cross-check + reclaim-loop guard (LOCAL, #1966/#668) ----
@@ -524,7 +534,14 @@ case "$SUBCOMMAND" in
         exit 0
         ;;
     marker)
-        [[ "$CLAIM_STATE" == "unclaimed" || -z "$CLAIMED_AT" ]] && exit 0
+        if [[ "$CLAIM_STATE" == "unclaimed" || -z "$CLAIMED_AT" ]]; then
+            # #13134: never print nothing for a live agent. A note with no
+            # `<!-- loom:` marker reads as a human comment to verdict-gate, so
+            # fall back to a lease-identified marker (it is not claimant
+            # activity: it carries no claim timestamp).
+            [[ -n "${LOOM_SWEEP_ID:-}" ]] && echo "<!-- loom:claim-activity sweep=${LOOM_SWEEP_ID} -->"
+            exit 0
+        fi
         echo "${ACTIVITY_PREFIX}${CLAIMED_AT} -->"
         exit 0
         ;;
