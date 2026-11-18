@@ -33,6 +33,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   bounding-box rule. The attribution code moved to
   `klayout_tools.drc_attribution` (`drc._attribute_to_instance` still resolves).
 
+- **`klt sim --resume` harvests a retained shard map before dispatching**
+  (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
+  without `--resume` (issue #3896), but `--resume` only ever read
+  `checkpoint.json` -- which a run without `--resume` never writes -- so
+  resuming a partial sharded run reported `resume: reused 0 checkpointed
+  corner(s)` and re-submitted every shard as a new job, re-billing the units
+  that had already passed. `--resume` now harvests the map first: each
+  recorded shard's remote `status.json` is read once (never waited on, never
+  launched), a terminal shard is collected through the plain attach
+  machinery, and its units are recorded into the checkpoint and counted in
+  the `resume: reused N` summary; only unlaunched/unfinished/failed shards
+  are submitted again. A map written for a different request still refuses
+  with `error.code: "resume_fingerprint_mismatch"`. Shard map entries now
+  also record their ordered unit ids (`units`, additive), so a later harvest
+  or `--attach` can recover a job's units without re-deriving the partition
+  that minted it. `--resume` alone is now enough for the
+  `environment.remote.resumable: true` recovery the report advertises;
+  `--attach <map> --collect-partial` remains the non-blocking form.
+
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
   stdout and never created `FILE` — the one mode that dropped a flag the user
@@ -82,6 +101,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   that declares `inputs` reports `provenance.input.paths` instead of
   `provenance.input.path`, so a manifest citing it must re-pin. No grader
   change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+- **`klt power` judges EM on a split arm's cross-section, not row by row**
+  (#6449, 2026-11-17, additive — no `schema_version` bump): where two arms of
+  one merged polygon join, the mesh's vertex grid cuts the wider arm
+  lengthwise into parallel rows, and a pad/load snapping to one node can put
+  the whole port current through a single row against a *row-width* limit —
+  an over-limit `em_verdict` finding on metal whose true cross-section
+  density is within limit. For each cut perpendicular to the flow, the
+  signed sum of the crossing branches is now compared against
+  `current_limit_a_per_um *` the contiguous conducting width, when the cut's
+  branches tile all the polygon's metal there and every member has a solved
+  current and a limit (never across a gap, layer or polygon; a true narrow
+  neck keeps its own width). `em_verdict` entries judged this way gain
+  `basis: "cross_section"`, `width_um` and `section_edge_ids`; every other
+  entry (vias, rectangular rails, edges on no eligible cut) is byte-identical
+  to before, and `coverage`/edge counts are unchanged. A cross-section can
+  relax a per-row finding, never tighten one, so a layout that failed only
+  because of the row split now passes while a real over-limit still fails.
+  Distributed pad/load injection and the IR solver are unchanged.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
@@ -125,6 +162,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Added** (#5850): an item 9 `testbenches` entry may declare `depends_on` —
+  repo-relative paths the bench depends on (a helper it imports, a model
+  card it includes) — and each declared dependency is hashed into the
+  envelope as its own `present` check (role `testbench_dependency`,
+  carrying its bench), so editing a helper a shipped testbench depends on
+  is caught by `klt signoff --attest 9 --check` (exit 3) instead of
+  passing green. Member binding stays shallow — undeclared dependencies
+  are not resolved — and every member now emits a passing
+  `dependency_binding` check recording how many edges it declared, so the
+  envelope says whether binding happened instead of implying completeness.
+  A dependency may be shared across entries (and may itself be an
+  inventoried member); a repeat within one entry is refused (exit 1).
+  An envelope committed before this change no longer reproduces under
+  `--check` (every member now emits the `dependency_binding` disclosure
+  row that older envelopes lack), so it is drift until re-attested once:
+  run `klt signoff --attest 9 --inventory <inv> -o <envelope>` and commit
+  the new envelope. Additive; `schema_version` unchanged. First ships in
+  the first release after `v0.9.2` (which refuses `depends_on` as an
+  unknown field).
 - **Behaviour change for consumers locating `klt synthesize` artifacts by
   path: they moved from flat `.klt/synthesize/` to
   `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
@@ -240,6 +296,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   attaching. A shard map now attaches under any `hosts` (the shard count is read
   from the map); a bare job id still requires `hosts = 1`. Additive: a call that
   used to fail now succeeds.
+- **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
+  2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
+  entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
+  itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) and embedded
+  as an absolute path in the generated Tcl, but the wrapper
+  `scripts/install-openroad-docker.sh` writes mounted only `$PWD`,
+  `$PDK_ROOT` and `$TMPDIR` — so every `klt place-and-route` /
+  `klt post-route-sta` run against a list-form corner failed at its first
+  OpenROAD stage with `cannot read file <cache>/liberty-merged/merged-*.lib`.
+  The wrapper now resolves the cache root exactly as
+  `klayout_tools.liberty_merge.cache_root()` does, `mkdir -p`s it before
+  `docker run` (Docker otherwise creates a missing bind-mount source as
+  root, issue #3151), mounts it `:ro`, and skips the mount when the path
+  duplicates `$PWD`/`$PDK_ROOT`/`$TMPDIR` (a duplicate mount point is a
+  hard `docker run` error). The mount-coverage hint for an unreadable path
+  under the cache root no longer advises "run from a common ancestor"
+  (unachievable for a cache path); it names the cache root instead. Hosts
+  with an older wrapper must re-run `scripts/install-openroad-docker.sh`
+  to regenerate it (or set `KLT_CACHE_DIR` under an already-mounted
+  directory, e.g. `$TMPDIR/klt-cache`).
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -290,6 +366,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   warning now says its definition may live in the model library instead of
   implying the netlist alone was searched; without a model library the
   wording is unchanged.
+- **`klt signoff --attest 2 --check` re-checks the committed regeneration claim
+  without the flags** (#5572 / PR #5611, 2026-11-16): `provenance.regeneration`
+  is part of what `--check` compares, but the fresh envelope was built only from
+  its command-line arguments — so a flag-less `--check` of a committed item-2
+  envelope carrying a regeneration claim reported `drifted` (exit 3) on
+  `provenance.regeneration` unless `--generator` / `--regenerated-hash` (and
+  `--hash-kind` for a geometry claim) were retyped verbatim, meaning the claim
+  lived a second time outside the evidence chain and an item-2 envelope could
+  not be verified from the repo alone. A flag-less `--check` now adopts the
+  committed claim as recorded and reports `match` (exit 0). Passing any of the
+  three flags is unchanged and is now an explicit cross-check: a value
+  differing from the committed claim, or flags against a claim-less envelope,
+  still reports drift (exit 3). No JSON field is added, renamed or removed and
+  no `schema_version` changes; an envelope written by the previous version
+  re-checks clean without being re-attested. **Migration:** if your CI treated
+  exit 3 from a flag-less `--check` as "needs re-attest", a fresh repository no
+  longer triggers that; and if you worked around the old behaviour by copying
+  the committed hash into the `--check` invocation, that duplicate literal can
+  now be dropped.
 - **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
   top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
   sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
@@ -298,6 +393,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   Sub-cell naming itself changed earlier (#4251) from KLayout's default
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
+- **`klt erc`: a substrate assertion reaching over a drawn well can no longer
+  fabricate a `erc.supply_short`, and substrate shorts name the geometry that
+  performed the merge** (#5745, 2026-11-17): the substrate/well body-merge
+  pass attributed a tie's tap sites to bodies without asking where each site
+  physically was. A `ties[]` entry declaring the #2255 form
+  (`well_layer: null` + `well_boxes`) whose asserted region reached over a
+  *different* supply's drawn well captured that net's own well tap into the
+  shared `vsubs` body -- a tap inside a drawn well taps the well (junction-
+  isolated from the substrate), not the substrate -- so the union-find welded
+  the two supply clusters and reported a fabricated `erc.supply_short` via
+  `substrate` on inputs that grade clean. Non-drawn-well ties now subtract
+  every drawn-well tie's (selected) well region before attributing substrate
+  bodies, so the repro shape grades clean; drawn-well ties keep their own
+  sites by construction. Additively, every `erc.supply_short` via
+  `"substrate"` now carries `body.joins` -- one `{net, tie, bbox}` entry per
+  tap site that welded that net to the body, with `well_box` (0-based index
+  into that tie's `well_boxes`, lowest when several overlap) when the site
+  came from an assertion -- so a finding names its evidence instead of
+  inviting a pass/fail bisection. Existing fields are unchanged; a spec
+  without the repro shape grades byte-identically except for the new
+  `joins` key. `schema_version` is unaffected (additive, per
+  `docs/json-contract.md`); `provenance.klt_version` tells which build
+  graded a committed report.
 
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a

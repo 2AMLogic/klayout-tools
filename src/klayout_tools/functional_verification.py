@@ -232,7 +232,7 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
-    _drop_sdf_zero_delay_bus_port_source_interconnects,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
     _parse_toplevel_parameters,
@@ -248,12 +248,18 @@ from .functional_verification_sdf import (
     _write_sdf_dut_wrapper,  # noqa: F401
 )
 from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scopes
+from .functional_verification_sdf_internal_bus import (
+    SDF_INTERNAL_BUS_NET_REASONS,
+    _apply_sdf_internal_bus_net_drop,
+)
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
 )
 from .functional_verification_sdf_steps import (
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
@@ -412,17 +418,6 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
-#: ``INTERCONNECT`` entries removed before annotation because they run from a
-#: bit-selected top-level input port (any destination not already claimed by
-#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
-#: corner. Icarus can fail to insert an intermodpath for such a source
-#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
-#: dropping it cannot change simulated timing. Issue #2984's counted
-#: exemption; a non-zero entry of the same shape is left in place and still
-#: fails loudly. Pre-dropped from the SDF text, not derived from a
-#: diagnostic substring.
-SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
-
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -559,6 +554,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "fails loudly"
     ),
     **SDF_COND_EXPRESSION_REASONS,
+    **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
@@ -2485,36 +2481,6 @@ def _apply_sdf_physical_only_drop(
     return new_path
 
 
-def _apply_sdf_bus_port_source_drop(
-    annotate_source_path: str,
-    output_dir: str,
-    ports: list[tuple[str, str, str]],
-    sdf_pre_dropped_counts: dict[str, int],
-) -> str:
-    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
-    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
-    function for the same reason (no new branch in
-    :func:`run_functional_verification`). Runs after the physical-only pass,
-    so entries that pass claimed keep their class and are not double counted.
-    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
-
-    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
-    a new normalized-copy path otherwise.
-    """
-    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
-        annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
-    )
-    if drop is None:
-        return annotate_source_path
-    text, count = drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
-    return new_path
-
-
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -2848,6 +2814,19 @@ def run_functional_verification(
         # dropping them is timing-neutral; non-zero ones stay and still fail.
         annotate_source_path = _apply_sdf_bus_port_source_drop(
             annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
+        )
+
+        # Issue #6075: the same cap also bites bit-selected INTERNAL nets,
+        # where Icarus inserts no survivor at all (0-of-N at any fanout).
+        # Both endpoints are instance pins here, so neither sibling pass
+        # above can have claimed these entries; the decision reads the same
+        # gate-level parse, and the zero-delay bound is the same.
+        annotate_source_path = _apply_sdf_internal_bus_net_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
