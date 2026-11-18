@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1231
+      "lines": 1230
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
