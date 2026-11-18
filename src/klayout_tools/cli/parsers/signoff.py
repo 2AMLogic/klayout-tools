@@ -15,6 +15,7 @@ from typing import Any
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
 from .. import signoff_cmd
+from .._doc_paths import RawDescriptionDocHelpFormatter
 from ..color import add_color_args
 
 
@@ -29,7 +30,7 @@ def add_signoff_parser(
     """
     signoff_parser = subparsers.add_parser(
         "signoff",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=RawDescriptionDocHelpFormatter,
         epilog=(
             "Opt-in evidence kinds (non-native envelopes) and the T1 "
             "checklist items each may satisfy; any other item rejects them "

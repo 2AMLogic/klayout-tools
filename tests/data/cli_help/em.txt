@@ -1,0 +1,10 @@
+Run a field-solver request: engine geode_fem, solve_mode quasi_static, outputs
+[c], on a caller-supplied mesh. Needs the geode binary (options.geode_binary,
+$KLT_GEODE_BINARY, or PATH). See docs/cli/em.md.
+
+positional arguments:
+  request path to the klt em request JSON
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

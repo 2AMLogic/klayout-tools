@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools._provenance import _combined_content_hash
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -190,6 +191,13 @@ def test_integration_sdf_annotated_run(tmp_path):
     sdf = report["environment"]["sdf"]
     assert sdf["annotated"] is True
     assert sdf["partial"] is False
+    source_paths = [
+        str(tmp_path / name) for name in ("and_cell.v", "and2.v", "tb_and2.v")
+    ]
+    assert report["provenance"]["input"] == {
+        "content_hash": _combined_content_hash(source_paths),
+        "role": "source",
+    }
 
 
 @needs_icarus

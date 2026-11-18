@@ -2501,13 +2501,10 @@ def _port_has_geometry(port: Any) -> bool:
     note rather than crashing (#210)."""
     if not isinstance(port, dict):
         return False
-    if not isinstance(port.get("x_um"), (int, float)) or isinstance(
-        port.get("x_um"), bool
-    ):
-        return False
-    if not isinstance(port.get("y_um"), (int, float)) or isinstance(
-        port.get("y_um"), bool
-    ):
+    # is_finite_number also refuses NaN/+-inf and an int too large for a float
+    # (10**400), which every caller would otherwise hit as an uncaught
+    # OverflowError/ValueError in its position arithmetic (#6539).
+    if not (is_finite_number(port.get("x_um")) and is_finite_number(port.get("y_um"))):
         return False
     layer = port.get("layer")
     return (
