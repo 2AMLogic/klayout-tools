@@ -1,9 +1,13 @@
 """sky130 curated-deck off-grid / corner-angle rules (issue #2642).
 
-Pure move, no behaviour change: split out of :mod:`.sky130` to keep that
-module under its file-size ceiling. ``sky130`` re-exports the public names and
-calls :func:`offgrid_rules` with its own provenance factory (passed in, so
-this module never imports :mod:`.sky130` back).
+Pure move, no behaviour change to DRC verdicts: split out of :mod:`.sky130` to
+keep that module under its file-size ceiling. ``sky130`` re-exports the public
+names and calls :func:`offgrid_rules` with its own provenance factory (passed
+in, so this module never imports :mod:`.sky130` back).
+
+Not a pure move for provenance, though: ``provenance.deck.content_hash`` hashes
+only ``decks/sky130.py``, so the 75 rules built here are no longer covered by
+it (see the "PROVENANCE CAVEAT" below; tracked in #6741).
 """
 
 from __future__ import annotations
@@ -45,10 +49,19 @@ from .sky130_unmodeled import native_output_id
 # `DrcRule(...)` literals: a row-per-source-line table can be diffed directly
 # against that contiguous section of the upstream file, which is the property
 # that makes a transcription of this size reviewable. The rules it builds are
-# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below), and
-# they live in *this* module on purpose -- `decks.deck_source_path()` hashes
-# this file as the deck's identity for `provenance.deck.content_hash`, so a
-# rule table moved to a sibling module would be invisible to that hash.
+# ordinary `DrcRule` entries that `sky130` appends to its `DECK`
+# (`DECK += offgrid_rules(...)`).
+#
+# PROVENANCE CAVEAT -- these rules are **outside** `provenance.deck.content_hash`.
+# The table lives in this sibling module only to keep `sky130.py` under its
+# file-size ceiling (issue #5737). `decks.deck_source_path("sky130")` returns
+# just `decks.sky130`'s own file, and that file's source is what the hash
+# covers, so all 75 rules built here (38 `grid_um` + 37 angle, of the deck's
+# 153) are invisible to it: editing this file -- `OFFGRID_GRID_UM`, a row, an
+# angle limit -- leaves the deck's identity hash byte-identical. The
+# pre-move layout had this table inside the hashed file, so this exposure is
+# new with the move; the same single-module gap already exists for the one-rule
+# `sg13g2_cont_grid` precedent (#5231). Tracked in #6741.
 #
 # Grid: **0.005um for every checked layer**, verbatim -- the source block
 # passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer
@@ -83,8 +96,8 @@ from .sky130_unmodeled import native_output_id
 #    (a corner under 45 degrees is under 90 too), so this can only
 #    under-report, never produce a finding the real deck would not. That is
 #    the same "transcribe the unconditional floor rather than the published
-#    conditional value" pattern this module's own threshold-fidelity note
-#    (see the module docstring, `li1.enclosing.licon1.1`/
+#    conditional value" pattern `sky130`'s own threshold-fidelity note
+#    (see its module docstring, `li1.enclosing.licon1.1`/
 #    `tap.enclosing.licon.1`) already established. These two rules are also
 #    the only ones in this group left `voltage_independent=False`: their
 #    source rule genuinely publishes two columns, so the
