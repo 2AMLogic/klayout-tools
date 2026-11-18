@@ -34,6 +34,7 @@
         },
         "deck": {"type": "string", "description": "Curated engine: the deck name (e.g. `sky130`). `--engine klayout`: the deck script's own path."},
         "engine": {"type": "string", "enum": ["curated", "klayout"], "description": "`klayout` on a `--engine klayout` report; the curated engine omits it."},
+        "environment": {"type": "object", "description": "`--engine klayout` reports only (the curated engine omits it); always present for that engine (issues #4950/#5844), including a run that tolerated a failed deck via `--allow-deck-errors`: `klayout_binary` is the resolved override path when `--klayout-binary`/`$KLT_KLAYOUT_BINARY` was in force, else the PATH-resolved absolute path of the `klayout` that ran (the bare name when nothing on PATH resolves).", "properties": {"klayout_binary": {"type": "string"}}, "additionalProperties": true},
         "dbu_um": {"type": "number", "description": "Database unit in micrometres; violation coordinates are integers in this unit."},
         "status": {"$ref": "#/$defs/status"},
         "violation_count": {"type": "integer", "minimum": 0},
