@@ -30,9 +30,9 @@ and 10"):
   numeric field of a cited envelope for every declared corner. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
-- **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
-  declared cold-start invocation exits ``0``; the PDK name + revision and at
-  least one tool version are pinned.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
 - **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
   declared CI/audit command exits ``0``.
 
@@ -49,7 +49,8 @@ Two failure classes, deliberately distinct:
 
 Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
 :func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
-with. Nothing is normalised.
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
 """
 
 from __future__ import annotations
@@ -60,7 +61,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -82,9 +82,10 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_input import input_binding
 from .signoff_attest_presence import file_check as _file_check
-from .signoff_attest_presence import split_entries
+from .signoff_attest_presence import path_checks, split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -144,9 +145,9 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
-    # Item 2's inventory is optional (issue #4767) and declares only commands;
-    # the stream is always the ``--input`` artifact, never an inventory field.
-    2: frozenset({"checks"}),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),
@@ -403,16 +404,18 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
-    bench_specs: dict[str, Any] = {}
+    bench_extra: dict[str, Any] = {}
     if item == 9:
-        inventory, bench_specs = item9.split_testbenches(
+        inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
-    inventory, presence = split_entries(
+    inventory, presence, yaml_selects = split_entries(
         inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
     )
     seen: dict[str, str] = {}
     normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -422,7 +425,7 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -764,23 +767,6 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -798,7 +784,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -987,11 +973,7 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
-        presence = normalized.get("presence", ())
-        checks.extend(
-            _file_check(root, path, role, presence=path in presence)
-            for path in sorted(normalized[field])
-        )
+        checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
@@ -1047,7 +1029,8 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
@@ -1138,11 +1121,11 @@ def check_attestation(
     plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
-    passing gate. Only the producing build's version strings are excluded
-    from the diff
-    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
-    the inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift.
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried
