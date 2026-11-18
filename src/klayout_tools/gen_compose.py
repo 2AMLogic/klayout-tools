@@ -1068,12 +1068,7 @@ def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
     """
     oriented = dict(port)
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if (
-        not isinstance(x_um, bool)
-        and isinstance(x_um, (int, float))
-        and not isinstance(y_um, bool)
-        and isinstance(y_um, (int, float))
-    ):
+    if is_finite_number(x_um) and is_finite_number(y_um):
         oriented["x_um"], oriented["y_um"] = _apply_orientation_um(
             float(x_um), float(y_um), orientation
         )
@@ -1201,11 +1196,7 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         width_um = raw_port.get("width_um")
         if width_um is not None:
-            if (
-                isinstance(width_um, bool)
-                or not isinstance(width_um, (int, float))
-                or width_um <= 0
-            ):
+            if not is_finite_number(width_um) or width_um <= 0:
                 raise GenComposeError(
                     f"{at} (name '{name}').width_um must be a number > 0"
                 )
@@ -1213,10 +1204,11 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         direction_deg = raw_port.get("direction_deg")
         if direction_deg is not None:
-            if (
-                isinstance(direction_deg, bool)
-                or not isinstance(direction_deg, (int, float))
-                or float(direction_deg) not in (0.0, 90.0, 180.0, 270.0)
+            if not is_finite_number(direction_deg) or float(direction_deg) not in (
+                0.0,
+                90.0,
+                180.0,
+                270.0,
             ):
                 raise GenComposeError(
                     f"{at} (name '{name}').direction_deg must be one of 0, 90, "
@@ -1678,12 +1670,7 @@ def _parse_explicit_xy_map(
             )
         x = raw_pair.get("x")
         y = raw_pair.get("y")
-        if (
-            isinstance(x, bool)
-            or isinstance(y, bool)
-            or not isinstance(x, (int, float))
-            or not isinstance(y, (int, float))
-        ):
+        if not is_finite_number(x) or not is_finite_number(y):
             raise GenComposeError(
                 f"request.placement.{field}['{block_id}'] must have numeric x/y fields"
             )
@@ -1745,12 +1732,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         )
     x = raw_origin.get("x", 0.0)
     y = raw_origin.get("y", 0.0)
-    if (
-        isinstance(x, bool)
-        or isinstance(y, bool)
-        or not isinstance(x, (int, float))
-        or not isinstance(y, (int, float))
-    ):
+    if not is_finite_number(x) or not is_finite_number(y):
         raise GenComposeError(
             "request.placement.origin_um must have numeric x/y fields"
         )
@@ -2027,11 +2009,7 @@ def _parse_width_override(raw_width: Any, where: str) -> float | None:
     """
     if raw_width is None:
         return None
-    if (
-        isinstance(raw_width, bool)
-        or not isinstance(raw_width, (int, float))
-        or raw_width <= 0
-    ):
+    if not is_finite_number(raw_width) or raw_width <= 0:
         raise GenComposeError(f"{where} must be a positive number when given")
     return float(raw_width)
 
@@ -3272,11 +3250,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "'metal') when connectivity[] is non-empty"
             )
         raw_width = routing.get("width_um")
-        if (
-            isinstance(raw_width, bool)
-            or not isinstance(raw_width, (int, float))
-            or raw_width <= 0
-        ):
+        if not is_finite_number(raw_width) or raw_width <= 0:
             raise GenComposeError(
                 "request.routing.width_um is required and must be > 0 when "
                 "connectivity[] is non-empty"
@@ -3341,11 +3315,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     cross_width_floor[0] if cross_width_floor is not None else width_um
                 )
             else:
-                if (
-                    isinstance(raw_cross_width, bool)
-                    or not isinstance(raw_cross_width, (int, float))
-                    or raw_cross_width <= 0
-                ):
+                if not is_finite_number(raw_cross_width) or raw_cross_width <= 0:
                     raise GenComposeError(
                         "request.routing.cross_block_width_um must be a "
                         "positive number when given"
