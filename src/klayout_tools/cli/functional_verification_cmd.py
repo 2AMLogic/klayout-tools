@@ -54,13 +54,16 @@ EXIT_TESTS_FAILED = 3
 def run(args: argparse.Namespace) -> int:
     mutations_path = getattr(args, "mutations", None)
     outdir = getattr(args, "outdir", None)
+    base_dir = getattr(args, "base_dir", None)
     try:
         if mutations_path:
             report = run_functional_verification_with_mutations(
-                args.request, mutations_path, output_dir=outdir
+                args.request, mutations_path, output_dir=outdir, base_dir=base_dir
             )
         else:
-            report = run_functional_verification(args.request, output_dir=outdir)
+            report = run_functional_verification(
+                args.request, output_dir=outdir, base_dir=base_dir
+            )
     except FunctionalVerificationError as exc:
         return emit_error(
             "functional-verification",

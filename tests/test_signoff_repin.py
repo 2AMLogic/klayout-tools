@@ -190,7 +190,7 @@ def test_unpinned_entry_is_never_given_a_pin(attested, capsys):
     assert manifest.read_bytes() == before
 
 
-def test_a_kind_the_grader_does_not_rehash_is_skipped(attested, capsys):
+def test_a_stale_pin_whose_artifact_does_not_resolve_is_skipped(attested, capsys):
     """A pinned ``drc`` report whose artifact does not resolve here.
 
     ``input_verified`` is not ``True``, so the pin -- the manifest author's
@@ -384,6 +384,10 @@ def test_text_mode_says_nothing_to_do(attested, capsys):
         pytest.param(["--manifest", "m.json", "--check", "r.json"], id="check"),
         pytest.param(["--manifest", "m.json", "--describe-grader"], id="describe"),
         pytest.param(["--manifest", "m.json", "e.json"], id="envelope-files"),
+        pytest.param(["--manifest", "m.json", "-o", "out.json"], id="output-short"),
+        pytest.param(
+            ["--manifest", "m.json", "--output", "out.json"], id="output-long"
+        ),
     ],
 )
 def test_usage_errors_return_the_usage_exit_code(extra, capsys, tmp_path, monkeypatch):
@@ -392,6 +396,33 @@ def test_usage_errors_return_the_usage_exit_code(extra, capsys, tmp_path, monkey
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["command"] == "signoff"
     assert "--repin" in error["message"]
+
+
+def test_output_flag_is_refused_not_silently_dropped(attested, capsys):
+    """Issue #6147: ``-o`` under ``--repin`` used to exit 0 and write nothing.
+
+    The user asked for a file and got none, with no warning. ``--repin``
+    renders no report to put in one, so ``-o`` is refused by name (exit 2) --
+    and the refusal comes before the manifest is touched, so a stale pin is
+    still stale afterwards rather than half-repinned.
+    """
+    repo, inventory, envelope, manifest = attested
+    _write_inventory(repo, ["gain", "bw"])
+    assert _attest(inventory, envelope) == 0  # the manifest's pin is now stale
+    before = manifest.read_bytes()
+    out = repo / "repin-report.json"
+
+    capsys.readouterr()
+    code = main(
+        ["signoff", "--repin", "--manifest", str(manifest), "-o", str(out)]
+        + ["--format", "json"]
+    )
+    error = json.loads(capsys.readouterr().err)["error"]
+
+    assert code == 2
+    assert "-o/--output" in error["message"]
+    assert not out.exists()
+    assert manifest.read_bytes() == before
 
 
 def test_unreadable_manifest_is_an_application_error(tmp_path, capsys):

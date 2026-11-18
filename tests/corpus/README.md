@@ -67,6 +67,37 @@ license that covers the rest of this repository (`klayout-tools`' own
 source code); only these specific upstream files carry the Apache-2.0
 license.
 
+## Pinned Tiny Tapeout DRC sample
+
+[`tt_gf0p2_drc_sample.json`](tt_gf0p2_drc_sample.json) records the shuttle
+and project commits, original authors and repositories for the two designs
+selected for issue #5084. PAL is 1×2 in the live index; Dog Battle is 1×1.
+The layouts and Apache-2.0 source archives are fetched at those commits,
+with license provenance recorded in the cache manifests; they are not
+vendored here. Fetches use the corpus fetcher's identifying User-Agent and
+one-second request pacing.
+
+Run the same check as the PR workflow:
+
+```bash
+uv run --frozen python scripts/tt_corpus_sample.py
+```
+
+Live measurement on 2026-11-17, checkout `d87e226ba`, KLayout 0.30.12:
+PAL passed in 118.798 seconds and Dog Battle in 67.967 seconds, both with
+`status: clean` and zero violations (about 3.1 minutes DRC total on the
+shared worker; CI timing may differ).
+
+The adapter runs only `tt_corpus_run.py --stages drc`, prints per-design
+wall time, and requires exactly the sample's records, exit zero, and clean
+DRC envelopes with zero violations. Missing inputs, skipped designs,
+timeouts, findings and partial coverage fail the check. This tests the
+curated gf180mcu deck, not the foundry's full signoff runset. The workflow
+allows 15 minutes total and bounds each design to 300 seconds, saving
+manifests and JSON reports as artifacts even on failure. Extract/LVS await
+the extract-timeout defect (#5893); the full Spot corpus run remains a
+separate increment of #5084.
+
 ## Golden fixtures — `tests/corpus/golden/`
 
 `tests/corpus/golden/<pdk>/<cell>.layers.json` holds the expected

@@ -614,7 +614,7 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
             "'.meas <type> <name> ...' card"
         )
     meas_type, card_name, rest = match.groups()
-    _validate_meas_card(local, card)
+    _validate_meas_card(local, card, control_scope=True)  # issue #5651 lint
     if meas_type.lower() != step["kind"]:
         raise SimError(
             f"step {step['name']!r}: measurement {local!r} is a '.meas "
@@ -717,7 +717,7 @@ def _replace_spectrum(
 ) -> str:
     """One ``<step>.spectrum.<vector>`` reference -> the vector in that
     ``noise`` step's spectrum plot (captured in :func:`control_lines`)."""
-    from .sim import NOISE_SPECTRUM_VECTORS
+    from .sim_noise import NOISE_SPECTRUM_VECTORS
 
     step_ref, qualifier, vec = match.group("step", "meas", "vec")
     text = f"{step_ref}.{qualifier}.{vec}"
