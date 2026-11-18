@@ -56,7 +56,9 @@ binary and identical `0.1.0` version string are **not** guaranteed to report
 the same category set for the same input across time, or across two builds
 snapshotted on different days. `CHANGELOG.md` is the source of truth for
 *which* categories/rule ids exist as of a given date — check it first before
-assuming a category change is a bug.
+assuming a category change is a bug. Record new JSON-visible changes in
+[`changelog.d/`](../changelog.d/README.md) for inclusion in `CHANGELOG.md`
+at release time. Check those fragments for changes pending on `main`.
 
 If a downstream project needs to pin exact reproducibility (e.g. golden
 acceptance data keyed on `category_counts`), key that pin off the shared
