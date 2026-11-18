@@ -8155,12 +8155,12 @@ def test_corner_axis_fields_are_registry_features():
 def test_expr_no_value_offhost_carries_runner_hint():
     report: dict = {}
     corners = [{"measurements": [{"name": "v", "value": None}]}]
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
     )
     assert report["diagnostics"][0]["code"] == "expr_runner_may_predate"
     local: dict = {}
-    sim._attach_expr_runner_hint(
+    sim._attach_runner_hints(
         local, [{"name": "v", "expr": "v(out)"}], corners, backend="local"
     )
     assert local == {}
