@@ -137,8 +137,8 @@ klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format t
   truncate a previous good one. The write is atomic (temp file +
   rename). The bytes are always plain JSON, whatever the file's suffix:
   unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
-  compressed, and `--check` reads these envelopes as plain JSON only —
-  do not compress one by hand. Refused without
+  compressed. `--check` accepts both plain JSON and reports compressed by
+  the caller, detecting gzip by contents rather than suffix. Refused without
   `--attest`/`--manifest`/`--fleet`, and together with `--check` or `--repin`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
@@ -695,7 +695,7 @@ the answer to "was that hash checked against the artifact itself?"
 | ----- | ------- |
 | `true` | The input artifact the envelope names was found, re-hashed (`sha256`, the same digest the producing run recorded), and **matches**. The freshness claim is anchored to a file. |
 | `false` | The artifact was found and re-hashed, and it **disagrees** with the hash the envelope recorded — the report describes a revision that is no longer on disk. |
-| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). |
+| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context — including one git does not track (see the index basis below). A `generic`/`model-run` envelope that *declares* a `content_hash` but names nothing verification can answer (no usable `path`, and no `paths` set that answered through its members) additionally carries `input_verified_note: "declared_hash_unbound"` — see below. |
 
 ```
 $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | .citation | {content_hash, input_verified}'
@@ -709,6 +709,23 @@ $ klt signoff --manifest manifest.json --format text
         cite: lvs.json (kind=lvs, status=match, content_hash=sha256:..., exit_status=0)
         input: CHANGED -- the artifact this envelope names no longer matches the content_hash it recorded
 ```
+
+**A declared hash nobody checked (issue #6403).** `input_verified: null`
+also covers the case where a `generic`/`model-run` envelope *declares*
+`provenance.input.content_hash` but names nothing verification can answer:
+no usable `provenance.input.path` (`null` or `scope: "external"`), or a
+`provenance.input.paths` set that never answered — malformed, empty, or on
+a `model-run` envelope, whose set is not verified through its members.
+That declaration is silently never re-hashed — the opt-in is `path`-keyed
+by design — yet it reads as a binding, indistinguishable in the citation
+from an envelope declaring no hash at all. Those citations carry the
+additive `input_verified_note: "declared_hash_unbound"` beside the
+unchanged `input_verified: null` (a single string token, never consulted
+by any grading rule, no `schema_version` bump), and the text report prints
+an `input note:` line under the `input:` one. A well-formed `paths` set
+answers through its members, and a declared `path` that merely fails to
+resolve here was grader-tried — neither is unbound, and both keep the
+plain `null`.
 
 **Which artifact is re-hashed** is the one the producing run pinned into
 `provenance.input`, named by the field that run echoes it back under — never
@@ -1129,8 +1146,8 @@ The file is written only after a successful render (exit `0` for T1, `3`
 below T1 — both are verdicts of record), only if its bytes changed, and
 atomically; it always receives JSON, whatever `--format` says. Those bytes
 are plain JSON whatever the file's suffix — a `.gz` name is not compressed,
-unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), and `--check` reads the
-committed report as plain JSON only. The same
+unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041). `--check` also accepts a
+committed report compressed by the caller, detecting gzip by contents. The same
 `-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
 the committed file untouched, so a make-style pipeline can re-run freely:
 
@@ -1645,7 +1662,9 @@ binding an author-written inventory leaves member edits undetected. Issue
 #3044 adds an optional `provenance.input.paths` for these: a non-empty list
 of members, each `{"path": <string | {"path", "scope": "repo"}>,
 "content_hash": "sha256:..."}`, with `path` resolved exactly as
-`provenance.input.path` is (including `--repo-root`).
+`provenance.input.path` is (including `--repo-root`). Members may also include
+an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
+or declared generator input.
 
 ```json
 "input": {
@@ -1967,7 +1986,9 @@ member is named in `detail.artifact_binding.members`) without running
 
 Every `hygiene` path is hashed as raw bytes (`sha256-raw-bytes`) and bound
 into the envelope, so any byte change to a listed file turns the committed
-envelope stale (`stale_evidence`, or a `--check` diff).
+envelope stale (`stale_evidence`, or a `--check` diff) — unless the entry
+declares `attest: "yaml"` (two paragraphs down), which binds the file's
+canonical parse instead.
 
 **List only repo-owned evidence:** the README, the spec table, the LICENSE,
 and a CI workflow whose content the repo owner wrote. **Do not list paths
@@ -1979,8 +2000,10 @@ change. The rule is about resync-managed *content*: a repo-owned workflow
 that a resync does not touch may still be listed even if Loom also installs
 other workflows. `--attest` does not hash "the file minus managed blocks".
 If the file's *presence* is what you want to attest and its content churns
-independently, list it presence-only instead (next paragraph); otherwise list
-fewer files.
+independently, list it presence-only instead (next paragraph); if it is a
+YAML workflow whose *behaviour* you want to pin while comments and
+reformatting churn, list it `attest: "yaml"` (the paragraph after next);
+otherwise list fewer files.
 
 **Presence-only entries (issue #5615).** A `hygiene` entry may be the object
 form `{"path": "<repo-relative>", "attest": "presence"}` alongside a bare
@@ -1995,6 +2018,39 @@ drift until re-attested once. The option is accepted only on item 10
 `hygiene`: item 1 `sources` are re-hashed into the input binding regardless,
 and an item 9 bench *is* the attested file, so `attest` there is refused
 (exit `1`), as is an unknown key, an unknown value, or an entry without `path`.
+
+**Canonical-YAML entries (issue #5862).** A `hygiene` entry may declare
+`{"path": "<repo-relative>", "attest": "yaml", "select"?: "<dotted path>"}`.
+The entry's `present` check binds the file by its **canonical parse** under
+the named algorithm `sha256-canonical-yaml-v1` (parsed with `yaml.safe_load`,
+mapping keys type-tagged so a workflow's YAML-1.1 boolean `on:` key sorts
+beside string keys, then serialised with sorted keys and compact separators):
+a comment-only, whitespace-only, key-reorder or anchor/alias refactor of the
+file is not drift, while every change to a key or value still is. That is
+the right pin for `.github/workflows/ci.yml` — the file that *runs* the
+attestation, where `presence` could not catch a `continue-on-error: true`
+added to the signoff job, a removed step or a changed command. `select`
+(optional) hashes only the named subtree (`jobs.signoff`, say), so edits to
+unrelated jobs are not drift either; a segment that is absent, or an
+intermediate that is not a mapping, is an error at attest time (exit `1`),
+never a silently empty hash. A `yaml` check records `attest`, `select`
+(when given) and its own `hash_algorithm` beside `content_hash`, plus the
+raw bytes as an informational `raw_content_hash`: when the raw bytes differ
+but the canonical hash matches, `--attest --check` still reports `match`
+(exit `0`) and adds a live `notes` entry (text: a `[NOTE]` line) — the note
+is not drift, and `raw_content_hash` is excluded from the diff. The
+`--manifest` re-hash (issue #4197) re-hashes the canonical form too, so the
+row stays `met` for a comment edit and `stale_evidence` for a semantic one.
+An unparseable or multi-document file is an attest-time error (exit `1`)
+naming the path — never a fallback to byte-hashing — and a build that does
+not read `attest: "yaml"` refuses it explicitly (exit `1`, naming the
+accepted values) rather than byte-hashing it. As with `presence`, the option
+is accepted only on item 10 `hygiene` (items 1/9 refuse it, exit `1`),
+`select` is accepted only with `attest: "yaml"`, and flipping an entry's
+mode or `select` is drift until re-attested once. A dotted `select` cannot
+name a key containing a `.` or the boolean `on:` key, and PyYAML keeps the
+last duplicate key, so an edit to a shadowed duplicate can be invisible to
+the canonical hash — accepted limitations of a parse-based pin.
 
 **Listed files must be stable by construction (issue #5603).** A `hygiene`
 path is bound by its full bytes, so a listed file must change only when the
@@ -2204,11 +2260,11 @@ attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
 generator nor verifies that the stream regenerates from the inputs (declare a
 `checks` command for that).
 
-`inputs` composes with repeated `--input`. It also composes with `--generator` /
-`--regenerated-hash` on a single stream, with one caveat: the grader compares
-`regenerated_hash` to the *bound* hash, which for an envelope that declares
-`inputs` is the set digest (`provenance.input.content_hash`), not the bare
-stream hash, and a `geometry` hash kind is unavailable for a set binding.
+`inputs` composes with repeated `--input`. For a single stream with
+`--generator` and `--regenerated-hash`, use `--hash-kind bytes` (the default)
+with the set digest (`provenance.input.content_hash`). A bare stream hash
+grades `unmet` / `stale_artifact`. `klt signoff --attest 2` refuses
+`--hash-kind geometry` with an inventory declaring `inputs` (exit `1`).
 
 > **Pin change.** An item-2 envelope that declares `inputs` reports
 > `provenance.input.paths` plus a set digest instead of a single
@@ -2335,7 +2391,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
-| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift |
+| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -2694,7 +2750,11 @@ when the run did not succeed, for example a `gh run view` query:
   "schema_version": 1,
   "kind": "t1-attestation-inventory",
   "t1_item": 10,
-  "hygiene": ["README.md", "LICENSE", ".github/workflows/ci.yml"],
+  "hygiene": [
+    "README.md",
+    "LICENSE",
+    {"path": ".github/workflows/ci.yml", "attest": "yaml", "select": "jobs.signoff"}
+  ],
   "checks": [
     {"name": "lint", "argv": ["uv", "run", "ruff", "check", "."]},
     {"name": "ci-run", "argv": ["sh", "scripts/ci-run-succeeded.sh"]}
@@ -3208,9 +3268,9 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
   "build_skew": {
-    "state": "build_only",
+    "state": "ruleset",
     "fields": [
-      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+      { "field": "build.grading_ruleset_id", "committed": "sha256:…", "fresh": "sha256:…" }
     ]
   },
   "fresh": { "…": "the full freshly-graded report" }
@@ -3224,16 +3284,30 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
-- **`build_skew` names version skew without grading it** (issue #5868).
-  `--check` is the version-tolerant freshness gate; a raw diff of two
-  `--format json` renders is not, because the `build` block differs whenever
-  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
-  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
-  (`build.grading_ruleset_id` moved: graded under different rules, not just
-  rendered by a different build) or `"unknown"` (the committed report has no
-  `build` block). `fields` lists each differing field. It never changes
-  `status` or the exit code, and `--format text` prints one `build_skew:` line
-  when the state is `build_only` or `ruleset`.
+- **`build_skew` names build-block skew without grading it** (issues
+  #5868, #5852). `--check` is the version-tolerant freshness gate; a raw
+  diff of two `--format json` renders is not, because the `build` block
+  differs whenever the rendering klt differs. `build_skew.state` is
+  `"same"`, `"build_only"` (some `build.*` field moved, the grading
+  ruleset did not), `"ruleset"` (`build.grading_ruleset_id` moved: graded
+  under different rules, not just rendered by a different build),
+  `"unverifiable"` (at least one side's identity cannot be resolved
+  honestly — no `version`, or a `+unknown` one from a source-tarball
+  install — so neither `"same"` nor a difference state is an assertion the
+  evidence supports; two `+unknown` builds that agree on every recorded
+  field would otherwise read as `"same"`) or `"unknown"` (the committed
+  report has no `build` block). `"unverifiable"` takes precedence over
+  `"build_only"` and `"ruleset"`: a `+unknown` side that also moved
+  `build.grading_ruleset_id` reads `"unverifiable"`, so a consumer that
+  alarms specifically on a ruleset move must also look for
+  `build.grading_ruleset_id` in `fields`. `fields` lists each differing
+  field, kept even under `"unverifiable"` — there it is what the recorded
+  values say, not a claim. It never changes `status` or the exit code, and `--format
+  text` prints one `build_skew:` line when the state is `build_only`,
+  `ruleset` or `unverifiable`. This one field is the whole report-only
+  story of the excluded `build` block: gate on `.build_skew.state` — a
+  consumer that wants to warn (or fail) on "committed by a different
+  build" reads it; nothing else carries that fact.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
@@ -3300,7 +3374,9 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report and from `--describe-grader`.
+  embedded `fresh` report, named (with the rest of the build identity) in
+  the response's `build_skew.fields` when it moved, and reported by
+  `--describe-grader`.
 
 ```bash
 # Fail on evidence drift; warn on a reworded checklist.
@@ -4424,7 +4500,15 @@ names when the evidence sits outside any checkout — mirroring `klt
 sim`'s `netlist`) — never a raw absolute host path, for the same reason
 `repo_relative_path` never emits one for `scope: "external"`. Omitting
 `provenance.input.path` is unaffected either way: `input_verified` stays
-`null`, exactly as it always has for `generic`. This is purely additive —
+`null`, exactly as it always has for `generic` — and since issue #6403 a
+citation whose envelope declared a `content_hash` but names nothing
+verification can answer (`null` and `scope: "external"` count as no usable
+`path`; an empty string declares nothing; a `paths` set counts as answered
+only when its members were verified — a malformed, empty, or `model-run`
+set never is) also carries the additive
+`input_verified_note: "declared_hash_unbound"`, so a declared-but-never-
+checked hash is visible in the rendered report instead of reading as
+absent. This is purely additive —
 no `schema_version` bump, and it changes no item's `met`/`unmet` verdict
 (see "No verdict changes" below); it only makes `input_verified: true`/
 `false` *reachable* for item 8's characterization-report evidence, the one

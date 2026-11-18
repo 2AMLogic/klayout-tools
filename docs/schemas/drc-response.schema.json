@@ -116,7 +116,8 @@
             "layout_content_hash": {"type": ["string", "null"]},
             "pdk": {"type": ["object", "null"]},
             "klt_version": {"type": ["string", "null"]},
-            "klayout_version": {"type": ["string", "null"]},
+            "klayout_version": {"type": ["string", "null"], "description": "KLayout version of the curated engine (the pip wheel)."},
+            "native_klayout_version": {"type": ["string", "null"], "description": "KLayout version of the native engine (the standalone binary's own `-v`); may differ from klayout_version."},
             "curated_deck": {"type": ["object", "null"]},
             "native_deck": {"type": ["object", "null"]}
           },
