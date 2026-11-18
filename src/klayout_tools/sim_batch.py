@@ -267,6 +267,12 @@ from .sim_batch_contract_worker import (  # noqa: F401
     par_backend_preflight_lines,
     runner_ngspice_init,
 )
+from .sim_batch_job_timeout import (
+    _resolve_job_ceiling_check,
+    _resolve_max_units_per_job,
+    assess_caller_job_timeout,
+    resolve_job_timeout_s,
+)
 
 # --------------------------------------------------------------------------- #
 # Configuration resolution (nothing secret, nothing hardcoded)
@@ -304,6 +310,10 @@ class BatchConfig:
     #: ``request.batch.max_concurrent_jobs`` (issue #3914): opt-in bound on
     #: the shard jobs in flight at once; ``None`` submits all at once.
     max_concurrent_jobs: int | None = None
+    #: ``request.batch.job_timeout_s`` (issue #5544): the caller's stated
+    #: wall bound for one job; ``None`` -- the default -- keeps the
+    #: fully-serial upper bound.
+    job_timeout_s: float | None = None
     #: ``request.batch.interrupted_grace_s`` (issue #2992); ``0`` disables.
     interrupted_grace_s: float = DEFAULT_INTERRUPTED_GRACE_S
     #: Pre-launch ``warn`` diagnostic for request features the manifest's
@@ -667,6 +677,7 @@ def _resolve_batch_config(
     job_ceiling_check = _resolve_job_ceiling_check(batch_spec)
     max_units_per_job = _resolve_max_units_per_job(batch_spec, job_ceiling_check)
     max_concurrent_jobs = _resolve_max_concurrent_jobs(batch_spec)
+    job_timeout_s = resolve_job_timeout_s(batch_spec)
     config = BatchConfig(
         provision_script=provision_script,
         bucket=bucket,
@@ -693,7 +704,9 @@ def _resolve_batch_config(
         poll_timeout_s=float(
             batch_spec.get(
                 "poll_timeout_s",
-                _default_batch_poll_timeout_s(corner_count, timeout_s),
+                _default_batch_poll_timeout_s(
+                    corner_count, timeout_s, job_timeout_s=job_timeout_s
+                ),
             )
         ),
         capacity_wait_s=capacity_wait_s,
@@ -703,6 +716,7 @@ def _resolve_batch_config(
         job_ceiling_check=job_ceiling_check,
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
+        job_timeout_s=job_timeout_s,
         interrupted_grace_s=_resolve_interrupted_grace_s(batch_spec),
     )
     # Issue #2851: compare the runner klt the AMI manifest publishes with
@@ -988,22 +1002,6 @@ def _resolve_max_job_seconds(
     return DEFAULT_BATCH_MAX_JOB_SECONDS, "default"
 
 
-def _resolve_job_ceiling_check(batch_spec: dict[str, Any]) -> str:
-    """``request.batch.job_ceiling_check``: ``"warn"`` (default),
-    ``"enforce"`` or ``"split"`` (issue #3446), else
-    :class:`~klayout_tools.sim.SimError` before any S3 write (issue #2833)."""
-    from .sim import SimError
-
-    value = batch_spec.get("job_ceiling_check", "warn")
-    if value not in JOB_CEILING_CHECK_MODES:
-        raise SimError(
-            "request.batch.job_ceiling_check must be one of "
-            f"{', '.join(repr(m) for m in JOB_CEILING_CHECK_MODES)} "
-            f"(got {value!r})"
-        )
-    return value
-
-
 def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
     """``request.batch.max_concurrent_jobs`` (issue #3914): a positive integer
     bound on the shard jobs in flight at once, else
@@ -1018,35 +1016,6 @@ def _resolve_max_concurrent_jobs(batch_spec: dict[str, Any]) -> int | None:
             "request.batch.max_concurrent_jobs must be a positive integer "
             f"(got {value!r})",
             code=BATCH_MAX_CONCURRENT_CODE,
-        )
-    return value
-
-
-def _resolve_max_units_per_job(
-    batch_spec: dict[str, Any], job_ceiling_check: str
-) -> int | None:
-    """``request.batch.max_units_per_job`` (issue #3446): a positive integer
-    cap on the units of one job, which opts the request into splitting;
-    else :class:`~klayout_tools.sim.SimError` before any S3 write. Combining
-    it with ``job_ceiling_check: "enforce"`` is contradictory (one refuses
-    an over-ceiling request, the other splits it) and is refused."""
-    from .sim import SimError
-
-    value = batch_spec.get("max_units_per_job")
-    if value is None:
-        return None
-    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise SimError(
-            "request.batch.max_units_per_job must be a positive integer "
-            f"(got {value!r})",
-            code=BATCH_MAX_UNITS_CODE,
-        )
-    if job_ceiling_check == "enforce":
-        raise SimError(
-            "request.batch.max_units_per_job splits an over-ceiling request "
-            'and cannot be combined with job_ceiling_check "enforce", which '
-            'refuses it; use "warn" or "split"',
-            code=BATCH_MAX_UNITS_CODE,
         )
     return value
 
@@ -1102,10 +1071,21 @@ def _assess_job_ceiling(
     ``max_units_per_job`` is the largest shard whose own bound stays within
     the ceiling (``0`` when even one unit's bound exceeds it), and
     ``recommended_hosts`` the smallest ``remote.hosts`` whose largest shard
-    (:func:`sim_remote._shard_corner_points` balances shards to at most
-    ``ceil(units / hosts)``) fits it, or ``None`` when no ``hosts`` value
-    can. An exceeded ceiling also carries a human-readable ``warning``.
+    -- :func:`sim_remote._shard_corner_points` balances shards to at most
+    ``ceil(units / hosts)`` -- fits it, or ``None`` when no ``hosts`` value
+    can (lower ``options.timeout_s`` instead). When the bound exceeds the
+    ceiling the result carries a human-readable ``warning``.
+
+    ``config.job_timeout_s`` (issue #5544) replaces the whole assessment:
+    :func:`sim_batch_job_timeout.assess_caller_job_timeout` defines every
+    field from the caller's stated bound instead of this serial formula.
     """
+    if getattr(config, "job_timeout_s", None) is not None:
+        return assess_caller_job_timeout(
+            unit_count=unit_count,
+            per_unit_timeout_s=per_unit_timeout_s,
+            config=config,
+        )
     units = max(1, unit_count)
     ceiling = config.max_job_seconds
     bound = _default_batch_job_timeout_s(units, per_unit_timeout_s)
@@ -2818,6 +2798,7 @@ def _prepare_batch_job_spec(
         netlist_path,
         corner_count=corner_count,
         timeout_s=timeout_s,
+        job_timeout_s=config.job_timeout_s,
         keep_artifacts=keep_artifacts,
         request_dir=request_dir,
         version_check=config.runner_version_check,
@@ -2959,7 +2940,7 @@ class _ShardManifest:
     def path(self) -> str:
         return self._path
 
-    def record(self, index: int, job_id: str, units_sha256: str) -> None:
+    def record(self, index: int, job_id: str, units_sha256: str, **extra: Any) -> None:
         with self._lock:
             self._entries[str(index)] = {
                 "index": index,
@@ -2970,6 +2951,7 @@ class _ShardManifest:
                 "launch_started_at": None,
                 "launched_at": None,
                 "collected_at": None,
+                **{k: v for k, v in extra.items() if v is not None},
             }
             self._flush_locked()
 
@@ -3687,17 +3669,21 @@ def _open_shard_manifest(
 
 
 def _prerecord_shards(
-    manifest: _ShardManifest | None, shard_indexes: dict[str, int]
+    manifest: _ShardManifest | None,
+    shards: Sequence[Sequence[CornerPoint]],
 ) -> None:
-    """Give every shard an entry before the first one is submitted (issue
-    #3896), so a client stopped mid-run leaves a record of the shards it
-    never reached, not only of those it got to."""
+    """Pre-record every non-empty shard's entry and ``units`` ids (#3896/#5775)."""
     if manifest is None:
         return
-    for digest, index in shard_indexes.items():
+    for index, points in enumerate(shards):
+        if not points:
+            continue
+        digest = _units_digest(points)
         prior = manifest.prior.get(str(index))
         if prior is None or prior["units_sha256"] != digest:
-            manifest.record(index, new_job_id(), digest)
+            manifest.record(
+                index, new_job_id(), digest, units=[p.corner_id for p in points]
+            )
 
 
 def _warn_unlaunched(manifest: _ShardManifest | None, hosts: int) -> None:
@@ -3902,7 +3888,7 @@ class _BatchFleetRun:
         *,
         config: BatchConfig,
         manifest: _ShardManifest | None,
-        shard_indexes: dict[str, int],
+        shards: Sequence[Sequence[CornerPoint]],
         netlist_path: str,
         timeout_s: float,
         keep_artifacts: bool,
@@ -3920,7 +3906,7 @@ class _BatchFleetRun:
         self.job_observer = sim_batch_observer.current_job_observer()
         self.config = config
         self.manifest = manifest
-        self.shard_indexes = shard_indexes
+        self.shard_indexes = {_units_digest(p): i for i, p in enumerate(shards) if p}
         self.netlist_path = netlist_path
         self.timeout_s = timeout_s
         self.keep_artifacts = keep_artifacts
@@ -3932,9 +3918,9 @@ class _BatchFleetRun:
         self.started = time.monotonic()
         self.abort = threading.Event()
         self.budget_spent = threading.Event()
-        self.watch = _CapacityWatch(len(shard_indexes))
+        self.watch = _CapacityWatch(len(self.shard_indexes))
         if manifest is not None:
-            for index in shard_indexes.values():
+            for index in self.shard_indexes.values():
                 prior = manifest.prior.get(str(index))
                 self.watch.seed(index, None if prior is None else prior.get("state"))
         self.abortable_sleep = _abortable_sleep(self.abort)
@@ -4102,7 +4088,9 @@ class _BatchFleetRun:
         if job_id is None:
             job_id = new_job_id()
             if manifest is not None:
-                manifest.record(index, job_id, digest)
+                manifest.record(
+                    index, job_id, digest, units=[p.corner_id for p in shard_points]
+                )
         result = self._run_job(shard_points, job_id, attach=False, index=index)
         _mark_collected(manifest, index, result)
         return _mark_resumed(result, False)
@@ -4193,19 +4181,15 @@ def _run_batch_fleet(
     manifest = _open_shard_manifest(
         artifacts_dir, shard_fingerprint, hosts, resume=resume, config=config
     )
-    shard_indexes = {
-        _units_digest(points): index
-        for index, points in enumerate(_shard_corner_points(corner_points, hosts))
-        if points
-    }
+    shards = _shard_corner_points(corner_points, hosts)
     if not attach_only:
         _stage_job_closure_once(request, netlist_path, request_dir)
-        _prerecord_shards(manifest, shard_indexes)
+        _prerecord_shards(manifest, shards)
 
     fleet = _BatchFleetRun(
         config=config,
         manifest=manifest,
-        shard_indexes=shard_indexes,
+        shards=shards,
         netlist_path=netlist_path,
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
@@ -4304,11 +4288,8 @@ def _submit_batch_shards(
     )
     assert manifest is not None
     shards = _shard_corner_points(corner_points, hosts)
-    shard_indexes = {
-        _units_digest(points): index for index, points in enumerate(shards) if points
-    }
     _stage_job_closure_once(request, netlist_path, request_dir)
-    _prerecord_shards(manifest, shard_indexes)
+    _prerecord_shards(manifest, shards)
     identities: list[dict[str, Any]] = []
     unit_start = 0
     for index, points in enumerate(shards):
