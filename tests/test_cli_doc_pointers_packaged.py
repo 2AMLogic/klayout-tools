@@ -66,6 +66,7 @@ _CONTRACT_DOC_SIBLINGS = {
         "json-contract.md",
     },
     "releasing-native.md": set(),
+    "design-evidence-tiers.md": set(),
 }
 _SIBLING_LINK = re.compile(r"\]\(\.\./([A-Za-z0-9._-]+\.md)(?:#[^)]*)?\)")
 _OWN_SIBLING_LINK = re.compile(r"\]\(([A-Za-z0-9._-]+\.md)(?:#[^)]*)?\)")

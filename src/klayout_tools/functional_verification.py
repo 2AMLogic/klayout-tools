@@ -232,7 +232,7 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
-    _drop_sdf_zero_delay_bus_port_source_interconnects,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
     _parse_toplevel_parameters,
@@ -248,12 +248,18 @@ from .functional_verification_sdf import (
     _write_sdf_dut_wrapper,  # noqa: F401
 )
 from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scopes
+from .functional_verification_sdf_internal_bus import (
+    SDF_INTERNAL_BUS_NET_REASONS,
+    _apply_sdf_internal_bus_net_drop,
+)
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
 )
 from .functional_verification_sdf_steps import (
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
@@ -412,17 +418,6 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
-#: ``INTERCONNECT`` entries removed before annotation because they run from a
-#: bit-selected top-level input port (any destination not already claimed by
-#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
-#: corner. Icarus can fail to insert an intermodpath for such a source
-#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
-#: dropping it cannot change simulated timing. Issue #2984's counted
-#: exemption; a non-zero entry of the same shape is left in place and still
-#: fails loudly. Pre-dropped from the SDF text, not derived from a
-#: diagnostic substring.
-SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
-
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -559,6 +554,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "fails loudly"
     ),
     **SDF_COND_EXPRESSION_REASONS,
+    **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
@@ -668,9 +664,8 @@ _REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
-    """Shared shape check for a JSON-decoded request, however it was sourced
-    (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
-    object" error for context."""
+    """Shared shape check for a JSON-decoded request, however sourced;
+    ``source`` is folded into the "must be a JSON object" error."""
     doc = _shared_validate_request_shape(
         data,
         source,
@@ -693,25 +688,29 @@ def load_request(request_path: str) -> dict[str, Any]:
     Raises :class:`FunctionalVerificationError` if the file is missing/
     unreadable, not valid JSON, or missing a required top-level field
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
-    ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
-    own ``load_request`` (user-authored input, never emitted by this tool).
+    ``schema`` field (user-authored input, never emitted by this tool).
     """
     request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
-    three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
-    JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
-    verb composes into ``klt eval``'s descriptor unchanged.
+    three forms ``klt lvs``'s own ``request`` argument accepts, so this
+    verb composes into ``klt eval``'s descriptor unchanged. ``base_dir``
+    optionally overrides that anchor so a request archived beside an
+    evidence record re-runs from the directory its paths were written
+    against (issue #5673); it must exist and be a directory.
     """
     doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
     return _require_sources(doc), request_dir
 
@@ -2485,46 +2484,15 @@ def _apply_sdf_physical_only_drop(
     return new_path
 
 
-def _apply_sdf_bus_port_source_drop(
-    annotate_source_path: str,
-    output_dir: str,
-    ports: list[tuple[str, str, str]],
-    sdf_pre_dropped_counts: dict[str, int],
-) -> str:
-    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
-    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
-    function for the same reason (no new branch in
-    :func:`run_functional_verification`). Runs after the physical-only pass,
-    so entries that pass claimed keep their class and are not double counted.
-    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
-
-    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
-    a new normalized-copy path otherwise.
-    """
-    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
-        annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
-    )
-    if drop is None:
-        return annotate_source_path
-    text, count = drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
-    return new_path
-
-
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
 
 def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
-    """Directory run artifacts are written to: ``output_dir`` (relative paths
-    resolve against the cwd, not the request directory) or, by default,
-    ``<request_dir>/.klt/functional-verification``.
-    """
+    """Directory run artifacts are written to: ``output_dir`` (relative
+    paths resolve against the cwd) or, by default,
+    ``<request_dir>/.klt/functional-verification``."""
     if output_dir:
         return os.path.abspath(output_dir)
     return os.path.join(request_dir, ".klt", "functional-verification")
@@ -2540,29 +2508,27 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str, output_dir: str | None = None, base_dir: str | None = None
 ) -> dict[str, Any]:
-    """Run the cocotb regression declared by ``request``.
+    """Run the cocotb regression declared by ``request`` -- accepting the
+    same three forms every other ``klt`` request argument does (see
+    :func:`load_request_arg`).
 
-    ``request`` accepts the same three forms every other ``klt`` request
-    argument does (see :func:`load_request_arg`): a path to a request JSON
-    file, ``"-"`` to read the request from stdin, or an inline JSON object
-    string.
+    ``base_dir`` optionally overrides that anchor (issue #5673): every
+    relative path (and the default artifact directory) resolves against
+    it, as the stdin form anchored there would; it must be a directory.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/functional-verification.md``). Raises
     :class:`FunctionalVerificationError` for anything that prevents a
-    trustworthy verdict from being produced at all -- a failing *test* is
-    never an error, it is ``status: "fail"`` in the returned report (which
-    the CLI turns into exit code 3).
+    trustworthy verdict -- a failing *test* is ``status: "fail"`` (exit 3).
 
-    Artifacts (the build directory, the raw ``results.xml``, the engine
-    transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
+    Artifacts (build directory, raw ``results.xml``, engine transcripts,
+    coverage ``.info``) are written to ``.klt/functional-verification/``
+    next to the request file (or under ``base_dir``) -- the same default
+    ``klt sim``/``klt synthesize`` use -- and kept, never deleted.
     """
-    request_doc, request_dir = load_request_arg(request)
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = _resolve_engine(request_doc)
@@ -2848,6 +2814,19 @@ def run_functional_verification(
         # dropping them is timing-neutral; non-zero ones stay and still fail.
         annotate_source_path = _apply_sdf_bus_port_source_drop(
             annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
+        )
+
+        # Issue #6075: the same cap also bites bit-selected INTERNAL nets,
+        # where Icarus inserts no survivor at all (0-of-N at any fanout).
+        # Both endpoints are instance pins here, so neither sibling pass
+        # above can have claimed these entries; the decision reads the same
+        # gate-level parse, and the zero-delay bound is the same.
+        annotate_source_path = _apply_sdf_internal_bus_net_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
