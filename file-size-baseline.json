@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5078
+      "lines": 5075
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
