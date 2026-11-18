@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from klayout_tools.cli import main
 from test_deck_diff import _report, _rule
 
@@ -137,6 +139,42 @@ def test_cli_text_rendering(tmp_path, capsys):
     assert "enforcement changed: poly.space.1 enforced -> unmodeled" in text
 
 
+def test_cli_text_rendering_deck_level_not_comparable_and_containers(tmp_path, capsys):
+    # Two different revisions (distinct content hashes), the newer one a
+    # later schema: a deck-level move, a field and an envelope field the
+    # older report predates, and a container-valued rule field.
+    a = _save(tmp_path / "a.json", _report())
+    b = _save(
+        tmp_path / "b.json",
+        _report(
+            content_hash="sha256:" + "b" * 64,
+            schema_version=2,
+            nominal_dbu_um=0.001,
+            density_window_um=5.0,
+            rules=[_rule(layers=["poly.drawing", "li1.drawing"], notes="new")],
+        ),
+    )
+
+    assert main(["deck", "diff", "--from", a, "--to", b]) == 3
+    text = capsys.readouterr().out
+    # Different revisions: the "same revision" line is not printed.
+    assert "same revision" not in text
+    assert "deck-level: nominal_dbu_um: 0.005 -> 0.001" in text
+    assert "not comparable (envelope): density_window_um" in text
+    assert "not comparable: poly.width.1 field notes" in text
+    # Containers render as sorted-key JSON, scalars as repr().
+    assert '  layers: ["poly.drawing"] -> ["poly.drawing", "li1.drawing"]' in text
+
+
+def test_cli_text_rendering_same_revision_identical(tmp_path, capsys):
+    a = _save(tmp_path / "a.json", _report())
+    b = _save(tmp_path / "b.json", _report())
+    assert main(["deck", "diff", "--from", a, "--to", b]) == 0
+    text = capsys.readouterr().out
+    assert "same revision: content_hash is identical on both sides" in text
+    assert "no differences" in text
+
+
 # --------------------------------------------------------------------------- #
 # CLI wiring: the literal `installed` side
 # --------------------------------------------------------------------------- #
@@ -197,6 +235,33 @@ def test_cli_both_sides_installed_without_deck_errors(capsys):
     )
     err = json.loads(capsys.readouterr().err)
     assert "--deck" in err["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        (None, "cannot read saved report"),
+        ("{not json", "is not valid JSON"),
+        ('{"hello": "world"}', "carries no deck name"),
+        ("[]", "carries no deck name"),
+    ],
+    ids=["missing", "invalid-json", "no-deck-field", "not-an-object"],
+)
+def test_cli_installed_side_needs_a_usable_saved_report_for_its_deck(
+    tmp_path, capsys, content, expected
+):
+    # With no --deck, the `installed` side takes its deck name from the other
+    # side's saved report, so that report must be readable and name a deck.
+    saved = tmp_path / "saved.json"
+    if content is not None:
+        saved.write_text(content)
+    rc = main(
+        ["deck", "diff", "--from", str(saved), "--to", "installed", "--format", "json"]
+    )
+    assert rc == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "deck diff"
+    assert expected in err["error"]["message"]
 
 
 def test_cli_installed_side_unknown_deck_errors(tmp_path, capsys):

@@ -14,10 +14,10 @@ changed here — one entry per resource, with impact links — is indexed in
 **`cli/` reflects `main`, not necessarily the latest PyPI release.** A verb
 documented under `cli/` can land on `main` before it ships in a tagged
 release — check [`RELEASING.md`](../RELEASING.md)'s "Release cadence"
-section for the policy bounding that gap, and
-[`CHANGELOG.md`](../CHANGELOG.md)'s `## Unreleased` section for exactly
-what has landed since the latest tag, before assuming a `cli/` page
-describes what `pip install`/`uv tool install klayout-tools` gives you today.
+section for the policy bounding that gap. Pending changes are recorded in
+[`changelog.d/`](../changelog.d/) and in existing `## Unreleased` entries in
+[`CHANGELOG.md`](../CHANGELOG.md). Release preparation folds both into the
+new version's `CHANGELOG.md` section.
 
 ## Layout
 

@@ -24,6 +24,13 @@ dependencies = [
     # Backs `klt kb validate` (src/klayout_tools/kb.py), so it's a runtime
     # dependency, not dev-only -- it was dev-only before that command existed.
     "jsonschema>=4.0",
+    # Backs `attest: "yaml"` hygiene entries
+    # (src/klayout_tools/signoff_attest_canonical_yaml.py, issue #5862):
+    # parsing a workflow to hash its canonical form, so a comment-only edit
+    # is not drift. Runtime for the same reason jsonschema is -- the
+    # `uvx --from klayout-tools klt signoff --check` the fleet's CI runs
+    # must reach the parser without extras.
+    "pyyaml>=6",
 ]
 
 [project.urls]
@@ -45,6 +52,10 @@ dev = [
     # Pinned to a major so diagnostics (and thus type-baseline.json) stay
     # stable between releases.
     "mypy>=2.4,<3",
+    # Stubs for the `pyyaml` runtime dependency (issue #5862): without them
+    # mypy reports `import-untyped` on `import yaml` and the type ratchet
+    # (scripts/check_type_baseline.py) refuses to run.
+    "types-pyyaml>=6",
     # Lets tests/test_mcp_server.py and tests/test_mcp_resources.py run their
     # stdio round-trips (and the in-process resource-handler tests) in CI.
     # Dev-only: they importorskip() `mcp`, so the suite also passes without it.
@@ -231,6 +242,20 @@ packages = ["src/klayout_tools"]
 # JSON-contract schemas: `klt mcp serve` serves them as MCP resources, so a
 # wheel-only install must carry them (issue #5420).
 "docs/schemas" = "klayout_tools/data/schemas"
+# Shared contract docs the per-verb pages cite as authority: 63 of the 68
+# shipped `cli/*.md` pages link `../json-contract.md` and 6 link
+# `../coverage-contract.md`, so ship them as siblings of `data/cli/` to keep
+# those relative links resolving for a wheel-only install (issue #5819).
+# Also cited by the shipped set and safe to ship: `releasing-native.md` (1 ref
+# from the CLI pages) links no other markdown file, and `type-checking.md`
+# (cited by `json-contract.md` itself) links only `json-contract.md`, which
+# ships above. `docs/ARCHITECTURE.md` (2 refs from the CLI pages) is
+# deliberately left out: it links `../scripts/README.md` and
+# `library/README.md`, which would dangle in the wheel (issue #5819).
+"docs/json-contract.md" = "klayout_tools/data/json-contract.md"
+"docs/coverage-contract.md" = "klayout_tools/data/coverage-contract.md"
+"docs/releasing-native.md" = "klayout_tools/data/releasing-native.md"
+"docs/type-checking.md" = "klayout_tools/data/type-checking.md"
 
 # Distribution version (issue #2823). `base-version` is the release this
 # checkout is at or working towards -- bump it here (then `uv lock`) when
@@ -293,6 +318,9 @@ ignore_missing_imports = false
 show_error_codes = true
 show_column_numbers = true
 pretty = false
+# Error out on `# type: ignore` comments mypy proves unnecessary (issue #5939
+# follow-up to #5685); the baseline ratchet cannot see these, so gate them here.
+warn_unused_ignores = true
 
 # KLayout's Python bindings ship no usable type information.
 [[tool.mypy.overrides]]
@@ -361,6 +389,9 @@ select = [
     "S602",  # subprocess shell=True
     "S604",  # shell=True call
     "S605",  # os.system-style shell
+    # Flag `# noqa` directives whose violation ruff no longer reports, so the
+    # suppression surface cannot re-accrete (issue #5939, #5685 follow-up).
+    "RUF100",  # unused noqa directive
 ]
 
 [tool.ruff.lint.mccabe]

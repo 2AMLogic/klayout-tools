@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING, Any
 from . import (
     remote_transport,
     sim_eye,
+    sim_op_check,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
@@ -202,7 +204,10 @@ def _runner_gate_release(version: str) -> str | None:
 #: its first release segment is ``0.8.1``, as is ``stress`` (#4592/#4858).
 #: ``search_param`` (``measurements[].search.param``, #5391) landed after
 #: ``v0.9.1``, so its first release segment is ``0.9.2``; an older runner would
-#: reject the key or silently search nothing, hence mandatory.
+#: reject the key or silently search nothing, hence mandatory. ``slope_band``
+#: (``measurements[].slope_band``, #5518) missed the ``v0.9.2`` tag (it was not
+#: in that release), so ``0.9.3`` is its first release segment; an older runner
+#: would reject the unknown form or drop the measurement, hence mandatory.
 def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], bool]:
     """Detector: the request declares at least one measurement ``finder`` finds."""
     return lambda request: bool(finder(request.get("measurements") or []))
@@ -213,6 +218,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
+    "slope_band": (
+        (0, 9, 3),
+        _declared(sim_slope_band_meas.slope_band_measurements),
+    ),
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
@@ -249,6 +258,12 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
         (0, 7, 1),
         lambda request: sim_twoport.has_noise_request(request.get("analysis")),
     ),
+    # No entry for `options.measurement_cases` (issue #5731): the expansion is
+    # resolved client-side -- `sim_measurement_template.expand_request` runs
+    # in `load_request` (which `_prepare_sim_request` calls) before any
+    # dispatch -- so the forwarded request
+    # document carries only the expanded plain `measurements[]` (the option
+    # key itself is dropped). An older runner sees an ordinary request.
 }
 
 #: Registry features a runner must be *known* to support (issue #2924): a
@@ -265,11 +280,18 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235).
+#: process x temperature with ``status: pass`` (#4235). The #5645 five
+#: (``corners.options``, ``options.nodeset``,
+#: ``options.initial_conditions``, ``analysis_overrides``,
+#: ``analysis.op_check``) are mandatory because each one's post-run
+#: ``*_unsupported_worker`` echo check already hard-fails the whole request
+#: -- mandatory membership mirrors that severity, moving the identical
+#: refusal from after the grid ran to before anything is launched.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
         "transfer",
         "snm",
+        "slope_band",
         "search",
         "search_param",
         "eye",
@@ -282,6 +304,11 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "twoport",
         "twoport_noise",
         "corners.params",
+        "corners.options",
+        "options.nodeset",
+        "options.initial_conditions",
+        "analysis_overrides",
+        "analysis.op_check",
     }
 )
 
@@ -336,6 +363,21 @@ _RELEASED_FEATURE_DETECTORS: dict[str, Any] = {
     "options.ngspice_options": _uses_option("ngspice_options"),
     "options.osdi_preload": _uses_option("osdi_preload"),
     "options.stage_model_inputs": _uses_option("stage_model_inputs"),
+    # The five #5645 rows: fields whose only worker guard was a post-run
+    # *_unsupported_worker echo check, so an old runner image ran the whole
+    # grid and the result was then refused wholesale. Each detector mirrors
+    # the predicate its echo check uses (sim_op_check.is_declared for
+    # analysis.op_check), so "declared" means the same thing pre-launch and
+    # post-run.
+    "analysis.op_check": lambda request: sim_op_check.is_declared(
+        request.get("analysis") or {}
+    ),
+    "analysis_overrides": lambda request: bool(request.get("analysis_overrides")),
+    "options.nodeset": _uses_option("nodeset"),
+    "options.initial_conditions": _uses_option("initial_conditions"),
+    "corners.options": lambda request: bool(
+        (request.get("corners") or {}).get("options")
+    ),
 }
 
 # One registry, not two: the #3232 minimum versions feed the same table the
