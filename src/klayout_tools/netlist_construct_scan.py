@@ -5,10 +5,15 @@ Shared verbatim by ``klt place-and-route``'s netlist pre-flight
 (``place_and_route_request._reject_unsupported_netlist_constructs``,
 issues #1973 and #5792) and ``klt synthesize``'s post-run scan
 (``synthesize_x_scan``, issues #5074 and #5792), so the synthesize-time
-warnings and the P&R rejection cannot drift apart. The module lives in the
-place_and_route group, next to the only code that rejects on these
-constructs; ``synthesize_x_scan`` imports it across groups under exact
-``shared_private_permissions`` grants (import-boundaries.json).
+warnings and the P&R rejection cannot drift apart. The one deliberate
+asymmetry (issue #6274): the pre-flight refuses a wider set of behavioural
+statements (:data:`_NETLIST_BEHAVIOURAL_RE`, a safety net for netlists that
+did not come from ``klt synthesize``) than ``klt synthesize``'s latch warning
+scans for (:data:`_NETLIST_BEHAVIOURAL_LATCH_RE`) -- always as a *superset*,
+never the reverse. The module lives in the place_and_route group, next to the
+only code that rejects on these constructs; ``synthesize_x_scan`` imports it
+across groups under exact ``shared_private_permissions`` grants
+(import-boundaries.json).
 """
 
 from __future__ import annotations
@@ -96,4 +101,61 @@ _NETLIST_X_CONSTANT_RE = re.compile(
 #: line (verified live, Yosys 0.67: ``  reg q;`` / ``  always @*``). A
 #: structural netlist -- module/port/wire declarations and cell
 #: instantiations only -- never has a line beginning with either keyword.
+#:
+#: This is the **latch**-shaped pattern ``klt synthesize``'s
+#: ``netlist_behavioural_latch`` warning scans with (its narrative is only
+#: true for what ``write_verilog -noattr`` emits), so it is deliberately left
+#: narrow; the P&R pre-flight's own, wider net is
+#: :data:`_NETLIST_BEHAVIOURAL_RE`, which must stay a superset of this one.
 _NETLIST_BEHAVIOURAL_LATCH_RE = re.compile(r"^\s*(reg|always)\b")
+
+#: Every behavioural statement the P&R pre-flight refuses (issues #5792,
+#: #6274): :data:`_NETLIST_BEHAVIOURAL_LATCH_RE`'s ``reg``/``always`` plus the
+#: SystemVerilog ``always_ff``/``always_comb``/``always_latch`` and ``initial``
+#: forms, which OpenSTA's structural reader rejects with the same bare
+#: ``[ERROR STA-0171] ... syntax error`` and which a netlist that did not come
+#: from ``klt synthesize`` can carry. Same line-start anchor and the same
+#: trailing ``\b`` -- so ``always_on_buf`` (a module), ``initialize_cell`` and
+#: a continuation line starting ``initial_value`` are not flagged. A
+#: false-positive sweep over the repo's tracked ``.v`` files (32; 17 flagged by
+#: the narrow pattern, all RTL/testbench sources) found this pattern flags no
+#: file the narrow one does not and no ``klt synthesize``-written netlist.
+#: ``function``/``task`` are deliberately not included: nothing in the issue
+#: shows a netlist carrying them, and nothing here verifies OpenSTA's reaction.
+_NETLIST_BEHAVIOURAL_RE = re.compile(r"^\s*(reg|always(?:_ff|_comb|_latch)?|initial)\b")
+
+#: A level-sensitive ``always @*`` / ``always @(*)`` header on its own line
+#: (comment-blanked, so trailing blanks are all that may follow).
+_NETLIST_LEVEL_ALWAYS_RE = re.compile(r"^\s*always\s*@\s*(?:\*|\(\s*\*\s*\))\s*$")
+
+#: The first line of an ``always`` body that is a bare ``if (...)``.
+_NETLIST_IF_BODY_RE = re.compile(r"^\s*if\s*\(")
+
+
+def _unmapped_latch_rendering_line(lines: list[str]) -> int | None:
+    """The 1-based line of the first ``always @*`` block in ``lines``
+    (comment-blanked, as :func:`_blank_verilog_comments` returns them) that is
+    Yosys's rendering of a gate-level latch that survived synthesis unmapped,
+    else ``None`` (issue #6274).
+
+    ``write_verilog -noattr`` writes a latch as a level-sensitive ``always
+    @*`` header followed directly -- on the next non-blank line -- by a bare
+    ``if (...)`` body (``if (en) q = d;``, ``if (!en) q = d;``, ``if (rst) q
+    = 1'h0;`` / ``else if (en) q = d;``; verified live, Yosys 0.67, ``proc``
+    and ``synth`` flows alike). It puts each latch's ``reg`` declaration in
+    the declaration block, **not** next to the ``always`` -- so this is the
+    evidence that the netlist holds an unmapped latch, and a flagged ``reg``
+    line need not be adjacent to it. A flop renders as ``always
+    @(posedge clk)`` and combinational RTL as ``always @(*)`` + ``begin``, so
+    neither qualifies -- which is what keeps an RTL source passed as a netlist
+    from being narrated as a latch.
+    """
+    for index, line in enumerate(lines):
+        if _NETLIST_LEVEL_ALWAYS_RE.match(line) is None:
+            continue
+        for body in lines[index + 1 :]:
+            if body.strip():
+                if _NETLIST_IF_BODY_RE.match(body) is not None:
+                    return index + 1
+                break
+    return None
