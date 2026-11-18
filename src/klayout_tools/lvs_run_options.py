@@ -132,9 +132,9 @@ def _parse_lvs_run_options(
     # extraction-only rule. `None` when omitted/`null`.
     label_layers = _parse_layout_label_layers(layout_spec)
     # Issue #2853: `layout.abstract_cells`/`abstract_cell_lef` mirror `klt
-    # extract --abstract-cells`/`--abstract-cell-lef` for inline extraction
-    # only -- see `_parse_layout_abstract_cells` for the shape and the
-    # extraction-only rule.
+    # extract --abstract-cells`/`--abstract-cell-lef`. `abstract_cells` is
+    # inline-extraction only; `abstract_cell_lef` is also accepted alone on
+    # the `layout.netlist` shape, disclosure-only (#5842) -- see the parser.
     layout_abstraction = _parse_layout_abstract_cells(layout_spec, request_dir)
     # Issue #4347: `layout.def_net_names`/`def_pins` mirror `klt extract
     # --def-net-names`/`--def-pins` for inline extraction only.

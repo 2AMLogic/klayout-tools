@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/_install_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
+
 LAMBDAPDK_VERSION="0.2.17"
 LAMBDAPDK_URL="https://github.com/siliconcompiler/lambdapdk/archive/refs/tags/v${LAMBDAPDK_VERSION}.tar.gz"
 # Computed by downloading the pinned tag archive once and hashing it:
@@ -19,29 +22,6 @@ LAMBDAPDK_URL="https://github.com/siliconcompiler/lambdapdk/archive/refs/tags/v$
 # using the same recipe (with the new version substituted) — the script
 # fails closed on mismatch, so a stale value here blocks every fetch.
 LAMBDAPDK_SHA256="ac7e950c4d0394a829658b6e219fea4a4b0c61a998183d5520f8b9e38c6efff2"
-
-# Detect a portable sha256 command (macOS ships shasum, Linux sha256sum).
-# Mirrors .loom/scripts/verify-install.sh's compute_sha256 helper.
-sha256_of() {
-    if command -v shasum &>/dev/null; then
-        shasum -a 256 "$1" | awk '{print $1}'
-    elif command -v sha256sum &>/dev/null; then
-        sha256sum "$1" | awk '{print $1}'
-    else
-        echo "error: no sha256 command found (need shasum or sha256sum)" >&2
-        return 1
-    fi
-}
-
-# Upstream commit id from a GitHub tag tarball's pax global header (`git
-# archive` writes `comment=<40-hex>` there). Prints nothing when absent --
-# never guessed (issue #3786).
-tarball_commit() {
-    local sha
-    sha="$(gzip -dc "$1" 2>/dev/null | head -c 1024 | grep -aoE 'comment=[0-9a-f]{40}' | head -n1 | cut -d= -f2 || true)"
-    [[ "$sha" =~ ^[0-9a-f]{40}$ ]] && printf '%s\n' "$sha"
-    return 0
-}
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PDKS_DIR="$REPO_ROOT/pdks"
@@ -64,17 +44,7 @@ fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading lambdapdk v$LAMBDAPDK_VERSION ..."
-curl -fL --progress-bar -o "$tmp/lambdapdk.tar.gz" "$LAMBDAPDK_URL"
-
-echo "Verifying checksum ..."
-actual_sha256="$(sha256_of "$tmp/lambdapdk.tar.gz")"
-if [[ "$actual_sha256" != "$LAMBDAPDK_SHA256" ]]; then
-    echo "error: checksum mismatch for lambdapdk v$LAMBDAPDK_VERSION" >&2
-    echo "  expected: $LAMBDAPDK_SHA256" >&2
-    echo "  actual:   $actual_sha256" >&2
-    exit 1
-fi
+fetch_and_verify "$LAMBDAPDK_URL" "$LAMBDAPDK_SHA256" "$tmp/lambdapdk.tar.gz" progress
 
 commit="$(tarball_commit "$tmp/lambdapdk.tar.gz")"
 

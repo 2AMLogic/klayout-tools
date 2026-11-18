@@ -55,6 +55,7 @@ import subprocess
 import time
 from typing import Any
 
+from ._engine_proc import run_in_group
 from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
@@ -83,7 +84,6 @@ from ._verilog_params import (
 from .equiv_errors import EquivError
 from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public here
     CANONICAL_SIM_BACKEND,
-    CROSS_CHECK_SIM_BACKEND,
     DEFAULT_SIM_BACKEND,
     SUPPORTED_SIM_BACKENDS,
     confirm_counterexample,
@@ -91,7 +91,9 @@ from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public h
     resolve_sim_backend,
 )
 from .equiv_stage import stage_record_path
+from .request_paths import RequestPaths
 
+_rpath = RequestPaths(EquivError)
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
@@ -398,11 +400,10 @@ def run_equiv(
 
     started = time.monotonic()
     timed_out = False
-    stdout = ""
-    stderr = ""
+    stdout = stderr = ""
     returncode: int | None = None
     try:
-        completed = subprocess.run(
+        completed = run_in_group(
             [yosys_binary, "-s", script_path],
             capture_output=True,
             text=True,
@@ -569,7 +570,7 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, f"request.{label}.sources entry")
         if not os.path.isfile(path):
             raise EquivError(f"{label} source not found: {entry}")
         try:
@@ -581,9 +582,7 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
 
     resolved_liberty = None
     if liberty is not None:
-        liberty_path = (
-            liberty if os.path.isabs(liberty) else os.path.join(request_dir, liberty)
-        )
+        liberty_path = _rpath(liberty, request_dir, f"request.{label}.liberty")
         if not os.path.isfile(liberty_path):
             raise EquivError(f"{label} liberty file not found: {liberty}")
         resolved_liberty = os.path.abspath(liberty_path)
