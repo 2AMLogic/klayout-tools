@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 516
+      "lines": 512
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -217,7 +217,7 @@
     },
     {
       "path": "src/klayout_tools/decks/extraction.py",
-      "lines": 2256
+      "lines": 2250
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
@@ -317,7 +317,7 @@
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
-      "lines": 1173
+      "lines": 1160
     },
     {
       "path": "src/klayout_tools/extract_report.py",
@@ -585,11 +585,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12348
+      "lines": 12339
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4421
+      "lines": 4355
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -813,7 +813,7 @@
     },
     {
       "path": "tests/test_drc_klayout_engine.py",
-      "lines": 3318
+      "lines": 3315
     },
     {
       "path": "tests/test_economy.py",

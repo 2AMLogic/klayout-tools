@@ -53,7 +53,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     resolve_committed_path,
 )
@@ -97,7 +96,7 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import report_checks, resolve_report_deck
+from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2628,10 +2627,11 @@ def rerun_drc_report(
     others. Use ``--check`` (cheap mode) to avoid this if that matters.
 
     Diffs the fresh report against the committed one via
-    :func:`klayout_tools._report_verify.diff_verdict_fields`, excluding
-    :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
-    (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
-    fields that legitimately vary between runs of identical inputs).
+    :func:`klayout_tools.drc_report_check.drc_rerun_result`, excluding its
+    ``DRC_RERUN_EXCLUDE_PATHS``: the volatile ``provenance`` version strings
+    plus (issue #5660) the host-local ``environment.klayout_binary`` and the
+    wheel-axis ``provenance.klayout_module_version`` -- fields that
+    legitimately vary between runs of identical inputs.
     ``status: "drifted"`` names every other field that changed, including a
     changed ``violation_count``/``violations`` (the DRC-outcome-changed
     case) as well as a changed ``provenance.input.content_hash`` (the
@@ -2707,7 +2707,7 @@ def rerun_drc_report(
             tile=_recorded_tile(committed),
         )
 
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return drc_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
 
 def _attribute_to_instance(
