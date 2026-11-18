@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from ._common_params import (
     declare_cut_and_metal_params,
+    declare_guard_ring_voltage_flavor_params,
     declare_ring_well_margin,
     declare_tap_and_well_layers,
     declare_well_present,
@@ -46,6 +47,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _snap_ring_box_um,
         _well_box_um,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
         """Substrate/well tap guard ring (spike section 4's family 3): a
@@ -53,9 +55,13 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_ring_layout`), optionally enclosed by a well tie on PDK
         families whose curated deck checks one (see ``well_present``)."""
 
-        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
-        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        # Declared via ``self.param(...)`` below; the
+        # PCellDeclarationHelper stubs cannot see them, so annotate for mypy.
         mfg_grid_um: float
+        voltage_flavor_mark_layer: kdb.LayerInfo
+        voltage_flavor_mark_present: bool
+        voltage_flavor_extra_mark_layer: kdb.LayerInfo
+        voltage_flavor_extra_mark_present: bool
 
         def __init__(self) -> None:
             super().__init__()
@@ -126,6 +132,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Enclose the ring in a well tie when the resolved PDK checks one",
                 default=True,
             )
+            declare_guard_ring_voltage_flavor_params(self, kdb)
             declare_tap_and_well_layers(self, kdb)
             declare_cut_and_metal_params(self, kdb)
             declare_well_present(self)
@@ -203,6 +210,10 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                 )
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
+                # Issue #6025: the flavour marker covers the well tie, so a
+                # deck rule needing the whole well inside it (sky130 nwell.9)
+                # holds for a ring abutting a flavour-marked device.
+                _draw_voltage_flavor_marks(self, dbu, well_box)
             if self.ring_implant_present:
                 # Tracks the tap ring, extended `ring_implant_margin_um`
                 # past every one of its edges (issue #2369's NP.5b/PP.5b
