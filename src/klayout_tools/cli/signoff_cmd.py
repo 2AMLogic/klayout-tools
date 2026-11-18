@@ -37,18 +37,18 @@ rendering the report, diffs the result against a previously committed one --
 excluding two surfaces that move without any verdict moving with them:
 
 - the ``build`` block, which states how the running install was provisioned
-  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`);
+  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`)
+  -- reported, not dropped, as ``build_skew`` (issues #5852, #5868);
 - the report's verbatim quotation of the checklist doc -- each item's
   ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
   (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).
 
-It exists so a gate script asking "does this committed evidence still hold"
-no longer has to byte-compare the committed file against a fresh render:
-that comparison fails between two byte-legitimate installs of the *same
-pinned commit*, purely on provisioning route, and again whenever an upstream
-release reworded the bundled checklist. Refused (exit 1) with the
-envelope-aggregation and ``--describe-grader`` modes, neither of which
-renders such a report.
+It exists so a gate script asking "does this committed evidence still hold" no
+longer has to byte-compare the committed file against a fresh render: that
+comparison fails between two byte-legitimate installs of the *same pinned
+commit*, purely on provisioning route, and again whenever an upstream release
+reworded the bundled checklist. Refused (exit 1) with the envelope-aggregation
+and ``--describe-grader`` modes, neither of which renders such a report.
 
 The second exclusion is reported, not silently dropped: the ``--check``
 response carries ``doc_drift`` (bool) and ``doc_drift_fields`` (the
@@ -136,9 +136,10 @@ from ..signoff_attest_carry import skip_lines
 from ..signoff_attest_input import input_line, with_entry
 from ..signoff_attest_live import attach_live_fields
 from ..signoff_attest_text import attestation_check_line as _attestation_check_line
-from ..signoff_attest_text import check_label
+from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
+from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
     GeneratorExecution,
@@ -151,6 +152,12 @@ from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 from .signoff_flags import mode_flag_problem
 from .signoff_repin_cmd import run_repin
+from .signoff_tier_text import (
+    _justified_gap_suffix,
+    _not_applicable_suffix,
+    _print_justified_gaps,
+    _print_not_applicable,
+)
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
@@ -263,10 +270,8 @@ def _attest_flag_problem(
                 "layout stream; see docs/cli/signoff.md)"
             )
         return None
-    if stream or any(
-        getattr(args, attr, None) is not None
-        for attr in ("generator", "regenerated_hash", "hash_kind")
-    ):
+    attrs = ("generator", "regenerated_hash", "hash_kind")
+    if stream or any(getattr(args, attr, None) is not None for attr in attrs):
         return (
             "--input/--generator/--regenerated-hash/--hash-kind only apply "
             f"to --attest {STREAM_ATTESTABLE_ITEM} (items 1, 8, 9 and 10 take "
@@ -358,6 +363,8 @@ def _print_attestation_check_text(result: dict) -> None:
     render_rerun_drift(result)
     print(f"fresh_status: {result['fresh_status']}")
     print(build_drift_line(result))
+    for line in note_lines(result):
+        print(line)
     failed = [c for c in result["fresh"]["attestation"]["checks"] if not c["passed"]]
     for check in failed:
         print(_attestation_check_line(check))
@@ -604,18 +611,13 @@ def _print_input_verified(citation: dict) -> None:
     """Print one line stating whether a citation's ``content_hash`` was
     verified against the **input artifact** the cited envelope names, or
     only against the envelope's own claim about it (issue #2196) -- or
-    nothing at all, when there is nothing to say.
-
-    Its own function (rather than an ``if`` in the already-dense caller)
-    so the "nothing to say" branch does not land in
-    :func:`_print_tier_report_text`'s complexity budget.
-
-    Nothing to say means the envelope recorded no input hash at all *and*
-    none could be re-derived: the citation already renders ``content_hash:
-    None``, and a second line repeating that adds no information. Every
+    nothing at all, when there is nothing to say: no input hash recorded
+    and none re-derivable, so ``content_hash: None`` already says it. Every
     other case prints, including the unverified one -- a freshness claim
     checked against a file and one checked only against another claim being
-    indistinguishable in the output is the exact gap this discloses.
+    indistinguishable is the exact gap this discloses. Since #6403 a citation
+    carrying ``input_verified_note`` also prints an ``input note:`` line;
+    its own function so the branches stay out of the caller's C901 budget.
     """
     verified = citation.get("input_verified")
     if verified is None and citation.get("content_hash") is None:
@@ -633,6 +635,10 @@ def _print_input_verified(citation: dict) -> None:
             "claim only -- the artifact itself was not read)"
         )
     print(f"        input: {statement}")
+    note = citation.get("input_verified_note")
+    if note is not None:
+        gloss = INPUT_VERIFIED_NOTE_GLOSSES.get(note)
+        print(f"        input note: {note}" + (f" -- {gloss}" if gloss else ""))
     for pex_input in citation.get("pex_inputs") or []:
         # Issue #2875: per-role schematic-side verification of a `pex` run.
         print(f"        pex input {pex_input['role']}: {pex_input['status']}")
@@ -800,36 +806,6 @@ def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
     return "UNMET", palette.red
 
 
-def _not_applicable_suffix(report: dict) -> str:
-    """``", N not_applicable"`` when the report has items satisfied by a
-    recorded "not applicable" (issue #2865); empty otherwise, so a report
-    with none renders exactly as before."""
-    count = report.get("t1_not_applicable_count")
-    return f", {count} not_applicable" if count else ""
-
-
-def _print_not_applicable(item: dict) -> None:
-    """The evidence behind a ``not_applicable`` item (issue #2865): the
-    ratified spec and the committed statement, each with its content hash,
-    and the statement's per-row reasons."""
-    block = item.get("not_applicable")
-    if not block:
-        return
-    spec = block["spec"]
-    statement = block["statement"]
-    print(
-        f"        not applicable: spec {spec['file']} "
-        f"(status={spec['status']}, rows={spec['row_count']}, "
-        f"content_hash={spec['content_hash']})"
-    )
-    print(
-        f"        statement: {statement['file']} "
-        f"(content_hash={statement['content_hash']})"
-    )
-    for row in statement["rows"]:
-        print(f"          {row['id']} [{row['class']}]: {row['reason']}")
-
-
 def _print_foundry_cell_exceptions(citation: dict) -> None:
     for exception in citation.get("foundry_cell_exceptions") or []:
         rules = ", ".join(
@@ -882,7 +858,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     print(f"tier: {result['tier'] or 'none'}")
     print(
         f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
-        f"{_not_applicable_suffix(result)}"
+        f"{_not_applicable_suffix(result)}{_justified_gap_suffix(result)}"
     )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
@@ -918,6 +894,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
+        # Issue #5599: each justified declared gap, its rationale artifact
+        # and its closing issue -- with the missing-link finding inline.
+        _print_justified_gaps(item)
         _print_group_coverage(item)
         citation = item["citation"]
         if citation:
@@ -1010,7 +989,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {block['block']} "
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
-            f"{_not_applicable_suffix(block)}"
+            f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
         )
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render

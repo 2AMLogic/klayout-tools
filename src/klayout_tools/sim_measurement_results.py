@@ -21,6 +21,8 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_noise_contributors,
+    sim_noise_mechanism,
     sim_search,
     sim_settled,
     sim_slope_band_meas,
@@ -74,6 +76,9 @@ def _corner_measurement_results(
     settleds: dict[int, sim_settled.SettledOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
+    noise_mechanisms: (
+        dict[int, sim_noise_mechanism.NoiseMechanismOutcome] | None
+    ) = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
@@ -153,6 +158,11 @@ def _corner_measurement_results(
         ),
         (sim_settled.is_settled, _sim._settled_measurement_result, settleds),
         (sim_search.is_search, _search_measurement_result, searches),
+        (
+            sim_noise_mechanism.is_mechanism,
+            sim_noise_mechanism.measurement_result,
+            noise_mechanisms,
+        ),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -250,6 +260,10 @@ def _corner_measurement_results(
     # from a `{case}` template carries its `case` on every result entry, the
     # same additive move `grade_step_measurements` makes with `step`.
     _attach_provenance(measurements_spec, measurement_results)
+    # `noise.top_n` on a total entry (issue #5558): additive, value untouched.
+    sim_noise_contributors.attach(
+        measurements_spec, measurement_results, noise_mechanisms, diagnostics, save_mode
+    )
     return measurement_results, diagnostics, {}
 
 
