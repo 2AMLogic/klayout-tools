@@ -131,8 +131,7 @@ def _raise_all_collected(errors: list[str]) -> NoReturn:
     if len(errors) == 1:
         raise _fv.FunctionalVerificationError(errors[0])
     raise _fv.FunctionalVerificationError(
-        f"mutation proposals document has {len(errors)} validation errors: "
-        + "; ".join(errors)
+        f"--mutations input has {len(errors)} validation errors: " + "; ".join(errors)
     )
 
 
