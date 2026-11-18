@@ -1720,8 +1720,11 @@ layout** and reports where they differ. It is a comparison surface over the
 two existing engines, not a third verification engine: the response embeds
 both raw reports **verbatim** under `reports.curated` / `reports.native`
 (each keeps its own `status`, coverage and findings), and adds an `identity`
-block (layout `content_hash`, PDK, curated and native deck identity, klt and
-klayout versions) and a `comparison` block. If the two runs hashed different
+block (layout `content_hash`, PDK, curated and native deck identity, klt
+version, and both KLayout versions) and a `comparison` block.
+`identity.klayout_version` is the **curated** engine's KLayout version (the
+pip wheel); `identity.native_klayout_version` is the **native** binary's own
+`-v` version, which can differ (`null` when the native report records none). If the two runs hashed different
 layouts or resolved different PDK variants, the command fails (exit 1)
 rather than comparing them. `--rules` and `--waivers` are refused (the
 cross-check compares whole-deck reports); the native-engine flags
@@ -4229,6 +4232,21 @@ check stays failed (`match: false`, `status:
 `resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
 instead. Pass `--deck-file` to verify a vendor runset that has no packaged
 counterpart. `--rerun` on a curated report rejects `--deck-file`.
+
+**A missing input is named, not a bare `actual: null` (issue #6466).** When
+the report's echoed `file` (or the positional `<file>` override) resolves to a
+concrete path that names no existing file, the `provenance.input.content_hash`
+check stays failed (`match: false`, `actual: null`, `status: "drifted"`, exit
+3 -- all unchanged) and gains the additive `input_not_found` key `klt lvs
+--check` attaches (`path`, `resolved`, `found_relative_to_report`,
+`resolved_against`, `hint`); `--format text` prints `input not found:
+<resolved>`. A relative bare-string `file` still anchors to the current working
+directory, so a file found only beside the report is reported through
+`found_relative_to_report` and never silently used. The key is absent when the
+file exists (including when its bytes moved), and when the echoed `file` names
+no path at all (`scope: "external"`/`"absent"`, or no field). It applies to
+each `reports.curated.`/`reports.native.` side of an `--engine both` report.
+The `provenance.waivers.content_hash` line carries no such block.
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the

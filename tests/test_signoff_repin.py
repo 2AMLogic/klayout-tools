@@ -227,6 +227,44 @@ def test_a_stale_pin_whose_artifact_does_not_resolve_is_skipped(attested, capsys
     assert manifest.read_bytes() == before
 
 
+def test_a_stale_drc_pin_with_a_verified_layout_is_repinned(attested, capsys):
+    """A verified layout permits re-pinning a ``drc`` report.
+
+    The adjacent skip fixture omits ``file``; here it names a layout beside
+    the envelope, with a recorded hash matching the layout's actual bytes.
+    """
+    repo, _inventory, _envelope, manifest = attested
+    layout = repo / "layout.gds"
+    layout.write_bytes(b"the layout bytes cited by DRC")
+    live_hash = _hash_of(layout)
+    old_hash = "sha256:" + "a" * 64
+    drc = repo / "drc.json"
+    drc.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "drc",
+                "status": "pass",
+                "file": layout.name,
+                "violations": [],
+                "checks": [{"name": "a", "violations": 0}],
+                "provenance": {"input": {"content_hash": live_hash}},
+            }
+        )
+    )
+    _write_manifest(manifest, {"3": {"file": str(drc), "content_hash": old_hash}})
+
+    code, payload = _repin(manifest, capsys)
+    assert code == 0
+    assert payload["skipped"] == []
+    (change,) = payload["changed"]
+    assert change["old_content_hash"] == old_hash
+    assert change["new_content_hash"] == live_hash
+    assert (
+        json.loads(manifest.read_text())["evidence"]["3"]["content_hash"] == live_hash
+    )
+
+
 def test_unresolvable_and_malformed_pinned_entries_are_reported(attested, capsys):
     """A pinned entry the grader cannot resolve is named, not silently kept."""
     repo, _inventory, _envelope, manifest = attested
