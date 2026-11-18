@@ -325,6 +325,29 @@ file's own bytes — a pinned `functional-verification` citation, reported as
 bytes and a pin taken over the decompressed copy binds those; the two are not
 interchangeable for that one basis.
 
+**Pin-basis change for `functional-verification` (issue #5550).** A
+`functional-verification` envelope from a `klt` that records the shared
+`provenance` block pins its **RTL digest**
+(`provenance.input.content_hash`, role `source` — the same scheme `klt
+synthesize`/`klt equiv` record), not the report's own bytes: the
+`evidence_file` re-hash basis now applies only where the envelope has no
+`provenance.input` to compare: a **legacy** envelope with no `provenance` key
+(a report committed by an older `klt`), and an `options.from_synthesize`
+report, whose block records `input: null` because its design input is the
+synthesized netlist (pinned by `from_synthesize.netlist_sha256`, which a
+manifest cannot pin) — such a report keeps the #4893 file-bytes binding it
+always had, and a command-backed pin of one stays `unverifiable_provenance`
+with a note naming that cause. A block whose `input` is present but whose
+`content_hash` is `null` (a source that could not be hashed) never falls back
+to the file's bytes. A manifest
+pin authored under #4893 (the report's byte hash) therefore grades
+`stale_evidence` against a provenance-bearing report — re-pin it against the
+report's `provenance.input.content_hash`. In exchange, a pin now detects an
+RTL edit the moment the report is re-run, a command-backed pinned citation
+grades instead of rendering `unverifiable_provenance`, and the report joins
+the provenance-consistency cross-check against `synthesize`/`equiv` citations
+over the same sources.
+
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
 `coverage` block reports `nothing_checked: true` — the shared convention in
@@ -4436,6 +4459,96 @@ A bare-only manifest behaves exactly as before. A suffix other than `analog` /
 partition only), never the whole report. Items 5 and 6 share the reader.
 `schema_version`: no bump.
 
+#### The per-spec-row table in the report (issue #5691)
+
+Grading a declared row set answers one question per *item*. The report also
+answers the reader's question per *row*: each spec row's limit, worst value,
+binding corner, verdict and yield estimate, and the cited file behind each
+number. When the manifest declares a top-level `spec_rows` map, the tier
+report gains one additive top-level `spec_rows[]` block — one record per
+declared row, in declaration order (a `"<item>.<partition>"` declaration
+renders its own records, marked with a `"partition"` field; a bare
+declaration carries `"item"` and no `"partition"`):
+
+```json
+{
+  "id": "t_dec",
+  "item": 5,
+  "state": "graded",
+  "gap": null,
+  "limits": {"min": null, "max": 1.2e-6},
+  "unit": "s",
+  "worst": {"value": 1.18e-6, "corner_id": "ss/1.620V/-40C",
+            "margin": 2.0e-8, "relative_margin": 0.0167},
+  "verdict": "pass",
+  "yield": {"method": "clopper-pearson", "estimate": 0.9993, "confidence": 0.9,
+            "confidence_interval": {"low": 0.9961, "high": 0.9999}},
+  "sources": [{"file": "sim/decision_time.json", "measurement": "t_dec@1v8"}]
+}
+```
+
+The block is a **projection of the same evidence grading already read**, not a
+second grader: no item verdict, `tier`, `row_coverage` or `row_sources` moves
+because of it. Its rules:
+
+- **States.** Every declared row gets a record, in one of four states. `graded`
+  — at least one cited, file-backed envelope carries a `spec_row`-tagged
+  measurement naming the row. `gap` — the row declares a free-text or justified
+  gap. The record quotes the free text or the justified gap's `reason` in
+  `gap` and has no measured values, even if a citation names it.
+  `no_evidence` — no citation
+  names the row. `unattributable` — a citation names the row but its envelope
+  carries no `spec_row` tags at all (the #3778 *asserted* coverage case): the
+  envelope's measurements cannot be attributed to a row, and guessing is the
+  bug this verb exists to prevent. `limits`/`unit`/`worst`/`verdict`/`yield`
+  are `null` wherever the state has nothing to quote.
+- **Row matching is exact string equality** between a declared row `id` and a
+  `measurements[].spec_row` tag. No prefix is stripped: the auto-prefixed
+  `<bench>.<row>` spelling is a `klt pex` labelling scheme, while `klt sim` and
+  `klt yield` tags are author-declared verbatim (see
+  [`sim.md`](sim.md) and [`yield.md`](yield.md)). A citation that does not name
+  the row, or whose tags name only other rows, contributes nothing.
+- **Quote, never re-derive.** `worst` quotes the binding measurement's own
+  `worst_case` byte-equal (plus the one new quotient below) and `yield` quotes
+  the measurement's `yield.empirical` verbatim — a `klt sim` envelope carries
+  neither, a `klt yield` envelope usually carries only the latter, and one row
+  may cite both (the sim side binds the worst value and corner, the yield side
+  fills in `yield`).
+- **The reduce.** Several tagged measurements may cover one row across several
+  citations. The binding one is picked by **minimum relative margin** —
+  `margin / |active bound|`, recorded as `worst.relative_margin` — because
+  absolute margin is wrong when instance limits scale with the supply (a 1 V
+  rail's 1 mV headroom is proportionally tighter than a 1.8 V rail's 20 mV).
+  When the active bound is `0`, or the measurement declares no `limits`, the
+  relative margin is undefined: the pick falls back to the absolute `margin`
+  and `relative_margin` is `null`. A non-`pass` measurement outranks any
+  `pass` one regardless of margin, by the house `error > inconclusive > fail >
+  pass` precedence extended monotonic for `klt yield`'s two extra tokens
+  (`fail > insufficient_evidence > pass > reported` — see
+  [`yield.md`](yield.md)'s "Status precedence"). Ties keep citation order.
+- **Disagreeing limits stay renderable, unreconciled.** When the tagged
+  measurements for one row do not all declare the same `limits`, the record
+  quotes the binding measurement's set as `limits` and lists every other
+  divergent declared set under an additive `limit_disagreement[]`
+  (`[{file, measurement, limits}]`). It does not refuse and does not pick a
+  "true" limit — the grader has no basis to.
+- **`verdict` is the binding measurement's own `status`** — `null` when that
+  measurement declares no `limits` (an unlimited measurement's `worst_case` is
+  not an extreme, so there is no graded bound to carry a verdict about — see
+  [`sim.md`](sim.md)'s `measurements[]` rollup) — and never re-graded here.
+- **Static projection only.** File-backed citations are re-read; command-backed
+  citations would have to be re-executed to render, so they contribute nothing
+  here, as does an unreadable, malformed or unresolvable citation. Grading
+  reports those on the item axis; the block never contradicts it.
+
+Every number is traceable: `sources[]` names the cited file and the
+measurement name behind each quoted value, in citation order. `--format text`
+renders the same records as a table after the item rows it qualifies; a report
+without the block renders byte-identically to before. The block is additive:
+no `schema_version` bump, and a manifest that declares no `spec_rows` omits the
+key entirely — so `--check` reports no drift on an upgrade alone (the same
+back-compat rule `partition_boundary` follows, above).
+
 #### Item 6 with several statistical rows (issue #2908)
 
 Item 6 reuses the item-5 list form and `spec_rows` schema above, with
@@ -5372,7 +5485,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation (no `provenance` block by design, and a command's stdout is not a stable file to re-hash; a *file-backed* one is re-hashed by the grader, issue #4893) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation of a **legacy** report (from a `klt` predating the `provenance` block, issue #5550) or an `options.from_synthesize` one (`provenance.input` is `null` by design), where a command's stdout is not a stable file to re-hash (a *file-backed* one of either is re-hashed by the grader, issue #4893), or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. (A cited item-11 *set* that is merely missing the `erc` or `lvs` part renders `"power_delivery_parts_missing"` instead, issue #4193.) The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `"coverage_undisclosed"`  | no  | **(issue #5789)** **Item 3 only, and only under `require_coverage_disclosure`.** The cited `klt drc` report graded `met` on `status: "clean"`, but the claim's `coverage_disclosed` declaration is not set-equal to the coverage the report itself states: `detail.coverage_undisclosed` names per field the `missing` entries (reported, not claimed) and `extra` entries (claimed, no longer reported — deck drift), or carries `reason: "no_coverage_block"` for pre-#2002 evidence that states no coverage at all. The item also carries `detail.cited_evidence` (the citation a `met` item would have had). Fix the declaration, or regenerate against the deck the claim describes. See "DRC coverage is reported, not graded" above. |
@@ -6108,7 +6221,9 @@ non-passing envelope discloses its pin too" below).
 
 **An unverifiable pin explains itself (issue #3747).** When the entry pins
 `content_hash` and the resolved envelope carries no input hash at all (a
-`functional-verification` envelope or an unprovenanced `generic` one), the
+legacy `functional-verification` envelope from a `klt` predating the
+`provenance` block, an `options.from_synthesize` one, or an unprovenanced
+`generic` one), the
 `unmet` / `unverifiable_provenance` item carries
 `detail.content_hash_pin: "unverifiable"` plus `detail.content_hash_pin_note`
 (the envelope kind and the missing `provenance.input.content_hash`), so the
@@ -6137,7 +6252,9 @@ unprovenanced `generic` envelope has no live hash, so its pin renders
 anchor the citation with `provenance.input.path` to make it enforceable.
 
 **A `functional-verification` pin binds the evidence file (issue #4893).**
-`klt functional-verification` records no input hash, so for a **file-backed**
+A `klt functional-verification` report with no `provenance.input` to compare —
+one from a `klt` predating the block, or an `options.from_synthesize` run (issue
+#5550) — records no input hash, so for a **file-backed**
 citation that pins `content_hash`, the grader re-hashes the cited file itself
 (`sha256:<hex>`, the same form every `klt` re-hash produces). An equal pin
 grades on the normal verdict; a differing one renders `unmet` /
