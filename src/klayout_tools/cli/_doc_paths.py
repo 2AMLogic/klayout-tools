@@ -6,19 +6,14 @@ from pathlib import Path
 from textwrap import TextWrapper
 from typing import Any
 
-import klayout_tools
-
+_DOC_DIR = Path(__file__).resolve().parents[1] / "data" / "cli"
 _DOC_POINTER = re.compile(
     r"(?<![\w./\\-])docs/cli/([A-Za-z0-9_-]+\.md)(?![\w/\\-]|\.\w)"
 )
 
 
-def _doc_dir() -> Path:
-    return Path(klayout_tools.__file__).parent / "data" / "cli"
-
-
 def _bundled_page(match: re.Match[str]) -> str:
-    page = _doc_dir() / match[1]
+    page = _DOC_DIR / match[1]
     return str(page) if page.is_file() else match[0]
 
 
@@ -29,21 +24,25 @@ def resolve_doc_paths(text: str) -> str:
 
 class _DocWrapper(TextWrapper):
     def _split(self, text: str) -> list[str]:
-        # Expand after tokenizing so even an install path containing spaces
-        # is measured and wrapped as a single word.
-        return [resolve_doc_paths(word) for word in super()._split(text)]
+        # Some help strings already contain an absolute path. Keep its
+        # directory together even when the installation prefix contains spaces.
+        chunks = re.findall(rf"(?:{re.escape(str(_DOC_DIR))}|\S)+|\s+", text)
+        return [" " if word.isspace() else resolve_doc_paths(word) for word in chunks]
 
 
 def _wrap_doc_text(text: str, width: int, indent: str = "") -> list[str] | None:
-    if "docs/cli/" not in text or not _doc_dir().is_dir():
+    if "docs/cli/" not in text and str(_DOC_DIR) not in text:
+        return None
+    if not _DOC_DIR.is_dir():
         return None
     return _DocWrapper(
         width=width,
         initial_indent=indent,
         subsequent_indent=indent,
-        break_on_hyphens=False,
+        expand_tabs=False,
+        replace_whitespace=False,
         break_long_words=False,
-    ).wrap(" ".join(text.split()))
+    ).wrap(text.strip())
 
 
 class DocHelpFormatter(argparse.HelpFormatter):

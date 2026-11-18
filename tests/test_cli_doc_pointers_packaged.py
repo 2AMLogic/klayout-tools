@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-import klayout_tools
+from klayout_tools import functional_verification_mutation_proposals
+from klayout_tools.cli import _doc_paths
 from klayout_tools.cli.parser import create_parser
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -136,7 +137,13 @@ def test_help_points_at_bundled_pages_for_every_parser(tmp_path, monkeypatch):
     docs.mkdir(parents=True)
     for page in (_ROOT / "docs" / "cli").glob("*.md"):
         (docs / page.name).touch()
-    monkeypatch.setattr(klayout_tools, "__file__", str(package / "__init__.py"))
+    monkeypatch.setattr(_doc_paths, "_DOC_DIR", docs)
+    # This verb already embeds the bundled path while constructing the parser.
+    monkeypatch.setattr(
+        functional_verification_mutation_proposals,
+        "__file__",
+        str(package / "proposals.py"),
+    )
     monkeypatch.setenv("COLUMNS", "80")
     for before, after in zip(source, _all_help_texts(create_parser()), strict=True):
         assert "docs/cli/" not in after
@@ -145,10 +152,10 @@ def test_help_points_at_bundled_pages_for_every_parser(tmp_path, monkeypatch):
 
 
 def test_help_rewrites_only_standalone_shipped_page_names(tmp_path, monkeypatch):
-    monkeypatch.setattr(klayout_tools, "__file__", str(tmp_path / "__init__.py"))
     page = tmp_path / "data" / "cli" / "sim.md"
     page.parent.mkdir(parents=True)
     page.touch()
+    monkeypatch.setattr(_doc_paths, "_DOC_DIR", page.parent)
     parser = create_parser()
     parser.epilog = (
         "See `docs/cli/sim.md`, docs/cli/sim.md#options and docs/cli/sim.md. "
