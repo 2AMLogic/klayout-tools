@@ -7,6 +7,8 @@ import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 SCRIPT = (
     Path(__file__).resolve().parent.parent / "scripts" / "install-openroad-docker.sh"
 )
@@ -38,8 +40,14 @@ def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     env = {k: v for k, v in env.items() if v is not None}
     # The installer ends by running `openroad -version` through the wrapper,
     # which hits the stub's `run` branch and records the argv.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
     subprocess.run(
-        ["bash", str(SCRIPT), str(dest)], check=True, env=env, capture_output=True
+        ["bash", str(SCRIPT), str(dest)],
+        check=True,
+        env=env,
+        cwd=cwd,
+        capture_output=True,
     )
     return log.read_text().splitlines()
 
@@ -92,12 +100,13 @@ def test_wrapper_mounts_default_klt_cache_root(tmp_path: Path) -> None:
     assert f"{cache}:{cache}:ro" in _mounts(argv)
 
 
-def test_wrapper_mounts_klt_cache_dir_itself(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suffix", ["", "/", "//"])
+def test_wrapper_mounts_klt_cache_dir_itself(tmp_path: Path, suffix: str) -> None:
     """Issue #5626: an explicit KLT_CACHE_DIR is mounted verbatim -- not
     suffixed with /klt (the default's suffix) or /liberty-merged (the merge
     subdir cache_dir() appends)."""
-    cache = tmp_path / "mycache"
-    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": str(cache)})
+    cache = f"{tmp_path}/mycache{suffix}"
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": cache})
     assert f"{cache}:{cache}:ro" in _mounts(argv)
     assert not any("/klt:" in m or "/liberty-merged:" in m for m in _mounts(argv))
 
@@ -122,13 +131,58 @@ def test_wrapper_creates_cache_dir_as_caller(tmp_path: Path) -> None:
     assert cache.stat().st_uid == os.getuid()
 
 
-def test_wrapper_skips_cache_mount_duplicate_of_tmpdir(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("tmp_suffix", "cache_suffix"),
+    [("", ""), ("", "/"), ("", "//"), ("/", ""), ("//", ""), ("/", "//")],
+)
+def test_wrapper_skips_cache_mount_duplicate_of_tmpdir(
+    tmp_path: Path, tmp_suffix: str, cache_suffix: str
+) -> None:
     """Issue #5626: KLT_CACHE_DIR=$TMPDIR must not produce a second -v for
     that path -- docker run rejects a duplicate mount point. The wrapper
     still runs (the installer ends with `openroad -version`, check=True)."""
-    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": str(tmp_path)})
-    specs = [m for m in _mounts(argv) if m.startswith(f"{tmp_path}:{tmp_path}")]
-    assert specs == [f"{tmp_path}:{tmp_path}"]
+    tmpdir = f"{tmp_path}{tmp_suffix}"
+    argv = _install(
+        tmp_path, {"TMPDIR": tmpdir, "KLT_CACHE_DIR": f"{tmp_path}{cache_suffix}"}
+    )
+    cwd = tmp_path / "cwd"
+    assert _mounts(argv) == [f"{cwd}:{cwd}", f"{tmpdir}:{tmpdir}", "/tmp:/tmp"]
+
+
+@pytest.mark.parametrize("target", ["cwd", "pdk", "root"])
+def test_wrapper_skips_cache_mount_duplicate_of_other_targets(
+    tmp_path: Path, target: str
+) -> None:
+    """Normalize every recorded target, preserving both '/' and mount flags."""
+    cwd = tmp_path / "cwd"
+    mounted = {"cwd": str(cwd), "pdk": f"{tmp_path}/pdk dir//", "root": "//"}[target]
+    env = {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": mounted.rstrip("/") + "/"}
+    expected = [f"{cwd}:{cwd}"]
+    if target != "cwd":
+        env["PDK_ROOT"] = mounted
+        expected.append(f"{mounted}:{mounted}:ro")
+    expected.extend([f"{tmp_path}:{tmp_path}", "/tmp:/tmp"])
+    assert _mounts(_install(tmp_path, env)) == expected
+
+
+@pytest.mark.parametrize("cache", ["~", "~/", "~/my cache//"])
+def test_wrapper_expands_literal_tilde_cache(tmp_path: Path, cache: str) -> None:
+    home = tmp_path / "home dir"
+    resolved = f"{home}{cache[1:]}"
+    mounts = _mounts(_install(tmp_path, {"HOME": str(home), "KLT_CACHE_DIR": cache}))
+    assert mounts[-1] == f"{resolved}:{resolved}:ro"
+    assert Path(resolved).is_dir()
+    assert not (tmp_path / "cwd" / "~").exists()
+
+
+@pytest.mark.parametrize("home", [None, ""])
+def test_wrapper_tilde_cache_with_missing_home_dedupes_tmp(
+    tmp_path: Path, home: str | None
+) -> None:
+    argv = _install(tmp_path, {"HOME": home, "KLT_CACHE_DIR": "~//"})
+    cwd = tmp_path / "cwd"
+    assert _mounts(argv) == [f"{cwd}:{cwd}", "/tmp:/tmp"]
+    assert not (cwd / "~").exists()
 
 
 def test_wrapper_survives_unset_home(tmp_path: Path) -> None:
@@ -183,13 +237,16 @@ def test_wrapper_multi_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> Non
     assert "/tmp:/tmp" not in mounts
 
 
+@pytest.mark.parametrize("suffix", ["", "/", "//"])
 def test_wrapper_skips_cache_mount_duplicate_of_extra_tmp_mount(
-    tmp_path: Path,
+    tmp_path: Path, suffix: str
 ) -> None:
     """Issues #5626 + #5878: when $TMPDIR differs from /tmp the wrapper mounts
     /tmp too, so KLT_CACHE_DIR=/tmp must not become a second, read-only -v for
     it -- docker run rejects a duplicate mount point and every `openroad`
     invocation would fail."""
-    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": "/tmp"})
-    specs = [m for m in _mounts(argv) if m.startswith("/tmp:")]
-    assert specs == ["/tmp:/tmp"]
+    argv = _install(
+        tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": f"/tmp{suffix}"}
+    )
+    cwd = tmp_path / "cwd"
+    assert _mounts(argv) == [f"{cwd}:{cwd}", f"{tmp_path}:{tmp_path}", "/tmp:/tmp"]
