@@ -1105,6 +1105,19 @@ klt sim request.json --backend batch --submit-only --format json
 klt sim request.json --job-status klt-sim-0123456789ab --format json
 ```
 
+`--job-status` also runs without the request file
+([#5810](https://github.com/2AMLogic/klayout-tools/issues/5810)) — a caller
+holding only the job id needs nothing else:
+
+```bash
+klt sim --job-status klt-sim-0123456789ab --format json
+```
+
+With no request, the bucket/region/profile resolve from the `$KLT_BATCH_*`
+environment and the fleet `batch-fleet.env` (see "Batch backend"); with no
+bucket in any of those sources, the same `requires a job bucket` error as a
+bucket-less request fires.
+
 `--submit-only` runs the same pre-submit gates as the blocking path (bucket
 and runner-version resolution, the whole-job ceiling), uploads the job,
 launches it, and exits `0` with the job's identity — it never polls and never
@@ -1234,9 +1247,13 @@ uploads and launches the single deck job and returns the payload above
 state, and `--attach` (below) collects the deck report. A long seeded deck
 campaign can therefore detach from the launching session and be collected later.
 
-`--job-status JOB_ID` makes one `status.json` read (the positional request only
-supplies the bucket/region/profile) and exits `0` whatever the *job's* state —
-the exit code describes the read, `state` describes the job:
+`--job-status JOB_ID` makes one `status.json` read and exits `0` whatever
+the *job's* state — the exit code describes the read, `state` describes the
+job. The positional request is optional
+([#5810](https://github.com/2AMLogic/klayout-tools/issues/5810)): given, it
+supplies the bucket/region/profile; omitted, they resolve from the
+`$KLT_BATCH_*` environment and the fleet `batch-fleet.env` (see "Batch
+backend" for the resolution order and the no-bucket error):
 
 | Field | Description |
 | ----- | ----------- |

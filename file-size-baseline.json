@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 548
+      "lines": 516
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -349,7 +349,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4334
+      "lines": 4337
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -369,7 +369,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2879
+      "lines": 2946
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -377,7 +377,7 @@
     },
     {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 658
+      "lines": 711
     },
     {
       "path": "src/klayout_tools/kb.py",
