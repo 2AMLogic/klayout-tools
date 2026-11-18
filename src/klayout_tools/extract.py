@@ -227,9 +227,7 @@ from .extract_detect_block import build_detection_findings
 # `_diode_required_terms` and `_is_synthesized_substrate_net_name` are
 # re-exported for `tests/test_extract.py`, `extract_parasitics.py` and (with
 # `_extraction_deck_name`) `extract_finfet.py`.
-from .extract_detect_diode_near_miss import (
-    _collect_diode_near_miss_warnings,
-)
+from .extract_detect_diode_near_miss import _collect_diode_near_miss_warnings
 from .extract_detect_diode_near_miss import (
     _diode_required_terms as _diode_required_terms,
 )
@@ -330,18 +328,11 @@ from .extract_progress import StageTimer, active_timer, stage
 # three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
 # `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
-    _case_collision_warnings,
-    _describe_device_recognition_only_layers,
     _describe_devices,
-    _describe_ignored_layers,
     _describe_matched_device_groups,
     _describe_nets,
-    _detect_merged_net_labels,
     _detect_single_terminal_nets,
-    _detect_split_net_labels,
-    _detect_unbiased_pmos_body_nets,
     _net_label_positions,
-    _split_net_label_warnings,
 )
 from .extract_report import (
     _describe_parasitics_metal_gaps as _describe_parasitics_metal_gaps,
@@ -367,17 +358,6 @@ from .extract_validate import validate_run_extract_args
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
-# The `extract_warnings` group below is a re-export for the same reason: every
-# warning builder it exports is now called from `extract_detect_block.py`
-# (issue #5196, stage 7) rather than from `run_extract` here, and the test
-# suite still reaches them through `klayout_tools.extract`.
-from .extract_warnings import (  # noqa: F401 -- re-exported, see comment above
-    ignored_layer_warnings,
-    merged_net_label_warnings,
-    pdk_dropped_param_warnings,
-    single_terminal_net_warnings,
-    unbiased_pmos_body_warnings,
-)
 from .metrics import is_registered
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
@@ -1636,6 +1616,7 @@ def run_extract(
     engine: str = "klayout",
     deck_file: str | None = None,
     deck_vars: Mapping[str, str] | None = None,
+    device_params: Mapping[str, Mapping[str, tuple[str, str]]] | None = None,
     runset_timeout: float | None = None,
     klayout_binary: str | None = None,
 ) -> dict[str, Any]:
@@ -1645,9 +1626,9 @@ def run_extract(
     runs. ``"klayout"`` (the default) is the curated-deck engine every
     paragraph below describes, byte-identical to this function before the
     parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
-    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
-    only, with every curated-engine-specific parameter refused by name. See
-    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
+    runset (``deck_file``, ``deck_vars``, ``device_params``) instead -- devices
+    and connectivity only, with every curated-engine-specific parameter refused
+    by name. See :mod:`klayout_tools.extract_runset` and docs/cli/extract.md, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -2948,13 +2929,14 @@ def run_extract(
             top=top,
             deck_vars=deck_vars,
             device_models=device_models,
+            device_params=device_params,
             no_netlist=no_netlist,
             runset_timeout_s=runset_timeout,
             klayout_binary=klayout_binary,
         )
-    if runset_timeout is not None or klayout_binary is not None:
+    if runset_timeout is not None or klayout_binary is not None or device_params:
         raise ExtractError(
-            "runset_timeout/klayout_binary are only used by engine "
+            "runset_timeout/klayout_binary/device_params are only used by engine "
             f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
         )
 

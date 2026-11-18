@@ -2713,6 +2713,22 @@ reported no stamp (older worker or absent capture); `variant_differs` /
 (`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
 `scheme_differs`).
 
+**Pinned-root layout caveat:** the client resolves the variant directory via
+`pdk.variant_dir_of`, with a legacy `root/<variant>` stamp-source fallback
+when the resolved directory has no readable stamp. The standalone worker
+reads `root/<variant>/SOURCES`. A flat worker root with only `root/SOURCES`
+normally yields `not_comparable` / `worker_stamp_unavailable` unless the
+bundle `.pdk-store.json` fallback supplies a stamp. If that flat root also
+contains a non-variant directory named `<variant>` with a different `SOURCES`
+file, the client can stamp the root while the worker stamps the nested file:
+even the **same install** can then report a misleading `mismatch`. A genuine
+nested variant tree (for example, one with `libs.tech/`) is selected by both.
+This does not invalidate every flat-client comparison: a flat client and a
+correctly nested worker can stamp the same revision and report `match`.
+`mismatch` is diagnostic only and does not fail the simulation; in the
+ambiguous layout it does not establish revision drift. This caveat concerns
+revision stamps, not the staged-model-input digest comparison below.
+
 Each side's PDK revision is also reported in full, independently of the
 comparison's status, so a divergence can be attributed from the report alone:
 
@@ -10312,6 +10328,23 @@ include left to the executing host). It is computed client-side, so `local`,
 `remote` and `batch` report the same value for one request. `klt sim` stays
 stateless: to guard a comparison, copy the earlier report's stamp into the new
 request's `expect_netlist_identity`.
+
+**Existing stamps can change (issue #5438).** Normalization strips inline
+comments with the package's shared `_spice_text` rule: everything from the
+first `;`, or from the first `$` that is itself a whole whitespace-delimited
+token (a `$` that merely *begins* a token, as in the `$3` of an anonymous-net
+name or in `.include $PDK_ROOT/...`, is content and survives). Versions
+before #5438 instead cut each line at the first whitespace-preceded `$` or
+`;`, so a card using KLayout's anonymous-net names (`X$1 $3 $4 inv`) collapsed
+to its first token — two different circuits shared one identity — and a `;`
+attached to the previous token (`R1 a b 1k; load`) was kept as content. An
+identity stamped by those versions can therefore change for a netlist whose
+bytes did not move. A run guarded with the old stamp fails loudly with the
+existing `expect_netlist_identity` mismatch error; refresh it by copying
+`environment.netlist_identity` from a report generated with the corrected
+version. `klt sim --check <report>` diagnoses exactly this case — every raw
+`sha256` matches while the identity does not — as `normalization_changed`
+(see `--check` above). The stamp format and the JSON fields do not change.
 
 ## Peak memory and timeout progress (issue #4867)
 

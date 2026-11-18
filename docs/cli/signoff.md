@@ -325,6 +325,29 @@ file's own bytes — a pinned `functional-verification` citation, reported as
 bytes and a pin taken over the decompressed copy binds those; the two are not
 interchangeable for that one basis.
 
+**Pin-basis change for `functional-verification` (issue #5550).** A
+`functional-verification` envelope from a `klt` that records the shared
+`provenance` block pins its **RTL digest**
+(`provenance.input.content_hash`, role `source` — the same scheme `klt
+synthesize`/`klt equiv` record), not the report's own bytes: the
+`evidence_file` re-hash basis now applies only where the envelope has no
+`provenance.input` to compare: a **legacy** envelope with no `provenance` key
+(a report committed by an older `klt`), and an `options.from_synthesize`
+report, whose block records `input: null` because its design input is the
+synthesized netlist (pinned by `from_synthesize.netlist_sha256`, which a
+manifest cannot pin) — such a report keeps the #4893 file-bytes binding it
+always had, and a command-backed pin of one stays `unverifiable_provenance`
+with a note naming that cause. A block whose `input` is present but whose
+`content_hash` is `null` (a source that could not be hashed) never falls back
+to the file's bytes. A manifest
+pin authored under #4893 (the report's byte hash) therefore grades
+`stale_evidence` against a provenance-bearing report — re-pin it against the
+report's `provenance.input.content_hash`. In exchange, a pin now detects an
+RTL edit the moment the report is re-run, a command-backed pinned citation
+grades instead of rendering `unverifiable_provenance`, and the report joins
+the provenance-consistency cross-check against `synthesize`/`equiv` citations
+over the same sources.
+
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
 `coverage` block reports `nothing_checked: true` — the shared convention in
@@ -2000,7 +2023,12 @@ is the combined set digest (see "Set binding" above), and
 therefore renders the manifest row `unmet` / `stale_evidence` (the changed
 member is named in `detail.artifact_binding.members`) without running
 `--attest --check`. A member that cannot be read is left out of the set; its
-`present` check already fails the attestation.
+`present` check already fails the attestation. A `{"glob": ...}` source
+entry contributes its **expanded** members to `provenance.input.paths` and
+the combined set digest: adding a matching file changes
+`provenance.input.content_hash`, so a manifest citing the envelope must be
+re-pinned after every such addition (the behaviour the "Pin change" note
+below describes).
 
 > **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
@@ -2107,6 +2135,18 @@ the README as the pinned artifact item 10 names. The answer to a churning
 file is the same as for resync-managed paths above — list fewer files: move
 the churn out and list a stable file instead, or list the file presence-only
 when its existence is all you attest.
+
+**Globs make the resync rule easier to violate by accident (issue #5614).**
+A `{"glob": ...}` hygiene entry expands to every tracked file matching it at
+attest time — including files added later — so a pattern wide enough to
+reach resync-managed content (`.loom/`, `.claude/`, `.gitignore`,
+`CLAUDE.md`) will start binding tooling files the moment a resync adds one,
+and the envelope goes red on every resync. Keep hygiene patterns scoped to
+repo-owned directories (`records/*.md`, not `**/*.md`), and re-check a
+glob's expansion (`git ls-files` with the same pattern) when the covered
+directory gains kinds of files, not just more of them. The expansion itself
+is deterministic — tracked files only — so the drift an added file causes is
+the intended signal: re-attest (owner action, below) or narrow the pattern.
 
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
@@ -2394,13 +2434,13 @@ or the entry grades `unmet`/`unreadable_evidence`. (The `{path, scope:
 "repo"}` input an envelope names is separate: it resolves against the repo
 root of the evidence file.)
 
-#### Inventory schema (`schema_version: 1`)
+#### Inventory schema (`schema_version: 1` and `2`)
 
 Every inventory is a JSON object with these common fields:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `schema_version` | yes | Integer. This build reads `1`; any other value is refused (exit `1`). |
+| `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
 | `description` | no | Free text, never graded. |
@@ -2411,7 +2451,7 @@ an inventory the author did not write.
 
 | Item | Field | Required | Checks run |
 | ---- | ----- | -------- | ---------- |
-| **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
+| **1** Design sources | `sources`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
@@ -2426,7 +2466,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
-| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -2469,6 +2509,32 @@ absolute, escape the repository (`..`), traverse a symlink anywhere along
 their length, or appear more than once across the inventory's path lists.
 The inventory file itself must not be a symlink, and must be a file (`-` is
 refused: there is no path to pin).
+
+**Glob members (schema 2, issue #5614).** A `sources` (item 1) or `hygiene`
+(item 10) entry may instead be `{"glob": "<pattern>"}`, expanded at attest
+time to the **git-tracked** files matching the pattern — each expanded member
+then appears in the envelope as its own `present` check with its own
+`content_hash`, exactly as if it had been listed literally, so the envelope
+stays a literal, checkable record of what was bound. Patterns are
+repository-relative and follow `fnmatch` rules: `*` matches any characters
+*including* path separators (so `records/*.md` covers subdirectories too —
+which is the point: an inventory whose intent is "every record under
+`records/`" keeps covering the directory as it grows), `?` matches one
+character, `[...]` a character class; empty and `.` path segments are
+dropped. A pattern is refused when it is not a non-empty string, is
+absolute, or escapes the repository with `..` — the same contract a literal
+path has. Expansion reads `git ls-files`, **never the filesystem**: an
+untracked local file is never a member, so a local `--attest` and CI's
+`--attest --check` expand to the same member set and the envelope stays
+byte-deterministic; git being unusable is an error naming the glob entry,
+with no filesystem fallback. A glob matching **zero** tracked files is
+refused (a glob that attests nothing is the original coverage gap in a new
+shape), and a glob naming a file that is also listed literally — in any
+path list — is the ordinary duplicate refusal. Because the envelope pins the
+expanded set, **a file added to a covered directory after the envelope was
+committed is drift**: `--attest --check` re-expands the glob, sees the extra
+`present` check and changed `check_count`, and exits non-zero. Re-attesting
+is the repo owner's action (the item-10 rule below).
 
 #### Hashing rules
 
@@ -5329,7 +5395,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
-| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation (no `provenance` block by design, and a command's stdout is not a stable file to re-hash; a *file-backed* one is re-hashed by the grader, issue #4893) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation of a **legacy** report (from a `klt` predating the `provenance` block, issue #5550) or an `options.from_synthesize` one (`provenance.input` is `null` by design), where a command's stdout is not a stable file to re-hash (a *file-backed* one of either is re-hashed by the grader, issue #4893), or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. (A cited item-11 *set* that is merely missing the `erc` or `lvs` part renders `"power_delivery_parts_missing"` instead, issue #4193.) The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"unanchored_evidence"`   | yes | **(issue #2718)** **Items 1, 2, 9 and 10 only.** The evidence resolved to a *passing* `generic` envelope, but it is not bound to an audited artifact. Either the envelope declares no `t1_item` (or a non-integer one), or it names no usable `provenance.input.path`, or the manifest entry pins no `content_hash`. The envelope's `status` is then only its author's word. Add the binding; there is nothing to re-run. A non-integer `t1_item` renders this for item 8 too. See "Items 1, 2, 9, and 10: bind them to an audited artifact" above. |
 | `"coverage_undisclosed"`  | no  | **(issue #5789)** **Item 3 only, and only under `require_coverage_disclosure`.** The cited `klt drc` report graded `met` on `status: "clean"`, but the claim's `coverage_disclosed` declaration is not set-equal to the coverage the report itself states: `detail.coverage_undisclosed` names per field the `missing` entries (reported, not claimed) and `extra` entries (claimed, no longer reported — deck drift), or carries `reason: "no_coverage_block"` for pre-#2002 evidence that states no coverage at all. The item also carries `detail.cited_evidence` (the citation a `met` item would have had). Fix the declaration, or regenerate against the deck the claim describes. See "DRC coverage is reported, not graded" above. |
@@ -6065,7 +6131,9 @@ non-passing envelope discloses its pin too" below).
 
 **An unverifiable pin explains itself (issue #3747).** When the entry pins
 `content_hash` and the resolved envelope carries no input hash at all (a
-`functional-verification` envelope or an unprovenanced `generic` one), the
+legacy `functional-verification` envelope from a `klt` predating the
+`provenance` block, an `options.from_synthesize` one, or an unprovenanced
+`generic` one), the
 `unmet` / `unverifiable_provenance` item carries
 `detail.content_hash_pin: "unverifiable"` plus `detail.content_hash_pin_note`
 (the envelope kind and the missing `provenance.input.content_hash`), so the
@@ -6094,7 +6162,9 @@ unprovenanced `generic` envelope has no live hash, so its pin renders
 anchor the citation with `provenance.input.path` to make it enforceable.
 
 **A `functional-verification` pin binds the evidence file (issue #4893).**
-`klt functional-verification` records no input hash, so for a **file-backed**
+A `klt functional-verification` report with no `provenance.input` to compare —
+one from a `klt` predating the block, or an `options.from_synthesize` run (issue
+#5550) — records no input hash, so for a **file-backed**
 citation that pins `content_hash`, the grader re-hashes the cited file itself
 (`sha256:<hex>`, the same form every `klt` re-hash produces). An equal pin
 grades on the normal verdict; a differing one renders `unmet` /

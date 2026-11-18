@@ -154,13 +154,11 @@ from .sim_remote import (
 if TYPE_CHECKING:
     from .sim import CornerPoint, _Checkpoint
 
-# Contract block moved to sim_batch_contract (issue #4065); re-exported so every
-# existing ``sim_batch`` import path keeps working.
+# Keep the contract names that callers import from sim_batch (issue #4065).
 from .sim_batch_contract import (  # noqa: F401
     _ATTACH_UNSTARTED_GRACE_S,
     _BATCH_AWS_TIMEOUT_S,
     _BATCH_INPUTS_TIMEOUT_S,
-    _BATCH_JOB_FAILURE_TAIL_BYTES,
     _BATCH_JOB_OVERHEAD_S,
     _BATCH_LAUNCH_TIMEOUT_S,
     _BATCH_PREFLIGHT_REJECT_EXIT,
@@ -169,9 +167,6 @@ from .sim_batch_contract import (  # noqa: F401
     _BATCH_STDERR_TAIL_BYTES,
     _CAPACITY_BACKOFF_BASE_S,
     _CAPACITY_BACKOFF_CAP_S,
-    _DECKS_BASE_RELEASE,
-    _DECKS_FIRST_DEV,
-    _PAR_BACKEND_FIRST_DEV,
     _POLL_PROGRESS_EVERY,
     BATCH_ARTIFACTS_DIRNAME,
     BATCH_CONCURRENCY_CAP_CODE,
@@ -184,14 +179,12 @@ from .sim_batch_contract import (  # noqa: F401
     BATCH_MAX_UNITS_CODE,
     BATCH_NETLIST_FILENAME,
     BATCH_NO_CAPACITY_CODE,
-    BATCH_POLL_TIMEOUT_CODE,
     BATCH_RECEIPT_FILENAME,
     BATCH_REPORT_FILENAME,
     BATCH_REQUEST_FILENAME,
     BATCH_RUNNER_FEATURE_CODE,
     BATCH_RUNNER_FEATURE_PREDATED_CODE,
     BATCH_RUNNER_IDENTITY_FILENAME,
-    BATCH_RUNNER_LACKS_DECKS_CODE,
     BATCH_RUNNER_LACKS_PLACE_AND_ROUTE_BACKEND_CODE,
     BATCH_RUNNER_MISMATCH_CODE,
     BATCH_RUNNER_UNKNOWN_CODE,
@@ -226,32 +219,20 @@ from .sim_batch_contract_jobspec import (
     _default_batch_poll_timeout_s,
 )
 from .sim_batch_contract_preflight import (  # noqa: F401
-    _feature_gate_shell,
     _job_stderr_capture_prefix,
-    _mandatory_feature_gate_shell,
-    _mandatory_feature_probe_shell,
     _runner_preflight_script,
     assess_remote_runner_features,
     remote_feature_preflight,
 )
 from .sim_batch_contract_spec import (  # noqa: F401
     _MANDATORY_RUNNER_FEATURES,
-    _RELEASED_FEATURE_DETECTORS,
     _RUNNER_REQUEST_FEATURES,
     BatchJobInput,
     BatchJobSpec,
-    _declared,
-    _feature_release_key,
     _missing_runner_features,
-    _release_key,
     _release_segment,
     _request_features,
     _runner_gate_release,
-    _step_res_declared,
-    _uses_dual_injection,
-    _uses_measurement_expr,
-    _uses_option,
-    _uses_process_section_objects,
 )
 from .sim_batch_contract_worker import (  # noqa: F401
     _WORKER_CAPTURE_PROGRAM,
@@ -261,15 +242,12 @@ from .sim_batch_contract_worker import (  # noqa: F401
     WORKER_CAPTURE_MODEL_INPUTS_MAX,
     WORKER_CAPTURE_PROBE_TIMEOUT_S,
     WORKER_CAPTURE_STR_MAX,
-    _assess_capability_support,
     _assess_deck_support,
     _bounded_model_inputs,
     _bounded_str,
-    _capability_preflight_lines,
     _deck_preflight_lines,
     _runner_supports_decks,
     _runner_supports_par_backend,
-    _runner_supports_since,
     _worker_capture_command,
     assess_par_backend_support,
     par_backend_preflight_lines,
