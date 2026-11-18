@@ -2671,6 +2671,22 @@ reported no stamp (older worker or absent capture); `variant_differs` /
 (`SOURCES` wins when present, so a `SOURCES` side against a store-only side is
 `scheme_differs`).
 
+**Pinned-root layout caveat:** the client resolves the variant directory via
+`pdk.variant_dir_of`, with a legacy `root/<variant>` stamp-source fallback
+when the resolved directory has no readable stamp. The standalone worker
+reads `root/<variant>/SOURCES`. A flat worker root with only `root/SOURCES`
+normally yields `not_comparable` / `worker_stamp_unavailable` unless the
+bundle `.pdk-store.json` fallback supplies a stamp. If that flat root also
+contains a non-variant directory named `<variant>` with a different `SOURCES`
+file, the client can stamp the root while the worker stamps the nested file:
+even the **same install** can then report a misleading `mismatch`. A genuine
+nested variant tree (for example, one with `libs.tech/`) is selected by both.
+This does not invalidate every flat-client comparison: a flat client and a
+correctly nested worker can stamp the same revision and report `match`.
+`mismatch` is diagnostic only and does not fail the simulation; in the
+ambiguous layout it does not establish revision drift. This caveat concerns
+revision stamps, not the staged-model-input digest comparison below.
+
 Each side's PDK revision is also reported in full, independently of the
 comparison's status, so a divergence can be attributed from the report alone:
 
