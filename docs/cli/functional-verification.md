@@ -1092,7 +1092,8 @@ things, in order:
 1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
    `zero_delay_alias_port_interconnect` and
    `zero_delay_physical_only_interconnect` and
-   `zero_delay_bus_port_source_interconnect`, none of which can change a
+   `zero_delay_bus_port_source_interconnect` and
+   `zero_delay_internal_bus_net_interconnect`, none of which can change a
    delay), every delay applied and no annotation failed. An
    `iopath_ifnone_edge_modpath` class means the arcs it lists ran with no
    module-path delay. An `iopath_cond_expression` class means the run omits
@@ -1193,8 +1194,8 @@ entry population — `"all"` or `"interconnect"` — so a stored report is
 self-describing about which delay population its verdict was measured
 against.
 
-Eight `dropped` classes exist today. The first four (`timingcheck` and the
-three zero-delay `INTERCONNECT` classes) cannot change a simulated delay.
+Nine `dropped` classes exist today. The first five (`timingcheck` and the
+four zero-delay `INTERCONNECT` classes) cannot change a simulated delay.
 `iopath_interconnect_only` records the requested net-delay-only mode.
 The last three classes describe SDF module-path delay detail omitted from
 the run and identify the affected cell arcs in `arcs`.
@@ -1205,6 +1206,7 @@ the run and identify the affected cell arcs in `arcs`.
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
 | `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
+| `zero_delay_internal_bus_net_interconnect` | SDF-text normalization (issue #6075) | An `INTERCONNECT` entry running across a bit-select of an **internal** wire — both endpoints ordinary instance pins whose parsed netlist connections resolve to the same bit-select of a wire that is not a top-level port — carrying zero delay at every corner, was removed before annotation. Measured live on Icarus 13.0: Icarus inserts **no** intermodpath for *every* entry on such a net (0-of-N at any fanout, unlike a port bit's last-declared-survivor rule), and the entry text is byte-identical to an entry on a scalar net that annotates cleanly, so the decision is made from the same gate-level parse the run already compiles, not from the SDF text. A non-zero entry on the identical net is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
