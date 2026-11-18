@@ -16,8 +16,10 @@ out-of-bounds request before any geometry is built) and the
 ``_<family>_describe()`` functions (which turn a built layout into the
 response envelope's ``device_count``/``ports``/``drc_hints`` fields) -- plus
 the helpers used exclusively by them (``_voltage_flavor_hints``, the
-``_ring_*`` port/note builders, ``_ring_params_validate``, the
-``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``).
+``_ring_*`` note builders, ``_ring_params_validate``, the
+``_well_island_*`` isolation solver, and ``_format_box_um``/``_box_um_field``;
+``_ring_ports`` lives next door in :mod:`klayout_tools.gen_ring_ports`,
+which also holds the strap-window spacing lookup it insets by).
 ``_well_island_layer_params`` comes along too: it is the one ``layer_params``
 resolver #1875 had to leave behind, because it calls
 :func:`_well_island_isolation` to reject an unsatisfiable isolation request
@@ -30,13 +32,9 @@ one-way -- ``gen.py`` imports this module at its own module level, and
 nothing here imports ``gen`` at module level. The layout-math helpers these
 functions call (``_mos_array_layout``, ``_res_array_layout``,
 ``_cap_array_layout``, ``_ring_layout``, ``_diff_pair_layout``,
-``_bjt_array_layout``, ``_esd_device_layout``, ``_grid_snapped``,
-``_box_separation_um``, ``_parse_well_regions``, ``_well_box_um``,
-``_auto_ring_inner_size_um``) and the geometry constants they read stay in
-``gen.py`` and are imported back **lazily, at call time**, exactly the way
-``gen_pcells/*.py`` and ``gen_layer_params.py`` already do it. By the time
-any function here actually runs, ``gen`` has finished importing this module
-and is fully loaded, so the lazy import never raises.
+``_bjt_array_layout``, ``_esd_device_layout``) and the geometry constants
+are exposed by ``gen.py`` and imported **lazily, at call time**, following
+the convention in ``gen_pcells/*.py`` and ``gen_layer_params.py``.
 
 The PDK layer-parameter names below have no such cycle -- ``gen.py`` itself
 re-exports them from :mod:`klayout_tools.gen_layer_params`, so they are
@@ -88,9 +86,11 @@ from .gen_layer_params import (
     _role_layer_info,
     _sd_implant_margin_um,
     _tap_pads_wanted,
-    _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
+from .gen_ring_ports import _ring_ports
+from .gen_voltage_flavor import _voltage_flavor_hints
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -417,32 +417,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         inner_w_um,
         inner_h_um,
     )
-
-
-def _voltage_flavor_hints(
-    family: str, params: dict[str, Any], notes: list[str]
-) -> dict[str, Any]:
-    """``drc_hints`` fields for the optional ``voltage_flavor`` marker (issue
-    #1054), shared by :func:`_mos_array_describe`/:func:`_diff_pair_describe`:
-    echoes the requested flavour (``None`` when omitted) and whether a real
-    marker layer was resolved for it, appending an explanatory entry to
-    ``notes`` (in place) when a non-empty request resolved to no layer --
-    mirrors ``esd_device``'s own ``esd_mark``/``salicide_block`` "notes it,
-    never silently drops it" precedent rather than rejecting the request."""
-    voltage_flavor = params["voltage_flavor"]
-    mark_present = False
-    if voltage_flavor:
-        mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if not mark_present:
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
-                f"resolved for the resolved PDK family ('{family}') -- no marker "
-                "was drawn"
-            )
-    return {
-        "voltage_flavor": voltage_flavor or None,
-        "voltage_flavor_mark_present": mark_present,
-    }
 
 
 def _sd_implant_hints(
@@ -793,6 +767,7 @@ def _mos_array_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -1020,6 +995,8 @@ def _res_array_series_note(joints: list[dict[str, Any]], num: int) -> str:
         f"units end to end; only R0_A and R{num - 1}_B are reported as ports. "
         "Per-joint overhead (jumper length): "
         + (", ".join(overhead) if overhead else "none (num is 1)")
+        + ". Compare against the schematic's single resistor with `klt lvs` "
+        "options.combine_devices: true (default false: one device per unit)"
     )
 
 
@@ -1699,70 +1676,6 @@ def _tap_pad_ports(
     return ports
 
 
-def _ring_ports(
-    ring: dict[str, Any],
-    offset_um: tuple[float, float],
-    tap_prefix: str,
-    tap_layer: dict[str, Any],
-    tap_width_um: float,
-    gap_layer: dict[str, Any],
-    tap_net: str | None = None,
-) -> list[dict[str, Any]]:
-    """Reported ``ports[]`` entries for a drawn ring.
-
-    One ``<tap_prefix><side>`` tap port at the midpoint of every side that is
-    still covered by ring metal there, plus -- when the ring was cut with
-    ``ring_gap_side`` (#434) -- one ``GAP_<side>`` entry marking the opening
-    itself. A ``GAP_*`` entry is a *marker, not a conductor*: it reports where
-    a route may cross the ring (``x_um``/``y_um`` = the opening's centre on
-    the ring's own centre line, ``width_um`` = the opening's length along that
-    side, ``direction_deg`` = the side's outward normal) on the layer a route
-    would cross it on, and `klt gen-compose` rejects any attempt to wire or
-    label it.
-
-    ``tap_net`` (issue #1421) names the net every tap port carries, reported
-    as each entry's ``net``. ``None`` (the default, and every caller that
-    predates ``well_island``) keeps the historical ``"net": null`` -- a ring
-    whose tie net the generator has no way to know. It is never applied to a
-    ``GAP_*`` entry: that marks the *absence* of ring conductor, so it carries
-    no net by construction.
-    """
-    from .gen import RING_SIDE_DIRECTIONS
-
-    ox, oy = offset_um
-    ports: list[dict[str, Any]] = []
-    for side, direction in RING_SIDE_DIRECTIONS.items():
-        xy = ring["ports"].get(side)
-        if xy is None:
-            continue  # this side's midpoint sits inside the ring opening
-        ports.append(
-            {
-                "name": f"{tap_prefix}{side}",
-                "net": tap_net,
-                "layer": tap_layer,
-                "x_um": xy[0] + ox,
-                "y_um": xy[1] + oy,
-                "width_um": tap_width_um,
-                "direction_deg": direction,
-            }
-        )
-
-    gap = ring["gap"]
-    if gap is not None:
-        ports.append(
-            {
-                "name": f"GAP_{gap['side']}",
-                "net": None,
-                "layer": gap_layer,
-                "x_um": gap["x_um"] + ox,
-                "y_um": gap["y_um"] + oy,
-                "width_um": gap["opening_um"],
-                "direction_deg": RING_SIDE_DIRECTIONS[gap["side"]],
-            }
-        )
-    return ports
-
-
 def _ring_gap_notes(ring: dict[str, Any] | None, ring_gap_side: str) -> list[str]:
     """``drc_hints.notes`` entries about a requested ring opening (#434)."""
     if not ring_gap_side:
@@ -1911,6 +1824,7 @@ def _guard_ring_describe(
 
     family = _pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    contact_layer = _PDK_ROLE_LAYERS[family]["contact"]
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
@@ -1919,6 +1833,10 @@ def _guard_ring_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        gap_contact_enclosure_um=_guard_ring_gap_contact_enclosure_um(family),
+        dbu=dbu,
+        mfg_grid_um=mfg_grid_um(family, contact_layer),
+        contact_fixed_size_um=_cut_fixed_size_um(family, contact_layer),
     )
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
@@ -1931,6 +1849,7 @@ def _guard_ring_describe(
         metal_layer,
         params["ring_width_um"],
         metal_layer,
+        pdk_variant=pdk_info["variant"],
     )
 
     notes = _ring_gap_notes(info, params["ring_gap_side"])
@@ -1948,6 +1867,9 @@ def _guard_ring_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(
+        family, params, notes, params["add_well"] and well_supported
+    )
     snapped = _grid_snapped(
         dbu,
         params["inner_width_um"],
@@ -1956,9 +1878,6 @@ def _guard_ring_describe(
     )
 
     return {
-        # The contacts actually drawn -- `2 * (contacts_ns + contacts_ew)`
-        # unless a ring opening (params.ring_gap_side) clipped one or more
-        # of them away.
         "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {
@@ -1966,6 +1885,7 @@ def _guard_ring_describe(
             "matched_group_id": None,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
@@ -2279,8 +2199,7 @@ def _well_island_validate(params: dict[str, Any]) -> None:
     )
 
     # The ring geometry is `guard_ring`'s, so its bounds are too -- reuse the
-    # shared validator rather than restating (and risking drift from) the
-    # same checks.
+    # shared validator rather than restating (and risking drift from) the same checks.
     _ring_params_validate("well_island", params)
 
     net = params["net"]
@@ -2332,6 +2251,7 @@ def _well_island_describe(
         params["ring_width_um"],
         metal_layer,
         net,
+        pdk_variant=pdk_info["variant"],
     )
 
     isolation = _well_island_isolation(params, family)
@@ -2382,8 +2302,7 @@ def _well_island_describe(
             # Issue #1421's own reporting contract: the caller (or
             # `klt gen-compose`, or their own placer) gets the island's
             # resulting well rectangle and the region no *other* well may
-            # enter, so a composition never has to re-derive either from raw
-            # geometry.
+            # enter, so a composition never has to re-derive either from raw geometry.
             "well_net": net,
             "well_box_um": _box_um_field(isolation["well_box_um"]),
             "well_separation_um": isolation["separation_um"],
@@ -2586,6 +2505,7 @@ def _diff_pair_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -2765,6 +2685,7 @@ def _bjt_array_describe(
                 tap_layer,
                 ring_w,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
@@ -3092,6 +3013,7 @@ def _esd_device_describe(
                 metal_layer,
                 GUARD_RING_DEFAULT_WIDTH_UM,
                 metal_layer,
+                pdk_variant=pdk_info["variant"],
             )
         )
 
