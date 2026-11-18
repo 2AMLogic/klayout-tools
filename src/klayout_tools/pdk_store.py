@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
 #: Upper bound on bytes read from ``.pdk-store.json``.
@@ -63,6 +64,21 @@ def store_pdk_stamp(variant: str, variant_dir: str) -> dict[str, Any] | None:
 
 #: Upper bound on bytes read from a variant's ``SOURCES`` file.
 _SOURCES_FILE_MAX = 16384
+
+#: An open_pdks ``SOURCES`` file leads with the revision that built the
+#: install: ``open_pdks <token>`` (a git commit id for a from-source build).
+_SOURCES_REVISION_RE = re.compile(r"^open_pdks[ \t]+(\S{4,64})[ \t]*$", re.MULTILINE)
+
+
+def sources_revision_token(stamp_text: Any) -> str | None:
+    """The ``open_pdks <token>`` revision token of a ``SOURCES`` stamp text,
+    or ``None`` when no parseable line is present (issue #5593). Worker and
+    client stamps are then nameable by the same token a caller asserts as
+    ``options.pdk_revision``; a non-``str`` input is simply unparsable."""
+    if not isinstance(stamp_text, str):
+        return None
+    found = _SOURCES_REVISION_RE.search(stamp_text)
+    return found.group(1) if found else None
 
 
 def sources_pdk_stamp(variant: str, variant_dir: str) -> dict[str, Any] | None:
