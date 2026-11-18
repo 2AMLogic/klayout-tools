@@ -229,12 +229,12 @@ from .functional_verification_pdk import (
 from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
-    _collect_sdf_alias_port_bits,
+    _collect_sdf_alias_port_bits,  # noqa: F401 -- tests reach it as fv._collect_sdf_alias_port_bits
     _collect_sdf_physical_only_instances,
     _drop_sdf_bit_selected_bus_iopaths,
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
-    _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_zero_delay_alias_port_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_alias_port_interconnects
     _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
@@ -262,9 +262,11 @@ from .functional_verification_sdf_rename import (
 from .functional_verification_sdf_steps import (
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_alias_port_drop,
     _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _sdf_refusal_attribution,
     _sdf_refusal_error,
 )
 from .request_paths import RequestPaths
@@ -2752,28 +2754,21 @@ def run_functional_verification(
         # of the two confirmed mechanisms this actually fixes) is a no-op
         # for a design with only scalar top-level ports (#1069's own case)
         # -- `sdf_paths` stays a single-element list in that case.
-        # Issue #2285: an `INTERCONNECT` entry whose destination is a
-        # top-level port bit the netlist drives through an `assign` alias
-        # (a P&R backend's tie-cell shape, `assign uio_oe[0] = net0;`)
-        # cannot be annotated by Icarus at all -- and cannot be made
-        # annotatable by rewriting the endpoint either (verified live; see
-        # the module comment above
-        # :func:`_drop_sdf_zero_delay_alias_port_interconnects`). When such
-        # an entry is zero-delay at every corner, dropping it cannot change
-        # any simulated timing, so it is removed from the SDF text here and
-        # counted in `environment.sdf.dropped` instead of failing the run.
-        # A non-zero-delay entry is left in place and still fails the
-        # diagnostic gate loudly.
-        alias_port_bits = _collect_sdf_alias_port_bits(sources, hdl_toplevel)
-        alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
-            annotate_source_path, alias_port_bits
+        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the
+        # netlist drives through an `assign` alias (a P&R backend's
+        # tie-cell shape) cannot be annotated by Icarus at all and cannot
+        # be made annotatable by rewriting the endpoint either; a
+        # zero-delay-at-every-corner entry is dropped up front and counted
+        # in `environment.sdf.dropped` instead of failing the run (the
+        # helper carries the full write-up; non-zero entries stay in
+        # place and still fail the diagnostic gate loudly).
+        annotate_source_path = _apply_sdf_alias_port_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
-        if alias_drop is not None:
-            alias_text, alias_dropped_count = alias_drop
-            annotate_source_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
-            with open(annotate_source_path, "w", encoding="utf-8") as handle:
-                handle.write(alias_text)
-            sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
 
         vector_ports = {name for _, width, name in ports if width}
 
@@ -2833,6 +2828,11 @@ def run_functional_verification(
             with open(deferred_path, "w", encoding="utf-8") as handle:
                 handle.write(deferred_text)
             sdf_paths = [safe_path, deferred_path]
+        # Issue #5769: remember what Icarus actually reads -- a refusal
+        # resolves its intermodpath locators against these files (Icarus's
+        # line counter is cumulative across the calls above), never
+        # against the request's own SDF path.
+        sdf.update(_sdf_refusal_attribution(sdf_paths, ports))
 
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
@@ -2951,7 +2951,7 @@ def run_functional_verification(
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
             raise _sdf_refusal_error(
-                sdf["file"],
+                sdf,
                 engine,
                 diagnostics,
                 _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
@@ -3079,41 +3079,26 @@ def run_functional_verification(
 
 # Re-exports of the subsystems split out of this module. Imported last so the
 # sibling modules (which reach back into this one lazily via ``_fv``) find
-# every name they need already defined; ``klayout_tools.functional_verification.<name>``
-# stays a working import path for every moved name.
+# every name they need already defined.
 from .functional_verification_mutation import (  # noqa: E402, F401
-    _write_mutant_combined_log,
     run_functional_verification_with_mutations,
 )
 from .functional_verification_mutation_proposals import (  # noqa: E402, F401
-    _MUTATION_PROPOSAL_REQUIRED_FIELDS,
-    _MUTATION_PROPOSALS_REQUIRED_FIELDS,
-    _load_mutation_proposals_json,
     _ProposalRecord,
-    _resolve_mutation_proposals,
     _validate_mutation_scope,
     _validate_proposal_indices,
     load_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _build_and_test_variant,
-    _first_new_failure,
-    _kill_process_tree,
-    _mutation_subprocess_entry,
     _run_isolated_variant,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
-    _VERILOG_TOP_REJECTED_OPTIONS,
-    VERILOG_TOP_FIELDS,
     _check_verilog_top_sdf,
     _reject_verilog_top_mutations,
-    _reject_verilog_top_options,
     _resolve_testbench_target,
     _resolve_verilog_top,
     _run_verilog_top,
     _sdf_annotate_scope,
     _sdf_extend_sources,
-    _verilog_top_error,
-    _verilog_top_fields,
-    _verilog_top_sdf_gate,
 )

@@ -1,4 +1,4 @@
-"""The ``request.batch`` knob resolvers, verbatim out of
+"""The ``request.batch`` knob resolvers, moved out of
 :mod:`klayout_tools.sim_batch` (issue #6437), plus the request-only knob
 validator the batch dry run runs before its host-dependent configuration
 resolution.
@@ -6,7 +6,11 @@ resolution.
 Split out of :mod:`klayout_tools.sim_batch` to keep that module under its
 per-file size ratchet (same shape as :mod:`klayout_tools.sim_batch_warn`
 and :mod:`klayout_tools.sim_batch_job_timeout`, issue #5544's precedent
-for a verbatim move).
+for a behaviour-preserving move). The bodies are unchanged except that the
+three finiteness guards (``max_job_seconds``, ``capacity_wait_s``,
+``interrupted_grace_s``) go through
+:func:`~klayout_tools._jsonnum.is_finite_number`, carrying issue #6115's
+rewrite of those guards forward from ``sim_batch``.
 
 Every resolver here reads only ``request.batch`` (plus, for
 :func:`_resolve_max_job_seconds`, the ``$KLT_BATCH_MAX_JOB_SECONDS``
@@ -24,10 +28,10 @@ This module does not import :mod:`klayout_tools.sim_batch` at runtime
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .sim_batch_contract import (
     BATCH_MAX_CONCURRENT_CODE,
     DEFAULT_BATCH_MAX_JOB_SECONDS,
@@ -58,8 +62,11 @@ def _resolve_max_job_seconds(
     naming its source, raised before any S3 write, never a silent fall
     through to a less specific source.
 
-    Moved verbatim from :mod:`klayout_tools.sim_batch` (issue #6437) so its
-    size ratchet stays green; re-imported there under the same name.
+    Moved from :mod:`klayout_tools.sim_batch` (issue #6437) so its size
+    ratchet stays green; re-imported there under the same name. Unchanged
+    by the move apart from the finiteness guard, which is
+    :func:`~klayout_tools._jsonnum.is_finite_number` (issue #6115) rather
+    than the pre-#6115 four-clause ``math.isfinite`` test.
     """
     from .sim import SimError
 
@@ -81,12 +88,7 @@ def _resolve_max_job_seconds(
                 value = float(raw.strip())
             except ValueError:
                 value = None
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value <= 0
-        ):
+        if not is_finite_number(value) or value <= 0:
             raise SimError(
                 f"{label} must be a positive number of seconds (got {raw!r})"
             )
@@ -142,17 +144,15 @@ def resolve_capacity_wait_s(batch_spec: dict[str, Any]) -> float:
     A ``bool`` is refused even though it is an ``int`` subclass: ``true``
     reading as "wait one second" is never what a request author meant.
 
-    Moved verbatim from :mod:`klayout_tools.sim_batch` (issue #6437) so its
-    size ratchet stays green; re-imported there under the same name."""
+    Moved from :mod:`klayout_tools.sim_batch` (issue #6437) so its size
+    ratchet stays green; re-imported there under the same name. Unchanged
+    by the move apart from the finiteness guard, which is
+    :func:`~klayout_tools._jsonnum.is_finite_number` (issue #6115) rather
+    than the pre-#6115 four-clause ``math.isfinite`` test."""
     from .sim import SimError
 
     value = batch_spec.get("capacity_wait_s", 0)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
+    if not is_finite_number(value) or value < 0:
         raise SimError(
             "request.batch.capacity_wait_s must be a non-negative number of "
             f"seconds (got {value!r})"
@@ -181,17 +181,15 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
     fail-fast), else :class:`~klayout_tools.sim.SimError` -- raised before any
     S3 write. A ``bool`` is refused, as for ``capacity_wait_s``.
 
-    Moved verbatim from :mod:`klayout_tools.sim_batch` (issue #6437) so its
-    size ratchet stays green; re-imported there under the same name."""
+    Moved from :mod:`klayout_tools.sim_batch` (issue #6437) so its size
+    ratchet stays green; re-imported there under the same name. Unchanged
+    by the move apart from the finiteness guard, which is
+    :func:`~klayout_tools._jsonnum.is_finite_number` (issue #6115) rather
+    than the pre-#6115 four-clause ``math.isfinite`` test."""
     from .sim import SimError
 
     value = batch_spec.get("interrupted_grace_s", DEFAULT_INTERRUPTED_GRACE_S)
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
+    if not is_finite_number(value) or value < 0:
         raise SimError(
             "request.batch.interrupted_grace_s must be a non-negative number "
             f"of seconds (got {value!r})"
