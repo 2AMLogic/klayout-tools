@@ -230,9 +230,7 @@ def _mark_map_collected(
     for entry in document.get("shards") or ():
         if _entry_index(entry) not in wanted:
             continue
-        order = ["pending", "submitted", "launching", "launched", "collected"]
-        current = str(entry.get("state") or "")
-        if current in order and order.index(current) >= order.index("collected"):
+        if entry.get("state") == "collected":
             continue
         entry["state"] = "collected"
         if not entry.get("collected_at"):
