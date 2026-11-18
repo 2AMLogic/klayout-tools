@@ -1436,6 +1436,17 @@ byte-exact shape:
 }
 ```
 
+**All validation errors are reported in one run** (issue #5679). Missing or
+mistyped fields on every `proposals[]` entry, a bad `scope`, a duplicate or
+non-positive `index` and a `scope` entry absent from `request.sources` are
+collected and raised together as one exit-1 error (each message's text is the
+same as when it was raised alone; several are joined with `; `). The
+scope-subset message also lists the `request.sources` strings actually
+available. `klt functional-verification --help` prints a complete example
+document; the same doc ships in the wheel as
+`klayout_tools/data/cli/functional-verification.md`, and `--help` prints the
+path that resolves on your install.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema` | string | Contract identifier + major version, matching this repo's request-side convention. Not validated. |
