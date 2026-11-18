@@ -57,7 +57,15 @@ NOT_DESIGN_LEGAL_WARNING = (
 #: See ``docs/cli/draw.md`` -> "Unrecognised keys".
 _ALLOWED_REQUEST_KEYS = frozenset({"schema", "params", "options"})
 _ALLOWED_PARAMS_KEYS = frozenset(
-    {"dbu_um", "shapes", "labels", "base_gds", "base_cell", "erase_um"}
+    {
+        "dbu_um",
+        "shapes",
+        "labels",
+        "base_gds",
+        "base_cell",
+        "erase_um",
+        "keep_hierarchy",
+    }
 )
 _ALLOWED_OPTIONS_KEYS = frozenset({"cell_name", "output"})
 _ALLOWED_SHAPE_KEYS = frozenset({"layer", "name", "rect_um", "polygon_um", "array"})
@@ -138,18 +146,17 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
             "options": {"cell_name": "TOP", "output": "out.gds"},
         }
 
-    ``params.dbu_um`` and ``options`` are optional; ``params.shapes`` is
-    required and must be non-empty -- unless ``params.base_gds`` is given
-    (issue #3378), which seeds the output from an existing stream: the base
-    cell is flattened into the output cell, every ``params.erase_um`` window
-    (``{"rect_um": [x0, y0, x1, y1], "layer": [L, D]}``, ``layer`` optional =
-    all layers) is subtracted from it, and ``shapes``/``labels`` are then added
-    on top. ``params.base_cell`` selects the base cell (default: its sole top
-    cell). With ``base_gds`` set, ``shapes`` may be empty if ``erase_um`` is
-    not. Omitting ``base_gds``/``base_cell``/``erase_um`` leaves the original
-    behaviour untouched. Returns a dict matching the documented
-    response schema (see ``docs/cli/draw.md``). Raises :class:`DrawError` for a
-    malformed request or a write failure.
+    Supply ``params.base_gds`` to start from an existing stream.
+    ``params.base_cell`` selects the input cell and defaults to its sole top
+    cell. By default, draw flattens that cell and subtracts any
+    ``params.erase_um`` windows before adding shapes and labels. Set
+    ``params.keep_hierarchy`` to preserve child instances and add shapes and
+    labels directly to the output top cell. Erase windows require flattening.
+    ``params.shapes`` must be non-empty unless the request specifies at least one
+    erase window.
+
+    Returns the response documented in ``docs/cli/draw.md``. Raises
+    :class:`DrawError` for a malformed request or a write failure.
 
     Unrecognised keys are **rejected** at every level of the request, so a typo
     in an optional key is an error rather than a silently-dropped value. Keys
@@ -171,7 +178,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         raise DrawError("request.options must be a JSON object")
     _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
-    base_gds, base_cell, erase_windows = _parse_base_params(params)
+    base_gds, base_cell, erase_windows, keep_hierarchy = _parse_base_params(params)
 
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
@@ -198,7 +205,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
 
     layout = kdb.Layout()
     top, base_name, dbu_um = _seed_layout(
-        layout, kdb, cell_name, dbu_um, params, base_gds, base_cell
+        layout, cell_name, dbu_um, params, base_gds, base_cell, keep_hierarchy
     )
 
     # Track per-(layer, datatype) shape counts and names for the response, in

@@ -11,31 +11,37 @@ from .draw_validation import DrawError, _reject_unknown_keys
 _ALLOWED_ERASE_KEYS = frozenset({"rect_um", "layer"})
 
 
-def _parse_base_params(params: dict[str, Any]) -> tuple[Any, Any, list]:
-    """Validate ``base_gds``/``base_cell``/``erase_um``; return them parsed.
-
-    Returns ``(base_gds, base_cell, erase_windows)``; ``base_gds`` is ``None``
-    (and the windows empty) when no base was requested.
-    """
+def _parse_base_params(
+    params: dict[str, Any],
+) -> tuple[str | None, str | None, list, bool]:
+    """Return the base path, selected cell, erase windows, and hierarchy mode."""
     base_gds = params.get("base_gds")
     base_cell = params.get("base_cell")
+    keep_hierarchy = params.get("keep_hierarchy", False)
+    if not isinstance(keep_hierarchy, bool):
+        raise DrawError("params.keep_hierarchy must be a boolean")
     if base_gds is None:
-        for key in ("base_cell", "erase_um"):
+        for key in ("base_cell", "erase_um", "keep_hierarchy"):
             if params.get(key) is not None:
                 raise DrawError(f"params.{key} requires params.base_gds")
-        return None, base_cell, []
+        return None, None, [], False
     if not isinstance(base_gds, str) or not base_gds:
         raise DrawError("params.base_gds must be a non-empty string")
     if base_cell is not None and (not isinstance(base_cell, str) or not base_cell):
         raise DrawError("params.base_cell must be a non-empty string")
-    return base_gds, base_cell, _parse_erase(params.get("erase_um"))
+    erase_windows = _parse_erase(params.get("erase_um"))
+    if keep_hierarchy and erase_windows:
+        raise DrawError("params.keep_hierarchy requires params.erase_um to be empty")
+    return base_gds, base_cell, erase_windows, keep_hierarchy
 
 
-def _seed_layout(layout, kdb, cell_name, dbu_um, params, base_gds, base_cell):
+def _seed_layout(
+    layout, cell_name, dbu_um, params, base_gds, base_cell, keep_hierarchy
+):
     """Create the output top cell; return ``(top, base_cell_name, dbu_um)``.
 
     Without a base this is an empty cell at ``dbu_um`` (``base_cell_name`` is
-    ``None``). With a base, the base cell is flattened into the new top cell and
+    ``None``). With a base, the selected cell tree is copied into the output and
     the base's dbu wins (an explicit, differing ``params.dbu_um`` is an error).
     The base cell's *name* is returned, not the cell: the base layout dies with
     this call.
@@ -53,7 +59,8 @@ def _seed_layout(layout, kdb, cell_name, dbu_um, params, base_gds, base_cell):
     layout.dbu = base.dbu
     top = layout.create_cell(cell_name)
     top.copy_tree(base_top)
-    top.flatten(True)
+    if not keep_hierarchy:
+        top.flatten(True)
     return top, base_top.name, base.dbu
 
 
