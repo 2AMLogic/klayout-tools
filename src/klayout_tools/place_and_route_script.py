@@ -171,7 +171,7 @@ def _io_delay_lines(
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
-        return [f"read_def -floorplan_initialize {floorplan['def_path']}"]
+        return [f"read_def -floorplan_initialize {_tcl_literal(floorplan['def_path'])}"]
 
     if method == "utilization":
         args = [f"-utilization {floorplan['utilization_pct']}"]
@@ -1314,7 +1314,7 @@ def _stage_script_lines(
         # physical artifact to pair with. `verilog_path` therefore follows
         # `def_path`/`gds_path` exactly: populated at `"route"`, `null`
         # before it.
-        write_verilog_call = f"write_verilog {verilog_path}"
+        write_verilog_call = f"write_verilog {_tcl_literal(verilog_path)}"
         # `-remove_cells` (see above): also strips the row-rail fallback's
         # own `filler_placement` instances (issue #1442) -- that path never
         # inserts a tapcell/endcap (the fallback deliberately carries no
@@ -1332,7 +1332,7 @@ def _stage_script_lines(
         if physical_only_masters:
             removed = " ".join(physical_only_masters)
             write_verilog_call += f" -remove_cells {{{removed}}}"
-        lines += [f"write_def {def_path}", write_verilog_call]
+        lines += [f"write_def {_tcl_literal(def_path)}", write_verilog_call]
     elif stage == "place":
         # A placement-only DEF, written as a side artifact alongside the
         # `write_db` checkpoint below. Originally added purely so an

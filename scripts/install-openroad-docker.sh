@@ -69,8 +69,8 @@
 # And it mounts the klt cache root (issue #5626): the merged `.lib` that a
 # descriptor's LIST-form `liberty` entry produces is written under
 # `$KLT_CACHE_DIR` itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`
-# -- exactly the resolution `src/klayout_tools/liberty_merge.py`'s
-# `cache_root()` performs -- and that absolute path is embedded in the
+# -- the selection `src/klayout_tools/liberty_merge.py`'s `cache_root()`
+# performs -- and that absolute path is embedded in the
 # generated Tcl (`read_liberty <path>`), so a container that cannot see it
 # fails on its first OpenROAD stage with an opaque `cannot read file` no
 # matter how well everything else is mounted. The mount is read-only
@@ -80,9 +80,11 @@
 # by the wrapper BEFORE `docker run` (Docker creates a missing bind-mount
 # source as root -- issue #3151's exact hazard, reachable whenever no
 # list-form corner has ever created `~/.cache/klt`), and the mount is
-# skipped when its path exactly equals a path already mounted (`docker run`
-# rejects a duplicate mount point, so `KLT_CACHE_DIR=$TMPDIR` must not
-# become a second `-v` for it).
+# skipped when its path equals a path already mounted after stripping trailing
+# slashes (`docker run` rejects a duplicate mount point, so
+# `KLT_CACHE_DIR=$TMPDIR/` must not become a second `-v` for it). A leading
+# `~` or `~/` in KLT_CACHE_DIR expands to ${HOME:-/tmp} before mkdir or
+# comparison; unlike Python's expanduser, `~user` is left literal.
 #
 # The wrapper forwards a narrow allowlist of the caller's environment into the
 # container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
@@ -99,8 +101,9 @@ set -euo pipefail
 
 DEST_DIR="${1:-/usr/local/bin}"
 
-# Pinned image -- bump the digest and CHANGELOG.md together in the same change
-# if this is ever refreshed, exactly as install-yosys.sh/install-verilator.sh/
+# Pinned image -- bump the digest and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed, exactly as install-yosys.sh/install-verilator.sh/
 # install-magic.sh/install-icarus-verilog.sh/install-xyce.sh bump a pinned
 # version + asset checksum together. `openroad/orfs` publishes ONLY a moving
 # `:latest` tag (no versioned tags), so the digest is the only pin available --
@@ -116,7 +119,8 @@ DEST_DIR="${1:-/usr/local/bin}"
 # consulting the `:latest` tag at all. Re-pin with:
 #   docker pull --platform linux/amd64 openroad/orfs:latest
 #   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
-# then record the resulting `openroad -version` string below and in CHANGELOG.md.
+# then record the resulting `openroad -version` string below and in a
+# changelog fragment (`changelog.d/README.md`).
 ORFS_IMAGE_REPO="openroad/orfs"
 # Pinned 2026-09-25: the `:latest` image created 2026-08-24, whose bundled
 # binary reports `openroad -version` == 26Q3-1510-g6cb3f2b704. Multi-platform
@@ -188,32 +192,42 @@ MOUNTED_PATHS+=("\$TMPDIR_MOUNT")
 # produce one. /tmp is recorded in MOUNTED_PATHS so the klt cache-root
 # dedupe below also sees it (KLT_CACHE_DIR=/tmp must not become a second
 # -v for it).
-TMPDIR_CMP="\$TMPDIR_MOUNT"
-while [[ "\$TMPDIR_CMP" == */ && "\$TMPDIR_CMP" != / ]]; do
-    TMPDIR_CMP="\${TMPDIR_CMP%/}"
-done
+strip_trailing_slashes() {
+    local path="\$1"
+    while [[ "\$path" == */ && "\$path" != / ]]; do
+        path="\${path%/}"
+    done
+    printf '%s' "\$path"
+}
+TMPDIR_CMP="\$(strip_trailing_slashes "\$TMPDIR_MOUNT")"
 if [[ "\$TMPDIR_CMP" != "/tmp" ]]; then
     MOUNTS+=(-v "/tmp:/tmp")
     MOUNTED_PATHS+=("/tmp")
 fi
 # klt cache root (issue #5626): the merged .lib a list-form \`liberty\`
 # descriptor produces is written under it and embedded as an absolute path
-# in the generated Tcl, so the container must see it. Resolved exactly as
-# src/klayout_tools/liberty_merge.py's cache_root() resolves it. mkdir -p
+# in the generated Tcl, so the container must see it. Uses the same selection
+# as src/klayout_tools/liberty_merge.py's cache_root(), expanding only ~ and
+# ~/ in KLT_CACHE_DIR (not ~user), with HOME defaulting to /tmp. mkdir -p
 # BEFORE docker run -- Docker would otherwise create a missing bind-mount
 # source as root (issue #3151). The mount is skipped when the path already
-# equals one mounted above -- docker run rejects a duplicate mount point,
-# so e.g. KLT_CACHE_DIR=\$TMPDIR must not become a second -v for it.
+# equals one mounted above after stripping trailing slashes from both paths
+# (keeping /) -- docker run rejects a duplicate mount point. Only comparisons
+# are normalized; existing mount arguments and permissions stay intact.
 # \$HOME is defaulted (\${HOME:-/tmp}) and a failed mkdir degrades to no
 # cache mount instead of killing the run: this block executes on EVERY
 # invocation under \`set -euo pipefail\`, and an unset or unwritable HOME
 # must not stop \`openroad -version\` et al. A missing cache root only
 # matters for list-form corners, which produce their own diagnostic.
 KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\${HOME:-/tmp}/.cache}/klt}"
+if [[ "\${KLT_CACHE_DIR:-}" == \~ || "\${KLT_CACHE_DIR:-}" == \~/* ]]; then
+    KLT_CACHE_ROOT="\${HOME:-/tmp}\${KLT_CACHE_DIR:1}"
+fi
 mkdir -p "\$KLT_CACHE_ROOT" 2>/dev/null || KLT_CACHE_ROOT=""
+KLT_CACHE_CMP="\$(strip_trailing_slashes "\$KLT_CACHE_ROOT")"
 CACHE_DUPE=0
 for m in "\${MOUNTED_PATHS[@]}"; do
-    if [[ "\$KLT_CACHE_ROOT" == "\$m" ]]; then
+    if [[ "\$KLT_CACHE_CMP" == "\$(strip_trailing_slashes "\$m")" ]]; then
         CACHE_DUPE=1
         break
     fi

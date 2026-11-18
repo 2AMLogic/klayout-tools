@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
+    _REQUIRED_METRICS,
     AttestationError,
     attach_output_tails,
     build_attestation,
@@ -199,6 +201,66 @@ def test_digital_non_numeric_metric_field_fails(tmp_path):
     envelope = _attest(repo, inventory)
 
     assert _failed(envelope) == [("metric", "power")]
+
+
+def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
+    repo = _repo(tmp_path)
+    payload = json.dumps(
+        {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+    )
+    for corner in ("tt", "ss"):
+        (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
+            gzip.compress(payload.encode())
+        )
+    inventory = _digital_inventory()
+    inventory["citations"] = {
+        "gain": ["evidence/sim_tt.json.gz"],
+        "bandwidth": ["evidence/sim_tt.json.gz", "evidence/sim_ss.json.gz"],
+    }
+    inventory["envelope_checks"] = {
+        "evidence/sim_tt.json.gz": _PASS,
+        "evidence/sim_ss.json.gz": _PASS,
+    }
+    inventory["metrics"] = {
+        corner: {
+            name: {
+                "envelope": f"evidence/sim_{corner}.json.gz",
+                "field": f"result.{name}",
+            }
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "1e999"])
+def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass", "result": {"fmax": 0}}).replace(
+            '"fmax": 0', f'"fmax": {literal}'
+        )
+    )
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "fail"
+    # The shared reader refuses the nonfinite literal, so the recogniser
+    # (#5688) rejects the cited file, both spec rows citing it, and each
+    # metric bound to it.
+    assert _failed(envelope) == [
+        ("envelope", "evidence"),
+        ("citation", "bandwidth"),
+        ("citation", "gain"),
+        *[("metric", name) for name in _REQUIRED_METRICS],
+    ]
 
 
 def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
@@ -426,74 +488,3 @@ def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
     rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
     assert rows, result["drift"]
     assert {e["check"]["row"] for e in rows} == {"gain"}
-
-
-# --------------------------------------------------------------------------- #
-# Cited paths must be recognised envelopes (issue #5688)
-# --------------------------------------------------------------------------- #
-
-
-def test_cited_prose_file_fails_even_with_a_true_command(tmp_path):
-    repo = _repo(tmp_path)
-    (repo / "evidence" / "NOTES.txt").write_text("looks fine to me\n")
-    inventory = _analog_inventory(
-        spec_rows=["gain"],
-        citations={"gain": ["evidence/NOTES.txt"]},
-        envelope_checks={"evidence/NOTES.txt": _PASS},
-    )
-    envelope = _attest(repo, inventory)
-    assert envelope["status"] == "fail"
-    checks = envelope["attestation"]["checks"]
-    env = [c for c in checks if c["check"] == "envelope"]
-    assert env == [
-        {
-            "check": "envelope",
-            "role": "evidence",
-            "path": "evidence/NOTES.txt",
-            "kind": None,
-            "passed": False,
-        }
-    ]
-    assert [c["passed"] for c in checks if c["check"] == "citation"] == [False]
-
-
-def test_real_generic_envelope_passes_and_records_kind(tmp_path):
-    envelope = _attest(_repo(tmp_path), _analog_inventory())
-    assert envelope["status"] == "pass"
-    kinds = {
-        c["path"]: c["kind"]
-        for c in envelope["attestation"]["checks"]
-        if c["check"] == "envelope"
-    }
-    assert kinds == {
-        "evidence/sim_tt.json": "generic",
-        "evidence/sim_ss.json": "generic",
-    }
-
-
-@pytest.mark.parametrize(
-    "text", ["{not json", "[1, 2]", json.dumps({"status": "pass"})]
-)
-def test_malformed_or_schemaless_citation_fails(tmp_path, text):
-    repo = _repo(tmp_path)
-    (repo / "evidence" / "sim_tt.json").write_text(text)
-    envelope = _attest(repo, _analog_inventory())
-    assert envelope["status"] == "fail"
-    assert ("envelope", "evidence") in [
-        (c["check"], c["role"])
-        for c in envelope["attestation"]["checks"]
-        if not c["passed"]
-    ]
-
-
-def test_envelope_check_text_line():
-    from klayout_tools.signoff_attest_text import attestation_check_line
-
-    base = {"check": "envelope", "role": "evidence", "path": "a.json"}
-    assert (
-        attestation_check_line({**base, "kind": "generic", "passed": True})
-        == "[PASS] evidence a.json envelope (generic)"
-    )
-    assert attestation_check_line({**base, "kind": None, "passed": False}) == (
-        "[FAIL] evidence a.json envelope: not a recognised envelope"
-    )

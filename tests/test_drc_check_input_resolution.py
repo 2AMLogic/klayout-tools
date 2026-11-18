@@ -108,7 +108,11 @@ def test_relative_path_beside_report_is_a_hint_never_silently_used(tmp_path, els
     assert entry["resolved"] == str(elsewhere / "top.gds")
     assert entry["resolved_against"] == str(elsewhere)
     assert entry["found_relative_to_report"] == str(tmp_path / "top.gds")
-    assert str(tmp_path) in entry["hint"]
+    assert entry["hint"] == (
+        "run --check from the report's directory, or pass an absolute path as "
+        "the positional <file> argument; request-file-relative paths resolve "
+        f"against {tmp_path}"
+    )
 
 
 def test_relative_path_present_in_cwd_is_found_and_matches(tmp_path, elsewhere):
@@ -259,6 +263,7 @@ def test_missing_override_is_the_path_diagnosed(tmp_path):
     )
     assert check["input_not_found"]["path"] == typo
     assert check["input_not_found"]["resolved"] == typo
+    assert check["input_not_found"]["hint"] is None
 
 
 def test_existing_override_with_wrong_bytes_is_a_mismatch(tmp_path):
