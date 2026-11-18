@@ -254,7 +254,11 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
-from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
+from .gen_compose_via_cuts import (
+    landing_pad_half_dbu,
+    own_via_cut_clearance_reason,
+    via_drop_cut_side_um,
+)
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -4756,16 +4760,9 @@ def _draw_routed_entry(
             landing_size_um = (landing_pad_size_um or {}).get(
                 (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
             ) + array_extra_um
-            # Round minimum sizes outward, preserving the margin
-            # against the *rounded* via too. The epsilon only removes
-            # floating-point noise at an integer grid coordinate.
-            landing_half_dbu = math.ceil(
-                max(
-                    landing_size_um / (2.0 * dbu),
-                    via_half_dbu + (landing_size_um - via_size_um) / (2.0 * dbu),
-                )
-                - 1e-9
-            )
+            # Outward rounding keeping the *rounded* via's margin; the
+            # access search sizes its pad with the same helper (#6572).
+            landing_half_dbu = landing_pad_half_dbu(landing_size_um, via_size_um, dbu)
             landing_box = kdb.Box(
                 cx - landing_half_dbu,
                 cy - landing_half_dbu,
