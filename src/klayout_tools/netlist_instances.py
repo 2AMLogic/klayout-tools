@@ -62,12 +62,31 @@ def parse_instance_cards(text: str) -> list[dict[str, Any]]:
     (an orphan continuation with no entry to fold onto), ``*`` (a comment,
     which the fold leaves byte-intact) or ``.`` (a SPICE control card:
     ``.subckt``, ``.param``, ``.include``, ...).
+
+    A ``.control`` ... ``.endc`` block is skipped as a whole, not line by
+    line: its interior holds ngspice commands (``run``, ``write out.raw``,
+    ``let vgs = 0.5``) that share the shape of a device card but are not
+    one (issue #6442). The block is one boolean of state -- both keywords
+    match case-insensitively on the card's first token, and an unterminated
+    ``.control`` (no ``.endc``) skips through the end of the deck -- a
+    malformed deck, where nothing after the opener can be trusted as a
+    device card.
     """
     folded = fold_continuations(text.encode("utf-8", errors="replace"))
     entries: list[dict[str, Any]] = []
+    in_control = False
     for raw in folded.split(b"\n"):
         card = raw.decode("utf-8", errors="replace").strip()
-        if not card or card.startswith(("*", "+", ".")):
+        if not card:
+            continue
+        keyword = card.split(None, 1)[0].lower()
+        if in_control:
+            in_control = keyword != ".endc"
+            continue
+        if keyword == ".control":
+            in_control = True
+            continue
+        if card.startswith(("*", "+", ".")):
             continue
         entry = _parse_card(card)
         if entry is not None:
