@@ -880,6 +880,31 @@ the right member even when two members under one path declare identical
 check order does not depend on inventory listing order. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
 
+Issue #5963 adds two additive, optional keys to a **file-backed**
+`evidence[]` entry of the `klt signoff --manifest` request (no
+`schema_version` bump; absent they change nothing): `artifact_manifest`
+(repo-relative path to a committed artifact-store `*.manifest.json`) and
+`artifact_member` (the manifest entry's `name`). For a `yield` entry whose
+samples document is not on disk, the grader takes the recorded `sha256` of
+the named member — `artifact_member`, else the entry whose `name` matches
+the report's own `samples` reference (exact, then a single basename match)
+— as the live hash the `content_hash` pin compares, reading only the
+committed manifest: no broker, no network, no subprocess, so the grade
+stays a pure function of the git tree. The citation discloses the basis
+(`content_hash_basis: "artifact_manifest"`, additive like issue #4893's
+`"evidence_file"`) and reports `input_verified: null` — the bytes were not
+re-hashed. A store-resolved hash never supplies a verdict (operator ruling
+2026-11-17, option `a`): the envelope itself stays committed and
+file-backed. An unreadable/invalid manifest, a missing, duplicate-named or
+basename-ambiguous member leaves the hash unresolved with a named reason in
+`content_hash_unresolved` (`manifest_unreadable`, `manifest_invalid`,
+`member_missing`, `duplicate_member`, `ambiguous_member` — the last three
+also on an unmet item's `detail`); a non-string key value fails closed as
+`invalid_evidence` for that item. A samples file present on disk always
+wins; entries that name no `artifact_manifest` are byte-identical to
+before. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Citing an object in
+the artifact store".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A

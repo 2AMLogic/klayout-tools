@@ -72,6 +72,14 @@ def pin_disclosure(
     :func:`content_hash_pin_state`, plus, when ``check_kind`` is given and
     the pin is uncomparable, the :func:`unverifiable_pin_note` saying why.
 
+    Issue #5963: a pinned entry whose resolution also carries
+    ``content_hash_unresolved`` (a `klt yield` samples document that could
+    not be hashed from disk *and* whose declared store pin could not resolve
+    it) has that disclosure folded in beside the pin state, so an unmet
+    item's ``detail`` names why -- the same field the ``met`` citation
+    carries -- instead of only the generic note. An entry that pins nothing
+    is untouched, exactly as before.
+
     The single implementation behind every site that surfaces a pin without
     letting it move the verdict, so those sites cannot drift.
     """
@@ -83,6 +91,9 @@ def pin_disclosure(
     detail: dict[str, Any] = {"content_hash_pin": pin_state}
     if pin_state == PIN_UNVERIFIABLE and check_kind is not None:
         detail["content_hash_pin_note"] = unverifiable_pin_note(check_kind, resolution)
+    unresolved = resolution.get("content_hash_unresolved")
+    if unresolved is not None:
+        detail["content_hash_unresolved"] = unresolved
     return detail
 
 
@@ -92,12 +103,16 @@ def rehash_evidence_file(
     file_label: str | None,
     actual_hash: str | None,
     input_verified: bool | None,
+    prior_basis: str | None = None,
 ) -> tuple[str | None, str | None, bool | None]:
     """Issue #4893: a ``functional-verification`` envelope records no input
     hash, so a file-backed citation that the manifest pins is re-hashed and the
     pin binds the evidence file's own bytes. Hashed only when pinned, so an
     unpinned entry's output is unchanged. Returns ``(actual_hash, basis,
-    input_verified)``."""
+    input_verified)``; ``basis`` is the caller's ``prior_basis`` (issue
+    #5963: a `klt yield` samples hash resolved from the committed store
+    manifest) whenever this re-hash does not fire, so exactly one site
+    decides which input a citation's ``content_hash`` was computed over."""
     if (
         actual_hash is None
         and check_kind == "functional-verification"
@@ -111,7 +126,7 @@ def rehash_evidence_file(
                 CONTENT_HASH_BASIS_EVIDENCE_FILE,
                 True,
             )
-    return actual_hash, None, input_verified
+    return actual_hash, prior_basis, input_verified
 
 
 #: ``detail.missing`` vocabulary for an ``unanchored_evidence`` binding

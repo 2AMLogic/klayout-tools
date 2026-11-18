@@ -719,7 +719,7 @@ a second input the envelope happens to mention:
 | `sim` | `netlist` | The SPICE deck it simulated. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
 | `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; a schema-1 absolute string verifies only where that exact path exists. |
-| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. |
+| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. Exception (issue #5963): when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
 
 **`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
 records `testbenches[].{request,netlist,schematic_netlist}_sha256` and/or
@@ -1194,7 +1194,10 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     `coverage_disclosed` (issue #5789) — the claim's own enumeration of the
     cited report's three coverage fields, graded under
     `require_coverage_disclosure`; see "DRC coverage is reported, not
-    graded" above.
+    graded" above. A `yield` entry may also carry `artifact_manifest` +
+    optional `artifact_member` (issue #5963) to pin its samples companion
+    through a committed store manifest offline — see "Citing an object in
+    the artifact store" below.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
     `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
     "pointer": ...}`: `klt
@@ -1418,6 +1421,42 @@ get <manifest>#<sha256|name> -o -`, which writes the bytes to stdout only after
 they re-hash to the manifest's digest, and `pointer` works on it as above.
 A missing or mismatched object leaves stdout empty and exits non-zero, so the
 item renders `unmet` with `command_failed`.
+
+**The offline form for a `yield` samples companion (issue #5963).** Running
+a broker fetch at grade time makes every grade a network operation, so a
+freshness gate that must re-grade offline (CI runners, air-gapped re-grades)
+cannot use it. For the one companion `klt signoff` itself hashes — a `klt
+yield` report's `samples` document — there is a committed, broker-free
+alternative on the **file-backed** entry:
+
+```json
+{
+  "file": "block/yield/yield.json",
+  "content_hash": "sha256:<recorded sha256 of the samples document>",
+  "artifact_manifest": "manifests/artifacts/bench-20261115-172039-abc.manifest.json",
+  "artifact_member": "bench/20261115-172039-abc/mc-samples.json"
+}
+```
+
+The envelope stays committed and file-backed — the verdict is still read
+from it, never from the store — and only the large samples companion is
+pinned through the store manifest. When (and only when) the samples file
+cannot be hashed from disk, the grader reads the committed
+`*.manifest.json` (the same manifest reader `klt artifact verify` uses),
+finds the named member — `artifact_member`, or by default the entry whose
+`name` matches the report's own `samples` reference (exact, else a single
+basename match) — and takes its recorded `sha256` as the live hash the
+`content_hash` pin compares. The citation discloses this honestly:
+`content_hash_basis: "artifact_manifest"` and `input_verified: null` (the
+bytes were not read; `klt artifact get`/`verify` remain the byte-level
+check). Nothing here needs a broker, an environment variable or a network:
+the grade stays a pure function of the git tree. A store manifest that is
+unreadable or invalid, a member that is missing, duplicated by name, or
+ambiguous by basename leaves the hash unresolved with a named
+`content_hash_unresolved["reason"]` — a pinned entry then renders `unmet`
+(`unverifiable_provenance`), never a guess and never an exception. A
+non-string `artifact_manifest`/`artifact_member` fails closed
+(`invalid_evidence`) for that item, like every other opt-in entry key.
 
 ### The declared partition boundary (issue #2278)
 
