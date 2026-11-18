@@ -5,7 +5,7 @@ power-only circuit pruning for ``reference.form: "gate-level-verilog"``
 Split out of :mod:`klayout_tools.lvs` as a pure move. ``LvsError``/
 ``CATEGORY_*``/``POWER_PINS_RULE_*`` constants stay defined in ``lvs`` and are
 imported *inside* the functions that need them, the same dependency direction
-as :mod:`klayout_tools.lvs_power`; ``lvs`` re-imports every name defined here.
+as :mod:`klayout_tools.lvs_power`.
 """
 
 from __future__ import annotations
