@@ -255,8 +255,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   #5733). A request document that already sets `layout.deck` is refused with
   a clean error (exit 1) — a flag never silently overrides a request
   document — and the flag is refused with `--check`. It never sets
-  `reference.deck` (the reference-netlist rewriting deck — a different knob,
-  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  `reference.deck` (the reference-netlist rewriting deck, configured through
+  a separate request field). Additive request
   surface; no `schema_version` bump.
 - **Inventory-driven `klt signoff --attest` envelopes record the klayout
   engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
@@ -277,6 +277,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   attaching. A shard map now attaches under any `hosts` (the shard count is read
   from the map); a bare job id still requires `hosts = 1`. Additive: a call that
   used to fail now succeeds.
+- **`klt pex` `delta[]` rows are self-describing: new `testbench` and
+  `measurement` fields** (#5681, 2026-11-17): `spec_row` is the bare
+  measurement name for a one-testbench run but `<stem>.<name>` for several, so
+  a single-testbench row named no bench and a consumer keying on
+  `(bench, measurement)` matched nothing. Every `delta[]` row (including the
+  extraction-failed error rows) now also carries `testbench` -- the request's
+  filename stem, identical whether the bench ran alone or with others, `null`
+  for `--measure-command` (no testbench file) -- and `measurement`, the bare
+  `measurements[].name`. Additive: `spec_row`, `coverage`, `status` and the exit
+  code are unchanged and `schema_version` does not bump. See
+  [`docs/cli/pex.md`](docs/cli/pex.md) "`delta[]` entries".
 - **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
   2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
   entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
