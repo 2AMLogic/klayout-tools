@@ -187,6 +187,38 @@ def test_flat_single_pdk_install_is_its_own_variant_directory(_searchable_home):
     assert client["stamp_sha256"] == hashlib.sha256(b"asap7 v1.0").hexdigest()
 
 
+def test_flat_install_under_a_pinned_root_keeps_its_sources_stamp(tmp_path):
+    """A flat, single-PDK install (issue #522) pinned by root is its own
+    variant directory: the stamp must come from ``<root>/SOURCES``, not the
+    phantom ``<root>/<variant>`` join (issue #6445)."""
+    flat = tmp_path / "sg13g2"
+    (flat / "libs.tech").mkdir(parents=True)
+    (flat / "SOURCES").write_text("sg13g2 v1.0\n", encoding="utf-8")
+
+    assert pdk_store.client_pdk_stamp("sg13g2", str(flat)) == {
+        "variant": "sg13g2",
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(b"sg13g2 v1.0").hexdigest(),
+    }
+
+
+def test_pinned_root_non_variant_nested_dir_loses_to_the_root(tmp_path):
+    """A ``root/<variant>`` that exists but is not a variant tree loses to the
+    root itself -- the ``pdk.variant_dir_of`` decision governs (issue #6445);
+    the join stays only as the stamp-source fallback (issue #5318's bundle
+    symlink, covered above)."""
+    root = tmp_path / "pdk"
+    (root / "libs.tech").mkdir(parents=True)
+    (root / "SOURCES").write_text("flat side\n", encoding="utf-8")
+    nested = root / "gf180mcuD"
+    nested.mkdir()
+    (nested / "SOURCES").write_text("nested side\n", encoding="utf-8")
+
+    client = pdk_store.client_pdk_stamp("gf180mcuD", str(root))
+
+    assert client["stamp_sha256"] == hashlib.sha256(b"flat side").hexdigest()
+
+
 def test_staged_model_comparison_carries_the_search_resolved_client_stamp(
     _searchable_home,
 ):

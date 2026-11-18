@@ -42,10 +42,10 @@ def test_wheel_force_includes_cli_docs():
 
 # Sibling links of the shipped pages: `../<name>.md` from a `docs/cli/*.md`
 # page (a doc directly in `docs/`, not `../design/`, `../guides/`, `../schemas/`
-# or any `../../` target), or a bare `<name>.md` from `docs/json-contract.md`
-# itself. Measured against the shipped pages (issue #5819); the sets are exact
-# so a newly cited sibling contract doc fails here instead of dangling in the
-# wheel.
+# or any `../../` target), or a bare `<name>.md` from the force-included
+# contract docs themselves. Measured against the shipped pages (issues #5819,
+# #6232); the sets are exact and per-source so a newly cited sibling contract
+# doc fails here, named by its doc, instead of dangling in the wheel.
 _CLI_PAGE_SIBLINGS = {
     "ARCHITECTURE.md",
     "coverage-contract.md",
@@ -53,9 +53,20 @@ _CLI_PAGE_SIBLINGS = {
     "json-contract.md",
     "releasing-native.md",
 }
-_JSON_CONTRACT_SIBLINGS = {
-    "coverage-contract.md",
-    "type-checking.md",
+_CONTRACT_DOC_SIBLINGS = {
+    "json-contract.md": {
+        "coverage-contract.md",
+        "type-checking.md",
+    },
+    "coverage-contract.md": {
+        "design-evidence-tiers.md",
+        "json-contract.md",
+    },
+    "type-checking.md": {
+        "json-contract.md",
+    },
+    "releasing-native.md": set(),
+    "design-evidence-tiers.md": set(),
 }
 _SIBLING_LINK = re.compile(r"\]\(\.\./([A-Za-z0-9._-]+\.md)(?:#[^)]*)?\)")
 _OWN_SIBLING_LINK = re.compile(r"\]\(([A-Za-z0-9._-]+\.md)(?:#[^)]*)?\)")
@@ -80,11 +91,13 @@ def test_shipped_pages_cite_only_packaged_sibling_docs():
     assert cited_cli == _CLI_PAGE_SIBLINGS, (
         f"docs/cli sibling-.md citations drifted: {sorted(cited_cli)}"
     )
-    json_contract = _ROOT / "docs" / "json-contract.md"
-    cited_contract = set(_OWN_SIBLING_LINK.findall(json_contract.read_text()))
-    assert cited_contract == _JSON_CONTRACT_SIBLINGS, (
-        f"json-contract.md sibling-.md citations drifted: {sorted(cited_contract)}"
-    )
+    cited_contract = set()
+    for name, expected in _CONTRACT_DOC_SIBLINGS.items():
+        cited = set(_OWN_SIBLING_LINK.findall((_ROOT / "docs" / name).read_text()))
+        assert cited == expected, (
+            f"{name} sibling-.md citations drifted: {sorted(cited)}"
+        )
+        cited_contract |= cited
     cfg = tomllib.loads((_ROOT / "pyproject.toml").read_text())
     force = cfg["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
     shipped = {
