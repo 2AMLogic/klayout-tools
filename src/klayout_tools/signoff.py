@@ -64,6 +64,7 @@ from .coverage import (
     coverage_skipped_work,
     coverage_state,
 )
+from .coverage_work import coverage_work_count
 from .design_evidence_tiers import (
     CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
@@ -73,6 +74,11 @@ from .design_evidence_tiers import (
 )
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
+
+# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
+# that requires them machine-derived (issue #5462); out of this file for its
+# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+from .signoff_attest_binding import attestation_record
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -86,10 +92,6 @@ from .signoff_coverage_disclosure import (
     item3_key_invalid,
     read_require_coverage_disclosure,
 )
-
-# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# that requires them machine-derived (issue #5462); out of this file for its
-# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     asserted_rows,
@@ -218,8 +220,8 @@ from .signoff_power_delivery import (
 )
 from .signoff_runset import (
     PINNED_RUNSETS,
+    check_runset,
     runset_disclosure,
-    runset_refusal,
     unrecognised_device_gaps,
 )
 from .signoff_runset import (
@@ -230,6 +232,7 @@ from .signoff_sta_constraints import (
     sta_annotation_refusal,
     sta_constraint_refusal,
 )
+from .signoff_unmet_reasons import unmet_reason_counts
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
 # this file for its size-ratchet ceiling (issue #5815) and re-imported by
@@ -2700,7 +2703,7 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     nothing, which is the permanent steady state on a PDK with no
     antenna-ratio table. Refusing it on the antenna scope alone would make
     the widened :func:`_erc_passed` unreachable through both entry points
-    (:func:`_build_check` and :func:`_kind_gated_refusal` both AND this in),
+    (:func:`_build_check` and :func:`_kind_gated_check` both AND this in),
     so the two are decided together here rather than drifting apart.
 
     Applied through both entry points on purpose: envelope-aggregation mode
@@ -3052,44 +3055,30 @@ def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool
 
 
 def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The cited envelope's own statement that it skipped requested work
-    (issue #2109) -- or ``None`` when it makes no such statement.
+    """Quote partial coverage in check details and manifest citations.
 
-    ``None`` for every row of the common rollup table except ``partial``,
-    including a legacy envelope whose verb-specific fields describe a gap
-    (`klt drc`'s ``rules_skipped``, surfaced separately and unchanged by
-    :func:`_drc_coverage_disclosure`). Re-reading those here would relabel
-    pre-contract data as a common partial claim, which is exactly the
-    "missing legacy coverage is not evidence either way" rule
-    :mod:`klayout_tools.coverage` exists to apply identically everywhere.
-
-    Quoted, not graded on, for every first-party kind: a `klt signoff`
-    verdict still rests on the producer's own status token (see
-    :func:`_non_passing_reason`). The one exception is ``generic``, which
-    has no adapter and is cross-checked against this block by
-    :func:`_generic_overstates_coverage` (issue #2906). Until a
-    verb's Phase 2 adapter lands, that token can still be the kind's
-    unconditional success word on a run whose common coverage says
-    ``partial`` -- and when it is, this key is what makes the gap visible in
-    the report rather than silent, on both the ``checks[]`` and the
-    ``"met"``-citation paths.
+    Totals include each represented unit, while the display cap applies to
+    records. The common coverage reader excludes legacy verb-specific gaps.
     """
     skipped = coverage_skipped_work(cast(dict[str, Any], envelope))
     if not skipped:
         return None
-    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
-        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
     by_reason: dict[str, int] = {}
     for record in skipped:
-        reason = str(record.get("reason"))
-        by_reason[reason] = by_reason.get(reason, 0) + 1
-    return {
+        reason = record["reason"]
+        by_reason[reason] = by_reason.get(reason, 0) + coverage_work_count(record)
+    total = sum(by_reason.values())
+    truncated = len(skipped) > _PARTIAL_COVERAGE_SKIPPED_CAP
+    disclosure: dict[str, Any] = {
         "reason": _REASON_PARTIAL_COVERAGE,
         "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
-        "skipped_total": len(skipped),
-        "skipped_by_reason": dict(sorted(by_reason.items())),
-        "truncated": True,
     }
+    if truncated or total > len(skipped):
+        disclosure["skipped_total"] = total
+        disclosure["skipped_by_reason"] = dict(sorted(by_reason.items()))
+    if truncated:
+        disclosure["truncated"] = True
+    return disclosure
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
@@ -3120,7 +3109,7 @@ def _non_passing_reason(
     (issue #2109).
 
     :data:`_REASON_NOTHING_CHECKED` is decided here as well as in
-    :func:`_kind_gated_refusal` because an envelope reporting the rollup's
+    :func:`_kind_gated_check` because an envelope reporting the rollup's
     zero-coverage token fails :func:`_check_passed` and so never reaches that
     function -- see :mod:`klayout_tools.signoff_nothing_checked`.
 
@@ -3199,23 +3188,22 @@ def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
     return allowed_kinds is None or check_kind in allowed_kinds
 
 
-def _kind_gated_refusal(
+def _kind_gated_check(
     check_kind: str,
     envelope: dict[str, Any],
     *,
     allowed_kinds: set[str] | None,
     require_post_layout: bool,
-) -> str | None:
-    """The reason :func:`_grade_evidence` must refuse this *passing*,
-    right-kind envelope -- or ``None`` when it has no such reason.
+) -> tuple[str | None, bool]:
+    """Return ``(refusal, runset_rehash_unverifiable)`` for a passing envelope.
 
-    Both refusals resolved here apply only to a kind the item accepts (see
-    :func:`_kind_is_accepted`), so they are decided in one place rather than
-    repeating that gate per condition:
+    These checks apply only to kinds the item accepts
+    (:func:`_kind_is_accepted`):
 
     - :data:`_REASON_NOTHING_CHECKED` (issue #1996) -- the envelope's own
       ``coverage`` block reports ``nothing_checked: true``, so its passing
       ``status`` was measured over nothing at all.
+    - :func:`check_runset` -- the pinned-runset check for LVS evidence.
     - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
       the item requires.
     - :data:`_REASON_UNDERSIZED_SAMPLE` /
@@ -3224,28 +3212,22 @@ def _kind_gated_refusal(
       estimate is not sized, or its own declared negative control did not
       detect the seeded degradation. See :func:`_yield_campaign_refusal`.
 
-    ``nothing_checked`` is checked first: an empty report is not post-layout
-    evidence either, and "this measured nothing" names the more fundamental
-    of the problems. The `klt yield` campaign-discipline gate is checked
-    last, since it is the narrowest -- it applies to one kind, and only once
-    the report has been established to have measured something and to be the
-    right kind of run. All are ordered *after* :func:`_check_passed` in the
-    caller, so a run that both failed and measured nothing is reported as the
-    failure it is.
+    :func:`_check_passed` runs before these checks. Within this gate,
+    ``nothing_checked`` comes first and the yield campaign check comes last.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
-        return None
+        return None, False
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
-        return refusal
+        return refusal, False
+    rehash_unverifiable = False
     if check_kind == "lvs":
-        # Issue #2870: pin and re-hash of a PDK-runset report; None for curated.
-        refusal = runset_refusal(envelope)
+        refusal, rehash_unverifiable = check_runset(envelope)
         if refusal is not None:
-            return refusal
+            return refusal, False
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
-        return _REASON_NOT_POST_LAYOUT
-    return _yield_campaign_refusal(check_kind, envelope)
+        return _REASON_NOT_POST_LAYOUT, False
+    return _yield_campaign_refusal(check_kind, envelope), rehash_unverifiable
 
 
 def _pex_body_bias_disclosure(
@@ -4411,15 +4393,14 @@ def build_tier_report(
         # t1_item_count`. `None` when the shipped doc is unreadable.
         "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
-        # Issue #2865: items satisfied by a recorded "not applicable", never
-        # folded into `t1_met_count`. Omitted when zero so a report with none
-        # is byte-identical to what this build rendered before the field
-        # existed (absent means 0).
+        # Issue #2865: recorded "not applicable" items, never in `t1_met_count`;
+        # omitted when zero (absent means 0).
         **(
             {"t1_not_applicable_count": not_applicable_count}
             if not_applicable_count
             else {}
         ),
+        **unmet_reason_counts(items),  # issue #5903; absent when nothing is unmet
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
         "build": _build_identity(),
@@ -4845,35 +4826,6 @@ def _unescape_json_pointer_token(token: str) -> tuple[str, bool]:
             return "", False
         index += 2
     return "".join(out), True
-
-
-def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
-    """Normalize a **compound** item's manifest entry (issue #2025, T1 item
-    11 only) into a list of :func:`_normalize_evidence_entry` specs, or
-    ``None`` if any part matches neither evidence shape.
-
-    A JSON array is the compound shape: every element is an ordinary
-    file-backed or command-backed evidence entry, and *all* of them must
-    normalize -- one malformed part renders the whole item
-    :data:`_REASON_INVALID_EVIDENCE` rather than being dropped from the set,
-    since a silently-shortened cited set is exactly how a compound item would
-    reach ``"met"`` without the artifact that was mistyped. An empty array is
-    likewise invalid: it cites nothing, but says it cites something.
-
-    A non-array entry is accepted too, as a one-element list -- so the
-    ordinary ``"11": "erc.json"`` shape is a well-formed (if, on its own,
-    insufficient) citation rather than a schema error.
-    """
-    if isinstance(raw, list):
-        if not raw:
-            return None
-        specs = [_normalize_evidence_entry(part) for part in raw]
-        if any(spec is None for spec in specs):
-            return None
-        return [spec for spec in specs if spec is not None]
-
-    spec = _normalize_evidence_entry(raw)
-    return None if spec is None else [spec]
 
 
 def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
@@ -5429,10 +5381,7 @@ def _grade_evidence(
     if sta_refusal is not None:
         return sta_refusal
 
-    # The two refusals that apply only to a kind this item actually accepts --
-    # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
-    # together, in that order. See `_kind_gated_refusal`.
-    kind_gated = _kind_gated_refusal(
+    kind_gated, rehash_unverifiable = _kind_gated_check(
         check_kind,
         envelope,
         allowed_kinds=allowed_kinds,
@@ -5465,7 +5414,10 @@ def _grade_evidence(
     if pin_state == PIN_STALE:
         return "unmet", _REASON_STALE_EVIDENCE, None, hints.stale_pin(spec, resolution)
 
-    citation = {**_citation(resolution), **citation_extra}
+    citation = {
+        **_citation(resolution, runset_rehash_unverifiable=rehash_unverifiable),
+        **citation_extra,
+    }
     execution_detail: dict[str, Any] = {}
     anchored_refusal = _bind_anchored_citation(
         check_kind,
@@ -5504,7 +5456,7 @@ def _grade_check_outcome(
     item proceeds and ``citation_extra`` carries them for the citation.
 
     ``allowed_kinds`` only orders :data:`_REASON_NOTHING_CHECKED` against
-    :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_refusal`
+    :func:`_build_tier_item`'s own kind gate, as :func:`_kind_gated_check`
     does; that verdict carries
     :func:`~.signoff_nothing_checked.nothing_checked_item_detail` (issue
     #5479), naming the artifact read though ``citation`` stays ``None``.
@@ -5562,7 +5514,7 @@ def _kind_gated_failure_detail(
     spec: Mapping[str, Any],
     resolution: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """The ``detail`` for a :func:`_kind_gated_refusal` verdict.
+    """The ``detail`` for a :func:`_kind_gated_check` refusal.
 
     Issue #2467: the two ``yield`` refusals name a state the reader cannot
     see from the reason alone -- *which* measurements are undersized, or
@@ -6199,12 +6151,7 @@ def _generic_artifact_binding(
     if isinstance(attestation, Mapping) and isinstance(
         attestation.get("producer"), str
     ):
-        binding["attestation"] = {
-            "producer": attestation["producer"],
-            "inventory_schema_version": attestation.get("inventory_schema_version"),
-            "check_count": attestation.get("check_count"),
-            "passed_count": attestation.get("passed_count"),
-        }
+        binding["attestation"] = attestation_record(attestation)
     return binding
 
 
@@ -6448,7 +6395,9 @@ def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
     return {"pointer": pointer} if pointer is not None else {}
 
 
-def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
+def _citation(
+    resolution: dict[str, Any], *, runset_rehash_unverifiable: bool = False
+) -> dict[str, Any]:
     """Build a ``"met"`` item's ``citation`` block from a
     :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
     docstring for what each field means."""
@@ -6486,7 +6435,12 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         citation["pex_inputs"] = resolution["pex_inputs"]
     # Issue #2870: a PDK-runset LVS citation says which engine produced it.
     if resolution["kind"] == "lvs":
-        citation.update(runset_disclosure(resolution["envelope"]) or {})
+        citation.update(
+            runset_disclosure(
+                resolution["envelope"], rehash_unverifiable=runset_rehash_unverifiable
+            )
+            or {}
+        )
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
