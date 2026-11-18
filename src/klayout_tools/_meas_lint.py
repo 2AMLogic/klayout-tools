@@ -204,47 +204,55 @@ def _token_start(spice: str, end: int) -> int | None:
     return None if match is None else match.start()
 
 
+def _extend_left_over_operand(spice: str, start: int) -> tuple[int, str]:
+    """Take one left step: ``again`` retries after widening, ``stop`` ends
+    the whole walk, and ``pass`` moves on to the right side."""
+    left = start
+    while left > 0 and spice[left - 1].isspace():
+        left -= 1
+    if left <= 0 or spice[left - 1] not in _MEAS_ARITH_OPS:
+        return start, "pass"
+    cursor = left - 1
+    while cursor > 0 and spice[cursor - 1].isspace():
+        cursor -= 1
+    found = _token_start(spice, cursor - 1)
+    if found is None or spice[found:cursor].strip().lower() in _MEAS_CARD_KEYWORDS:
+        # No operand precedes the operator, only a card keyword or nothing.
+        # Absorb a leading unary sign without swallowing the keyword, then
+        # stop the whole walk (including the right side), as before.
+        return (left - 1 if spice[left - 1] in "+-" else start), "stop"
+    return found, "again"
+
+
+def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
+    """Widen *end* over one operand bound by an arithmetic operator,
+    returning whether the walk may continue."""
+    right = end
+    while right < len(spice) and spice[right].isspace():
+        right += 1
+    if right >= len(spice) or spice[right] not in _MEAS_ARITH_OPS:
+        return end, False
+    cursor = right + 1
+    while cursor < len(spice) and spice[cursor].isspace():
+        cursor += 1
+    found = _token_end(spice, cursor)
+    return (end, False) if found is None else (found, True)
+
+
 def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
     """Widen a lone flagged reference over the operand it is bound to by an
     outer arithmetic operator (``2*v(a)`` or ``v(a)*2``), so the refusal's
     example rewrite wraps the whole local expression in ``par('...')``
     rather than only the reference."""
     while True:
-        left = start
-        while left > 0 and spice[left - 1].isspace():
-            left -= 1
-        if left > 0 and spice[left - 1] in _MEAS_ARITH_OPS:
-            cursor = left - 1
-            while cursor > 0 and spice[cursor - 1].isspace():
-                cursor -= 1
-            found = _token_start(spice, cursor - 1)
-            if found is None or (
-                spice[found:cursor].strip().lower() in _MEAS_CARD_KEYWORDS
-            ):
-                # No operand sits before the operator -- nothing, or only a
-                # card keyword (``when -v(a)``): the operator is a leading
-                # unary sign. It belongs inside the span, and the keyword
-                # stays outside it (``par('when -v(a)')`` is a keyword-less
-                # card ngspice-47 fatals on, and this lint accepts it).
-                if spice[left - 1] in "+-":
-                    start = left - 1
-                break
-            start = found
+        start, verdict = _extend_left_over_operand(spice, start)
+        if verdict == "again":
             continue
-        right = end
-        while right < len(spice) and spice[right].isspace():
-            right += 1
-        if right < len(spice) and spice[right] in _MEAS_ARITH_OPS:
-            cursor = right + 1
-            while cursor < len(spice) and spice[cursor].isspace():
-                cursor += 1
-            found = _token_end(spice, cursor)
-            if found is None:
-                break
-            end = found
-            continue
-        break
-    return start, end
+        if verdict == "stop":
+            return start, end
+        end, again = _extend_right_over_operand(spice, end)
+        if not again:
+            return start, end
 
 
 def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, int]:
