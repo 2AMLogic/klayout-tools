@@ -9,7 +9,7 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--mutations <proposals>] [--format text|json]
+klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>] [--format text|json]
 ```
 
 This is the build phase carried by two accepted Phase 1 spikes — read them
@@ -48,11 +48,51 @@ args.
   accepts). Relative paths inside the request (`sources`, and the
   `testbench.module` file — or, if given, `testbench.search_path`) resolve
   against the **request file's own directory**; for the stdin/inline forms,
-  against the current working directory.
+  against the current working directory. `--base-dir` overrides that anchor.
+- `--base-dir <dir>` — optional: resolve every relative path in the request
+  (`sources`, `testbench.module`/`testbench.search_path`,
+  `options.includes`, `options.sdf.file`, `options.initial_state.netlist`,
+  `options.source_defines` keys) — and the default
+  `.klt/functional-verification/` artifact directory — against `<dir>`
+  instead of the request file's own directory. See
+  "[Archived requests: `--base-dir`](#archived-requests---base-dir)" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 - `--mutations <proposals>` — optional, issue #1592: run mutation testing
   against the same `<request>` — see "Mutation testing: `--mutations`"
   below.
+
+## Archived requests: `--base-dir`
+
+The request-file default is the right one when the request lives beside the
+design it names. It is the wrong one for the **archived copy** of a request
+— and archiving the request is exactly what an evidence record is for. A
+record directory is a sibling of the thing it documents, not an ancestor of
+it, so a request that ran correctly from the project root cannot be re-run
+from the directory it is committed in: the same relative paths now point
+somewhere else (`RTL source not found: rtl/counter.sv`), and rewriting them
+on the way into the record would leave the committed request no longer
+byte-identical to the one that produced the committed response.
+
+`--base-dir <dir>` decouples the two: the request document is still read
+from wherever it sits, but every relative path inside it — and the default
+artifact directory (`<dir>/.klt/functional-verification/`, still overridable
+with `-o/--outdir`) — resolves against `<dir>`. The contract is one
+equivalence:
+
+> a file request run with `--base-dir D` resolves every relative path
+> exactly as the same document piped on **stdin** with `cwd=D`.
+
+`<dir>` must exist and be a directory; anything else is exit 1 through the
+standard error envelope, never a silent fallback to the request's own
+directory. A relative `<dir>` resolves against the current working
+directory, and absolute paths inside the request are unaffected.
+
+This also composes with `--mutations`, which the stdin workaround cannot do
+(`--mutations` consumes stdin before the baseline run re-reads the request,
+so `klt functional-verification - --mutations ... < request.json` fails with
+"stdin request is not valid JSON") — an archived request's mutation
+proposals re-run is `klt functional-verification records/r1/request.json
+--mutations proposals.json --base-dir <project root>`.
 
 ## Engines
 
@@ -342,14 +382,17 @@ initial-state shim, scoped-define wrappers) are not listed.
 
 Everything a run produces is written to `.klt/functional-verification/` next
 to the request file — the same "next to the input" default `klt sim`/`klt
-synthesize` already use — and kept, never deleted.
+synthesize` already use — and kept, never deleted. Under `--base-dir <dir>`
+the default directory follows the anchor instead
+(`<dir>/.klt/functional-verification/`), matching the stdin form rather
+than carving out an exception.
 
 Pass `-o/--outdir DIR` to write them to `DIR` instead (created if missing; a
 relative `DIR` resolves against the current directory, not the request's).
 This keeps the evidence of two runs of the same request apart. Request-relative
-source and testbench paths still resolve against the request's own directory,
-and `--mutations` honours the flag too (`DIR/mutants/`). The run-identity
-digest does not fold in the output directory. The `environment.results_xml`,
+source and testbench paths still resolve against the request's own directory
+(or the `--base-dir` override), and `--mutations` honours the flag too
+(`DIR/mutants/`). The run-identity digest does not fold in the output directory. The `environment.results_xml`,
 `trace.path`, coverage and mutation `log_path` fields report the chosen
 location (`environment.*` and mutation `log_path` as the repo-relative `{path, scope}`
 envelope — see [`docs/json-contract.md`](../json-contract.md)).
@@ -881,10 +924,18 @@ That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
 neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
 alias-map normalization above resolves it, and it costs one `SDF ERROR:
 <file>:<line>: Could not find intermodpath!`. Verified live against Icarus
-13.0: the failure needs the port bit's net to carry **more than one**
-`INTERCONNECT` entry — a bus-port net whose only entry is the diode's own
-annotates cleanly, but a real router inserts one diode per violating pin, so
-a multi-load input bit collects several and one of them fails. `klt`
+13.0, re-measured with one-variable-per-case controls in issue #5705: the
+deciding variable is the port bit's net's **physical fanout**, not the
+`INTERCONNECT` entry count — `$sdf_annotate` creates at most **one**
+interconnect modpath per bit-selected top-level port net, for the
+destination of the **last-declared instance on that net**, and rejects
+every other load's entry. A bus-port net whose only load is the diode's
+annotates cleanly (fanout 1), but a real router inserts one diode per
+violating pin, so a multi-load input bit collects several and the
+non-survivors fail. (An earlier revision of this paragraph read the
+precondition as needing **more than one** entry; that holds for this
+fixture by declaration order — a lone entry on a fanout-above-1 net fails
+too when it targets a non-last-declared instance.) `klt`
 **removes** those entries from the SDF text it hands `$sdf_annotate` and
 reports the count as its own `dropped` class, distinct from the alias-port
 one:
@@ -895,9 +946,11 @@ one:
 }
 ```
 
-The justification is that the destination is structurally incapable of
-carrying a modpath — no `specify` block, no output pin, so nothing the entry
-could annotate and no logic that observes the pin — and the exemption carries
+The justification is that the destination is a physical-only cell — no
+`specify` block, no output pin, so no timing content and no logic that
+observes the pin (the entry can still be the #5705 cap's annotated survivor
+when its instance is the net's last-declared load; the drop does not rest on
+"no modpath exists") — and the exemption carries
 the same **delay-value** bound as the alias-port class above:
 
 - An entry is dropped only when *every* `min:typ:max` member of *every*
@@ -906,8 +959,10 @@ the same **delay-value** bound as the alias-port class above:
   `max`) is left in place, fails to annotate, and still fails the run with
   exit 1.
 - The destination must be a *physical-only* instance. An entry onto an
-  ordinary `specify`-bearing standard cell — the general shape (b) case — is
-  **not** covered by this exemption and still fails the run loudly; that
+  ordinary `specify`-bearing standard cell — the general shape (b) case,
+  which on a fanout-above-1 port-bit net fails whenever it is not the
+  last-declared instance's entry (issue #5705) — is **not** covered by
+  this exemption and still fails the run loudly; that
   remains an open Icarus limitation, not something this drop papers over.
 - Only `INTERCONNECT` entries are eligible, and only entries whose *source*
   is a bit-selected top-level input port (the one shape this failure was
@@ -1080,12 +1135,13 @@ things, in order:
 1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
    `zero_delay_alias_port_interconnect` and
    `zero_delay_physical_only_interconnect` and
-   `zero_delay_bus_port_source_interconnect`, none of which can change a
+   `zero_delay_bus_port_source_interconnect` and
+   `zero_delay_internal_bus_net_interconnect`, none of which can change a
    delay), every delay applied and no annotation failed. An
    `iopath_ifnone_edge_modpath` class means the arcs it lists ran with no
-   module-path delay. A genuinely failed annotation
-   exits 1 with the offending transcript line, so a *returned report* already
-   rules that out.
+   module-path delay. An `iopath_cond_expression` class means the run omits
+   the SDF's state-dependent delays for the listed arcs. A genuinely failed
+   annotation exits 1 with the offending transcript line.
 2. **The testbench's own clock period against the design's post-route timing**
    — [`klt place-and-route`](place-and-route.md)'s `spef_sta.worst_slack_ns`
    and `setup_violation_count` for the same design. A testbench clocked at or
@@ -1171,10 +1227,9 @@ machine-readable instead of requiring a transcript hand-count:
 }
 ```
 
-`partial` is `false` and `dropped` is `{}` on a run where nothing was
-dropped: no benign diagnostic class was filtered out of the completed
-transcript scan, and no `INTERCONNECT` entry was normalized away before
-annotation. These values describe observed diagnostics and deliberate
+`partial` is `false` and `dropped` is `{}` when the transcript scan finds
+no counted diagnostic and normalization removes no delay entries.
+These values describe observed diagnostics and deliberate
 pre-annotation drops, not proof that every delay and timing check applied.
 Both keys are additive, alongside the existing `file`/`corner`/`annotated`;
 `entries` (issue #2364) is additive the same way, echoing the request's
@@ -1182,13 +1237,11 @@ entry population — `"all"` or `"interconnect"` — so a stored report is
 self-describing about which delay population its verdict was measured
 against.
 
-Seven `dropped` classes exist today. The first four (`timingcheck` and the
-three zero-delay `INTERCONNECT` classes) cannot change a simulated delay;
-`iopath_interconnect_only` deliberately does — it is the requested
-net-delay-only mode, and the count is what makes that choice honest; the two
-`iopath_*_modpath` classes cannot change a delay relative to annotating (their
-entries have no modpath to land on) but mark arcs that run with no module-path
-delay, so they also name them in `arcs`:
+Nine `dropped` classes exist today. The first five (`timingcheck` and the
+four zero-delay `INTERCONNECT` classes) cannot change a simulated delay.
+`iopath_interconnect_only` records the requested net-delay-only mode.
+The last three classes describe SDF module-path delay detail omitted from
+the run and identify the affected cell arcs in `arcs`.
 
 | Class | Source | Meaning |
 |---|---|---|
@@ -1196,9 +1249,11 @@ delay, so they also name them in `arcs`:
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
 | `zero_delay_bus_port_source_interconnect` | SDF-text normalization (issue #2984) | An `INTERCONNECT` entry whose source is a bit-selected top-level **input** port (`ui_in[3] u1.A`), whatever its destination, carrying zero delay at every corner, was removed before annotation because Icarus can fail to insert an intermodpath from such a source (`Could not find intermodpath!`). Entries the `zero_delay_physical_only_interconnect` pass already removed are not counted again. A non-zero entry of the same shape is left in place and still fails the run. |
+| `zero_delay_internal_bus_net_interconnect` | SDF-text normalization (issue #6075) | An `INTERCONNECT` entry running across a bit-select of an **internal** wire — both endpoints ordinary instance pins whose parsed netlist connections resolve to the same bit-select of a wire that is not a top-level port — carrying zero delay at every corner, was removed before annotation. Measured live on Icarus 13.0: Icarus inserts **no** intermodpath for *every* entry on such a net (0-of-N at any fanout, unlike a port bit's last-declared-survivor rule), and the entry text is byte-identical to an entry on a scalar net that annotates cleanly, so the decision is made from the same gate-level parse the run already compiles, not from the SDF text. A non-zero entry on the identical net is left in place and still fails the run. |
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
+| `iopath_cond_expression` | SDF-text normalization (issue #5296) | `count` is the number of `COND`-wrapped `IOPATH` entries removed before annotation. The `reason` explains that Icarus's SDF parser rejects operator expressions such as `~D` with `Invalid/malformed COND`, which aborts annotation. `arcs` lists distinct `{celltype, from, to}` objects sorted by those fields. This pass keeps unconditional `IOPATH` entries and simple conditions such as `COND D` or `COND D==1'b1`. The run omits the state-dependent SDF delays from the removed entries. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
@@ -1266,7 +1321,7 @@ analysis.
 ## Mutation testing: `--mutations`
 
 ```
-klt functional-verification <request> --mutations <proposals> [--format text|json]
+klt functional-verification <request> --mutations <proposals> [--base-dir <dir>] [--format text|json]
 ```
 
 Coverage measures what a testbench *executed*, not what it would *notice
@@ -1554,10 +1609,10 @@ re-simulating the old netlist. For a report written outside a git repo
 | --- | --- | --- |
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"icarus"` (default) or `"verilator"`. An unsupported value is an application error (exit 1). Icarus 13.0 does **not** implement the full SystemVerilog-2012 subset (e.g. packed-struct named-field assignment patterns), so modern SV IP — lowRISC/OpenTitan primitives, Ibex, OpenHW cores — commonly requires `"verilator"`; today that is discovered only as a raw `iverilog` syntax error in the build log, never as a structured field. This is a per-request, not a per-project, choice — see "Which engine for which sources". |
-| `sources` | array\<string\> | RTL source file paths, resolved relative to the request. Required, non-empty. May point at original RTL. Pointing it at `klt synthesize`'s `netlist_path` **by hand** is the *unverified* route — nothing ties the file to the run that produced it, so a stale netlist left in the build tree re-simulates cleanly; use `options.from_synthesize` instead. May be empty or omitted **only** when `options.from_synthesize` is present; otherwise required and non-empty. |
+| `sources` | array\<string\> | RTL source file paths, resolved relative to the request. `~` and `$VAR` are expanded. An unset `$VAR` is exit 1 naming the variable, so a committed request naming `$PDK_ROOT/...` runs as-is. Required, non-empty. May point at original RTL. Pointing it at `klt synthesize`'s `netlist_path` **by hand** is the *unverified* route — nothing ties the file to the run that produced it, so a stale netlist left in the build tree re-simulates cleanly; use `options.from_synthesize` instead. May be empty or omitted **only** when `options.from_synthesize` is present; otherwise required and non-empty. |
 | `hdl_toplevel` | string | The DUT module name. Required. |
 | `testbench.module` | string | The Python test module **name** (`"test_gcd"`, not `"test_gcd.py"`), resolved as `<search dir>/<module>.py` where `<search dir>` is `testbench.search_path` if given, else the request's own directory. Required — this verb does not synthesize testbenches; the module is human- or generator-authored. |
-| `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
+| `testbench.search_path` | string | Optional. Directory to resolve `testbench.module` against, instead of the request's own directory — absolute, or relative to the request (the same convention `sources` entries already use; `~` and `$VAR` are expanded). Lets one unmodified testbench module be shared by several requests (e.g. RTL, gate-level netlist, and layout-extracted views of the same design) that live in different directories. Omitted: unchanged default behavior — the module is resolved next to the request. |
 | `testbench.testcase` | string \| array\<string\> \| null | Optional testcase-name filter; `null`/omitted runs every `@cocotb.test()` in the module. Under cocotb ≥ 2.1 (the pinned line, issue #2583) filtered-out tests are **deselected, not skipped** — the runner compiles the names into a `COCOTB_TEST_FILTER` regex, and a deselected test does not appear in the report at all (`test_count` counts only selected tests). Cocotb 2.0.x instead recorded each filtered-out test as a `skipped` entry; `skipped_count` remains live for tests that *ran* and skipped themselves. |
 | `options.coverage` | boolean | Defaults to `false`. `true` requires `engine: "verilator"` (see "Coverage"). |
 | `options.timescale` | `[string, string]` | `[unit, precision]`, defaulting to `["1ns", "1ps"]`. Passed to **both** the build and test steps — Icarus elaboration otherwise fails the moment a testbench's `Clock(..., unit="ns")` meets an unset (default 1 s) simulator precision. |
@@ -1567,14 +1622,23 @@ re-simulating the old netlist. For a report written outside a git repo
 | `requires_tools` | array | Optional (issue #4473), default `[]`. Build-time tools the suite needs beyond cocotb and the simulator, each `{"name": str, "version": str\|null, "sha256": str\|null}`. Before any build, each `name` is resolved with `shutil.which` on `request.env["PATH"]` when set (else the ambient `PATH`). `version` (optional) is a substring match on the tool's `--version` output; `sha256` (optional) is compared with the resolved binary's digest. A bad shape (non-array, entry without `name`, non-string fields, unknown fields) is exit 1 naming `request.requires_tools`; any unmet tool is exit 1 with `error.code: "missing_tool"` (see "Exit codes"). Applied to `--mutations` runs too. See "External toolchains". |
 | `options.source_defines` | object | Optional (issue #3290). Key = an entry of `request.sources` (matched after the same path resolution; an unknown key is exit 1), value = a defines object with the same `string -> string \| null` rules as `options.defines`. For each named source a wrapper is generated under the output directory (`` `define K [V] `` / `` `include "<abs path>" `` / `` `undef K ``) and substituted for that source in the same list position, so the defines reach that one file and cannot leak into later sources; the source's own directory is added to the include path for nested relative `` `include ``s. If a name is also in `options.defines`, the scoped value wins inside that source. Echoed as `environment.source_defines` (keyed by absolute source path; `{}` when absent). Works with `--mutations`. Defaults to `{}`. |
 | `options.build_args` | array\<string\> | Optional. Extra Icarus/Verilator build args, appended **after** the fixed `--coverage --trace` args a coverage run already adds and after any SDF back-annotation args (composed, not replaced — see "Coverage" and "SDF back-annotation"). Defaults to `[]`. |
-| `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
-| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
+| `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`, `~` and `$VAR` are expanded). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
+| `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field (`~` and `$VAR` expanded), and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
 | `options.sdf.entries` | string | Optional, one of `"all"`/`"interconnect"`, default `"all"` (issue #2364). `"all"` annotates every delay entry the SDF carries. `"interconnect"` drops every non-`INTERCONNECT` delay entry (on a real `write_sdf` output, the `IOPATH` population) before annotation and reports the count as the `iopath_interconnect_only` `environment.sdf.dropped` class — the supported net-delay back-annotation configuration for a design whose post-route STA closes (see "SDF back-annotation"). Echoed as `environment.sdf.entries`. An unknown value is exit 1 rather than silently ignored. |
 | `options.from_synthesize` | object | Optional (issue #5684). `{"report": <path>, "netlist": <path>\|null}` — re-simulate the netlist a `klt synthesize` run produced. `report` (required, relative to the request) is that run's `--format json` report; the netlist is its `netlist_path`, resolved from the report's own location (`scope: "repo"`) and prepended to `sources`. `netlist`, when given, wins over the recorded path (relative to the request) and is **required** when the report records `scope: "external"` (a synthesize run outside any git repo). **The hash gate is a requirement, not a courtesy:** before any build the netlist is re-hashed and must equal the report's `netlist_sha256`, and the report's `hdl_toplevel` must equal the request's. A mismatch, a report with no `netlist_sha256`, an unresolvable netlist, or a bare-string/unknown-key value is exit 1 (never exit 3 — a netlist that failed the gate never ran) and names the expected and actual digests. The response gains a top-level `from_synthesize` block `{report, netlist, netlist_sha256, hash_check}` (paths as `{path, scope}` envelopes; additive, absent when unused). Cell-model auto-prepending is out of scope (#5782): supply the PDK's behavioural models and `FUNCTIONAL` define via `sources`/`options.defines`. |
 | `options.initial_state` | object | Optional. Gate-level power-up state control, Icarus only (`mode`, `seeds`, `netlist`, `clock`) — see "Gate-level power-up state: `options.initial_state`". Not combinable with `options.sdf` or `--mutations` (exit 1). |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. Echoed verbatim as `environment.parameters` (`{}` when absent; issue #5697), so a stored envelope states which parameterization it is evidence for -- a parameterized DUT swept over several sizes produces reports that differ in this field, not only in log hashes. On `--mutations` runs the echo rides the baseline report the mutation envelope reuses. Whether a future `run_identity` digest (issue #2097) folds in `parameters` is explicitly left to that design's follow-up; nothing here changes it. |
+
+Every path field above whose description says "resolved relative to the
+request" resolves against the **request file's own directory** by default
+(stdin/inline request: the current working directory). The `--base-dir`
+flag overrides that anchor wholesale — see
+"[Archived requests: `--base-dir`](#archived-requests---base-dir)". The
+request document itself has no base-directory key: a relative one would
+re-anchor on exactly the directory this flag exists to escape, and an
+absolute one would embed a host path in committed evidence.
 
 ## Response
 
@@ -1644,7 +1708,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
 | `from_synthesize` | object | Additive (issue #5684); present only when `options.from_synthesize` was used: the report and netlist `{path, scope}` envelopes, the verified `netlist_sha256`, and the `hash_check` entry (`{field, expected, actual, match}`, always `match: true` here — a mismatch is exit 1 before any build). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` whenever `dropped` is nonempty. `dropped` maps each counted class to `{count, reason}` and includes `arcs` for classes that record affected cell arcs, including `iopath_cond_expression` (issue #5296). The `sdf` object also carries `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See [SDF back-annotation](#sdf-back-annotation-optionssdf) for the class list and report shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`

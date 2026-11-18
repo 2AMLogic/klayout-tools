@@ -145,7 +145,10 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+# Imported as modules, never by name: extract_runset (issue #5481) defers
+# its imports of this module's own helpers to call time.
 from . import extract_dead_metal as _dead_metal
+from . import extract_runset
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
@@ -250,6 +253,15 @@ from .extract_flavour import (
     _extract_flavour_devices,
     _flavour_split_island,
     apportion_shared_sd,
+)
+
+# Moved out (issue #5481) and re-exported, so every existing
+# `from .extract import _resolve_netlist_target` still resolves.
+from .extract_netlist_target import _default_output_path as _default_output_path
+from .extract_netlist_target import _finish_netlist_write as _finish_netlist_write
+from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_target
+from .extract_netlist_target import (
+    _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
 from .extract_netlist_write import write_flat_netlist
 from .extract_netselect import NetSelectors
@@ -1436,16 +1448,16 @@ def _spef_warnings(
     """Warnings for the ``--spef`` writer (issue #3257 gaps A and C)."""
     out: list[str] = []
     # Gap A: DEF connectivity without a declared-port set leaves every
-    # labelled net a bare-name port, which OpenSTA cannot attach
-    # (`STA-1656`). A warning only -- the SPEF bytes are unchanged.
+    # labelled net a bare-name port; whether OpenSTA attaches it is
+    # layout-dependent. A warning only -- the SPEF bytes are unchanged.
     if def_net_connections and def_pins is None and declared_pins is None:
         out.append(
             "--def-net-connections without --def-pins/--pins: every "
-            "labelled net is written as a top-level port, so OpenSTA "
-            "read_spef cannot attach the nets (bare-name port hubs, "
-            "STA-1656) and timing stays identical to an unannotated "
-            "run. Pass --def-pins <routed.def> (or --pins) to declare "
-            "only the real ports."
+            "labelled net is written as a top-level port, so whether "
+            "OpenSTA read_spef attaches the nets is layout-dependent "
+            "(bare-name port hubs, STA-1656), not a stable signature. "
+            "Pass --def-pins <routed.def> (or --pins) to declare only "
+            "the real ports."
         )
     # Gap C: same-named floating nets omitted from the SPEF.
     if skipped_nets:
@@ -1585,6 +1597,7 @@ def run_extract(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     spef_output: str | None = None,
+    report_parasitics: str = "full",
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
@@ -1620,8 +1633,21 @@ def run_extract(
     substrate_tie_ohms: float | None = None,
     probes: Sequence[Mapping[str, Any]] = (),
     omit_dead_metal: bool = False,
+    engine: str = "klayout",
+    deck_file: str | None = None,
+    deck_vars: Mapping[str, str] | None = None,
+    runset_timeout: float | None = None,
+    klayout_binary: str | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
+
+    ``engine`` (``klt extract --engine``, issue #5481) selects which extractor
+    runs. ``"klayout"`` (the default) is the curated-deck engine every
+    paragraph below describes, byte-identical to this function before the
+    parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
+    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
+    only, with every curated-engine-specific parameter refused by name. See
+    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -1925,18 +1951,12 @@ def run_extract(
     omitted (the default) skips this entirely -- byte-identical to before
     this feature existed.
 
-    ``spef_output`` (``klt extract --spef <path>``, issue #948, Epic #700
-    Phase 3) additionally writes ``parasitics``'s per-net R/C model as a
-    Standard Parasitic Exchange Format file at the given path -- see
-    :func:`_write_spef` for the exact translation and its documented
-    net-name-only correlation scope, and ``docs/cli/extract.md``'s "SPEF
-    export" section for the CLI contract. Requires ``parasitics=True``
-    (there is nothing to translate otherwise); given without it, this is an
-    :class:`ExtractError`, the same "a flag naming something invalid is an
-    error, not a silent no-op" convention ``mom_net`` above already follows.
-    ``None`` (the default) skips this entirely -- byte-identical to before
-    this feature existed. The resolved path is echoed back as the response's
-    ``spef_path`` field (``null`` when omitted).
+    ``spef_output`` (issue #948) writes the per-net R/C model as SPEF and
+    requires ``parasitics=True``. See :func:`_write_spef` and "SPEF export"
+    in ``docs/cli/extract.md`` for details. The report's ``spef_path`` holds
+    the resolved path or ``null`` when omitted.
+    ``report_parasitics="slim"`` (issue #5816) requires ``spef_output`` and
+    reduces the JSON report after SPEF export and metrics calculation.
 
     ``substrate_spreading_net`` (``klt extract --substrate-spreading <net>``,
     issue #2561, Phase 2 of issue #2515, requires ``parasitics=True``)
@@ -2589,9 +2609,9 @@ def run_extract(
     :func:`_wire_abstract_cells`. ``abstract_cell_patterns`` empty (the
     default) skips this mode entirely; the written SPICE and every other
     field are then byte-identical to before this feature existed.
-    ``abstract_cell_lef_paths`` is only ever consulted as the fallback pin
-    source and has no effect when every matched cell type resolves its pins
-    from in-cell labels.
+    ``abstract_cell_lef_paths`` is a pin source *merged* with the
+    label-derived pins (#3749): labels win per pin name, LEF-only pins are
+    appended, and `klt lvs` discloses the LEF's well/substrate ports (#5842).
 
     ``abstracted_cells`` reports this mode's own result: one entry per
     *distinct* matched cell type (sorted by cell name), each
@@ -2904,6 +2924,40 @@ def run_extract(
     automatically when missing (matching ``klt render``/``klt lvs``),
     including any missing intermediate directories.
     """
+    # Engine dispatch (issue #5481), deliberately first in the body: the
+    # runset engine shares none of the curated path's deck resolution, so
+    # everything after it is curated-engine-only. The refused-flag set is read
+    # out of this call's own arguments against `extract_runset`'s explicit
+    # parameter -> flag table, so a parameter added here forces a deliberate
+    # decision there (`tests/test_extract_runset_check.py` checks the
+    # table in both directions). `--backend batch` never reaches here, and
+    # `--check`/`--rerun` run no engine at all.
+    extract_runset.validate_engine(engine)
+    extract_runset.require_deck_file(engine, deck_file)
+    extract_runset.require_runset_engine_for_deck_vars(engine, deck_vars)
+    if engine == extract_runset.RUNSET_ENGINE:
+        given = locals()
+        extract_runset.refuse_unsupported(
+            {k: given[k] for k in extract_runset.REFUSED_FLAG_BY_PARAM if k in given}
+        )
+        _validate_no_netlist_flags(no_netlist, output, subcircuit_cell, None)
+        return extract_runset.run_extract_klayout_runset(
+            path,
+            deck_file=deck_file or "",
+            output=output,
+            top=top,
+            deck_vars=deck_vars,
+            device_models=device_models,
+            no_netlist=no_netlist,
+            runset_timeout_s=runset_timeout,
+            klayout_binary=klayout_binary,
+        )
+    if runset_timeout is not None or klayout_binary is not None:
+        raise ExtractError(
+            "runset_timeout/klayout_binary are only used by engine "
+            f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
+        )
+
     if abstract_cell_lef_paths and not abstract_cell_patterns:
         raise ExtractError(
             "abstract_cell_lef_paths (--abstract-cell-lef) was given but "
@@ -2947,6 +3001,7 @@ def run_extract(
     ) = validate_run_extract_args(
         mom_net=mom_net,
         spef_output=spef_output,
+        report_parasitics=report_parasitics,
         substrate_spreading_net=substrate_spreading_net,
         substrate_tie_ohms=substrate_tie_ohms,
         critical_nets=critical_nets,
@@ -3305,6 +3360,7 @@ def run_extract(
         parasitics_report=parasitics_report,
         path=path,
         pdk_info=pdk_info,
+        report_parasitics_shape=report_parasitics,
         pin_renames=pin_renames,
         pin_ties=pin_ties,
         probe_results=probe_results,
@@ -3441,59 +3497,6 @@ def _require_hierarchy_cells_populated(
             f"--hierarchical-cells {missing[0]!r} matched no extracted device "
             "-- the cell is placed in the layout hierarchy but none of the "
             "devices this deck recognized resolve to a placement of it"
-        )
-
-
-def _resolve_netlist_target(
-    path: str, output: str | None, no_netlist: bool
-) -> tuple[str, str | None]:
-    """Where the netlist is written, plus the scratch dir to delete after (or
-    ``None``). ``--no-netlist`` (issue #2850) writes into a private temp dir
-    so nothing persists; otherwise ``output`` or the next-to-input default,
-    with its parent directory created."""
-    if no_netlist:
-        scratch_dir = tempfile.mkdtemp(prefix="klt-extract-")
-        return os.path.join(scratch_dir, "extracted.spice"), scratch_dir
-    netlist_path = output if output is not None else _default_output_path(path)
-    out_dir = os.path.dirname(os.path.abspath(netlist_path))
-    try:
-        os.makedirs(out_dir, exist_ok=True)
-    except OSError as exc:
-        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
-    return netlist_path, None
-
-
-def _finish_netlist_write(
-    netlist_path: str, scratch_dir: str | None
-) -> tuple[str | None, str | None]:
-    """``(reported netlist_path, netlist_sha256)``; both ``None`` after
-    discarding the scratch dir of a ``--no-netlist`` run (issue #2850)."""
-    if scratch_dir is not None:
-        shutil.rmtree(scratch_dir, ignore_errors=True)
-        return None, None
-    return netlist_path, sha256_file(netlist_path)
-
-
-def _validate_no_netlist_flags(
-    no_netlist: bool,
-    output: str | None,
-    subcircuit_cell: str | None,
-    subcircuit_output: str | None,
-) -> None:
-    """``--no-netlist`` (issue #2850) rejections: it contradicts ``-o`` and
-    the ``--subcircuit`` family, which slices/hashes the written netlist."""
-    if not no_netlist:
-        return
-    if output is not None:
-        raise ExtractError(
-            "--no-netlist cannot be combined with -o/--output -- no netlist "
-            "is written, so there is nothing to place at that path"
-        )
-    if subcircuit_cell is not None or subcircuit_output is not None:
-        raise ExtractError(
-            "--no-netlist cannot be combined with --subcircuit/"
-            "--subcircuit-output -- the sub-circuit deck is sliced from the "
-            "written netlist"
         )
 
 
@@ -3734,6 +3737,9 @@ def check_extract_report(
     via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
     counts as a match.
 
+    Under ``--engine klayout-runset`` the deck entry is replaced by a runset
+    hash check -- :func:`extract_runset_flags.provenance_hash_check`.
+
     ``committed["file"]`` is read through
     :func:`klayout_tools._report_verify.resolve_committed_path` (issue
     #2659), so both shapes a committed report can carry work: the ``{path,
@@ -3748,7 +3754,6 @@ def check_extract_report(
     traceback.
     """
     committed = _load_committed_report(report_path, ExtractError)
-    deck_name = get_path(committed, ("provenance", "deck", "name"))
     checks = [
         hash_check(
             "provenance.input.content_hash",
@@ -3761,10 +3766,8 @@ def check_extract_report(
                 )
             ),
         ),
-        hash_check(
-            "provenance.deck.content_hash",
-            get_path(committed, ("provenance", "deck", "content_hash")),
-            content_hash(deck_source_path(deck_name) if deck_name else None),
+        extract_runset.provenance_hash_check(
+            committed, deck_source_path=deck_source_path
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -4840,12 +4843,6 @@ def extract_netlist_from_layout(
         substrate_spreading,
         pin_renames,
     )
-
-
-def _default_output_path(path: str) -> str:
-    """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
-    stem, _ext = os.path.splitext(path)
-    return f"{stem}.spice"
 
 
 def _default_subcircuit_output_path(netlist_path: str, cell_name: str) -> str:

@@ -370,7 +370,12 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters. The container runs as the caller's
+own header comment for why that matters. It also mounts `$TMPDIR` and the
+klt cache root (`$KLT_CACHE_DIR` itself when set, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/klt`, `mkdir -p`'d as the caller and
+mounted `:ro`, skipped if it duplicates an already-mounted path) so the
+merged `.lib` a list-form `liberty` descriptor produces is readable inside
+the container (issue #5626). The container runs as the caller's
 uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
 writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
 #3151); re-run the installer to upgrade an older wrapper. It also forwards
@@ -378,7 +383,8 @@ writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
 the caller into the container by name (`-e NAME`, issue #3821) so ORFS-style Tcl
 reading `$::env(PLATFORM_DIR)` works; the rest of the environment is not
 forwarded. Values pass verbatim, so a host-path `PLATFORM_DIR` only resolves if
-it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`).
+it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`, plus `/tmp` when
+`$TMPDIR` differs from it, or the klt cache root).
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the
@@ -386,8 +392,8 @@ generated wrapper's `docker run` reference `openroad/orfs@sha256:…`, so every
 host and CI run executes the same OpenROAD build. Upstream publishes only a
 moving `:latest` tag, and before this pin two identically-provisioned fleet
 workers held different images under it (issue #2465). Bump the digest
-deliberately — with a `CHANGELOG.md` line, as with the pinned
-version + checksum in `install-yosys.sh`/`install-verilator.sh`/
+deliberately — with a [changelog fragment](../changelog.d/README.md), as with
+the pinned version + checksum in `install-yosys.sh`/`install-verilator.sh`/
 `install-magic.sh`/`install-icarus-verilog.sh`/`install-xyce.sh` — and record
 the new `openroad -version` string alongside it; the script's header comment
 carries the exact re-pin commands.
@@ -447,17 +453,12 @@ guesses from; an unknown name exits `1`, and an unguessable slug with no
 
 ## `check_file_size_baseline.py`
 
-Monotonic per-file line-size ratchet, gated in CI's `lint` job next to the
-complexity ratchet (issue #2766). Agent PRs tend to grow files; this stops
-the growth. It is deliberately stricter than
-[`check_complexity_baseline.py`](check_complexity_baseline.py) in one key
-way: the **trusted** baseline is read from the **comparison revision**,
-never from the working tree, so a PR cannot loosen its own gate by editing
-the committed `file-size-baseline.json` (repo root). The **proposed**
-baseline in the candidate tree must exactly mirror the candidate's
-remaining debt — both sides are checked, because only checking sizes
-against the old baseline would let stale ceilings through, and only
-trusting the proposed baseline would let a PR self-approve growth.
+CI's `lint` job enforces the per-file line-size ratchet (issue #2766).
+The checker reads the **trusted** baseline and measures file sizes at
+the **comparison revision**. The trusted
+`file-size-baseline.json` (repo root) authorizes existing oversized paths
+and vendor pins. The measured comparison size caps each oversized file's
+growth, even when the trusted entry records a larger or smaller value.
 
 **Scope.** Tracked first-party Python (`.py`), Rust (`.rs`), and shell
 (`.sh`) source — including tests, scripts, and examples. The vendored
@@ -466,24 +467,21 @@ agent-tooling trees `.loom/`, `.claude/`, `.agents/` are not governed
 neither are docs, binary fixtures, or generated reports (not source
 extensions). Counting is physical lines: blank and comment lines count,
 a final line without a trailing newline counts, an empty file is 0 lines.
-The hard limit is 500 lines: files at or under it carry no baseline
-entry; files over it carry exactly one, equal to their current size.
+The hard limit is 500 lines. Files at or under it carry no baseline entry.
+An existing oversized file can carry forward its trusted entry if
+that value still covers the file, so concurrent shrinks can merge without
+ledger edits. You can also record the exact candidate size, including
+when re-seeding a lagging entry. A permitted rename must be proven by
+`git diff -M`, stay within the source's measured comparison size, and
+record the exact destination size.
 
-**What fails** (exit 1): a file grows above its trusted ceiling; an
-unbaselined file exceeds the limit (new oversized file, or growth across
-the limit — including a renamed file, unless the diff proves a
-non-growing rename from a trusted-baselined path via `git diff -M` plus a
-size check against the old path's ceiling); a proposed ceiling is not
-exactly the file's current size (stale, too high after a reduction, or
-invented); an entry survives for a file that shrank to the limit or was
-deleted; a proposed debt entry or vendor hash is absent from the trusted
-baseline; a vendor hash no longer matches a candidate file's actual
-bytes. What never fails: unchanged or shrunken files (with the entry
-tightened to match, or removed at/below the limit), and any removal of
-debt entries or exemptions — tightening is always allowed, loosening
-never is. Exit 2 means the gate could not run (missing/malformed
-baseline, unresolvable comparison revision, git failure), with an
-actionable diagnostic either way.
+**What fails** (exit 1). Oversized files fail if they lack trusted
+permission, exceed their measured comparison size, or lack a proposed
+entry. An edited entry must match the current size. Entries for deleted
+files and files that are now at or below the hard limit must be removed.
+Vendor pins must match the candidate bytes and pass the policy below.
+Missing or malformed input, an unresolvable comparison revision, or a
+required comparison size that cannot be measured produces exit 2.
 
 **Vendored code is identified by content hash, never by directory name.**
 A hash pin in the trusted baseline exempts a file only while its actual
@@ -520,10 +518,9 @@ git fetch origin main
 python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HEAD origin/main)"
 ```
 
-After shrinking a file (and only then), regenerate the proposed baseline
-— it records the candidate's actual debt and carries forward only vendor
-pins whose bytes still match; it never adds exemptions or authorizes
-growth, and the next check validates that:
+To explicitly regenerate the proposed baseline, use `--update-baseline`.
+It records exact candidate sizes and carries forward vendor pins whose
+bytes still match. Run check mode afterward to validate the result.
 
 ```
 python scripts/check_file_size_baseline.py --update-baseline

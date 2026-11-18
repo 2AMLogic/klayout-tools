@@ -52,7 +52,8 @@ from typing import Any
 
 from . import env_provenance
 from ._paths import _load_request_json
-from ._report_verify_exclude import LIST_ITEM, reject_wildcard_exclude
+from ._report_verify_diff import diff_verdict_fields
+from ._report_verify_exclude import LIST_ITEM
 
 #: The `provenance` fields every verb's own docstring documents as
 #: legitimately varying between two runs of the identical inputs -- the tool
@@ -97,11 +98,6 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
 VOLATILE_FLOW_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
     ("engine_version",)
 }
-
-#: Sentinel distinguishing "key absent" from a legitimate JSON `null` when
-#: diffing two report dicts (see :func:`_diff_json`) -- `None != None` would
-#: otherwise be indistinguishable from `None != <missing>`.
-_MISSING = object()
 
 
 def get_path(data: Any, path: tuple[str, ...]) -> Any:
@@ -150,7 +146,8 @@ def resolve_committed_path(
       still-plain-string field): returned verbatim, so the historical
       anchoring is byte-unchanged -- a relative value still resolves against
       the current process's cwd, the convention ``klt drc --check``
-      established and :func:`klayout_tools.lvs._input_hash_check` documents.
+      established and :func:`klayout_tools._report_verify_hints.input_hash_check`
+      documents.
     - the ``{path, scope}`` object :func:`~klayout_tools.env_provenance
       .repo_relative_path` builds: ``scope: "repo"`` is joined to the repo
       root discovered from **the committed report's own location**, which is
@@ -277,20 +274,34 @@ def build_rerun_result(
     reports this same ``{status, drift, fresh}`` shape (and renders through
     the same :func:`klayout_tools.cli.output.render_rerun_drift`) rather
     than inventing a second drift-report shape.
+
+    Provenance fields the fresh report does not carry (issue #5866) are
+    surfaced as an **additive, optional** ``not_compared`` list --
+    ``[{"field": "provenance.gds_sha256", "committed": <value>}]``, field
+    names dotted exactly like ``drift[]``'s -- placed above ``fresh``. The
+    key is emitted only when non-empty, so every payload that has no such
+    field stays byte-identical, and ``status``/the exit code reflect only
+    fields both reports actually carry (see :func:`diff_verdict_fields`
+    for the narrowness of the rule).
     """
+    not_compared: list[dict[str, Any]] = []
     drift = diff_verdict_fields(
         committed if committed_for_diff is None else committed_for_diff,
         fresh if fresh_for_diff is None else fresh_for_diff,
         exclude=exclude,
+        not_compared=not_compared,
     )
-    return {
+    result: dict[str, Any] = {
         "schema_version": 1,
         "mode": mode,
         "report": report_path,
         "status": "drifted" if drift else "match",
         "drift": drift,
-        "fresh": fresh,
     }
+    if not_compared:
+        result["not_compared"] = not_compared
+    result["fresh"] = fresh
+    return result
 
 
 def strip_keys(value: Any, keys: frozenset[str]) -> Any:
@@ -420,72 +431,3 @@ def strip_path_only_keys(
     if include_volatile_provenance:
         patterns = patterns | VOLATILE_PROVENANCE_PATHS
     return strip_path_patterns(report, patterns)
-
-
-def diff_verdict_fields(
-    committed: Any,
-    fresh: Any,
-    *,
-    exclude: frozenset[tuple[str, ...]] = frozenset(),
-) -> list[dict[str, Any]]:
-    """Recursively diff two JSON-decoded report values, returning one entry
-    per leaf field whose value differs -- ``{"field": "a.b.c", "committed":
-    ..., "fresh": ...}``, dotted-path field names, sorted-key traversal for
-    determinism. A path exactly matching an entry in ``exclude`` (see
-    :data:`VOLATILE_PROVENANCE_PATHS`) is skipped entirely, subtree included;
-    a :data:`LIST_ITEM` wildcard entry is rejected outright -- see
-    :func:`reject_wildcard_exclude`.
-
-    Dicts are compared key-by-key (the union of both sides' keys, so a field
-    added/removed between the committed and fresh schema surfaces as a
-    diff -- see this module's docstring caveat on schema evolution). Lists of
-    equal length are compared index-by-index (both ``violations``/
-    ``mismatches`` are already documented as sorted for determinism, so two
-    runs against unchanged inputs produce identically-ordered lists); a
-    length mismatch is reported as one whole-list diff entry rather than a
-    misleading index-by-index one. Any other type mismatch (or genuinely
-    unequal leaf values) is one diff entry at that path.
-    """
-    reject_wildcard_exclude(exclude)
-    diffs: list[dict[str, Any]] = []
-    _diff_json(committed, fresh, (), exclude, diffs)
-    return diffs
-
-
-def _diff_json(
-    committed: Any,
-    fresh: Any,
-    path: tuple[str, ...],
-    exclude: frozenset[tuple[str, ...]],
-    out: list[dict[str, Any]],
-) -> None:
-    if path in exclude:
-        return
-    if isinstance(committed, dict) and isinstance(fresh, dict):
-        for key in sorted(set(committed) | set(fresh)):
-            _diff_json(
-                committed.get(key, _MISSING),
-                fresh.get(key, _MISSING),
-                path + (key,),
-                exclude,
-                out,
-            )
-        return
-    if (
-        isinstance(committed, list)
-        and isinstance(fresh, list)
-        and len(committed) == len(fresh)
-    ):
-        for index, (committed_item, fresh_item) in enumerate(
-            zip(committed, fresh, strict=True)
-        ):
-            _diff_json(committed_item, fresh_item, path + (str(index),), exclude, out)
-        return
-    if committed != fresh:
-        out.append(
-            {
-                "field": ".".join(path),
-                "committed": None if committed is _MISSING else committed,
-                "fresh": None if fresh is _MISSING else fresh,
-            }
-        )
