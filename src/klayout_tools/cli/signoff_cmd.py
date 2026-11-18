@@ -37,18 +37,18 @@ rendering the report, diffs the result against a previously committed one --
 excluding two surfaces that move without any verdict moving with them:
 
 - the ``build`` block, which states how the running install was provisioned
-  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`);
+  rather than which commit it came from (:data:`..signoff.VOLATILE_REPORT_PATHS`)
+  -- reported, not dropped, as ``build_skew`` (issues #5852, #5868);
 - the report's verbatim quotation of the checklist doc -- each item's
   ``title``/``text``/``notes`` and the whole-doc ``source_doc_content_hash``
   (:data:`..signoff.DOC_PROSE_REPORT_PATHS`, issue #2526).
 
-It exists so a gate script asking "does this committed evidence still hold"
-no longer has to byte-compare the committed file against a fresh render:
-that comparison fails between two byte-legitimate installs of the *same
-pinned commit*, purely on provisioning route, and again whenever an upstream
-release reworded the bundled checklist. Refused (exit 1) with the
-envelope-aggregation and ``--describe-grader`` modes, neither of which
-renders such a report.
+It exists so a gate script asking "does this committed evidence still hold" no
+longer has to byte-compare the committed file against a fresh render: that
+comparison fails between two byte-legitimate installs of the *same pinned
+commit*, purely on provisioning route, and again whenever an upstream release
+reworded the bundled checklist. Refused (exit 1) with the envelope-aggregation
+and ``--describe-grader`` modes, neither of which renders such a report.
 
 The second exclusion is reported, not silently dropped: the ``--check``
 response carries ``doc_drift`` (bool) and ``doc_drift_fields`` (the

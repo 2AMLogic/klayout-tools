@@ -137,8 +137,8 @@ klt signoff --attest 2 --input <stream> --check <committed-envelope> [--format t
   truncate a previous good one. The write is atomic (temp file +
   rename). The bytes are always plain JSON, whatever the file's suffix:
   unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), a `.gz` name is not
-  compressed, and `--check` reads these envelopes as plain JSON only —
-  do not compress one by hand. Refused without
+  compressed. `--check` accepts both plain JSON and reports compressed by
+  the caller, detecting gzip by contents rather than suffix. Refused without
   `--attest`/`--manifest`/`--fleet`, and together with `--check` or `--repin`.
 - `--skip-local-only` — with `--attest` and `-o`: do not run `local_only`
   commands; carry their committed outcome from the existing `-o` envelope
@@ -1146,8 +1146,8 @@ The file is written only after a successful render (exit `0` for T1, `3`
 below T1 — both are verdicts of record), only if its bytes changed, and
 atomically; it always receives JSON, whatever `--format` says. Those bytes
 are plain JSON whatever the file's suffix — a `.gz` name is not compressed,
-unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041), and `--check` reads the
-committed report as plain JSON only. The same
+unlike `drc`/`lvs`/`sim`/`pex` `-o` (issue #6041). `--check` also accepts a
+committed report compressed by the caller, detecting gzip by contents. The same
 `-o` works with `--fleet` roll-ups. Re-rendering an unchanged tree leaves
 the committed file untouched, so a make-style pipeline can re-run freely:
 
@@ -1536,6 +1536,7 @@ or item-2 attestation that makes a regeneration claim:
 | The manifest entry pins the same `content_hash` | manifest | not pinned: `unanchored_evidence`; pinned but different: `stale_evidence` |
 | The named artifact re-hashes to that value from the grading context (`input_verified: true`) | filesystem | changed since the envelope was written: `stale_evidence`; not found or not readable here: `unverifiable_provenance` — including a `scope: "repo"` path over a `.git`-less copy of the tree, which [`--repo-root`](#grading-outside-a-git-checkout---repo-root) exists to name a root for |
 | **Items 1 and 2, only when claimed** (issue #2887): `provenance.regeneration.regenerated_hash` equals the hash the artifact re-hashed to | envelope | differs: `stale_artifact`; malformed block: `unanchored_evidence`. See "Items 1 and 2: attesting that the artifact was regenerated" below |
+| **Item 1, attested envelopes only** (issue #5640): the envelope binds the set its own `attestation.checks[]` enumerates — `provenance.input.paths` is present whenever a `present` check names a file | envelope | binds its inventory alone (the pre-0.9.0 shape, no `paths` key): `provenance_narrower_than_attested`, with `detail` naming `attested_members` and `bound_paths` |
 
 **Which condition failed** (issue #5124). An `unanchored_evidence` binding
 refusal carries `detail.missing`, a list drawn from the fixed vocabulary
@@ -1560,6 +1561,24 @@ the pin must be the envelope's recorded input hash; when the pin instead
 equals the cited envelope file's own sha256 — hashing the record, not what
 the record is about — `detail.pin_is_envelope_file_hash` is `true` and the
 hint leads with that.
+
+**Item 1's coverage floor** (issue #5640). `klt signoff --attest 1` binds
+every inventory member (`provenance.input.paths`, below), but a pre-0.9.0
+producer bound the inventory file alone — and the gap is invisible in a
+`met` row, because the inventory is still pinned and its hash still matches.
+The grader therefore reads the breadth off the envelope itself: an item-1
+envelope whose `attestation.checks[]` enumerates at least one `present`
+file while `provenance.input` declares no `paths` key grades
+`unmet`/`provenance_narrower_than_attested`. The envelope proves, in its
+own bytes, that it knew about members it pinned nothing for. `detail`
+carries `missing: ["provenance.input.paths"]`, `attested_members` (how many
+files the envelope enumerated) and `bound_paths` (`0`). The remedy is one
+re-attest with klt ≥ 0.9.0 (`klt signoff --attest 1 --inventory ... -o ...`)
+plus the manifest re-pin. Hand-written envelopes without an `attestation`
+block, and attestations whose `checks[]` list no `present` file, enumerate
+nothing and are not refused; a present-but-malformed `paths` key keeps its
+own `unanchored_evidence` refusal (below); and items 2, 8, 9 and 10 bind a
+single artifact by design, so the floor never applies to them.
 
 `klt signoff --attest` (both `--inventory` and `--input`) adds a top-level
 `manifest_entry` (`{"file": <--output or null>, "content_hash": "sha256:<hex>"}`)
@@ -1641,6 +1660,11 @@ Rejected examples:
   `unmet`/`stale_evidence`.
 - A bare characterization-style `generic` envelope with none of the binding:
   `unmet`/`unanchored_evidence`.
+- An item-1 attested envelope whose `provenance.input` binds only the
+  inventory (the pre-0.9.0 shape, no `paths`) while its
+  `attestation.checks[]` enumerate sources and derived files:
+  `unmet`/`provenance_narrower_than_attested` — re-attest with klt ≥ 0.9.0
+  and re-pin (issue #5640).
 
 Command-backed evidence follows the same rules. The binding is read from
 the command's stdout envelope, and a relative `provenance.input.path` is
@@ -1662,7 +1686,9 @@ binding an author-written inventory leaves member edits undetected. Issue
 #3044 adds an optional `provenance.input.paths` for these: a non-empty list
 of members, each `{"path": <string | {"path", "scope": "repo"}>,
 "content_hash": "sha256:..."}`, with `path` resolved exactly as
-`provenance.input.path` is (including `--repo-root`).
+`provenance.input.path` is (including `--repo-root`). Members may also include
+an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
+or declared generator input.
 
 ```json
 "input": {
@@ -1979,6 +2005,12 @@ member is named in `detail.artifact_binding.members`) without running
 > **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
 > inventory-only hash now grades `stale_evidence`.
+>
+> **Pre-0.9.0 envelopes.** An item-1 envelope produced before this change
+> (klt < 0.9.0) binds its inventory alone while still enumerating the same
+> members in its `attestation.checks[]`; `--manifest` grades it
+> `unmet`/`provenance_narrower_than_attested` (issue #5640). The remedy is
+> the same re-attest the pin change above calls for.
 
 #### Item 10: what belongs in a hygiene inventory, and who re-attests (issue #4839)
 
@@ -2258,11 +2290,11 @@ attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
 generator nor verifies that the stream regenerates from the inputs (declare a
 `checks` command for that).
 
-`inputs` composes with repeated `--input`. It also composes with `--generator` /
-`--regenerated-hash` on a single stream, with one caveat: the grader compares
-`regenerated_hash` to the *bound* hash, which for an envelope that declares
-`inputs` is the set digest (`provenance.input.content_hash`), not the bare
-stream hash, and a `geometry` hash kind is unavailable for a set binding.
+`inputs` composes with repeated `--input`. For a single stream with
+`--generator` and `--regenerated-hash`, use `--hash-kind bytes` (the default)
+with the set digest (`provenance.input.content_hash`). A bare stream hash
+grades `unmet` / `stale_artifact`. `klt signoff --attest 2` refuses
+`--hash-kind geometry` with an inventory declaring `inputs` (exit `1`).
 
 > **Pin change.** An item-2 envelope that declares `inputs` reports
 > `provenance.input.paths` plus a set digest instead of a single
@@ -2388,7 +2420,7 @@ an inventory the author did not write.
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
 | **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
@@ -2604,6 +2636,40 @@ form instead of a placeholder name:
   "tools": {"iverilog": "12.0"}
 }
 ```
+
+A **literal** pin is checked for shape only: klt verifies `pdk.name` and
+`pdk.revision` are non-empty and each `tools.<tool>` version is a non-empty
+string, but never compares the literal with the artifact it names -- a literal
+that has drifted from the repo's own pin of record passes silently, which is
+why the reference form below exists.
+
+**A pin declared by the file that owns it (issue #5563).** Instead of
+hand-copying a value the repo already tracks (a tool commit, a PDK revision),
+each of `pdk.name`, `pdk.revision` and every `tools.<tool>` entry may be a
+reference object that klt resolves from a JSON file in the repo at attest and
+`--check` time:
+
+```json
+"pins": {
+  "pdk": {
+    "name": "sky130A",
+    "revision": {"from": "config/pdk.json", "key": "sky130.revision"}
+  },
+  "tools": {"ngspice": {"from": "config/toolchain.json", "key": "tools.ngspice.commit"}}
+}
+```
+
+`from` is a repo-relative path (absolute paths, `..` escapes and symlinks are
+refused, exactly like every other inventory path); `key` is a dotted path into
+that file's JSON (digit segments index lists, as for item-8 metric bindings).
+The check's `value` carries the **resolved** string, and a check that used at
+least one reference records where each value came from as `resolved_from`
+(a literal-only inventory emits the check it always did -- no
+`resolved_from` key). A reference whose file is missing, is not readable JSON,
+lacks the key, or resolves to anything but a non-empty string grades the pin
+`passed: false` -- a failed check, not a malformed inventory. Because `--check`
+re-resolves from the owning file, a pin bump drifts the committed envelope the
+same way a source edit does: no re-attest can re-legitimize a stale copy.
 
 A multi-bench block can give each bench its own cold start and declare a spec
 row that has no bench yet (a plain-string `testbenches` list with one
@@ -3266,9 +3332,9 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
   "build_skew": {
-    "state": "build_only",
+    "state": "ruleset",
     "fields": [
-      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+      { "field": "build.grading_ruleset_id", "committed": "sha256:…", "fresh": "sha256:…" }
     ]
   },
   "fresh": { "…": "the full freshly-graded report" }
@@ -3282,16 +3348,30 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
-- **`build_skew` names version skew without grading it** (issue #5868).
-  `--check` is the version-tolerant freshness gate; a raw diff of two
-  `--format json` renders is not, because the `build` block differs whenever
-  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
-  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
-  (`build.grading_ruleset_id` moved: graded under different rules, not just
-  rendered by a different build) or `"unknown"` (the committed report has no
-  `build` block). `fields` lists each differing field. It never changes
-  `status` or the exit code, and `--format text` prints one `build_skew:` line
-  when the state is `build_only` or `ruleset`.
+- **`build_skew` names build-block skew without grading it** (issues
+  #5868, #5852). `--check` is the version-tolerant freshness gate; a raw
+  diff of two `--format json` renders is not, because the `build` block
+  differs whenever the rendering klt differs. `build_skew.state` is
+  `"same"`, `"build_only"` (some `build.*` field moved, the grading
+  ruleset did not), `"ruleset"` (`build.grading_ruleset_id` moved: graded
+  under different rules, not just rendered by a different build),
+  `"unverifiable"` (at least one side's identity cannot be resolved
+  honestly — no `version`, or a `+unknown` one from a source-tarball
+  install — so neither `"same"` nor a difference state is an assertion the
+  evidence supports; two `+unknown` builds that agree on every recorded
+  field would otherwise read as `"same"`) or `"unknown"` (the committed
+  report has no `build` block). `"unverifiable"` takes precedence over
+  `"build_only"` and `"ruleset"`: a `+unknown` side that also moved
+  `build.grading_ruleset_id` reads `"unverifiable"`, so a consumer that
+  alarms specifically on a ruleset move must also look for
+  `build.grading_ruleset_id` in `fields`. `fields` lists each differing
+  field, kept even under `"unverifiable"` — there it is what the recorded
+  values say, not a claim. It never changes `status` or the exit code, and `--format
+  text` prints one `build_skew:` line when the state is `build_only`,
+  `ruleset` or `unverifiable`. This one field is the whole report-only
+  story of the excluded `build` block: gate on `.build_skew.state` — a
+  consumer that wants to warn (or fail) on "committed by a different
+  build" reads it; nothing else carries that fact.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
@@ -3358,7 +3438,9 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report and from `--describe-grader`.
+  embedded `fresh` report, named (with the rest of the build identity) in
+  the response's `build_skew.fields` when it moved, and reported by
+  `--describe-grader`.
 
 ```bash
 # Fail on evidence drift; warn on a reworded checklist.
