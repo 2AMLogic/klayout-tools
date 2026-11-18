@@ -53,7 +53,9 @@ def attested(tmp_path):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     (repo / "report.md").write_text("# characterization\n")
-    (repo / "sim.json").write_text(json.dumps({"status": "pass"}))
+    (repo / "sim.json").write_text(
+        json.dumps({"schema_version": 1, "kind": "generic", "status": "pass"})
+    )
     inventory = _write_inventory(repo, ["gain"])
     envelope = repo / "env.json"
     assert _attest(inventory, envelope) == 0
