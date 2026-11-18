@@ -24,13 +24,14 @@ from ..functional_verification_mutation_proposals import (
     functional_verification_doc_location,
 )
 from . import functional_verification_cmd
+from ._doc_paths import DocHelpFormatter, resolve_doc_paths
 
 
 class _RawText(str):
     """Marks help text :class:`_RawEpilogFormatter` must not re-wrap."""
 
 
-class _RawEpilogFormatter(argparse.HelpFormatter):
+class _RawEpilogFormatter(DocHelpFormatter):
     """Wrap ``description`` like the default formatter but keep an epilog
     built from :class:`_RawText` verbatim (a JSON example loses its layout
     under re-wrapping; ``RawDescriptionHelpFormatter`` would instead stop
@@ -38,7 +39,10 @@ class _RawEpilogFormatter(argparse.HelpFormatter):
 
     def _fill_text(self, text: str, width: int, indent: str) -> str:
         if isinstance(text, _RawText):
-            return "".join(indent + line for line in text.splitlines(keepends=True))
+            return "".join(
+                indent + line
+                for line in resolve_doc_paths(text).splitlines(keepends=True)
+            )
         return super()._fill_text(text, width, indent)
 
 
