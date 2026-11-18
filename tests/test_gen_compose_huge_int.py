@@ -18,14 +18,27 @@ envelope (raising sites) or the documented "nothing usable" advisory
 behaviour. Every site now guards with ``_jsonnum.is_finite_number``,
 which also refuses NaN/±infinity floats that previously slipped through
 the number check.
+
+Issue #6580 extends the same coverage to the ``gen_compose_routing`` ring
+helpers (``_ring_gap_ports`` / ``_ring_side_lines`` /
+``_ring_trace_half_width_um``): a ``generator_report``'s ``GAP_*`` /
+``TAP_*`` / ``COLL_*`` port geometry is trusted as-is (``_parse_blocks``
+checks only the block ``name``), so a poisoned coordinate/width reaches
+them untouched and must read as "no usable geometry for that port" --
+the same skip a missing value takes.
 """
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
-from klayout_tools import gen_compose
-from klayout_tools.gen_compose import GenComposeError
+from klayout_tools import gen_compose, gen_compose_routing
+from klayout_tools.gen_compose import GenComposeError, compose
+from test_gen_compose import _DIFF_PAIR_GAP_E, _DIFF_PAIR_GAP_W, _gen_block
+from test_gen_compose import _isolate as _isolate
+from test_gen_compose import pdk_root as pdk_root
 
 HUGE = 10**400
 
@@ -303,3 +316,181 @@ def test_probe_position_finite_pair_survives():
 def test_probe_position_missing_axes_are_none():
     assert gen_compose._port_probe_position_um({"x_um": 1.0}) is None
     assert gen_compose._port_probe_position_um({}) is None
+
+
+# ---------------------------------------------------------------------------
+# generator_report ring ports  (_ring_gap_ports / _ring_side_lines /
+# _ring_trace_half_width_um, advisory -- issue #6580)
+# ---------------------------------------------------------------------------
+
+#: Values a ``generator_report`` ring port can carry that ``is_number``
+#: accepted: an int too large for ``float()`` (crash at the conversion) and
+#: NaN/±inf (poisoned geometry flowing silently into ring comparisons).
+_RING_POISON = [HUGE, -HUGE] + NON_FINITE
+
+
+def _gap_block(**override):
+    port = {"x_um": 10.0, "y_um": 1.0, "width_um": 0.5}
+    port.update(override)
+    return {"ports": {"GAP_E": port}}
+
+
+@pytest.mark.parametrize("key", ["x_um", "y_um", "width_um"])
+@pytest.mark.parametrize("value", _RING_POISON)
+def test_ring_gap_ports_unusable_number_skips_that_gap(key, value):
+    """A poisoned ``GAP_<side>`` geometry reads as "no usable geometry" --
+    the same skip a missing key takes -- never an ``OverflowError`` from
+    ``float()`` (huge int) nor a NaN/inf opening in the returned map."""
+    assert gen_compose_routing._ring_gap_ports(_gap_block(**{key: value})) == {}
+
+
+def test_ring_gap_ports_finite_geometry_still_read():
+    gaps = gen_compose_routing._ring_gap_ports(_gap_block())
+    assert gaps == {"E": {"x_um": 10.0, "y_um": 1.0, "opening_um": 0.5}}
+
+
+@pytest.mark.parametrize("width", [-0.5, 0.0])
+def test_ring_gap_ports_nonpositive_opening_still_skipped(width):
+    """Finite-but-unusable widths keep their existing ``<= 0.0`` skip."""
+    assert gen_compose_routing._ring_gap_ports(_gap_block(width_um=width)) == {}
+
+
+@pytest.mark.parametrize("value", _RING_POISON + [True])
+def test_ring_side_lines_unusable_coordinate_drops_only_that_side(value):
+    """One poisoned side, three good sides: the good centre lines survive
+    (``True`` stays ignored -- ``bool`` never passed ``is_number``)."""
+    block = {
+        "ports": {
+            "TAP_E": {"x_um": value, "y_um": 1.0},
+            "GAP_N": {"x_um": 1.0, "y_um": 2.0, "width_um": 0.5},
+            "TAP_W": {"x_um": -3.0, "y_um": 2.0},
+            "TAP_S": {"x_um": 1.0, "y_um": -4.0},
+        }
+    }
+    assert gen_compose_routing._ring_side_lines(block) == {
+        "N": 2.0,
+        "W": -3.0,
+        "S": -4.0,
+    }
+
+
+def test_ring_side_lines_finite_coordinates_still_read():
+    block = {"ports": {"TAP_E": {"x_um": 10, "y_um": 1.0}}}
+    assert gen_compose_routing._ring_side_lines(block) == {"E": 10.0}
+
+
+@pytest.mark.parametrize("value", _RING_POISON + [True, -2.0, 0.0])
+def test_ring_trace_half_width_unusable_width_is_skipped(value):
+    """A poisoned/non-positive tap width contributes nothing; a good tap
+    still does. Finite non-positive widths keep their existing ``> 0.0``
+    skip; a ``GAP_`` port's opening length is never read as a trace width."""
+    block = {
+        "ports": {
+            "TAP_E": {"x_um": 1.0, "y_um": 0.0, "width_um": value},
+            "COLL_W": {"x_um": -1.0, "y_um": 0.0, "width_um": 2.0},
+            "GAP_N": {"x_um": 0.0, "y_um": 3.0, "width_um": 8.0},
+        }
+    }
+    assert gen_compose_routing._ring_trace_half_width_um(block) == 1.0
+
+
+@pytest.mark.parametrize("value", _RING_POISON + [True])
+def test_ring_trace_half_width_all_taps_unusable_is_none(value):
+    block = {"ports": {"TAP_E": {"x_um": 1.0, "y_um": 0.0, "width_um": value}}}
+    assert gen_compose_routing._ring_trace_half_width_um(block) is None
+
+
+def test_ring_trace_half_width_finite_widths_still_read():
+    block = {"ports": {"TAP_E": {"x_um": 1.0, "y_um": 0.0, "width_um": 0.34}}}
+    assert gen_compose_routing._ring_trace_half_width_um(block) == pytest.approx(0.17)
+
+
+# ---------------------------------------------------------------------------
+# end to end: compose() with a poisoned ring port in a generator_report
+# ---------------------------------------------------------------------------
+
+
+def _assert_all_finite(obj):
+    """No NaN/±inf float anywhere in the composed report."""
+    if isinstance(obj, float):
+        assert math.isfinite(obj), f"non-finite value reached the report: {obj}"
+    elif isinstance(obj, dict):
+        for item in obj.values():
+            _assert_all_finite(item)
+    elif isinstance(obj, (list, tuple)):
+        for item in obj:
+            _assert_all_finite(item)
+
+
+def _compose_ring_poisoned(tmp_path, pdk_root, value, port_name, key):
+    """#6580's end-to-end repro: the `_compose_two_diff_pairs` shape from
+    `test_gen_compose.py` (ring gaps ``GAP_E``/``GAP_W``, net
+    ``a.M1_1_D`` -> ``b.Q1_1_S``) with one of block ``a``'s reported ring
+    port coordinates poisoned."""
+    a = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "a_ringpoison",
+        mirror=True,
+        splits=2,
+        **_DIFF_PAIR_GAP_E,
+    )
+    b = _gen_block(
+        tmp_path,
+        pdk_root,
+        "diff_pair",
+        "b_ringpoison",
+        mirror=False,
+        splits=2,
+        **_DIFF_PAIR_GAP_W,
+    )
+    for port in a["ports"]:
+        if port.get("name") == port_name:
+            port[key] = value
+    output = tmp_path / "ringpoison.gds"
+    return compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "a", "generator_report": a},
+                {"id": "b", "generator_report": b},
+            ],
+            "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "a", "port": "M1_1_D"},
+                        {"block": "b", "port": "Q1_1_S"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "ringpoison", "output": str(output)},
+        }
+    )
+
+
+@pytest.mark.parametrize("key", ["x_um", "width_um"])
+@pytest.mark.parametrize("value", [HUGE, float("nan")])
+def test_compose_poisoned_ring_gap_port_is_ignored_not_a_crash(
+    tmp_path, pdk_root, key, value
+):
+    """Poisoning block ``a``'s reported ``GAP_E`` opening reads as "closed
+    ring" -- the net comes back unrouted instead of an ``OverflowError``
+    traceback (huge int) or a NaN coordinate flowing through the ring
+    checks (NaN)."""
+    report = _compose_ring_poisoned(tmp_path, pdk_root, value, "GAP_E", key)
+    assert report["unrouted_nets"] == ["N1"]
+    assert report["nets"][0]["routed"] is False
+    _assert_all_finite(report)
+
+
+@pytest.mark.parametrize("value", [HUGE, float("nan")])
+def test_compose_poisoned_ring_tap_port_completes(tmp_path, pdk_root, value):
+    """A poisoned ``TAP_E`` coordinate drops that side line only -- the
+    ``GAP_E`` opening on the same centre line still declares it, so the
+    compose completes (routed either way) with finite geometry."""
+    report = _compose_ring_poisoned(tmp_path, pdk_root, value, "TAP_E", "x_um")
+    _assert_all_finite(report)

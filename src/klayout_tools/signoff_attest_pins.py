@@ -17,12 +17,11 @@ helpers.
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from .signoff import _finite_json_float, _reject_json_constant
+from .signoff import SignoffError, _read_envelope
 
 
 def _resolve_section(
@@ -69,15 +68,16 @@ def json_node(root: str, path: str, field: str) -> Any:
     read or parsed, or the key is absent. A JSON ``null`` at the key is
     indistinguishable from an absent one; both callers require a type a
     ``null`` fails (item 8's metric bindings a finite number, item 9's pins a
-    non-empty string), so the ambiguity never reaches a caller."""
+    non-empty string), so the ambiguity never reaches a caller.
+
+    The read is the shared :func:`~.signoff._read_envelope`, like every other
+    evidence read in ``klt signoff``: a ``.json.gz`` is read as it stands (gzip
+    by magic bytes, so a ``klt sim --report-out report.json.gz`` is citable
+    without a decompressed copy), and a nonfinite literal or a truncated or
+    damaged gzip is refused as unreadable (#6259)."""
     try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
+        node: Any = _read_envelope(os.path.join(root, path))
+    except SignoffError:
         return None
     for segment in field.split("."):
         if isinstance(node, Mapping) and segment in node:

@@ -212,7 +212,17 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
         (0.40, None),
         (0.44, None),
         (0.46, None),
-        (0.50, {"x0": 1.90, "y0": 0.0, "x1": 1.94, "y1": 0.42}),
+        # (0.46, 0.69) is the positive-but-unusable band (#6425): the inset
+        # extent is > 0 but below metal1.width.1's 0.23um, so no DRC-legal
+        # strap fits. 0.50 used to pin a 0.04um window here -- a window
+        # `metal1.width.1` forbids any strap from filling.
+        (0.50, None),
+        (0.68, None),
+        # Exactly metal1.width.1 wide (0.69 - 2 * 0.23 = 0.23): a legal
+        # strap fits, so the window still reports -- the boundary is
+        # inclusive, matching DRC's own "width < rule" violation test.
+        (0.69, {"x0": 1.805, "y0": 0.0, "x1": 2.035, "y1": 0.42}),
+        (0.70, {"x0": 1.80, "y0": 0.0, "x1": 2.04, "y1": 0.42}),
     ],
 )
 def test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box(
@@ -231,6 +241,91 @@ def test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box(
     gap = _gap_port({"ports": ports})
     assert gap["name"] == "GAP_S"
     assert gap["strap_window_um"] == window
+
+
+@pytest.mark.parametrize(
+    ("ring_gap_um", "window"),
+    [
+        # sky130's li1.space.1 and li1.width.1 are both 0.17um, so an
+        # opening reports a window only from 2 * 0.17 + 0.17 = 0.51um up.
+        # The documented minimum (0.40) used to report a 0.06um window that
+        # `li1.width.1` forbids any strap from filling (#6425).
+        (0.40, None),
+        (0.50, None),
+        # Opening centred on the ring's 1.92um midline: x0 = 1.92 - gap/2 +
+        # 0.17, x1 = 1.92 + gap/2 - 0.17.
+        (0.51, {"x0": 1.835, "y0": 0.0, "x1": 2.005, "y1": 0.42}),
+        (0.60, {"x0": 1.79, "y0": 0.0, "x1": 2.05, "y1": 0.42}),
+    ],
+)
+def test_sky130_window_below_min_width_reports_null(
+    tmp_path, pdk_root, ring_gap_um, window
+):
+    """The `null` case is width-aware (#6425): a non-null `strap_window_um`
+    means a strap at least `li1.width.1` wide fits, not merely that the
+    spacing inset left a positive sliver."""
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "S",
+                "ring_gap_um": ring_gap_um,
+            },
+            "options": {"output": str(tmp_path / f"sky130_narrow_{ring_gap_um}.gds")},
+        }
+    )
+
+    gap = _gap_port(report)
+    assert gap["name"] == "GAP_S"
+    assert gap["strap_window_um"] == window
+
+
+def test_layer_without_a_width_rule_keeps_the_spacing_only_null_condition():
+    """Edge case (#6425): when the resolved deck carries no plain `width`
+    rule for the opening's layer, the width floor is absent and the window
+    degrades to the pre-existing behaviour -- null only when the spacing
+    inset leaves an extent <= 0, never on width. (999, 0) is a layer with
+    neither a space nor a width rule in any curated deck, so the window is
+    the opening's own box, however narrow."""
+    from klayout_tools.gen_ring_ports import (
+        _min_width_um_for_layer,
+        _ring_ports,
+    )
+
+    assert _min_width_um_for_layer("sky130A", (999, 0)) is None
+    assert _min_width_um_for_layer("sky130A", None) is None
+    assert _min_width_um_for_layer("sky130A", (67, 20)) == (
+        pytest.approx(0.17),
+        "li1.width.1",
+    )
+
+    ring = {
+        "ports": {},
+        "gap": {
+            "side": "S",
+            "box_um": (1.0, 0.0, 1.06, 0.42),
+            "x_um": 1.03,
+            "y_um": 0.21,
+            "opening_um": 0.06,
+        },
+    }
+    ports = _ring_ports(
+        ring,
+        (0.0, 0.0),
+        "TAP_",
+        {"layer": 66, "datatype": 44},
+        0.17,
+        {"layer": 999, "datatype": 0},
+        pdk_variant="sky130A",
+    )
+    assert ports[-1]["strap_window_um"] == {
+        "x0": 1.0,
+        "y0": 0.0,
+        "x1": 1.06,
+        "y1": 0.42,
+    }
 
 
 def test_strap_inside_the_window_is_drc_clean_outside_it_is_not(tmp_path, pdk_root):
@@ -284,3 +379,113 @@ def test_strap_inside_the_window_is_drc_clean_outside_it_is_not(tmp_path, pdk_ro
     drc_report = run_drc(str(tmp_path / "strap_outside.gds"), "sky130")
     assert drc_report["status"] != "clean"
     assert any(v["rule"] == "li1.space.1" for v in drc_report["violations"])
+
+
+@pytest.mark.parametrize(
+    ("variant", "deck", "route_layer", "ring_gap_um"),
+    [
+        # sky130: exactly the boundary opening (window == min width) and a
+        # wider one -- li1.space.1 / li1.width.1 are both 0.17um. gf180mcu
+        # (metal1.space.1 / metal1.width.1 both 0.23um): the standalone
+        # guard_ring generator rejects ring_gap_um < 0.72 (#6477), so 0.72 is
+        # the smallest opening it can write; the exact-minimum 0.69 boundary
+        # is pinned on the port metadata alone, in
+        # test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box.
+        ("sky130A", "sky130", (67, 20), 0.51),
+        ("sky130A", "sky130", (67, 20), 0.80),
+        ("gf180mcuD", "gf180mcu", (34, 0), 0.72),
+        ("gf180mcuD", "gf180mcu", (34, 0), 1.00),
+    ],
+)
+def test_strap_filling_a_reported_window_is_drc_clean(
+    tmp_path, both_pdk_root, variant, deck, route_layer, ring_gap_um
+):
+    """DRC-backed acceptance (#6425): whenever `strap_window_um` is non-null,
+    a strap filling it exactly -- edges on the window's spacing inset, width
+    equal to the window's along-side extent -- passes `klt drc` for sky130
+    and gf180mcu. That is the width-aware reading of the field: non-null
+    means a legal strap fits, including at exactly the minimum width.
+
+    "Passes" is judged against the bare ring's own DRC result: the rule counts
+    must be unchanged by adding the strap, so the assertion is about the
+    strap alone. Every ring here is clean (the standalone GF180MCU opening
+    minimum of 0.72um, #6477, keeps its rings clean), so the equality below
+    *is* `status == "clean"`."""
+    import collections
+
+    import klayout.db as kdb
+
+    output = tmp_path / f"fill_{variant}_{ring_gap_um}.gds"
+    report = generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "S",
+                "ring_gap_um": ring_gap_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    window = _gap_port(report)["strap_window_um"]
+    assert window is not None
+    ring_only = run_drc(str(output), deck)
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    top.shapes(layout.layer(*route_layer)).insert(
+        kdb.Box(
+            round(window["x0"] / layout.dbu),
+            round((window["y0"] - 0.5) / layout.dbu),
+            round(window["x1"] / layout.dbu),
+            round((window["y1"] + 0.5) / layout.dbu),
+        )
+    )
+    layout.write(str(output))
+
+    with_strap = run_drc(str(output), deck)
+    rules_before = collections.Counter(v["rule"] for v in ring_only["violations"])
+    rules_after = collections.Counter(v["rule"] for v in with_strap["violations"])
+    assert rules_after == rules_before, with_strap["violations"]
+
+
+def test_strap_in_the_unusable_band_violates_the_width_rule(tmp_path, pdk_root):
+    """Why the band reports null (#6425): at sky130's documented-minimum
+    `ring_gap_um: 0.4` the spacing-inset extent is a positive 0.06um, and a
+    li1 strap filling it exactly is flagged `li1.width.1` -- the silent
+    until-`klt drc` failure the null case now removes up front."""
+    import klayout.db as kdb
+
+    output = tmp_path / "unusable_band.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "contacts_per_side": 2,
+                "ring_gap_side": "S",
+                "ring_gap_um": 0.4,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cell()
+    # Ring is 3.84um wide, so the 0.4um opening is centred at x = 1.92:
+    # spans 1.72..2.12, and the spacing-inset extent is 1.89..1.95.
+    top.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(
+            round(1.89 / layout.dbu),
+            round(-0.5 / layout.dbu),
+            round(1.95 / layout.dbu),
+            round(0.92 / layout.dbu),
+        )
+    )
+    layout.write(str(output))
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] != "clean"
+    assert any(v["rule"] == "li1.width.1" for v in drc_report["violations"])

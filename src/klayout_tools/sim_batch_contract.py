@@ -4,9 +4,7 @@ First seam split out of :mod:`klayout_tools.sim_batch` (issue #4065), moved
 verbatim, then split by section so each file stays within the size limit:
 this module holds the constants and exceptions; ``sim_batch_contract_spec``,
 ``_worker``, ``_preflight`` and ``_jobspec`` hold the rest.
-:mod:`klayout_tools.sim_batch` re-exports every name, so ``from
-klayout_tools.sim_batch import _x`` keeps working. Names a test patches must be
-patched in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
+Patch names in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
 ``sim_batch_contract_worker``).
 """
 

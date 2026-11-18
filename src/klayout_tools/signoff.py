@@ -55,7 +55,7 @@ from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
 from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
 from .build_identity import build_version, version_report
 from .coverage import (
@@ -2529,7 +2529,7 @@ def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
 
     def sort_key(entry: dict[str, Any]) -> tuple[int, float]:
         value = entry.get("worst_slack_ns")
-        if is_number(value):
+        if is_finite_number(value):
             return (0, float(value))
         return (-1, 0.0)
 
@@ -2843,10 +2843,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     - ``drc`` passes on ``status == "clean"``. Its ``coverage`` block is
       **not** consulted (issue #2002): a "clean" verdict from a deck with
       rule-free drawn layers or skipped rules passes exactly like one from a
-      fully-covering deck. Those fields are surfaced, not graded -- see
-      :func:`_drc_coverage_disclosure` and this module's "DRC coverage
-      surfacing" docstring section for why the disclosure ``docs/design-
-      evidence-tiers.md`` item 3 requires stays claimant-enforced.
+      fully-covering deck. Those fields are surfaced, not graded, unless the
+      manifest opts into ``require_coverage_disclosure`` (issue #5789; applied
+      later in ``_build_tier_item``) -- see :func:`_drc_coverage_disclosure`
+      and ``docs/cli/signoff.md`` ("DRC coverage is reported, not graded").
     - ``lvs`` passes on ``status == "match"`` *and* (issue #1965, closing the
       gap left by #1952/#1964's additive ``power_connectivity`` block) its
       ``power_connectivity.status`` is not ``"mismatch"``. ``"unchecked"``
@@ -3328,8 +3328,8 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "violation_count": envelope.get("violation_count"),
         }
         # Issue #2002: what this "clean" was measured *inside*, quoted from
-        # the envelope's own `coverage` block -- reported, never graded on
-        # (see this module's "DRC coverage surfacing" docstring section).
+        # the envelope's own `coverage` block -- reported; graded only by the
+        # opt-in `require_coverage_disclosure` ratchet (#5789; docs/cli/signoff.md).
         # Omitted entirely for an envelope committed before `coverage`
         # existed, so old evidence renders exactly as it did before.
         coverage = _drc_coverage_disclosure(kind, envelope)
@@ -6365,7 +6365,7 @@ def _resolve_evidence(
         )
 
     actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified
+        check_kind, spec, file_label, actual_hash, input_verified, provenance
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
@@ -6450,8 +6450,8 @@ def _citation(
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
     # Present only when the cited envelope actually reports coverage, and
-    # never consulted by any grading rule: item 3's verdict is still
-    # `status == "clean"` alone.
+    # consulted by no grading rule unless the manifest opts in
+    # (`require_coverage_disclosure`, #5789); default: `status == "clean"` alone.
     coverage = _drc_coverage_disclosure(resolution["kind"], resolution["envelope"])
     if coverage is not None:
         citation["coverage"] = coverage
