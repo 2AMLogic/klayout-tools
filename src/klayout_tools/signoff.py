@@ -4716,6 +4716,10 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if options is None:
         return None
 
+    expected_hash = raw.get("content_hash")
+    if expected_hash is not None and not isinstance(expected_hash, str):
+        expected_hash = None
+
     command = raw.get("command")
     if (
         isinstance(command, list)
@@ -4724,9 +4728,6 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     ):
         if "artifact_manifest" in raw or "artifact_member" in raw:
             return None  # Store pins require a file-backed envelope.
-        expected_hash = raw.get("content_hash")
-        if expected_hash is not None and not isinstance(expected_hash, str):
-            expected_hash = None
         cwd = raw.get("cwd")
         if not isinstance(cwd, str):
             cwd = None
@@ -4742,9 +4743,6 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     file = raw.get("file")
     if not isinstance(file, str):
         return None
-    expected_hash = raw.get("content_hash")
-    if expected_hash is not None and not isinstance(expected_hash, str):
-        expected_hash = None
     return {
         "kind": "file",
         "file": file,

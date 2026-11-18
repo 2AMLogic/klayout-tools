@@ -124,7 +124,7 @@ def test_store_pin_resolves_absent_samples_hash_and_discloses_basis(
 def test_store_pin_stale_pin_renders_stale_evidence(
     tmp_path, monkeypatch, status, reason, member
 ):
-    """Both verdict paths disclose the actual manifest member and its recorded digest."""
+    """Both verdict paths disclose the selected member and its recorded digest."""
     monkeypatch.chdir(tmp_path)
     name = member or MEMBER_NAME
     digest = _sha("the new samples bytes")
