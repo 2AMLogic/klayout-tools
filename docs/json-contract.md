@@ -2211,7 +2211,21 @@ depends on its meaning staying fixed:
   re-attest.
 - Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
   "sha256-raw-bytes"`). Introducing any normalisation would be a new named
-  algorithm recorded in the envelope, never a silent change to this one.
+  algorithm recorded in the envelope, never a silent change to this one —
+  the one such algorithm is `sha256-canonical-yaml-v1` (issue #5862): an
+  inventory `hygiene` entry `{"attest": "yaml", "select"?}` records it,
+  with `attest` and `select`, beside that check's own `content_hash` (the
+  digest of the canonical parse — type-tagged keys, sequences recursed
+  element-wise, sorted, compact — of the whole file or the `select`
+  subtree; a node with no deterministic canonical form, e.g. `!!set`, is
+  an error naming the path) plus an informational
+  `raw_content_hash`, which the `--check` drift diff excludes and reports
+  as a live note instead. The envelope-level `attestation.hash_algorithm`
+  stays `sha256-raw-bytes` for every other check, and no inventory
+  `schema_version` bump carries the entry: within version 1 the per-entry
+  accepted keys are part of the `hygiene` entry's documented shape, and a
+  build that does not read `attest: "yaml"` refuses it explicitly (exit
+  `1`, naming the accepted values) rather than byte-hashing it.
 
 Field-level schema, path rules, examples and exit codes:
 [`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).
