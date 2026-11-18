@@ -214,6 +214,7 @@
         "klayout_tools.erc_spec",
         "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
+        "klayout_tools.erc_substrate_bodies",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
       ]
