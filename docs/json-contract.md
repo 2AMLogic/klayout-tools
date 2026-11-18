@@ -275,6 +275,19 @@ absent (not `null`) when unmeasured and always absent on `cap_cmomf`. No
 existing member changed, so **no `schema_version` bump**. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section.
 
+**A whole new *engine*, whose report adds fields and removes none, is
+additive.** Issue #5481 added `klt extract --engine klayout-runset`, which
+runs a PDK's own KLayout LVS runset instead of a curated `--deck`. Its report
+carries a top-level `engine`, `deck_file` and `deck_vars`, plus
+`provenance.runset` (the same block `klt lvs` already emits); `deck`,
+`parasitics` and `pdk` are `null` because no curated deck, parasitics pass or
+PDK resolution ran. Every field the default engine documents keeps its
+meaning, and a **default-engine report is byte-identical** to one produced
+before the flag existed — it does not even carry `engine`. So **no
+`schema_version` bump** (`klt extract` stays at 4). A consumer that wants to
+tell the two apart reads `engine`, whose absence means the curated engine.
+See `docs/cli/extract.md`'s "Engine" section.
+
 **A new terminal key on one device class's `nets` map is additive by the
 same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
 `devices[].nets` for a bipolar device class of a deck entry that declares
@@ -850,6 +863,22 @@ unchanged either way. The two fields also appear on the matching
 committed envelope. The key is refused (exit `1`) on any non-item-9 command.
 See [`docs/cli/signoff.md`](cli/signoff.md)'s "A cold start that only
 validates its bench".
+
+Issue #5641 lets an item-9 `testbenches[]` entry declare its `cold_start` as a
+**list** of named commands as well as the single object it always took
+(additive; no `schema_version` bump): each member `{name, argv, ...}` — `name`
+a non-empty string, unique within its entry; anything else refused, exit `1` —
+yields its own `command` check (`role: "cold_start"`) carrying `testbench` and
+`name` alongside the usual `argv`/`cwd`/`exit_status`/`passed`, and the entry's
+file is still inventoried exactly once (one `present` check). An entry with a
+single-object `cold_start` — or none, under a top-level one — emits the checks
+it always did, with no `name` key, so a committed envelope re-checks `match`
+unchanged. Because `name` joins the carried-check identity, `--attest --check`
+and `--skip-local-only` deliver a `local_only` member's committed outcome to
+the right member even when two members under one path declare identical
+`argv`. Members are emitted in `name` order after benches sorted by path, so
+check order does not depend on inventory listing order. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
