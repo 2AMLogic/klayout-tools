@@ -5226,6 +5226,11 @@ name:
 ]
 ```
 
+End-to-end verification of `top_n` on the `batch` backend is pending and
+remains tracked in
+[#6470](https://github.com/2AMLogic/klayout-tools/issues/6470), the same item
+as for `mechanism`.
+
 `value`, `status`, `margin` and grading are **exactly** what the same entry
 returns without `top_n` (with or without `mechanism`): the list is an
 additive sibling and never changes what the entry means, so `limits`, Monte
@@ -5250,7 +5255,7 @@ without `top_n` is byte-identical to before.
 | Field | Meaning |
 | ----- | ------- |
 | `name` | The leaf's ngspice vector name without its leading `onoise` and the one separator after it -- the flattened instance path plus generator, e.g. `m1_1overf`, `m.x1.mi_1overf`. Report output only; never parsed, split or normalised, and never accepted as request input. |
-| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (exactly for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
+| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (to within floating-point error for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
 | `mechanism` | `"thermal"`, `"flicker"`, or `null` for a generator the suffix table does not classify (gate leakage, junction shot noise). |
 
 - **Leaves, not device totals.** A device's total vector would hide which of
