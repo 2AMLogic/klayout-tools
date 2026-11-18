@@ -165,7 +165,10 @@ depending on someone remembering. Design decisions:
   `## X.Y.Z (date)` CHANGELOG heading below `## Unreleased`, and resolves the
   "first release after `vPREV`" notes in `docs/cli/signoff.md`; the workflow
   then runs `uv lock`, `scripts/gen_site_cli_data.py` and
-  `scripts/generate_deck_history.py --as-release vX.Y.Z`. Only one release PR
+  `scripts/generate_deck_history.py --as-release vX.Y.Z`. The prep refuses
+  (exit 2) when the `## Unreleased` section has no entries — nothing to
+  release — so an empty cycle stops before tagging instead of failing the
+  GitHub release after the PyPI upload (issue #6086). Only one release PR
   (`release/v*` branch) is open at a time. It is never auto-merged.
 - **Tag on merge.** A `push` to `main` that touches `pyproject.toml` runs the
   tag job. It tags the commit only if its subject is
