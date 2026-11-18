@@ -96,8 +96,9 @@ def _ring_ports(
     opening's own box inset along the ring side -- never across it -- by the
     resolved deck's minimum same-layer spacing for ``gap_layer``
     (:func:`_min_spacing_um_for_layer`, the same lookup and threshold a
-    ``klt drc`` run judges a strap with), in the composed frame like every
-    other port field, each coordinate rounded to the 6-decimal micron
+    ``klt drc`` run judges a strap with), in the generated cell's own
+    origin-relative frame like the marker's ``x_um``/``y_um``, each
+    coordinate rounded to the 6-decimal micron
     precision deck thresholds themselves report at -- the pure-float inset
     arithmetic would otherwise leak representation noise (17-digit tails)
     no other reported coordinate in the response has. A strap whose extent
@@ -113,6 +114,11 @@ def _ring_ports(
     PDK family -- or a deck with no ``"space"`` rule for ``gap_layer`` --
     insets by ``0.0``, reporting the opening's own box, the same
     degrade-to-no-op the #1386 spacing lookup established.
+
+    ``offset_um`` places the ring inside the generated cell; it is not a
+    compose placement. A compose consumer transforms the box by
+    ``blocks[].orientation`` before adding ``blocks[].offset_um`` to obtain
+    compose coordinates. See ``docs/cli/gen-compose.md`` for compose guidance.
 
     ``tap_net`` (issue #1421) names the net every tap port carries, reported
     as each entry's ``net``. ``None`` (the default, and every caller that

@@ -2102,6 +2102,7 @@ def _run_single_corner(
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
     via_pad_trim_info: dict[str, Any] | None = None
+    pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
@@ -2130,6 +2131,7 @@ def _run_single_corner(
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
         via_pad_trim_info = merge_info.get("via_pad_trim")
+        pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -2487,13 +2489,8 @@ def _run_single_corner(
         # "when is this populated" contract.
         "unrouted_def_path": unrouted_def_path,
         "gds_path": gds_path,
-        # Additive field (issue #1029): whether the DEF->GDS merge above
-        # actually applied a KLayout LEF/DEF layer-map file, and how it was
-        # resolved -- `resolve_klayout_layer_map` silently degrades to no map at
-        # all (`resolution: "none"`) when neither a variant-named nor a
-        # family-level map file exists, which previously left no trace in
-        # this response for a caller to notice. `null` unless
-        # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
+        # PDK source map and its resolution; null before route (#1029).
+        # No map means sequential default layer numbers, not PDK assignments.
         "layer_map": layer_map_info,
         # Additive field (issue #1488): what the DEF->GDS merge's own
         # single-pin net-name marker pass did, so a caller can tell an
@@ -2524,6 +2521,9 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
+        # Derived-map pin coverage on conductor; null before route (#5700).
+        # Status/layers/reason are documented in docs/cli/place-and-route.md.
+        "pin_conductor": pin_conductor_info,
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
         # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.
