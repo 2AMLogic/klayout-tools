@@ -27,6 +27,32 @@ from ._common_params import (
 )
 
 
+def _ring_well_mark_box(
+    pcell: Any, info: dict[str, Any]
+) -> tuple[float, float, float, float] | None:
+    """The guard ring's own well tie box, or ``None`` when no ring well is
+    drawn (issue #6458)."""
+    from klayout_tools.gen import _shift_box
+
+    if (
+        info["ring"] is None
+        or not pcell.add_guard_ring
+        or not pcell.well_present
+        or pcell.flavor != "pfet"
+    ):
+        return None
+    margin = pcell.ring_well_margin_um
+    return _shift_box(
+        (
+            -margin,
+            -margin,
+            info["ring"]["outer_w_um"] + margin,
+            info["ring"]["outer_h_um"] + margin,
+        ),
+        *info["ring_offset_um"],
+    )
+
+
 def _insert_voltage_flavor_marks(
     pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
 ) -> None:
@@ -316,23 +342,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # #6458, the `diff_pair` sibling of #6025) and the well shape
             # drawn further down is the very same box -- the two cannot
             # drift apart.
-            ring_well_mark_box = None
-            if (
-                info["ring"] is not None
-                and self.add_guard_ring
-                and self.well_present
-                and self.flavor == "pfet"
-            ):
-                margin = self.ring_well_margin_um
-                ring_well_mark_box = _shift_box(
-                    (
-                        -margin,
-                        -margin,
-                        info["ring"]["outer_w_um"] + margin,
-                        info["ring"]["outer_h_um"] + margin,
-                    ),
-                    *info["ring_offset_um"],
-                )
+            ring_well_mark_box = _ring_well_mark_box(self, info)
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
             # its *own* box (issue #1577), not the well shape's -- gf180mcu's
