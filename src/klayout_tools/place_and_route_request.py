@@ -28,6 +28,13 @@ from typing import Any
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
+from .netlist_construct_scan import (
+    _NETLIST_BEHAVIOURAL_LATCH_RE,
+    _NETLIST_SIGNED_DECL_RE,
+    _NETLIST_X_CONSTANT_RE,
+    _blank_verilog_comments,
+    _strip_verilog_comments,
+)
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .place_and_route_clock import validate_clock_constraints
@@ -1361,89 +1368,19 @@ _MACRO_INSTANCE_RE_TEMPLATE = r"\b{cell}\b\s+\b{instance}\b\s*\("
 #: ``.Q1_1_G(net123)`` or ``.Q1_1_G()`` (left unconnected).
 _PORT_CONNECTION_RE = re.compile(r"\.\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\(([^()]*)\)")
 
-_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-
-
-def _strip_verilog_comments(text: str) -> str:
-    return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
-
-
-def _blank_verilog_comments(text: str) -> list[str]:
-    """``text``'s lines with every comment blanked out but **line numbering
-    preserved** -- one output entry per input line, comment characters
-    replaced by spaces rather than deleted.
-
-    :func:`_strip_verilog_comments` deletes comments outright, which
-    collapses the line structure a multi-line ``/* ... */`` spans and makes
-    the result useless for reporting a line number.
-    :func:`_reject_unsupported_netlist_constructs` needs to name the exact
-    1-based netlist line its diagnostic points at (issue #1973 -- the whole
-    point is to beat OpenSTA's own ``line N, syntax error`` to the punch),
-    so it needs this shape instead.
-    """
-    out: list[str] = []
-    in_block = False
-    for line in text.splitlines():
-        chars = list(line)
-        i = 0
-        while i < len(chars):
-            if in_block:
-                if line.startswith("*/", i):
-                    chars[i] = chars[i + 1] = " "
-                    i += 2
-                    in_block = False
-                    continue
-                chars[i] = " "
-                i += 1
-            elif line.startswith("/*", i):
-                chars[i] = chars[i + 1] = " "
-                i += 2
-                in_block = True
-            elif line.startswith("//", i):
-                for j in range(i, len(chars)):
-                    chars[j] = " "
-                break
-            else:
-                i += 1
-        out.append("".join(chars))
-    return out
-
-
-#: A ``signed`` qualifier on a port/wire declaration in a structural-Verilog
-#: netlist -- ``output signed [15:0] sample;``, ``wire signed [7:0] mid;``,
-#: ``input wire signed [3:0] a;`` (issue #1973). Anchored to a preceding
-#: declaration keyword on purpose: an expression-level ``$signed(...)`` cast
-#: is accepted by every downstream reader (and is the RTL-side replacement
-#: this repo's own ``docs/guides/digital-review/rtl-style-guide.md``
-#: recommends for a ``signed`` port), so it must never be flagged -- and
-#: ``$signed(`` is never immediately preceded by one of these keywords plus
-#: whitespace.
-_NETLIST_SIGNED_DECL_RE = re.compile(
-    r"\b(?:input|output|inout|wire|reg|logic)\s+signed\b"
-)
-
-#: A bare ``x``-valued Verilog constant literal -- ``5'hxx``, ``2'bxx``,
-#: ``1'bx``, ``8'shX0`` (issue #1973). Requires at least one ``x``/``X``
-#: digit, so an ordinary resolved constant (``1'b0``, ``16'd100``,
-#: ``8'hbe``) never matches -- only the unresolved bits OpenSTA turns into
-#: an unroutable ``GROUND``-typed net.
-_NETLIST_X_CONSTANT_RE = re.compile(
-    r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*"
-)
-
 
 def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     """Raise :class:`PlaceAndRouteError` naming the construct, the 1-based
     line number, and the offending line when ``netlist_path`` carries a
-    ``signed`` port/wire qualifier or a bare ``x``-valued constant -- the
-    two constructs that deterministically fail a real OpenROAD run several
-    stages in, with a diagnostic pointing at a generated file the caller
-    never wrote (issue #1973; see this module's docstring "Netlist
-    pre-flight" section for the full rationale).
+    ``signed`` port/wire qualifier, a bare ``x``-valued constant, or a
+    behavioural ``reg``/``always`` statement -- the three constructs that
+    deterministically fail a real OpenROAD run several stages in, with a
+    diagnostic pointing at a generated file the caller never wrote (issues
+    #1973 and #5792; see this module's docstring "Netlist pre-flight"
+    section for the full rationale).
 
     Reports the **first** offending line in file order, whichever construct
-    it is: both are already fatal, so there is nothing to gain from
+    it is: all are already fatal, so there is nothing to gain from
     enumerating every occurrence, and the first one is the one a reader will
     go fix. A netlist this cannot read is not an error here --
     :func:`_resolve_netlist` has already established the file exists and is
@@ -1481,6 +1418,24 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "cells; if it already produced this netlist, its report "
                 "`warnings.netlist_x_constants` names these lines -- drive or "
                 "remove the undriven source signal in the RTL."
+            )
+
+        behavioural_match = _NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+        if behavioural_match is not None:
+            raise PlaceAndRouteError(
+                f"netlist '{netlist_path}' line {lineno} is behavioural "
+                f"Verilog (a '{behavioural_match.group(1)}' statement): "
+                f"{line.strip()} -- OpenSTA's Verilog reader (used by the "
+                "'floorplan' stage) rejects behavioural statements with a "
+                "syntax error. This shape is how `write_verilog` renders a "
+                "gate-level latch that survived synthesis unmapped -- the "
+                "synthesis library had no latch cell to map it onto (see the "
+                "`klt synthesize` response's `structural.unexpected_latches` "
+                "and `instance_counts_by_type` `$_DLATCH_*_` counts; its "
+                "`warnings.netlist_behavioural_latch` names these lines). "
+                "Use a `cell_library` that has a latch cell, give `klt "
+                "synthesize`'s `latch_map` a target, or remove the inferred "
+                "latch from the RTL."
             )
 
 
