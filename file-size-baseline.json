@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 918
+      "lines": 914
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9856
+      "lines": 9853
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6448
+      "lines": 6380
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
-      "lines": 534
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/size.py",
@@ -909,7 +909,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26198
+      "lines": 26197
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
