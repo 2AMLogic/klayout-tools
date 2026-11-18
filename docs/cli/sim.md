@@ -6856,9 +6856,9 @@ circuit in one netlist, each carrying its own node/source names, its own
 stimulus and its own start state — has two shipped shapes and neither scales
 in the middle: `corners.params` used as a *case* axis declares M measurements
 once but costs one ngspice process per case per PVT point (N x the corner
-count), while N hand-replicated copies in one deck cost 15 processes but need
-every reduction hand-declared against every copy's own node names (N x M
-declarations). `options.measurement_cases` is the shape in between: declare
+count), while N hand-replicated copies in one deck cost one process per PVT
+point but need every reduction hand-declared against every copy's own node
+names (N x M declarations). `options.measurement_cases` is the shape in between: declare
 the N copy scopes once and write each reduction once, with a `{case}`
 placeholder where the copy's own names go.
 
@@ -6881,7 +6881,7 @@ stays O(N x M) results, which is the answer's own size; the process count
 stays at the corner count. Each expanded result carries a `case` provenance
 field (alongside the `step`/`derived_from` fields an `analysis_steps[]`
 measurement carries) on the corner's `measurements[]` entry and on the
-report's `metrics.measurements` rollup entry, and is graded through the
+report's top-level `measurements[]` rollup entry, and is graded through the
 existing `limits`/`plausible_range`/Monte Carlo paths unchanged.
 
 ### Rules
