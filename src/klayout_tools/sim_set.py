@@ -302,7 +302,10 @@ def _execute_members(
     still holds a ``pending`` job -- the set then holds no more fleet capacity
     than it has member threads. A job that never launches cannot starve the
     set: past one more ``launch_budget`` the unstarted members become
-    ``not_launched`` entries instead of being submitted."""
+    ``not_launched`` entries instead of being submitted -- but, once no live
+    member remains to run them (#6278); while another member is still running,
+    its worker keeps draining the unstarted members at the reduced
+    concurrency."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)
