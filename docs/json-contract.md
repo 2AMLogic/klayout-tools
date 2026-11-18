@@ -923,6 +923,15 @@ the right member even when two members under one path declare identical
 check order does not depend on inventory listing order. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
 
+Issue #5563 adds the optional `resolved_from` field to an item-9 `pin` entry
+in `attestation.checks[]` when at least one pin in that check uses a reference.
+It maps each referenced leaf name (`name` or `revision` for the `pdk` role,
+the tool name for the `tools` role) to its declared `{"from", "key"}` object.
+On a passing check, the corresponding leaf in `value` holds the resolved
+string. A literal-only check omits `resolved_from`. This field is additive
+and requires no `schema_version` bump. See
+[A pin declared by the file that owns it (issue #5563)](cli/signoff.md#examples).
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
