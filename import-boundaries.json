@@ -770,6 +770,7 @@
         "klayout_tools.cli.signoff_cmd",
         "klayout_tools.cli.signoff_flags",
         "klayout_tools.cli.signoff_repin_cmd",
+        "klayout_tools.cli.signoff_tier_text",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
@@ -799,6 +800,7 @@
         "klayout_tools.signoff_foundry_cell",
         "klayout_tools.signoff_generator_batch",
         "klayout_tools.signoff_grouped_citations",
+        "klayout_tools.signoff_justified_gap",
         "klayout_tools.signoff_multi_member",
         "klayout_tools.signoff_na",
         "klayout_tools.signoff_nothing_checked",
@@ -840,6 +842,8 @@
         "klayout_tools.sim_bin_range",
         "klayout_tools.sim_model_bins",
         "klayout_tools.sim_batch_async",
+        "klayout_tools.sim_batch_capacity_retry",
+        "klayout_tools.sim_batch_capacity_watch",
         "klayout_tools.sim_batch_contract",
         "klayout_tools.sim_batch_contract_jobspec",
         "klayout_tools.sim_batch_contract_preflight",
@@ -2466,6 +2470,12 @@
       "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_stderr_envelope",
       "reason": "Issue #5711: the shared collect half of the batch lifecycle (`_batch_collect`) classifies a collected report / stderr envelope exactly as `sim_batch` does -- one classifier, not a copy per verb. Replaces the per-verb grants for `extract_batch` and `netlist_batch`."
+    },
+    {
+      "consumer": "klayout_tools.drc_klayout_app",
+      "exporter": "klayout_tools.build_identity",
+      "symbol": "_recorded_klayout_version_expected",
+      "reason": "Issue #5660: the binary-worded --engine klayout mismatch warning must quote the exact build-time expected KLayout version that _provenance (same shared-core group) used to compute klayout_version_mismatch, so the warning cannot name an expected version the envelope did not; both call sites read it via the build_identity attribute, exactly as _provenance does."
     }
   ],
   "legacy_exceptions": {
