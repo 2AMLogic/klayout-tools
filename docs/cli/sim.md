@@ -9586,7 +9586,13 @@ A sizing pass (issue #1718).
 It takes the **same request document** the sweep takes — only `netlist` is
 required; `models`/`corners` are read exactly as documented above;
 `analysis`/`measurements` are not needed for the analysis itself (this mode
-always runs a plain `op`). A `--op-lint` run never runs the corner matrix,
+always runs a plain `op`). A `measurements` that *is* supplied must still be
+an array of objects, as in the sweep (issue #6590): `null`, a scalar, a
+string, an object, or a non-object entry is refused with the error envelope
+(exit `1`, no ngspice launch) naming `request.measurements` or
+`measurements[<i>]` and the offending Python type, instead of being skipped
+or escaping as a traceback. An absent key or `[]` is still accepted.
+A `--op-lint` run never runs the corner matrix,
 never writes artifacts, and emits its own envelope (below) instead of the
 sweep response.
 
