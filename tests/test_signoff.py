@@ -13783,7 +13783,7 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
 #: comparable across provisioning routes.
 _TARBALL_ROUTE_BUILD_BLOCK = {
-    "version": "0.5.0+unknown",
+    "version": "0.5.0+unknown",  # unresolved identity: build_skew is "unverifiable"
     "package_version": "0.5.0",
     "git_commit": None,
     "git_tag": None,
@@ -13811,12 +13811,12 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
     manifest = _manifest(evidence={"3": drc_path})
     fresh = build_tier_report(manifest)
     committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
-
+    committed_build = json.loads(Path(committed_path).read_text())["build"]
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
-
+    assert committed_build != fresh["build"]
+    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
     skew_fields = [  # fresh values are install-specific, so derived, not hard-coded
         {"field": f"build.{k}", "committed": v, "fresh": fresh["build"][k]}
         for k, v in sorted(_TARBALL_ROUTE_BUILD_BLOCK.items() - fresh["build"].items())
@@ -13830,7 +13830,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_skew": {"state": "build_only", "fields": skew_fields},
+        "build_skew": {"state": "unverifiable", "fields": skew_fields},
         "fresh": fresh,
     }
 
