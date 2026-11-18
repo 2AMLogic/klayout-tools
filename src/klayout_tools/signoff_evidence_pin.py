@@ -86,6 +86,79 @@ def pin_disclosure(
     return detail
 
 
+#: ``citation.input_verified_note`` for a ``generic``/``model-run``
+#: envelope that declares ``provenance.input.content_hash`` naming
+#: nothing verification answers -- no usable ``provenance.input.path``,
+#: and no ``paths`` set that answered through its members (issue #6403):
+#: the declared hash is silently
+#: never re-hashed, and ``input_verified: null`` also means "nothing to
+#: hash", so it cannot say "declared, never checked" on its own.
+DECLARED_HASH_UNBOUND = "declared_hash_unbound"
+
+#: The ``--`` gloss each ``input_verified_note`` token renders with in
+#: ``klt signoff --format text`` (issue #6403), keyed by token so a second
+#: token can never inherit this one's explanation; unmapped tokens render
+#: bare.
+INPUT_VERIFIED_NOTE_GLOSSES = {
+    DECLARED_HASH_UNBOUND: "declared hash binds nothing -- never re-hashed",
+}
+
+
+def _usable_input_path(path: Any) -> bool:
+    """Whether a ``provenance.input.path`` value is a shape the opt-in
+    branch (issue #2403) can even attempt: a non-empty string, or a
+    ``{path, scope: "repo"}`` object -- the same shapes
+    ``signoff._generic_binding_path`` accepts, so this note cannot fire on
+    a declaration the resolution machinery treats as a real (if
+    unsuccessful) attempt."""
+    if isinstance(path, str) and path:
+        return True
+    return isinstance(path, Mapping) and path.get("scope") == "repo"
+
+
+def declared_hash_unbound_disclosure(
+    resolution: Mapping[str, Any],
+) -> dict[str, str]:
+    """Issue #6403: a ``generic``/``model-run`` envelope that declares
+    ``provenance.input.content_hash`` (non-empty string) naming nothing
+    verification answers has that hash silently never re-hashed -- the
+    citation renders ``input_verified: null`` exactly like one declaring
+    no hash at all. That is: no usable ``provenance.input.path``, or a
+    ``provenance.input.paths`` set that never answered (malformed, empty,
+    or on a ``model-run`` envelope, whose set is never member-verified) --
+    a well-formed ``generic`` set answers through its members and is not
+    unbound. Returns ``{"input_verified_note": DECLARED_HASH_UNBOUND}`` so
+    the declared-but-never-checked case is visible beside the unchanged
+    ``null``; ``{}`` (no key) for every envelope the note does not
+    describe. Disclosure only, like every citation field -- never
+    consulted by any grading rule."""
+    if resolution["kind"] not in ("generic", "model-run"):
+        return {}
+    provenance = resolution["envelope"].get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if not isinstance(input_block, Mapping):
+        return {}
+    if "paths" in input_block:
+        # A `paths` set binds through its members, not `input.path`: the
+        # note stays off it exactly while the set answered (members were
+        # verified -- `input_verified` settled or members rendered). A
+        # malformed or empty set re-hashes nothing
+        # (`_fold_generic_input_set` forces `input_verified: null`), and a
+        # `model-run` envelope's set is never folded at all, so in both
+        # the declared hash binds nothing with no disclosure -- the exact
+        # gap this note exists to close -- and it fires.
+        if resolution.get("input_verified") is not None or resolution.get(
+            "input_members"
+        ):
+            return {}
+    elif _usable_input_path(input_block.get("path")):
+        return {}
+    declared = input_block.get("content_hash")
+    if not isinstance(declared, str) or not declared:
+        return {}
+    return {"input_verified_note": DECLARED_HASH_UNBOUND}
+
+
 def rehash_evidence_file(
     check_kind: str,
     spec: Mapping[str, Any],
@@ -120,6 +193,16 @@ MISSING_T1_ITEM = "t1_item"
 MISSING_INPUT_PATH = "provenance.input.path"
 MISSING_CONTENT_HASH = "manifest content_hash"
 
+#: Refusal for an item-1 envelope that enumerates attested members it does
+#: not bind (issue #5640): a pre-0.9.0 producer wrote only the
+#: inventory-file binding, so the envelope's own ``attestation.checks[]``
+#: prove it knew about sources and derived files it pinned nothing for.
+REASON_PROVENANCE_NARROWER = "provenance_narrower_than_attested"
+
+#: ``detail.missing`` entry for that refusal: the binding key a current
+#: ``klt signoff --attest 1`` envelope carries.
+MISSING_PROVENANCE_PATHS = "provenance.input.paths"
+
 
 def generic_binding_check(
     item_id: int | None,
@@ -131,9 +214,12 @@ def generic_binding_check(
     """``(refusal, missing)`` for a generic citation bound to T1 ``item_id``
     (issues #2718, #5124). ``refusal`` is ``"wrong_item"`` for a declared
     ``t1_item`` naming another item, ``"unanchored_evidence"`` when a field
-    is missing, else ``None``. ``missing`` names the absent fields: a
-    ``t1_item`` absent (anchored item only) or not an integer,
-    ``provenance.input.path`` unusable, and no manifest ``content_hash``."""
+    is missing, ``REASON_PROVENANCE_NARROWER`` for an item-1 envelope that
+    enumerates attested members it does not bind (issue #5640), else
+    ``None``. ``missing`` names the absent fields: a ``t1_item`` absent
+    (anchored item only) or not an integer, ``provenance.input.path``
+    unusable, no manifest ``content_hash``, or
+    ``MISSING_PROVENANCE_PATHS`` for the narrow-binding refusal."""
     declared = envelope.get("t1_item")
     if is_int(declared) and declared != item_id:
         return "wrong_item", []
@@ -146,7 +232,46 @@ def generic_binding_check(
         missing.append(MISSING_INPUT_PATH)
     if anchored and not isinstance(spec.get("content_hash"), str):
         missing.append(MISSING_CONTENT_HASH)
+    if not missing and item_id == 1 and provenance_narrowing(envelope) is not None:
+        return REASON_PROVENANCE_NARROWER, [MISSING_PROVENANCE_PATHS]
     return ("unanchored_evidence" if missing else None), missing
+
+
+def attested_present_members(envelope: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The ``attestation.checks[]`` entries recording a ``present`` file with
+    a usable path -- the members a ``klt signoff --attest`` envelope
+    enumerated (the set issue #4197 re-hashes, counted for #5640's breadth
+    floor). ``[]`` for an envelope with no ``attestation.checks[]`` or none
+    that enumerates a file."""
+    attestation = envelope.get("attestation")
+    checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
+    if not isinstance(checks, list):
+        return []
+    return [
+        check
+        for check in checks
+        if isinstance(check, Mapping)
+        and check.get("check") == "present"
+        and isinstance(check.get("path"), str)
+        and check["path"]
+    ]
+
+
+def provenance_narrowing(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The coverage loss an envelope proves about itself (issue #5640), or
+    ``None`` when it does not narrow: ``{"attested_members", "bound_paths"}``
+    when it enumerates ``present`` checks but declares no
+    ``provenance.input.paths`` set -- the pre-0.9.0 producer's shape, which
+    binds its inventory alone. A present-but-malformed ``paths`` key is not
+    narrowing: the binding is there and its own refusal applies."""
+    present = attested_present_members(envelope)
+    if not present:
+        return None
+    provenance = envelope.get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if isinstance(input_block, Mapping) and "paths" in input_block:
+        return None
+    return {"attested_members": len(present), "bound_paths": 0}
 
 
 def unanchored_detail(
@@ -154,10 +279,15 @@ def unanchored_detail(
 ) -> dict[str, Any]:
     """``detail`` for a binding refusal: ``{}`` when nothing is missing, else
     ``missing`` plus, when the pin is what is missing, the manifest entry
-    shape to cite."""
+    shape to cite, and, for the narrow-binding refusal, the breadth counts
+    the record states the loss with (issue #5640)."""
     if not missing:
         return {}
     detail: dict[str, Any] = {"missing": list(missing)}
+    if MISSING_PROVENANCE_PATHS in missing:
+        counts = provenance_narrowing(resolution.get("envelope") or {})
+        if counts is not None:
+            detail.update(counts)
     live_hash = resolution["content_hash"]
     if MISSING_CONTENT_HASH in missing and live_hash is not None:
         detail["manifest_entry"] = {
