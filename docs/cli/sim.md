@@ -9991,6 +9991,21 @@ include left to the executing host). It is computed client-side, so `local`,
 stateless: to guard a comparison, copy the earlier report's stamp into the new
 request's `expect_netlist_identity`.
 
+**Existing stamps can change (issue #5438).** Normalization strips inline
+comments with the package's shared `_spice_text` rule: everything from the
+first `;`, or from the first whitespace-delimited `$`-prefixed token. Versions
+before #5438 instead cut each line at the first whitespace-preceded `$` or
+`;`, so a card using KLayout's anonymous-net names (`X$1 $3 $4 inv`) collapsed
+to its first token — two different circuits shared one identity — and a `;`
+attached to the previous token (`R1 a b 1k; load`) was kept as content. An
+identity stamped by those versions can therefore change for a netlist whose
+bytes did not move. A run guarded with the old stamp fails loudly with the
+existing `expect_netlist_identity` mismatch error; refresh it by copying
+`environment.netlist_identity` from a report generated with the corrected
+version. `klt sim --check <report>` diagnoses exactly this case — every raw
+`sha256` matches while the identity does not — as `normalization_changed`
+(see `--check` above). The stamp format and the JSON fields do not change.
+
 ## Peak memory and timeout progress (issue #4867)
 
 Each unit report gains an optional, additive `peak_rss_bytes` (engine peak

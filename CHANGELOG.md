@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`environment.netlist_identity` no longer truncates cards that use KLayout
+  `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
+  sim`'s netlist identity cut every line at the first whitespace-preceded `$`
+  or `;`, so `X$1 $3 $4 inv` and `X$1 $7 $4 nand` both collapsed to `x$1` —
+  two different circuits shared one identity, and `expect_netlist_identity`
+  passed when it should have refused. Normalization now strips inline comments
+  with the shared `_spice_text` rule (everything from the first `;`, or from
+  the first token-delimited `$`; a `$` glued to the previous token, such as
+  `$3`, is a net name and survives; `R1 a b 1k; load` now matches
+  `R1 a b 1k`). **Identity stamps can change** for netlists whose bytes did
+  not move: a stored `expect_netlist_identity` from an older version that now
+  mismatches fails loudly with the existing mismatch error; refresh it from a
+  report generated with the corrected version. `klt sim --check` diagnoses
+  the case (raw `sha256` match + identity mismatch) as
+  `normalization_changed`. The stamp format and JSON fields do not change.
+  Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+
 - **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
   entries** (#5527, 2026-11-13): after an attestation inventory changed,
   `klt signoff --attest` regenerated the envelope but the manifest's pin
