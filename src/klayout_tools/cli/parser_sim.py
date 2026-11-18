@@ -89,8 +89,11 @@ def add_sim_parser(
         help=(
             "with --batch-set, re-submit a request refused for fleet capacity "
             "(batch_no_capacity / batch_concurrency_cap) up to N more times "
-            "with doubling backoff (default: 0, off); other failures are "
-            "never retried (issue #3520)"
+            "with doubling backoff; on a sharded single request, re-run the "
+            "shards lost to a capacity refusal in up to N more passes once "
+            "the other shards finish, each with a fresh --wait-for-capacity "
+            "budget (default: 0, off); other failures are never retried "
+            "(issues #3520, #5567)"
         ),
     )
     sim_parser.add_argument(

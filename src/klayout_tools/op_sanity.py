@@ -115,7 +115,7 @@ from typing import Any
 
 from . import _spice_number as spice_number
 from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -972,10 +972,10 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if is_number(explicit):
+    if is_finite_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
-    if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):
+    if not is_finite_number(multiple):
         multiple = _DEFAULT_TRIODE_MARGIN_KT
     kelvin = float(temperature_c) + 273.15
     return float(multiple) * _KT_OVER_Q_V_PER_K * kelvin

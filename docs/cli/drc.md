@@ -88,8 +88,9 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
 - `--min-klayout-version X.Y.Z` — declare the minimum standalone `klayout`
   *application* version the native deck needs (`--engine klayout` only,
   issue #2689; ignored for `--engine curated`). Omitted (the default), no
-  version check runs. See "Engine" → `"klayout"` → "Declaring a minimum
-  application version".
+  version *check* runs -- but the binary is still probed once, softly, to
+  record `provenance.klayout_version` (issue #5660). See "Engine" →
+  `"klayout"` → "Declaring a minimum application version".
 - `--klayout-binary PATH` — run the native deck (and the
   `--min-klayout-version` probe) with this standalone KLayout application
   instead of `klayout` on `PATH` (`--engine klayout`/`both`, issue #4950).
@@ -716,8 +717,15 @@ minimum fails with exit `1`, naming the detected and required versions and
 asking you to install or update the application; the deck is never launched.
 A malformed minimum, or a missing, failing, timed-out or unparseable probe,
 is also an error once a minimum is declared. Neither `--allow-deck-errors`
-nor `--allow-missing-host-tools` bypasses it. Omitting the option preserves
-the previous behaviour exactly: no probe, no compatibility claim.
+nor `--allow-missing-host-tools` bypasses it.
+
+Without `--min-klayout-version` the same single probe still runs (issue
+#5660) but fails *soft*: the parsed version is recorded as
+`provenance.klayout_version` (the engine of record — the pip `klayout`
+wheel's version moves to the additive `provenance.klayout_module_version`),
+and an unresolvable probe records `klayout_version: null` instead of
+failing a run that declared no floor and would otherwise succeed. No
+compatibility is claimed or checked when the option is omitted.
 
 ### Pinning the KLayout application
 
@@ -728,10 +736,12 @@ also honors), then `klayout` on `PATH`. The same binary serves the
 `--min-klayout-version` probe and the deck run, so an old build still fails
 with `klayout_version_too_old` from its own `-v`. An explicitly named binary
 that is not runnable is an error naming the flag or variable; it never falls
-back to `PATH`. When an override is in force the report gains an additive
-`environment.klayout_binary` (the resolved absolute path); without one the
-report is unchanged. `klt` does not fetch KLayout — supply any build you
-trust. In a pinned throwaway environment:
+back to `PATH`. Every `--engine klayout` report records
+`environment.klayout_binary` naming the binary that ran (issues #4950/#5844):
+the resolved override path when one was in force, else the PATH-resolved
+absolute path of the `klayout` that ran — so a committed envelope can always
+answer *which* `klayout` produced it. `klt` does not fetch KLayout — supply
+any build you trust. In a pinned throwaway environment:
 
 ```
 KLT_KLAYOUT_BINARY=/opt/klayout-0.30.12/klayout \
@@ -3786,7 +3796,7 @@ On a run with findings:
 | `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Curated engine only: `--engine klayout` never emits it, even when its findings carry `source_cell`/`source_path` (and `--waivers` is refused there). On the curated engine, present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
 | `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13g2 `nwell.enclosing.pactiv.1`, whose NW.c runset counterpart measures against `NWell_Nsram` -- NWell outside the 25/0 SRAM marker -- while this deck measures against plain NWell; its `SVaricap` carve-out *is* modelled (issue #5442, see Coverage); sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`, `nwell.space.nactiv.1`; the NW.c/NW.d rules `nwell.enclosing.pactiv.1` and `nwell.space.nactiv.1` note that the runset exempts NWell inside SRAM marker layer 25/0 via `NWell_Nsram`, while NW.c1 does not): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the PDK commit the deck was read against (the `ihp-sg13cmos5l` commit for sg13cmos5l, the ihp-sg13g2 v0.3.0 commit for sg13g2). The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1/d live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
-| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". `klayout_version_mismatch: true` is informational: the rule evaluation and the verdict are not changed by it, but report details that depend on the engine build (the deck content hash, `rules_skipped`, category counts) may differ from a run on the tested version. Re-run on the tested version (`klt version`) to reproduce a report exactly. |
+| `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". `klayout_version_mismatch: true` is informational: the rule evaluation and the verdict are not changed by it, but report details that depend on the engine build (the deck content hash, `rules_skipped`, category counts) may differ from a run on the tested version. Re-run on the tested version (`klt version`) to reproduce a report exactly. `klayout_version` names the engine that actually ran (issue #5660): for `--engine klayout` it is the standalone application's own `-v` version — probed once per run even without `--min-klayout-version`, `null` when unresolvable and no floor was declared — and the pip wheel's version is recorded beside it as the additive `klayout_module_version`; for `--engine curated` it remains `klayout.__version__` (the wheel is the engine there). |
 
 ### `metrics` object
 
@@ -4352,14 +4362,30 @@ field is `"klayout"`) and diffs the fresh report against the committed one,
 field by field. `provenance.klt_version`/`provenance.klayout_version`/
 `provenance.pdk.version` are excluded from the diff — these legitimately
 vary between two runs of identical inputs on different tool
-installs/PDK snapshots; every other field (including `status`,
-`violation_count`, `violations`, and the hashes cheap mode also checks) is
-load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
+installs/PDK snapshots; so (issue #5660) are an `--engine klayout` report's
+`environment.klayout_binary` (a host-local path) and
+`provenance.klayout_module_version` (the pip wheel), which a report committed
+before that change never carried. Every other
+field (including `status`, `violation_count`, `violations`, and the hashes
+cheap mode also checks) is load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
 deliberately **not** excluded: unlike the raw version strings, whether the
 mismatch itself changed between the committed run and a fresh rerun is
 informative on its own (a `false` → `true` transition means the fresh
 report used a different engine than the one that produced the committed
-baseline), so it is reported as ordinary drift like any other field. A
+baseline), so it is reported as ordinary drift like any other field --
+**except across the issue #5660 boundary**. That change redefined the flag's
+input for `--engine klayout`: before it, the pip wheel was compared against
+the version this build was tested with; after it, the standalone binary is. On
+a host where the two disagree (the case #5660 exists for) a pre-#5660 report
+says `true` and a fresh run says `false` with nothing in the evidence changed,
+so the two values are not comparable. When the committed report carries the
+flag but predates `provenance.klayout_module_version` (which the fresh
+`--engine klayout` report always writes), the flag is reported in
+`not_compared` -- with the committed value, whether or not the two happen to
+agree -- instead of as drift, and a report committed before that change
+re-runs as `match`. Between two post-#5660 reports, and for `--engine curated`
+(where the wheel is the engine and the definition never moved), the flag is
+compared exactly as described above. A
 committed `--engine klayout` report carrying `engine_deck_errors` (issue
 #1941) is re-run with the same `--allow-deck-errors` tolerance the original
 invocation used, so verifying such a report diffs it — including any change
@@ -4401,7 +4427,8 @@ Response shape:
     { "field": "violation_count", "committed": 0, "fresh": 1 }
   ],
   "not_compared": [
-    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" }
+    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" },
+    { "field": "provenance.klayout_version_mismatch", "committed": true }
   ],
   "fresh": { "...": "the freshly produced klt drc report, full shape" }
 }

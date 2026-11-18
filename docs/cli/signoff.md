@@ -2000,7 +2000,12 @@ is the combined set digest (see "Set binding" above), and
 therefore renders the manifest row `unmet` / `stale_evidence` (the changed
 member is named in `detail.artifact_binding.members`) without running
 `--attest --check`. A member that cannot be read is left out of the set; its
-`present` check already fails the attestation.
+`present` check already fails the attestation. A `{"glob": ...}` source
+entry contributes its **expanded** members to `provenance.input.paths` and
+the combined set digest: adding a matching file changes
+`provenance.input.content_hash`, so a manifest citing the envelope must be
+re-pinned after every such addition (the behaviour the "Pin change" note
+below describes).
 
 > **Pin change.** Existing manifests citing an item-1 envelope must re-pin the
 > evidence `content_hash` to the new `provenance.input.content_hash`; the old
@@ -2056,8 +2061,13 @@ the named algorithm `sha256-canonical-yaml-v1` (parsed with `yaml.safe_load`,
 mapping keys type-tagged so a workflow's YAML-1.1 boolean `on:` key sorts
 beside string keys, then serialised with sorted keys and compact separators):
 a comment-only, whitespace-only, key-reorder or anchor/alias refactor of the
-file is not drift, while every change to a key or value still is. That is
-the right pin for `.github/workflows/ci.yml` — the file that *runs* the
+file is not drift; drift is a change to the canonical representation of the
+selected YAML content. In v1, date/datetime values normalize to ISO strings
+and `!!binary` values to `"bytes:<hex>"` strings of the decoded bytes; equal
+canonical representations share a digest, so a date scalar `2026-11-15`
+and the string `"2026-11-15"` are not distinguished, nor are
+`!!binary "YWI="` and the string `"bytes:6162"`. That is the right pin for
+`.github/workflows/ci.yml` — the file that *runs* the
 attestation, where `presence` could not catch a `continue-on-error: true`
 added to the signoff job, a removed step or a changed command. `select`
 (optional) hashes only the named subtree (`jobs.signoff`, say), so edits to
@@ -2102,6 +2112,18 @@ the README as the pinned artifact item 10 names. The answer to a churning
 file is the same as for resync-managed paths above — list fewer files: move
 the churn out and list a stable file instead, or list the file presence-only
 when its existence is all you attest.
+
+**Globs make the resync rule easier to violate by accident (issue #5614).**
+A `{"glob": ...}` hygiene entry expands to every tracked file matching it at
+attest time — including files added later — so a pattern wide enough to
+reach resync-managed content (`.loom/`, `.claude/`, `.gitignore`,
+`CLAUDE.md`) will start binding tooling files the moment a resync adds one,
+and the envelope goes red on every resync. Keep hygiene patterns scoped to
+repo-owned directories (`records/*.md`, not `**/*.md`), and re-check a
+glob's expansion (`git ls-files` with the same pattern) when the covered
+directory gains kinds of files, not just more of them. The expansion itself
+is deterministic — tracked files only — so the drift an added file causes is
+the intended signal: re-attest (owner action, below) or narrow the pattern.
 
 **Migration for existing item 10 inventories:** remove resync-managed paths
 from `hygiene`, then re-attest once and commit the new envelope
@@ -2389,13 +2411,13 @@ or the entry grades `unmet`/`unreadable_evidence`. (The `{path, scope:
 "repo"}` input an envelope names is separate: it resolves against the repo
 root of the evidence file.)
 
-#### Inventory schema (`schema_version: 1`)
+#### Inventory schema (`schema_version: 1` and `2`)
 
 Every inventory is a JSON object with these common fields:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `schema_version` | yes | Integer. This build reads `1`; any other value is refused (exit `1`). |
+| `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
 | `description` | no | Free text, never graded. |
@@ -2406,7 +2428,7 @@ an inventory the author did not write.
 
 | Item | Field | Required | Checks run |
 | ---- | ----- | -------- | ---------- |
-| **1** Design sources | `sources`: list of paths | yes, non-empty | each file exists (`present`, role `source`) |
+| **1** Design sources | `sources`: list of paths — each entry a literal path, or (schema 2) a `{"glob": "<pattern>"}` object | yes, non-empty | each file exists (`present`, role `source`) |
 | | `derived`: list of `{path, generator, check}` or `{path, generator, recorded}` | yes, non-empty | each file exists (`present`, role `derived`), **and** exactly one of: its `check` command exits `0` (`command`, role `freshness`), or its `recorded` digests match (`recorded_hash`, role `freshness`; see below). `generator` names what produced it (e.g. `"klt netlist"`). Both or neither of `check`/`recorded` is refused (exit `1`). |
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
@@ -2421,7 +2443,7 @@ an inventory the author did not write.
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
 | | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
-| **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
+| **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while a change to the canonical representation of the selected content is |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
 A **command** is `{"argv": ["prog", "arg", ...], "cwd": "<repo-relative dir>", "local_only": false}`.
@@ -2464,6 +2486,32 @@ absolute, escape the repository (`..`), traverse a symlink anywhere along
 their length, or appear more than once across the inventory's path lists.
 The inventory file itself must not be a symlink, and must be a file (`-` is
 refused: there is no path to pin).
+
+**Glob members (schema 2, issue #5614).** A `sources` (item 1) or `hygiene`
+(item 10) entry may instead be `{"glob": "<pattern>"}`, expanded at attest
+time to the **git-tracked** files matching the pattern — each expanded member
+then appears in the envelope as its own `present` check with its own
+`content_hash`, exactly as if it had been listed literally, so the envelope
+stays a literal, checkable record of what was bound. Patterns are
+repository-relative and follow `fnmatch` rules: `*` matches any characters
+*including* path separators (so `records/*.md` covers subdirectories too —
+which is the point: an inventory whose intent is "every record under
+`records/`" keeps covering the directory as it grows), `?` matches one
+character, `[...]` a character class; empty and `.` path segments are
+dropped. A pattern is refused when it is not a non-empty string, is
+absolute, or escapes the repository with `..` — the same contract a literal
+path has. Expansion reads `git ls-files`, **never the filesystem**: an
+untracked local file is never a member, so a local `--attest` and CI's
+`--attest --check` expand to the same member set and the envelope stays
+byte-deterministic; git being unusable is an error naming the glob entry,
+with no filesystem fallback. A glob matching **zero** tracked files is
+refused (a glob that attests nothing is the original coverage gap in a new
+shape), and a glob naming a file that is also listed literally — in any
+path list — is the ordinary duplicate refusal. Because the envelope pins the
+expanded set, **a file added to a covered directory after the envelope was
+committed is drift**: `--attest --check` re-expands the glob, sees the extra
+`present` check and changed `check_count`, and exits non-zero. Re-attesting
+is the repo owner's action (the item-10 rule below).
 
 #### Hashing rules
 
@@ -4168,6 +4216,70 @@ new. Outcomes:
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+#### Declared gaps: the free-text and justified forms (issue #5599)
+
+A declared gap is **pending work, never permanent** (operator ruling on
+#5858, 2026-11-17): what is owed is the feature, tool or data that would let
+the row be graded, so the justified form records the open issue that would
+close it. Both forms keep the item `unmet` / `partial_coverage` -- a gap is
+never covered and never grades `met`, even when every row is one. Whether a
+justified gap should ever stop blocking was #5858, and that ruling settled
+it: gaps keep blocking T1.
+
+The free-text form is unchanged and keeps its exact `detail.declared_gaps`
+shape (`[{id, gap}]`):
+
+```json
+{"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+```
+
+The justified form is an object carrying a human **reason**, a **rationale
+artifact** pinned by content hash (the same `{file, content_hash}` binding
+the item-6 `not_applicable` form uses -- checked like any cited artifact),
+and the **issue** that would close the gap:
+
+```json
+{
+  "id": "pvt_ss_125c",
+  "gap": {
+    "reason": "no liberty file ships for this PVT point",
+    "rationale": {"file": "gaps/pvt_ss_125c.md", "content_hash": "sha256:..."},
+    "issue": "#1234"
+  }
+}
+```
+
+Outcomes:
+
+- a justified gap is listed under `detail.justified_gaps`
+  (`[{id, reason, rationale, issue}]`, `issue` `null` when absent -- never
+  mixed into `declared_gaps`) and counted at the top level as
+  `t1_justified_gap_count`, omitted when zero exactly like
+  `t1_not_applicable_count`, so a report declaring none is byte-identical
+  to this build's previous rendering (`--check` sees no drift);
+  `--format text` appends ", N justified gaps" to the T1 line and lists each
+  gap's reason, rationale file + hash and issue beside the item;
+- a justified gap whose rationale file is missing or unreadable grades
+  `unmet` / `justified_gap_rationale_unreadable`; one whose content hash
+  does not match grades `unmet` / `justified_gap_rationale_stale` (`detail`
+  names the row, the file, and both hashes). A broken declaration is never
+  silently demoted to the free-text form;
+- an object `gap` without a `reason`, without a `rationale`, with a
+  malformed rationale reference, or with a non-string `issue` is
+  `invalid_evidence`, as is a citation naming a justified-gap row (a gap
+  row cannot be covered, either form);
+- a justified gap that names **no issue** is accepted but reported as a
+  top-level **finding** (`findings[]`: `finding` =
+  `justified_gap_without_issue_link` with the item, partition when present,
+  and row); `--format text` prints the finding beside the gap. New
+  manifests should prefer the justified form and name the issue that would
+  close each gap.
+
+Item 6 rows accept the same two forms with the same outcomes. The rationale
+path resolves as given (like a `not_applicable` document), so a relative
+path is read against the process working directory. `schema_version`: no
+bump; every new report field is omitted when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -4351,7 +4463,10 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
   declared gap blocks `tier: "T1"` here as for item 5, issue #5858); the
   `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
   `unratified_rows` (every `ratified: false` row, covered or not -- evidence
-  against a proposed limit is provisional) separately;
+  against a proposed limit is provisional) separately; item 6's rows also
+  accept the justified object form of `gap` (issue #5599, listed under
+  `detail.justified_gaps` with the same outcomes as item 5's -- see
+  "Declared gaps" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;
@@ -5186,6 +5301,8 @@ distinguishable from "no samples document was ever named" (see
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
 | `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `t1_justified_gap_count` | integer     | **Present only when at least one justified gap is declared** (issue #5599; absent means `0`, byte-identical when none): the count of `spec_rows` rows declared with the justified object form of `gap`, across all items and partitions. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17); it never counts as coverage and never moves an item off `unmet`. See "Declared gaps" above. |
+| `findings`      | array\<object\>      | **Present only when at least one finding exists** (issue #5599): one entry per justified gap that names no issue — `{"finding": "justified_gap_without_issue_link", "item", "partition" (when the block is mixed-signal), "row"}`. A declared gap is pending work, so the open issue that would close it should be recorded; its absence is reported here, never refused. |
 | `unmet_reason_counts` | object\<string, integer\> | **Present only when at least one T1 item is `unmet`** (issue #5903; a report with none is byte-identical to a pre-#5903 one). Maps each `reason` token to how many unmet T1 items carry it, e.g. `{"no_evidence": 3, "stale_evidence": 1}`; values sum to the number of unmet T1 items. `not_applicable` items and T2–T4 ladder rows (`tier_not_supported`) are not counted. Separates a block that is mid-progress from one whose pin went stale without changing the exit code (still `3`): `jq -e '(.unmet_reason_counts.stale_evidence // 0) == 0' report.json`. Additive: no `schema_version` bump. Derived from `items[]`, so `--check` leaves it out of the comparison. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
@@ -5511,6 +5628,8 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
 | `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
+| `t1_justified_gap_count` | integer     | Present only when non-zero (issue #5599): this block's justified declared-gap count — `spec_rows` rows declared with the justified object form of `gap`. The text roll-up prints `, N justified gaps` beside the count. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17). |
+| `findings`      | array\<object\>      | Present only when non-empty (issue #5599): this block's tier report findings, carried verbatim — today, one entry per justified gap that names no issue (`finding: "justified_gap_without_issue_link"`). |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |
