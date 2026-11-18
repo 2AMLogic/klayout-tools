@@ -16,6 +16,7 @@ as ``_resistor_body_region``), so the import graph stays one-directional.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from ._layout import region as _region
@@ -117,6 +118,52 @@ def split_terminal_regions(
         anode += shape_anode
         cathode += shape_cathode
     return scope, link, anode, cathode
+
+
+def extract_device(
+    l2n: kdb.LayoutToNetlist,
+    index: int,
+    spec: ResistorDevice,
+    body: kdb.Region,
+    terminal: kdb.Region,
+    split: tuple[kdb.Region, kdb.Region],
+) -> None:
+    """Register and extract one split-terminal resistor (issue #4312).
+
+    Anode and cathode abut around the link, so each is registered as its own
+    layer (and tied to ``contact`` separately by :func:`connect_terminals`),
+    while the extractor's ``tA``/``tB`` pick out which is which.
+    """
+    import klayout.db as kdb
+
+    anode, cathode = split
+    l2n.register(anode, f"res{index}_anode")
+    l2n.register(cathode, f"res{index}_cathode")
+    l2n.register(terminal, f"res{index}_terminals")
+    l2n.extract_devices(
+        kdb.DeviceExtractorResistor(spec.name, spec.sheet_rho_ohm_sq),
+        {"R": body, "C": terminal, "tA": anode, "tB": cathode},
+    )
+
+
+def connect_terminals(
+    l2n: kdb.LayoutToNetlist,
+    resistors: Iterable[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            kdb.Region,
+            tuple[kdb.Region, kdb.Region] | None,
+        ]
+    ],
+    contact: kdb.Region,
+) -> None:
+    """Connect each split-terminal resistor's anode and cathode to ``contact``."""
+    for _spec, _body, _terminal, split in resistors:
+        if split is not None:
+            anode, cathode = split
+            l2n.connect(anode, contact)
+            l2n.connect(cathode, contact)
 
 
 def bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:

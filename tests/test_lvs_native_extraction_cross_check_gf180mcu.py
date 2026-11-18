@@ -488,28 +488,6 @@ def test_rm_r_matches_native_deck(
 
 
 @_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
-def test_efuse_is_recognised_by_native_deck(tmp_path: Path) -> None:
-    """The golden eFuse layout (issue #4312, `test_lvs_gf180mcu_efuse.py`)
-    is recognised as exactly one `efuse` by both engines. Only the class and
-    count are compared: the native deck declares `ignore_parameter('efuse',
-    'R')` and reports zero `L`/`W` for the link, so no parameter is a
-    cross-check target (`klt lvs` scopes `R` out the same way, see that test
-    module)."""
-    from test_lvs_gf180mcu_efuse import _write
-
-    resistor = next(r for r in EXTRACTION_DECK.resistors if r.name == "efuse")
-    assert resistor.provenance.rule_id == "gf180mcu_fd_pr__efuse"
-
-    path = _write(tmp_path, "efuse", [{"x": 0.0, "names": ("anode", "cathode")}])
-
-    compiled = run_extract(path, "gf180mcu", output=str(tmp_path / "efuse.spice"))
-    assert compiled["device_counts"] == {"efuse": 1}
-
-    native_device = _one_native_device(_run_native(path))
-    assert native_device["class"].lower() == "efuse"
-
-
-@_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
 def test_tm9k_r_matches_native_deck_with_5lm_metal_level(tmp_path: Path) -> None:
     """A 6-square `metal5_res`-marked Metal5 bar extracts as `tm9k` with
     identical `R` under both engines, once `extra_rd={"metal_level": "5LM"}`
@@ -767,9 +745,8 @@ def test_ldmos_matches_native_deck(
 # under-covering.
 # --------------------------------------------------------------------------- #
 
-#: Upstream `rule_id`s this module reaches a verdict for, one way or another
-#: -- hand-maintained, same discipline as the sky130 module's own
-#: `_CROSS_CHECK_VERDICT_RULE_IDS`.
+#: Upstream `rule_id`s this module reaches a verdict for, one way or another --
+#: hand-maintained, like the sky130 module's `_CROSS_CHECK_VERDICT_RULE_IDS`.
 _CROSS_CHECK_VERDICT_RULE_IDS = frozenset(
     {
         "gf180mcu_fd_pr__nfet_03v3",  # agrees

@@ -199,12 +199,11 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
 
 
 def test_gf180mcu_resistor_provenance_cites_lvs_deck():
-    """Every one of gf180mcu's curated resistor entries carries a
-    `provenance` citing the real `res_extraction.lvs` device-class name its
-    `sheet_rho_ohm_sq` was transcribed from (issue #904, extended to the
-    drawn metal-resistor family -- `rm1`/`rm2`/`rm3`/`tm9k` (this deck's own
-    default `metal_top` flavour) -- by issue #1640)."""
-    by_name = {r.name: r for r in GF180MCU_DECK.resistors}
+    """Every curated gf180mcu resistor entry but the eFuse (see
+    `test_lvs_gf180mcu_efuse.py`) carries a `provenance` citing the real
+    `res_extraction.lvs` device-class name its `sheet_rho_ohm_sq` was
+    transcribed from (issue #904; metal family `rm1`..`tm9k`, issue #1640)."""
+    by_name = {r.name: r for r in GF180MCU_DECK.resistors if r.name != "efuse"}
     assert set(by_name) == {
         "ppolyf_u",
         "ppolyf_u_1k",
@@ -212,25 +211,19 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
         "rm2",
         "rm3",
         "tm9k",
-        "efuse",
     }
 
-    for resistor in GF180MCU_DECK.resistors:
+    for resistor in by_name.values():
         assert resistor.provenance is not None
         assert (
             resistor.provenance.source_repo
             == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
         )
-        assert resistor.provenance.source_path == (
-            "libs.tech/klayout/tech/lvs/rule_decks/"
-            + (
-                "efuse_extraction.lvs"
-                if resistor.name == "efuse"
-                else "res_extraction.lvs"
-            )
+        assert (
+            resistor.provenance.source_path
+            == "libs.tech/klayout/tech/lvs/rule_decks/res_extraction.lvs"
         )
 
-    assert by_name["efuse"].provenance.rule_id == "gf180mcu_fd_pr__efuse"
     assert by_name["ppolyf_u"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u"
     assert by_name["ppolyf_u_1k"].provenance.rule_id == "gf180mcu_fd_pr__ppolyf_u_1k"
     assert by_name["rm1"].provenance.rule_id == "gf180mcu_fd_pr__rm1"

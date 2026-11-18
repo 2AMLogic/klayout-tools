@@ -184,7 +184,11 @@ def _resolve_resistors(
     # A split-terminal body has no enclosure band: its scope is already cut.
     _sever_terminal_enclosure_bands(
         layout,
-        [(spec, body, layer) for spec, body, layer, split in recognised if split is None],
+        [
+            (spec, body, layer)
+            for spec, body, layer, split in recognised
+            if split is None
+        ],
         bases,
     )
 

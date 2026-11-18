@@ -22,6 +22,11 @@ import pytest
 from klayout_tools.decks.gf180mcu import EXTRACTION_DECK
 from klayout_tools.extract import run_extract
 from klayout_tools.lvs import run_lvs
+from test_lvs_native_extraction_cross_check_gf180mcu import (
+    _SKIP_NO_GF180MCU_LVS_CROSS_CHECK,
+    _one_native_device,
+    _run_native,
+)
 
 _DBU_UM = 0.001
 
@@ -99,6 +104,11 @@ def test_deck_declares_efuse_split_terminal_device() -> None:
     assert efuse.anode_marker == _LVS_SOURCE
     assert efuse.sheet_rho_ohm_sq == pytest.approx(28.5714)
     assert efuse.provenance is not None
+    assert efuse.provenance.rule_id == "gf180mcu_fd_pr__efuse"
+    assert efuse.provenance.source_path.endswith("/efuse_extraction.lvs")
+    assert (
+        efuse.provenance.source_repo == "google/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+    )
     assert "resistor" in EXTRACTION_DECK.device_classes
     assert _LVS_SOURCE in EXTRACTION_DECK.connectivity_layers
 
@@ -208,3 +218,19 @@ def test_pdk_efuse_cell_lvs_matches(tmp_path: Path) -> None:
         {"compare_parameters": {"efuse": ["L", "W"]}},
     )
     assert report["status"] == "match"
+
+
+@_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
+def test_efuse_is_recognised_by_native_deck(tmp_path: Path) -> None:
+    """The golden eFuse layout is recognised as exactly one `efuse` by both
+    engines. Only the class and count are compared: the native deck declares
+    `ignore_parameter('efuse', 'R')` and reports zero `L`/`W` for the link, so
+    no parameter is a cross-check target (`klt lvs` scopes `R` out the same
+    way, see `test_golden_layout_lvs_matches_with_r_not_compared`)."""
+    path = _write(tmp_path, "efuse", [{"x": 0.0, "names": ("anode", "cathode")}])
+
+    compiled = run_extract(path, "gf180mcu", output=str(tmp_path / "efuse.spice"))
+    assert compiled["device_counts"] == {"efuse": 1}
+
+    native_device = _one_native_device(_run_native(path))
+    assert native_device["class"].lower() == "efuse"
