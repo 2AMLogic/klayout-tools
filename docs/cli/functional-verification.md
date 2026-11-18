@@ -1096,9 +1096,9 @@ things, in order:
    `zero_delay_internal_bus_net_interconnect`, none of which can change a
    delay), every delay applied and no annotation failed. An
    `iopath_ifnone_edge_modpath` class means the arcs it lists ran with no
-   module-path delay. A genuinely failed annotation
-   exits 1 with the offending transcript line, so a *returned report* already
-   rules that out.
+   module-path delay. An `iopath_cond_expression` class means the run omits
+   the SDF's state-dependent delays for the listed arcs. A genuinely failed
+   annotation exits 1 with the offending transcript line.
 2. **The testbench's own clock period against the design's post-route timing**
    — [`klt place-and-route`](place-and-route.md)'s `spef_sta.worst_slack_ns`
    and `setup_violation_count` for the same design. A testbench clocked at or
@@ -1184,10 +1184,9 @@ machine-readable instead of requiring a transcript hand-count:
 }
 ```
 
-`partial` is `false` and `dropped` is `{}` on a run where nothing was
-dropped: no benign diagnostic class was filtered out of the completed
-transcript scan, and no `INTERCONNECT` entry was normalized away before
-annotation. These values describe observed diagnostics and deliberate
+`partial` is `false` and `dropped` is `{}` when the transcript scan finds
+no counted diagnostic and normalization removes no delay entries.
+These values describe observed diagnostics and deliberate
 pre-annotation drops, not proof that every delay and timing check applied.
 Both keys are additive, alongside the existing `file`/`corner`/`annotated`;
 `entries` (issue #2364) is additive the same way, echoing the request's
@@ -1195,13 +1194,11 @@ entry population — `"all"` or `"interconnect"` — so a stored report is
 self-describing about which delay population its verdict was measured
 against.
 
-Eight `dropped` classes exist today. The first five (`timingcheck` and the
-four zero-delay `INTERCONNECT` classes) cannot change a simulated delay;
-`iopath_interconnect_only` deliberately does — it is the requested
-net-delay-only mode, and the count is what makes that choice honest; the two
-`iopath_*_modpath` classes cannot change a delay relative to annotating (their
-entries have no modpath to land on) but mark arcs that run with no module-path
-delay, so they also name them in `arcs`:
+Nine `dropped` classes exist today. The first five (`timingcheck` and the
+four zero-delay `INTERCONNECT` classes) cannot change a simulated delay.
+`iopath_interconnect_only` records the requested net-delay-only mode.
+The last three classes describe SDF module-path delay detail omitted from
+the run and identify the affected cell arcs in `arcs`.
 
 | Class | Source | Meaning |
 |---|---|---|
@@ -1213,6 +1210,7 @@ delay, so they also name them in `arcs`:
 | `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 | `iopath_ifnone_edge_modpath` | SDF-text normalization (issue #2885) | An `IOPATH` entry onto a cell arc whose only module paths in the cell's own Verilog model are `ifnone` + edge-sensitive (gf180mcu XOR/XNOR/MUX-select/half-adder-sum arcs) was removed before annotation, because Icarus discards those paths at elaboration and no `IOPATH` can match them. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc, sorted — naming every arc that ran with no module-path delay. |
 | `iopath_bus_bit_modpath` | SDF-text normalization (issue #2958) | A bit-selected `IOPATH` entry (`IOPATH A_CLK A_DOUT[0]`) onto a bus output that the cell's own Verilog model reaches only through a whole-vector module path (a hard macro's `(A_CLK *> A_DOUT)`) was removed before annotation, because Icarus registers no per-bit modpath. Carries an additional `arcs` list — `{celltype, from, to}` per distinct dropped arc (`to` is the bus, bit-select dropped), sorted. |
+| `iopath_cond_expression` | SDF-text normalization (issue #5296) | `count` is the number of `COND`-wrapped `IOPATH` entries removed before annotation. The `reason` explains that Icarus's SDF parser rejects operator expressions such as `~D` with `Invalid/malformed COND`, which aborts annotation. `arcs` lists distinct `{celltype, from, to}` objects sorted by those fields. This pass keeps unconditional `IOPATH` entries and simple conditions such as `COND D` or `COND D==1'b1`. The run omits the state-dependent SDF delays from the removed entries. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
@@ -1658,7 +1656,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
 | `from_synthesize` | object | Additive (issue #5684); present only when `options.from_synthesize` was used: the report and netlist `{path, scope}` envelopes, the verified `netlist_sha256`, and the `hash_check` entry (`{field, expected, actual, match}`, always `match: true` here — a mismatch is exit 1 before any build). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363; `zero_delay_bus_port_source_interconnect`, issue #2984; `zero_delay_internal_bus_net_interconnect`, issue #6075) or an `IOPATH` entry onto an arc whose only modpaths Icarus discards (`iopath_ifnone_edge_modpath`, issue #2885, whose entry additionally lists the affected `arcs`), and `dropped` names each such class with `{count, reason}`; plus `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See "SDF back-annotation" for the full shape. | See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` whenever `dropped` is nonempty. `dropped` maps each counted class to `{count, reason}` and includes `arcs` for classes that record affected cell arcs, including `iopath_cond_expression` (issue #5296). The `sdf` object also carries `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See [SDF back-annotation](#sdf-back-annotation-optionssdf) for the class list and report shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
