@@ -4226,6 +4226,21 @@ check stays failed (`match: false`, `status:
 instead. Pass `--deck-file` to verify a vendor runset that has no packaged
 counterpart. `--rerun` on a curated report rejects `--deck-file`.
 
+**A missing input is named, not a bare `actual: null` (issue #6466).** When
+the report's echoed `file` (or the positional `<file>` override) resolves to a
+concrete path that names no existing file, the `provenance.input.content_hash`
+check stays failed (`match: false`, `actual: null`, `status: "drifted"`, exit
+3 -- all unchanged) and gains the additive `input_not_found` key `klt lvs
+--check` attaches (`path`, `resolved`, `found_relative_to_report`,
+`resolved_against`, `hint`); `--format text` prints `input not found:
+<resolved>`. A relative bare-string `file` still anchors to the current working
+directory, so a file found only beside the report is reported through
+`found_relative_to_report` and never silently used. The key is absent when the
+file exists (including when its bytes moved), and when the echoed `file` names
+no path at all (`scope: "external"`/`"absent"`, or no field). It applies to
+each `reports.curated.`/`reports.native.` side of an `--engine both` report.
+The `provenance.waivers.content_hash` line carries no such block.
+
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the
 `{path, scope}` envelope, and a `scope: "repo"` entry is joined to the repo
