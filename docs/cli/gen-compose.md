@@ -792,7 +792,19 @@ into the circuit.)
   along-side extent stays within it clears the ring metal on both cut ends
   at every sweep point (`null` when the along-side extent is narrower than
   the layer's minimum width, or ≤ 0 after the spacing inset — no
-  same-layer-legal strap fits; issue #6425).
+  same-layer-legal strap fits; issue #6425). That window is reported in
+  the **block's own** (generator-report) frame — the same frame as the
+  marker's own `x_um`/`y_um` in the `klt gen` report fed to
+  `blocks[].generator_report`; it is never re-aimed into composed
+  coordinates. To check a strap drawn in the composed layout, transform
+  the box by the block's `blocks[].orientation` first — an axis-aligned
+  flip: negate `x` for `"mirror_x"`, `y` for `"mirror_y"`, both for
+  `"rotate_180"`, re-sorting the corners into min/max — and *then* add
+  the block's `offset_um` from this response's own `blocks[]` entry. A
+  bare `offset_um` translation is correct only under
+  `orientation: "none"`; translating an oriented block's window without
+  flipping it first puts the strap's legal envelope in the wrong place —
+  an error only `klt drc` catches, after the fact.
 
   ```bash
   # A guard-ringed pair whose ring is opened on the east side, on the row

@@ -2614,9 +2614,9 @@ def run_extract(
     :func:`_wire_abstract_cells`. ``abstract_cell_patterns`` empty (the
     default) skips this mode entirely; the written SPICE and every other
     field are then byte-identical to before this feature existed.
-    ``abstract_cell_lef_paths`` is only ever consulted as the fallback pin
-    source and has no effect when every matched cell type resolves its pins
-    from in-cell labels.
+    ``abstract_cell_lef_paths`` is a pin source *merged* with the
+    label-derived pins (#3749): labels win per pin name, LEF-only pins are
+    appended, and `klt lvs` discloses the LEF's well/substrate ports (#5842).
 
     ``abstracted_cells`` reports this mode's own result: one entry per
     *distinct* matched cell type (sorted by cell name), each

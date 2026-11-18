@@ -203,9 +203,8 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
 @pytest.mark.parametrize(
     ("ring_gap_um", "window"),
     [
-        # gf180mcu's metal1.space.1 is 0.23um, so every accepted opening in
-        # [0.40, 0.46) -- 0.40 being the documented minimum -- insets to a
-        # negative along-side extent, and one exactly two spacings wide
+        # gf180mcu's metal1.space.1 is 0.23um, so an opening below 0.46um
+        # insets to a negative along-side extent. One exactly two spacings wide
         # (0.46) insets to zero: none admits a same-layer-legal strap, and
         # all three report null, never an inverted or zero-width box (which
         # a consumer's geometry library would silently normalise into a
@@ -227,22 +226,19 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
     ],
 )
 def test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box(
-    tmp_path, both_pdk_root, ring_gap_um, window
+    ring_gap_um, window
 ):
-    report = generate(
-        {
-            "generator": "guard_ring",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                "contacts_per_side": 2,
-                "ring_gap_side": "S",
-                "ring_gap_um": ring_gap_um,
-            },
-            "options": {"output": str(tmp_path / f"narrow_{ring_gap_um}.gds")},
-        }
-    )
+    from klayout_tools.gen_ring_layout import _ring_layout
+    from klayout_tools.gen_ring_ports import _ring_ports
 
-    gap = _gap_port(report)
+    # These openings exercise the metadata independently of the standalone
+    # GF180MCU generator's wider implant-spacing minimum.
+    ring = _ring_layout(3.0, 3.0, 0.42, 2, "S", ring_gap_um)
+    metal = {"layer": 34, "datatype": 0, "name": None}
+    ports = _ring_ports(
+        ring, (0.0, 0.0), "TAP_", metal, 0.42, metal, pdk_variant="gf180mcuD"
+    )
+    gap = _gap_port({"ports": ports})
     assert gap["name"] == "GAP_S"
     assert gap["strap_window_um"] == window
 
@@ -388,12 +384,16 @@ def test_strap_inside_the_window_is_drc_clean_outside_it_is_not(tmp_path, pdk_ro
 @pytest.mark.parametrize(
     ("variant", "deck", "route_layer", "ring_gap_um"),
     [
-        # Exactly the boundary opening (window == min width) and a wider one,
-        # on both curated decks: li1.space.1 / li1.width.1 are 0.17um on
-        # sky130, metal1.space.1 / metal1.width.1 are 0.23um on gf180mcu.
+        # sky130: exactly the boundary opening (window == min width) and a
+        # wider one -- li1.space.1 / li1.width.1 are both 0.17um. gf180mcu
+        # (metal1.space.1 / metal1.width.1 both 0.23um): the standalone
+        # guard_ring generator rejects ring_gap_um < 0.72 (#6477), so 0.72 is
+        # the smallest opening it can write; the exact-minimum 0.69 boundary
+        # is pinned on the port metadata alone, in
+        # test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box.
         ("sky130A", "sky130", (67, 20), 0.51),
         ("sky130A", "sky130", (67, 20), 0.80),
-        ("gf180mcuD", "gf180mcu", (34, 0), 0.69),
+        ("gf180mcuD", "gf180mcu", (34, 0), 0.72),
         ("gf180mcuD", "gf180mcu", (34, 0), 1.00),
     ],
 )
@@ -406,12 +406,11 @@ def test_strap_filling_a_reported_window_is_drc_clean(
     and gf180mcu. That is the width-aware reading of the field: non-null
     means a legal strap fits, including at exactly the minimum width.
 
-    "Passes" is judged against the bare ring's own DRC result, not against a
-    literal `clean`: gf180mcu rings cut with a narrow `ring_gap_um` (<= ~0.75)
-    already fail `nplus.space.1` / `comp.enclosing.contact.1` before any strap
-    exists (a ring-cut matter independent of the strap window), and the 0.69
-    boundary case sits inside that range. Every other case here has a clean
-    ring, so for those the equality below *is* `status == "clean"`."""
+    "Passes" is judged against the bare ring's own DRC result: the rule counts
+    must be unchanged by adding the strap, so the assertion is about the
+    strap alone. Every ring here is clean (the standalone GF180MCU opening
+    minimum of 0.72um, #6477, keeps its rings clean), so the equality below
+    *is* `status == "clean"`."""
     import collections
 
     import klayout.db as kdb
