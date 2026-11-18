@@ -4,7 +4,7 @@ Split out of ``functional_verification_mutation.py`` (itself split out of
 ``functional_verification.py``, the #1909 SDF-split precedent): the
 ``<proposals>`` document loader/validators and the resolution of proposals
 against the request's sources. Names that stay in ``functional_verification.py``
-are reached as ``_fv.<name>`` at call time; every name is re-exported from there.
+are reached as ``_fv.<name>`` at call time.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from ._vendor import mutation_variants as _mutation_variants
 
@@ -33,6 +33,41 @@ _MUTATION_PROPOSAL_REQUIRED_FIELDS = (
     "original_code",
     "mutated_code",
 )
+
+
+#: A minimal, complete `<proposals>` document: every required field filled in,
+#: ``index`` 1-based (0 is rejected). Rendered into ``klt
+#: functional-verification --help`` (issue #5679) so the schema is learnable
+#: without a failed run per field; a test pins that it validates.
+MUTATION_PROPOSALS_EXAMPLE: dict[str, Any] = {
+    "schema": "klt.functional_verification.mutation_proposals/1",
+    "scope": ["<a path from request.sources, byte-for-byte>"],
+    "proposals": [
+        {
+            "index": 1,
+            "category": "operator",
+            "file": "<same string as in scope>",
+            "line": 10,
+            "original_code": "<the byte-exact source line>",
+            "mutated_code": "<the replacement line>",
+        }
+    ],
+}
+
+#: Repo-relative location of the CLI doc, valid in a source checkout.
+_CLI_DOC_REPO_PATH = "docs/cli/functional-verification.md"
+
+
+def functional_verification_doc_location() -> str:
+    """Where to read the ``functional-verification`` CLI doc *from this
+    install*: the copy bundled in the wheel
+    (``klayout_tools/data/cli/functional-verification.md``) when present, else
+    the repo-relative path. The wheel ships the doc since v0.9.2 (#5288) but
+    nothing pointed at it, so a pinned ``uvx`` install had a dead pointer."""
+    bundled = (
+        Path(__file__).resolve().parent / "data" / "cli" / "functional-verification.md"
+    )
+    return str(bundled) if bundled.is_file() else _CLI_DOC_REPO_PATH
 
 
 @dataclass(frozen=True)
@@ -79,6 +114,134 @@ def _load_mutation_proposals_json(path: str) -> Any:
         ) from exc
 
 
+def _raise_collected(errors: list[str]) -> None:
+    """Raise one :class:`FunctionalVerificationError` naming every collected
+    validation failure (issue #5679: the author sees the whole schema gap in
+    one run, not one field per run). A single failure raises its message
+    unchanged; several are joined with ``"; "``, each message's text kept
+    intact so substring matchers still find it. No-op when ``errors`` is
+    empty."""
+    if errors:
+        _raise_all_collected(errors)
+
+
+def _raise_all_collected(errors: list[str]) -> NoReturn:
+    """The always-raising half of :func:`_raise_collected`, for call sites
+    that know the list is non-empty and read better typed as diverging."""
+    if len(errors) == 1:
+        raise _fv.FunctionalVerificationError(errors[0])
+    raise _fv.FunctionalVerificationError(
+        f"mutation proposals document has {len(errors)} validation errors: "
+        + "; ".join(errors)
+    )
+
+
+def _entry_errors(position: int, entry: dict[str, Any]) -> list[str]:
+    """Every shape/type failure of one ``proposals[]`` entry (empty if valid)."""
+    prefix = f"mutation proposals.proposals[{position}]"
+    errors = [
+        f"{prefix} is missing required field: {field}"
+        for field in _MUTATION_PROPOSAL_REQUIRED_FIELDS
+        if field not in entry
+    ]
+    for field in ("index", "line"):
+        if field in entry:
+            value = entry[field]
+            if not isinstance(value, int) or isinstance(value, bool):
+                errors.append(f"{prefix}.{field} must be an integer")
+    for field in ("category", "file"):
+        if field in entry:
+            value = entry[field]
+            if not isinstance(value, str) or not value:
+                errors.append(f"{prefix}.{field} must be a non-empty string")
+    for field in ("original_code", "mutated_code"):
+        if field in entry and not isinstance(entry[field], str):
+            errors.append(f"{prefix}.{field} must be a string")
+    detectability_argument = entry.get("detectability_argument")
+    if detectability_argument is not None and not isinstance(
+        detectability_argument, str
+    ):
+        errors.append(f"{prefix}.detectability_argument must be a string when given")
+    return errors
+
+
+def parse_mutation_proposals(
+    path: str,
+) -> tuple[list[str], list[_ProposalRecord], list[int], list[str]]:
+    """Load a ``<proposals>`` document (spike §3b) and collect **every**
+    structural/type failure instead of stopping at the first (issue #5679).
+
+    Returns ``(scope, proposals, indices, errors)``: ``scope`` and
+    ``proposals`` hold only what validated, ``indices`` every integer
+    ``index`` seen (including on entries that failed another check, so a
+    duplicate is still reported next to an unrelated missing field), and
+    ``errors`` the messages -- empty iff the document is valid. A file that
+    is missing, unreadable, not JSON or not an object has nothing to
+    accumulate over and raises immediately.
+
+    Per-proposal *anchor* validation is deliberately **not** done here -- that
+    needs the request's resolved ``sources`` and belongs to
+    :func:`_resolve_mutation_proposals`, whose failures are individual
+    ``"rejected"`` results, not whole-document ones.
+    """
+    document = _load_mutation_proposals_json(path)
+    if not isinstance(document, dict):
+        raise _fv.FunctionalVerificationError(
+            f"mutation proposals file must contain a JSON object: {path}"
+        )
+    errors = [
+        f"mutation proposals file is missing required field: {field}"
+        for field in _MUTATION_PROPOSALS_REQUIRED_FIELDS
+        if field not in document
+    ]
+
+    scope: list[str] = []
+    if "scope" in document:
+        scope_raw = document["scope"]
+        if not isinstance(scope_raw, list) or not all(
+            isinstance(entry, str) and entry for entry in scope_raw
+        ):
+            errors.append(
+                "mutation proposals 'scope' must be an array of non-empty strings"
+            )
+        else:
+            scope = list(scope_raw)
+
+    proposals: list[_ProposalRecord] = []
+    indices: list[int] = []
+    if "proposals" in document:
+        proposals_raw = document["proposals"]
+        if not isinstance(proposals_raw, list):
+            errors.append("mutation proposals 'proposals' must be an array")
+            proposals_raw = []
+        for position, entry in enumerate(proposals_raw):
+            if not isinstance(entry, dict):
+                errors.append(
+                    f"mutation proposals.proposals[{position}] must be a JSON object"
+                )
+                continue
+            index = entry.get("index")
+            if isinstance(index, int) and not isinstance(index, bool):
+                indices.append(index)
+            entry_errors = _entry_errors(position, entry)
+            errors.extend(entry_errors)
+            if entry_errors:
+                continue
+            proposals.append(
+                _ProposalRecord(
+                    index=entry["index"],
+                    category=entry["category"],
+                    file=entry["file"],
+                    line=entry["line"],
+                    original_code=entry["original_code"],
+                    mutated_code=entry["mutated_code"],
+                    detectability_argument=entry.get("detectability_argument"),
+                )
+            )
+
+    return scope, proposals, indices, errors
+
+
 def load_mutation_proposals(path: str) -> tuple[list[str], list[_ProposalRecord]]:
     """Load and validate a ``<proposals>`` document (spike §3b): ``schema``
     (unvalidated), ``scope`` (array of RTL source paths, matched against
@@ -90,109 +253,28 @@ def load_mutation_proposals(path: str) -> tuple[list[str], list[_ProposalRecord]
     -- a malformed `<proposals>` document can produce no trustworthy
     mutation run at all, the same "fail the whole request, don't run half a
     plan" posture ``options.sdf`` validation already takes in the base
-    contract. Per-proposal *anchor* validation (does ``original_code``
-    actually occur once on the declared line of the *pristine* source) is
-    deliberately **not** done here -- that needs the request's own resolved
-    ``sources``, and belongs to :func:`_resolve_mutation_proposals`, whose
-    failures are individual ``"rejected"`` results, not whole-document ones.
+    contract. Every failure is reported at once (see
+    :func:`parse_mutation_proposals`).
 
     Returns ``(scope, proposals)``.
     """
-    document = _load_mutation_proposals_json(path)
-    if not isinstance(document, dict):
-        raise _fv.FunctionalVerificationError(
-            f"mutation proposals file must contain a JSON object: {path}"
-        )
-    for field in _MUTATION_PROPOSALS_REQUIRED_FIELDS:
-        if field not in document:
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals file is missing required field: {field}"
-            )
-
-    scope_raw = document["scope"]
-    if not isinstance(scope_raw, list) or not all(
-        isinstance(entry, str) and entry for entry in scope_raw
-    ):
-        raise _fv.FunctionalVerificationError(
-            "mutation proposals 'scope' must be an array of non-empty strings"
-        )
-    scope = list(scope_raw)
-
-    proposals_raw = document["proposals"]
-    if not isinstance(proposals_raw, list):
-        raise _fv.FunctionalVerificationError(
-            "mutation proposals 'proposals' must be an array"
-        )
-
-    proposals: list[_ProposalRecord] = []
-    for position, entry in enumerate(proposals_raw):
-        if not isinstance(entry, dict):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}] must be a JSON object"
-            )
-        for field in _MUTATION_PROPOSAL_REQUIRED_FIELDS:
-            if field not in entry:
-                raise _fv.FunctionalVerificationError(
-                    f"mutation proposals.proposals[{position}] is missing "
-                    f"required field: {field}"
-                )
-
-        index = entry["index"]
-        if not isinstance(index, int) or isinstance(index, bool):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].index must be an integer"
-            )
-        category = entry["category"]
-        if not isinstance(category, str) or not category:
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].category must be "
-                "a non-empty string"
-            )
-        file_field = entry["file"]
-        if not isinstance(file_field, str) or not file_field:
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].file must be a "
-                "non-empty string"
-            )
-        line = entry["line"]
-        if not isinstance(line, int) or isinstance(line, bool):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].line must be an integer"
-            )
-        original_code = entry["original_code"]
-        if not isinstance(original_code, str):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].original_code "
-                "must be a string"
-            )
-        mutated_code = entry["mutated_code"]
-        if not isinstance(mutated_code, str):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].mutated_code "
-                "must be a string"
-            )
-        detectability_argument = entry.get("detectability_argument")
-        if detectability_argument is not None and not isinstance(
-            detectability_argument, str
-        ):
-            raise _fv.FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].detectability_argument "
-                "must be a string when given"
-            )
-
-        proposals.append(
-            _ProposalRecord(
-                index=index,
-                category=category,
-                file=file_field,
-                line=line,
-                original_code=original_code,
-                mutated_code=mutated_code,
-                detectability_argument=detectability_argument,
-            )
-        )
-
+    scope, proposals, _indices, errors = parse_mutation_proposals(path)
+    _raise_collected(errors)
     return scope, proposals
+
+
+def _index_errors(indices: list[int]) -> list[str]:
+    """One message per duplicate or non-positive ``index`` (spike §3b)."""
+    seen: set[int] = set()
+    errors: list[str] = []
+    for index in indices:
+        if index <= 0 or index in seen:
+            errors.append(
+                "mutation proposals[].index must be unique and positive "
+                f"(got {index!r})"
+            )
+        seen.add(index)
+    return errors
 
 
 def _validate_proposal_indices(proposals: list[_ProposalRecord]) -> None:
@@ -202,14 +284,22 @@ def _validate_proposal_indices(proposals: list[_ProposalRecord]) -> None:
     1, unlike a bad ``file``/anchor mismatch on one proposal, which is a
     per-proposal ``"rejected"`` result instead (see
     :func:`_resolve_mutation_proposals`)."""
-    seen: set[int] = set()
-    for proposal in proposals:
-        if proposal.index <= 0 or proposal.index in seen:
-            raise _fv.FunctionalVerificationError(
-                "mutation proposals[].index must be unique and positive "
-                f"(got {proposal.index!r})"
-            )
-        seen.add(proposal.index)
+    _raise_collected(_index_errors([proposal.index for proposal in proposals]))
+
+
+def _scope_errors(scope: list[str], request_sources: list[str]) -> list[str]:
+    """The scope-subset failure, naming both the unmatched entries and the
+    ``request.sources`` strings actually available (matching stays an exact
+    string compare -- issue #5679 only improves the diagnostic)."""
+    missing = [entry for entry in scope if entry not in request_sources]
+    if not missing:
+        return []
+    available = ", ".join(request_sources) if request_sources else "(none)"
+    return [
+        "mutation proposals 'scope' must be a subset of request.sources "
+        f"-- not present in request.sources: {', '.join(missing)} "
+        f"(request.sources has: {available})"
+    ]
 
 
 def _validate_mutation_scope(scope: list[str], request_sources: list[str]) -> None:
@@ -218,12 +308,42 @@ def _validate_mutation_scope(scope: list[str], request_sources: list[str]) -> No
     cannot be meaningfully tested. Whole-document exit 1, checked before the
     (expensive) baseline ever runs.
     """
-    missing = [entry for entry in scope if entry not in request_sources]
-    if missing:
-        raise _fv.FunctionalVerificationError(
-            "mutation proposals 'scope' must be a subset of request.sources "
-            f"-- not present in request.sources: {', '.join(missing)}"
-        )
+    _raise_collected(_scope_errors(scope, request_sources))
+
+
+def _load_request_and_proposals(
+    request: str, proposals_path: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str, list[str], list[_ProposalRecord]]:
+    """Load both ``--mutations`` input documents and validate them as one
+    report (issue #5679): cheap, whole-document checks before the expensive
+    baseline ever runs -- a malformed proposals document or an out-of-scope
+    entry should never cost a full build+test cycle to discover. The
+    ``<request>`` is parsed (a cheap JSON read) *before* the proposals are
+    judged so the ``scope`` subset check joins the same accumulated report:
+    one run names every failure, in both documents at once.
+
+    ``base_dir`` is forwarded to :func:`_fv.load_request_arg` so a request
+    archived beside an evidence record can still be re-anchored (issue #5673).
+
+    Returns ``(request_doc, request_dir, scope, proposal_records)``; raises
+    :class:`FunctionalVerificationError` naming every failure otherwise.
+    """
+    scope, proposal_records, indices, errors = parse_mutation_proposals(proposals_path)
+    try:
+        request_doc, request_dir = _fv.load_request_arg(request, base_dir=base_dir)
+    except _fv.FunctionalVerificationError as exc:
+        # Both documents malformed: report the proposals failures too rather
+        # than hiding them behind the request's own. `_raise_all_collected`
+        # always raises here (`str(exc)` keeps the list non-empty).
+        _raise_all_collected([*errors, *_index_errors(indices), str(exc)])
+    _fv._reject_verilog_top_mutations(request_doc.get("testbench"))
+    raw_sources = request_doc.get("sources")
+    errors.extend(_index_errors(indices))
+    errors.extend(
+        _scope_errors(scope, raw_sources if isinstance(raw_sources, list) else [])
+    )
+    _raise_collected(errors)
+    return request_doc, request_dir, scope, proposal_records
 
 
 def _resolve_mutation_proposals(

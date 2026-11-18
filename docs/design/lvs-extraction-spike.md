@@ -951,7 +951,7 @@ traceback to stdout and returns from the `lvs` proc without ever writing a
 report file, but the process itself still exits `0`). This is the same
 "never trust a subprocess's raw exit code" precedent `sim.py`'s own
 docstring establishes for `ngspice`, now confirmed for netgen too: this
-issue's implementation (`lvs._run_netgen_lvs`) treats "no report file was
+issue's implementation (`lvs_netgen._run_netgen_lvs`) treats "no report file was
 written at all" as its own distinct failure (a clear `LvsError` quoting
 netgen's stdout, since netgen's errors go there, not to the log file), and
 otherwise defers entirely to the log file's own `"Final result:"` text --

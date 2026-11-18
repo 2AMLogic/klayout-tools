@@ -4,8 +4,7 @@ functional-verification flow.
 Split out of ``functional_verification.py`` (the #1909 SDF-split precedent).
 Names that stay in ``functional_verification.py`` are reached as
 ``_fv.<name>`` at call time, so monkeypatching them on
-``klayout_tools.functional_verification`` still takes effect; every name is
-re-exported from there.
+``klayout_tools.functional_verification`` still takes effect.
 """
 
 from __future__ import annotations
