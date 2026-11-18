@@ -3384,9 +3384,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             detail["body_bias"] = body_bias
         # Issue #6559: which extractor built the leg -- a runset leg has no
         # parasitics. Reported, never graded on; absent for a curated run.
-        pex_engine = _pex_engine_disclosure(kind, envelope)
-        if pex_engine is not None:
-            detail["pex_extraction"] = pex_engine
+        detail.update(_pex_engine_disclosure(kind, envelope) or {})
     elif kind == "power":
         em_verdict = envelope.get("em_verdict") or {}
         detail = {
@@ -6452,9 +6450,9 @@ def _citation(
     # Issue #6559: and which extractor built the cited leg -- a runset-engine
     # leg carries no parasitics, which this item's intent needs. Disclosure
     # only, like `body_bias` above; present only for a runset-engine run.
-    pex_engine = _pex_engine_disclosure(resolution["kind"], resolution["envelope"])
-    if pex_engine is not None:
-        citation["pex_extraction"] = pex_engine
+    citation.update(
+        _pex_engine_disclosure(resolution["kind"], resolution["envelope"]) or {}
+    )
     # Issue #2109: a citation whose cited run's common coverage reports
     # skipped *requested* work carries that statement, so an item graded
     # `"met"` off a pre-adapter producer -- one still reporting its

@@ -2,34 +2,32 @@
 
 Same faked-subprocess layer as ``tests/test_extract_runset.py`` (whose
 ``fake_klayout`` fixture and ``_inputs`` this file reuses): the runset
-subprocess is stubbed, the extraction, the pex envelope and the CLI are real.
-The fake runset extracts ``NMOS`` devices, whose KLayout parameters are
+subprocess is stubbed, the extraction and the pex envelope are real. The fake
+runset extracts ``NMOS`` devices, whose KLayout parameters are
 ``L W AS AD PS PD``. No ngspice, no PDK and no fleet is involved: delta mode is
 exercised through ``--measure-command`` (a tiny Python harness), which the pex
 envelope grades exactly as it does testbench legs.
 
-One PDK-gated test at the end runs a **single** local ``klt pex --extract-only``
-on IHP's ``pnpMPA`` testcase; it skips without the ``ihp-sg13cmos5l`` install.
+The CLI surface lives in ``tests/test_pex_runset_cli.py`` and the ``klt
+signoff`` surfacing in ``tests/test_pex_runset_signoff.py`` (file-size ratchet:
+new files stay at or under 500 lines). One PDK-gated test at the end runs a
+**single** local ``klt pex --extract-only`` on IHP's ``pnpMPA`` testcase; it
+skips without the ``ihp-sg13cmos5l`` install.
 """
 
 # ruff: noqa: F401, F811
 from __future__ import annotations
 
-import json
 import os
 import shutil
 
 import pytest
 
-from klayout_tools.cli import main, pex_cmd
-from klayout_tools.cli.parser import create_parser
 from klayout_tools.pex import PexError, run_pex
-from klayout_tools.pex_runset import PexRunset, extraction_fields, runset_from_args
-from klayout_tools.signoff import build_signoff, build_tier_report
+from klayout_tools.pex_runset import PexRunset, extraction_fields
 from test_extract_runset import _inputs, _run
 from test_extract_runset import fake_klayout as fake_klayout
 from test_pex import _write_harness, resistor_layout
-from test_signoff import PEX_PASS_ENVELOPE, _manifest, _write
 
 NMOS_PARAMS = ["AD", "AS", "L", "PD", "PS", "W"]
 W_L = {"W": ("w", "u"), "L": ("l", "u")}
@@ -54,7 +52,6 @@ def _extract_only(tmp_path, *, runset=None, deck=None, n_dev=1, **kwargs):
     )
 
 
-# --------------------------------------------------------------------------- #
 # The route and its machine-readable disclosure
 # --------------------------------------------------------------------------- #
 
@@ -347,274 +344,6 @@ def test_device_params_on_the_cards_do_not_disturb_model_mismatch(
 
 
 # --------------------------------------------------------------------------- #
-# The CLI
-# --------------------------------------------------------------------------- #
-
-
-def _cli(tmp_path, *argv, capsys):
-    gds, deck = _inputs(tmp_path)
-    code = main(
-        [
-            "pex",
-            gds,
-            *[a.replace("DECKFILE", deck) for a in argv],
-            "--output",
-            str(tmp_path / "out.spice"),
-            "--outdir",
-            str(tmp_path / "art"),
-            "--format",
-            "json",
-        ]
-    )
-    captured = capsys.readouterr()
-    return code, captured.out, json.loads(captured.err or "null")
-
-
-def test_cli_runset_route_needs_no_deck_and_emits_the_disclosure(
-    tmp_path, fake_klayout, capsys
-):
-    code, out, _err = _cli(
-        tmp_path,
-        "--engine",
-        "klayout-runset",
-        "--deck-file",
-        "DECKFILE",
-        "--extract-only",
-        capsys=capsys,
-    )
-
-    assert code == 4  # extract-only: ran, graded nothing (`not_checked`)
-    extraction = json.loads(out)["extraction"]
-    assert extraction["engine"] == "klayout-runset"
-    assert extraction["parasitics_carried"] is False
-    assert extraction["device_counts"] == {"NMOS": 1}
-
-
-def test_cli_text_output_names_the_engine(tmp_path, fake_klayout, capsys):
-    gds, deck = _inputs(tmp_path)
-    code = main(
-        [
-            "pex",
-            gds,
-            "--engine",
-            "klayout-runset",
-            "--deck-file",
-            deck,
-            "--extract-only",
-            "--output",
-            str(tmp_path / "out.spice"),
-            "--outdir",
-            str(tmp_path / "art"),
-        ]
-    )
-
-    assert code == 4
-    assert "engine: klayout-runset  parasitics: none" in capsys.readouterr().out
-
-
-def test_cli_device_param_reaches_the_cards_and_the_disclosure(
-    tmp_path, fake_klayout, capsys
-):
-    code, out, _err = _cli(
-        tmp_path,
-        "--engine",
-        "klayout-runset",
-        "--deck-file",
-        "DECKFILE",
-        "--device-param",
-        "NMOS:W=w:u",
-        "--device-param",
-        "NMOS:L=l:u",
-        "--extract-only",
-        capsys=capsys,
-    )
-
-    assert code == 4
-    assert json.loads(out)["extraction"]["params_not_carried"] == {
-        "NMOS": ["AD", "AS", "PD", "PS"]
-    }
-    assert "l=0.2u w=0.4u" in (tmp_path / "out.spice").read_text()
-
-
-@pytest.mark.parametrize(
-    ("argv", "needle"),
-    [
-        (["--engine", "klayout-runset", "--extract-only"], "requires --deck-file"),
-        (
-            ["--deck", "sky130", "--deck-file", "DECKFILE", "--extract-only"],
-            "--deck-file is only used",
-        ),
-        (
-            ["--deck", "sky130", "--deck-var", "a=b", "--extract-only"],
-            "--deck-var is only used",
-        ),
-        (
-            ["--deck", "sky130", "--device-param", "NMOS:W=w", "--extract-only"],
-            "only used by engine",
-        ),
-        (
-            ["--deck", "sky130", "--runset-timeout", "5", "--extract-only"],
-            "only used by engine",
-        ),
-        (
-            [
-                "--engine",
-                "klayout-runset",
-                "--deck-file",
-                "DECKFILE",
-                "--deck-var",
-                "input=x",
-                "--extract-only",
-            ],
-            "may not set 'input'",
-        ),
-        (
-            [
-                "--engine",
-                "klayout-runset",
-                "--deck-file",
-                "DECKFILE",
-                "--deck-var",
-                "novalue",
-                "--extract-only",
-            ],
-            "not KEY=VALUE",
-        ),
-        (
-            [
-                "--engine",
-                "klayout-runset",
-                "--deck-file",
-                "DECKFILE",
-                "--device-param",
-                "bogus",
-                "--extract-only",
-            ],
-            "not CLASS:PARAM=NAME",
-        ),
-    ],
-)
-def test_cli_runset_flag_usage_errors_exit_2(
-    tmp_path, fake_klayout, capsys, argv, needle
-):
-    code, out, err = _cli(tmp_path, *argv, capsys=capsys)
-
-    assert code == 2
-    assert out == ""
-    assert needle in err["error"]["message"]
-    assert err["error"]["command"] == "pex"
-    assert "cmd" not in fake_klayout
-
-
-def test_cli_default_engine_still_requires_a_deck(tmp_path, fake_klayout, capsys):
-    code, _out, err = _cli(tmp_path, "--extract-only", capsys=capsys)
-
-    assert code == 2
-    assert "--deck" in err["error"]["message"]
-
-
-def test_cli_curated_deck_is_refused_by_name_under_the_runset_engine(
-    tmp_path, fake_klayout, capsys
-):
-    code, _out, err = _cli(
-        tmp_path,
-        "--engine",
-        "klayout-runset",
-        "--deck-file",
-        "DECKFILE",
-        "--deck",
-        "sky130",
-        "--extract-only",
-        capsys=capsys,
-    )
-
-    assert code == 1
-    assert "cannot honour --deck" in err["error"]["message"]
-
-
-def test_cli_parasitic_only_flag_is_refused_by_name_under_the_runset_engine(
-    tmp_path, fake_klayout, capsys
-):
-    code, _out, err = _cli(
-        tmp_path,
-        "--engine",
-        "klayout-runset",
-        "--deck-file",
-        "DECKFILE",
-        "--critical-net",
-        "n1",
-        "--distributed-rc",
-        "--extract-only",
-        capsys=capsys,
-    )
-
-    assert code == 1
-    message = err["error"]["message"]
-    assert "--critical-net" in message
-    assert "--distributed-rc" in message
-
-
-def test_cli_dry_run_is_refused_under_the_runset_engine(tmp_path, fake_klayout, capsys):
-    """`--dry-run`'s preflight models the curated deck and parasitics; it does
-    not pretend to model an engine it does not."""
-    code, _out, err = _cli(
-        tmp_path,
-        "--engine",
-        "klayout-runset",
-        "--deck-file",
-        "DECKFILE",
-        "--dry-run",
-        "--extract-only",
-        capsys=capsys,
-    )
-
-    assert code == 1
-    assert "--dry-run does not model --engine klayout-runset" in err["error"]["message"]
-    assert "cmd" not in fake_klayout
-
-
-def test_runset_from_args_is_none_for_the_default_engine():
-    assert runset_from_args("klayout", None, None, None, None) is None
-
-
-def test_submit_manifest_records_the_runset_arguments_with_an_absolute_deck_file(
-    tmp_path, monkeypatch
-):
-    """`--attach` rebuilds the request from the manifest, so the engine and the
-    runset path (made absolute) have to be recorded -- a bare `--attach` from
-    another working directory must resolve the runset identically."""
-    monkeypatch.chdir(tmp_path)
-    args = create_parser().parse_args(
-        [
-            "pex",
-            "l.gds",
-            "tb.json",
-            "--engine",
-            "klayout-runset",
-            "--deck-file",
-            "pdk.lvs",
-            "--deck-var",
-            "run_mode=flat",
-            "--device-param",
-            "NMOS:W=w:u",
-            "--runset-timeout",
-            "30",
-            "--submit-only",
-            "--backend",
-            "batch",
-        ]
-    )
-
-    request = pex_cmd._submit_request(args)
-
-    assert request["engine"] == "klayout-runset"
-    assert request["deck_file"] == str(tmp_path / "pdk.lvs")
-    assert request["deck_var"] == ["run_mode=flat"]
-    assert request["device_params"] == ["NMOS:W=w:u"]
-    assert request["runset_timeout"] == 30.0
-
-
-# --------------------------------------------------------------------------- #
 # `klt extract`'s own structured disclosure, which pex copies
 # --------------------------------------------------------------------------- #
 
@@ -629,78 +358,6 @@ def test_extract_report_params_not_carried_is_empty_when_all_declared(
     report = _run(tmp_path, device_params={"NMOS": ALL_PARAMS})
 
     assert report["params_not_carried"] == {}
-
-
-# --------------------------------------------------------------------------- #
-# `klt signoff` surfaces the disclosure like `body_bias` -- reported, not graded
-# --------------------------------------------------------------------------- #
-
-PEX_RUNSET_PASS_ENVELOPE = {
-    **PEX_PASS_ENVELOPE,
-    "extraction": {
-        "engine": "klayout-runset",
-        "parasitics_carried": False,
-        "params_not_carried": {"pnpMPA": ["A", "P"]},
-        "device_counts": {"pnpMPA": 10},
-    },
-    "body_bias": {
-        "status": "not_assessed",
-        "unbiased_device_count": None,
-        "unbiased_nets": None,
-        "unbiased_pmos_body_nets": None,
-    },
-}
-
-DISCLOSURE = {
-    "engine": "klayout-runset",
-    "parasitics_carried": False,
-    "params_not_carried": {"pnpMPA": ["A", "P"]},
-}
-
-
-def test_signoff_detail_surfaces_the_runset_engine_disclosure(tmp_path):
-    path = _write(tmp_path, "pex.json", PEX_RUNSET_PASS_ENVELOPE)
-
-    check = build_signoff([path])["checks"][0]
-
-    assert check["kind"] == "pex"
-    assert check["detail"]["pex_extraction"] == DISCLOSURE
-    # Not-assessed is quoted as such, never as a clean `biased`.
-    assert check["detail"]["body_bias"]["status"] == "not_assessed"
-    assert check["detail"]["body_bias"]["unbiased_nets"] == []
-
-
-def test_signoff_citation_surfaces_the_runset_engine_disclosure(tmp_path):
-    path = _write(tmp_path, "pex.json", PEX_RUNSET_PASS_ENVELOPE)
-
-    report = build_tier_report(_manifest(evidence={"7": path}))
-
-    item_7 = next(item for item in report["items"] if item["id"] == 7)
-    assert item_7["citation"]["pex_extraction"] == DISCLOSURE
-
-
-def test_signoff_does_not_grade_on_the_runset_disclosure(tmp_path):
-    """Reported, never graded: grading policy for a parasitic-free leg is
-    issue #6606's. The verdict is exactly the curated envelope's."""
-    runset = _write(tmp_path, "runset.json", PEX_RUNSET_PASS_ENVELOPE)
-    curated = _write(tmp_path, "curated.json", PEX_PASS_ENVELOPE)
-
-    runset_result = build_signoff([runset])
-    curated_result = build_signoff([curated])
-
-    assert runset_result["status"] == curated_result["status"] == "pass"
-    assert runset_result["checks"][0]["passed"] is True
-
-
-def test_signoff_omits_the_disclosure_for_a_curated_pex_envelope(tmp_path):
-    path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    check = build_signoff([path])["checks"][0]
-    report = build_tier_report(_manifest(evidence={"7": path}))
-    item_7 = next(item for item in report["items"] if item["id"] == 7)
-
-    assert "pex_extraction" not in check["detail"]
-    assert "pex_extraction" not in (item_7["citation"] or {})
 
 
 # --------------------------------------------------------------------------- #

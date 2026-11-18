@@ -10,6 +10,7 @@ Both are **reported, never graded on**: item 7's verdict is still
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -59,7 +60,7 @@ def _pex_body_bias_disclosure(
 
 
 def _pex_engine_disclosure(
-    kind: str, envelope: dict[str, Any]
+    kind: str, envelope: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     """What the cited ``klt pex`` envelope says about *which extractor* built
     its extracted leg (issue #6559) -- or ``None`` when there is nothing to
@@ -72,6 +73,10 @@ def _pex_engine_disclosure(
     says so in ``extraction.engine``/``parasitics_carried``/
     ``params_not_carried``; this quotes them verbatim, never re-deriving them,
     so a reader of the citation sees the caveat beside the verdict.
+
+    Returns ``{"pex_extraction": {...}}`` -- already keyed, so a call site
+    merges it with ``update(... or {})`` and adds no branch to its (complexity-
+    ratcheted) builder.
 
     ``None`` in exactly two cases, both meaning "this artifact makes no
     engine statement", never "the extraction had parasitics": ``kind !=
@@ -89,7 +94,11 @@ def _pex_engine_disclosure(
         return None
     uncarried = extraction.get("params_not_carried")
     return {
-        "engine": extraction.get("engine"),
-        "parasitics_carried": extraction.get("parasitics_carried"),
-        "params_not_carried": dict(uncarried) if isinstance(uncarried, dict) else {},
+        "pex_extraction": {
+            "engine": extraction.get("engine"),
+            "parasitics_carried": extraction.get("parasitics_carried"),
+            "params_not_carried": (
+                dict(uncarried) if isinstance(uncarried, dict) else {}
+            ),
+        }
     }

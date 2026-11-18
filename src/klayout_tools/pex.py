@@ -2369,7 +2369,7 @@ def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
     layout_path: str,
-    deck_name: str,
+    deck_name: str | None,
     *,
     top: str | None,
     pdk_variant: str | None,
