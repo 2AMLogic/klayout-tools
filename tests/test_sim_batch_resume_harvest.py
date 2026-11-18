@@ -7,6 +7,7 @@ test_sim_batch_shard_attach.py / test_sim_batch.py to keep both small."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -63,6 +64,54 @@ def _harvest_fixture(tmp_path, monkeypatch):
 
 def _report_ids(corners):
     return {c["corner_id"] for c in corners}
+
+
+def test_run_sim_zero_unit_batch_request_dispatches_nothing(
+    tmp_path, monkeypatch, bare_name_ngspice_resolution
+):
+    """An empty corner grid never stages inputs or mints a billed job (#6540)."""
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path, corners={"supply_v": {"vdd": []}})
+    path = _write_request(tmp_path, request)
+
+    def unexpected_subprocess(argv, timeout_s):
+        raise AssertionError(f"zero-unit batch request invoked a subprocess: {argv}")
+
+    monkeypatch.setattr(sb, "_run_subprocess", unexpected_subprocess)
+
+    plan = _run(path, tmp_path, dry_run=True)
+    assert plan["unit_count"] == 0
+    assert plan["units"] == []
+
+    report = _run(path, tmp_path)
+    assert report["status"] == "not_checked"
+    assert report["corners"] == []
+    assert "remote" not in report["environment"]
+
+
+@pytest.mark.parametrize("state", ["pending", *sb._ShardManifest._STATE_FIELDS])
+@pytest.mark.parametrize("collected_at", [None, "2026-11-17T00:00:00+00:00"])
+def test_mark_map_collected_preserves_completed_entries_and_timestamps(
+    tmp_path, state, collected_at
+):
+    path = tmp_path / sb.BATCH_SHARDS_FILENAME
+    entry = {"index": 0, "state": state, "collected_at": collected_at}
+    untouched = {"index": 1, "state": "launched", "collected_at": None}
+    document = {"shards": [dict(entry), dict(untouched)]}
+
+    sbr._mark_map_collected(str(path), document, [0])
+
+    after = json.loads(path.read_text())["shards"]
+    assert after[1] == untouched
+    if state == "collected":
+        assert after[0] == entry
+    else:
+        assert after[0]["state"] == "collected"
+        if collected_at:
+            assert after[0]["collected_at"] == collected_at
+        else:
+            stamped = datetime.fromisoformat(after[0]["collected_at"])
+            assert stamped.tzinfo == timezone.utc
 
 
 def test_resume_harvest_collects_terminal_shards_and_skips_the_rest(
