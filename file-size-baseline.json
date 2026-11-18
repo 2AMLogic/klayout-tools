@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1151
+      "lines": 1150
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
