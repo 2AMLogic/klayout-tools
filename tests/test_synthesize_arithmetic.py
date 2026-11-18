@@ -20,6 +20,7 @@ import shutil
 
 import pytest
 
+from helpers.subprocess_fakes import _patch_yosys_run
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize
 from klayout_tools.synthesize import (
@@ -37,7 +38,6 @@ from klayout_tools.synthesize import (
 )
 
 HAVE_YOSYS = shutil.which("yosys") is not None
-
 
 # --------------------------------------------------------------------------- #
 # request.arithmetic validation
@@ -277,7 +277,7 @@ def test_measure_candidate_disqualifies_on_yosys_timeout(tmp_path, monkeypatch):
         assert cmd[:2] == ["yosys", "-s"]
         raise synthesize.subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     engine_options = _EngineOptions(
         liberty_path="/abs/lib.lib",

@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -50,6 +52,58 @@ def test_deck_info_provides() -> None:
         assert entry["provides"] == deck_provides(name)
         if "curated_drc" in entry["provides"]:
             assert get_deck(name)
+
+
+def test_deck_info_documented_example_matches_gf180mcu() -> None:
+    doc = Path(__file__).resolve().parents[1] / "docs/cli/deck.md"
+    context = "docs/cli/deck.md: klt deck info example"
+    section = re.search(
+        r"^## `klt deck info`[ \t]*\n(.*?)(?=^## |\Z)",
+        doc.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"{context}: missing section heading"
+    block = re.search(
+        r"^```json[ \t]*\n(.*?)^```[ \t]*$",
+        section[1],
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert block is not None, f"{context}: missing fenced JSON block"
+    try:
+        payload = json.loads(block[1])
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"{context}: invalid JSON ({exc})")
+
+    live = deck_info("gf180mcu")
+    assert isinstance(payload, dict), f"{context}: expected a JSON object"
+    assert payload.get("schema_version") == live["schema_version"], (
+        f"{context}: schema_version differs from deck_info()"
+    )
+    decks = payload.get("decks")
+    assert isinstance(decks, list) and len(decks) == 1, (
+        f"{context}: expected one entry in decks"
+    )
+    example = decks[0]
+    actual = live["decks"][0]
+    assert isinstance(example, dict) and example.get("deck") == actual["deck"], (
+        f"{context}: expected the gf180mcu deck entry"
+    )
+    assert example.get("content_hash") == "sha256:...", (
+        f"{context}: content_hash must use the sha256:... placeholder"
+    )
+    for field in ("device_classes", "unmodeled_rules", "provides"):
+        values = example.get(field)
+        assert isinstance(values, list) and all(
+            isinstance(value, str) for value in values
+        ), f"{context}: {field} must be a list of strings"
+        missing = set(values).difference(actual[field])
+        assert not missing, f"{context}: gf180mcu {field} missing {sorted(missing)}"
+    assert "released" in example and example["released"] is actual["released"], (
+        f"{context}: released differs from deck_info()"
+    )
+    assert "release" in example and example["release"] == actual["release"], (
+        f"{context}: release differs from deck_info()"
+    )
 
 
 def test_asap7_rejected_with_route_hint() -> None:
@@ -120,6 +174,7 @@ _EXPECTED_DECK_SCOPES: dict[str, frozenset[str]] = {
         {
             "Act",
             "Cnt",
+            "Cont upper-landing containment (curated)",
             "Gat",
             "M1",
             "M2",
@@ -137,6 +192,10 @@ _EXPECTED_DECK_SCOPES: dict[str, frozenset[str]] = {
             "V2",
             "V3",
             "V4",
+            "Via1 upper-landing containment (curated)",
+            "Via2 upper-landing containment (curated)",
+            "Via3 upper-landing containment (curated)",
+            "Via4 upper-landing containment (curated)",
             "pSD",
         }
     ),
