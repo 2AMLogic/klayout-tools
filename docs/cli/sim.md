@@ -5280,12 +5280,13 @@ that does not understand it, so on such a runner give `level` as a literal
 number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
-`crossings` is a third measurement form: an entry declares **exactly one** of
-`spice`, `expr`, or `crossings` (declaring two is exit 1). It requires
-`analysis.kind: "tran"`; an unknown key, a missing `signal`/`level`, an
-unknown `edge`, a malformed window or `max` are all refused up front
-(`SimError`, exit 1) with a corrective message. Optional `unit`, `limits`,
-`plausible_range` and `k_sigma` apply to the entry's `value` (the count).
+`crossings` is a measurement form refused beside every other measurement form
+(an entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`; an unknown key, a missing
+`signal`/`level`, an unknown `edge`, a malformed window or `max` are all
+refused up front (`SimError`, exit 1) with a corrective message. Optional
+`unit`, `limits`, `plausible_range` and `k_sigma` apply to the entry's `value`
+(the count).
 
 ### Response
 
@@ -5419,11 +5420,11 @@ expression. These remain **unsupported**; `cycle_mean` is the supported way:
 | `from`   | no       | Earliest allowed window start, in seconds (a number or a SPICE literal such as `"10u"`); default 0. The window starts at the first reference edge at or after it. Named `from` to match `crossings`. |
 | `cycles` | yes      | Integer `>= 1`: the window spans this many reference periods (`cycles + 1` edges). |
 
-`cycle_mean` is a fourth measurement form, mutually exclusive with `spice`,
-`expr` and `crossings` (declaring two is exit 1). It requires `analysis.kind:
-"tran"`, is refused for `engine: "xyce"` and inside `analysis_steps[]`, and
-rejects unknown keys by name. Optional `unit`, `limits`, `plausible_range`
-and `k_sigma` apply to the mean.
+`cycle_mean` is a measurement form refused beside every other measurement form
+(an entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`, is refused for `engine: "xyce"`
+and inside `analysis_steps[]`, and rejects unknown keys by name. Optional
+`unit`, `limits`, `plausible_range` and `k_sigma` apply to the mean.
 
 ### Response
 
@@ -6236,12 +6237,12 @@ instead:
 | `voltage` | yes      | One-line ngspice vector for the source's positive-terminal voltage relative to ground (`"v(a)"`). |
 | `from`/`to` | no     | Window in seconds, a number or SPICE time literal. Default: the whole transient. Must lie inside the `tran` analysis and `from < to`. |
 
-`energy` is a further measurement form: an entry declares **exactly one** of
-`spice`, `expr`, `crossings`, `cycle_mean`, `transfer` or `energy` (two is exit 1). It requires
-`analysis.kind: "tran"`. Unknown keys, a missing `source`/`voltage`, a
-malformed or inverted window, or a window outside `analysis.args` are refused
-up front (`SimError`, exit 1). Optional `unit`, `limits`, `plausible_range`
-and `k_sigma` apply to `value` (the net energy).
+`energy` is a measurement form refused beside every other measurement form (an
+entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`. Unknown keys, a missing
+`source`/`voltage`, a malformed or inverted window, or a window outside
+`analysis.args` are refused up front (`SimError`, exit 1). Optional `unit`,
+`limits`, `plausible_range` and `k_sigma` apply to `value` (the net energy).
 
 ### Response
 
@@ -6333,13 +6334,12 @@ explicit rating in `limits`:
 | `b`         | no       | Reference node. Default: ground, i.e. `|v(a)|`. |
 | `from`/`to` | no       | Window in seconds, a number or SPICE time literal. Default: the whole transient. Must lie inside the `tran` analysis and `from < to`. |
 
-`stress` is a further measurement form: an entry declares **exactly one** of
-`spice`, `expr`, `crossings`, `cycle_mean`, `energy`, `noise`, `transfer`,
-`tian`, `snm`, `search` or `stress` (two is exit 1). It requires
-`analysis.kind: "tran"`. Unknown keys, a missing `a`, a malformed or inverted
-window, or a window outside `analysis.args` are refused up front (`SimError`,
-exit 1). Optional `unit`, `limits`, `plausible_range` and `k_sigma` apply to
-`value`. Declare one entry per node pair.
+`stress` is a measurement form refused beside every other measurement form (an
+entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`. Unknown keys, a missing `a`, a
+malformed or inverted window, or a window outside `analysis.args` are refused
+up front (`SimError`, exit 1). Optional `unit`, `limits`, `plausible_range`
+and `k_sigma` apply to `value`. Declare one entry per node pair.
 
 ### Response
 

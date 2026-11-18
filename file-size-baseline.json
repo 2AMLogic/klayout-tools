@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
-      "lines": 534
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/size.py",
