@@ -301,6 +301,7 @@ from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEG
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
+from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
@@ -2665,7 +2666,7 @@ def _clock_uncertainty_lines(
         return []
     return [
         f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
-        f"[get_clocks {clock_port}]"
+        f"[get_clocks {_tcl_literal(clock_port)}]"  # issue #5708: literal word
         for key in CLOCK_UNCERTAINTY_KEYS
         if clock_uncertainty.get(key) is not None
     ]
@@ -2923,8 +2924,8 @@ _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
     return [
         _UNIT_PIN_LINE,
-        f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]",
+        f"create_clock -name {_tcl_literal(clock_port)} "
+        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
     ]
 
 
@@ -2937,18 +2938,21 @@ def _propagated_clock_lines(clock_port: str) -> list[str]:
     after ``create_clock`` and before any I/O delay / SPEF / metric
     collection, so every report the session produces is the propagated
     analysis. The clock-port spelling matches :func:`_clock_lines`'s own
-    (plain interpolation -- the same string ``create_clock -name`` used)."""
-    return [f"set_propagated_clock [get_clocks {clock_port}]"]
+    (`_tcl_literal`-quoted -- the same string ``create_clock -name`` sees,
+    issue #5708)."""
+    return [f"set_propagated_clock [get_clocks {_tcl_literal(clock_port)}]"]
 
 
 def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
     """Issue #4241: one ``create_clock`` per secondary clock, then any
-    ``set_clock_groups -asynchronous``. Empty for a single-clock request."""
+    ``set_clock_groups -asynchronous``. Empty for a single-clock request.
+
+    Clock groups are braced Tcl words (no substitution)."""
     if not clock_extras:
         return []
     lines = [
-        f"create_clock -name {c['port']} -period {c['period_ns']} "
-        f"[get_ports {c['port']}]"
+        f"create_clock -name {_tcl_literal(c['port'])} -period {c['period_ns']} "
+        f"[get_ports {_tcl_literal(c['port'])}]"
         for c in clock_extras["clocks"]
     ]
     groups = clock_extras["groups"]
@@ -3001,31 +3005,18 @@ def _io_delay_lines(
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
-            f"set klt_clock_port [get_ports {clock_port}]",
+            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_non_clock_inputs "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} -clock {clock_port} "
-            "$klt_non_clock_inputs",
+            f"set_input_delay {input_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
         ]
     if output_delay_ns is not None:
         lines.append(
-            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+            f"set_output_delay {output_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
-
-
-_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
-
-
-def _tcl_literal(text: str) -> str:
-    """Backslash-quote ``text`` into one literal Tcl word: no word
-    splitting, no ``$``/``[...]``/backslash substitution, no brace
-    matching. Control characters never reach here
-    (:func:`_validate_port_delay_maps` rejects them), so only the
-    Tcl-special printable characters need escaping. Same idiom as
-    ``lvs_netgen.py``'s ``_tcl_word``, kept module-local per this module's
-    self-contained convention."""
-    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
 
 
 def _request_io_delay_lines(
@@ -3216,7 +3207,7 @@ def _port_io_delay_lines(
             mapped = " ".join(_tcl_literal(port) for port in mapping)
             if side == "input":
                 lines += [
-                    f"set klt_clock_port [get_ports {clock_port}]",
+                    f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
                     "set klt_input_candidates "
                     "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
                 ]
@@ -3233,14 +3224,16 @@ def _port_io_delay_lines(
                 "    }",
                 "}",
                 f"if {{[llength $klt_{side}_default_ports] > 0}} {{",
-                f"    {command} {scalar} -clock {clock_port} $klt_{side}_default_ports",
+                f"    {command} {scalar} "
+                f"-clock {_tcl_literal(clock_port)} $klt_{side}_default_ports",
                 "}",
             ]
         for port, bounds in mapping.items():
             for bound, flag in (("min_ns", "-min"), ("max_ns", "-max")):
                 if bound in bounds:
                     lines.append(
-                        f"{command} {flag} {bounds[bound]!r} -clock {clock_port} "
+                        f"{command} {flag} {bounds[bound]!r} "
+                        f"-clock {_tcl_literal(clock_port)} "
                         f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
     return lines
@@ -3262,7 +3255,7 @@ def _input_transition_lines(
     if input_transition_ns is not None:
         mapped = " ".join(_tcl_literal(port) for port in mapping)
         lines += [
-            f"set klt_transition_clock_port [get_ports {clock_port}]",
+            f"set klt_transition_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_transition_candidates "
             "[lsearch -inline -all -not -exact [all_inputs] "
             "$klt_transition_clock_port]",
@@ -3301,9 +3294,11 @@ def _boundary_lines(
     cells = boundary.get("driving_cells") or {}
 
     def drive_args(cell: dict[str, str]) -> str:
-        args = f"-lib_cell {cell['cell']} -pin {cell['pin']}"
+        args = (
+            f"-lib_cell {_tcl_literal(cell['cell'])} -pin {_tcl_literal(cell['pin'])}"
+        )
         if "input_pin" in cell:
-            args += f" -from_pin {cell['input_pin']}"
+            args += f" -from_pin {_tcl_literal(cell['input_pin'])}"
         return args
 
     default_cell = boundary.get("driving_cell")
@@ -3312,7 +3307,7 @@ def _boundary_lines(
             _tcl_literal(port) for port in [*cells, *(input_transitions or {})]
         )
         lines += [
-            f"set klt_drive_clock_port [get_ports {clock_port}]",
+            f"set klt_drive_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_drive_candidates "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_drive_clock_port]",
             f"set klt_drive_mapped [list {mapped}]",
@@ -3749,15 +3744,15 @@ def _sta_script_lines(
     if sdf_path is not None and spef_path is None:
         raise ValueError("sdf_path requires spef_path")
     lines = [
-        f"read_lef {tech_lef}",
-        f"read_lef {cell_lef}",
+        f"read_lef {_tcl_literal(tech_lef)}",
+        f"read_lef {_tcl_literal(cell_lef)}",
     ]
-    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
     lines += [
-        f"read_def {def_path}",
-        f"read_liberty {liberty_path}",
+        f"read_def {_tcl_literal(def_path)}",
+        f"read_liberty {_tcl_literal(liberty_path)}",
     ]
-    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
@@ -3783,7 +3778,7 @@ def _sta_script_lines(
         lines += _spef_net_check_lines(spef_net_names or [])
         lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
         lines.append(f'puts "{_SPEF_READ_BEGIN}"')
-        lines.append(f"read_spef {spef_path}")
+        lines.append(f"read_spef {_tcl_literal(spef_path)}")  # issue #5708
         lines.append(f'puts "{_SPEF_READ_END}"')
         if sdf_path is not None:
             lines.append(write_sdf_line(sdf_path))
@@ -3877,20 +3872,20 @@ def _sta_netlist_script_lines(
     shapes throughout, differing only in ``geometry_source``/the estimate
     provenance fields.
     """
-    lines = [f"read_liberty {liberty_path}"]
+    lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
     # Issue #2635 (`request.macros`): each macro's corner-matching liberty
     # right after the standard-cell one, each macro's LEF right after the
     # cell LEF -- both necessarily before `read_verilog`/`link_design`,
     # which is where an undeclared macro surfaces as `ORD-2013`.
-    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
     lines += [
-        f"read_lef {tech_lef}",
-        f"read_lef {cell_lef}",
+        f"read_lef {_tcl_literal(tech_lef)}",
+        f"read_lef {_tcl_literal(cell_lef)}",
     ]
-    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
     lines += [
-        f"read_verilog {verilog_path}",
-        f"link_design {hdl_toplevel}",
+        f"read_verilog {_tcl_literal(verilog_path)}",
+        f"link_design {_tcl_literal(hdl_toplevel)}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _extra_clock_lines(clock_extras)
@@ -3908,6 +3903,7 @@ def _sta_netlist_script_lines(
         report_instances,
         boundary,
     )
+    # Mode is enum-validated; model is a braced Tcl word (no substitution).
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:
