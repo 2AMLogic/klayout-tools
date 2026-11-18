@@ -15929,11 +15929,6 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
 
     assert result["status"] == "drifted"
     by_field = {check["field"]: check for check in result["checks"]}
-    # Issue #2659 narrowed this to the *reference* side: `layout` is now the
-    # `{path, scope}` envelope, resolved against the repo root of the
-    # report's own directory, so it no longer hits the anchoring trap at all
-    # (asserted directly below, and from a third directory in
-    # `test_check_lvs_report_re_hashes_a_repo_scoped_layout_from_another_checkout`).
     check = by_field["environment.reference_sha256"]
     assert check["match"] is False
     assert check["expected"] is not None
@@ -15945,6 +15940,10 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     )
     assert os.path.realpath(missing["found_relative_to_report"]) == os.path.realpath(
         pair / "ref.spice"
+    )
+    assert missing["hint"] == (
+        "run --check from the report's directory, or pass --layout/an absolute path; "
+        f"request-file-relative paths resolve against {pair.resolve()}"
     )
     assert by_field["environment.layout_sha256"]["match"] is True
     assert "input_not_found" not in by_field["environment.layout_sha256"]
@@ -16011,6 +16010,7 @@ def test_check_lvs_report_deleted_input_has_no_report_relative_fallback(tmp_path
     assert missing["path"] == layout_path
     assert missing["resolved"] == layout_path
     assert missing["found_relative_to_report"] is None
+    assert missing["hint"] is None
     assert "input_not_found" not in by_field["environment.reference_sha256"]
 
 
