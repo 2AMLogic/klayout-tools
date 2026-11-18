@@ -38,8 +38,8 @@ def _cards(text: str) -> list[tuple[int, int, str]]:
     """Top-level (outside ``.subckt``) logical cards of ``text`` as
     ``(first_line, last_line, joined_text)`` -- ``+`` continuations joined,
     ``;``/``$`` tail comments dropped by the shared
-    :func:`strip_spice_inline_comment`. Line indices are 0-based and
-    inclusive."""
+    :func:`strip_spice_inline_comment`, cards left empty by that strip are
+    dropped. Line indices are 0-based and inclusive."""
     lines = text.split("\n")
     cards: list[tuple[int, int, str]] = []
     depth = 0
@@ -55,6 +55,8 @@ def _cards(text: str) -> list[tuple[int, int, str]]:
             joined += " " + lines[index].strip()[1:].strip()
             index += 1
         joined = strip_spice_inline_comment(joined)
+        if not joined:
+            continue
         lowered = joined.lower()
         if lowered.startswith("."):
             word = lowered.split(None, 1)[0]

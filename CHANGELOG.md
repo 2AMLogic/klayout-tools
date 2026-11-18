@@ -14,6 +14,40 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --repin -o FILE` is now a usage error instead of a silent
+  no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
+  stdout and never created `FILE` — the one mode that dropped a flag the user
+  typed, while every other `klt signoff` mode honours `-o`. `-o`/`--output`
+  now joins `--fleet`, `--attest`, `--check` and `--describe-grader` among the
+  forms `--repin` refuses by name (exit `2`, before the manifest is read or
+  rewritten). `--repin` still writes no output file; the JSON envelope is on
+  stdout as before. The other report/attest inputs `--repin` ignores
+  (`--tiers-doc`, `--inventory`, `--input`, `--allow-generator-exec`,
+  `--generator-approvals`) are unchanged.
+
+- **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
+  entries** (#5527, 2026-11-13): after an attestation inventory changed,
+  `klt signoff --attest` regenerated the envelope but the manifest's pin
+  still named the old input hash, so the next `--manifest` run silently
+  graded the item `unmet`/`stale_evidence` — and the only fix was a hand
+  edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
+  pins in place from the evidence they name. It rewrites a pin **only** when
+  the grader re-derived the live hash from the artifact itself
+  (`input_verified: true`) — the gate is that flag, never the evidence
+  kind, so a `drc`/`lvs`/`extract`/`sim` pin is re-pinned too whenever its
+  artifact resolves. A stale pin it could not re-verify (for example a `drc`
+  report whose named layout does not resolve here, where the pin is the
+  manifest author's independent claim about which revision was checked) is
+  left intact and reported as skipped, and an entry that pins nothing is
+  never given a pin.
+  A manifest with nothing to re-pin is not written at all. The JSON payload
+  (`schema_version: 1`) lists one record per changed and per skipped entry;
+  `--repin` requires `--manifest` (not `-`) and is a usage error combined
+  with the envelope `<file>` arguments, `--fleet`, `--attest`, `--check` or
+  `--describe-grader`. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
+  section.
+
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
@@ -29,6 +63,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   that declares `inputs` reports `provenance.input.paths` instead of
   `provenance.input.path`, so a manifest citing it must re-pin. No grader
   change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+- **`klt power` judges EM on a split arm's cross-section, not row by row**
+  (#6449, 2026-11-17, additive — no `schema_version` bump): where two arms of
+  one merged polygon join, the mesh's vertex grid cuts the wider arm
+  lengthwise into parallel rows, and a pad/load snapping to one node can put
+  the whole port current through a single row against a *row-width* limit —
+  an over-limit `em_verdict` finding on metal whose true cross-section
+  density is within limit. For each cut perpendicular to the flow, the
+  signed sum of the crossing branches is now compared against
+  `current_limit_a_per_um *` the contiguous conducting width, when the cut's
+  branches tile all the polygon's metal there and every member has a solved
+  current and a limit (never across a gap, layer or polygon; a true narrow
+  neck keeps its own width). `em_verdict` entries judged this way gain
+  `basis: "cross_section"`, `width_um` and `section_edge_ids`; every other
+  entry (vias, rectangular rails, edges on no eligible cut) is byte-identical
+  to before, and `coverage`/edge counts are unchanged. A cross-section can
+  relax a per-row finding, never tighten one, so a layout that failed only
+  because of the row split now passes while a real over-limit still fails.
+  Distributed pad/load injection and the IR solver are unchanged.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
@@ -72,6 +124,50 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Added** (#5850): an item 9 `testbenches` entry may declare `depends_on` —
+  repo-relative paths the bench depends on (a helper it imports, a model
+  card it includes) — and each declared dependency is hashed into the
+  envelope as its own `present` check (role `testbench_dependency`,
+  carrying its bench), so editing a helper a shipped testbench depends on
+  is caught by `klt signoff --attest 9 --check` (exit 3) instead of
+  passing green. Member binding stays shallow — undeclared dependencies
+  are not resolved — and every member now emits a passing
+  `dependency_binding` check recording how many edges it declared, so the
+  envelope says whether binding happened instead of implying completeness.
+  A dependency may be shared across entries (and may itself be an
+  inventoried member); a repeat within one entry is refused (exit 1).
+  An envelope committed before this change no longer reproduces under
+  `--check` (every member now emits the `dependency_binding` disclosure
+  row that older envelopes lack), so it is drift until re-attested once:
+  run `klt signoff --attest 9 --inventory <inv> -o <envelope>` and commit
+  the new envelope. Additive; `schema_version` unchanged. First ships in
+  the first release after `v0.9.2` (which refuses `depends_on` as an
+  unknown field).
+- **Behaviour change for consumers locating `klt synthesize` artifacts by
+  path: they moved from flat `.klt/synthesize/` to
+  `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
+  (#6228, 2026-11-17; the layout itself shipped with #2119): since #2119
+  each invocation exclusively creates its own directory beneath the request
+  file's `.klt/synthesize/`, so the artifacts that previously landed flat at
+  `<request-dir>/.klt/synthesize/<hdl_toplevel>_synth.v` and
+  `.klt/synthesize/synth_<hdl_toplevel>.ys` are now written at
+  `<request-dir>/.klt/synthesize/<run_id>/<same names>`. The response
+  carries that run's `run_id` (additively; a caller-supplied `run_id`
+  request key also exists and exclusively reserves the directory), and all
+  existing `{path, scope}` fields still point at this invocation's files —
+  including the `{"path": null, "scope": "external"}` shape an
+  out-of-repository request reports, where the artifacts are still at
+  `<request dir>/.klt/synthesize/<run_id>/`. A flow driver that resolves
+  its netlist by the old documented flat path now fails to find it, and one
+  that globs `.klt/synthesize/` newest-first can silently pick up a previous
+  run's netlist; resolve via the response's paths or `run_id` instead,
+  never by newest-mtime globbing. There is no mutable `latest` alias, by
+  design — it would reintroduce the cross-run ambiguity the per-invocation
+  isolation fixed; a pipeline that needs a stable path should set
+  `outputs.dir`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
+  "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
+  only; no `schema_version` bump.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -173,6 +269,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `measurements[].name`. Additive: `spec_row`, `coverage`, `status` and the exit
   code are unchanged and `schema_version` does not bump. See
   [`docs/cli/pex.md`](docs/cli/pex.md) "`delta[]` entries".
+- **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
+  2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
+  entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
+  itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) and embedded
+  as an absolute path in the generated Tcl, but the wrapper
+  `scripts/install-openroad-docker.sh` writes mounted only `$PWD`,
+  `$PDK_ROOT` and `$TMPDIR` — so every `klt place-and-route` /
+  `klt post-route-sta` run against a list-form corner failed at its first
+  OpenROAD stage with `cannot read file <cache>/liberty-merged/merged-*.lib`.
+  The wrapper now resolves the cache root exactly as
+  `klayout_tools.liberty_merge.cache_root()` does, `mkdir -p`s it before
+  `docker run` (Docker otherwise creates a missing bind-mount source as
+  root, issue #3151), mounts it `:ro`, and skips the mount when the path
+  duplicates `$PWD`/`$PDK_ROOT`/`$TMPDIR` (a duplicate mount point is a
+  hard `docker run` error). The mount-coverage hint for an unreadable path
+  under the cache root no longer advises "run from a common ancestor"
+  (unachievable for a cache path); it names the cache root instead. Hosts
+  with an older wrapper must re-run `scripts/install-openroad-docker.sh`
+  to regenerate it (or set `KLT_CACHE_DIR` under an already-mounted
+  directory, e.g. `$TMPDIR/klt-cache`).
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
