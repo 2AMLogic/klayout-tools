@@ -10,12 +10,18 @@ diff.
 
 **The safety rule is the whole design.** A pin is only rewritten when the
 grader itself re-derived the live hash from the artifact on disk
-(``resolution["input_verified"] is True``). For the kinds where the pin is
-the manifest author's independent claim about *which* revision was checked
-(``drc``/``lvs``/``extract``/``sim`` reports whose
-``provenance.input.content_hash`` is the report's own say-so), copying that
-claim into the manifest would defeat the staleness gate the pin exists to
-be. Those entries are left untouched and reported as skipped.
+(``resolution["input_verified"] is True``). That flag is the gate, never the
+evidence's ``kind``: a ``drc``/``lvs``/``extract``/``sim`` report whose named
+artifact resolves here is re-pinned like any other, because the value
+written is a hash this run computed, not a claim copied out of the report.
+
+What is left untouched and reported as skipped is a stale pin the grader
+could *not* re-verify (``input_verified`` is not ``True`` -- for example, a
+``drc`` report whose named layout does not resolve from this grading
+context). There the pin is the manifest author's independent claim about
+*which* revision was checked, and copying the report's own say-so
+(``provenance.input.content_hash``) into the manifest would defeat the
+staleness gate the pin exists to be.
 
 An entry that pins nothing is never *given* a pin: ``--repin`` updates an
 existing claim, it does not manufacture one.
