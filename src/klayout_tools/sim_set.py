@@ -44,7 +44,6 @@ from .sim_batch import (
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
 from .sim_set_runtime import (
-    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
@@ -302,7 +301,10 @@ def _execute_members(
     still holds a ``pending`` job -- the set then holds no more fleet capacity
     than it has member threads. A job that never launches cannot starve the
     set: past one more ``launch_budget`` the unstarted members become
-    ``not_launched`` entries instead of being submitted."""
+    ``not_launched`` entries instead of being submitted -- but, once no live
+    member remains to run them (#6278); while another member is still running,
+    its worker keeps draining the unstarted members at the reduced
+    concurrency."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)

@@ -11,10 +11,28 @@ def _mos_cap_enabled(pcell: Any) -> bool:
     return bool(pcell.mos_cap)
 
 
+def _mos_cap_mark_box_um(info: dict[str, Any]) -> tuple[float, float, float, float]:
+    """The MOS-capacitor marker box: the footprint of every unit device (real
+    and dummy), with no margin (issue #6170).
+
+    Deliberately *not* the ``voltage_flavor`` marker box, which is grown by a
+    margin to clear that marker's own enclosure rules and so also covers the
+    guard ring's COMP. gf180mcu ``DF.1c`` measures the width of ``COMP`` under
+    the capacitor marker, and the 0.42 um ring is no capacitor, so a marker
+    reaching it reports four ring-wide violations on every array."""
+    unit = info["unit"]
+    cells = [*info["cells"], *info["dummy_cells"]]
+    return (
+        min(c["x0_um"] for c in cells),
+        min(c["y0_um"] for c in cells),
+        max(c["x0_um"] + unit["total_len_um"] for c in cells),
+        max(c["y0_um"] + unit["bbox_height_um"] for c in cells),
+    )
+
+
 def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
     """Draw the MOS-capacitor marker (issue #3283) when ``pcell.mos_cap`` is
-    set: the same enclosing box as the voltage-flavor marker, so it covers
-    every unit device."""
+    set: one box over every unit device (:func:`_mos_cap_mark_box_um`)."""
     if not _mos_cap_enabled(pcell):
         return
     from klayout_tools.gen import _insert_boxes
@@ -23,7 +41,7 @@ def _insert_mos_cap_mark(pcell: Any, info: dict[str, Any], dbu: float) -> None:
         pcell.cell,
         pcell.layout.layer(pcell.mos_cap_mark_layer),
         dbu,
-        [info["voltage_flavor_mark_box_um"]],
+        [_mos_cap_mark_box_um(info)],
     )
 
 

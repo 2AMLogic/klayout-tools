@@ -66,6 +66,26 @@
 # on `$TMPDIR` are stripped before the comparison so `/tmp/` or `/tmp//`
 # does not duplicate it either).
 #
+# And it mounts the klt cache root (issue #5626): the merged `.lib` that a
+# descriptor's LIST-form `liberty` entry produces is written under
+# `$KLT_CACHE_DIR` itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`
+# -- the selection `src/klayout_tools/liberty_merge.py`'s `cache_root()`
+# performs -- and that absolute path is embedded in the
+# generated Tcl (`read_liberty <path>`), so a container that cannot see it
+# fails on its first OpenROAD stage with an opaque `cannot read file` no
+# matter how well everything else is mounted. The mount is read-only
+# (klt writes the merged file host-side before ever invoking the wrapper;
+# OpenROAD only ever `read_liberty`s it), mirroring the `$PDK_ROOT:ro`
+# precedent. Two guards the one-liner needs: the directory is `mkdir -p`'d
+# by the wrapper BEFORE `docker run` (Docker creates a missing bind-mount
+# source as root -- issue #3151's exact hazard, reachable whenever no
+# list-form corner has ever created `~/.cache/klt`), and the mount is
+# skipped when its path equals a path already mounted after stripping trailing
+# slashes (`docker run` rejects a duplicate mount point, so
+# `KLT_CACHE_DIR=$TMPDIR/` must not become a second `-v` for it). A leading
+# `~` or `~/` in KLT_CACHE_DIR expands to ${HOME:-/tmp} before mkdir or
+# comparison; unlike Python's expanduser, `~user` is left literal.
+#
 # The wrapper forwards a narrow allowlist of the caller's environment into the
 # container (issue #3821): `PLATFORM_DIR` (the ORFS idiom, read by Tcl as
 # `$::env(PLATFORM_DIR)`) when it is set -- even if empty -- and every variable
@@ -75,7 +95,7 @@
 # host state and break reproducibility). Because values are verbatim, a
 # host-path `PLATFORM_DIR` only resolves in the container if it lies under a
 # mounted path ($PWD, $PDK_ROOT, $TMPDIR, plus /tmp itself when $TMPDIR
-# differs from it -- issue #5878).
+# differs from it -- issue #5878 -- or the klt cache root).
 
 set -euo pipefail
 
@@ -125,7 +145,9 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # "Docker: extract the binary onto \$PATH" recipe, plus a \$PDK_ROOT mount
 # (falling back to \`klt pdk find\` when \$PDK_ROOT is unset -- issue #1868,
 # see this generator's own header comment for why), a \$TMPDIR mount, and
-# /tmp itself kept mounted whenever \$TMPDIR differs from it (issue #5878).
+# /tmp itself kept mounted whenever \$TMPDIR differs from it (issue #5878),
+# and the klt cache root that holds the merged Liberty file a list-form
+# descriptor's \`liberty\` entry produces (issue #5626).
 #
 # Runs the image by PINNED DIGEST, never by the moving \`:latest\` tag, so this
 # wrapper keeps executing the exact OpenROAD build it was installed against
@@ -140,8 +162,10 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # because that uid usually has no passwd entry (hence no home) in the image.
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
+MOUNTED_PATHS=("\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then
     MOUNTS+=(-v "\$PDK_ROOT:\$PDK_ROOT:ro")
+    MOUNTED_PATHS+=("\$PDK_ROOT")
 elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     # \$PDK_ROOT unset -- mirror \`klt place-and-route\`'s own PDK resolution
     # (find_pdk()'s search order) so the mount matches what it will actually
@@ -150,10 +174,12 @@ elif command -v klt >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     RESOLVED_PDK_ROOT="\$(klt pdk find --format json 2>/dev/null | jq -r '.root // empty' 2>/dev/null || true)"
     if [[ -n "\$RESOLVED_PDK_ROOT" ]]; then
         MOUNTS+=(-v "\$RESOLVED_PDK_ROOT:\$RESOLVED_PDK_ROOT:ro")
+        MOUNTED_PATHS+=("\$RESOLVED_PDK_ROOT")
     fi
 fi
 TMPDIR_MOUNT="\${TMPDIR:-/tmp}"
 MOUNTS+=(-v "\$TMPDIR_MOUNT:\$TMPDIR_MOUNT")
+MOUNTED_PATHS+=("\$TMPDIR_MOUNT")
 # A \$TMPDIR other than /tmp stops /tmp itself being visible inside the
 # container, but callers legitimately pass /tmp-resident paths (issue #5878:
 # with any other TMPDIR exported, an input under /tmp failed with an opaque
@@ -161,13 +187,51 @@ MOUNTS+=(-v "\$TMPDIR_MOUNT:\$TMPDIR_MOUNT")
 # host). Keep /tmp mounted too unless TMPDIR already resolves to it --
 # docker rejects a duplicate mount point, and all trailing slashes are
 # stripped from the comparison so TMPDIR=/tmp/ or /tmp// does not
-# produce one.
-TMPDIR_CMP="\$TMPDIR_MOUNT"
-while [[ "\$TMPDIR_CMP" == */ && "\$TMPDIR_CMP" != / ]]; do
-    TMPDIR_CMP="\${TMPDIR_CMP%/}"
-done
+# produce one. /tmp is recorded in MOUNTED_PATHS so the klt cache-root
+# dedupe below also sees it (KLT_CACHE_DIR=/tmp must not become a second
+# -v for it).
+strip_trailing_slashes() {
+    local path="\$1"
+    while [[ "\$path" == */ && "\$path" != / ]]; do
+        path="\${path%/}"
+    done
+    printf '%s' "\$path"
+}
+TMPDIR_CMP="\$(strip_trailing_slashes "\$TMPDIR_MOUNT")"
 if [[ "\$TMPDIR_CMP" != "/tmp" ]]; then
     MOUNTS+=(-v "/tmp:/tmp")
+    MOUNTED_PATHS+=("/tmp")
+fi
+# klt cache root (issue #5626): the merged .lib a list-form \`liberty\`
+# descriptor produces is written under it and embedded as an absolute path
+# in the generated Tcl, so the container must see it. Uses the same selection
+# as src/klayout_tools/liberty_merge.py's cache_root(), expanding only ~ and
+# ~/ in KLT_CACHE_DIR (not ~user), with HOME defaulting to /tmp. mkdir -p
+# BEFORE docker run -- Docker would otherwise create a missing bind-mount
+# source as root (issue #3151). The mount is skipped when the path already
+# equals one mounted above after stripping trailing slashes from both paths
+# (keeping /) -- docker run rejects a duplicate mount point. Only comparisons
+# are normalized; existing mount arguments and permissions stay intact.
+# \$HOME is defaulted (\${HOME:-/tmp}) and a failed mkdir degrades to no
+# cache mount instead of killing the run: this block executes on EVERY
+# invocation under \`set -euo pipefail\`, and an unset or unwritable HOME
+# must not stop \`openroad -version\` et al. A missing cache root only
+# matters for list-form corners, which produce their own diagnostic.
+KLT_CACHE_ROOT="\${KLT_CACHE_DIR:-\${XDG_CACHE_HOME:-\${HOME:-/tmp}/.cache}/klt}"
+if [[ "\${KLT_CACHE_DIR:-}" == \~ || "\${KLT_CACHE_DIR:-}" == \~/* ]]; then
+    KLT_CACHE_ROOT="\${HOME:-/tmp}\${KLT_CACHE_DIR:1}"
+fi
+mkdir -p "\$KLT_CACHE_ROOT" 2>/dev/null || KLT_CACHE_ROOT=""
+KLT_CACHE_CMP="\$(strip_trailing_slashes "\$KLT_CACHE_ROOT")"
+CACHE_DUPE=0
+for m in "\${MOUNTED_PATHS[@]}"; do
+    if [[ "\$KLT_CACHE_CMP" == "\$(strip_trailing_slashes "\$m")" ]]; then
+        CACHE_DUPE=1
+        break
+    fi
+done
+if [[ -n "\$KLT_CACHE_ROOT" && "\$CACHE_DUPE" -eq 0 ]]; then
+    MOUNTS+=(-v "\$KLT_CACHE_ROOT:\$KLT_CACHE_ROOT:ro")
 fi
 # Forward PLATFORM_DIR and OPENROAD_* by name (issue #3821).
 ENV_ARGS=()
