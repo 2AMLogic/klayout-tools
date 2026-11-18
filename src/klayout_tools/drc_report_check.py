@@ -1,4 +1,5 @@
-"""Hash checks behind ``klt drc --check`` (issues #1106, #4986).
+"""Hash checks behind ``klt drc --check`` (issues #1106, #4986), and the
+``--check --rerun`` diff exclusions (issue #5660).
 
 Split out of :mod:`klayout_tools.drc` to keep that module under its per-file
 size ceiling; :func:`klayout_tools.drc.check_drc_report` is the public entry.
@@ -10,7 +11,13 @@ import os
 from typing import Any
 
 from ._provenance import content_hash
-from ._report_verify import get_path, hash_check
+from ._report_verify import (
+    VOLATILE_PROVENANCE_PATHS,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    strip_path_patterns,
+)
 from ._report_verify_hints import deck_not_found_entry, input_hash_check
 from .decks import deck_source_path
 
@@ -44,9 +51,10 @@ def resolve_report_deck(
 
     Order: (1) ``deck_override`` (``--deck-file``) wins -- for a
     ``klayout``-engine report only, so an ``--engine both`` envelope's
-    curated side keeps its name-resolved deck and a curated single report
-    ignores the flag, exactly as ``--rerun`` already rejects it -- and only
-    when it names an existing file; a missing override is itself the
+    curated side keeps its name-resolved deck; a curated *single* report
+    never reaches here with an override, because :func:`report_checks`
+    rejects the combination exactly as ``--rerun`` does (issue #6070) -- and
+    only when it names an existing file; a missing override is itself the
     ``deck_not_found`` diagnostic, never a silent ``None`` hash; (2) the
     report's own ``deck`` -- for ``--engine curated`` a deck *name*
     resolved to its module source via :func:`deck_source_path`, for
@@ -103,6 +111,7 @@ def _report_hash_checks(
             report_path,
             override=input_path,
             hasher=content_hash,
+            override_hint="an absolute path as the positional <file> argument",
         ),
         deck_check,
     ]
@@ -142,11 +151,21 @@ def report_checks(
 
     Issue #4986: an ``--engine both`` envelope nests each engine's own report
     under ``reports.<engine>``; each is checked with the same logic, fields
-    prefixed with the engine. A null native side (engine failed / unavailable)
+    prefixed with the engine. ``deck_path`` (``--deck-file``) on a curated
+    single-engine report raises :class:`klayout_tools.drc.DrcError` (issue
+    #6070). A null native side (engine failed / unavailable)
     is skipped, never reported as drift. Returns ``[]`` for a crosscheck
     envelope with no embedded report (the caller raises).
     """
     if committed.get("mode") != "crosscheck":
+        if deck_path is not None and committed.get("engine") != "klayout":
+            # Issue #6070: same contract as ``--check --rerun`` -- never a
+            # silently ignored flag. (Function-local: drc imports this module.)
+            from .drc import DrcError
+
+            raise DrcError(
+                "--deck-file cannot be combined with --check on a curated report"
+            )
         return _report_hash_checks(
             committed,
             report_path=report_path,
@@ -170,3 +189,91 @@ def report_checks(
                 )
             )
     return checks
+
+
+#: ``klt drc --check --rerun`` exclusions (issue #5660): the volatile
+#: provenance fields plus the two surfaces an ``--engine klayout`` run now
+#: always populates. The same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` -- "a
+#: field a report never carried cannot itself have drifted".
+#:
+#: * ``environment.klayout_binary`` -- a host-local path (#2849 precedent): the
+#:   same KLayout installed under another prefix is not a change in evidence.
+#: * ``provenance.klayout_module_version`` -- the pip-wheel axis, volatile like
+#:   its sibling ``provenance.klayout_version``.
+DRC_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("environment", "klayout_binary"),
+    ("provenance", "klayout_module_version"),
+}
+
+
+def _rerun_diff_view(report: dict[str, Any]) -> dict[str, Any]:
+    """``report`` minus :data:`DRC_RERUN_EXCLUDE_PATHS`, and minus an
+    ``environment`` block those exclusions left empty.
+
+    The second step is what makes a report committed before #5660 (no
+    ``environment`` key at all) re-run as ``match``: path exclusion alone
+    leaves ``{}`` on the fresh side against a *missing* key on the committed
+    side, which the key-union diff reports as drift on ``environment`` itself.
+    A block that still holds any other key is kept, so a future
+    ``environment`` field stays evidence until someone excludes it.
+    """
+    view = strip_path_patterns(report, DRC_RERUN_EXCLUDE_PATHS)
+    if view.get("environment") == {}:
+        del view["environment"]
+    return view
+
+
+#: ``provenance.klayout_version_mismatch`` is computed from a different input on
+#: each side of #5660: the pip wheel before it, the standalone binary after it
+#: (``provenance.klayout_module_version`` is written exactly when the
+#: binary-derived value is in force, so its presence marks the new definition).
+_MISMATCH_PATH: frozenset[tuple[str, ...]] = frozenset(
+    {("provenance", "klayout_version_mismatch")}
+)
+
+
+def _carries(report: dict[str, Any], key: str) -> bool:
+    provenance = report.get("provenance")
+    return isinstance(provenance, dict) and key in provenance
+
+
+def _mismatch_redefined(committed: dict[str, Any], fresh: dict[str, Any]) -> bool:
+    """Whether ``klayout_version_mismatch`` crosses the #5660 definition
+    boundary: the committed report carries the flag but predates the change
+    (no ``klayout_module_version``) while the fresh one is binary-derived.
+    ``--engine curated`` reports never carry ``klayout_module_version`` on
+    either side, so their wheel-derived flag keeps being compared; a committed
+    report that never carried the flag has nothing to mark not-compared and
+    keeps drifting on a fresh one that grew it, exactly as before."""
+    return (
+        _carries(fresh, "klayout_module_version")
+        and not _carries(committed, "klayout_module_version")
+        and _carries(committed, "klayout_version_mismatch")
+    )
+
+
+def drc_rerun_result(
+    *, report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
+) -> dict[str, Any]:
+    """:func:`~klayout_tools._report_verify.build_rerun_result` with the
+    DRC-specific exclusions of :data:`DRC_RERUN_EXCLUDE_PATHS`. ``fresh`` is
+    still embedded verbatim.
+
+    Across the #5660 definition boundary the two reports' mismatch flags are
+    not comparable (a divergent host flips ``true`` -> ``false`` with nothing
+    in the evidence changed), so the fresh *view* drops the flag. The
+    committed value then lands in ``not_compared`` through the #5866 rule
+    (a provenance scalar the fresh side does not carry) -- auditable, and
+    neither ``status`` nor the exit code reflects it. Between two post-#5660
+    reports (or two curated ones) the flag is compared as before."""
+    fresh_view = _rerun_diff_view(fresh)
+    if _mismatch_redefined(committed, fresh):
+        fresh_view = strip_path_patterns(fresh_view, _MISMATCH_PATH)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=DRC_RERUN_EXCLUDE_PATHS,
+        committed_for_diff=_rerun_diff_view(committed),
+        fresh_for_diff=fresh_view,
+    )

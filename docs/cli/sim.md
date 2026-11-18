@@ -1013,8 +1013,11 @@ outstanding units are dispatched, `--resume` **harvests** the map: each
 recorded shard's `status.json` is read once, a shard whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
-`resume: reused N checkpointed corner(s)` summary and never re-billed. Shards
-the map records `submitted` (never launched), still `running`/`interrupted`,
+`resume: reused N checkpointed corner(s)` summary and never re-billed.
+Harvested reuse is reported through `environment.resume.resumed_corners`,
+not as `environment.remote.fleet[]` entries with `resumed: true`; `fleet[]`
+lists only shards dispatched after the harvest. Shards the map records
+`submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
 grouping is unchanged is launched under its recorded job id instead). A map
@@ -1529,6 +1532,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+
+  On a **sharded single request** (`remote.hosts > 1`, or a split job)
+  `--capacity-retries N` ([#5567](https://github.com/2AMLogic/klayout-tools/issues/5567))
+  recovers shards lost to a capacity refusal inside the same invocation: once
+  every other shard has finished and released its instance, the shards lost
+  with `batch_no_capacity` / `batch_concurrency_cap` are launched again, in up
+  to `N` further passes with doubling backoff (5s, 10s, ...), each pass with a
+  fresh `--wait-for-capacity` budget. The already-submitted job of each such
+  shard is launched (nothing is submitted twice, so `batch-shards.json` and a
+  later `--resume` stay consistent). A recovered shard reports its real
+  corners in global order with no `lost_shard`; a shard still refused after
+  `N` passes is reported exactly as before and stays resumable. Shards lost
+  for any other reason are never retried, and an interrupt during a backoff
+  returns the partial report. Default `0` (off) is byte-identical to before; an
+  unsharded single job has nothing to retry.
 - **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
   Before anything is submitted, every member is resolved (with
   `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
@@ -1621,10 +1639,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
   each one resumes from its own directory, `<outdir>/<stem>/` (see "Member
   directories" above). Re-run
-  the same set with the same `-o`: a sharded request re-attaches to the shard
-  jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
-  resubmits only the shards it cannot collect; a request with no prior
-  directory runs fresh. A non-sharded or deck-list request resumes through its
+  the same set with the same `-o`: a sharded request harvests finished jobs
+  recorded in its `batch-shards.json`, reports their reused units in
+  `environment.resume.resumed_corners`, and dispatches only the outstanding
+  units (`environment.remote.fleet[]` covers that dispatch); a request with no
+  prior directory runs fresh. A non-sharded or deck-list request resumes through its
   own checkpoint (the set always runs on `batch`, which supports `--resume`
   for both). A request whose resume is refused -- a shard map written for a
   different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
@@ -2095,9 +2114,11 @@ live (`jobs_prefix`, `region`, `profile`; never the bucket) and per shard its `i
 A client stopped mid-run (terminal timeout, session end) therefore leaves a
 durable record of which jobs were never launched; the end-of-run stderr line
 names the map and how many shards are `submitted` but not launched. A re-run
-with `--resume` and the same `--outdir` re-attaches to every recorded shard
-through the `--attach` path: a `done` job is collected, a live one is polled,
-a shard still in `state: "submitted"` is **launched** first -- but only while
+with `--resume` and the same `--outdir` first harvests terminal shards, as
+described above. When a remaining shard's grouping still matches its recorded
+digest, dispatch re-attaches through the `--attach` path: a `done` job is
+collected, a live one is polled, a shard still in `state: "submitted"` is
+**launched** first -- but only while
 the fleet has published no `status.json` for it, and never from `launching` or
 `launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
@@ -2107,9 +2128,11 @@ poll instead of another full window) is submitted again under a new id,
 overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
 the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
 the grace the first run already waited. A `batch_poll_timeout` shard is never
-resubmitted (that job may still be running). Each
-`environment.remote.fleet[]` entry carries `resumed: true|false`. A map
-written before these fields existed carries no `state` and is only ever polled.
+resubmitted (that job may still be running). The shards dispatched after the
+harvest appear in `environment.remote.fleet[]`, with `resumed: true|false`
+describing dispatch-time re-attachment. Harvested shards are absent from
+`fleet[]`; their reused units count toward `environment.resume.resumed_corners`.
+A map written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
@@ -5087,6 +5110,7 @@ quantity instead; `klt sim` evaluates it against the spectrum:
 | `at_hz` | Spot density (per √Hz) at that frequency, interpolated between the two bracketing spectrum points -- in log-frequency for a `dec`/`oct` sweep, linearly for `lin`; exact on a grid point. |
 | `band_hz` | `[lo, hi]`: total rms over the band, `sqrt(∫ density² df)`, trapezoidal on the swept grid with the band edges interpolated in the squared density. |
 | `mechanism` | Optional. `"thermal"` or `"flicker"`: narrow the value to that share of the total rather than the whole spectrum. See "Per-mechanism shares" below. |
+| `top_n` | Optional. A positive integer: also return the `top_n` largest noise contributors by name, in an additive `noise.contributors` member. `value` is unchanged. See "Largest contributors" below. |
 
 Exactly one of `at_hz` / `band_hz`. The `noise1.` plot prefix is internal; it
 is never part of a request. The value is an ordinary
@@ -5155,7 +5179,9 @@ reported -- it is a sound *lower bound* on that mechanism -- so an incomplete
 decomposition can never pass silently into an evidence record.
 
 The same evidence rides an additive `noise` object on that
-`corners[].measurements[]` entry (present only for a `mechanism` entry):
+`corners[].measurements[]` entry (present on every `mechanism` entry; a
+`top_n` request adds a `contributors` member to it, and puts a `noise` object
+holding only `contributors` on a total entry -- see "Largest contributors"):
 
 ```json
 { "name": "thermal_rms", "value": 3.09e-05, "status": "pass",
@@ -5183,7 +5209,80 @@ the scalar leaves the corner. This reduction needs no artifact retention
 (`options.keep_artifacts: false`), removing that structural constraint on
 `batch`/`remote`. End-to-end batch verification remains tracked in
 [#6470](https://github.com/2AMLogic/klayout-tools/issues/6470). A request with
-no `mechanism` entry emits a byte-identical deck and an unchanged report.
+no `mechanism` (or `top_n`) entry emits a byte-identical deck and an
+unchanged report.
+
+### Largest contributors (`noise.top_n`)
+
+Issue [#5558](https://github.com/2AMLogic/klayout-tools/issues/5558). A
+`mechanism` share says the block is flicker-limited; a sizing decision needs
+the device. An optional `top_n` -- a positive integer, on either form and on
+either `at_hz` or `band_hz` -- returns the `top_n` largest noise generators by
+name:
+
+```json
+"measurements": [
+  { "name": "vn_band", "noise": { "quantity": "onoise", "band_hz": [100, 1e6], "top_n": 3 }, "unit": "V" }
+]
+```
+
+`value`, `status`, `margin` and grading are **exactly** what the same entry
+returns without `top_n` (with or without `mechanism`): the list is an
+additive sibling and never changes what the entry means, so `limits`, Monte
+Carlo statistics and `klt yield` are unaffected. The response gains one member,
+`noise.contributors` -- shown here for an entry without `mechanism`, where
+`noise` holds nothing else:
+
+```json
+{ "name": "vn_band", "value": 1.05258e-04, "unit": "V", "status": "pass", "margin": null,
+  "noise": { "contributors": [
+    { "name": "m1_1overf",     "value": 1.0340e-04, "mechanism": "flicker" },
+    { "name": "m1_id",         "value": 1.4866e-05, "mechanism": "thermal" },
+    { "name": "rload_thermal", "value": 1.2874e-05, "mechanism": "thermal" }
+  ] } }
+```
+
+On a `mechanism` entry the list joins the `noise` object described above
+(`mechanism`, `total`, `unclassified`, `residual_relative`,
+`unclassified_suffixes`), which is otherwise unchanged; a `mechanism` entry
+without `top_n` is byte-identical to before.
+
+| Field | Meaning |
+| ----- | ------- |
+| `name` | The leaf's ngspice vector name without its leading `onoise` and the one separator after it -- the flattened instance path plus generator, e.g. `m1_1overf`, `m.x1.mi_1overf`. Report output only; never parsed, split or normalised, and never accepted as request input. |
+| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (exactly for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
+| `mechanism` | `"thermal"`, `"flicker"`, or `null` for a generator the suffix table does not classify (gate leakage, junction shot noise). |
+
+- **Leaves, not device totals.** A device's total vector would hide which of
+  its generators dominates, so only individual generators are ranked.
+- **Order.** Largest `value` first; ties break by `name` ascending, so the
+  order never depends on rawfile order. Fewer generators than `top_n` returns
+  them all -- not an error.
+- **Zero-power generators are omitted.** sky130's `igb`/`igd`/`igs` are
+  emitted for every MOSFET and are identically zero at ordinary biases; a
+  generator whose reduced value is exactly `0.0` never pads the list.
+- **With `mechanism`**, only that mechanism's generators are ranked; without
+  it, all of them are, unclassified ones included (`mechanism: null`).
+- **No fraction or count fields.** A share is `value` over the entry's
+  `value` (or `noise.total`); derive it.
+
+The two refusals `mechanism` has apply to `top_n` as well, naming the entry:
+`quantity: "inoise"` (no per-contributor input-referred spectra exist), and
+`analysis.args` without the trailing `pts_per_summary` argument. A `top_n`
+that is not a positive integer (`0`, `-1`, `1.5`, `true`, `"3"`) is refused at
+validation. A total entry's `value` still comes from the total form's
+`let`/`print` path -- `top_n` only adds the rawfile dump and its reduction.
+
+If the spectra rawfile is missing or unreadable, a **total** entry keeps its
+`value` and `status`, omits `noise.contributors`, and the corner gains a
+`warning` diagnostic (`code: "measurement"`) whose message leads with
+`[noise_mechanism_rawfile_missing]` / `[noise_mechanism_unreadable]` -- never
+`status: "error"`, because the total was fine. A `mechanism` entry keeps its
+existing error behaviour.
+
+Limits: `analysis_steps[]`, `engine: "xyce"` and input-referred (`inoise`)
+contributors are not supported, for the reasons `mechanism` is not; there are
+no limits or grading on an individual contributor.
 
 ### Runner version
 
@@ -6804,9 +6903,9 @@ circuit in one netlist, each carrying its own node/source names, its own
 stimulus and its own start state — has two shipped shapes and neither scales
 in the middle: `corners.params` used as a *case* axis declares M measurements
 once but costs one ngspice process per case per PVT point (N x the corner
-count), while N hand-replicated copies in one deck cost 15 processes but need
-every reduction hand-declared against every copy's own node names (N x M
-declarations). `options.measurement_cases` is the shape in between: declare
+count), while N hand-replicated copies in one deck cost one process per PVT
+point but need every reduction hand-declared against every copy's own node
+names (N x M declarations). `options.measurement_cases` is the shape in between: declare
 the N copy scopes once and write each reduction once, with a `{case}`
 placeholder where the copy's own names go.
 
@@ -6829,7 +6928,7 @@ stays O(N x M) results, which is the answer's own size; the process count
 stays at the corner count. Each expanded result carries a `case` provenance
 field (alongside the `step`/`derived_from` fields an `analysis_steps[]`
 measurement carries) on the corner's `measurements[]` entry and on the
-report's `metrics.measurements` rollup entry, and is graded through the
+report's top-level `measurements[]` rollup entry, and is graded through the
 existing `limits`/`plausible_range`/Monte Carlo paths unchanged.
 
 ### Rules

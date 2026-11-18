@@ -149,16 +149,15 @@ def _worst_path_stage_lines(report_path_stages: bool) -> list[str]:
 #: which is what separates data rows from the table's one-number description
 #: rows (``data arrival time``) and its one-number capture rows
 #: (``^ ff_b/CLK (...)`` has no ``Delay`` column value). The edge field is
-#: optional in the pattern (all rows observed live carry ``^``/``v``, but
-#: the identity that matters -- ``pin`` -- is exact-matched against the
-#: worst-path record's own ``startpoint``/``endpoint``, so a loose pattern
-#: can only ever over-*match*, never mis-attribute a row: the description
-#: rows that share this shape (``clock clk (rise edge)``,
-#: ``clock network delay (ideal)``) carry pin names that never equal a
-#: data path's own startpoint or endpoint, and they sit outside the
-#: startpoint..endpoint window anyway).
+#: optional for compatibility (all rows observed live carry ``^``/``v``),
+#: but must be a separate whitespace-delimited token so a pin beginning
+#: with ``v`` or ``^`` is preserved when the edge field is absent.
+#: ``_stage_rows`` bounds the stage window by exact startpoint/endpoint
+#: matches. Description rows that share this shape (``clock clk (rise
+#: edge)``, ``clock network delay (ideal)``) sit outside that window;
+#: matching the endpoints alone does not validate intermediate pin names.
 _STAGE_ROW_RE = re.compile(
-    r"^(?P<incr>-?\d+\.\d+)\s+(?P<path>-?\d+\.\d+)\s*(?P<edges>[\^v]{0,2})\s*"
+    r"^(?P<incr>-?\d+\.\d+)\s+(?P<path>-?\d+\.\d+)\s+(?:(?P<edges>[\^v]{1,2})\s+)?"
     r"(?P<pin>\S+)\s+\((?P<cell>[^)]+)\)$"
 )
 
