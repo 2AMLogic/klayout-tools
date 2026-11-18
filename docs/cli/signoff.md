@@ -536,10 +536,12 @@ item 3 `unmet` (`check_failed`), with
 A `--rules` subset report never qualifies. Paths resolve against the working
 directory.
 
-**Attribution limit.** The RDB/external-script engine reports
-`source_cell: null` (`drc.md`), so grading is by per-rule counts; where a
-violation does carry a `source_cell` (curated engine), it must be an excepted
-cell or lie beneath one (an excepted cell appears in its `source_path`). A clean report grades as before and ignores the list.
+**Attribution.** Violations that carry a `source_cell` -- the curated
+engine, and (since the `klayout` engine's per-instance attribution) RDB
+markers that fall inside a placed instance (`drc.md`) -- must be an excepted
+cell or lie beneath one (an excepted cell appears in its `source_path`).
+Markers with `source_cell: null` (e.g. top-level geometry) are graded by
+per-rule counts alone. A clean report grades as before and ignores the list.
 
 Applied exceptions appear in item 3's `citation.foundry_cell_exceptions`
 (JSON; each with `cell`, `cell_hash`, `rules`, `bare_cell_report`) and as
