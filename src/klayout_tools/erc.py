@@ -3394,12 +3394,12 @@ def _input_hash_check(
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
     path the committed report echoes back (``file``/``spec``).
 
-    Hashes via :func:`~klayout_tools._provenance.content_hash` because the
-    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
-    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
-    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
-    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
-    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
+    Hashes via :func:`~klayout_tools._provenance.content_hash` (the recorded
+    ``provenance.*.content_hash`` values are ``sha256:``-prefixed). That form is
+    not why this stays local: the shared ``input_hash_check`` takes it as
+    ``hasher``. This copy takes the caller-resolved path (no ``override``) and
+    attaches the original three-key ``input_not_found`` (``path``, ``resolved``,
+    ``found_relative_to_report``; issue #2595), not ``resolved_against``/``hint``.
     """
     path = echoed if isinstance(echoed, str) and echoed else None
     check = hash_check(field, expected, content_hash(path))
