@@ -132,7 +132,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
     explicit_deck_options,
-    sha256_file,
     version_drift_advisories,
 )
 from ._report_verify import (
@@ -144,7 +143,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
-from ._report_verify_hints import input_not_found_entry
+from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -163,10 +162,7 @@ from .lvs_combine import (
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,  # noqa: F401
-    _hierarchy_mismatch_warnings,
-    _parse_combine_devices,  # noqa: F401
     _parse_combine_devices_max_attempts,  # noqa: F401
-    _parse_combine_devices_per_circuit,  # noqa: F401
     _purge_emptied_nets,
     _resolve_combine_devices_per_circuit_targets,  # noqa: F401
     _series_fold_offset_absorbed_warnings,
@@ -182,36 +178,29 @@ from .lvs_finfet import (
     bulk_disclosures,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
-    prepare_finfet_request,  # noqa: F401
     reference_reader,
     sliced_reference_file,
 )
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,  # noqa: F401
-    _boundary_supply_nets,  # noqa: F401
-    _circuit_pin_names,  # noqa: F401
     _gate_level_power_pin_evidence,  # noqa: F401
     _gate_level_power_pin_evidence_detail,  # noqa: F401
     _gate_level_power_pin_names,  # noqa: F401
-    _instance_supply_nets,  # noqa: F401
     _is_power_only_circuit,  # noqa: F401
     _layout_supply_net_names,  # noqa: F401
     _name_or_none,  # noqa: F401
-    _power_only_pruned_mismatch,  # noqa: F401
     _prune_power_only_circuits,  # noqa: F401
-    _purge_named_circuits,  # noqa: F401
     _reference_power_only_masters,  # noqa: F401
     _reference_signal_pin_names,  # noqa: F401
     _subcircuit_parent_name,  # noqa: F401
     _subcircuit_ref_name,  # noqa: F401
-    _supply_net_spellings,  # noqa: F401
     _supply_pin_universe,  # noqa: F401
 )
-from .lvs_gate_level_convert import (  # noqa: F401
-    CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+from .lvs_gate_level_convert import (
     _convert_gate_level_reference,
     _gate_level_port_case_fold_warnings,
 )
+from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
@@ -224,7 +213,6 @@ from .lvs_mismatch import (
     _flavour_selection_warnings,
     _make_compare_logger,
     _mismatch,
-    _parse_parameter_tolerance,  # noqa: F401
     _sort_key,
     _SupplyPinUniverse,  # noqa: F401
     _terminal_names,
@@ -236,12 +224,6 @@ from .lvs_mos_options import (
     apply_ignore_mos_bulk,
     parse_ignore_mos_bulk,  # noqa: F401
 )
-from .lvs_netgen import (  # noqa: F401  (re-exported: klayout_tools.lvs.<name>)
-    _NETGEN_DEFAULT_TIMEOUT_S,
-    _resolve_netgen_binary,
-    _resolve_netgen_setup,
-    _run_netgen_lvs,
-)
 from .lvs_netgen_branch import _run_netgen_engine_branch
 from .lvs_pin_anchors import (
     _apply_top_level_pin_anchors,
@@ -251,7 +233,6 @@ from .lvs_pin_anchors import (
 from .lvs_power import (
     _body_verification_report,
     _body_verification_unchecked,
-    _parse_power_connectivity,  # noqa: F401
     _power_connectivity_report,
     _power_connectivity_unchecked,
     _well_layer_lef_pins,
@@ -261,12 +242,10 @@ from .lvs_reference_stage import _read_reference_stage
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
-from .lvs_supply import parse_supply_nets, supply_fragmentation_findings  # noqa: F401
 from .lvs_timeout import (
     COMPARE_TIMEOUT_CODE,
     CompareTimeout,
     heartbeat,
-    parse_compare_timeout,  # noqa: F401
     run_with_deadline,
 )
 from .netlist_capacitor_recovery import (
@@ -446,9 +425,9 @@ CATEGORY_HINTS_REJECTED = "hints.rejected"
 #: structural flatten rather than the netlist's original hierarchy (see
 #: `_flatten_netlist_safely`).
 CATEGORY_TOPOLOGY_FLATTENED = "topology.flattened"
-#: Issue #4548: a flat layout netlist against a still-hierarchical reference
-#: with `options.flatten_reference` unset -- advisory naming that option (see
-#: `_hierarchy_mismatch_warnings`).
+#: Issues #4548/#5756: a hierarchy asymmetry between the compared sides --
+#: flat layout vs hierarchical reference, or the inverse after the tool's own
+#: flatten -- advisory naming the fix (see `_hierarchy_mismatch_warnings`).
 CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH = "topology.hierarchy_mismatch"
 #: Issue #1552: one of `options.combine_devices_per_circuit`'s own glob
 #: patterns matched zero circuits on this side -- most often a typo'd
@@ -2092,75 +2071,6 @@ def _finish_response(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str,
-    expected: str | None,
-    echoed: Any,
-    report_path: str,
-    override: str | None = None,
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an
-    input path the committed report echoes back (``layout``/``reference``),
-    with issue #2595's ``input_not_found`` diagnostic attached when that
-    path does not name an existing file.
-
-    :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
-    "the file is not there" and (vacuously) for "no path was recorded", so a
-    plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
-    indistinguishable, to a reader, from a recorded hash that no longer
-    matches. That is exactly the confusing shape issue #2595 reported when a
-    committed request/report pair with *request-file-relative*
-    ``layout``/``reference`` paths is ``--check``ed from a different
-    directory.
-
-    This does **not** change where the path is resolved: ``--check`` still
-    anchors a relative echoed path to the current working directory, the
-    same convention ``klt drc --check``'s ``file`` field uses (re-anchoring
-    one verb and not the other would make the two silently disagree). It
-    only makes the failure legible, as an *additional*, optional key on the
-    entry -- ``expected``/``actual``/``match`` and the resulting ``status``
-    are byte-identical to before:
-
-    - ``path`` -- the echoed path verbatim, as the report recorded it.
-    - ``resolved`` -- the absolute path that was actually looked for.
-    - ``found_relative_to_report`` -- the absolute path the input *does*
-      occupy relative to the committed report's own directory, when it is
-      there; ``null`` otherwise (including for an echoed absolute path,
-      which has no report-relative candidate to try).
-
-    Kept local to this module rather than folded into the shared
-    ``hash_check`` on purpose: ``klt drc --check`` resolves its own
-    ``provenance.input`` path the identical way and would need the identical
-    diagnostic to stay consistent, which is a deliberate follow-up, not a
-    side effect of this one. Promote this helper to ``_report_verify`` if
-    and when that happens.
-
-    Issue #2659: ``echoed`` is resolved through
-    :func:`klayout_tools._report_verify.resolve_committed_path`, so the
-    ``{path, scope}`` object ``layout`` carries today is joined to the repo
-    root of the committed report's own directory -- which is precisely the
-    case the "known limitation" above describes, now *resolved* for the
-    layout side rather than merely diagnosed; ``reference`` too since #4984
-    (only a bare-string one keeps the cwd anchoring). An
-    entry naming no path at all (``scope: "external"``/``"absent"``, or a
-    report with no such field) resolves to ``None`` and renders exactly as
-    an absent one always has.
-    """
-    path = resolve_committed_path(echoed, report_path=report_path, override=override)
-    check = hash_check(field, expected, sha256_file(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report
-    )
-    return check
-
-
 def check_lvs_report(
     report_path: str, *, layout_path: str | None = None
 ) -> dict[str, Any]:
@@ -2204,14 +2114,14 @@ def check_lvs_report(
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
-        _input_hash_check(
+        input_hash_check(
             "environment.layout_sha256",
             get_path(committed, ("environment", "layout_sha256")),
             committed.get("layout"),
             report_path,
             override=layout_path,
         ),
-        _input_hash_check(
+        input_hash_check(
             "environment.reference_sha256",
             get_path(committed, ("environment", "reference_sha256")),
             committed.get("reference"),
@@ -2236,10 +2146,12 @@ def check_lvs_report(
         # Issue #2849: the PDK runset is an input too -- a changed runset
         # can change the verdict without moving the layout or reference.
         checks.append(
-            hash_check(
+            input_hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
-                content_hash(committed.get("deck_file")),
+                committed.get("deck_file"),
+                report_path,
+                hasher=content_hash,
             )
         )
     result = build_check_result(report_path=report_path, checks=checks)
@@ -2921,39 +2833,38 @@ def _parse_layout_abstract_cells(
     ``--abstract-cell-lef`` (issue #620), forwarded to inline extraction so a
     mixed-level compare -- a transistor-level region next to placed cells
     extracted as pin-only black boxes -- runs as **one** ``klt lvs`` request
-    and keeps the deck-aware checks (``body_verification``) that need the
-    inline-extraction shape.
+    and keeps the deck-aware checks that need the inline-extraction shape.
 
     Same shape and validation as ``klt extract``'s request fields of the same
     names (``cli/extract_cmd.py``): each is a string or an array of strings
     (``fnmatch`` cell-name globs / LEF file paths, the latter resolved
     against the request document's directory). An empty array is a no-op,
-    as it is for ``klt extract``. ``abstract_cell_lef`` without a non-empty
-    ``abstract_cells`` is rejected, mirroring ``run_extract``'s own check (the
-    LEF is only ever a pin-resolution *fallback* for a matched cell type).
+    as it is for ``klt extract``. Inline-shape ``abstract_cell_lef`` without
+    a non-empty ``abstract_cells`` is rejected (the LEF only supplies pins
+    for a matched cell type; labels win per name, LEF-only pins merge, #3749).
 
-    **Extraction-only**, like ``layout.label_layers``: a non-empty value on
-    the pre-extracted ``layout.netlist`` shape is a clean :class:`LvsError`
-    -- that netlist's cells were already abstracted (or not) when it was
-    extracted, and silently accepting the field would read as "the
-    abstraction was applied".
+    ``abstract_cells`` is **extraction-only** (non-empty on the pre-extracted
+    ``layout.netlist`` shape is a clean :class:`LvsError` -- that netlist was
+    already abstracted or not at extraction time); ``abstract_cell_lef`` alone
+    is **disclosure-only** there (issue #5842): it only feeds
+    ``power_connectivity.excluded_pins`` (two-step disclosure).
     """
     patterns = _layout_str_list(layout_spec, "abstract_cells")
     lef_given = _layout_str_list(layout_spec, "abstract_cell_lef")
-    if (patterns or lef_given) and "netlist" in layout_spec:
-        given = "abstract_cells" if patterns else "abstract_cell_lef"
+    on_netlist = "netlist" in layout_spec
+    if patterns and on_netlist:
         raise LvsError(
-            f"request.layout.{given} applies only to inline extraction "
+            "request.layout.abstract_cells applies only to inline extraction "
             "(request.layout.file + request.layout.deck): a pre-extracted "
             "request.layout.netlist was already abstracted (or not) when it "
             "was extracted -- re-extract it with `klt extract "
             "--abstract-cells ...`, or give request.layout.file instead"
         )
-    if lef_given and not patterns:
+    if lef_given and not patterns and not on_netlist:
         raise LvsError(
             "request.layout.abstract_cell_lef was given but "
             "request.layout.abstract_cells is empty -- abstract_cell_lef only "
-            "has an effect as a pin-resolution fallback for a cell type "
+            "has an effect as a pin source for a cell type "
             "abstract_cells actually matches"
         )
     echo: dict[str, list[str]] = {}
@@ -2981,13 +2892,14 @@ def _layout_abstraction_echo(
     (``{"cell", "instance_count", "pin_count", "resolution_source",
     "lef_path"}``) -- an empty list when the patterns matched no instantiated
     cell, so "the glob matched nothing" is visible rather than silently
-    indistinguishable from a full abstraction. All three are omitted
-    entirely (not ``null``) when ``layout.abstract_cells`` was not given, so
-    every report from a request without it -- and every report committed
-    before it existed -- stays byte-identical.
+    indistinguishable from a full abstraction. All three are omitted entirely
+    (not ``null``) when ``layout.abstract_cells`` was not given, so reports
+    without it -- committed or new -- stay byte-identical.
     """
     if not abstraction.patterns:
-        return {}
+        # Issue #5842: LEF-only (disclosure-only, netlist shape) is echoed so
+        # `--check --rerun` replays it (no extraction ran, no abstracted_cells).
+        return dict(abstraction.echo)
     return {**abstraction.echo, "abstracted_cells": list(abstracted_cells)}
 
 
@@ -3219,8 +3131,8 @@ def _resolve_layout(
     ``layout.file`` shape -- every instantiated cell matching one of the
     patterns is extracted as a pin-only black box, exactly like ``klt extract
     --abstract-cells``. Already validated by
-    :func:`_parse_layout_abstract_cells` (which rejects it on the
-    ``layout.netlist`` shape, so it never reaches that branch). No PDK is
+    :func:`_parse_layout_abstract_cells` (which rejects ``abstract_cells`` on
+    the ``layout.netlist`` shape -- that shape runs no extraction). No PDK is
     resolved here (``klt lvs`` has no ``layout.pdk``), so an
     ``abstract_cell_lef`` port is probed the way ``klt extract
     --abstract-cell-lef`` probes it without ``--pdk``.
@@ -3508,14 +3420,12 @@ def _resolve_layout(
     # Issue #1942: recognise a round-tripped `X ... PARAMS:` card naming one
     # of `layout.deck`'s own custom (`GenericDeviceExtractor`-shaped) device
     # classes -- e.g. a MoM capacitor -- as a device of that class instead
-    # of letting it degrade into a mangled-name abstract circuit. A best-
-    # effort lookup only: an unresolvable `deck_name`/`deck_options` here is
-    # deliberately swallowed rather than raised -- `run_lvs` re-resolves
-    # `layout.deck` itself right after this function returns (see its own
-    # `layout_deck` comment) and raises the authoritative `LvsError` there,
-    # so this must not duplicate (and potentially reorder) that validation.
-    # `None`/empty when `layout.deck` was never given, unchanged from every
-    # request that predates this parameter.
+    # of a mangled-name abstract circuit. A best-effort lookup only: an
+    # unresolvable `deck_name`/`deck_options` here is deliberately swallowed
+    # rather than raised -- `run_lvs` re-resolves `layout.deck` right after
+    # this function returns and raises the authoritative `LvsError`, so
+    # this must not duplicate (and potentially reorder) that validation.
+    # Empty when `layout.deck` was never given, unchanged for old requests.
     custom_device_classes: dict[str, str] = {}
     resistor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
@@ -3529,16 +3439,16 @@ def _resolve_layout(
                 layout_deck_for_recovery
             )
             # Issue #1157: recognise a round-tripped bulk-bearing drawn-
-            # resistor class's `X` card (the bare-mode card shape ngspice
-            # can parse) as a real 3-terminal resistor device again -- the
-            # exact recovery the MoM-capacitor table above established,
-            # keyed off `layout.deck`'s own `resistors` table.
+            # resistor class's `X` card as a real 3-terminal device again.
             resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
+    from .netlist_normalize import defined_subckt_names
+
     reader = make_capacitor_class_recovery_reader(
         recovered_capacitor_classes,
         custom_device_classes=custom_device_classes,
         resistor_classes=resistor_classes,
+        defined_subckt_names=defined_subckt_names(layout_netlist_text),
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -3699,6 +3609,7 @@ def _read_reference_netlist(
     from .netlist_normalize import (
         NormalizeError,
         convert_reference_netlist,
+        defined_subckt_names,
         detect_subckt_call_devices,
     )
 
@@ -3831,6 +3742,7 @@ def _read_reference_netlist(
             recovered_capacitor_classes,
             custom_device_classes=custom_device_classes,
             resistor_classes=resistor_classes,
+            defined_subckt_names=defined_subckt_names(read_text),
         ),
     )
     try:
