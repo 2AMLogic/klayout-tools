@@ -1,0 +1,76 @@
+name: File size ratchet (main)
+
+# Per-commit ratchet verdict for pushes to main (issue #6285).
+#
+# ci.yml's per-file size ratchet measures each PR against its merge-base,
+# but a MERGE COMMIT itself can produce a file size neither parent had
+# (two independent additions near the same region combine in the 3-way
+# merge), so main's committed file-size-baseline.json can drift from the
+# tree it describes without any PR run ever measuring that intermediate
+# size. The ci.yml push-to-main run that would catch it shares one
+# concurrency group on github.ref, and GitHub's single pending slot lets a
+# newer merge supersede a still-pending run during a merge burst -- the
+# superseded run never started, so it produced no verdict and #6285's
+# drift reached the next unrelated PR untouched.
+#
+# .loom/docs/ci-principles.md is the policy behind this workflow: rule 2
+# ("never cancel verification of a distinct commit once it has started";
+# the one-pending-run queue bound is the allowed exception, and it is
+# exactly the hole here) and rule 6 ("a check that cannot run must not
+# look like a check that passed" -- so a missing/zero `before` SHA below
+# fails with exit 2 instead of passing without a comparison revision).
+#
+# This workflow keys its concurrency group on the commit SHA with
+# cancel-in-progress: false, so every main push queues its own verdict
+# instead of being superseded. It runs ONLY the stdlib-only
+# scripts/check_file_size_baseline.py against the push's before SHA --
+# about a minute of CI, no full-suite minutes, and therefore no
+# interaction with the wall-clock budget concerns of #2406. The PR-side
+# gate in ci.yml is unchanged and still needed.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # One group per commit SHA: a merge burst queues verdicts rather than
+  # superseding them, and each merge commit gets its own red/green
+  # (ci-principles.md rule 2).
+  group: file-size-ratchet-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  ratchet:
+    name: Per-file size ratchet (main push)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the step fetches the push's before SHA, which a
+          # force-push can leave unreachable from the new tip (same
+          # rationale as ci.yml's lint job checkout).
+          fetch-depth: 0
+
+      - name: Per-file size ratchet vs the push's before SHA
+        # Same guard as ci.yml's "Per-file size ratchet (merge-base)"
+        # step: a push with no usable `before` SHA (branch creation, or
+        # the all-zero SHA) fails with exit 2 rather than passing without
+        # a comparison revision (ci-principles.md rule 6). Comparing
+        # against the before SHA also covers multi-commit pushes: the
+        # trees are what is checked, not the individual commits. The
+        # checker imports only the stdlib, so no uv / dev-extra install
+        # is needed; the runner's python3 (3.12 on ubuntu-24.04)
+        # satisfies the checker's 3.10+ syntax.
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "::error::push event has no usable 'before' SHA ('$PUSH_BEFORE'); cannot determine the comparison revision" >&2
+            exit 2
+          fi
+          git fetch --no-tags origin "$PUSH_BEFORE"
+          python3 scripts/check_file_size_baseline.py --comparison-rev "$PUSH_BEFORE"

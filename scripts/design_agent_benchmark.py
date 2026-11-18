@@ -375,10 +375,8 @@ def _apply_mutant_edits(
     (``_all_offsets``/``_line_at`` to locate and uniqueness-check the anchor,
     ``MutationVariantPlan._resolve_one`` to resolve it to an exact byte span,
     ``_replace_exact`` to splice it) exactly as
-    ``functional_verification._resolve_mutation_proposals`` does, rather than
-    re-deriving byte-exact replacement here. Two deliberate differences from
-    that caller, both because a *netlist* mutant is a different unit than an
-    RTL proposal:
+    ``functional_verification_mutation_proposals._resolve_mutation_proposals`` does.
+    A *netlist* mutant differs from an RTL proposal in two ways:
 
     * **Whole-file anchor uniqueness.** ``_resolve_one`` requires the anchor
       to be unique on a declared line; issue #2254's requirement 1 is

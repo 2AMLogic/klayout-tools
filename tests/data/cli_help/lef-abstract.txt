@@ -13,10 +13,11 @@ translation section for the field-by-field mapping. Runs fully headless via
 KLayout's native batch database API -- no GUI, no Qt.
 
 positional arguments:
-  file path to a GDSII or OASIS layout file
+  file path to a GDSII or OASIS layout file; omit it and pass --no-layout to emit a layout-free black-box abstract from the socket descriptor alone
 
 options:
   -h, --help show this help message and exit
+  --no-layout emit the abstract from the socket descriptor alone (issue #5714): footprint = the descriptor outline, every pin synthesized, OBS = the whole outline on each routing layer minus the pin ports. Exactly one of <file> / --no-layout is required; incompatible with --top, --obs-mode and --require-power-pins.
   --socket SOCKET path to a socket descriptor JSON file (see docs/schemas/socket.schema.json). Not validated by argparse -- a missing/malformed descriptor exits 1 with a clean error rather than argparse's usage-error exit 2.
   --macro-name MACRO_NAME name for the emitted LEF MACRO block
   --cell-library CELL_LIBRARY standard-cell library whose tech LEF supplies the routing-layer/SITE header this command reads (e.g. sky130_fd_sc_hd) -- not the macro's own library; resolved via the same PDK discovery `klt pdk find`/`klt synthesize` use

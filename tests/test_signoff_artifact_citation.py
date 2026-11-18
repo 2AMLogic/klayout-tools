@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import artifact_store as store
+from klayout_tools import artifact_objects as store
 from klayout_tools.signoff import artifact_resolution, build_tier_report
-from test_artifact_store import REPO, _key, _sha, broker  # noqa: F401
+from test_artifact_store import REPO, _key, _sha
+from test_artifact_store import broker as broker
 
 INPUT_BYTES = b"design source\n"
 INPUT_HASH = "sha256:" + hashlib.sha256(INPUT_BYTES).hexdigest()
@@ -74,7 +75,7 @@ def real_input(tmp_path):
     return {"path": "design.txt", "scope": "repo"}
 
 
-def test_stored_envelope_cited_by_uri_is_met(broker, tmp_path, real_input):  # noqa: F811
+def test_stored_envelope_cited_by_uri_is_met(broker, tmp_path, real_input):
     uri, entry = _store(broker, json.dumps(_envelope(real_input)).encode())
     manifest = _write_manifest(tmp_path, entry)
 
@@ -85,7 +86,7 @@ def test_stored_envelope_cited_by_uri_is_met(broker, tmp_path, real_input):  # n
     assert item["citation"]["input_verified"] is True
 
 
-def test_bare_string_uri_is_resolved_and_read(broker, tmp_path, real_input):  # noqa: F811
+def test_bare_string_uri_is_resolved_and_read(broker, tmp_path, real_input):
     """Item 1 requires a pinned `content_hash`, so the bare form cannot be
     `met` -- but it must be fetched and classified (`unanchored_evidence`),
     not refused as an unreadable literal path."""
@@ -96,7 +97,7 @@ def test_bare_string_uri_is_resolved_and_read(broker, tmp_path, real_input):  # 
     assert item["reason"] == "unanchored_evidence"
 
 
-def test_gzip_stored_envelope_is_read(broker, tmp_path, real_input):  # noqa: F811
+def test_gzip_stored_envelope_is_read(broker, tmp_path, real_input):
     uri, entry = _store(
         broker, gzip.compress(json.dumps(_envelope(real_input)).encode())
     )
@@ -108,7 +109,7 @@ def test_gzip_stored_envelope_is_read(broker, tmp_path, real_input):  # noqa: F8
     assert item["status"] == "met", item
 
 
-def test_artifact_input_path_is_rehashed_from_the_store(broker, tmp_path):  # noqa: F811
+def test_artifact_input_path_is_rehashed_from_the_store(broker, tmp_path):
     in_uri, in_entry = _store(broker, INPUT_BYTES)
     env_path = tmp_path / "envelope.json"
     env_path.write_text(json.dumps(_envelope({"path": in_uri, "scope": "repo"})))
@@ -123,7 +124,7 @@ def test_artifact_input_path_is_rehashed_from_the_store(broker, tmp_path):  # no
     assert item["citation"]["input_verified"] is True
 
 
-def test_artifact_input_with_wrong_bytes_is_stale(broker, tmp_path):  # noqa: F811
+def test_artifact_input_with_wrong_bytes_is_stale(broker, tmp_path):
     in_uri, in_entry = _store(broker, b"someone edited this\n")
     env_path = tmp_path / "envelope.json"
     env_path.write_text(json.dumps(_envelope({"path": in_uri, "scope": "repo"})))
@@ -160,14 +161,14 @@ def test_no_manifest_flag_is_artifact_unavailable(tmp_path):
     _assert_artifact_unmet(item, uri, "no_manifest")
 
 
-def test_uri_missing_from_manifest(broker, tmp_path):  # noqa: F811
+def test_uri_missing_from_manifest(broker, tmp_path):
     _, other = _store(broker, b"other\n")
     uri = f"artifact:{_key(REPO, 'a' * 64)}"
     item = _grade(uri, tmp_path, _write_manifest(tmp_path, other))
     _assert_artifact_unmet(item, uri, "no_entry")
 
 
-def test_broker_corruption_is_never_met(broker, tmp_path, real_input):  # noqa: F811
+def test_broker_corruption_is_never_met(broker, tmp_path, real_input):
     uri, entry = _store(broker, json.dumps(_envelope(real_input)).encode())
     broker.corrupt = True
     item = _grade(uri, tmp_path, _write_manifest(tmp_path, entry))
@@ -187,7 +188,7 @@ def test_broker_unreachable_is_unmet(monkeypatch, tmp_path, real_input):
     _assert_artifact_unmet(item, uri, "broker_unconfigured")
 
 
-def test_key_in_two_manifests_resolves(broker, tmp_path, real_input):  # noqa: F811
+def test_key_in_two_manifests_resolves(broker, tmp_path, real_input):
     uri, entry = _store(broker, json.dumps(_envelope(real_input)).encode())
     first = _write_manifest(tmp_path, entry, name="a.json")
     second = _write_manifest(tmp_path, entry, name="b.json")
@@ -199,7 +200,7 @@ def test_key_in_two_manifests_resolves(broker, tmp_path, real_input):  # noqa: F
     )
 
 
-def test_cli_flag_resolves(broker, tmp_path, real_input, capsys):  # noqa: F811
+def test_cli_flag_resolves(broker, tmp_path, real_input, capsys):
     from klayout_tools.cli import main
 
     uri, entry = _store(broker, json.dumps(_envelope(real_input)).encode())
@@ -229,3 +230,81 @@ def test_cli_flag_resolves(broker, tmp_path, real_input, capsys):  # noqa: F811
     report = json.loads(capsys.readouterr().out)
     item = next(i for i in report["items"] if i["id"] == 1)
     assert item["status"] == "met"
+
+
+def test_unavailable_compound_citation_identifies_its_own_uri(tmp_path):
+    uris = [f"artifact:{_key(REPO, digit * 64)}" for digit in ("a", "b")]
+    report = build_tier_report(
+        {"block": "demo", "kind": "analog", "evidence": {"1": uris[0], "11": uris[1]}},
+        repo_root=str(tmp_path),
+    )
+    for item_id, uri in zip((1, 11), uris, strict=True):
+        item = next(row for row in report["items"] if row["id"] == item_id)
+        _assert_artifact_unmet(item, uri, "no_manifest")
+
+
+def test_unreadable_stored_envelope_reports_its_uri(broker, tmp_path):
+    uri, entry = _store(broker, b"invalid JSON")
+    item = _grade(uri, tmp_path, _write_manifest(tmp_path, entry))
+    assert (item["reason"], item["detail"]) == (
+        "unreadable_evidence",
+        {"artifact": uri},
+    )
+
+
+def test_fleet_reuses_one_manifest_for_envelope_and_input(
+    broker,
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    from klayout_tools import signoff_artifact
+    from klayout_tools.cli import main
+
+    input_uri, input_entry = _store(broker, INPUT_BYTES)
+    env_uri, env_entry = _store(broker, json.dumps(_envelope(input_uri)).encode())
+    manifest = _write_manifest(tmp_path, env_entry, input_entry)
+    loads = []
+    load_manifest = signoff_artifact.load_manifest
+
+    def counted_load(path):
+        loads.append(path)
+        return load_manifest(path)
+
+    monkeypatch.setattr(signoff_artifact, "load_manifest", counted_load)
+    fleet = tmp_path / "fleet.json"
+    fleet.write_text(
+        json.dumps(
+            {
+                "blocks": [
+                    {
+                        "block": block,
+                        "kind": "analog",
+                        "evidence": {
+                            "1": {"file": env_uri, "content_hash": INPUT_HASH}
+                        },
+                    }
+                    for block in ("one", "two")
+                ]
+            }
+        )
+    )
+    main(
+        [
+            "signoff",
+            "--fleet",
+            str(fleet),
+            "--artifact-manifest",
+            manifest,
+            "--repo-root",
+            str(tmp_path),
+            "--format",
+            "json",
+        ]
+    )
+    blocks = json.loads(capsys.readouterr().out)["blocks"]
+    assert [(row["block"], row["t1_met_count"]) for row in blocks] == [
+        ("one", 1),
+        ("two", 1),
+    ]
+    assert loads == [manifest]

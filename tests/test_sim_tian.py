@@ -14,19 +14,16 @@ import cmath
 import json
 import math
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE as real_ngspice
 from klayout_tools import sim, sim_passes, sim_raw, sim_tian
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
-real_ngspice = pytest.mark.skipif(
-    shutil.which("ngspice") is None, reason="ngspice not installed"
-)
 
 _BODY = {"voltage_pass": "pv", "current_pass": "pi", "tv": "v(tv)", "ti": "i(vi)"}
 
