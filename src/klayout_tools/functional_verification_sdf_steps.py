@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from .functional_verification_sdf import (
     _cut_sdf_spans,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,
     _normalize_sdf_header_triples,
     _read_sdf_text,
     _sdf_cell_celltype,
@@ -168,6 +169,54 @@ def _apply_sdf_cond_expression_drop(
         handle.write(cond_text)
     sdf_pre_dropped_counts[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_count
     sdf_pre_dropped_arcs[SDF_COND_EXPRESSION_DROPPED_CLASS] = cond_arcs
+    return new_path
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2984's pipeline step. Moved verbatim out of functional_verification.py
+# (whose per-file size ratchet lets it only shrink -- issue #6075's step below
+# it in the pipeline needed the headroom).
+# --------------------------------------------------------------------------- #
+
+#: ``INTERCONNECT`` entries removed before annotation because they run from a
+#: bit-selected top-level input port (any destination not already claimed by
+#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
+#: corner. Icarus can fail to insert an intermodpath for such a source
+#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
+#: dropping it cannot change simulated timing. Issue #2984's counted
+#: exemption; a non-zero entry of the same shape is left in place and still
+#: fails loudly. Pre-dropped from the SDF text, not derived from a
+#: diagnostic substring.
+SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
+
+
+def _apply_sdf_bus_port_source_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    ports: list[tuple[str, str, str]],
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
+    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
+    function for the same reason (no new branch in
+    :func:`run_functional_verification`). Runs after the physical-only pass,
+    so entries that pass claimed keep their class and are not double counted.
+    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
+
+    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
+    a new normalized-copy path otherwise.
+    """
+    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
+        annotate_source_path,
+        {name for direction, width, name in ports if width and direction == "input"},
+    )
+    if drop is None:
+        return annotate_source_path
+    text, count = drop
+    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
     return new_path
 
 
