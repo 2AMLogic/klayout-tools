@@ -97,6 +97,79 @@ def pin_disclosure(
     return detail
 
 
+#: ``citation.input_verified_note`` for a ``generic``/``model-run``
+#: envelope that declares ``provenance.input.content_hash`` naming
+#: nothing verification answers -- no usable ``provenance.input.path``,
+#: and no ``paths`` set that answered through its members (issue #6403):
+#: the declared hash is silently
+#: never re-hashed, and ``input_verified: null`` also means "nothing to
+#: hash", so it cannot say "declared, never checked" on its own.
+DECLARED_HASH_UNBOUND = "declared_hash_unbound"
+
+#: The ``--`` gloss each ``input_verified_note`` token renders with in
+#: ``klt signoff --format text`` (issue #6403), keyed by token so a second
+#: token can never inherit this one's explanation; unmapped tokens render
+#: bare.
+INPUT_VERIFIED_NOTE_GLOSSES = {
+    DECLARED_HASH_UNBOUND: "declared hash binds nothing -- never re-hashed",
+}
+
+
+def _usable_input_path(path: Any) -> bool:
+    """Whether a ``provenance.input.path`` value is a shape the opt-in
+    branch (issue #2403) can even attempt: a non-empty string, or a
+    ``{path, scope: "repo"}`` object -- the same shapes
+    ``signoff._generic_binding_path`` accepts, so this note cannot fire on
+    a declaration the resolution machinery treats as a real (if
+    unsuccessful) attempt."""
+    if isinstance(path, str) and path:
+        return True
+    return isinstance(path, Mapping) and path.get("scope") == "repo"
+
+
+def declared_hash_unbound_disclosure(
+    resolution: Mapping[str, Any],
+) -> dict[str, str]:
+    """Issue #6403: a ``generic``/``model-run`` envelope that declares
+    ``provenance.input.content_hash`` (non-empty string) naming nothing
+    verification answers has that hash silently never re-hashed -- the
+    citation renders ``input_verified: null`` exactly like one declaring
+    no hash at all. That is: no usable ``provenance.input.path``, or a
+    ``provenance.input.paths`` set that never answered (malformed, empty,
+    or on a ``model-run`` envelope, whose set is never member-verified) --
+    a well-formed ``generic`` set answers through its members and is not
+    unbound. Returns ``{"input_verified_note": DECLARED_HASH_UNBOUND}`` so
+    the declared-but-never-checked case is visible beside the unchanged
+    ``null``; ``{}`` (no key) for every envelope the note does not
+    describe. Disclosure only, like every citation field -- never
+    consulted by any grading rule."""
+    if resolution["kind"] not in ("generic", "model-run"):
+        return {}
+    provenance = resolution["envelope"].get("provenance")
+    input_block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    if not isinstance(input_block, Mapping):
+        return {}
+    if "paths" in input_block:
+        # A `paths` set binds through its members, not `input.path`: the
+        # note stays off it exactly while the set answered (members were
+        # verified -- `input_verified` settled or members rendered). A
+        # malformed or empty set re-hashes nothing
+        # (`_fold_generic_input_set` forces `input_verified: null`), and a
+        # `model-run` envelope's set is never folded at all, so in both
+        # the declared hash binds nothing with no disclosure -- the exact
+        # gap this note exists to close -- and it fires.
+        if resolution.get("input_verified") is not None or resolution.get(
+            "input_members"
+        ):
+            return {}
+    elif _usable_input_path(input_block.get("path")):
+        return {}
+    declared = input_block.get("content_hash")
+    if not isinstance(declared, str) or not declared:
+        return {}
+    return {"input_verified_note": DECLARED_HASH_UNBOUND}
+
+
 def rehash_evidence_file(
     check_kind: str,
     spec: Mapping[str, Any],
