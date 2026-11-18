@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://2amlogic.com/klayout-tools/schemas/coverage.schema.json",
   "title": "Checked-work coverage version 1",
-  "description": "Shared work records; existing verb-specific fields may coexist. Work IDs must also be unique across all four categories (checked by the runtime validator).",
+  "description": "Shared work records. Work IDs must be unique within and across all four categories. Producers must emit disjoint groups and omit the individual work represented by each group.",
   "type": "object",
   "required": ["schema_version", "known", "checked", "skipped", "inapplicable", "unknown", "nothing_checked", "nothing_checked_reasons"],
   "properties": {
@@ -11,7 +11,7 @@
     "checked": {"$ref": "#/$defs/identities"},
     "skipped": {"$ref": "#/$defs/records"},
     "inapplicable": {"$ref": "#/$defs/records"},
-    "unknown": {"$ref": "#/$defs/records"},
+    "unknown": {"$ref": "#/$defs/records", "items": {"not": {"required": ["count"]}}},
     "nothing_checked": {"type": "boolean"},
     "nothing_checked_reasons": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "uniqueItems": true}
   },
@@ -26,7 +26,13 @@
         "required": ["id", "reason"],
         "properties": {
           "id": {"$ref": "#/$defs/identity"},
-          "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+          "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+          "missing": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"$ref": "#/$defs/identity"}
+          },
+          "count": {"type": "integer", "minimum": 1, "default": 1}
         },
         "additionalProperties": false
       },
