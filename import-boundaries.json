@@ -300,6 +300,7 @@
       "modules": [
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
+        "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
@@ -728,6 +729,7 @@
         "klayout_tools._spice_number",
         "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
+        "klayout_tools._tcl",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
