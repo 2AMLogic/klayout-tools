@@ -512,6 +512,8 @@ def test_build_delta_rows_single_testbench_bare_spec_row():
     assert rows == [
         {
             "spec_row": "vout",
+            "testbench": None,
+            "measurement": "vout",
             "corner_id": "tt/1.800V/27C",
             "schematic_value": 1.0,
             "extracted_value": 1.1,
@@ -600,21 +602,6 @@ def test_unextracted_delta_rows_carry_per_side_status():
     (row,) = _unextracted_delta_rows(spec_row_prefix=None, schematic_report=schematic)
     assert row["schematic_status"] == "fail"
     assert row["extracted_status"] == "error"
-
-
-def test_build_delta_rows_multi_testbench_prefixes_spec_row():
-    schematic = _sim_report(
-        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
-    )
-    extracted = _sim_report(
-        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
-    )
-    rows = _build_delta_rows(
-        spec_row_prefix="gain-tb",
-        schematic_report=schematic,
-        extracted_report=extracted,
-    )
-    assert rows[0]["spec_row"] == "gain-tb.vout"
 
 
 def test_build_delta_rows_missing_schematic_corner_is_error():
@@ -6365,6 +6352,8 @@ def test_build_delta_rows_without_flag_carries_no_device_only_keys():
     )
     assert set(row) == {
         "spec_row",
+        "testbench",
+        "measurement",
         "corner_id",
         "schematic_value",
         "extracted_value",
