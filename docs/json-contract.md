@@ -923,10 +923,11 @@ re-hashed. A store-resolved hash never supplies a verdict (operator ruling
 file-backed. An unreadable/invalid manifest, a missing, duplicate-named or
 basename-ambiguous member leaves the hash unresolved with a named reason in
 `content_hash_unresolved` (`manifest_unreadable`, `manifest_invalid`,
-`member_missing`, `duplicate_member`, `ambiguous_member` — the last three
-also on an unmet item's `detail`); a non-string key value fails closed as
-`invalid_evidence` for that item. A samples file present on disk always
-wins; entries that name no `artifact_manifest` are byte-identical to
+`member_missing`, `duplicate_member`, or `ambiguous_member`). For any of
+these failures, a pinned unmet item carries the same object in
+`detail.content_hash_unresolved`. A non-string store-pin value or either
+store-pin key on a command-backed entry yields `invalid_evidence` for that
+item. A samples file present on disk always wins; entries that name no `artifact_manifest` are byte-identical to
 before. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Citing an object in
 the artifact store".
 

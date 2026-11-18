@@ -1475,7 +1475,8 @@ ambiguous by basename leaves the hash unresolved with a named
 `content_hash_unresolved["reason"]` — a pinned entry then renders `unmet`
 (`unverifiable_provenance`), never a guess and never an exception. A
 non-string `artifact_manifest`/`artifact_member` fails closed
-(`invalid_evidence`) for that item, like every other opt-in entry key.
+(`invalid_evidence`) for that item. Command-backed entries also render
+`invalid_evidence` if they declare either store-pin key.
 
 ### The declared partition boundary (issue #2278)
 
@@ -1589,11 +1590,11 @@ gains no `detail`.
 **What a stale pin's `detail` names (issues #4795, #4837, #5837).** A
 citation graded `stale_evidence` over a pin mismatch carries
 `detail.hash_check` — `{field, expected, actual, match}`, `expected` being
-the manifest's pinned `content_hash` and `actual` the hash the cited
-envelope recorded — plus a `hint` stating which hash `content_hash` must
+the manifest's pinned `content_hash` and `actual` the resolved hash — plus a `hint` stating which hash `content_hash` must
 be. When the envelope records what was hashed (`provenance.input.path` /
 `paths`, or a yield report's samples document), `compared_against` names
-it. An envelope whose `provenance.input` carries only `content_hash`/`role`
+it. For a store-pinned yield report, it names the manifest and selected member
+as `manifest#member`. An envelope whose `provenance.input` carries only `content_hash`/`role`
 (the shape `klt drc` and the other provenance-backed kinds emit) has
 nothing to name there, so `compared_against` is absent and the hint states
 the pin must be the envelope's recorded input hash; when the pin instead
@@ -5217,17 +5218,16 @@ both for the citation and for the `content_hash` staleness pin. A future
 picked up automatically and takes precedence, with no manifest change
 required.
 
-**A stale yield pin says which file was hashed (issue #5392).** When the
-pinned `content_hash` disagrees, the `stale_evidence` `detail` carries
-`compared_against` (the resolved samples-document path that was hashed) and a
-`hint` that `content_hash` must be the sha256 of that samples document, not of
-the yield report; if the pin equals the yield report file's own sha256,
-`detail.pin_is_envelope_file_hash` is `true` and the hint says so. For yield,
-`detail.hash_check.field` reads `samples (sha256 of the named samples
-document)` instead of `provenance.input.content_hash` (a yield report has no
-such field); `expected`/`actual`/`match` are unchanged. When the samples
-document cannot be found, `compared_against` is omitted. Other kinds are
-unchanged.
+**A stale yield pin identifies the source of the digest (issues #5392 and
+#5963).** When signoff hashes a samples file, `detail.compared_against`
+names its path and `detail.hash_check.field` is `samples (sha256 of the named
+samples document)`. When the committed store manifest supplies the hash,
+`compared_against` names the selected `manifest#member`,
+`hash_check.field` is `artifact_manifest.entries[].sha256`, and the hint
+says to pin that member's recorded digest with the `sha256:` prefix.
+If the pin equals the yield report file's own digest,
+`detail.pin_is_envelope_file_hash` is `true`. If neither source supplies a
+digest, the pin is unverifiable and the detail omits `compared_against`.
 
 **The named samples document is resolved relative to the report, not to
 `klt signoff`'s own cwd (issue #2197).** `klt yield` records `samples`
@@ -5244,15 +5244,12 @@ never affected by this: its `samples` path is already resolved relative to
 the entry's own `cwd`, the same directory the subprocess that produced it
 ran in.
 
-If the named samples document cannot be found in *either* place, the
-citation's `content_hash` is `null` — exactly as it always was for a
-missing document — but the citation also carries a `content_hash_unresolved`
-object naming what was named and where this looked, so that case stays
-distinguishable from "no samples document was ever named" (see
-"`citation` fields" below). An unpinned manifest entry still renders
-`"met"` either way; a pinned one already renders `"unmet"`/
-`unverifiable_provenance` when the actual hash is `null`, per the
-`content_hash` mismatch rule above.
+When the disk lookup fails, a file-backed entry can still resolve the
+samples digest through its declared store manifest. If lookup fails across
+all available sources, `content_hash` is `null` and
+`content_hash_unresolved` records the attempted locations. A passing yield
+report can still render `met` without a pin. A pinned entry with no
+resolved hash renders `unmet`/`unverifiable_provenance`.
 
 ### Tier-report JSON schema
 
@@ -5362,7 +5359,7 @@ distinguishable from "no samples document was ever named" (see
 | `status`    | string               | `"met"`, `"unmet"`, or (item 6 only, issue #2865) `"not_applicable"` — see above and "Item 6 `not_applicable`" below. |
 | `reason`    | string \| null       | `null` when `status` is `"met"` or `"not_applicable"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), `pointer` when the evidence entry carried one (issue #5815), `drc_crosscheck` for a cross-check (`--engine both`) `drc` citation (issue #5815), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples digest could not be resolved from disk or a declared store manifest (issues #2197 and #5963), `yield_campaign` for a `yield` citation whose report carries measurements (issue #2467 — the campaign's rolled-up `sample_size`/`negative_control` state; see "Campaign discipline on item 6" below), `artifact_binding` for an artifact-anchored `generic` citation of item 1, 2, 9 or 10 (issue #2718), `pointer` when the evidence entry carried one (issue #5815), `drc_crosscheck` for a cross-check (`--engine both`) `drc` citation (issue #5815), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -5375,7 +5372,7 @@ distinguishable from "no samples document was ever named" (see
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
-| `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
+| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. For a **grouped** citation (issue #5597) these are the *leading group's* parts, and every group's own parts live in the item-level `citations` array (one compound citation per group, in manifest order) beside `citations_graded` and `members_covered`/`members_total` — see "Item 11 is compound" above. **Absent** for every other item. |

@@ -257,7 +257,7 @@ from .signoff_store_pin import (
 from .signoff_store_pin import (
     _resolve_relative_to_spec as _resolve_relative_to_spec,
 )
-from .signoff_store_pin import store_pin_samples_hash
+from .signoff_store_pin import store_pin_samples_entry
 from .signoff_unmet_reasons import unmet_reason_counts
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
@@ -4656,19 +4656,16 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     )
     if cell_exceptions is None:
         return None
-    artifact_manifest = raw.get("artifact_manifest")
-    if artifact_manifest is not None and not isinstance(artifact_manifest, str):
-        return None
-    artifact_member = raw.get("artifact_member")
-    if artifact_member is not None and not isinstance(artifact_member, str):
-        return None
+    for key in ("artifact_manifest", "artifact_member"):
+        if key in raw and not isinstance(raw[key], str):
+            return None
     return {
         "require_annotation_complete": require_annotation,
         "require_complete_constraints": require_constraints,
         "foundry_cell_exceptions": cell_exceptions,
         "coverage_disclosed": raw.get("coverage_disclosed"),
-        "artifact_manifest": artifact_manifest,
-        "artifact_member": artifact_member,
+        "artifact_manifest": raw.get("artifact_manifest"),
+        "artifact_member": raw.get("artifact_member"),
     }
 
 
@@ -4725,6 +4722,8 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
         and command
         and all(isinstance(part, str) for part in command)
     ):
+        if "artifact_manifest" in raw or "artifact_member" in raw:
+            return None  # Store pins require a file-backed envelope.
         expected_hash = raw.get("content_hash")
         if expected_hash is not None and not isinstance(expected_hash, str):
             expected_hash = None
@@ -4897,17 +4896,17 @@ def _yield_samples_content_hash(
     **Store-pin fallback** (issue #5963): when -- and only when -- no disk
     candidate could be hashed and the entry names an ``artifact_manifest``,
     the live hash is the ``sha256`` that *committed* store manifest records
-    for the samples member (``store_pin_samples_hash``). The disk re-hash
+    for the samples member (``store_pin_samples_entry``). The disk re-hash
     always wins; the store-resolved hash is a pin to compare, never a
     re-hash of bytes -- the returned basis marks it, and per the operator
     ruling of 2026-11-17 it never supplies a verdict: the envelope itself
     stays file-backed and committed.
 
-    Returns ``(content_hash, unresolved, hashed_path, basis)`` (
-    ``hashed_path``, issue #5392: the samples file hashed, else ``None``;
+    Returns ``(content_hash, unresolved, source, basis)``. The source names
+    the hashed samples file or the selected ``manifest#member``.
     ``basis``, issue #5963: :data:`CONTENT_HASH_BASIS_ARTIFACT_MANIFEST`
     when the hash came from the store manifest, else ``None`` -- a disk
-    re-hash needs no marker). ``content_hash`` is ``None`` when the
+    re-hash needs no marker. ``content_hash`` is ``None`` when the
     envelope names no ``samples`` document (or it isn't a string), or when
     neither candidate location could be hashed and no store pin resolved it
     -- exactly mirroring ``sha256_file``'s own "unhashable input" fallback,
@@ -4941,9 +4940,15 @@ def _yield_samples_content_hash(
         if digest is not None:
             return f"sha256:{digest}", None, candidate, None
 
-    pinned_hash, pin_failure = store_pin_samples_hash(samples, spec)
-    if pinned_hash is not None:
-        return pinned_hash, None, None, CONTENT_HASH_BASIS_ARTIFACT_MANIFEST
+    entry, pin_failure = store_pin_samples_entry(samples, spec)
+    if entry is not None:
+        source = f"{spec['artifact_manifest']}#{entry['name']}"
+        return (
+            f"sha256:{entry['sha256']}",
+            None,
+            source,
+            CONTENT_HASH_BASIS_ARTIFACT_MANIFEST,
+        )
 
     unresolved: dict[str, Any] = {"samples": samples, "searched": candidates}
     if pin_failure is not None:
@@ -6349,22 +6354,14 @@ def _resolve_evidence(
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
     content_hash_unresolved: dict[str, Any] | None = None
-    yield_samples_path: str | None = None
+    yield_samples_source: str | None = None
     samples_basis: str | None = None
     input_verified: bool | None
     if actual_hash is None and check_kind == "yield":
-        # klt yield's current JSON shape (issue #816) carries no
-        # `provenance` block of its own -- see this module's "Statistical-
-        # evidence binding" docstring section and
-        # :func:`_yield_samples_content_hash`.
-        actual_hash, content_hash_unresolved, yield_samples_path, samples_basis = (
+        actual_hash, content_hash_unresolved, yield_samples_source, samples_basis = (
             _yield_samples_content_hash(envelope, spec)
         )
-        # A live re-hash of the samples document (issue #2196 by construction);
-        # `None` only when nothing could be hashed (issue #2197's
-        # `content_hash_unresolved` then names why) -- or when the hash came
-        # from the committed store manifest instead (issue #5963): those
-        # bytes were not read, so they are not claimed re-hashed.
+        # Only an on-disk samples hash verifies the bytes.
         input_verified = (
             True if actual_hash is not None and samples_basis is None else None
         )
@@ -6395,7 +6392,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
-            "yield_samples_path": yield_samples_path,
+            "yield_samples_source": yield_samples_source,
             "content_hash_basis": content_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,

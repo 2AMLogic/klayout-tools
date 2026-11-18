@@ -67,7 +67,7 @@ def _select_member(
     single basename match (the recorded ``name`` is the store's full
     member path, the ``samples`` reference what the run was invoked with;
     they usually differ in directory only); a basename matching more than
-    one *distinct* name is :data:`AMBIGUOUS_MEMBER`, never a guess."""
+    one entry is :data:`AMBIGUOUS_MEMBER`, never a guess."""
     if member is not None:
         matches = _named_entries(entries, member)
         if len(matches) == 1:
@@ -92,20 +92,15 @@ def _select_member(
     return None, MEMBER_MISSING
 
 
-def store_pin_samples_hash(
+def store_pin_samples_entry(
     samples: str, spec: Mapping[str, Any]
-) -> tuple[str | None, dict[str, Any] | None]:
-    """The ``sha256:`` hash a committed store manifest records for a `klt
-    yield` citation's samples document, or why it could not (issue #5963).
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Return the selected samples entry with its recorded name and sha256.
 
-    Called only after the samples file could not be hashed from disk (the
-    disk re-hash always wins); a spec that names no ``artifact_manifest``
-    gets ``(None, None)`` -- no fallback was declared, so there is nothing
-    to report. Returns ``(content_hash, None)`` on success, or
-    ``(None, {artifact_manifest, reason})`` with a named
-    :data:`content_hash_unresolved` reason -- never raises: an unreadable
-    or invalid manifest, a missing member or an ambiguous name leaves the
-    hash unresolved, exactly as a missing file always has."""
+    Called after disk lookup fails. A declared manifest that cannot resolve
+    a unique member yields a failure disclosure with its path and reason.
+    With no declared manifest, both results are None.
+    """
     manifest_path = spec.get("artifact_manifest")
     if not isinstance(manifest_path, str) or not manifest_path:
         return None, None
@@ -122,7 +117,7 @@ def store_pin_samples_hash(
     entry, reason = _select_member(manifest["entries"], member, samples)
     if entry is None:
         return None, {"artifact_manifest": manifest_path, "reason": reason}
-    return f"sha256:{entry['sha256']}", None
+    return entry, None
 
 
 def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:

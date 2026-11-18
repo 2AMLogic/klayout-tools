@@ -11,8 +11,10 @@ hash never supplies a verdict, and the citation discloses its basis."""
 import hashlib
 import json
 
+import pytest
+
 from klayout_tools.signoff import build_tier_report
-from test_signoff import YIELD_PASS_ENVELOPE, _manifest
+from test_signoff import DRC_CLEAN_ENVELOPE, YIELD_PASS_ENVELOPE, _manifest, _write
 
 REPO = "acme/widgets"
 
@@ -57,7 +59,9 @@ def _store_manifest(root, entries) -> str:
     return str(path.relative_to(root))
 
 
-def _yield_report(root, *, samples: str = "mc-samples.json", samples_bytes=None):
+def _yield_report(
+    root, *, samples: str = "mc-samples.json", samples_bytes=None, status="pass"
+):
     """A committed file-backed yield envelope under ``block/yield/``; the
     samples document it names is written beside it only when the test asks
     for one on disk."""
@@ -65,7 +69,7 @@ def _yield_report(root, *, samples: str = "mc-samples.json", samples_bytes=None)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     if samples_bytes is not None:
         (evidence_dir / samples).write_bytes(samples_bytes)
-    envelope = {**YIELD_PASS_ENVELOPE, "samples": samples}
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": samples, "status": status}
     report = evidence_dir / "yield.json"
     report.write_text(json.dumps(envelope))
     return str(report.relative_to(root))
@@ -110,28 +114,43 @@ def test_store_pin_resolves_absent_samples_hash_and_discloses_basis(
     assert "content_hash_unresolved" not in citation
 
 
-def test_store_pin_stale_pin_renders_stale_evidence(tmp_path, monkeypatch):
-    """AC 1: same resolution, a pin naming a different revision -- the same
-    ``stale_evidence`` refusal a stale disk-hash pin always rendered."""
+@pytest.mark.parametrize(
+    ("status", "reason", "member"),
+    [
+        ("pass", "stale_evidence", None),
+        ("fail", "check_failed", "archives/renamed-samples.json"),
+    ],
+)
+def test_store_pin_stale_pin_renders_stale_evidence(
+    tmp_path, monkeypatch, status, reason, member
+):
+    """Both verdict paths disclose the actual manifest member and its recorded digest."""
     monkeypatch.chdir(tmp_path)
-    manifest = _store_manifest(
-        tmp_path, [_entry(_sha("the new samples bytes"), MEMBER_NAME)]
-    )
-    report = _yield_report(tmp_path)
+    name = member or MEMBER_NAME
+    digest = _sha("the new samples bytes")
+    manifest = _store_manifest(tmp_path, [_entry(digest, name)])
+    report = _yield_report(tmp_path, status=status)
+    expected = "sha256:" + _sha("the old samples bytes")
+    entry = {"file": report, "content_hash": expected, "artifact_manifest": manifest}
+    if member is not None:
+        entry["artifact_member"] = member
 
-    result = _grade(
-        tmp_path,
-        {
-            "file": report,
-            "content_hash": "sha256:" + _sha("the old samples bytes"),
-            "artifact_manifest": manifest,
-        },
-    )
+    item = _item_6(_grade(tmp_path, entry))
 
-    item_6 = _item_6(result)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "stale_evidence"
-    assert item_6["citation"] is None
+    assert item["status"] == "unmet"
+    assert item["reason"] == reason
+    assert item["citation"] is None
+    detail = item["detail"]
+    assert detail["content_hash_pin"] == "stale"
+    assert detail["hash_check"] == {
+        "field": "artifact_manifest.entries[].sha256",
+        "expected": expected,
+        "actual": f"sha256:{digest}",
+        "match": False,
+    }
+    assert detail["compared_against"] == f"{manifest}#{name}"
+    assert "recorded sha256" in detail["hint"]
+    assert "provenance.input" not in detail["hint"]
 
 
 def test_disk_samples_hash_wins_over_the_manifest(tmp_path, monkeypatch):
@@ -360,23 +379,36 @@ def test_explicit_member_disambiguates_the_basename(tmp_path, monkeypatch):
     assert item_6["citation"]["content_hash"] == f"sha256:{samples_sha}"
 
 
-def test_non_string_store_pin_keys_fail_closed(tmp_path, monkeypatch):
-    """AC 6: a non-string ``artifact_manifest``/``artifact_member`` renders
-    that one item ``invalid_evidence`` -- an opt-in requirement never fails
-    open -- and only that item."""
-    monkeypatch.chdir(tmp_path)
-    report = _yield_report(tmp_path)
-
-    for overrides in (
+@pytest.mark.parametrize(
+    "overrides",
+    [
         {"artifact_manifest": 5},
         {"artifact_member": ["x"]},
-        {"artifact_member": 7},
-    ):
-        result = _grade(tmp_path, {"file": report, **overrides})
-        item_6 = _item_6(result)
-        assert item_6["status"] == "unmet"
-        assert item_6["reason"] == "invalid_evidence"
-        assert item_6["citation"] is None
+        {"artifact_manifest": None},
+        {"artifact_member": None},
+    ],
+)
+def test_non_string_store_pin_keys_fail_closed(tmp_path, monkeypatch, overrides):
+    """A malformed store-pin option affects only the item that declares it."""
+    monkeypatch.chdir(tmp_path)
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    evidence = {"3": drc, "6": {"file": _yield_report(tmp_path), **overrides}}
+    result = build_tier_report(_manifest(evidence=evidence))
+    assert next(item for item in result["items"] if item["id"] == 3)["status"] == "met"
+    item = _item_6(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "invalid_evidence"
+    assert item["citation"] is None
+
+
+def test_command_entry_rejects_store_pin(tmp_path, monkeypatch):
+    """Store pins require a committed file-backed evidence envelope."""
+    monkeypatch.chdir(tmp_path)
+    manifest = _store_manifest(tmp_path, [_entry(_sha("samples"), MEMBER_NAME)])
+    item = _item_6(
+        _grade(tmp_path, {"command": ["klt", "yield"], "artifact_manifest": manifest})
+    )
+    assert item["reason"] == "invalid_evidence"
 
 
 def test_no_store_pin_declared_is_unchanged(tmp_path, monkeypatch):
