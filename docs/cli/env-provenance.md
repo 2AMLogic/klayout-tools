@@ -382,6 +382,13 @@ assert not find_absolute_path_fields(clean)  # same check as `lint-envelope`
   (`/home`, `/Users`, `C:\Users`) by design, so a clean `scan` says nothing
   about non-home roots.
 
+A tool-binary field is the everyday case: `klt drc --engine klayout` records
+the resolved binary in `environment.klayout_binary` on every run
+([`drc.md`](drc.md) → "Pinning the KLayout application"), and
+`scrub_payload(resp, [("/usr/bin", "<KLAYOUT_BIN_DIR>")])` rewrites
+`/usr/bin/klayout` to `<KLAYOUT_BIN_DIR>/klayout` — clean under an empty
+allow-list.
+
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
 `find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,
 `lint_envelope_files()`, and `render_path_field()` (the same
