@@ -24,8 +24,12 @@ them (``signoff.py``'s ``_yield_campaign_disclosure``). Number formatting
 follows the producers' own text conventions: ``repr`` for worst-case
 values/margins (exactly what ``klt sim``'s text summary prints,
 ``cli/sim_measurement_text.py``), ``.6g`` for limits bounds (``klt
-yield``'s ``_fmt``), ``.6f`` for yield estimates and confidence-interval
-bounds (``klt yield``'s empirical line).
+yield``'s ``_fmt``) each labelled with its operator -- ``>=``/``<=``, or
+``>``/``<`` when ``exclusive_min``/``exclusive_max`` is set, as ``klt
+yield``'s own ``limits:`` line does -- and ``.6f`` for yield estimates and
+confidence-interval bounds (``klt yield``'s empirical line). The numeric
+formatting never raises: a malformed non-numeric value is quoted
+verbatim (``repr``), so the ``klt report`` no-traceback guarantee holds.
 
 Absent cells render as ``-`` -- the same absent marker both producers'
 text output uses -- never as a literal ``null``/``0``: a measurement with
@@ -148,7 +152,6 @@ def _row(m: dict[str, Any], with_yield: bool) -> tuple[str, ...]:
     emp = _empirical(m)
     if emp is None:
         return row + (_ABSENT, _ABSENT)
-    estimate = emp.get("estimate")
     ci = emp.get("confidence_interval")
     ci_text = _ABSENT
     if (
@@ -156,14 +159,11 @@ def _row(m: dict[str, Any], with_yield: bool) -> tuple[str, ...]:
         and ci.get("low") is not None
         and ci.get("high") is not None
     ):
-        ci_text = f"[{ci['low']:.6f}, {ci['high']:.6f}]"
+        ci_text = f"[{_fixed(ci['low'], '.6f')}, {_fixed(ci['high'], '.6f')}]"
         confidence = emp.get("confidence")
         if confidence is not None:
-            ci_text += f" @ {confidence:.0%}"
-    return row + (
-        _ABSENT if estimate is None else f"{estimate:.6f}",
-        ci_text,
-    )
+            ci_text += f" @ {_fixed(confidence, '.0%')}"
+    return row + (_fixed(emp.get("estimate"), ".6f"), ci_text)
 
 
 def _empirical(m: dict[str, Any]) -> dict[str, Any] | None:
@@ -179,18 +179,49 @@ def _empirical(m: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def _fixed(value: Any, spec: str) -> str:
+    """``format(value, spec)`` for one producer number, never raising.
+
+    ``None`` is the absent marker. A value the format spec cannot render (a
+    producer-contract violation, e.g. a string where a number belongs) is
+    quoted verbatim via ``repr`` -- visibly wrong in the table, rather than
+    a traceback (``docs/cli/report.md``'s no-traceback guarantee) and rather
+    than ``-``, which would read as "no value declared"."""
+    if value is None:
+        return _ABSENT
+    try:
+        return format(value, spec)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+#: ``limits`` keys in render order, with the operator each bound carries:
+#: ``(key, inclusive operator, exclusive operator)`` -- the same labelling
+#: ``klt yield``'s own text line prints (``cli/yield_cmd.py``:
+#: ``min(>=)=...`` / ``max(<=)=...``, ``>``/``<`` when ``exclusive_min`` /
+#: ``exclusive_max`` is set).
+_BOUNDS = (("min", ">=", ">"), ("max", "<=", "<"))
+
+
 def _limits(limits: Any) -> str:
-    """A ``limits`` block rendered ``min–max`` (.6g, ``klt yield``'s own
-    formatting), ``-`` when absent -- never ``0``: ``limits: null`` means
-    the producer declared no bounds at all."""
+    """A ``limits`` block rendered with each bound's identity and
+    inclusivity -- ``>=30`` (floor), ``<=10`` (ceiling), ``>=1e+06,
+    <=2e+09`` (window), ``>-3, <3`` (strict bounds) -- numbers ``.6g``
+    (``klt yield``'s own formatting). ``-`` when absent, never ``0``:
+    ``limits: null`` means the producer declared no bounds at all.
+
+    The operator is what makes the number checkable: a bare ``10`` cannot
+    say whether ``iq_ua`` has a 10 uA ceiling or floor, and one-sided limits
+    are the common shape."""
     if not isinstance(limits, dict):
         return _ABSENT
-    bounds = [
-        format(limits[key], ".6g")
-        for key in ("min", "max")
-        if limits.get(key) is not None
-    ]
-    return "–".join(bounds) if bounds else _ABSENT
+    bounds = []
+    for key, inclusive, exclusive in _BOUNDS:
+        if limits.get(key) is None:
+            continue
+        op = exclusive if limits.get(f"exclusive_{key}") else inclusive
+        bounds.append(op + _fixed(limits[key], ".6g"))
+    return ", ".join(bounds) if bounds else _ABSENT
 
 
 def _number(value: Any) -> str:

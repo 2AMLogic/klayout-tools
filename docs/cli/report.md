@@ -106,11 +106,15 @@ conventions (`repr` for worst-case values/margins as `klt sim`'s text
 summary prints them; `.6g` for limits bounds and `.6f` for yield figures
 as `klt yield` prints them):
 
-- **Limits** renders the declared bounds `min–max`, or `-` when the entry
-  has `limits: null` — a measurement with no declared bounds has no
-  worst-case extreme (every margin is `null`, see the `measurements`
-  rollup row in [`sim.md`](sim.md)), so its **Margin** cell reads `-`
-  (absent) too, never `0`.
+- **Limits** renders each declared bound with its direction, so a floor
+  and a ceiling never read the same: `>=30` (a `min` only), `<=10` (a
+  `max` only), `>=1e+06, <=2e+09` (both). A bound flagged `exclusive_min`
+  / `exclusive_max` renders strict — `>-3, <3` — the same `>=`/`<=` vs
+  `>`/`<` labelling `klt yield`'s own `limits:` line prints. The cell is
+  `-` when the entry has `limits: null` — a measurement with no declared
+  bounds has no worst-case extreme (every margin is `null`, see the
+  `measurements` rollup row in [`sim.md`](sim.md)), so its **Margin** cell
+  reads `-` (absent) too, never `0`.
 - **Worst**/**Corner** quote `worst_case.value`/`worst_case.corner_id`; a
   `null` `worst_case.value` (an errored or `absent` measurement) renders
   `-`, not zero. **Status** is the entry's own aggregate status
@@ -122,7 +126,10 @@ as `klt yield` prints them):
 
 Absent cells always render `-` — the marker both producers' own text
 output uses — never a literal `null`, matching this doc's omit-absent
-convention above.
+convention above. A present value that is not a number (a producer-contract
+violation, e.g. a string `limits.min`) is quoted verbatim in its cell
+(`>='abc'`) rather than failing the render or reading as absent — the
+no-traceback guarantee under "Exit codes and errors" holds for it too.
 
 ## Why a third format
 

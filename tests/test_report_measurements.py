@@ -286,10 +286,11 @@ def test_sim_report_renders_measurement_table(tmp_path):
         "| t_rise_400 | s | - | 2.3640661938534276e-06 | - | tt/1.800V/27C | pass |"
         in report["markdown"]
     )
-    # limits {min, max} -> bounds rendered .6g; value/margin quoted verbatim
-    # (repr, exactly what klt sim's own text summary prints).
+    # limits {min, max} -> each bound rendered .6g with its operator;
+    # value/margin quoted verbatim (repr, exactly what klt sim's own text
+    # summary prints).
     assert (
-        "| ring_freq_hz | Hz | 1e+06–2e+09 | 123500000.0 | 122500000.0 "
+        "| ring_freq_hz | Hz | >=1e+06, <=2e+09 | 123500000.0 | 122500000.0 "
         "| ss/1.800V/27C | pass |" in report["markdown"]
     )
     # The plain-text rendering carries the same table, space-aligned, and
@@ -307,7 +308,7 @@ def test_yield_report_adds_yield_columns(tmp_path):
     # estimate .6f, CI bounds .6f with the confidence level named -- the
     # figures klt yield itself prints.
     assert (
-        "| i_mismatch_pct | % | -3–3 | - | - | - | fail "
+        "| i_mismatch_pct | % | >=-3, <=3 | - | - | - | fail "
         "| 0.406250 | [0.259662, 0.566513] @ 90% |" in report["markdown"]
     )
     # A Monte Carlo rollup entry carries no worst_case: Worst/Margin/Corner
@@ -340,7 +341,7 @@ def test_null_worst_value_and_absent_status_render_absent_not_zero(tmp_path):
     report = build_report([path])
 
     assert (
-        "| startup_time | s | 0–0.001 | - | - | tt/1.800V/27C | absent |"
+        "| startup_time | s | >=0, <=0.001 | - | - | tt/1.800V/27C | absent |"
         in report["markdown"]
     )
 
