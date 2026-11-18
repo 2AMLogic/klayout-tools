@@ -163,6 +163,52 @@ def test_duplicate_names_are_rejected(tmp_path):
         sim.run_sim(str(request))
 
 
+# The two context refusals are rendered by the shared helpers in
+# ``sim_measurement_kind``; the ``match=`` tests above pin only their stable
+# stems, so these pin the whole sentence -- the per-form ``explanation=`` /
+# ``form=`` clauses included. The expected text is the wording the module
+# carried inline before it delegated, written out literally (not rebuilt from
+# the helper's template) so a drifted clause fails here.
+
+
+@pytest.mark.parametrize(
+    ("analysis", "got"),
+    [
+        ({"kind": "tran"}, "'tran'"),
+        ({"kind": "AC"}, "'AC'"),
+        ({"kind": ""}, "''"),
+        ({}, "None"),
+    ],
+)
+def test_non_dc_refusal_wording_is_pinned(analysis, got):
+    with pytest.raises(sim.SimError) as exc:
+        sim_slope_band_meas.validate_slope_band_context([_DECL], analysis)
+    assert str(exc.value) == (
+        "measurement 'usable_range' declares 'slope_band', which reduces a "
+        'swept transfer curve and so requires analysis.kind "dc" '
+        f"(got {got})"
+    )
+
+
+def test_duplicate_name_refusal_wording_is_pinned():
+    # Case-insensitive match, reported with the *second* entry's spelling.
+    other = {"name": "USABLE_RANGE", "slope_band": _BODY}
+    with pytest.raises(sim.SimError) as exc:
+        sim_slope_band_meas.validate_slope_band_context([_DECL, other], {"kind": "DC"})
+    assert str(exc.value) == (
+        "duplicate measurement name 'USABLE_RANGE': names must be unique when "
+        "measurements[] declares a slope_band entry"
+    )
+
+
+def test_analysis_kind_is_checked_before_duplicate_names():
+    other = {"name": "usable_range", "slope_band": _BODY}
+    with pytest.raises(sim.SimError, match='requires analysis.kind "dc"'):
+        sim_slope_band_meas.validate_slope_band_context(
+            [_DECL, other], {"kind": "tran"}
+        )
+
+
 def test_refused_for_xyce(tmp_path):
     request = _request(tmp_path, [_DECL], engine="xyce")
     with pytest.raises(sim.SimError, match="slope_band is not supported for engine"):
