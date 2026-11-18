@@ -14,6 +14,236 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`environment.netlist_identity` no longer truncates cards that use KLayout
+  `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
+  sim`'s netlist identity cut every line at the first whitespace-preceded `$`
+  or `;`, so `X$1 $3 $4 inv` and `X$1 $7 $4 nand` both collapsed to `x$1` —
+  two different circuits shared one identity, and `expect_netlist_identity`
+  passed when it should have refused. Normalization now strips inline comments
+  with the shared `_spice_text` rule (everything from the first `;`, or from
+  the first `$` that is a whole whitespace-delimited token; a `$` that only
+  begins a token, such as the `$3` of `X$1 $3 $4 inv`, is a net name and
+  survives; `R1 a b 1k; load` now matches
+  `R1 a b 1k`). **Identity stamps can change** for netlists whose bytes did
+  not move: a stored `expect_netlist_identity` from an older version that now
+  mismatches fails loudly with the existing mismatch error; refresh it from a
+  report generated with the corrected version. `klt sim --check` diagnoses
+  the case (raw `sha256` match + identity mismatch) as
+  `normalization_changed`. The stamp format and JSON fields do not change.
+  Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+- **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
+  resistor now extracts as a two-terminal device instead of silently
+  vanishing** (#5889, 2026-11-17). The DRM's own SB.10
+  (`poly2.enclosing.sab.1`) *mandates* that Poly2 extend >= 220 nm beyond
+  every SAB edge, so a DRC-clean `ppolyf_u`/`ppolyf_u_1k` drawing carries an
+  unmarked 220 nm Poly2 band around the recognised body on every side; that
+  band wraps the body and merged both contacted leads into ONE terminal
+  component, so `DeviceExtractorResistorWithBulk` found a single contact
+  region ("Expected two polygons on contacts interacting with one resistor
+  shape") and formed no device — the device count dropped (29 -> 27 on the
+  issue's block layout) while `klt drc` stayed clean. Both poly entries now
+  declare the new `ResistorDevice.terminal_enclosure_um=0.22`:
+  `_resolve_resistors` narrows the terminal region to the Poly2 within
+  220 nm of Poly2 drawn *beyond* the mandated band (each lead plus its
+  channel through the band) and severs the band's side flanks from the
+  terminal conductor's connectivity, so each lead lands on its own net and
+  the extracted L/W/R are exactly the marked body's own geometry (6.0
+  squares -> 2100 Ω at 350 Ω/□ on the reproducer). A drawing with no band
+  (exact-body markers, the pre-#5889 fixture style) extracts bit-for-bit as
+  before; a halo that is itself a conductor path around the body still
+  forms no device. Other decks are untouched (the field defaults to `0.0`).
+  No JSON field added or removed; `schema_version` unchanged.
+
+- **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
+  item-1 envelope that enumerates attested members but binds only its
+  inventory (the pre-0.9.0 producer's `provenance.input` shape, no
+  `provenance.input.paths`) now grades `unmet`/
+  `provenance_narrower_than_attested` instead of `met`, with `detail`
+  naming the breadth gap (`missing`, `attested_members`, `bound_paths`).
+  The floor is derived from the envelope's own `attestation.checks[]`, so
+  #4764's `paths`-binding envelopes are unaffected, as are hand-written
+  envelopes without an `attestation` block, attestations listing no
+  `present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+  design). **A committed pre-0.9.0 item-1 envelope flips `met` -> `unmet`;
+  the remedy is one re-attest with klt >= 0.9.0 plus the manifest re-pin.**
+  No `schema_version` bump: a new value in the existing `reason` enum, the
+  same additive class as #2718's `unanchored_evidence`/`wrong_item`.
+
+- **`klt signoff`: a declared-but-never-checked evidence hash is now
+  disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
+  records `provenance.input.content_hash` but names nothing verification
+  can answer — no usable `provenance.input.path`, or a `paths` set that
+  never answered (malformed, empty, or on a `model-run` envelope, whose
+  set is not member-verified) — has that hash silently never re-hashed:
+  its `met` citation rendered `input_verified: null`
+  identically to an envelope declaring no hash at all. Those citations now
+  carry the additive `input_verified_note: "declared_hash_unbound"`
+  (`input_verified` unchanged at `null`, no item verdict moves, no
+  `schema_version` bump), and `--format text` prints an
+  `input note: declared_hash_unbound -- …` line under the `input:` one.
+  A well-formed `paths` set answers through its members and never carries
+  the note. Documented in `docs/cli/signoff.md`'s `input_verified` table
+  and the generic-evidence section, and in `docs/json-contract.md`'s
+  `provenance.input` notes.
+
+- **`klt signoff --attest` inventory path lists accept `{"glob":
+  "<pattern>"}` members** (#5614, 2026-11-17): a `sources` (item 1) or
+  `hygiene` (item 10) entry may be a glob object instead of a literal path,
+  expanded at attest time to the **git-tracked** files matching it (never a
+  filesystem walk, so the envelope stays byte-deterministic across hosts).
+  Each expanded member gets its own `present` check and hash, so the
+  previously-undetectable case — a file added to a covered directory after
+  the envelope was committed — is now drift: `--attest --check` re-expands
+  and exits non-zero. A zero-match glob, a glob colliding with a literal
+  entry, an absolute/`..` pattern, a symlinked member, and a glob in a
+  `schema_version: 1` inventory are all refused; inventory schema version 2
+  carries the new form and this build reads `{1, 2}` (a v1 inventory attests
+  byte-identically to before).
+
+- **`klt sim --resume` harvests a retained shard map before dispatching**
+  (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
+  without `--resume` (issue #3896), but `--resume` only ever read
+  `checkpoint.json` -- which a run without `--resume` never writes -- so
+  resuming a partial sharded run reported `resume: reused 0 checkpointed
+  corner(s)` and re-submitted every shard as a new job, re-billing the units
+  that had already passed. `--resume` now harvests the map first: each
+  recorded shard's remote `status.json` is read once (never waited on, never
+  launched), a terminal shard is collected through the plain attach
+  machinery, and its units are recorded into the checkpoint and counted in
+  the `resume: reused N` summary; only unlaunched/unfinished/failed shards
+  are submitted again. A map written for a different request still refuses
+  with `error.code: "resume_fingerprint_mismatch"`. Shard map entries now
+  also record their ordered unit ids (`units`, additive), so a later harvest
+  or `--attach` can recover a job's units without re-deriving the partition
+  that minted it. `--resume` alone is now enough for the
+  `environment.remote.resumable: true` recovery the report advertises;
+  `--attach <map> --collect-partial` remains the non-blocking form.
+  Harvested reuse is reported in `environment.resume.resumed_corners`,
+  not as `environment.remote.fleet[]` entries with `resumed: true`;
+  `fleet[]` lists only shards dispatched after the harvest. A zero-unit
+  off-host corner request now returns `status: "not_checked"`, empty
+  `corners`, and no `environment.remote` instead of submitting a billed
+  job, even without `--resume` (#6540).
+
+- **`klt drc --engine klayout`: `provenance.klayout_version` names the binary
+  that ran the deck, not klt's own pip wheel** (#5660, 2026-11-17): the
+  standalone `klayout` application `--engine klayout` launches and the
+  `klayout` wheel inside klt's own environment are separate installs, but the
+  envelope recorded the wheel's version for a deck the application ran -- so a
+  committed report misnamed its engine whenever the two diverged, and
+  `klayout_version_mismatch` fired (with a `--with klayout==` remedy that
+  cannot reproduce the run) on decks whose engine *was* the tested version.
+  The binary's own `-v` version is now probed exactly once per run and
+  recorded as `klayout_version` -- tracking `--klayout-binary`/
+  `$KLT_KLAYOUT_BINARY` -- with the mismatch advisory and its stderr warning
+  computed from that same value (the warning's remedy names the application,
+  not the wheel). The wheel's version survives as the additive
+  `provenance.klayout_module_version`, and `environment.klayout_binary`
+  (previously emitted only under an override) now records the resolved binary
+  on every `--engine klayout` run, as an absolute path where resolvable. A run
+  with no `--min-klayout-version` still probes but fails *soft*: an
+  unresolvable probe records `klayout_version: null` instead of failing; with
+  a floor declared, probe failures stay fatal exactly as before.
+  `--list-rule-categories --engine klayout` records the same fields.
+  `--engine curated`, `klt lvs` and every other provenance caller are
+  byte-identical (the wheel genuinely is the engine there), and `klt drc
+  --check` in cheap mode is unaffected (it compares content hashes only).
+  `klt drc --check --rerun` excludes both new fields
+  (`environment.klayout_binary`, a host-local path, and
+  `provenance.klayout_module_version`) from its drift diff, and -- because the
+  change also redefines the input of `provenance.klayout_version_mismatch`
+  (wheel before, binary after) -- reports that flag in `not_compared`, not as
+  drift, when the committed report predates the change. A report committed
+  before this change therefore still re-runs as `match`, including on a host
+  where the wheel and the binary disagree. Between two post-change reports
+  (and for `--engine curated`) the flag is compared as before. No
+  `schema_version` bump: both fields are additive and
+  `provenance`'s `$defs` block is `additionalProperties: true`.
+
+- **`klt extract --report-parasitics slim` slims the JSON `parasitics`
+  report beside a `--spef` file** (#5816, 2026-11-17): `--spef` and the
+  JSON report describe the same measurement twice — the SPEF's
+  `*CAP`/`*RES` rows are a verbatim translation of `parasitics.nets[]`, and
+  each coupling capacitor appears in the JSON once from *each side of the
+  pair* — so a caller who wants the complete measurement and a committable
+  report had to commit the same numbers in two formats (~94% of a ~4 MB
+  report was `parasitics.nets[]`, almost all of it SPEF-carried data or one
+  constant repeated per net). The new `--report-parasitics {full,slim}` flag
+  (default `full`, byte-identical to the pre-#5816 output; request-form
+  field `report_parasitics`) drops from each `nets[]` entry the data the
+  SPEF beside it already carries (`coupled[]`, `hub_net`, and the
+  empty/constant lumped-model `terminals`/`segments`/`pin_order` and
+  `integrity` sub-keys — populated distributed-ladder fields and real
+  integrity findings are kept), and adds `parasitics.report_shape: "slim"`
+  plus a `parasitics.coupling_by_layer_pair` histogram that counts each
+  capacitor once per layer pair it spans, including same-layer coupling.
+  `slim` requires `--spef` (a clean `ExtractError`
+  otherwise); a slim run's SPEF and written SPICE are byte-identical to a
+  full run's. No `schema_version` bump: the default shape is unchanged and
+  every new field is additive.
+
+- **`klt functional-verification`: the response records a shared `provenance`
+  block, and a signoff `content_hash` pin binds the RTL, not the report's
+  bytes** (#5550, 2026-11-17): the response carried no `provenance` key, so a
+  `klt signoff` manifest citing the report as item 5/7 evidence could only
+  hash-pin it through the #4893 evidence-file re-hash — binding the report's
+  own bytes, blind to any RTL edit underneath it, with command-backed pinned
+  citations grading `unverifiable_provenance`. The response now carries the
+  shared block: `provenance.input.content_hash` (role `source`) digests
+  `request.sources` as resolved *before* the SDF/initial-state shims,
+  escaped-divider renames, and scoped-define wrappers are substituted, using
+  the same content-only combined scheme `klt
+  synthesize`/`klt equiv` record — so the digest is byte-identical for the
+  same RTL under a different checkout path or `-o` directory, excludes the
+  cocotb testbench, the SDF, and every generated wrapper, and the report
+  joins `_provenance_consistency`'s per-role cross-check against
+  `synthesize`/`equiv` citations over the same sources. `options.from_synthesize`
+  runs record `input: null` (their netlist is already pinned by
+  `from_synthesize.netlist_sha256`). Grading change, disclosed: a pinned
+  citation now compares against the RTL digest; the `evidence_file` basis
+  applies only where the envelope has no `provenance.input` — a legacy
+  envelope with no `provenance` key, or an `options.from_synthesize` report
+  (which keeps the #4893 file-bytes binding it always had; a command-backed
+  pin of one stays `unverifiable_provenance`, with a note naming that cause)
+  — so a manifest pinned under #4893 (the report's byte hash) grades
+  `stale_evidence` against a new report that records a source digest —
+  re-pin against `provenance.input.content_hash`. No
+  `schema_version` bump: the block is additive by contract.
+
+- **`klt signoff --repin -o FILE` is now a usage error instead of a silent
+  no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
+  stdout and never created `FILE` — the one mode that dropped a flag the user
+  typed, while every other `klt signoff` mode honours `-o`. `-o`/`--output`
+  now joins `--fleet`, `--attest`, `--check` and `--describe-grader` among the
+  forms `--repin` refuses by name (exit `2`, before the manifest is read or
+  rewritten). `--repin` still writes no output file; the JSON envelope is on
+  stdout as before. The other report/attest inputs `--repin` ignores
+  (`--tiers-doc`, `--inventory`, `--input`, `--allow-generator-exec`,
+  `--generator-approvals`) are unchanged.
+
+- **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
+  entries** (#5527, 2026-11-13): after an attestation inventory changed,
+  `klt signoff --attest` regenerated the envelope but the manifest's pin
+  still named the old input hash, so the next `--manifest` run silently
+  graded the item `unmet`/`stale_evidence` — and the only fix was a hand
+  edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
+  pins in place from the evidence they name. It rewrites a pin **only** when
+  the grader re-derived the live hash from the artifact itself
+  (`input_verified: true`) — the gate is that flag, never the evidence
+  kind, so a `drc`/`lvs`/`extract`/`sim` pin is re-pinned too whenever its
+  artifact resolves. A stale pin it could not re-verify (for example a `drc`
+  report whose named layout does not resolve here, where the pin is the
+  manifest author's independent claim about which revision was checked) is
+  left intact and reported as skipped, and an entry that pins nothing is
+  never given a pin.
+  A manifest with nothing to re-pin is not written at all. The JSON payload
+  (`schema_version: 1`) lists one record per changed and per skipped entry;
+  `--repin` requires `--manifest` (not `-`) and is a usage error combined
+  with the envelope `<file>` arguments, `--fleet`, `--attest`, `--check` or
+  `--describe-grader`. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
+  section.
+
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
@@ -29,6 +259,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   that declares `inputs` reports `provenance.input.paths` instead of
   `provenance.input.path`, so a manifest citing it must re-pin. No grader
   change. Docs: `docs/cli/signoff.md`, "Pinning the generator's inputs".
+- **`klt power` judges EM on a split arm's cross-section, not row by row**
+  (#6449, 2026-11-17, additive — no `schema_version` bump): where two arms of
+  one merged polygon join, the mesh's vertex grid cuts the wider arm
+  lengthwise into parallel rows, and a pad/load snapping to one node can put
+  the whole port current through a single row against a *row-width* limit —
+  an over-limit `em_verdict` finding on metal whose true cross-section
+  density is within limit. For each cut perpendicular to the flow, the
+  signed sum of the crossing branches is now compared against
+  `current_limit_a_per_um *` the contiguous conducting width, when the cut's
+  branches tile all the polygon's metal there and every member has a solved
+  current and a limit (never across a gap, layer or polygon; a true narrow
+  neck keeps its own width). `em_verdict` entries judged this way gain
+  `basis: "cross_section"`, `width_um` and `section_edge_ids`; every other
+  entry (vias, rectangular rails, edges on no eligible cut) is byte-identical
+  to before, and `coverage`/edge counts are unchanged. A cross-section can
+  relax a per-row finding, never tighten one, so a layout that failed only
+  because of the row split now passes while a real over-limit still fails.
+  Distributed pad/load injection and the IR solver are unchanged.
 - **`klt env-provenance lint-envelope --json-stream` lints concatenated JSON
   document streams** (#5887, 2026-11-17): each FILE argument is parsed as a
   single JSON document, so a file holding several whitespace-separated
@@ -72,6 +320,74 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
+  2026-11-17): the single-request batch dry run now reaches the same
+  `plan_batch_job` the submit path runs, so a request the fleet would
+  refuse is refused by the dry run with the submit path's own
+  `error.code` and message — `batch_max_units_per_job_invalid` for a
+  malformed `batch.max_units_per_job` or one combined with
+  `job_ceiling_check: "enforce"` (both used to dry-run clean), and
+  `batch_job_ceiling_exceeded` for a request whose bound exceeds
+  `max_job_seconds` under `"enforce"` (never checked on this path at
+  all). The dry-run report gains an additive `job_ceiling` field — the
+  `environment.remote.job_ceiling` name and shape, including
+  `split`/`effective_hosts` when a split mode is active — present only
+  when a batch configuration resolves on this host, so a configless host
+  dry-runs clean exactly as before. The warn / serial-bound (#4982) /
+  split stderr notices print as a submit would print them. `hosts` keeps
+  its meaning (the request's `remote.hosts`; the planned shard count is
+  `job_ceiling.effective_hosts`, never a redefinition), and `--format
+  text` prints a `batch plan:` line with the unit count and planned job
+  count. `schema_version` is unchanged; the field is additive.
+- **Added** (#5850): an item 9 `testbenches` entry may declare `depends_on` —
+  repo-relative paths the bench depends on (a helper it imports, a model
+  card it includes) — and each declared dependency is hashed into the
+  envelope as its own `present` check (role `testbench_dependency`,
+  carrying its bench), so editing a helper a shipped testbench depends on
+  is caught by `klt signoff --attest 9 --check` (exit 3) instead of
+  passing green. Member binding stays shallow — undeclared dependencies
+  are not resolved — and every member now emits a passing
+  `dependency_binding` check recording how many edges it declared, so the
+  envelope says whether binding happened instead of implying completeness.
+  A dependency may be shared across entries (and may itself be an
+  inventoried member); a repeat within one entry is refused (exit 1).
+  An envelope committed before this change no longer reproduces under
+  `--check` (every member now emits the `dependency_binding` disclosure
+  row that older envelopes lack), so it is drift until re-attested once:
+  run `klt signoff --attest 9 --inventory <inv> -o <envelope>` and commit
+  the new envelope. Additive; `schema_version` unchanged. First ships in
+  the first release after `v0.9.2` (which refuses `depends_on` as an
+  unknown field).
+- **Behaviour change for consumers locating `klt synthesize` artifacts by
+  path: they moved from flat `.klt/synthesize/` to
+  `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
+  (#6228, 2026-11-17; the layout itself shipped with #2119): since #2119
+  each invocation exclusively creates its own directory beneath the request
+  file's `.klt/synthesize/`, so the artifacts that previously landed flat at
+  `<request-dir>/.klt/synthesize/<hdl_toplevel>_synth.v` and
+  `.klt/synthesize/synth_<hdl_toplevel>.ys` are now written at
+  `<request-dir>/.klt/synthesize/<run_id>/<same names>`. The response
+  carries that run's `run_id` (additively; a caller-supplied `run_id`
+  request key also exists and exclusively reserves the directory), and all
+  existing `{path, scope}` fields still point at this invocation's files —
+  including the `{"path": null, "scope": "external"}` shape an
+  out-of-repository request reports, where the artifacts are still at
+  `<request dir>/.klt/synthesize/<run_id>/`. A flow driver that resolves
+  its netlist by the old documented flat path now fails to find it, and one
+  that globs `.klt/synthesize/` newest-first can silently pick up a previous
+  run's netlist; resolve via the response's paths or `run_id` instead,
+  never by newest-mtime globbing. There is no mutable `latest` alias, by
+  design — it would reintroduce the cross-run ambiguity the per-invocation
+  isolation fixed; a pipeline that needs a stable path should set
+  `outputs.dir`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
+  "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
+  only; no `schema_version` bump.
+- **Fixed** (#6227, `klt route`; no JSON field changes): a `routing.width_um`
+  or `pins[].direction_deg` too large for a float (e.g. `10**400`) raised an
+  uncaught `OverflowError` instead of the contract's `RouteError`; both now
+  use the shared finite-number check. `width_um` of `inf`/`nan`, previously
+  accepted, is now rejected with the same `RouteError`.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -93,9 +409,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/cli/drc.md`'s corrected waiver guidance; `DF.6_MV`/`PL.4_MV` remain
   disclosed unmodeled), and `DF.1c` flags the same narrow MOSCAP fixture both
   engines report. A consequence for `klt gen mos_array`: its MOSCAP-marked
-  devices now report the genuine `comp.width.moscap.1` finding (the native
-  deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
-  passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+  devices reported the genuine `comp.width.moscap.1` finding (the native
+  deck flags the same shapes) until the generator fix (#6170). No JSON
+  field added or removed; `schema_version` unchanged.
 
 - **HDL verbs expand `$VAR` / `~` in request path fields** (#5678, 2026-11-17):
   `klt functional-verification`, `synthesize`, `formal` and `equiv` resolved
@@ -106,7 +422,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extract` / `sim` document, and an unset `$VAR` is a request error naming the
   variable instead of a bare "not found". Additive: a literal path keeps its
   meaning, no `schema_version` bump.
-
+- **`klt drc --deck gf180mcu` reports fully orphan cuts** (#5915, 2026-11-17):
+  the eight single-population conductor-over-cut enclosure rules
+  (`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+  `metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1`,
+  `metal5.enclosing.via4.1`) now set `require_containment` (#2726), so a
+  Contact/Via1-Via4 drawn entirely outside its conductor is reported instead
+  of passing `clean` (the legacy zero-overlap term only saw cuts that touch the
+  conductor). The four multi-population sides (`poly2.`/`comp.enclosing.contact.1`,
+  `metal4.enclosing.via4.1`, `mim.enclosing.via4.1`) keep the legacy behaviour.
+  A layout that previously reported `clean` with an unlanded gf180mcu cut can
+  now report `violations`. Both checked-in layout trees were enumerated at
+  merge base and at head: the three `tests/corpus/gf180mcu` cells are
+  unchanged, and of the 16 `blocks/gf180*/output/*.gds` snapshots only
+  `blocks/gf180-bandgap/output/bandgap_top.gds` moves (`clean` ->
+  `violations`, `metal1.enclosing.via1.1` 0 -> 1) — a true positive: a Via1
+  landed on Metal2 above with no Metal1 below, filed upstream
+  (2AMLogic/gf180-bandgap#504). `docs/cli/drc.md` also records that asap7
+  has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
+  field or `schema_version` changes; the deck's `provenance.deck` hash
+  changes.
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -140,8 +475,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   #5733). A request document that already sets `layout.deck` is refused with
   a clean error (exit 1) — a flag never silently overrides a request
   document — and the flag is refused with `--check`. It never sets
-  `reference.deck` (the reference-netlist rewriting deck — a different knob,
-  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  `reference.deck` (the reference-netlist rewriting deck, configured through
+  a separate request field). Additive request
   surface; no `schema_version` bump.
 - **Inventory-driven `klt signoff --attest` envelopes record the klayout
   engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
@@ -162,6 +497,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   attaching. A shard map now attaches under any `hosts` (the shard count is read
   from the map); a bare job id still requires `hosts = 1`. Additive: a call that
   used to fail now succeeds.
+- **`klt pex` `delta[]` rows are self-describing: new `testbench` and
+  `measurement` fields** (#5681, 2026-11-17): `spec_row` is the bare
+  measurement name for a one-testbench run but `<stem>.<name>` for several, so
+  a single-testbench row named no bench and a consumer keying on
+  `(bench, measurement)` matched nothing. Every `delta[]` row (including the
+  extraction-failed error rows) now also carries `testbench` -- the request's
+  filename stem, identical whether the bench ran alone or with others, `null`
+  for `--measure-command` (no testbench file) -- and `measurement`, the bare
+  `measurements[].name`. Additive: `spec_row`, `coverage`, `status` and the exit
+  code are unchanged and `schema_version` does not bump. See
+  [`docs/cli/pex.md`](docs/cli/pex.md) "`delta[]` entries".
+- **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
+  2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
+  entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
+  itself when set, else `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) and embedded
+  as an absolute path in the generated Tcl, but the wrapper
+  `scripts/install-openroad-docker.sh` writes mounted only `$PWD`,
+  `$PDK_ROOT` and `$TMPDIR` — so every `klt place-and-route` /
+  `klt post-route-sta` run against a list-form corner failed at its first
+  OpenROAD stage with `cannot read file <cache>/liberty-merged/merged-*.lib`.
+  The wrapper now resolves the cache root exactly as
+  `klayout_tools.liberty_merge.cache_root()` does, `mkdir -p`s it before
+  `docker run` (Docker otherwise creates a missing bind-mount source as
+  root, issue #3151), mounts it `:ro`, and skips the mount when the path
+  duplicates `$PWD`/`$PDK_ROOT`/`$TMPDIR` (a duplicate mount point is a
+  hard `docker run` error). The mount-coverage hint for an unreadable path
+  under the cache root no longer advises "run from a common ancestor"
+  (unachievable for a cache path); it names the cache root instead. Hosts
+  with an older wrapper must re-run `scripts/install-openroad-docker.sh`
+  to regenerate it (or set `KLT_CACHE_DIR` under an already-mounted
+  directory, e.g. `$TMPDIR/klt-cache`).
 - **`klt sim --fail-fast-probe` reads the same `.spiceinit` as the corners it
   screens** (#6047, 2026-11-17): `_run_corner` pins the thread count by writing
   a run-directory `.spiceinit`, which *replaces* `$HOME/.spiceinit`, but the
@@ -202,6 +568,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   committed envelope re-checks `match`; no `schema_version` bump. Repeating
   one path across item-9 object entries is still refused, and the refusal now
   points at the list form. See `docs/cli/signoff.md`.
+- **`klt sim --capacity-retries N` now works on a sharded single request**
+  (#5567, 2026-11-16): a sharded batch run whose `--wait-for-capacity` budget
+  ran out left the refused shards as `lost_shard` corners, recoverable only
+  by a second `--attach` / `--resume` invocation. With `--capacity-retries N`
+  the shards lost to `batch_no_capacity` / `batch_concurrency_cap` are
+  launched again, in up to `N` further passes after the other shards finish,
+  with doubling backoff and a fresh capacity-wait budget per pass; their
+  already-submitted jobs are launched, never re-submitted. Default `0` is
+  unchanged, and `--batch-set` behaves as before.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure
@@ -212,6 +587,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   warning now says its definition may live in the model library instead of
   implying the netlist alone was searched; without a model library the
   wording is unchanged.
+- **`klt signoff --attest 2 --check` re-checks the committed regeneration claim
+  without the flags** (#5572 / PR #5611, 2026-11-16): `provenance.regeneration`
+  is part of what `--check` compares, but the fresh envelope was built only from
+  its command-line arguments — so a flag-less `--check` of a committed item-2
+  envelope carrying a regeneration claim reported `drifted` (exit 3) on
+  `provenance.regeneration` unless `--generator` / `--regenerated-hash` (and
+  `--hash-kind` for a geometry claim) were retyped verbatim, meaning the claim
+  lived a second time outside the evidence chain and an item-2 envelope could
+  not be verified from the repo alone. A flag-less `--check` now adopts the
+  committed claim as recorded and reports `match` (exit 0). Passing any of the
+  three flags is unchanged and is now an explicit cross-check: a value
+  differing from the committed claim, or flags against a claim-less envelope,
+  still reports drift (exit 3). No JSON field is added, renamed or removed and
+  no `schema_version` changes; an envelope written by the previous version
+  re-checks clean without being re-attested. **Migration:** if your CI treated
+  exit 3 from a flag-less `--check` as "needs re-attest", a fresh repository no
+  longer triggers that; and if you worked around the old behaviour by copying
+  the committed hash into the `--check` invocation, that duplicate literal can
+  now be dropped.
 - **Added** (#5808, additive — no `schema_version` bump): `klt gen` reports a
   top-level `subcell_naming_scheme` string id (`"core-suffix-v1"`: the PCell
   sub-cell is `<cell_name>__core`; `"pdk-cell-v1"`: sg13g2 `bjt_array` keeps
@@ -220,6 +614,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   Sub-cell naming itself changed earlier (#4251) from KLayout's default
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
+- **`klt erc`: a substrate assertion reaching over a drawn well can no longer
+  fabricate a `erc.supply_short`, and substrate shorts name the geometry that
+  performed the merge** (#5745, 2026-11-17): the substrate/well body-merge
+  pass attributed a tie's tap sites to bodies without asking where each site
+  physically was. A `ties[]` entry declaring the #2255 form
+  (`well_layer: null` + `well_boxes`) whose asserted region reached over a
+  *different* supply's drawn well captured that net's own well tap into the
+  shared `vsubs` body -- a tap inside a drawn well taps the well (junction-
+  isolated from the substrate), not the substrate -- so the union-find welded
+  the two supply clusters and reported a fabricated `erc.supply_short` via
+  `substrate` on inputs that grade clean. Non-drawn-well ties now subtract
+  every drawn-well tie's (selected) well region before attributing substrate
+  bodies, so the repro shape grades clean; drawn-well ties keep their own
+  sites by construction. Additively, every `erc.supply_short` via
+  `"substrate"` now carries `body.joins` -- one `{net, tie, bbox}` entry per
+  tap site that welded that net to the body, with `well_box` (0-based index
+  into that tie's `well_boxes`, lowest when several overlap) when the site
+  came from an assertion -- so a finding names its evidence instead of
+  inviting a pass/fail bisection. Existing fields are unchanged; a spec
+  without the repro shape grades byte-identically except for the new
+  `joins` key. `schema_version` is unaffected (additive, per
+  `docs/json-contract.md`); `provenance.klt_version` tells which build
+  graded a committed report.
 
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a
