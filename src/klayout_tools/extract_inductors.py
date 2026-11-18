@@ -321,8 +321,10 @@ def _substrate_layers(
     first, as ``(region, global net name)`` -- ``None`` meaning "joins the
     well net": the substrate outside every isolation island (the deck's
     ``substrate_net``), one per island (``<substrate_net>_iso<n>``, the same
-    identities the MOS bodies there take), then the well (shrunk by 1 nm so
-    a marker that merely abuts a well does not join it)."""
+    identities the MOS bodies there take), then the well, last, so it is only
+    reached for a marker with no substrate or island under it. The well
+    overlap is shrunk by 1 nm, which drops overlap slivers under 2 nm wide
+    (a marker that merely abuts a well has no overlap to begin with)."""
     plain = recognition.markers - nwell
     outside, per_island = partition_region_by_islands(plain, isolation_islands)
     layers: list[tuple[kdb.Region, str | None]] = [(outside, deck.substrate_net)]

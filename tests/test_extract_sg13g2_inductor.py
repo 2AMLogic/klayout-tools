@@ -182,6 +182,28 @@ def test_windings_over_nwell_take_the_well_net_as_substrate(tmp_path):
     assert _merged(report) == ["c|d"]
 
 
+def test_winding_straddling_a_well_edge_takes_the_substrate_net(tmp_path):
+    """A marker only partly over an NWell has substrate under it too, and the
+    substrate outranks the well (the ``SUB`` candidates are ordered, see
+    ``_build_inductor_extractor``): the half-covered winding gets ``vsubs``
+    while a second winding wholly inside its own well keeps the well net."""
+
+    def build(top: kdb.Cell) -> None:
+        _add_winding(top, 0, ("a1", "b1"))
+        _add_winding(top, 50 * UM, ("a2", "b2"))
+        nwell = top.shapes(top.layout().layer(*NWELL))
+        nwell.insert(kdb.Box(-5 * UM, -5 * UM, 20 * UM, 45 * UM))  # half of marker 1
+        nwell.insert(kdb.Box(45 * UM, -5 * UM, 95 * UM, 45 * UM))  # all of marker 2
+
+    report = _extract(tmp_path, build)
+
+    subs = {d["nets"]["a"]: d["nets"]["sub"] for d in _inductors(report)}
+    assert set(subs) == {"a1", "a2"}
+    assert subs["a1"] == "vsubs"
+    assert subs["a2"] != "vsubs"
+    assert _merged(report) == ["c|d"]
+
+
 # --------------------------------------------------------------------------- #
 # Markers that must not become a two-terminal device
 # --------------------------------------------------------------------------- #

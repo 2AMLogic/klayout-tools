@@ -2205,8 +2205,10 @@ deck's `vsubs` otherwise.
 is not recognised — a centre-tapped `inductor3`, an `LC` pin, a missing or
 duplicated `LA`/`LB` pin — leaves its winding as plain wire (the terminals stay
 merged, as before) and adds a `warnings[]` entry naming why. An `IND` marker
-with no `inductor*` label (the `rfcmim` flavour marker) or no winding metal
-under it (an isolated label) is silent.
+with no `inductor*` label (27/0 is also an exclusion layer in both MiM
+capacitor flavours, `mimcap_exclude` and `rfmimcap_exc`, so a bare marker is
+not an inductor claim) or no winding metal under it (an isolated label) is
+silent.
 
 **Not modelled.** The device carries connectivity only: no `w`/`s`/`d`/turns
 parameters are measured (so a reference's `w=`/`s=`/`d=`/`nr_r=` are not
