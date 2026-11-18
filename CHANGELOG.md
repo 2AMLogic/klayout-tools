@@ -63,10 +63,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
   pins in place from the evidence they name. It rewrites a pin **only** when
   the grader re-derived the live hash from the artifact itself
-  (`input_verified: true`); a stale pin it could not re-verify — the
-  `drc`/`lvs`/`extract`/`sim` case, where the pin is the manifest author's
-  independent claim about which revision was checked — is left intact and
-  reported as skipped, and an entry that pins nothing is never given a pin.
+  (`input_verified: true`) — the gate is that flag, never the evidence
+  kind, so a `drc`/`lvs`/`extract`/`sim` pin is re-pinned too whenever its
+  artifact resolves. A stale pin it could not re-verify (for example a `drc`
+  report whose named layout does not resolve here, where the pin is the
+  manifest author's independent claim about which revision was checked) is
+  left intact and reported as skipped, and an entry that pins nothing is
+  never given a pin.
   A manifest with nothing to re-pin is not written at all. The JSON payload
   (`schema_version: 1`) lists one record per changed and per skipped entry;
   `--repin` requires `--manifest` (not `-`) and is a usage error combined
