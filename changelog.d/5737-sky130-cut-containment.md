@@ -4,7 +4,7 @@
   `met2.`/`met3.enclosing.via2.1`, `met4.enclosing.via3.1`, `met5.enclosing.via4.1`),
   so a cut sitting entirely off its conductor -- previously `clean` because the
   enclosure term only sees cuts that touch the metal -- now reports on its rule id.
-  The six multi-population sides (`diff.`/`tap.`/`poly.enclosing.licon.1`,
+  The seven multi-population sides (`diff.`/`tap.`/`poly.enclosing.licon.1`,
   `met3.`/`capm.enclosing.via3.1`, `met4.`/`capm2.enclosing.via4.1`) keep the legacy
   behaviour. A `licon1` with no `li1` above it is now itself reported, so a bare
   contact placed at a `klt gen` gate port needs an `li1` landing (0.08 um enclosure
