@@ -75,7 +75,10 @@ def _reject_from_synthesize_with_mutations(options: Any) -> None:
 
 
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str, output_dir: str | None = None
+    request: str,
+    proposals_path: str,
+    output_dir: str | None = None,
+    base_dir: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -84,6 +87,13 @@ def run_functional_verification_with_mutations(
     per resolved proposal in ``proposals_path`` (spike §1a's ported seam),
     classified ``killed``/``survived``/``rejected`` (spike §1a/§3c) into the
     additive ``mutation_testing`` response block (spike §3c).
+
+    ``base_dir`` forwards into every request-relative resolution and the
+    baseline run (issue #5673) -- the same override
+    :func:`run_functional_verification` accepts, which on this path is the
+    only way to combine an archived request with mutation testing (the
+    stdin workaround is unavailable: ``--mutations`` consumes stdin before
+    the baseline re-reads the request).
 
     Raises :class:`FunctionalVerificationError` (CLI exit 1) for every
     whole-run failure mode: anything the base contract already raises for
@@ -109,8 +119,9 @@ def run_functional_verification_with_mutations(
     # the (expensive) baseline ever runs; see
     # :func:`.functional_verification_mutation_proposals._load_request_and_proposals`
     # (issue #5679: one run names every failure, in both documents at once).
+    # ``base_dir`` re-anchors the request's relative paths (issue #5673).
     request_doc, request_dir, scope, proposal_records = _load_request_and_proposals(
-        request, proposals_path
+        request, proposals_path, base_dir=base_dir
     )
 
     engine = request_doc.get("engine", _fv.DEFAULT_ENGINE)
@@ -200,7 +211,7 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = _fv.run_functional_verification(request, output_dir)
+    baseline = _fv.run_functional_verification(request, output_dir, base_dir=base_dir)
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"

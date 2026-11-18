@@ -1619,7 +1619,7 @@ and 4).
 | `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
-| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
+| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). With `ring_gap_side` set, the standalone GF180MCU minimum is `0.72` µm and the minimum on other families is `0.40` µm. Must be `0` for a closed ring. |
 | `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
 | `add_well`               | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
 | `voltage_flavor`         | string | `""`    | Optional device-class marker drawn over the ring's well tie (issue #6025), same names as `mos_array`'s (`"hvi"` on `sky130`, `"medium_voltage"` on `gf180mcu`, `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l`) — so a ring abutting a flavour-marked device keeps sky130's `nwell.enclosed.hvi.1` satisfied. Needs `add_well` on a family that checks a well; an unrecognised name, or no well to mark, draws nothing and is flagged via `drc_hints.notes`. Echoed as `drc_hints.voltage_flavor`/`voltage_flavor_mark_present`. `""` leaves the output unchanged. |
@@ -1670,7 +1670,12 @@ opening through the ring's band so a route can pass through it instead:
   through the well.
 - Any tap contact the opening would clip is dropped, and the side's own
   `TAP_*`/`COLL_*` port is not reported when its midpoint lands in the
-  opening (there is no metal left under it there).
+  opening (there is no metal left under it there). On standalone GF180MCU
+  guard rings, the snapped Comp opening needs at least 0.72 µm to leave
+  0.40 µm of Nplus or Pplus spacing after the implant extends 0.16 µm
+  past each cut face. The generator rejects narrower widths before writing
+  a layout and drops contacts that would have less than 0.07 µm of Comp
+  enclosure at either face after grid snapping.
 - The opening is reported as a `GAP_<side>` entry in `ports[]` on the layer a
   route would cross the ring on: `x_um`/`y_um` is the opening's centre on the
   ring's own centre line, **`width_um` is the opening's length along that
@@ -1681,9 +1686,10 @@ opening through the ring's band so a route can pass through it instead:
 - The same `GAP_<side>` entry carries `strap_window_um` (issue #5656) — the
   opening's own box inset **along the ring side** (never across it) by the
   resolved PDK deck's minimum same-layer spacing for the opening's layer
-  (`{x0, y0, x1, y1}` in the composed frame, like every port field, each
-  coordinate rounded to 6 decimals so exact-equality comparison is safe). A
-  hand drawn strap (`klt draw`, or a `rect_um` in a composed stream) whose
+  (`{x0, y0, x1, y1}` in the cell's own origin-relative frame, like every
+  port field, each coordinate rounded to 6 decimals so exact-equality
+  comparison is safe). A hand drawn strap (`klt draw`, or a `rect_um` in a
+  composed stream) whose
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
@@ -1696,7 +1702,13 @@ opening through the ring's band so a route can pass through it instead:
   the same curated deck `klt drc` judges with (e.g. sky130's `li1.space.1`
   0.17 µm, gf180mcu's `metal1.space.1` 0.23 µm); when the family or a
   spacing rule for the layer cannot be resolved, the window degrades to the
-  opening's own box (inset 0).
+  opening's own box (inset 0). The window stays in that cell-own frame even
+  when the report is fed to [`klt gen-compose`](gen-compose.md): a compose
+  consumer flips the box by the block's `blocks[].orientation` (an
+  axis-aligned flip, re-sorting the corners into min/max) and then adds its
+  `blocks[].offset_um` from the compose response before comparing against
+  composed coordinates — a bare translation is correct only under
+  `orientation: "none"`.
 - A `drc_hints.notes[]` entry records the opening (and that substrate
   isolation is interrupted there), or — when `ring_gap_side` is set on a
   block whose ring is switched off — that no opening was cut.
@@ -2538,7 +2550,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
-| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the composed frame, each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the cell's own origin-relative frame (like the port's own `x_um`/`y_um`; a `gen-compose` consumer flips it by the block's `orientation` and adds its `offset_um` before comparing against composed coordinates), each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
 
 #### `drc_hints` fields
 

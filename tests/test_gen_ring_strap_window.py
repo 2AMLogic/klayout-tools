@@ -203,9 +203,8 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
 @pytest.mark.parametrize(
     ("ring_gap_um", "window"),
     [
-        # gf180mcu's metal1.space.1 is 0.23um, so every accepted opening in
-        # [0.40, 0.46) -- 0.40 being the documented minimum -- insets to a
-        # negative along-side extent, and one exactly two spacings wide
+        # gf180mcu's metal1.space.1 is 0.23um, so an opening below 0.46um
+        # insets to a negative along-side extent. One exactly two spacings wide
         # (0.46) insets to zero: none admits a same-layer-legal strap, and
         # all three report null, never an inverted or zero-width box (which
         # a consumer's geometry library would silently normalise into a
@@ -217,22 +216,19 @@ def test_mos_array_strap_window_tracks_the_gap_as_the_sweep_moves_it(
     ],
 )
 def test_opening_too_narrow_for_a_strap_reports_null_not_an_inverted_box(
-    tmp_path, both_pdk_root, ring_gap_um, window
+    ring_gap_um, window
 ):
-    report = generate(
-        {
-            "generator": "guard_ring",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                "contacts_per_side": 2,
-                "ring_gap_side": "S",
-                "ring_gap_um": ring_gap_um,
-            },
-            "options": {"output": str(tmp_path / f"narrow_{ring_gap_um}.gds")},
-        }
-    )
+    from klayout_tools.gen_ring_layout import _ring_layout
+    from klayout_tools.gen_ring_ports import _ring_ports
 
-    gap = _gap_port(report)
+    # These openings exercise the metadata independently of the standalone
+    # GF180MCU generator's wider implant-spacing minimum.
+    ring = _ring_layout(3.0, 3.0, 0.42, 2, "S", ring_gap_um)
+    metal = {"layer": 34, "datatype": 0, "name": None}
+    ports = _ring_ports(
+        ring, (0.0, 0.0), "TAP_", metal, 0.42, metal, pdk_variant="gf180mcuD"
+    )
+    gap = _gap_port({"ports": ports})
     assert gap["name"] == "GAP_S"
     assert gap["strap_window_um"] == window
 

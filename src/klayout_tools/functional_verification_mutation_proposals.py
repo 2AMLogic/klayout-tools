@@ -312,7 +312,7 @@ def _validate_mutation_scope(scope: list[str], request_sources: list[str]) -> No
 
 
 def _load_request_and_proposals(
-    request: str, proposals_path: str
+    request: str, proposals_path: str, base_dir: str | None = None
 ) -> tuple[dict[str, Any], str, list[str], list[_ProposalRecord]]:
     """Load both ``--mutations`` input documents and validate them as one
     report (issue #5679): cheap, whole-document checks before the expensive
@@ -322,12 +322,15 @@ def _load_request_and_proposals(
     judged so the ``scope`` subset check joins the same accumulated report:
     one run names every failure, in both documents at once.
 
+    ``base_dir`` is forwarded to :func:`_fv.load_request_arg` so a request
+    archived beside an evidence record can still be re-anchored (issue #5673).
+
     Returns ``(request_doc, request_dir, scope, proposal_records)``; raises
     :class:`FunctionalVerificationError` naming every failure otherwise.
     """
     scope, proposal_records, indices, errors = parse_mutation_proposals(proposals_path)
     try:
-        request_doc, request_dir = _fv.load_request_arg(request)
+        request_doc, request_dir = _fv.load_request_arg(request, base_dir=base_dir)
     except _fv.FunctionalVerificationError as exc:
         # Both documents malformed: report the proposals failures too rather
         # than hiding them behind the request's own. `_raise_all_collected`
