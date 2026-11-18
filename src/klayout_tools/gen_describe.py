@@ -77,10 +77,8 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
-    _res_end_contact_um,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
-    _res_head_len_um,
     _res_sab_geometry_um,
     _ring_implant_margin_um,
     _role_layer_info,
@@ -88,6 +86,7 @@ from .gen_layer_params import (
     _tap_pads_wanted,
     mfg_grid_um,
 )
+from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
 from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
 from .gen_ring_ports import _ring_ports
 from .gen_voltage_flavor import _voltage_flavor_hints
@@ -1126,15 +1125,10 @@ def _res_array_describe(
         if metal_level
         else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
     )
-    # Issue #2449: sky130 high/xhigh draw a rectangular precision-poly licon.
-    end_contact = _res_end_contact_um(
-        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-    )
-    # Issue #5704: sky130 high/xhigh extend the head to the PDK's
-    # precision-resistor contact-extension rule (licon.1c + li.5).
-    head_len_um = _res_head_len_um(
-        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-    )
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    # Issues #2449/#5704: sky130 high/xhigh draw a rectangular licon + long head.
+    end_contact = _res_end_contact_um(family, flavor, metal_level)
+    head_len_um = _res_head_len_um(family, flavor, metal_level)
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -1146,9 +1140,7 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
-        _res_sab_geometry_um(
-            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-        )[0],
+        _res_sab_geometry_um(family, flavor, metal_level)[0],
         head_len_um,
     )
     unit = info["unit"]
@@ -1211,13 +1203,7 @@ def _res_array_describe(
             f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
             "contacts (licon.1b/c precision-resistor exception) on "
             f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
-            + (
-                f", extended to {head_len_um}um along the body axis (the "
-                "PDK's licon.1c + li.5 precision-resistor contact-extension "
-                "rule; the unit pitch grows accordingly)"
-                if head_len_um > 0.0
-                else ""
-            )
+            + _res_head_note(head_len_um)
         )
 
     snapped = _grid_snapped(

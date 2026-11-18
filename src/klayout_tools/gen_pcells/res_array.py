@@ -66,8 +66,8 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _insert_boxes,
         _res_array_layout,
-        _res_flavor_mask_box_um,
     )
+    from klayout_tools.gen_res_head import _res_flavor_mask_box_um
 
     class _ResArrayPCell(kdb.PCellDeclarationHelper):
         """Unit resistor/capacitor array (spike section 4's family 2): a row
