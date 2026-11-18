@@ -296,7 +296,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_erc_parser(subparsers)
 
-    add_functional_verification_parser(subparsers, _add_format_arg)
+    add_functional_verification_parser(subparsers, _add_pdk_args, _add_format_arg)
     _add_place_and_route_parser(subparsers)
     _add_wave_parser(subparsers)
 
