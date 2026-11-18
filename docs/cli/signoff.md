@@ -2420,7 +2420,7 @@ an inventory the author did not write.
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version>}}` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
 | **10** Repo hygiene | `hygiene`: list of paths, or `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` objects (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
@@ -2636,6 +2636,40 @@ form instead of a placeholder name:
   "tools": {"iverilog": "12.0"}
 }
 ```
+
+A **literal** pin is checked for shape only: klt verifies `pdk.name` and
+`pdk.revision` are non-empty and each `tools.<tool>` version is a non-empty
+string, but never compares the literal with the artifact it names -- a literal
+that has drifted from the repo's own pin of record passes silently, which is
+why the reference form below exists.
+
+**A pin declared by the file that owns it (issue #5563).** Instead of
+hand-copying a value the repo already tracks (a tool commit, a PDK revision),
+each of `pdk.name`, `pdk.revision` and every `tools.<tool>` entry may be a
+reference object that klt resolves from a JSON file in the repo at attest and
+`--check` time:
+
+```json
+"pins": {
+  "pdk": {
+    "name": "sky130A",
+    "revision": {"from": "config/pdk.json", "key": "sky130.revision"}
+  },
+  "tools": {"ngspice": {"from": "config/toolchain.json", "key": "tools.ngspice.commit"}}
+}
+```
+
+`from` is a repo-relative path (absolute paths, `..` escapes and symlinks are
+refused, exactly like every other inventory path); `key` is a dotted path into
+that file's JSON (digit segments index lists, as for item-8 metric bindings).
+The check's `value` carries the **resolved** string, and a check that used at
+least one reference records where each value came from as `resolved_from`
+(a literal-only inventory emits the check it always did -- no
+`resolved_from` key). A reference whose file is missing, is not readable JSON,
+lacks the key, or resolves to anything but a non-empty string grades the pin
+`passed: false` -- a failed check, not a malformed inventory. Because `--check`
+re-resolves from the owning file, a pin bump drifts the committed envelope the
+same way a source edit does: no re-attest can re-legitimize a stale copy.
 
 A multi-bench block can give each bench its own cold start and declare a spec
 row that has no bench yet (a plain-string `testbenches` list with one
@@ -4169,6 +4203,70 @@ new. Outcomes:
   or a citation naming an undeclared or `gap` row -> `unmet` /
   `invalid_evidence` for item 5 only.
 
+#### Declared gaps: the free-text and justified forms (issue #5599)
+
+A declared gap is **pending work, never permanent** (operator ruling on
+#5858, 2026-11-17): what is owed is the feature, tool or data that would let
+the row be graded, so the justified form records the open issue that would
+close it. Both forms keep the item `unmet` / `partial_coverage` -- a gap is
+never covered and never grades `met`, even when every row is one. Whether a
+justified gap should ever stop blocking was #5858, and that ruling settled
+it: gaps keep blocking T1.
+
+The free-text form is unchanged and keeps its exact `detail.declared_gaps`
+shape (`[{id, gap}]`):
+
+```json
+{"id": "noise_mc", "gap": "statistical reduction a klt sim request cannot express"}
+```
+
+The justified form is an object carrying a human **reason**, a **rationale
+artifact** pinned by content hash (the same `{file, content_hash}` binding
+the item-6 `not_applicable` form uses -- checked like any cited artifact),
+and the **issue** that would close the gap:
+
+```json
+{
+  "id": "pvt_ss_125c",
+  "gap": {
+    "reason": "no liberty file ships for this PVT point",
+    "rationale": {"file": "gaps/pvt_ss_125c.md", "content_hash": "sha256:..."},
+    "issue": "#1234"
+  }
+}
+```
+
+Outcomes:
+
+- a justified gap is listed under `detail.justified_gaps`
+  (`[{id, reason, rationale, issue}]`, `issue` `null` when absent -- never
+  mixed into `declared_gaps`) and counted at the top level as
+  `t1_justified_gap_count`, omitted when zero exactly like
+  `t1_not_applicable_count`, so a report declaring none is byte-identical
+  to this build's previous rendering (`--check` sees no drift);
+  `--format text` appends ", N justified gaps" to the T1 line and lists each
+  gap's reason, rationale file + hash and issue beside the item;
+- a justified gap whose rationale file is missing or unreadable grades
+  `unmet` / `justified_gap_rationale_unreadable`; one whose content hash
+  does not match grades `unmet` / `justified_gap_rationale_stale` (`detail`
+  names the row, the file, and both hashes). A broken declaration is never
+  silently demoted to the free-text form;
+- an object `gap` without a `reason`, without a `rationale`, with a
+  malformed rationale reference, or with a non-string `issue` is
+  `invalid_evidence`, as is a citation naming a justified-gap row (a gap
+  row cannot be covered, either form);
+- a justified gap that names **no issue** is accepted but reported as a
+  top-level **finding** (`findings[]`: `finding` =
+  `justified_gap_without_issue_link` with the item, partition when present,
+  and row); `--format text` prints the finding beside the gap. New
+  manifests should prefer the justified form and name the issue that would
+  close each gap.
+
+Item 6 rows accept the same two forms with the same outcomes. The rationale
+path resolves as given (like a `not_applicable` document), so a relative
+path is read against the process working directory. `schema_version`: no
+bump; every new report field is omitted when unused.
+
 **Derived coverage (issue #3778).** A `klt sim` measurement may declare the
 spec row it grades (`measurements[].spec_row`, echoed on the report's
 `measurements[]`; see `docs/cli/sim.md`). When a citation carries `rows` **and**
@@ -4352,7 +4450,10 @@ Item 6 reuses the item-5 list form and `spec_rows` schema above, with
   declared gap blocks `tier: "T1"` here as for item 5, issue #5858); the
   `detail` lists `uncovered_rows`, `declared_gaps` (`[{id, gap}]`) and
   `unratified_rows` (every `ratified: false` row, covered or not -- evidence
-  against a proposed limit is provisional) separately;
+  against a proposed limit is provisional) separately; item 6's rows also
+  accept the justified object form of `gap` (issue #5599, listed under
+  `detail.justified_gaps` with the same outcomes as item 5's -- see
+  "Declared gaps" above);
 - a failing citation keeps its own `reason` (e.g. `check_failed`) with
   `detail.failed_citations` / `detail.failed_rows`, as for item 5; the #2467
   campaign-discipline gate applies per citation, unchanged;
@@ -5187,6 +5288,8 @@ distinguishable from "no samples document was ever named" (see
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`. **Never includes `not_applicable` items** (issue #2865). |
 | `t1_not_applicable_count` | integer    | **Present only when at least one item is `not_applicable`** (issue #2865; absent means `0`, so a report with none is byte-identical to a pre-#2865 one). `tier` is `"T1"` when `t1_met_count + t1_not_applicable_count == t1_item_count`. |
+| `t1_justified_gap_count` | integer     | **Present only when at least one justified gap is declared** (issue #5599; absent means `0`, byte-identical when none): the count of `spec_rows` rows declared with the justified object form of `gap`, across all items and partitions. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17); it never counts as coverage and never moves an item off `unmet`. See "Declared gaps" above. |
+| `findings`      | array\<object\>      | **Present only when at least one finding exists** (issue #5599): one entry per justified gap that names no issue — `{"finding": "justified_gap_without_issue_link", "item", "partition" (when the block is mixed-signal), "row"}`. A declared gap is pending work, so the open issue that would close it should be recorded; its absence is reported here, never refused. |
 | `unmet_reason_counts` | object\<string, integer\> | **Present only when at least one T1 item is `unmet`** (issue #5903; a report with none is byte-identical to a pre-#5903 one). Maps each `reason` token to how many unmet T1 items carry it, e.g. `{"no_evidence": 3, "stale_evidence": 1}`; values sum to the number of unmet T1 items. `not_applicable` items and T2–T4 ladder rows (`tier_not_supported`) are not counted. Separates a block that is mid-progress from one whose pin went stale without changing the exit code (still `3`): `jq -e '(.unmet_reason_counts.stale_evidence // 0) == 0' report.json`. Additive: no `schema_version` bump. Derived from `items[]`, so `--check` leaves it out of the comparison. |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
@@ -5512,6 +5615,8 @@ under `3` as it did under `2`; only `blocking_item` moved.
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count (never includes `not_applicable`).                     |
 | `t1_not_applicable_count` | integer    | Present only when non-zero (issue #2865): this block's `"not_applicable"` T1 item count. The text roll-up prints `T1: 10/11 items met, 1 not_applicable`. |
+| `t1_justified_gap_count` | integer     | Present only when non-zero (issue #5599): this block's justified declared-gap count — `spec_rows` rows declared with the justified object form of `gap`. The text roll-up prints `, N justified gaps` beside the count. A declared gap is pending work, never permanent (operator ruling on #5858, 2026-11-17). |
+| `findings`      | array\<object\>      | Present only when non-empty (issue #5599): this block's tier report findings, carried verbatim — today, one entry per justified gap that names no issue (`finding: "justified_gap_without_issue_link"`). |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |

@@ -152,6 +152,12 @@ from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
 from .signoff_flags import mode_flag_problem
 from .signoff_repin_cmd import run_repin
+from .signoff_tier_text import (
+    _justified_gap_suffix,
+    _not_applicable_suffix,
+    _print_justified_gaps,
+    _print_not_applicable,
+)
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
@@ -800,36 +806,6 @@ def _status_marker(status: str, palette: Palette) -> tuple[str, str]:
     return "UNMET", palette.red
 
 
-def _not_applicable_suffix(report: dict) -> str:
-    """``", N not_applicable"`` when the report has items satisfied by a
-    recorded "not applicable" (issue #2865); empty otherwise, so a report
-    with none renders exactly as before."""
-    count = report.get("t1_not_applicable_count")
-    return f", {count} not_applicable" if count else ""
-
-
-def _print_not_applicable(item: dict) -> None:
-    """The evidence behind a ``not_applicable`` item (issue #2865): the
-    ratified spec and the committed statement, each with its content hash,
-    and the statement's per-row reasons."""
-    block = item.get("not_applicable")
-    if not block:
-        return
-    spec = block["spec"]
-    statement = block["statement"]
-    print(
-        f"        not applicable: spec {spec['file']} "
-        f"(status={spec['status']}, rows={spec['row_count']}, "
-        f"content_hash={spec['content_hash']})"
-    )
-    print(
-        f"        statement: {statement['file']} "
-        f"(content_hash={statement['content_hash']})"
-    )
-    for row in statement["rows"]:
-        print(f"          {row['id']} [{row['class']}]: {row['reason']}")
-
-
 def _print_foundry_cell_exceptions(citation: dict) -> None:
     for exception in citation.get("foundry_cell_exceptions") or []:
         rules = ", ".join(
@@ -882,7 +858,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
     print(f"tier: {result['tier'] or 'none'}")
     print(
         f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met"
-        f"{_not_applicable_suffix(result)}"
+        f"{_not_applicable_suffix(result)}{_justified_gap_suffix(result)}"
     )
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.
     # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
@@ -918,6 +894,9 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
         _print_not_applicable(item)
+        # Issue #5599: each justified declared gap, its rationale artifact
+        # and its closing issue -- with the missing-link finding inline.
+        _print_justified_gaps(item)
         _print_group_coverage(item)
         citation = item["citation"]
         if citation:
@@ -1010,7 +989,7 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"[{color}{marker}{palette.reset}] {block['block']} "
             f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
-            f"{_not_applicable_suffix(block)}"
+            f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
         )
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render

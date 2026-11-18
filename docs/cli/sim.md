@@ -1013,8 +1013,11 @@ outstanding units are dispatched, `--resume` **harvests** the map: each
 recorded shard's `status.json` is read once, a shard whose remote job is
 already terminal (`done`) is collected through the plain attach machinery and
 its units are recorded into the run's checkpoint — counted in the
-`resume: reused N checkpointed corner(s)` summary and never re-billed. Shards
-the map records `submitted` (never launched), still `running`/`interrupted`,
+`resume: reused N checkpointed corner(s)` summary and never re-billed.
+Harvested reuse is reported through `environment.resume.resumed_corners`,
+not as `environment.remote.fleet[]` entries with `resumed: true`; `fleet[]`
+lists only shards dispatched after the harvest. Shards the map records
+`submitted` (never launched), still `running`/`interrupted`,
 or terminally failed are *not* waited on or launched by the harvest; their
 units are re-dispatched as new jobs (an unlaunched recorded shard whose
 grouping is unchanged is launched under its recorded job id instead). A map
@@ -1529,6 +1532,21 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   re-submits such a request up to `N` more times with doubling backoff
   (5s, 10s, ...). Only those two codes are retried -- never another failure,
   and never on local ngspice.
+
+  On a **sharded single request** (`remote.hosts > 1`, or a split job)
+  `--capacity-retries N` ([#5567](https://github.com/2AMLogic/klayout-tools/issues/5567))
+  recovers shards lost to a capacity refusal inside the same invocation: once
+  every other shard has finished and released its instance, the shards lost
+  with `batch_no_capacity` / `batch_concurrency_cap` are launched again, in up
+  to `N` further passes with doubling backoff (5s, 10s, ...), each pass with a
+  fresh `--wait-for-capacity` budget. The already-submitted job of each such
+  shard is launched (nothing is submitted twice, so `batch-shards.json` and a
+  later `--resume` stay consistent). A recovered shard reports its real
+  corners in global order with no `lost_shard`; a shard still refused after
+  `N` passes is reported exactly as before and stays resumable. Shards lost
+  for any other reason are never retried, and an interrupt during a backoff
+  returns the partial report. Default `0` (off) is byte-identical to before; an
+  unsharded single job has nothing to retry.
 - **All-or-nothing preflight** ([#4972](https://github.com/2AMLogic/klayout-tools/issues/4972)).
   Before anything is submitted, every member is resolved (with
   `--max-units-per-job` / `--max-concurrent-jobs` applied) and run through the
@@ -1621,10 +1639,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
 - **Resuming a set (`--resume`).** `--resume` is forwarded to every request and
   each one resumes from its own directory, `<outdir>/<stem>/` (see "Member
   directories" above). Re-run
-  the same set with the same `-o`: a sharded request re-attaches to the shard
-  jobs recorded in its `batch-shards.json` (`fleet[].resumed: true`) and
-  resubmits only the shards it cannot collect; a request with no prior
-  directory runs fresh. A non-sharded or deck-list request resumes through its
+  the same set with the same `-o`: a sharded request harvests finished jobs
+  recorded in its `batch-shards.json`, reports their reused units in
+  `environment.resume.resumed_corners`, and dispatches only the outstanding
+  units (`environment.remote.fleet[]` covers that dispatch); a request with no
+  prior directory runs fresh. A non-sharded or deck-list request resumes through its
   own checkpoint (the set always runs on `batch`, which supports `--resume`
   for both). A request whose resume is refused -- a shard map written for a
   different request (`resume_fingerprint_mismatch`; the shard count may differ, since a resume splits only the remaining units, so `--resume` is repeatable), or an
@@ -2095,9 +2114,11 @@ live (`jobs_prefix`, `region`, `profile`; never the bucket) and per shard its `i
 A client stopped mid-run (terminal timeout, session end) therefore leaves a
 durable record of which jobs were never launched; the end-of-run stderr line
 names the map and how many shards are `submitted` but not launched. A re-run
-with `--resume` and the same `--outdir` re-attaches to every recorded shard
-through the `--attach` path: a `done` job is collected, a live one is polled,
-a shard still in `state: "submitted"` is **launched** first -- but only while
+with `--resume` and the same `--outdir` first harvests terminal shards, as
+described above. When a remaining shard's grouping still matches its recorded
+digest, dispatch re-attaches through the `--attach` path: a `done` job is
+collected, a live one is polled, a shard still in `state: "submitted"` is
+**launched** first -- but only while
 the fleet has published no `status.json` for it, and never from `launching` or
 `launched` (a possibly-launched job is polled, not launched again) -- and only a
 shard with no usable job (never submitted, outputs gone, or a terminally
@@ -2107,9 +2128,11 @@ poll instead of another full window) is submitted again under a new id,
 overwriting its entry. Resubmitting an interrupted shard risks billing it twice if
 the fleet's `reconcile` later re-launches the old job; the exposure is bounded by
 the grace the first run already waited. A `batch_poll_timeout` shard is never
-resubmitted (that job may still be running). Each
-`environment.remote.fleet[]` entry carries `resumed: true|false`. A map
-written before these fields existed carries no `state` and is only ever polled.
+resubmitted (that job may still be running). The shards dispatched after the
+harvest appear in `environment.remote.fleet[]`, with `resumed: true|false`
+describing dispatch-time re-attachment. Harvested shards are absent from
+`fleet[]`; their reused units count toward `environment.resume.resumed_corners`.
+A map written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
 seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
@@ -6856,9 +6879,9 @@ circuit in one netlist, each carrying its own node/source names, its own
 stimulus and its own start state — has two shipped shapes and neither scales
 in the middle: `corners.params` used as a *case* axis declares M measurements
 once but costs one ngspice process per case per PVT point (N x the corner
-count), while N hand-replicated copies in one deck cost 15 processes but need
-every reduction hand-declared against every copy's own node names (N x M
-declarations). `options.measurement_cases` is the shape in between: declare
+count), while N hand-replicated copies in one deck cost one process per PVT
+point but need every reduction hand-declared against every copy's own node
+names (N x M declarations). `options.measurement_cases` is the shape in between: declare
 the N copy scopes once and write each reduction once, with a `{case}`
 placeholder where the copy's own names go.
 
@@ -6881,7 +6904,7 @@ stays O(N x M) results, which is the answer's own size; the process count
 stays at the corner count. Each expanded result carries a `case` provenance
 field (alongside the `step`/`derived_from` fields an `analysis_steps[]`
 measurement carries) on the corner's `measurements[]` entry and on the
-report's `metrics.measurements` rollup entry, and is graded through the
+report's top-level `measurements[]` rollup entry, and is graded through the
 existing `limits`/`plausible_range`/Monte Carlo paths unchanged.
 
 ### Rules
