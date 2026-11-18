@@ -1306,6 +1306,12 @@ deck; both sides of every hop are checked. On sky130's via4 hop this grows
 the met4 pad to 1.18 µm (0.8 + 2 × 0.19), while met5's 2 µm area floor
 already exceeds its 1.42 µm enclosure floor (0.8 + 2 × 0.31). Missing
 enclosure rules leave the existing baseline and area floors intact.
+On gf180mcuC/D the top-metal pad is additionally floored to 0.44 µm
+(#6612): the native metaltop deck both 5LM variants select enforces
+`MT.1` width ≥ 0.44 µm on Metal5, a rule the curated deck cannot express
+(its `metal5.width.1` is 0.28 µm and its `metaltop.width.1` sits on
+MetalTop, a layer no 5LM composition draws), so that one floor is keyed
+by variant instead of resolved from the deck.
 Pads round outward onto the output grid, preserving their margin against
 the rounded via cut as well as their minimum size.
 These floors affect the drawn pads; the router's spacing pre-checks retain

@@ -180,6 +180,29 @@ def _min_enclosing_margin_um_for_layer(
     return max(candidates, key=lambda entry: entry[0], default=None)
 
 
+#: Variant-keyed top-metal landing-pad *width* floors in um (issue #6612) --
+#: the one size gen-compose floors off a rule its curated decks *cannot*
+#: express, so it is keyed by exact variant string here rather than resolved
+#: from a deck. gf180mcu's curated deck carries no MetalTop thickness
+#: option: its only width rules touching Metal5 ``(81, 0)`` are
+#: ``metal5.width.1`` = 0.28um (below the 0.42um ``_VIA_LANDING_SIZE_UM``
+#: baseline, so a deck-driven width floor is a no-op) and
+#: ``metaltop.width.1`` = 0.36um on MetalTop ``(53, 0)`` -- a layer no 5LM
+#: composition draws -- while the 0.44um DRM value is documented there as
+#: not modeled. The *native* runset both shipped 5LM variants select does
+#: model it: its variant table maps ``gf180mcuC`` -> ``5LM, 9K`` and
+#: ``gf180mcuD`` -> ``5LM, 11K`` (5LM being the only stack where Metal5
+#: *is* the top metal, the stack this package's role table resolves), and
+#: ``metaltop.drc`` applies ``MT.1`` = 0.44um for both ``'9K'`` and
+#: ``'11K'`` -- 0.36um only for ``'6K'``, which no shipped variant selects.
+#: gf180mcuA/B (3LM/4LM) are deliberately absent: Metal5 is not their top
+#: metal, and their landing sizes stay exactly as before (#6612 scope).
+_TOP_METAL_LANDING_WIDTH_FLOOR_UM: dict[str, float] = {
+    "gf180mcuC": 0.44,
+    "gf180mcuD": 0.44,
+}
+
+
 def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
     """A landing pad's baseline/area side length (um) on ``layer`` (#2072).
 
@@ -207,7 +230,10 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     regardless of the extra size), or ``_VIA_LANDING_SIZE_UM`` unchanged
     when the layer has no such rule (or the family/deck cannot be
     resolved) -- an unresolvable family degrades to the pre-#2072 fixed
-    size, never blocks routing.
+    size, never blocks routing. A variant's native top-metal width floor
+    (:data:`_TOP_METAL_LANDING_WIDTH_FLOOR_UM`, #6612) additionally raises
+    the result on that variant's own ``top_metal`` layer only, as a
+    ``max`` -- a larger area-driven side still wins.
 
     Same known, already-accepted scoping trade-off as ``via_drop_size_um``
     (issue #1501): this resolved size is threaded into *drawing*
@@ -226,9 +252,19 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
 
     area_floor = _min_area_um2_for_layer(variant, layer)
     if area_floor is None:
-        return _VIA_LANDING_SIZE_UM
-    needed_side_um = math.sqrt(area_floor[0])
-    return max(_VIA_LANDING_SIZE_UM, needed_side_um)
+        side_um = _VIA_LANDING_SIZE_UM
+    else:
+        side_um = max(_VIA_LANDING_SIZE_UM, math.sqrt(area_floor[0]))
+    # #6612: the variant-keyed native top-metal width floor. The exact-
+    # variant dict lookup gates the (unraisable-for-these-variants) family
+    # resolution, so an unknown variant still degrades to the size above.
+    width_floor_um = _TOP_METAL_LANDING_WIDTH_FLOOR_UM.get(variant)
+    if (
+        width_floor_um is not None
+        and layer == _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]
+    ):
+        side_um = max(side_um, width_floor_um)
+    return side_um
 
 
 def _resolve_landing_pad_sizes(
