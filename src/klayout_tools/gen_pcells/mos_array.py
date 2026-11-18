@@ -22,6 +22,7 @@ from ._common_params import (
     declare_ring_well_margin,
     declare_voltage_flavor_mark_params,
     declare_well_present,
+    union_box,
 )
 from ._mos_array_shapes import (
     _insert_mos_cap_mark,
@@ -63,6 +64,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _pcell_tap_reach_um,
         _shift_box,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
     class _MosArrayPCell(kdb.PCellDeclarationHelper):
         """Matched MOS transistor array (spike section 4's family 1): a
@@ -509,6 +511,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # same way `diff_pair`/`esd_device`/`bjt_array` already compose
             # `_ring_layout`, sized off `well_box_um` (the array's own
             # shared-footprint box, computed above regardless of `flavor`).
+            ring_well_mark_box = None
             if info["ring"] is not None and self.add_guard_ring:
                 li_tap = self.layout.layer(self.tap_layer)
                 ox, oy = info["ring_offset_um"]
@@ -556,9 +559,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         ring["outer_w_um"] + margin,
                         ring["outer_h_um"] + margin,
                     )
-                    _insert_boxes(
-                        self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
-                    )
+                    ring_well_mark_box = _shift_box(ring_well_box, ox, oy)
+                    _insert_boxes(self.cell, li_well, dbu, [ring_well_mark_box])
                 if self.ring_implant_present:
                     # Tracks the tap ring, extended `ring_implant_margin_um`
                     # past every edge of it (issue #2369's NP.5b/PP.5b
@@ -584,34 +586,16 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
-            # sized to enclose every unit device (real and dummy) --
-            # independent of `flavor`, so a caller can request both a well
-            # (pfet) and a voltage-flavor marker (or either alone). Its own
-            # box (`voltage_flavor_mark_box_um`) is *not* the same box the
-            # well shape above encloses (issue #1577): gf180mcu's real
-            # signoff deck needs the marker to reach further than the well's
-            # own margin does -- see `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s
-            # own docstring.
-            if self.voltage_flavor_mark_present:
-                li_voltage_flavor_mark = self.layout.layer(
-                    self.voltage_flavor_mark_layer
-                )
-                _insert_boxes(
-                    self.cell,
-                    li_voltage_flavor_mark,
-                    dbu,
-                    [info["voltage_flavor_mark_box_um"]],
-                )
-            if (
-                self.voltage_flavor_mark_present
-                and self.voltage_flavor_extra_mark_present
-            ):
-                _insert_boxes(
-                    self.cell,
-                    self.layout.layer(self.voltage_flavor_extra_mark_layer),
-                    dbu,
-                    [info["voltage_flavor_mark_box_um"]],
-                )
+            # encloses every unit device (real and dummy), independent of
+            # `flavor`; its box is not the well's (#1577: gf180mcu needs a
+            # wider margin). Issue #6025: also grown over the guard ring's
+            # own well tie when one is drawn, so an HV-nwell enclosure rule
+            # (sky130 nwell.9) holds.
+            _draw_voltage_flavor_marks(
+                self,
+                dbu,
+                union_box(info["voltage_flavor_mark_box_um"], ring_well_mark_box),
+            )
 
             _insert_mos_cap_mark(self, info, dbu)
 

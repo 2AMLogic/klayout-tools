@@ -45,6 +45,7 @@ exclusive with ``file``/``--check`` and refuses the layout-only flags.
 
 import argparse
 
+from ..coverage_work import coverage_work_count
 from ..env_provenance import render_path_field
 from ..erc import (
     ErcError,
@@ -210,7 +211,8 @@ def _print_skipped_coverage(report: dict) -> None:
     skipped = (report.get("erc_coverage") or {}).get("skipped") or []
     if not skipped:
         return
-    print(f"erc_skipped: {len(skipped)} (not checked; see erc_coverage.skipped)")
+    skipped_count = sum(map(coverage_work_count, skipped))
+    print(f"erc_skipped: {skipped_count} (not checked; see erc_coverage.skipped)")
     for entry in skipped:
         print(f"  {entry['id']}: {entry['reason']}")
 
