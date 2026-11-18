@@ -43,39 +43,17 @@ comes from. An optional ``op_lint`` block tunes thresholds, declares extra
 I/O nodes, and overrides per-model conventions; see ``docs/cli/sim.md``'s
 "Operating-point lint" section for the full field reference.
 
-Reading per-device values: ``print @m...[param]``, not ``.meas``
------------------------------------------------------------------
-ngspice has no ``.MEASURE OP`` statement (an operating point has no sweep
-variable to search over -- see ``sim.py``'s ``_validate_meas_card`` and
-issue #205), so per-device operating-point values can only be read with
-``print @<element>[<param>]`` inside a ``.control`` block. That is exactly
-the path ``klt size`` already uses for the single device it is sizing
-(``size.py``'s ``_OP_PARAMS``/``_write_sweep_deck``/``_parse_sweep_log``);
-this module generalises it from "the one sized device" to "every MOS
-instance in an arbitrary netlist". No new SPICE-interaction pattern, and no
-new dependency.
-
-Instance-path resolution is the one wrinkle: a PDK device instantiated as
-``X1 d g s b <model>`` exposes its op-point vectors at
-``@m.<instance>.<inner element>[param]``, and the inner element name is a
-*PDK convention*, not a standard -- sky130 names it ``m`` + the subcircuit
-name (``msky130_fd_pr__nfet_01v8``), gf180mcu names it ``m0`` (both verified
-against the installed PDKs with ngspice 46 while building this module).
-Issue #5637 adds a second wrinkle from the same root: when the PDK device
-cell wraps an **OSDI (Verilog-A) instance** rather than a built-in ``M``
-element -- as PSP103-class libraries do -- ngspice exposes the vectors as an
-``N`` element instead, at ``@n.<instance>.<inner element>[param]``, and the
-saturation voltage is named ``vdss``, not ``vdsat``. Rather than guess one
-prefix/element pair and silently report nothing, the generated deck
-``print``s *every* candidate path (each element-name guess under both the
-``m.`` and ``n.`` prefixes) for each device; an unknown vector name is
-a non-fatal ``Error: no such device or model name`` log line in ngspice's
-batch mode (also verified), so the run costs one process either way and the
-candidate that actually answered is recorded per device in
-``devices[].op_point_element``. ``op_lint.models.<model>.op_point_element``
-overrides the element-name guesses for a PDK that follows neither
-convention; written with an ``m.``/``n.`` prefix (``"n.nsg13_hv_pmos"``) it
-pins the prefix too, which is what reaches an OSDI inner element.
+Reading per-device operating points
+-----------------------------------
+Like ``klt size``, the lint uses ``print @<element>[param]`` in a ``.control``
+block because ngspice has no ``.MEASURE OP``. For PDK subcircuits, sky130
+names the inner MOS element ``m<subcircuit name>`` and gf180mcu uses ``m0``.
+An OSDI (Verilog-A) instance uses the ``n.`` prefix, and PSP103 models
+report saturation voltage as ``vdss``. The deck tries each inner name under
+``m.`` then ``n.`` in one run. Unanswered probes are nonfatal in batch mode.
+The responding path is recorded in ``devices[].op_point_element``. To supply
+an inner name, set ``op_lint.models.<model>.op_point_element``. A prefix on
+the override (e.g. ``n.nsg13_hv_pmos``) also selects the element type.
 
 Sign conventions: compare magnitudes
 -------------------------------------
@@ -154,24 +132,12 @@ from .sim import (
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Element-name prefixes an op-point vector may live under. `m.` addresses a
-#: built-in MOS element; `n.` addresses an OSDI (Verilog-A) instance, which
-#: is how PSP103-class open-PDK model libraries wrap their devices. Only a
-#: PDK-device *subcircuit's* inner element can be either, so the cross-
-#: product is confined to that branch of :func:`_op_candidates`.
 _OP_PREFIXES = ("m", "n")
 
-#: Op-point vectors requested per device. ``size.py``'s ``_OP_PARAMS`` is
-#: this vocabulary minus ``vdss`` (and ``gm``, which no check here needs).
-#: ``vdss`` is deliberate divergence (issue #5637): PSP103-class OSDI models
-#: name the drain saturation voltage ``vdss`` and do not expose ``vdsat`` at
-#: all, so this module probes both spellings for one response field --
-#: something ``size.py`` cannot hit, having no OSDI model-library support.
+#: Unlike ``klt size``, op-lint supports OSDI and probes ``vdss`` for PSP103.
+#: Deck order gives ``vdss`` the final say when both saturation aliases answer.
 _OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "vdss", "id")
 
-#: Response-field name each :data:`_OP_PARAMS` entry parses into. ``vdsat``
-#: and ``vdss`` are per-model alternatives -- only one answers on a given
-#: model -- so both parse into the same field.
 _OP_PARAM_KEYS = {
     "vgs": "vgs_v",
     "vth": "vth_v",
@@ -421,17 +387,9 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     """ngspice op-point instance paths to probe for one device, most likely
     first. See this module's docstring for why more than one is probed."""
     lowered = instance.lower()
-    # A device inside a user subcircuit carries its instance path
-    # (`xdut.m1`); ngspice names its vectors `m.<path>` for a built-in MOS
-    # element and `n.<path>` for an OSDI (Verilog-A) instance -- which is
-    # what PSP103-class PDK device cells wrap (issue #5637). The inner
-    # element name itself is also a PDK convention, not a standard, so the
-    # probe set is the prefix x element-name cross-product, `m.` first.
     leaf = lowered.rsplit(".", 1)[-1]
     if leaf.startswith("x"):
         if override:
-            # An override starting with `m.`/`n.` pins that prefix; a bare
-            # element name is tried under both.
             prefix, sep, rest = override.partition(".")
             if sep and rest and prefix in _OP_PREFIXES:
                 return [f"{prefix}.{lowered}.{rest}"]
@@ -443,9 +401,7 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
             for prefix in _OP_PREFIXES
             for element in elements
         ]
-    # A plain `M` element's vectors live directly under its own name -- and
-    # a built-in M is never an OSDI instance, so only the `m.` prefix exists
-    # here.
+    # A plain M element uses its own name, including any enclosing hierarchy.
     if override:
         return [override]
     return [f"m.{lowered}" if "." in lowered else lowered]

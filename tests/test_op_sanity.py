@@ -1,24 +1,11 @@
 """Tests for the per-device operating-point sanity lint (`klt sim --op-lint`,
 `klt eval`'s `op-sanity` gate) and the `klayout_tools.op_sanity` library.
 
-Two tiers, mirroring `test_sim.py`/`test_size.py`:
-
-- **Unit tests** (the majority) exercise the netlist parser, the rail
-  classification, every check, the corner-aware triode margin, and the full
-  `run_op_sanity` pipeline with `subprocess.run` stubbed by a fake ngspice
-  that *reads the generated deck* and answers exactly the vectors it asks
-  for. These always run, everywhere, and are what a check/parse regression
-  actually gets caught by.
-- **Integration tests** run the real `ngspice -b` against the installed
-  sky130A/gf180mcu ngspice model libraries -- the acceptance criterion that
-  per-device `Vth` comes from the model rather than a constant can only be
-  checked that way. They skip (never silently pass) when ngspice or the PDK
-  model library is absent, as CI installs neither ngspice model tree, when
-  `KLT_SKIP_NGSPICE_TESTS=1` opts the host out of this slow tier, and when
-  the run they did start was killed by its own wall-clock budget rather
-  than reaching an answer (issue #2677 --
-  `_skip_if_the_simulator_ran_out_of_wall_clock`). Every *other* way they
-  can fail still fails.
+Unit tests read the generated ngspice deck and return only the requested
+vectors. Integration tests check model-derived values against real sky130A
+and gf180mcu libraries. They skip when the model library or ngspice is
+unavailable, when KLT_SKIP_NGSPICE_TESTS=1, or when the simulator exceeds
+its wall-clock budget (see _skip_if_the_simulator_ran_out_of_wall_clock).
 """
 
 from __future__ import annotations
@@ -134,26 +121,59 @@ _PRINT_V_RE = re.compile(r"^print v\((.+)\)$")
 _MARKER_RE = re.compile(r"^echo KLT_OP_DEVICE (\d+) (\S+)$")
 
 
+_DeviceValues = dict[str, dict[str, float]]
+
+
+def _probe_responses(deck_lines, device_values, candidate_index, node_voltages):
+    """Emulate only the marker and print commands emitted by the op-lint deck."""
+    out = []
+    current = None
+    candidates = []
+    for line in deck_lines:
+        marker = _MARKER_RE.match(line)
+        if marker is not None:
+            current = marker.group(2)
+            candidates = []
+            out.append(f"KLT_OP_DEVICE {marker.group(1)} {marker.group(2)}")
+            continue
+        if line == "echo KLT_OP_NODES":
+            current = None
+            out.append("KLT_OP_NODES")
+            continue
+        op_match = _PRINT_OP_RE.match(line)
+        if op_match is not None and current is not None:
+            path, param = op_match.groups()
+            if path not in candidates:
+                candidates.append(path)
+            if candidates.index(path) != candidate_index:
+                out.append(f"Error: no such device or model name {path}")
+                continue
+            value = device_values.get(current, {}).get(param)
+            if value is None:
+                out.append(f"Error: no such parameter {param}.")
+            else:
+                out.append(f"@{path}[{param}] = {value:.6e}")
+            continue
+        node_match = _PRINT_V_RE.match(line)
+        if node_match is not None:
+            node = node_match.group(1)
+            out.append(f"v({node}) = {(node_voltages or {}).get(node, 0.0):.6e}")
+    return out
+
+
 def _install_fake_ngspice(
     monkeypatch,
-    values: dict[str, dict[str, float]],
+    values: _DeviceValues | None = None,
     *,
+    by_temp: dict[float, _DeviceValues | None] | None = None,
     node_voltages: dict[str, float] | None = None,
     candidate_index: int = 0,
     prologue: str = "",
     side_effect: BaseException | None = None,
 ):
-    """Stub `subprocess.run` with a fake ngspice that reads the generated
-    deck and answers exactly the vectors it asks for.
-
-    Reading the deck (rather than replaying a canned log) is what makes
-    these tests real: the device order, the candidate instance paths, and
-    the probed node list all come from the code under test, so a deck-
-    generation regression shows up as a parse failure here instead of
-    passing against a stale fixture. `candidate_index` picks *which* of a
-    device's candidate paths answers -- everything else gets ngspice's real
-    non-fatal "no such device or model name" line, exactly as the PDK whose
-    convention was not matched does.
+    """Answer the generated deck's print commands on the selected candidate path.
+    A by_temp entry supplies the device values for that corner's .temp card.
+    A None entry simulates a corner that fails to converge.
     """
 
     def fake_run(cmd, capture_output, text, timeout):
@@ -167,39 +187,23 @@ def _install_fake_ngspice(
         ]
         if prologue:
             out.append(prologue)
-        current: str | None = None
-        candidates: list[str] = []
         with open(deck_path, encoding="utf-8") as handle:
             deck_lines = [line.strip() for line in handle.read().splitlines()]
-        for line in deck_lines:
-            marker = _MARKER_RE.match(line)
-            if marker is not None:
-                current = marker.group(2)
-                candidates = []
-                out.append(f"KLT_OP_DEVICE {marker.group(1)} {marker.group(2)}")
-                continue
-            if line == "echo KLT_OP_NODES":
-                current = None
-                out.append("KLT_OP_NODES")
-                continue
-            op_match = _PRINT_OP_RE.match(line)
-            if op_match is not None and current is not None:
-                path, param = op_match.groups()
-                if path not in candidates:
-                    candidates.append(path)
-                if candidates.index(path) != candidate_index:
-                    out.append(f"Error: no such device or model name {path}")
-                    continue
-                value = values.get(current, {}).get(param)
-                if value is None:
-                    out.append(f"Error: no such parameter {param}.")
-                else:
-                    out.append(f"@{path}[{param}] = {value:.6e}")
-                continue
-            node_match = _PRINT_V_RE.match(line)
-            if node_match is not None:
-                node = node_match.group(1)
-                out.append(f"v({node}) = {(node_voltages or {}).get(node, 0.0):.6e}")
+        device_values = values or {}
+        if by_temp is not None:
+            temp = next(
+                line.split()[1] for line in deck_lines if line.startswith(".temp ")
+            )
+            point = by_temp[float(temp)]
+            if point is None:
+                Path(log_path).write_text(
+                    "Error: no convergence\nsimulation(s) aborted\n", encoding="utf-8"
+                )
+                return fake_completed("** ngspice-99\n")
+            device_values = point
+        out.extend(
+            _probe_responses(deck_lines, device_values, candidate_index, node_voltages)
+        )
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(out) + "\nngspice-99 done\n")
         return fake_completed("** ngspice-99\n")
@@ -209,6 +213,7 @@ def _install_fake_ngspice(
 
 #: A saturated NMOS: comfortably above Vth, Vds well above Vdsat.
 _SATURATED_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdsat": 0.15, "id": 4.5e-5}
+_OSDI_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdss": 0.15, "id": 4.5e-5}
 #: A saturated PMOS (BSIM4 reports every value as a positive magnitude).
 _SATURATED_PMOS = {"vgs": 1.2, "vth": 0.75, "vds": 0.9, "vdsat": 0.39, "id": 4.5e-5}
 
@@ -538,43 +543,28 @@ def test_model_kind_override_beats_a_conflicting_naming_heuristic():
 
 
 def test_op_candidates_cover_both_pdk_inner_element_conventions():
-    # sky130 names the inner element `m<subckt>`, gf180mcu names it `m0`
-    # (both verified against the installed PDKs -- see op_sanity.py).
-    assert op_sanity._op_candidates("XM1", "sky130_fd_pr__nfet_01v8", None)[:3] == (
-        [
-            "m.xm1.msky130_fd_pr__nfet_01v8",
-            "m.xm1.m0",
-            "m.xm1.msky130_fd_pr__nfet_01v8_0",
-        ]
-    )
-    # Issue #5637: a PDK device subcircuit may wrap an OSDI (Verilog-A)
-    # instance -- an `N` element in ngspice, whose vectors answer under the
-    # `n.` prefix. Every subcircuit candidate is probed under both prefixes,
-    # `m.` first (the convention every shipped PDK follows).
-    assert "n.xm1.msky130_fd_pr__nfet_01v8" in op_sanity._op_candidates(
-        "XM1", "sky130_fd_pr__nfet_01v8", None
-    )
-    assert "n.xm1.m0" in op_sanity._op_candidates("XM1", "nfet_03v3", None)
-    # A plain `M` element's vectors live directly under its own name,
-    # byte-identical to the pre-#5637 list: a built-in M is never an OSDI
-    # instance, so probing `n.` there would double the deck for nothing.
-    assert op_sanity._op_candidates("M2", "nch", None) == ["m2"]
-    # An explicit override carrying an `m.`/`n.` prefix pins that prefix
-    # (this is what reaches an OSDI inner element); a bare element name is
-    # tried under both prefixes.
-    assert op_sanity._op_candidates("XM1", "weird", "mcore") == [
-        "m.xm1.mcore",
-        "n.xm1.mcore",
+    assert op_sanity._op_candidates("XM1", "nfet", None) == [
+        "m.xm1.mnfet",
+        "m.xm1.m0",
+        "m.xm1.mnfet_0",
+        "n.xm1.mnfet",
+        "n.xm1.m0",
+        "n.xm1.mnfet_0",
     ]
-    assert op_sanity._op_candidates("XM1", "weird", "n.nsg13_hv_pmos") == [
-        "n.xm1.nsg13_hv_pmos"
-    ]
-    # `"m."`/`"n."` with an empty remainder does not pin a prefix -- it is a
-    # (never-answering) bare element name like any other.
-    assert op_sanity._op_candidates("XM1", "weird", "n.") == [
-        "m.xm1.n.",
-        "n.xm1.n.",
-    ]
+    assert op_sanity._op_candidates("M2", "nfet", None) == ["m2"]
+
+
+@pytest.mark.parametrize(
+    ("override", "paths"),
+    [
+        ("mcore", ["m.xm1.mcore", "n.xm1.mcore"]),
+        ("m.mcore", ["m.xm1.mcore"]),
+        ("n.nsg13_hv_pmos", ["n.xm1.nsg13_hv_pmos"]),
+        ("n.", ["m.xm1.n.", "n.xm1.n."]),
+    ],
+)
+def test_op_candidate_override(override, paths):
+    assert op_sanity._op_candidates("XM1", "nfet", override) == paths
 
 
 # --------------------------------------------------------------------------- #
@@ -604,16 +594,31 @@ def test_triode_margin_honours_explicit_overrides():
 # --------------------------------------------------------------------------- #
 
 
-def test_golden_path_reports_no_findings(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("nmos", "candidate", "path", "vdsat"),
+    [
+        (_SATURATED_NMOS, 0, "m.xm1.mnmos_demo", 0.15),
+        (_OSDI_NMOS, 3, "n.xm1.mnmos_demo", 0.15),
+        ({**_SATURATED_NMOS, "vdss": 0.14}, 0, "m.xm1.mnmos_demo", 0.14),
+    ],
+    ids=["bsim", "osdi", "both-aliases"],
+)
+def test_golden_path_reports_no_findings(
+    tmp_path, monkeypatch, nmos, candidate, path, vdsat
+):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(
         monkeypatch,
-        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
+        {"XM1": nmos, "XM2": _SATURATED_PMOS},
+        candidate_index=candidate,
         node_voltages={"vdd": 1.8, "in": 0.9, "bias": 0.6, "out": 1.2},
     )
 
     report = op_sanity.run_op_sanity(str(request))
 
+    assert report["diagnostics"] == []
+    assert report["devices"][0]["op_point_element"] == path
+    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(vdsat)
     assert report["status"] == "clean"
     assert report["findings"] == []
     assert report["finding_count"] == 0
@@ -673,14 +678,15 @@ def test_subthreshold_but_conducting_device_is_not_reported_off(tmp_path, monkey
     assert report["devices"][0]["region"] == "subthreshold"
 
 
-def test_triode_device_is_reported_as_a_warning_with_values(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("nmos", "candidate"), [(_SATURATED_NMOS, 0), (_OSDI_NMOS, 3)])
+def test_triode_device_is_reported_as_a_warning_with_values(
+    tmp_path, monkeypatch, nmos, candidate
+):
     request = _write_request(tmp_path, _GOOD_NETLIST)
     _install_fake_ngspice(
         monkeypatch,
-        {
-            "XM1": {"vgs": 0.9, "vth": 0.7, "vds": 0.10, "vdsat": 0.15, "id": 3e-5},
-            "XM2": _SATURATED_PMOS,
-        },
+        {"XM1": {**nmos, "vds": 0.10, "id": 3e-5}, "XM2": _SATURATED_PMOS},
+        candidate_index=candidate,
     )
 
     report = op_sanity.run_op_sanity(str(request))
@@ -988,6 +994,8 @@ def test_unanswered_op_vectors_produce_an_actionable_diagnostic(tmp_path, monkey
     assert report["devices"][0]["region"] == "unknown"
     message = report["diagnostics"][0]["message"]
     assert "op_point_element" in message
+    assert "@m.xm1.m0" in message and "@n.xm1.m0" in message
+    assert "m. or n. prefix" in message
 
 
 def test_op_point_element_override_resolves_a_nonstandard_pdk(tmp_path, monkeypatch):
@@ -1001,131 +1009,6 @@ def test_op_point_element_override_resolves_a_nonstandard_pdk(tmp_path, monkeypa
     report = op_sanity.run_op_sanity(str(request))
 
     assert report["devices"][0]["op_point_element"] == "m.xm1.mcore"
-    assert report["devices"][0]["region"] == "saturation"
-
-
-#: A saturated NMOS whose model speaks PSP103-class OSDI instead of BSIM: the
-#: drain saturation voltage is named `vdss`, `vdsat` does not exist, and the
-#: device answers on the `n.`-prefixed candidate (candidate index 3 -- the
-#: `n.` twin of the first `m.` guess, see the candidate-order unit test).
-_OSDI_SATURATED_NMOS = {"vgs": 0.9, "vth": 0.7, "vds": 1.2, "vdss": 0.15, "id": 4.5e-5}
-_OSDI_TRIODE_NMOS = {**_OSDI_SATURATED_NMOS, "vds": 0.10}
-
-
-def test_osdi_device_answers_on_n_prefixed_candidate(tmp_path, monkeypatch):
-    """Issue #5637: a PDK subcircuit wrapping an OSDI (Verilog-A) instance is
-    an `N` element -- its vectors answer under `n.`, and its saturation
-    voltage is named `vdss`. The lint must populate every value, resolve the
-    region, and stay silent about the device."""
-    request = _write_request(tmp_path, _GOOD_NETLIST)
-    _install_fake_ngspice(
-        monkeypatch,
-        {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
-        candidate_index=3,
-    )
-
-    report = op_sanity.run_op_sanity(str(request))
-
-    codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
-    assert codes == set()
-    assert report["devices"][0]["op_point_element"] == "n.xm1.mnmos_demo"
-    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(0.15)
-    assert report["devices"][0]["region"] == "saturation"
-    assert report["status"] == "clean"
-
-
-def test_osdi_device_is_reported_triode_via_vdss(tmp_path, monkeypatch):
-    """The triode finding must fire from a `vdss`-reported model exactly as
-    from a `vdsat`-reported one."""
-    request = _write_request(tmp_path, _GOOD_NETLIST)
-    _install_fake_ngspice(
-        monkeypatch,
-        {"XM1": _OSDI_TRIODE_NMOS, "XM2": _SATURATED_PMOS},
-        candidate_index=3,
-    )
-
-    report = op_sanity.run_op_sanity(str(request))
-
-    assert report["devices"][0]["region"] == "triode"
-    (finding,) = _findings(report, "triode")
-    assert finding["device"] == "XM1"
-
-
-def test_corner_all_tabulates_an_osdi_device(tmp_path, monkeypatch):
-    """`--op-lint-corner all` gets a real margin for a device only `vdss`
-    answers for, instead of silently omitting it from the table."""
-    request = _three_corner_request(tmp_path)
-    runners = {}
-    for temp, values in {
-        27.0: {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
-        70.0: {"XM1": _OSDI_SATURATED_NMOS, "XM2": _SATURATED_PMOS},
-        125.0: {"XM1": _OSDI_TRIODE_NMOS, "XM2": _SATURATED_PMOS},
-    }.items():
-        capture = _CaptureRun()
-        _install_fake_ngspice(
-            capture,
-            values,
-            candidate_index=3,
-            node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2},
-        )
-        runners[temp] = capture.run
-
-    def fake_run(cmd, capture_output, text, timeout):
-        deck_path = cmd[cmd.index("-b") + 1]
-        with open(deck_path, encoding="utf-8") as handle:
-            deck = handle.read()
-        match = re.search(r"^\.temp\s+(\S+)", deck, re.MULTILINE)
-        temp = float(match.group(1))
-        return runners[temp](cmd, capture_output, text, timeout)
-
-    monkeypatch.setattr(op_sanity.subprocess, "run", fake_run)
-
-    report = op_sanity.run_op_sanity(str(request), corner="all")
-
-    assert len(report["corner_margins"]) == 3
-    assert all(entry["worst_device"] is not None for entry in report["corner_margins"])
-    hot = [e for e in report["corner_margins"] if e["triode_count"] == 1]
-    assert len(hot) == 1
-    assert hot[0]["worst_margin_v"] == pytest.approx(-0.05)
-
-
-def test_unanswered_n_prefix_is_named_in_the_diagnostic(tmp_path, monkeypatch):
-    """Neither prefix answers: the diagnostic still fires, lists both
-    prefixes' paths, and its advice mentions that `op_point_element` may
-    carry an `m.`/`n.` prefix (issue #5637 -- the old advice sent the reader
-    to an element-name-only override that cannot fix a prefix mismatch)."""
-    request = _write_request(tmp_path, _GOOD_NETLIST)
-    _install_fake_ngspice(
-        monkeypatch,
-        {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
-        candidate_index=99,
-        node_voltages={"out": 1.2},
-    )
-
-    report = op_sanity.run_op_sanity(str(request))
-
-    message = report["diagnostics"][0]["message"]
-    assert "@n.xm1.m0" in message
-    assert "m. or n. prefix" in message
-
-
-def test_a_model_reporting_both_vdsat_and_vdss_is_deterministic(tmp_path, monkeypatch):
-    """Both spellings answering at once is exotic, but must cost exactly one
-    `vdsat_v` and never crash. The parser's standing last-print-wins rule
-    (deck order: `vdsat` prints before `vdss`) resolves it to the `vdss`
-    value."""
-    request = _write_request(tmp_path, _GOOD_NETLIST)
-    _install_fake_ngspice(
-        monkeypatch,
-        {
-            "XM1": {**_SATURATED_NMOS, "vdss": 0.14},
-            "XM2": _SATURATED_PMOS,
-        },
-    )
-
-    report = op_sanity.run_op_sanity(str(request))
-
-    assert report["devices"][0]["values"]["vdsat_v"] == pytest.approx(0.14)
     assert report["devices"][0]["region"] == "saturation"
 
 
@@ -1856,45 +1739,6 @@ def test_integration_gf180_resolves_its_own_inner_element_convention(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _CaptureRun:
-    """Stand-in for ``monkeypatch`` that captures the fake ngspice runner."""
-
-    run = None
-
-    def setattr(self, _target, _name, value):
-        self.run = value
-
-
-def _install_temp_dispatched_ngspice(monkeypatch, by_temp, *, fail_temps=()):
-    """Fake ngspice whose answers depend on the deck's ``.temp`` card."""
-    runners = {}
-    for temp, values in by_temp.items():
-        capture = _CaptureRun()
-        _install_fake_ngspice(
-            capture, values, node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2}
-        )
-        runners[temp] = capture.run
-
-    def fake_run(cmd, capture_output, text, timeout):
-        deck_path = cmd[cmd.index("-b") + 1]
-        with open(deck_path, encoding="utf-8") as handle:
-            deck = handle.read()
-        match = re.search(r"^\.temp\s+(\S+)", deck, re.MULTILINE)
-        temp = float(match.group(1))
-        if temp in fail_temps:
-            log_path = cmd[cmd.index("-o") + 1]
-            with open(log_path, "w", encoding="utf-8") as handle:
-                handle.write("Error: no convergence\nsimulation(s) aborted\n")
-            return fake_completed("** ngspice-99\n")
-        return runners[temp](cmd, capture_output, text, timeout)
-
-    monkeypatch.setattr(op_sanity.subprocess, "run", fake_run)
-
-
-def _triode_at(vds: float) -> dict:
-    return {**_SATURATED_NMOS, "vds": vds, "vdsat": 0.15}
-
-
 def _three_corner_request(tmp_path):
     return _write_request(
         tmp_path,
@@ -1903,15 +1747,20 @@ def _three_corner_request(tmp_path):
     )
 
 
-def test_corner_all_tabulates_worst_margin_per_corner(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("nmos", "candidate"), [(_SATURATED_NMOS, 0), (_OSDI_NMOS, 3)])
+def test_corner_all_tabulates_worst_margin_per_corner(
+    tmp_path, monkeypatch, nmos, candidate
+):
     request = _three_corner_request(tmp_path)
-    _install_temp_dispatched_ngspice(
+    _install_fake_ngspice(
         monkeypatch,
-        {
-            27.0: {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS},
-            70.0: {"XM1": _SATURATED_NMOS, "XM2": {**_SATURATED_PMOS, "vds": 0.5}},
-            125.0: {"XM1": _triode_at(0.1), "XM2": _SATURATED_PMOS},
+        node_voltages={"vdd": 1.8, "in": 0.9, "out": 1.2},
+        by_temp={
+            27.0: {"XM1": nmos, "XM2": _SATURATED_PMOS},
+            70.0: {"XM1": nmos, "XM2": {**_SATURATED_PMOS, "vds": 0.5}},
+            125.0: {"XM1": {**nmos, "vds": 0.1}, "XM2": _SATURATED_PMOS},
         },
+        candidate_index=candidate,
     )
 
     report = op_sanity.run_op_sanity(str(request), corner="all")
@@ -1940,9 +1789,7 @@ def test_corner_default_has_null_corner_margins(tmp_path, monkeypatch):
 def test_corner_all_failing_corner_has_null_margin(tmp_path, monkeypatch):
     request = _three_corner_request(tmp_path)
     ok = {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS}
-    _install_temp_dispatched_ngspice(
-        monkeypatch, {27.0: ok, 70.0: ok, 125.0: ok}, fail_temps=(125.0,)
-    )
+    _install_fake_ngspice(monkeypatch, by_temp={27.0: ok, 70.0: ok, 125.0: None})
 
     report = op_sanity.run_op_sanity(str(request), corner="all")
 

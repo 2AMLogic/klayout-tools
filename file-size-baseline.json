@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1848
+      "lines": 1840
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -981,7 +981,7 @@
     },
     {
       "path": "tests/test_op_sanity.py",
-      "lines": 1820
+      "lines": 1819
     },
     {
       "path": "tests/test_output_lock.py",
