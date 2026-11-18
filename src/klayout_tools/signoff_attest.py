@@ -30,9 +30,9 @@ and 10"):
   numeric field of a cited envelope for every declared corner. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
-- **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
-  declared cold-start invocation exits ``0``; the PDK name + revision and at
-  least one tool version are pinned.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
 - **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
   declared CI/audit command exits ``0``.
 
@@ -60,7 +60,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -82,6 +81,7 @@ from .signoff import (
     _reject_json_constant,
 )
 from .signoff_attest_drift import drift_result
+from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import input_binding
 from .signoff_attest_presence import file_check as _file_check
@@ -145,9 +145,9 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
-    # Item 2's inventory is optional (issue #4767) and declares only commands;
-    # the stream is always the ``--input`` artifact, never an inventory field.
-    2: frozenset({"checks"}),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),
@@ -402,9 +402,9 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
-    bench_specs: dict[str, Any] = {}
+    bench_extra: dict[str, Any] = {}
     if item == 9:
-        inventory, bench_specs = item9.split_testbenches(
+        inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
     inventory, presence = split_entries(
@@ -421,7 +421,7 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -763,23 +763,6 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -797,7 +780,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -1046,7 +1029,8 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)

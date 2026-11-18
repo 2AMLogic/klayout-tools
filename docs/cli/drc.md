@@ -969,11 +969,15 @@ real open_pdks install never pays for the extra probe.
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
   only whatever the deck's own `report(...)`/`.output(...)` calls named.
-- **No per-instance attribution.** `source_cell`/`source_path` are always
-  `null` for this engine — mapping a violation back to its originating
-  placed instance (see "Per-instance attribution" below) needs this
-  module's own instance-tree walk against the *input* layout, which an RDB
-  report does not carry.
+- **Per-instance attribution matches the curated engine.** `source_cell`/
+  `source_path` are filled by the same instance-tree walk the curated engine
+  uses (see "Per-instance attribution" below): a marker whose `bbox` lies
+  wholly inside one placed instance carries that instance's cell name and
+  placement path. Markers contained in no single instance — top-level
+  geometry, or a `bbox` straddling an instance boundary — stay `null`/`null`
+  with the top `cell` as the only honest attribution, and so do markers the
+  deck reported under an RDB `<cell>` other than the selected top cell
+  (their coordinates are in another frame than the walk's).
 - **`bbox`/`polygon` fidelity depends on the RDB value kind.** Every
   coordinate pair embedded in an item's reported geometry contributes to
   `bbox` (converted from the RDB's micrometre user units back to the input
@@ -1254,7 +1258,7 @@ width/space rules are 30 % larger inside it:
 | Official rule | `klt drc` rule id | Threshold | Checked region |
 | --- | --- | --- | --- |
 | `DF.1a_LV` | `comp.width.1` | 0.22 um | `Comp` polygons touching no `Dualgate` |
-| `DF.1a_MV` | `comp.width.mv.1` | 0.30 um | `Comp` polygons overlapping `Dualgate` |
+| `DF.1a_MV` | `comp.width.mv.1` | 0.30 um | `Comp` polygons overlapping `Dualgate`, outside the `MVSD`/`MVPSD` drain markers |
 | `DF.3a_LV` | `comp.space.1` | 0.28 um | `Comp` polygons touching no `Dualgate` |
 | `DF.3a_MV` | `comp.space.mv.1` | 0.36 um | `Comp` polygons overlapping `Dualgate` |
 
@@ -1536,7 +1540,14 @@ when the deck module is imported.
 
 - **Semantics** follow the pinned upstream deck, not a per-point reading of the
   DRM text: selection is of whole polygons that do not interact with the tap
-  reach region, so a long active with one end near a tap is legal. `inside`
+  reach region, so a long active with one end near a tap is legal. The check
+  therefore under-reports **monotonically** — it can only miss a missing-tap
+  defect, never invent one — and a violation count of 0 does **not** establish
+  the DRM `DF.13`/`DF.14` universal form ("every point of the diffusion lies
+  within the rule's distance of a tap"): the count is not a sound acceptance
+  criterion for missing-tap closure. [`klt tap-distance`](tap-distance.md) is
+  the verb that asserts the universal form per point; assert on its
+  `measurement.measured_max_distance_um`. `inside`
   grows the tap in `step_um` octagon steps, clipping every step with the raw
   `nwell` layer; `outside` uses a diamond candidate filter refined by a
   Euclidean separation check. The two do not share one boundary metric. See
@@ -1547,14 +1558,22 @@ when the deck module is imported.
 - **Empty tap layers never skip the rule**: with active present and no tap
   drawn (or every tap under a `res_mk` marker), the active is reported.
 - **Voltage markers**: `dualgate` / `v5_xtor` are marker reads. `lv` selects
-  active touching neither; `mv` selects active overlapping `dualgate`. A rule
+  active touching neither; `mv` selects active overlapping `dualgate`. The two
+  selections are **not complements** (the deck's D3 approximation): active
+  touching `v5_xtor` without `Dualgate` is evaluated by *neither* voltage
+  column — it is removed from `DF.13`/`DF.14` evaluation, not moved to the
+  stricter column. A rule
   that reads the marker is not part of `coverage.voltage_domain_warnings`.
 - **Coverage**: `comp` absent → `inapplicable` (`no_applicable_geometry`).
   `comp` drawn but the voltage-selected active region empty →
   `inapplicable` (`inapplicable_empty_checked_region`), not counted in
   `rules_checked`. A `max_distance_um` or `step_um` that is not a whole number
   of database units on the layout's `dbu` is *skipped* with reason
-  `grid_not_representable` rather than rounded.
+  `grid_not_representable` rather than rounded. The four gf180mcu rules
+  declare their D1/D3 approximations on the rule
+  (`DrcRule.approximations`, issue #5805), so every run that checks one —
+  including, and especially, a zero-violation run — discloses them under
+  [`coverage.approximated_rules`](#coverage).
 - `klt drc rules` reports `value_um: null` for these rules and exposes
   `well_domain`, `voltage`, `max_distance_um` and `step_um` under `limits`.
 
@@ -1839,9 +1858,14 @@ licons by an approximation (see the `licon1.width.1` note below), not
 replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
 reads `clean` here while the PDK's own Magic `drc(full)` still reports those
 head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
-them. `klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
-independent check. This gap is documentation-only: no field of the JSON
-`coverage` object changes.
+them. Both `licon.1c` and `rpm.1` are head-geometry-derived — measured
+2026-11-15 (Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev3+gd5d57daf9a14`), a uniform 0.2 µm marker (`spacing_um` <= 0.4)
+leaves `rpm.1` unchanged while head length alone clears it — so the marker
+overhang is ruled out and the head-length fix is tracked in #5704. `klt
+drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the independent
+check. This gap is documentation-only: no field of the JSON `coverage`
+object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -2247,9 +2271,13 @@ primitives can't isolate (`comp.space.1`/`comp.space.mv.1`, `poly2.space.1`,
 `poly2.width.1`, `nwell.enclosing.comp.1`), a marker layer this deck's
 curated layer set doesn't draw (`comp.width.1`/`comp.space.1` model the
 `Dualgate` half of the PDK's own thin-oxide region but not its `v5_xtor`
-half; `comp.width.mv.1` doesn't exclude the `mvsd`/`mvpsd` LDMOS drain
-markers the official `DF.1a_MV` does -- both are drawn layers since issue
-#4569, but a derived layer cannot subtract two markers), the axis-aligned-envelope
+half; `comp.width.mv.1` excludes the `mvsd`/`mvpsd` LDMOS drain markers the
+official `DF.1a_MV` clips out — both drawn layers since issue #4569 — via
+`DerivedLayer`'s whole-polygon context stage (issue #3484) since issue
+#5719, which matches the official boolean clip wherever the PDK's own LDMOS
+PCells draw (marked drain COMP lies fully under the marker) but drops a
+marker-straddling polygon whole where the official rule would check its
+clipped remainder), the axis-aligned-envelope
 conservatism of a fixed-size bound (`contact.width.1`'s and
 `via1.width.1`-`via4.width.1`'s squares — *both* bounds are enforced as of
 issue #2370, see "Fixed-size rules" above, but the maximum is measured on
@@ -3529,23 +3557,36 @@ with the input and deck; `--check --rerun` replays the waiver file the
 committed report recorded (`--waivers` itself cannot be combined with
 `--check`, like `--rules`).
 
-**Known false positives: the PDK's own `nfet_10v0_asym` PCell (issue #4949).**
-`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` reports 17 markers under
-the curated gf180mcu deck, all with `source_cell: nfet_10v0_asym`: 16x
-`comp.enclosing.contact.1` and 1x `comp.width.mv.1` (the deck does not exempt
-`MVSD`-marked drains the way the official `DF.1a_MV` does, see above). The
-`comp.enclosing.contact.1` result for the PCell's narrow 0.22 um drain stripe is
-**not** cross-checked against the foundry runset (it cannot run on KLayout <
-0.30.9), so the deck is deliberately not loosened. To accept them explicitly:
+**The PDK's own `nfet_10v0_asym` PCell (issues #4949, #5719).**
+`klt gen --pdk-pcell gf180mcu_klayoutapi/nfet_10v0_asym` reports 16 markers under
+the curated gf180mcu deck, all 16x `comp.enclosing.contact.1` with
+`source_cell: nfet_10v0_asym`. This result **is** cross-checked against the
+foundry runset now that it can run (the native deck needs KLayout >= 0.30.9;
+verified against a standalone 0.30.12): the runset reports
+`CO.4 : COMP overlap of contact. : 0.07µm` x16 on the same 16 markers. It is a
+real finding, not a transcription artefact — the foundry deck flags the
+foundry PCell's own geometry — so the curated deck is deliberately not
+loosened. A waiver here accepts a finding the foundry runset itself reports,
+which is a materially different thing from waiving a transcription artefact,
+and the justification must say so:
 
 ```json
 {"waivers": [
   {"cell": "nfet_10v0_asym", "rule": "comp.enclosing.contact.1",
-   "justification": "PDK PCell drain stripe; unverified against native deck (#4949)"},
-  {"cell": "nfet_10v0_asym", "rule": "comp.width.mv.1",
-   "justification": "MVSD-marked LDMOS drain; official DF.1a_MV exempts it (#4949)"}
+   "justification": "confirmed by the native deck (CO.4 x16, issues #4949/#5719); accepted knowingly"}
 ]}
 ```
+
+(The 17th marker this section used to list — 1x `comp.width.mv.1` on the
+PCell's 0.22 um `MVSD`-marked drain stripe — was a curated-deck false
+positive: the official `DF.1a_MV` clips `MVSD`/`MVPSD`-marked drains out and
+reports nothing there. Fixed by issue #5719's MVSD/MVPSD exemption, which
+restores curated/native agreement on the PCell.)
+
+The same PCell also draws geometry the native deck additionally reports as
+`DF.6_MV` x2 and `PL.4_MV` x2. Both ids are listed in
+`coverage.unmodeled_rules`, so that delta is disclosed non-coverage, not a
+miss.
 
 **Known limit — straddling markers.** A marker whose bbox spans two instances
 (a filler abutting a tap cell, say) carries the *container's* `source_cell`,
@@ -3777,6 +3818,7 @@ for which skipped rules make a run partial and which do not.
 | `marker_blind_layers_in_stream`    | array\<string\> | `"<layer>/<datatype>"` area-marker layers present in the stream that the selected deck declares it does **not** model rule-switching for (issue #3815; sky130: `81/2` `areaid.ce`). The curated deck evaluates every rule uniformly, so the marker changes no result — a `clean` or an identical violation set with and without the marker is not marker-aware evidence. Purely informational: does not change `status`, violations or the exit code. Sorted; `[]` when none is present or the deck declares none. Curated engine only. Additive. Deck-static counterpart: `klt deck rules` `marker_blind_layers`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
 | `unmodeled_rules`                  | array\<string\> | Official foundry-runset rule ids the selected deck knowingly does **not** transcribe (issue #3031) — a static property of the deck. For sky130 this includes the enclosure refinements and the thick-oxide/marker-layer width and spacing rules (`UNMODELED_RULES` in `decks/sky130.py` is the authoritative list); sg13g2: the `Pad.*` and `LU.*` ids; gf180mcu: `MT30.*`, `MT.2b`/`MT.3`/`MT.4`, `MSLOT.*`, the Metal1–5 wide-metal `M1.2b`–`M5.2b` and narrow-line end-of-line `CO.6a`/`CO.6b`, `V1.3c`–`V4.4c` ids (issue #3968), the DRM 9.2 bond-pad guideline ids `PAD.1`, `PAD.2`, `PAD.5`–`PAD.20` (issue #4001; only 9.1's `PAD.4` is evaluated), and the untranscribed `ESD.*`/`GR.*` remainder (issues #3796, #3792) and `MDN.*`/`MDP.*` LDMOS remainder (issue #4569). `--engine klayout` with the packaged `asap7.drc`: the ids under "Not implemented" in the ASAP7 deck section; any other deck script gets `[]`. See below. Sorted alphabetically; empty for a deck that declares none. |
+| `approximated_rules`               | array\<object\> | `{"rule": string, "class": string, "description": string}` — one entry per approximation a **checked** rule declares (`DrcRule.approximations`, issue #5805; gf180mcu's four `comp.tap_distance.*` rules are the first, disclosing the deck's D1 whole-polygon selection — a count of 0 is not the DRM `DF.13`/`DF.14` universal form — and D3 non-complement voltage selection). Describes the rule's fidelity, not the outcome: disclosed on `clean` and `violations` runs alike, so it is populated on exactly the zero-violation runs the caveat matters for. Skipped/inapplicable rules contribute nothing. The key is **absent** (not `[]`) when no checked rule declares any, so decks without approximations emit an unchanged `coverage` block. Purely informational: does not change `status`, violations or the exit code. Sorted by rule id, declaration order within a rule. Additive. Curated engine only. |
 | `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
@@ -3921,7 +3963,9 @@ classes of rule are excluded from the gate:
   `nplus.*`/`pplus.*` implant rules, whose "7.8 Nplus"/"7.9 Pplus" tables
   carry one `LAYOUT RULE` value per row and whose upstream executable
   `rule_decks/{nplus,pplus}.drc` condition on neither `dualgate` nor
-  `v5_xtor`). This is opt-in per rule (`DrcRule.voltage_independent`), not a
+  `v5_xtor`; and, since issue #5719, `comp.width.moscap.1`, whose `DF.1c`
+  publishes a single 1 um value conditioned on nothing but the MOS-capacitor
+  marker). This is opt-in per rule (`DrcRule.voltage_independent`), not a
   default: every rule transcribed from a multi-column section still counts
   as unscoped.
 
@@ -4271,6 +4315,30 @@ committed `--engine klayout` report carrying `engine_deck_errors` (issue
 #1941) is re-run with the same `--allow-deck-errors` tolerance the original
 invocation used, so verifying such a report diffs it — including any change
 in the tolerated `exit_status`/`error_lines` — rather than failing outright.
+**A provenance field the fresh run does not emit is not drift (issue
+#5866).** A committed report may carry `provenance` keys `klt drc` never
+writes — spliced in by a downstream wrapper (e.g. a `gds_sha256` digest
+added after `klt` wrote the report), or emitted by a different version of
+the tool. Such a key is reported in an additive, optional `not_compared`
+list (emitted only when non-empty, so every existing payload is unchanged)
+and affects neither `status` nor the exit code: only a field both reports
+actually carry can drift. The rule is provenance-only and
+one-directional — a verdict-bearing key missing from the fresh report
+(`violation_count`, `violations`, `coverage`, …) still drifts, a key the
+*fresh* report grew still drifts, and a fresh report missing its entire
+`provenance` block still drifts. The carve-out covers scalar keys only: a
+committed `provenance` *sub-block* (a dict or list — e.g. a
+`regeneration` claim the fresh run declined to adopt) absent from the
+fresh report is one absent verdict-bearing structure and still drifts.
+The `provenance.regeneration` subtree (`klt signoff --attest`'s
+caller-supplied claim) is excluded from the carve-out entirely: its
+`hash_kind` leaf is written only when it differs from the default
+(`bytes`), so absence there encodes a default *value*, not an
+unproducible field — any leaf disagreement inside a declined claim still
+drifts (the explicit `--hash-kind` cross-check of issue #5572).
+`--format text` lists the skipped fields
+in a `not compared:` block, so a non-zero exit always means "something
+that could be compared did not match".
 Response shape:
 
 ```json
@@ -4282,6 +4350,9 @@ Response shape:
   "drift": [
     { "field": "status", "committed": "clean", "fresh": "violations" },
     { "field": "violation_count", "committed": 0, "fresh": 1 }
+  ],
+  "not_compared": [
+    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" }
   ],
   "fresh": { "...": "the freshly produced klt drc report, full shape" }
 }

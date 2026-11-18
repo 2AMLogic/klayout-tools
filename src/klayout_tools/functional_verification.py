@@ -118,25 +118,23 @@ implemented deliberately rather than rediscovered:
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
-   distinct from finding 7's *scalar* bare-port fix, and only reachable once
-   that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve at all. Two
-   separate mechanisms, depending on which side of the entry carries the
-   bit-selected port -- see the module comment above
-   :func:`_split_sdf_bus_port_interconnects` for the full write-up and
-   `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
-   evidence: (a) as a *destination*, order-dependent -- fixed by deferring
-   every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* feeding a
-   ``specify``-bearing destination -- fails even in total isolation,
-   unfixable by reordering, and confirmed sensitive to the testbench itself
-   (a no-op test resolves cleanly; any test that actually drives the DUT and
-   awaits a trigger does not) -- left unfixed and pinned down by
-   ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-   unresolvable`` rather than silently reported as "annotated" or masked.
-   The issue's own "wrapper double-binds the net identity" hypothesis is
-   refuted by shape (a) alone: reordering the entries (bit-selected-port
-   entry last instead of first) resolves everything, which a genuine
-   identity double-bind would not fix.
+   distinct from finding 7's *scalar* bare-port fix, and only reachable
+   once that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve.
+   Two separate mechanisms, depending on which side of the entry carries
+   the bit-selected port -- full write-up in the module comment above
+   :func:`_split_sdf_bus_port_interconnects` and
+   `docs/design/sdf-annotate-feasibility-spike.md` §3.7:
+   (a) as a *destination*, order-dependent -- fixed by deferring every
+   such entry to its own, later ``$sdf_annotate`` call; (b) as a *source*
+   -- the one-modpath-per-port-net cap (issue #5705, raw
+   ``iverilog``/``vvp`` 13.0): on a fanout-above-1 net ``$sdf_annotate``
+   annotates only the last-declared instance's destination and rejects
+   the rest, deterministically -- unfixable by reordering, left unfixed,
+   pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
+   fanout_stays_unresolvable`` rather than silently reported as
+   "annotated" or masked. The "wrapper double-binds the net identity"
+   hypothesis is refuted by shape (a): reordering (bit-selected entry
+   last) resolves everything, which a genuine double-bind would not.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -234,7 +232,7 @@ from .functional_verification_sdf import (
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
     _drop_sdf_zero_delay_alias_port_interconnects,
-    _drop_sdf_zero_delay_bus_port_source_interconnects,
+    _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
     _parse_toplevel_parameters,
@@ -250,16 +248,23 @@ from .functional_verification_sdf import (
     _write_sdf_dut_wrapper,  # noqa: F401
 )
 from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scopes
+from .functional_verification_sdf_internal_bus import (
+    SDF_INTERNAL_BUS_NET_REASONS,
+    _apply_sdf_internal_bus_net_drop,
+)
 from .functional_verification_sdf_rename import (
     _apply_sdf_escaped_divider_rename,
     _sdf_renamed_report,
 )
 from .functional_verification_sdf_steps import (
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
     _sdf_refusal_error,
 )
+from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -413,17 +418,6 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
-#: ``INTERCONNECT`` entries removed before annotation because they run from a
-#: bit-selected top-level input port (any destination not already claimed by
-#: :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS`) and carry zero delay at every
-#: corner. Icarus can fail to insert an intermodpath for such a source
-#: (``Could not find intermodpath!``); an all-zero entry models no delay, so
-#: dropping it cannot change simulated timing. Issue #2984's counted
-#: exemption; a non-zero entry of the same shape is left in place and still
-#: fails loudly. Pre-dropped from the SDF text, not derived from a
-#: diagnostic substring.
-SDF_BUS_PORT_SOURCE_DROPPED_CLASS = "zero_delay_bus_port_source_interconnect"
-
 #: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
 #: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
 #: -- removed before annotation because the request selected
@@ -560,6 +554,7 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "fails loudly"
     ),
     **SDF_COND_EXPRESSION_REASONS,
+    **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
@@ -656,6 +651,9 @@ class FunctionalVerificationError(Exception):
             self.code = code
 
 
+_rpath = RequestPaths(FunctionalVerificationError)
+
+
 # ---------------------------------------------------------------------------
 # request loading (same file / "-" / inline-JSON convention as `klt lvs`)
 # ---------------------------------------------------------------------------
@@ -666,9 +664,8 @@ _REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
-    """Shared shape check for a JSON-decoded request, however it was sourced
-    (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
-    object" error for context."""
+    """Shared shape check for a JSON-decoded request, however sourced;
+    ``source`` is folded into the "must be a JSON object" error."""
     doc = _shared_validate_request_shape(
         data,
         source,
@@ -691,25 +688,29 @@ def load_request(request_path: str) -> dict[str, Any]:
     Raises :class:`FunctionalVerificationError` if the file is missing/
     unreadable, not valid JSON, or missing a required top-level field
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
-    ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
-    own ``load_request`` (user-authored input, never emitted by this tool).
+    ``schema`` field (user-authored input, never emitted by this tool).
     """
     request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
-    three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
-    JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
-    verb composes into ``klt eval``'s descriptor unchanged.
+    three forms ``klt lvs``'s own ``request`` argument accepts, so this
+    verb composes into ``klt eval``'s descriptor unchanged. ``base_dir``
+    optionally overrides that anchor so a request archived beside an
+    evidence record re-runs from the directory its paths were written
+    against (issue #5673); it must exist and be a directory.
     """
     doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
     return _require_sources(doc), request_dir
 
@@ -760,11 +761,7 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
-        )
+        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
     else:
         search_dir = request_dir
 
@@ -977,9 +974,7 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = (
-        netlist if os.path.isabs(netlist) else os.path.join(request_dir, netlist)
-    )
+    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
     if not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
@@ -1273,7 +1268,7 @@ def _resolve_source_defines(
                 "request.options.source_defines keys must be non-empty strings"
             )
         path = os.path.abspath(
-            key if os.path.isabs(key) else os.path.join(request_dir, key)
+            _rpath(key, request_dir, "request.options.source_defines key")
         )
         if path not in sources:
             raise FunctionalVerificationError(
@@ -1394,7 +1389,7 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
@@ -2489,46 +2484,15 @@ def _apply_sdf_physical_only_drop(
     return new_path
 
 
-def _apply_sdf_bus_port_source_drop(
-    annotate_source_path: str,
-    output_dir: str,
-    ports: list[tuple[str, str, str]],
-    sdf_pre_dropped_counts: dict[str, int],
-) -> str:
-    """Issue #2984's zero-delay bit-selected-input-source SDF-text drop, the
-    sibling of :func:`_apply_sdf_physical_only_drop` and kept as its own
-    function for the same reason (no new branch in
-    :func:`run_functional_verification`). Runs after the physical-only pass,
-    so entries that pass claimed keep their class and are not double counted.
-    Counts under :data:`SDF_BUS_PORT_SOURCE_DROPPED_CLASS`.
-
-    Returns ``annotate_source_path`` unchanged when nothing was dropped, or
-    a new normalized-copy path otherwise.
-    """
-    drop = _drop_sdf_zero_delay_bus_port_source_interconnects(
-        annotate_source_path,
-        {name for direction, width, name in ports if width and direction == "input"},
-    )
-    if drop is None:
-        return annotate_source_path
-    text, count = drop
-    new_path = os.path.join(output_dir, "klt_sdf_bus_port_source_dropped.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    sdf_pre_dropped_counts[SDF_BUS_PORT_SOURCE_DROPPED_CLASS] = count
-    return new_path
-
-
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 
 
 def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
-    """Directory run artifacts are written to: ``output_dir`` (relative paths
-    resolve against the cwd, not the request directory) or, by default,
-    ``<request_dir>/.klt/functional-verification``.
-    """
+    """Directory run artifacts are written to: ``output_dir`` (relative
+    paths resolve against the cwd) or, by default,
+    ``<request_dir>/.klt/functional-verification``."""
     if output_dir:
         return os.path.abspath(output_dir)
     return os.path.join(request_dir, ".klt", "functional-verification")
@@ -2544,29 +2508,27 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str, output_dir: str | None = None, base_dir: str | None = None
 ) -> dict[str, Any]:
-    """Run the cocotb regression declared by ``request``.
+    """Run the cocotb regression declared by ``request`` -- accepting the
+    same three forms every other ``klt`` request argument does (see
+    :func:`load_request_arg`).
 
-    ``request`` accepts the same three forms every other ``klt`` request
-    argument does (see :func:`load_request_arg`): a path to a request JSON
-    file, ``"-"`` to read the request from stdin, or an inline JSON object
-    string.
+    ``base_dir`` optionally overrides that anchor (issue #5673): every
+    relative path (and the default artifact directory) resolves against
+    it, as the stdin form anchored there would; it must be a directory.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/functional-verification.md``). Raises
     :class:`FunctionalVerificationError` for anything that prevents a
-    trustworthy verdict from being produced at all -- a failing *test* is
-    never an error, it is ``status: "fail"`` in the returned report (which
-    the CLI turns into exit code 3).
+    trustworthy verdict -- a failing *test* is ``status: "fail"`` (exit 3).
 
-    Artifacts (the build directory, the raw ``results.xml``, the engine
-    transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
+    Artifacts (build directory, raw ``results.xml``, engine transcripts,
+    coverage ``.info``) are written to ``.klt/functional-verification/``
+    next to the request file (or under ``base_dir``) -- the same default
+    ``klt sim``/``klt synthesize`` use -- and kept, never deleted.
     """
-    request_doc, request_dir = load_request_arg(request)
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = _resolve_engine(request_doc)
@@ -2826,17 +2788,17 @@ def run_functional_verification(
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
-        # cannot be annotated by Icarus at all. Unlike the general shape (b)
-        # case (which stays failing, pinned by
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # fanout-above-1 net, #5705's cap leaves every non-last-declared
+        # load's entry unannotated. Unlike the general shape (b) case
+        # (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-        # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so there is no modpath the
-        # entry could ever annotate. When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing, so
+        # unresolvable`), this destination has no timing content and no
+        # logic observes the pin -- its entry can still be the cap's
+        # survivor, so the drop rests on timing emptiness, not "no modpath
+        # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run. A non-zero-delay entry is left in
-        # place and still fails the diagnostic gate loudly.
+        # instead of failing the run; a non-zero-delay entry still fails.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
@@ -2852,6 +2814,19 @@ def run_functional_verification(
         # dropping them is timing-neutral; non-zero ones stay and still fail.
         annotate_source_path = _apply_sdf_bus_port_source_drop(
             annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
+        )
+
+        # Issue #6075: the same cap also bites bit-selected INTERNAL nets,
+        # where Icarus inserts no survivor at all (0-of-N at any fanout).
+        # Both endpoints are instance pins here, so neither sibling pass
+        # above can have claimed these entries; the decision reads the same
+        # gate-level parse, and the zero-delay bound is the same.
+        annotate_source_path = _apply_sdf_internal_bus_net_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
