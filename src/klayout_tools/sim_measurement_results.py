@@ -21,6 +21,7 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_noise_contributors,
     sim_noise_mechanism,
     sim_search,
     sim_settled,
@@ -259,6 +260,10 @@ def _corner_measurement_results(
     # from a `{case}` template carries its `case` on every result entry, the
     # same additive move `grade_step_measurements` makes with `step`.
     _attach_provenance(measurements_spec, measurement_results)
+    # `noise.top_n` on a total entry (issue #5558): additive, value untouched.
+    sim_noise_contributors.attach(
+        measurements_spec, measurement_results, noise_mechanisms, diagnostics, save_mode
+    )
     return measurement_results, diagnostics, {}
 
 
