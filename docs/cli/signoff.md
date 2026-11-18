@@ -2784,7 +2784,7 @@ pre-#4764 envelope reports `drifted` with field pointers
     "field": "provenance.input",
     "keys_committed": ["content_hash", "path"],
     "keys_fresh": ["content_hash", "paths"],
-    "note": "the committed and freshly re-attested envelopes bind provenance.input with different key shapes — a cross-release envelope-shape change (item 1 moved from the single 'path' binding to the 'paths' input-set binding in 0.9.0, #4764), not evidence content drift. Regenerate the envelope: re-run 'klt signoff --attest ITEM --inventory INVENTORY -o PATH' under the current klt and re-commit it."
+    "note": "the committed and freshly re-attested envelopes bind provenance.input with different key shapes -- a cross-release envelope-shape change (item 1 moved from the single 'path' binding to the 'paths' input-set binding in 0.9.0, #4764), not evidence content drift. Regenerate the envelope: re-run 'klt signoff --attest ITEM --inventory INVENTORY -o PATH' under the current klt and re-commit it."
   }
 }
 ```
