@@ -1,8 +1,8 @@
 """Tests for the measurement-form registry in ``sim_forms`` (issue #5695).
 
-The seven exclusive form modules used to each carry a hand-maintained tuple of
+The exclusive form modules used to each carry a hand-maintained tuple of
 "every *other* exclusive form"; those tuples are now derived from one ordered
-registry. These tests are the assertion those 69 string literals stood in for:
+registry. These tests are the assertion those per-module string literals stood in for:
 that the exclusivity matrix is complete, and that it stays complete when a new
 form module is added.
 """
