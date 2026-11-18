@@ -7,6 +7,7 @@ test_sim_batch_shard_attach.py / test_sim_batch.py to keep both small."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -16,6 +17,7 @@ from klayout_tools import sim_batch as sb
 from klayout_tools import sim_batch_resume as sbr
 from test_sim_batch import (
     _batch_request,
+    _capture,
     _corner_points,
     _FakeRunner,
     _install_fake_batch,
@@ -33,6 +35,8 @@ from test_sim_batch import (
 )
 from test_sim_batch_async import _submit_shards
 from test_sim_batch_shard_attach import _split_runner, _states
+
+pytestmark = pytest.mark.usefixtures("bare_name_ngspice_resolution")
 
 # --- `--resume`'s harvest of a retained shard map (issue #5775) ---------------
 
@@ -65,6 +69,54 @@ def _report_ids(corners):
     return {c["corner_id"] for c in corners}
 
 
+def test_run_sim_zero_unit_batch_request_dispatches_nothing(
+    tmp_path, monkeypatch, bare_name_ngspice_resolution
+):
+    """An empty corner grid never stages inputs or mints a billed job (#6540)."""
+    _write_body(tmp_path)
+    request = _batch_request(tmp_path, corners={"supply_v": {"vdd": []}})
+    path = _write_request(tmp_path, request)
+
+    def unexpected_subprocess(argv, timeout_s):
+        raise AssertionError(f"zero-unit batch request invoked a subprocess: {argv}")
+
+    monkeypatch.setattr(sb, "_run_subprocess", unexpected_subprocess)
+
+    plan = _run(path, tmp_path, dry_run=True)
+    assert plan["unit_count"] == 0
+    assert plan["units"] == []
+
+    report = _run(path, tmp_path)
+    assert report["status"] == "not_checked"
+    assert report["corners"] == []
+    assert "remote" not in report["environment"]
+
+
+@pytest.mark.parametrize("state", ["pending", *sb._ShardManifest._STATE_FIELDS])
+@pytest.mark.parametrize("collected_at", [None, "2026-11-17T00:00:00+00:00"])
+def test_mark_map_collected_preserves_completed_entries_and_timestamps(
+    tmp_path, state, collected_at
+):
+    path = tmp_path / sb.BATCH_SHARDS_FILENAME
+    entry = {"index": 0, "state": state, "collected_at": collected_at}
+    untouched = {"index": 1, "state": "launched", "collected_at": None}
+    document = {"shards": [dict(entry), dict(untouched)]}
+
+    sbr._mark_map_collected(str(path), document, [0])
+
+    after = json.loads(path.read_text())["shards"]
+    assert after[1] == untouched
+    if state == "collected":
+        assert after[0] == entry
+    else:
+        assert after[0]["state"] == "collected"
+        if collected_at:
+            assert after[0]["collected_at"] == collected_at
+        else:
+            stamped = datetime.fromisoformat(after[0]["collected_at"])
+            assert stamped.tzinfo == timezone.utc
+
+
 def test_resume_harvest_collects_terminal_shards_and_skips_the_rest(
     tmp_path, monkeypatch, capsys
 ):
@@ -78,13 +130,16 @@ def test_resume_harvest_collects_terminal_shards_and_skips_the_rest(
     launches = len(runner.argvs_matching("launch"))
     before = json.loads(open(payload["manifest_path"]).read())
 
-    corners, engine_version = _harvest(tmp_path, request)
+    corners, engine_version, environment = _harvest(tmp_path, request)
 
     # The 10-unit/cap-4 split is 3 shards (4/4/2 units); only shard 0 is
     # terminal-done, so only its 4 units are harvested.
     assert _report_ids(corners) == {f"tt_1.800_{i}" for i in range(4)}
     assert all(c["status"] == "pass" for c in corners)
     assert engine_version == "46"
+    assert len(environment["fleet"]) == 1
+    assert environment["fleet"][0]["job_id"] == jobs[0]
+    assert environment["fleet"][0]["resumed"] is True
     assert len(runner.argvs_matching("launch")) == launches  # never launches
     after = json.loads(open(payload["manifest_path"]).read())
     assert after["shards"][0]["state"] == "collected"
@@ -125,7 +180,7 @@ def test_resume_harvest_skips_unlaunched_and_already_known_units(
     known = [p.corner_id for p in _corner_points(10)][7:]
     launches = len(runner.argvs_matching("launch"))
 
-    corners, _ = _harvest(tmp_path, request, known=known)
+    corners, _, _ = _harvest(tmp_path, request, known=known)
 
     # Only shard 1 (units 4-6) is terminal-done, launched and not known.
     assert _report_ids(corners) == {f"tt_1.800_{i}" for i in (4, 5, 6)}
@@ -158,7 +213,7 @@ def test_resume_harvest_leaves_a_terminally_failed_shard_outstanding(
 
     monkeypatch.setattr(sb, "_run_subprocess", _failed_first)
 
-    corners, _ = _harvest(tmp_path, request)
+    corners, _, _ = _harvest(tmp_path, request)
 
     shard_0_ids = [p.corner_id for p in _corner_points(10)][:4]
     shard_0 = [c for c in corners if c["corner_id"] in set(shard_0_ids)]
@@ -184,7 +239,7 @@ def test_resume_harvest_on_a_legacy_map_without_units_or_state(tmp_path, monkeyp
         entry.pop("state", None)
     open(payload["manifest_path"], "w").write(json.dumps(document))
 
-    corners, _ = _harvest(tmp_path, request)
+    corners, _, _ = _harvest(tmp_path, request)
 
     assert len(_report_ids(corners)) == 10
     after = json.loads(open(payload["manifest_path"]).read())
@@ -196,8 +251,81 @@ def test_resume_harvest_without_a_map_is_a_noop(tmp_path, monkeypatch):
     (tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME).unlink()
     calls = len(runner.calls)
 
-    assert _harvest(tmp_path, request) == ([], None)
+    assert _harvest(tmp_path, request) == ([], None, None)
     assert len(runner.calls) == calls
+
+
+@pytest.mark.parametrize("empty_environment", [None, {}])
+@pytest.mark.parametrize("all_empty", [False, True])
+def test_resume_harvest_preserves_shards_without_provenance(
+    tmp_path, monkeypatch, empty_environment, all_empty
+):
+    _, request, payload = _harvest_fixture(tmp_path, monkeypatch)
+    first_job = payload["shards"][0]["job_id"]
+    real_collect = sb._run_batch_job
+
+    def collect(**kwargs):
+        corners, version, environment = real_collect(**kwargs)
+        if all_empty or kwargs["job_id"] == first_job:
+            environment = empty_environment
+        return corners, version, environment
+
+    monkeypatch.setattr(sb, "_run_batch_job", collect)
+    corners, version, environment = _harvest(tmp_path, request)
+
+    assert len(corners) == 10
+    assert version == "46"
+    fleet = environment["fleet"]
+    assert len(fleet) == 3
+    expected = None if empty_environment is None else {"resumed": True}
+    assert fleet[0] == expected
+    if all_empty:
+        assert fleet == [expected] * 3
+    else:
+        assert [entry["job_id"] for entry in fleet[1:]] == [
+            entry["job_id"] for entry in payload["shards"][1:]
+        ]
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_resume_environment_merges_jobs_without_changing_inputs(sharded):
+    from copy import deepcopy
+
+    collected = {"job_id": "collected", "instance_id": "i-collected", "resumed": True}
+    prior = {"job_id": "reobserved", "state": "running"}
+    current = {"job_id": "reobserved", "state": "done"}
+    harvested = {"fleet": [collected, prior, None, {}]}
+    dispatched = (
+        {"fleet": [current, None], "interrupted": True, "max_concurrent_jobs": 1}
+        if sharded
+        else current
+    )
+    originals = deepcopy((harvested, dispatched))
+
+    merged = sbr.merge_resume_environment(harvested, dispatched)
+
+    expected_fleet = [collected, None, {}, current]
+    expected = (
+        {
+            "fleet": expected_fleet + [None],
+            "interrupted": True,
+            "max_concurrent_jobs": 1,
+        }
+        if sharded
+        else {"fleet": expected_fleet}
+    )
+    assert merged == expected
+    assert (harvested, dispatched) == originals
+
+
+@pytest.mark.parametrize("environment", [None, {"job_id": "one"}, {"fleet": [None]}])
+def test_resume_environment_without_harvest_leaves_dispatch_unchanged(environment):
+    assert sbr.merge_resume_environment(None, environment) is environment
+
+
+def test_resume_environment_without_dispatch_keeps_harvest():
+    environment = {"fleet": [{"job_id": "one", "resumed": True}]}
+    assert sbr.merge_resume_environment(environment, None) is environment
 
 
 @pytest.mark.parametrize("lose_a_corner", [False, True])
@@ -260,7 +388,8 @@ def _harvest_run_fixture(tmp_path, monkeypatch, *, fail_second_shard):
                 for point in sim._corner_points_from_wire(document["_explicit_points"])
             ]
             runner.outputs_by_job[job_id] = {
-                "report.json": _sim_report(corner_ids=tuple(ids))
+                "report.json": _sim_report(corner_ids=tuple(ids)),
+                "worker_environment.json": _capture(cpu_model=job_id),
             }
             submitted.append(ids)
             shard_count["n"] += 1
@@ -303,6 +432,11 @@ def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, cap
     first_jobs = [
         entry["job_id"] for entry in json.loads(manifest_path.read_text())["shards"]
     ]
+    harvested_job = next(
+        entry["job_id"]
+        for entry in json.loads(manifest_path.read_text())["shards"]
+        if entry["state"] == "collected"
+    )
     submitted.clear()
     launches_before = len(_launches(runner))
 
@@ -317,6 +451,18 @@ def test_run_sim_resume_harvests_a_retained_shard_map(tmp_path, monkeypatch, cap
     assert [c["corner_id"] for c in second["corners"]] == ids
     assert all(c["status"] == "pass" for c in second["corners"])
     assert second["environment"]["resume"]["resumed_corners"] == 2
+    assert second["environment"]["models_lib_sha256_scope"] == "client"
+    fleet = second["environment"]["remote"]["fleet"]
+    assert len(fleet) == 3  # harvested shard plus the two replacement shards
+    assert fleet[0]["job_id"] == harvested_job
+    assert set(first_jobs) & {entry["job_id"] for entry in fleet} == {harvested_job}
+    assert [entry["resumed"] for entry in fleet] == [True, False, False]
+    assert len({entry["job_id"] for entry in fleet}) == 3
+    assert fleet[0]["instance_id"] == "i-0fake"
+    assert fleet[0]["worker_environment"]["cpu_model"] == harvested_job
+    assert all(entry["worker_environment"]["capture"] == "ok" for entry in fleet)
+    assert fleet[0]["client_submitted_at"] is None
+    assert all(entry["client_collected_at"] for entry in fleet)
     assert "harvested 2 already-completed unit(s) from 1 shard(s)" in (
         capsys.readouterr().err
     )
@@ -366,6 +512,20 @@ def test_run_sim_resume_with_every_shard_done_dispatches_nothing(
     assert [c["corner_id"] for c in second["corners"]] == ids
     assert all(c["status"] == "pass" for c in second["corners"])
     assert second["environment"]["resume"]["resumed_corners"] == 4
+    assert second["environment"]["models_lib_sha256_scope"] == "client"
+    fleet = second["environment"]["remote"]["fleet"]
+    assert [entry["job_id"] for entry in fleet] == [
+        entry["job_id"] for entry in first["environment"]["remote"]["fleet"]
+    ]
+    assert all(entry["resumed"] for entry in fleet)
+    assert all(entry["client_collected_at"] for entry in fleet)
+    assert all(entry["client_submitted_at"] is None for entry in fleet)
+    assert all(entry["client_launched_at"] is None for entry in fleet)
+    assert all(entry["instance_id"] == "i-0fake" for entry in fleet)
+    assert all(entry["worker_environment"]["capture"] == "ok" for entry in fleet)
+    assert all(
+        entry["worker_environment"]["cpu_model"] == entry["job_id"] for entry in fleet
+    )
     assert "harvested 4 already-completed unit(s) from 2 shard(s)" in (
         capsys.readouterr().err
     )

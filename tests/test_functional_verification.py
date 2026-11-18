@@ -46,7 +46,7 @@ import pytest
 
 from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _stub_verilator_coverage
 from klayout_tools import functional_verification as fv
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
@@ -1782,28 +1782,6 @@ def test_stubbed_missing_simulator_binary(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Coverage post-processing (Verilator only)
 # --------------------------------------------------------------------------- #
-
-_COVERAGE_SUMMARY = """\
-Coverage Summary:
-  line      : 100.0% (  6/  6)
-  toggle    : 60.0% (102/170)
-  branch    : 100.0% (  4/  4)
-  expr      : 100.0% (  5/  5)
-  fsm_state : 0.0% (  0/  0)
-  fsm_arc   : 0.0% (  0/  0)
-"""
-
-
-def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
-    def fake_run(cmd, **kwargs):
-        assert cmd[0] == "verilator_coverage"
-        if cmd[1] == "--write-info":
-            with open(cmd[2], "w", encoding="utf-8") as handle:
-                handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")
-            return fake_completed(returncode=returncode)
-        return fake_completed(returncode=returncode, stdout=summary)
-
-    monkeypatch.setattr(fv.subprocess, "run", fake_run)
 
 
 def test_stubbed_coverage_run_populates_the_coverage_block(tmp_path, monkeypatch):
@@ -5302,24 +5280,15 @@ async def test_output_settles_within_two_ns(dut):
 )
 def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
     """Issue #1619 shape (b), root-caused rather than fixed -- see the
-    module-level comment above :func:`_split_sdf_bus_port_interconnects` for
-    the full writeup and issue #5705 for the measured mechanism.
-
-    The failure is Icarus's one-modpath-per-bit-selected-port-net cap, not
-    something `_split_sdf_bus_port_interconnects`'s deferral can work
-    around: on this fixture's fanout-2 `a[0]` net, `$sdf_annotate`
-    annotates only the last-declared instance's destination (`u_d`, the
-    diode); the `a[0] u1.in` entry is rejected deterministically, in
-    both SDF entry orders. (#5705 measured the same verdicts under both
-    an idle and a fully driving plain-Verilog bench; the cocotb
-    no-op-vs-driven flip recorded in #1619's era may still be real on
-    top of the cap, but no race is needed to explain the rejection.)
-    The survivor is fixed by netlist declaration order, which the split
-    never touches, so reordering or deferring cannot help. This test
-    pins this fixture's outcome down: it must keep raising, not
-    silently start passing (which would mean either Icarus's own
-    behaviour changed, or a future change here papered over the failure
-    without actually resolving it)."""
+    module-level comment above :func:`_split_sdf_bus_port_interconnects`
+    and #5705's measured mechanism: Icarus's one-modpath-per-bit-selected-
+    port-net cap annotates only the last-declared instance's destination,
+    so the `a[0] u1.in` entry is rejected deterministically, in either
+    SDF entry order (the survivor is fixed by netlist declaration order,
+    which the split never touches). This test pins that the run keeps
+    raising rather than silently passing, and (issue #5769) that the
+    refusal names the rejected arc `a[0] → u1.in` plus the buffer
+    workaround while never naming the surviving `u_d.in` arc."""
     tmp_path.joinpath("bus_fanout_in.v").write_text(
         _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
     )
@@ -5334,8 +5303,14 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
     }
     annotated = _write_request(tmp_path / "request-sdf.json", request)
 
-    with pytest.raises(fv.FunctionalVerificationError, match="did not fully apply"):
+    with pytest.raises(
+        fv.FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
         run_functional_verification(annotated)
+    message = str(excinfo.value)
+    assert "a[0] → u1.in" in message
+    assert "u_d.in" not in message
+    assert "insert a buffer" in message
 
 
 def _bus_port_source_sdf_text(

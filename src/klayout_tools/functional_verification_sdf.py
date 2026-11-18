@@ -1532,15 +1532,15 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
 # A real post-route SDF can carry such entries and Icarus fails the run with
 # `SDF ERROR: ... Could not find intermodpath!` on some of them (the
 # one-modpath-per-port-net cap characterised above for shape (b), issue
-# #5705). The failure mechanism is not what this pass depends on: it
-# removes only entries whose every `min:typ:max` member is zero, which
-# model no delay at any corner, so
-# dropping one cannot change simulated timing -- the same bound #2285 and
-# #2363 use. The "dropping its entry would change simulated timing" argument
-# for leaving shape (b) failing therefore holds only for NON-zero entries,
-# and those are still left in place (and still raise), as
-# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
-# pins with its non-zero delays.
+# #5705). This pass removes only entries whose every `min:typ:max` member
+# is zero -- no delay at any corner, so dropping one cannot change
+# simulated timing, the same bound #2285 and #2363 use. NON-zero entries
+# therefore stay and keep failing the run, deliberately (issue #5769's
+# recorded decision, round 20261116-r15): every `dropped` class is bounded
+# to zero-delay entries, an opt-in or automatic drop of real delay would
+# silently change simulated timing, and a caller needing that trade files
+# a new request. The refusal instead names the rejected arcs and
+# the buffer workaround (`_sdf_intermodpath_rejected_arcs`).
 # --------------------------------------------------------------------------- #
 
 
