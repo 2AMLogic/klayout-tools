@@ -56,7 +56,9 @@ binary and identical `0.1.0` version string are **not** guaranteed to report
 the same category set for the same input across time, or across two builds
 snapshotted on different days. `CHANGELOG.md` is the source of truth for
 *which* categories/rule ids exist as of a given date — check it first before
-assuming a category change is a bug.
+assuming a category change is a bug. Record new JSON-visible changes in
+[`changelog.d/`](../changelog.d/README.md) for inclusion in `CHANGELOG.md`
+at release time. Check those fragments for changes pending on `main`.
 
 If a downstream project needs to pin exact reproducibility (e.g. golden
 acceptance data keyed on `category_counts`), key that pin off the shared
@@ -1272,7 +1274,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   as `input_verified: true | false | null` (see
   [`cli/signoff.md`](cli/signoff.md)); a verb that pins an `input` hash
   without echoing the path it covers leaves its consumers with `null` there,
-  so **new verbs should echo the artifact path they hashed**.
+  so **new verbs should echo the artifact path they hashed**. Inside a
+  `klt signoff` report, a `generic`/`model-run` envelope that declares such
+  a pathless hash is disclosed on its citation as the additive
+  `input_verified_note: "declared_hash_unbound"` (issue #6403) — advisory,
+  grading nothing — so the declared-but-never-checked case no longer reads
+  as a binding.
 
   **That echoed path is the `{path, scope}` shape, not a bare string (issue
   #2659).** `input_verified` is only re-derivable where the echoed path still
@@ -1873,21 +1880,33 @@ All eight share one contract:
   the recorded `content_hash`/`layout_sha256`, so a file that disagrees
   reports `drifted`. With no explicit input the behaviour is unchanged
   (additive; no `schema_version` bump, no new response field).
-- **An unresolvable input path is named, not silently `null` (issue #2595,
-  `lvs` only so far).** A committed report that echoes an input back exactly
+- **An unresolvable input path is named, not silently `null` (issue #2595
+  for `lvs`, issue #6466 for `drc`; `erc` carries its own copy).** A
+  committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
   shared convention, not an oversight, and unchanged here. Since #2659 above
   this covers only `lvs`'s `reference` (and any pre-#2659 report's
   bare-string field). But a path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
-  lvs --check` therefore attaches an **additive, optional** `input_not_found`
-  block (`path`, `resolved`, `found_relative_to_report`) to such a
-  `checks[]` entry; `expected`/`actual`/`match`/`status` are unchanged, and
-  the key is absent on a genuine content mismatch. Additive by the envelope
+  lvs --check` (its layout, reference and runset-deck lines) and `klt drc
+  --check` (its `provenance.input.content_hash` line, on a top-level report
+  and on each `reports.curated.`/`reports.native.` side of an `--engine both`
+  envelope) therefore attach an **additive, optional** `input_not_found`
+  block (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
+  `hint`) to such a `checks[]` entry; `expected`/`actual`/`match`/`status` are
+  unchanged, and the key is absent on a genuine content mismatch, on an
+  echo that names no path (`scope: "external"`/`"absent"`, or no field) and
+  on a path that resolves to an existing file. An explicit input override
+  (`klt drc <file> --check`, `klt lvs --layout`) still wins and is the path
+  diagnosed when *it* is missing. `klt drc --check`'s other echoed-path line,
+  `provenance.waivers.content_hash`, carries no such block (it is not routed
+  through the same resolution); its deck line has its own `deck_not_found`
+  block. Additive by the envelope
   rules above — no `schema_version` bump, and a consumer that never reads the
   key sees the bytes it saw before. See
-  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`".
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`" and
+  [`cli/drc.md`](cli/drc.md).
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
@@ -1895,7 +1914,11 @@ All eight share one contract:
   verb that the KLayout engine build does to `klt drc`. The engine *identity*
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
-  identity in — the whole `build` block (issue #2249).
+  identity in — the whole `build` block (issue #2249), which `--check`
+  additionally reports (report-only, never touching `status`) as the
+  additive `build_skew` field: `same`/`build_only`/`ruleset`/
+  `unverifiable`/`unknown` over the block's fields, with the difference
+  states naming what moved (issues #5868, #5852).
 - **A provenance field the fresh run does not emit is `not_compared`, not
   drift (issue #5866).** A committed report may carry `provenance` keys the
   re-running `klt` never writes — spliced in by a downstream wrapper
@@ -2209,7 +2232,21 @@ depends on its meaning staying fixed:
   re-attest.
 - Hashes are `sha256:<hex>` of raw bytes (`hash_algorithm:
   "sha256-raw-bytes"`). Introducing any normalisation would be a new named
-  algorithm recorded in the envelope, never a silent change to this one.
+  algorithm recorded in the envelope, never a silent change to this one —
+  the one such algorithm is `sha256-canonical-yaml-v1` (issue #5862): an
+  inventory `hygiene` entry `{"attest": "yaml", "select"?}` records it,
+  with `attest` and `select`, beside that check's own `content_hash` (the
+  digest of the canonical parse — type-tagged keys, sequences recursed
+  element-wise, sorted, compact — of the whole file or the `select`
+  subtree; a node with no deterministic canonical form, e.g. `!!set`, is
+  an error naming the path) plus an informational
+  `raw_content_hash`, which the `--check` drift diff excludes and reports
+  as a live note instead. The envelope-level `attestation.hash_algorithm`
+  stays `sha256-raw-bytes` for every other check, and no inventory
+  `schema_version` bump carries the entry: within version 1 the per-entry
+  accepted keys are part of the `hygiene` entry's documented shape, and a
+  build that does not read `attest: "yaml"` refuses it explicitly (exit
+  `1`, naming the accepted values) rather than byte-hashing it.
 
 Field-level schema, path rules, examples and exit codes:
 [`cli/signoff.md`](cli/signoff.md#attesting-items-1-9-and-10---attest-issue-2844).

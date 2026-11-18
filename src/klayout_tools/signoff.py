@@ -64,6 +64,7 @@ from .coverage import (
     coverage_skipped_work,
     coverage_state,
 )
+from .coverage_work import coverage_work_count
 from .design_evidence_tiers import (
     CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
@@ -78,6 +79,7 @@ from .metrics import get_metric, is_registered
 # that requires them machine-derived (issue #5462); out of this file for its
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
 from .signoff_attest_binding import attestation_record
+from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -153,6 +155,7 @@ from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
     content_hash_pin_state,
+    declared_hash_unbound_disclosure,
     generic_binding_check,
     pin_disclosure,
     rehash_evidence_file,
@@ -3054,44 +3057,30 @@ def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool
 
 
 def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The cited envelope's own statement that it skipped requested work
-    (issue #2109) -- or ``None`` when it makes no such statement.
+    """Quote partial coverage in check details and manifest citations.
 
-    ``None`` for every row of the common rollup table except ``partial``,
-    including a legacy envelope whose verb-specific fields describe a gap
-    (`klt drc`'s ``rules_skipped``, surfaced separately and unchanged by
-    :func:`_drc_coverage_disclosure`). Re-reading those here would relabel
-    pre-contract data as a common partial claim, which is exactly the
-    "missing legacy coverage is not evidence either way" rule
-    :mod:`klayout_tools.coverage` exists to apply identically everywhere.
-
-    Quoted, not graded on, for every first-party kind: a `klt signoff`
-    verdict still rests on the producer's own status token (see
-    :func:`_non_passing_reason`). The one exception is ``generic``, which
-    has no adapter and is cross-checked against this block by
-    :func:`_generic_overstates_coverage` (issue #2906). Until a
-    verb's Phase 2 adapter lands, that token can still be the kind's
-    unconditional success word on a run whose common coverage says
-    ``partial`` -- and when it is, this key is what makes the gap visible in
-    the report rather than silent, on both the ``checks[]`` and the
-    ``"met"``-citation paths.
+    Totals include each represented unit, while the display cap applies to
+    records. The common coverage reader excludes legacy verb-specific gaps.
     """
     skipped = coverage_skipped_work(cast(dict[str, Any], envelope))
     if not skipped:
         return None
-    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
-        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
     by_reason: dict[str, int] = {}
     for record in skipped:
-        reason = str(record.get("reason"))
-        by_reason[reason] = by_reason.get(reason, 0) + 1
-    return {
+        reason = record["reason"]
+        by_reason[reason] = by_reason.get(reason, 0) + coverage_work_count(record)
+    total = sum(by_reason.values())
+    truncated = len(skipped) > _PARTIAL_COVERAGE_SKIPPED_CAP
+    disclosure: dict[str, Any] = {
         "reason": _REASON_PARTIAL_COVERAGE,
         "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
-        "skipped_total": len(skipped),
-        "skipped_by_reason": dict(sorted(by_reason.items())),
-        "truncated": True,
     }
+    if truncated or total > len(skipped):
+        disclosure["skipped_total"] = total
+        disclosure["skipped_by_reason"] = dict(sorted(by_reason.items()))
+    if truncated:
+        disclosure["truncated"] = True
+    return disclosure
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
@@ -5631,13 +5620,12 @@ def _anchored_input_refusal(
     return _attested_checks_refusal(resolution, repo_root, detail)
 
 
-def _attested_check_members(
-    envelope: Mapping[str, Any],
-) -> list[tuple[Any, str]]:
-    """``({path, scope}, recorded_hash)`` for every ``present`` check of a
-    ``klt signoff --attest`` envelope that recorded a ``sha256:`` content
-    hash (issue #4197) -- the inventory's listed ``sources`` and ``derived``
-    files. ``[]`` for an envelope with no ``attestation.checks[]``."""
+def _attested_check_members(envelope: Mapping[str, Any]) -> list[tuple[Any, str]]:
+    """``({path, scope}, recorded_hash)`` for every raw-byte ``present``
+    check of a ``--attest`` envelope that recorded a ``sha256:`` content
+    hash (issue #4197). ``attest: "yaml"`` checks belong to
+    :func:`.signoff_attest_canonical_yaml.rehash_checks` instead; ``[]``
+    when there are no ``attestation.checks[]``."""
     attestation = envelope.get("attestation")
     checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
     if not isinstance(checks, list):
@@ -5653,6 +5641,7 @@ def _attested_check_members(
             and path
             and isinstance(recorded, str)
             and recorded.startswith("sha256:")
+            and check.get("attest") != "yaml"
         ):
             members.append(({"path": path, "scope": "repo"}, recorded))
     return members
@@ -5664,18 +5653,16 @@ def _attested_checks_refusal(
     detail: dict[str, Any] | None,
 ) -> str | None:
     """Re-hash the files an attestation's ``present`` checks recorded (issue
-    #4197). The envelope's ``provenance.input`` pins only the inventory, so
-    without this an edit to a listed source or derived file stays ``met``
-    until re-attested. A drifted file is :data:`_REASON_STALE_EVIDENCE`; one
-    that cannot be read from the grading context is
-    :data:`_REASON_UNVERIFIABLE_PROVENANCE`. ``None`` -- and nothing added to
-    the citation -- when every file re-hashes or the envelope carries none."""
+    #4197) -- raw bytes, or the canonical parse of an ``attest: "yaml"``
+    entry (issue #5862). ``provenance.input`` pins only the inventory, so
+    without this an edit to a listed file stays ``met`` until re-attested;
+    drift is :data:`_REASON_STALE_EVIDENCE`, an unreadable file
+    :data:`_REASON_UNVERIFIABLE_PROVENANCE`, all-matching ``None``."""
     members = _attested_check_members(resolution["envelope"])
-    if not members:
-        return None
     results = _verify_generic_input_set(
         members, resolution["spec"], resolution.get("file"), repo_root
     )
+    results.extend(_rehash_yaml(resolution, repo_root, _resolve_input_artifact_value))
     bad = [
         {
             "path": member["path"]["path"],
@@ -6420,21 +6407,21 @@ def _citation(
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
-        # Issue #2196: was that `content_hash` checked against the input
-        # artifact itself, or only against the envelope's own claim about
-        # it? Always present -- including the `None` ("nothing was
-        # re-hashed") case, which is the one this field exists to stop
-        # being silent. See this module's "Input-artifact verification"
-        # docstring section; never consulted by any grading rule.
+        # Issue #2196: was that `content_hash` checked against the input artifact
+        # itself, or only against the envelope's own claim? Always present --
+        # including the `None` ("nothing was re-hashed") case, the one this
+        # field exists to stop being silent. See the "Input-artifact
+        # verification" docstring section; never consulted by any grading rule.
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
-    # Issue #5815: the RFC 6901 `pointer` the evidence entry carried, when
-    # it carried one -- additive, never a grading input.
+    # Issue #6403: a declared pathless `content_hash` binds nothing -- disclose
+    # that beside the unchanged `null` ({} -- no key -- otherwise).
+    citation.update(declared_hash_unbound_disclosure(resolution))
+    # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
     citation.update(_citation_pointer(resolution["spec"]))
     if resolution.get("content_hash_basis") is not None:
-        # Issue #4893: `content_hash` is a re-hash of the cited evidence file
-        # itself, not a design input.
+        # Issue #4893: `content_hash` is a re-hash of the cited evidence file itself.
         citation["content_hash_basis"] = resolution["content_hash_basis"]
     if resolution["kind"] == "model-run":
         # Issue #4859: disclosure only -- `method` is echoed, never graded,
@@ -6442,8 +6429,7 @@ def _citation(
         citation["method"] = resolution["envelope"].get("method")
         citation["executed_by_klt"] = False
     # Issue #2875: per-role verification of a `pex` envelope's schematic-side
-    # inputs (request, body, DUT, reference netlist). Present only when the
-    # cited envelope records those digests; legacy envelopes omit it.
+    # inputs (request, body, DUT, reference netlist); legacy envelopes omit it.
     if resolution.get("pex_inputs"):
         citation["pex_inputs"] = resolution["pex_inputs"]
     # Issue #2870: a PDK-runset LVS citation says which engine produced it.
