@@ -3700,6 +3700,9 @@ def _run_sim_corners(
         pdk_root=pdk_root,
         timeout_s=timeout_s,
     )
+    netlist_digests = sim_env_report.NetlistDigests.capture(  # #5569: pre-dispatch
+        resolved.request, resolved.netlist_path, repo_root=resolved.repo_root
+    )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir
     backend = resolved.backend
@@ -3802,7 +3805,7 @@ def _run_sim_corners(
     # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
     # form), `--submit-only` (refused with `--resume` before any S3 write)
     # and `--dry-run` (which must not touch S3 at all).
-    harvested_engine_version = sim_batch_resume.maybe_harvest_resume_shards(
+    harvested_version, harvested_env = sim_batch_resume.maybe_harvest_resume_shards(
         resume=resume,
         backend=backend,
         checkpoint=checkpoint,
@@ -3823,7 +3826,7 @@ def _run_sim_corners(
     if loaded_engine_version is None:
         # An all-harvested rerun dispatches nothing, so the harvested jobs'
         # engine version is the only one this report can carry.
-        loaded_engine_version = harvested_engine_version
+        loaded_engine_version = harvested_version
 
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
@@ -4202,17 +4205,17 @@ def _run_sim_corners(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
+    remote_environment = sim_batch_resume.merge_resume_environment(
+        harvested_env, remote_environment
+    )
 
     if resume:
         # Reassemble the full corner list in the request's own order: a
         # corner is either freshly run just now (`corners_new`) or reused
         # verbatim from a matching checkpoint (`pre_completed`) -- every
         # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Only done under `resume`: every backend
-        # that reaches here is `local`/`local-parallel` (see the `remote`
-        # guard above), which always return exactly one report per
-        # dispatched point, keyed by that point's own `corner_id`. `batch`
-        # does too: lost shards are synthesized per point (`_lost_shard_corner`).
+        # `dispatch_points` above). Lost batch shards synthesize unrun reports
+        # per point, so every dispatched point still has a report.
         new_by_id = {corner["corner_id"]: corner for corner in corners_new}
         corners = [
             new_by_id[point.corner_id]
@@ -4383,7 +4386,7 @@ def _run_sim_corners(
         "models_lib_sha256_scope": (
             "client" if remote_environment is not None else "local"
         ),
-        "netlist_sha256": sha256_file(netlist_path),
+        **netlist_digests.environment(attach_job_id, resume, remote_environment),
     }
     environment.update(
         param_file_environment(
@@ -4393,11 +4396,7 @@ def _run_sim_corners(
     )
     environment.update(_threads_environment(effective_threads))
     environment.update(_corner_coverage_environment(request, corner_points))
-    environment.update(
-        sim_env_report.netlist_closure_environment(
-            request, netlist_path, repo_root=repo_root
-        )
-    )
+    environment.update(netlist_digests.closure)
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
@@ -4540,6 +4539,7 @@ def _run_sim_corners(
         "measurements": measurements_rollup,
         "corners": corners,
     }
+    netlist_digests.pin_provenance_input(report["provenance"])
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     if top_diags := [
         d

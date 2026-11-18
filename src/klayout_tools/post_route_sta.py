@@ -304,10 +304,9 @@ from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
-from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
+from .post_route_sta_electrical import (
     _ELECTRICAL_NET_PREFIX,
     _ELECTRICAL_OK,
-    _ELECTRICAL_ROW_RE,
     _ELECTRICAL_UNSUPPORTED,
     _MAX_CAP_BEGIN,
     _MAX_CAP_END,
@@ -317,9 +316,6 @@ from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
     _MIN_PERIOD_END,
     _MIN_PULSE_BEGIN,
     _MIN_PULSE_END,
-    _SLACK_ROW_RE,
-    _electrical_class,
-    _electrical_slack_class,
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
@@ -330,16 +326,13 @@ from .post_route_sta_instance_paths import (
     _validate_report_instances,
 )
 from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
-    _CHECK_ROLE_TYPES,
     _PORT_PATHS_BEGIN,
     _PORT_PATHS_END,
-    _SLACK_CONSISTENCY_TOL_NS,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
     _apply_port_record,
     _empty_path_record,
     _parse_port_path_rows,
-    _parse_worst_path_rows,
     _port_paths,
     _worst_path_record,
     _worst_paths,

@@ -10229,8 +10229,7 @@ def test_waivers_move_matching_markers_to_waived(tmp_path):
 def test_waivers_do_not_apply_to_other_rule_or_cell(tmp_path):
     gds = _hier_gds(tmp_path)
     waivers = _waivers_file(
-        tmp_path,
-        [_waiver(rule="poly.space.1"), _waiver(cell="block_a")],
+        tmp_path, [_waiver(rule="poly.space.1"), _waiver(cell="block_a")]
     )
 
     report = run_drc(gds, "sky130", waivers_file=waivers)
@@ -10409,7 +10408,8 @@ def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
         capsys,
         [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
     )
-    assert "--waivers is not supported with --engine klayout" in message
+    assert "only the curated engine matches waivers" in message
+    assert "docs/cli/drc.md, 'Waivers'" in message
 
 
 def test_waived_report_check_and_rerun_replay_waivers(tmp_path):

@@ -147,6 +147,165 @@ Vvss vss 0 0
 
 
 # --------------------------------------------------------------------------- #
+# --device-param (issue #5513)
+# --------------------------------------------------------------------------- #
+
+#: The recipe docs/cli/extract.md gives for a MOS class: geometry under its own
+#: names, and the junction parameters cross-declared because the call's S/D
+#: order is the extractor's (S G D B) while the PDK subcircuit is `d g s b`.
+_HV_NMOS_PARAMS = {
+    "sg13_hv_nmos": {
+        "W": ("w", "u"),
+        "L": ("l", "u"),
+        "AS": ("ad", "p"),
+        "AD": ("as", "p"),
+        "PS": ("pd", "u"),
+        "PD": ("ps", "u"),
+    }
+}
+
+
+def _hv_nmos_inputs(tmp_path):
+    """``(runset, gds)`` for the PDK's own hv NMOS testcase. The cell is
+    renamed in a scratch copy: its only cell is called ``sg13_hv_nmos``, the
+    PDK subcircuit the extracted ``X`` calls instantiate, so an extracted
+    ``.SUBCKT sg13_hv_nmos`` would shadow the very model it calls."""
+    from klayout_tools import pdk
+
+    try:
+        root = pdk.find_pdk(variant="ihp-sg13cmos5l")["assets"]["klayout"]
+    except Exception:  # any resolution failure means "absent"
+        pytest.skip("no ihp-sg13cmos5l PDK install")
+    lvs_dir = os.path.join(root, "tech", "lvs")
+    case = os.path.join(lvs_dir, "testing", "testcases", "unit", "mos_devices")
+    deck = os.path.join(lvs_dir, "sg13cmos5l.lvs")
+    source = os.path.join(case, "layout", "sg13_hv_nmos.gds")
+    if not all(os.path.isfile(p) for p in (deck, source)):
+        pytest.skip("ihp-sg13cmos5l install lacks the hv NMOS LVS testcase")
+    layout = kdb.Layout()
+    layout.read(source)
+    layout.top_cell().name = "hv_nmos_tb_top"
+    gds = tmp_path / "hv_nmos.gds"
+    layout.write(str(gds))
+    return deck, str(gds)
+
+
+@pytest.fixture(scope="module")
+def hv_nmos_report(tmp_path_factory):
+    """One real runset run, shared: ``(report, netlist path)``."""
+    if shutil.which("klayout") is None:
+        pytest.skip("klayout binary absent")
+    tmp_path = tmp_path_factory.mktemp("hv_nmos")
+    deck, gds = _hv_nmos_inputs(tmp_path)
+    netlist = tmp_path / "hv_nmos.spice"
+    report = run_extract(
+        gds,
+        None,
+        engine="klayout-runset",
+        deck_file=deck,
+        top="hv_nmos_tb_top",
+        output=str(netlist),
+        device_params=_HV_NMOS_PARAMS,
+    )
+    return report, str(netlist)
+
+
+def _micron(token: str, suffix: str) -> float:
+    assert token.endswith(suffix), token
+    return float(token.removesuffix(suffix))
+
+
+def _x_cards(netlist: str) -> list[tuple[tuple[str, ...], dict[str, str]]]:
+    """``(nets, {name: token})`` per ``X`` card, ``+`` continuations folded."""
+    cards = []
+    for line in netlist.replace("\n+", " ").splitlines():
+        if line.startswith("X"):
+            words = line.split()
+            params = dict(w.split("=", 1) for w in words if "=" in w)
+            cards.append((tuple(words[1:5]), params))
+    return cards
+
+
+def test_real_runset_carries_the_measured_mos_geometry(hv_nmos_report):
+    """The gap this flag closes: before it, every one of these devices was a
+    parameter-free call, simulated at the subcircuit's own 0.35u/0.34u."""
+    report, netlist = hv_nmos_report
+    assert report["device_counts"] == {"sg13_hv_nmos": 4}
+    cards = _x_cards(open(netlist).read())
+    assert len(cards) == 4
+    measured = {
+        tuple(d["nets"][t] for t in "sgdb"): d["params"] for d in report["devices"]
+    }
+    for nets, carried in cards:
+        params = measured[nets]
+        # The card's numbers are the report's own measured micron values.
+        assert _micron(carried["w"], "u") == pytest.approx(params["w_um"])
+        assert _micron(carried["l"], "u") == pytest.approx(params["l_um"])
+        # Cross-declared: the S-side area rides the call's `d` pin.
+        assert _micron(carried["ad"], "p") == pytest.approx(params["as_um2"])
+        assert _micron(carried["as"], "p") == pytest.approx(params["ad_um2"])
+        assert _micron(carried["pd"], "u") == pytest.approx(params["ps_um"])
+        assert _micron(carried["ps"], "u") == pytest.approx(params["pd_um"])
+    # Four different drawn sizes, none of them the subcircuit's default.
+    sizes = {(carried["w"], carried["l"]) for _, carried in cards}
+    assert len(sizes) == 4
+    assert ("0.35u", "0.34u") not in sizes
+    # Everything the class defines is declared, so nothing is disclosed.
+    assert report["warnings"] == []
+    assert "not carried" not in open(netlist).read()
+    declared = report["device_params"]["sg13_hv_nmos"]
+    assert set(declared) == {"W", "L", "AS", "AD", "PS", "PD"}
+
+
+@pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice absent")
+def test_real_runset_carried_netlist_runs_an_op(hv_nmos_report, tmp_path):
+    """The netlist, with its carried ``w=``/``l=``/``as=``..., loads against the
+    PDK's own model library and completes a single ``.op``. The PDK's MOS model
+    is PSP103, which ngspice can only load as a compiled OSDI binary."""
+    from klayout_tools import pdk
+
+    _, netlist = hv_nmos_report
+    assets = pdk.find_pdk(variant="ihp-sg13cmos5l")["assets"]["ngspice"]
+    corner = os.path.join(assets, "models", "cornerMOShv.lib")
+    osdi = [os.path.join(assets, "osdi", f"{m}.osdi") for m in ("psp103", "psp103_nqs")]
+    for needed in (corner, *osdi):
+        if not os.path.isfile(needed):
+            pytest.skip(f"ihp-sg13cmos5l install lacks {os.path.basename(needed)}")
+
+    pre_osdi = "\n".join(f"pre_osdi {path}" for path in osdi)
+    tb = tmp_path / "tb.cir"
+    tb.write_text(
+        f"""* klt extract --engine klayout-runset --device-param op (issue #5513)
+.lib {corner} mos_tt
+.include {netlist}
+Xdut hv_nmos_tb_top
+.control
+{pre_osdi}
+op
+.endc
+.end
+"""
+    )
+    completed = subprocess.run(
+        ["ngspice", "-b", str(tb)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=str(tmp_path),
+    )
+    output = (completed.stdout + completed.stderr).lower()
+    assert completed.returncode == 0, output
+    for bad in (
+        "unknown subcircuit",
+        "unable to find definition",
+        "could not find a valid modelname",
+        "error on line",
+        "fatal",
+    ):
+        assert bad not in output, output
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 

@@ -151,6 +151,7 @@ def test_refused_flag_table_names_real_run_extract_parameters():
             "deck_file",
             "deck_vars",
             "device_models",
+            "device_params",
             "klayout_binary",
             "runset_timeout",
         ),
