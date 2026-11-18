@@ -1939,7 +1939,13 @@ All eight share one contract:
   differs from the default (`bytes`), so absence there encodes a default
   *value*, not an unproducible field, and any leaf disagreement inside a
   declined claim still drifts (the explicit `--hash-kind` cross-check of
-  issue #5572). The
+  issue #5572). One further case files a field a report *does* carry
+  there: `klt drc --check --rerun` reports a committed
+  `provenance.klayout_version_mismatch` as `not_compared` when the
+  committed `--engine klayout` report predates issue #5660 (no
+  `provenance.klayout_module_version`) — that change redefined the flag's
+  input from the pip wheel to the standalone binary, so a pre- and a
+  post-change value are not comparable. The
   `--format text` renderer lists the skipped field names in a
   `not compared:` block, so a non-zero exit always means "something that
   could be compared did not match".

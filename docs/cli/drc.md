@@ -4312,14 +4312,27 @@ vary between two runs of identical inputs on different tool
 installs/PDK snapshots; so (issue #5660) are an `--engine klayout` report's
 `environment.klayout_binary` (a host-local path) and
 `provenance.klayout_module_version` (the pip wheel), which a report committed
-before that change never carried -- it still re-runs as `match`. Every other
+before that change never carried. Every other
 field (including `status`, `violation_count`, `violations`, and the hashes
 cheap mode also checks) is load-bearing. `provenance.klayout_version_mismatch` (issue #1490) is
 deliberately **not** excluded: unlike the raw version strings, whether the
 mismatch itself changed between the committed run and a fresh rerun is
 informative on its own (a `false` → `true` transition means the fresh
 report used a different engine than the one that produced the committed
-baseline), so it is reported as ordinary drift like any other field. A
+baseline), so it is reported as ordinary drift like any other field --
+**except across the issue #5660 boundary**. That change redefined the flag's
+input for `--engine klayout`: before it, the pip wheel was compared against
+the version this build was tested with; after it, the standalone binary is. On
+a host where the two disagree (the case #5660 exists for) a pre-#5660 report
+says `true` and a fresh run says `false` with nothing in the evidence changed,
+so the two values are not comparable. When the committed report carries the
+flag but predates `provenance.klayout_module_version` (which the fresh
+`--engine klayout` report always writes), the flag is reported in
+`not_compared` -- with the committed value, whether or not the two happen to
+agree -- instead of as drift, and a report committed before that change
+re-runs as `match`. Between two post-#5660 reports, and for `--engine curated`
+(where the wheel is the engine and the definition never moved), the flag is
+compared exactly as described above. A
 committed `--engine klayout` report carrying `engine_deck_errors` (issue
 #1941) is re-run with the same `--allow-deck-errors` tolerance the original
 invocation used, so verifying such a report diffs it — including any change
@@ -4361,7 +4374,8 @@ Response shape:
     { "field": "violation_count", "committed": 0, "fresh": 1 }
   ],
   "not_compared": [
-    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" }
+    { "field": "provenance.gds_sha256", "committed": "sha256:<hex>" },
+    { "field": "provenance.klayout_version_mismatch", "committed": true }
   ],
   "fresh": { "...": "the freshly produced klt drc report, full shape" }
 }

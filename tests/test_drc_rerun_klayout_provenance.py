@@ -129,6 +129,157 @@ def test_rerun_of_report_committed_before_the_new_fields_matches(
     assert code == 0
 
 
+def _divergent_host(monkeypatch) -> None:
+    """The host class #5660 exists for: the pip wheel (``0.30.13``), the
+    standalone binary the stub answers ``-v`` with (``0.30.12``) and the
+    build's expected version (``0.30.12``) -- wheel and application disagree,
+    and only the *application* agrees with the build."""
+    from klayout_tools import _provenance, build_identity
+
+    monkeypatch.setattr(_provenance, "_klayout_version", lambda: "0.30.13")
+    monkeypatch.setattr(
+        build_identity, "_recorded_klayout_version_expected", lambda: "0.30.12"
+    )
+
+
+def _to_pre_5660(report: dict) -> None:
+    """Rewrite a post-#5660 report into what the pre-#5660 code wrote on the
+    divergent host: no ``environment``, no ``klayout_module_version``, and --
+    the part a plain key deletion misses -- ``klayout_version`` and
+    ``klayout_version_mismatch`` derived from the *wheel*, not the binary."""
+    del report["environment"]
+    del report["provenance"]["klayout_module_version"]
+    report["provenance"]["klayout_version"] = "0.30.13"
+    report["provenance"]["klayout_version_mismatch"] = True
+
+
+def test_divergent_host_fresh_report_flips_the_mismatch_flag(
+    tmp_path, monkeypatch, capsys
+):
+    """Anti-vacuity guard for the divergent-host tests below: the flag the
+    legacy fixture carries (``True``, wheel-derived) must genuinely differ from
+    what the fixed code writes on this host (``False``, binary-derived)."""
+    _divergent_host(monkeypatch)
+    _, report = _committed_report(tmp_path, monkeypatch, capsys)
+    provenance = report["provenance"]
+    assert provenance["klayout_version"] == "0.30.12"
+    assert provenance["klayout_module_version"] == "0.30.13"
+    assert provenance["klayout_version_mismatch"] is False
+
+
+def test_rerun_of_pre_5660_report_on_divergent_host_matches(
+    tmp_path, monkeypatch, capsys
+):
+    """Scenario 3 (the one the issue is about): the committed report was
+    written by the pre-#5660 code on a host whose wheel and binary disagree,
+    so its ``klayout_version_mismatch`` is ``true`` (wheel vs build). The fixed
+    code computes ``false`` (binary vs build). Nothing in the evidence changed,
+    so this is neither drift nor exit 3 -- and the flag is surfaced as
+    ``not_compared`` rather than silently swallowed."""
+    _divergent_host(monkeypatch)
+    report_path, _ = _committed_report(tmp_path, monkeypatch, capsys)
+    _rewrite(report_path, _to_pre_5660)
+
+    code, result = _rerun(report_path, capsys)
+
+    assert result["drift"] == []
+    assert result["status"] == "match"
+    assert code == 0
+    assert result["not_compared"] == [
+        {"field": "provenance.klayout_version_mismatch", "committed": True}
+    ]
+    # The embedded fresh report is verbatim: it still carries its own flag.
+    assert result["fresh"]["provenance"]["klayout_version_mismatch"] is False
+
+
+def test_rerun_of_pre_5660_report_on_agreeing_host_matches(
+    tmp_path, monkeypatch, capsys
+):
+    """Wheel, binary and build agree: the flag is ``false`` on both sides, and
+    the legacy report re-runs as ``match``."""
+    report_path, report = _committed_report(tmp_path, monkeypatch, capsys)
+    wheel = report["provenance"]["klayout_module_version"]
+
+    def to_legacy(r):
+        _to_pre_5660(r)
+        r["provenance"]["klayout_version"] = wheel
+        r["provenance"]["klayout_version_mismatch"] = report["provenance"][
+            "klayout_version_mismatch"
+        ]
+
+    _rewrite(report_path, to_legacy)
+
+    code, result = _rerun(report_path, capsys)
+
+    assert result["drift"] == []
+    assert code == 0
+
+
+def test_rerun_between_two_post_5660_reports_still_compares_the_flag(
+    tmp_path, monkeypatch, capsys
+):
+    """Negative control: the ``false`` -> ``true`` signal the docs defend is
+    kept where both reports use the binary-derived definition (both carry
+    ``klayout_module_version``) -- the not-comparable rule is the pre/post
+    boundary only."""
+    report_path, _ = _committed_report(tmp_path, monkeypatch, capsys)
+    _rewrite(
+        report_path,
+        lambda r: r["provenance"].update(klayout_version_mismatch=True),
+    )
+
+    code, result = _rerun(report_path, capsys)
+
+    assert code == 3
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {
+            "field": "provenance.klayout_version_mismatch",
+            "committed": True,
+            "fresh": False,
+        }
+    ]
+    assert "not_compared" not in result
+
+
+def test_mismatch_flag_is_compared_when_the_fresh_report_has_no_module_version():
+    """Negative control at the unit level: a curated-shaped pair (neither side
+    carries ``klayout_module_version``; the wheel *is* the engine there, so the
+    flag's definition never moved) must still drift on a changed flag."""
+    committed = {"provenance": {"klayout_version_mismatch": True}}
+    fresh = {"provenance": {"klayout_version_mismatch": False}}
+
+    result = drc_rerun_result(report_path="r.json", committed=committed, fresh=fresh)
+
+    assert result["status"] == "drifted"
+    assert [d["field"] for d in result["drift"]] == [
+        "provenance.klayout_version_mismatch"
+    ]
+    assert "not_compared" not in result
+
+
+def test_boundary_rule_does_not_hide_a_flag_the_committed_report_never_carried():
+    """The rule marks a *committed* flag not-compared; it must not widen into
+    hiding a flag only the fresh report grew -- that is the ordinary
+    schema-growth drift it always was."""
+    committed = {"provenance": {"klayout_version": "0.30.13"}}
+    fresh = {
+        "provenance": {
+            "klayout_version": "0.30.12",
+            "klayout_module_version": "0.30.13",
+            "klayout_version_mismatch": False,
+        }
+    }
+
+    result = drc_rerun_result(report_path="r.json", committed=committed, fresh=fresh)
+
+    assert "not_compared" not in result
+    assert result["status"] == "drifted"
+    assert [d["field"] for d in result["drift"]] == [
+        "provenance.klayout_version_mismatch"
+    ]
+
+
 def test_rerun_ignores_a_different_host_local_binary_path(
     tmp_path, monkeypatch, capsys
 ):

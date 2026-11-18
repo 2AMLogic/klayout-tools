@@ -39,8 +39,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   --check` in cheap mode is unaffected (it compares content hashes only).
   `klt drc --check --rerun` excludes both new fields
   (`environment.klayout_binary`, a host-local path, and
-  `provenance.klayout_module_version`) from its drift diff, so a report
-  committed before this change still re-runs as `match`. No
+  `provenance.klayout_module_version`) from its drift diff, and -- because the
+  change also redefines the input of `provenance.klayout_version_mismatch`
+  (wheel before, binary after) -- reports that flag in `not_compared`, not as
+  drift, when the committed report predates the change. A report committed
+  before this change therefore still re-runs as `match`, including on a host
+  where the wheel and the binary disagree. Between two post-change reports
+  (and for `--engine curated`) the flag is compared as before. No
   `schema_version` bump: both fields are additive and
   `provenance`'s `$defs` block is `additionalProperties: true`.
 

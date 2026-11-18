@@ -213,17 +213,57 @@ def _rerun_diff_view(report: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
+#: ``provenance.klayout_version_mismatch`` is computed from a different input on
+#: each side of #5660: the pip wheel before it, the standalone binary after it
+#: (``provenance.klayout_module_version`` is written exactly when the
+#: binary-derived value is in force, so its presence marks the new definition).
+_MISMATCH_PATH: frozenset[tuple[str, ...]] = frozenset(
+    {("provenance", "klayout_version_mismatch")}
+)
+
+
+def _carries(report: dict[str, Any], key: str) -> bool:
+    provenance = report.get("provenance")
+    return isinstance(provenance, dict) and key in provenance
+
+
+def _mismatch_redefined(committed: dict[str, Any], fresh: dict[str, Any]) -> bool:
+    """Whether ``klayout_version_mismatch`` crosses the #5660 definition
+    boundary: the committed report carries the flag but predates the change
+    (no ``klayout_module_version``) while the fresh one is binary-derived.
+    ``--engine curated`` reports never carry ``klayout_module_version`` on
+    either side, so their wheel-derived flag keeps being compared; a committed
+    report that never carried the flag has nothing to mark not-compared and
+    keeps drifting on a fresh one that grew it, exactly as before."""
+    return (
+        _carries(fresh, "klayout_module_version")
+        and not _carries(committed, "klayout_module_version")
+        and _carries(committed, "klayout_version_mismatch")
+    )
+
+
 def drc_rerun_result(
     *, report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
     """:func:`~klayout_tools._report_verify.build_rerun_result` with the
     DRC-specific exclusions of :data:`DRC_RERUN_EXCLUDE_PATHS`. ``fresh`` is
-    still embedded verbatim."""
+    still embedded verbatim.
+
+    Across the #5660 definition boundary the two reports' mismatch flags are
+    not comparable (a divergent host flips ``true`` -> ``false`` with nothing
+    in the evidence changed), so the fresh *view* drops the flag. The
+    committed value then lands in ``not_compared`` through the #5866 rule
+    (a provenance scalar the fresh side does not carry) -- auditable, and
+    neither ``status`` nor the exit code reflects it. Between two post-#5660
+    reports (or two curated ones) the flag is compared as before."""
+    fresh_view = _rerun_diff_view(fresh)
+    if _mismatch_redefined(committed, fresh):
+        fresh_view = strip_path_patterns(fresh_view, _MISMATCH_PATH)
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
         exclude=DRC_RERUN_EXCLUDE_PATHS,
         committed_for_diff=_rerun_diff_view(committed),
-        fresh_for_diff=_rerun_diff_view(fresh),
+        fresh_for_diff=fresh_view,
     )
