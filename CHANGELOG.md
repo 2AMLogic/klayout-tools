@@ -338,6 +338,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
   "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
   only; no `schema_version` bump.
+- **Fixed** (#6227, `klt route`; no JSON field changes): a `routing.width_um`
+  or `pins[].direction_deg` too large for a float (e.g. `10**400`) raised an
+  uncaught `OverflowError` instead of the contract's `RouteError`; both now
+  use the shared finite-number check. `width_um` of `inf`/`nan`, previously
+  accepted, is now rejected with the same `RouteError`.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
