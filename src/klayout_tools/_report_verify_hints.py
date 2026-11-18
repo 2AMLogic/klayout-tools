@@ -26,7 +26,7 @@ def input_not_found_entry(
     report_path: str,
     found_relative_to_report: str | None,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -39,13 +39,21 @@ def input_not_found_entry(
       to (the cwd); ``None`` for an absolute path, which has no anchor.
     - ``hint`` -- when the input sits next to the report, how to reach it;
       ``None`` otherwise.
+    - ``override_hint`` -- the flag/argument a caller offers for re-pointing
+      the check at an existing file; ``None`` when the verb has no such
+      override (``klt erc --check``, whose ``--check`` is mutually exclusive
+      with its positional inputs), in which case the hint names only the
+      report's directory to run from -- no "or pass …" clause for a flag
+      that does not exist.
     """
     report_dir = os.path.dirname(os.path.abspath(report_path))
+    remedy = "run --check from the report's directory"
+    if override_hint is not None:
+        remedy += f", or pass {override_hint}"
     hint = (
         None
         if found_relative_to_report is None
-        else f"run --check from the report's directory, or pass {override_hint}; "
-        f"request-file-relative paths resolve against {report_dir}"
+        else f"{remedy}; request-file-relative paths resolve against {report_dir}"
     )
     return {
         "path": path,
@@ -64,16 +72,20 @@ def input_hash_check(
     override: str | None = None,
     hasher: Callable[[str | None], str | None] = sha256_file,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
-    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``), with issue
-    #2595's ``input_not_found`` diagnostic attached when that path does not
-    name an existing file.
+    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``, ``klt erc``'s
+    ``file``/``spec``), with issue #2595's ``input_not_found`` diagnostic
+    attached when that path does not name an existing file.
 
-    Shared by ``klt lvs --check`` (issues #2595, #6223) and ``klt drc --check``
-    (issue #6466); ``klt erc --check`` keeps its own smaller copy.
+    Shared by ``klt lvs --check`` (issues #2595, #6223), ``klt drc --check``
+    (issue #6466) and ``klt erc --check`` (issue #6655, which until then kept
+    a smaller local copy). ``override_hint`` names the flag/argument the verb
+    offers for re-pointing the check at an existing file, and is ``None`` when
+    it has none (``klt erc --check``): the hint then omits the "or pass …"
+    clause rather than naming a nonexistent flag.
 
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
