@@ -62,7 +62,7 @@ import functools
 import math
 from typing import Any
 
-from ._jsonnum import is_finite_number, is_number
+from ._jsonnum import is_finite_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
@@ -1094,7 +1094,7 @@ def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
         values: list[float] = []
         for key in ("x_um", "y_um", "width_um"):
             value = port.get(key)
-            if not is_number(value):
+            if not is_finite_number(value):
                 break
             values.append(float(value))
         if len(values) != 3 or values[2] <= 0.0:
@@ -1120,7 +1120,7 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
         if side is None or not isinstance(port, dict):
             continue
         value = port.get("x_um" if side in ("E", "W") else "y_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         lines[side] = float(value)
     return lines
@@ -1185,7 +1185,7 @@ def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
         if _ring_port_side(name) is None:
             continue
         value = port.get("width_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         if value > 0.0:
             widths.append(float(value))
