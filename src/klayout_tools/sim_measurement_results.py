@@ -21,8 +21,10 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_noise_mechanism,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -30,6 +32,13 @@ from . import (
     sim_tian,
     sim_transfer_meas,
 )
+from .sim_measurement_template import expand_request as expand_request
+
+#: Re-exported for ``sim.py``'s load path (``load_request``), which applies
+#: the issue #5731 case expansion before anything else reads a request; this
+#: module is the measurement-side seam ``sim.py`` already imports names from,
+#: and ``sim.py``'s own size ratchet has no line to spare for a new import
+#: statement. Self-aliased per the repo's re-export convention.
 
 #: The ``code`` of the info diagnostic an ``on_unreached: "null"`` measurement
 #: whose target was never reached carries (its status is
@@ -58,6 +67,7 @@ def _corner_measurement_results(
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    slope_bands: dict[int, sim_slope_band_meas.SlopeBandOutcome] | None = None,
     eyes: dict[int, sim_eye.EyeOutcome] | None = None,
     step_resolutions: (
         dict[int, sim_step_resolution.StepResolutionOutcome] | None
@@ -65,6 +75,9 @@ def _corner_measurement_results(
     settleds: dict[int, sim_settled.SettledOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
+    noise_mechanisms: (
+        dict[int, sim_noise_mechanism.NoiseMechanismOutcome] | None
+    ) = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
@@ -130,7 +143,12 @@ def _corner_measurement_results(
         ),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _sim._tian_measurement_result, tians),
-        (sim_snm_meas.is_snm, _sim._snm_measurement_result, snms),
+        (sim_snm_meas.is_snm, sim_snm_meas.snm_measurement_result, snms),
+        (
+            sim_slope_band_meas.is_slope_band,
+            sim_slope_band_meas.slope_band_measurement_result,
+            slope_bands,
+        ),
         (sim_eye.is_eye, _sim._eye_measurement_result, eyes),
         (
             sim_step_resolution.is_step_resolution,
@@ -139,6 +157,11 @@ def _corner_measurement_results(
         ),
         (sim_settled.is_settled, _sim._settled_measurement_result, settleds),
         (sim_search.is_search, _search_measurement_result, searches),
+        (
+            sim_noise_mechanism.is_mechanism,
+            sim_noise_mechanism.measurement_result,
+            noise_mechanisms,
+        ),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
@@ -232,7 +255,29 @@ def _corner_measurement_results(
                     + "; ".join(unattributed[: _sim._MEAS_ERROR_MAX_ENTRIES]),
                 }
             )
+    # Additive per-result provenance (issue #5731): a measurement expanded
+    # from a `{case}` template carries its `case` on every result entry, the
+    # same additive move `grade_step_measurements` makes with `step`.
+    _attach_provenance(measurements_spec, measurement_results)
     return measurement_results, diagnostics, {}
+
+
+def _attach_provenance(
+    measurements_spec: list[dict[str, Any]],
+    measurement_results: list[dict[str, Any]],
+) -> None:
+    """Attach each spec's additive provenance fields (``case`` for a
+    measurement expanded from a `{case}` template, issue #5731) onto its
+    result entry, in declared order -- one result per spec, so the zip is
+    exact. ``measurement_provenance`` is empty for every plain
+    scalar-``analysis`` spec, so requests declaring neither keep these
+    entries byte-identical. (``step``/``derived_from`` on the steps path are
+    attached by ``grade_step_measurements`` itself, which returns before this
+    runs.)"""
+    for spec, result in zip(measurements_spec, measurement_results, strict=True):
+        provenance = sim_steps.measurement_provenance(spec)
+        if provenance:
+            result.update(provenance)
 
 
 def _transfer_measurement_result(

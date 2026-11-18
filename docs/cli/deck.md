@@ -273,9 +273,11 @@ exit 1 with an error.
 ## `klt deck info`
 
 ```
-klt deck info                 # every registered deck (sky130, gf180mcu, sg13g2)
+klt deck info                # every registered deck
 klt deck info --deck gf180mcu # one deck only
 ```
+
+The example uses a placeholder hash and shows selected device classes.
 
 ```json
 {
@@ -283,15 +285,16 @@ klt deck info --deck gf180mcu # one deck only
   "decks": [
     {
       "deck": "gf180mcu",
-      "content_hash": "sha256:79e71a1e7d84be3cfc82e4c70afbdf7b743ac1f361fb8e981f57831014d2e8b0",
+      "content_hash": "sha256:...",
       "device_classes": [
-        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
-        "diode_nd2ps_06v0", "diode_pd2nw_06v0"
+        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3", "cap_pmos_03v3", "resistor", "diode_nd2ps_06v0",
+        "diode_pd2nw_06v0"
       ],
       "provides": ["curated_drc", "extraction"],
       "released": false,
       "release": null,
-      "unmodeled_rules": ["MSLOT.1", "MT.2b", "MT30.1a"]
+      "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
     }
   ]
 }
