@@ -32,6 +32,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   that minted it. `--resume` alone is now enough for the
   `environment.remote.resumable: true` recovery the report advertises;
   `--attach <map> --collect-partial` remains the non-blocking form.
+  Harvested reuse is reported in `environment.resume.resumed_corners`,
+  not as `environment.remote.fleet[]` entries with `resumed: true`;
+  `fleet[]` lists only shards dispatched after the harvest. A zero-unit
+  off-host corner request now returns `status: "not_checked"`, empty
+  `corners`, and no `environment.remote` instead of submitting a billed
+  job, even without `--resume` (#6540).
 
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
