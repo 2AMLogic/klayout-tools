@@ -969,11 +969,15 @@ real open_pdks install never pays for the extra probe.
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
   only whatever the deck's own `report(...)`/`.output(...)` calls named.
-- **No per-instance attribution.** `source_cell`/`source_path` are always
-  `null` for this engine — mapping a violation back to its originating
-  placed instance (see "Per-instance attribution" below) needs this
-  module's own instance-tree walk against the *input* layout, which an RDB
-  report does not carry.
+- **Per-instance attribution matches the curated engine.** `source_cell`/
+  `source_path` are filled by the same instance-tree walk the curated engine
+  uses (see "Per-instance attribution" below): a marker whose `bbox` lies
+  wholly inside one placed instance carries that instance's cell name and
+  placement path. Markers contained in no single instance — top-level
+  geometry, or a `bbox` straddling an instance boundary — stay `null`/`null`
+  with the top `cell` as the only honest attribution, and so do markers the
+  deck reported under an RDB `<cell>` other than the selected top cell
+  (their coordinates are in another frame than the walk's).
 - **`bbox`/`polygon` fidelity depends on the RDB value kind.** Every
   coordinate pair embedded in an item's reported geometry contributes to
   `bbox` (converted from the RDB's micrometre user units back to the input
@@ -1137,6 +1141,30 @@ TopVia1 both sides, and TopVia2 both sides; its `mim.enclosing.topvia1.1`
 keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
 and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
 uncovered exactly as sg13cmos5l's does above.
+
+gf180mcu is opted in (#5915) on every single-population cut side:
+`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+`metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1` and
+`metal5.enclosing.via4.1` (plus the pre-existing non-cut
+`ldmos_xtor.enclosing.mvpsd.1`). Four sides stay on the legacy behaviour
+because the cut lands on one of several disjoint populations and the engine
+has no compound-layer expression for "one of": `poly2.enclosing.contact.1` /
+`comp.enclosing.contact.1` (a contact lands on poly2 *or* comp), and
+`metal4.enclosing.via4.1` / `mim.enclosing.via4.1` (a MiM via4 lands on the
+`mim` plate rather than on Metal4). A fully orphan cut is therefore still not
+reported by those four rules. sky130 has its own opt-in issue (#5737) and
+keeps the legacy behaviour until it lands.
+
+asap7 has **no** cut-containment gap, and `require_containment` does not apply
+to it: it is a native KLayout DRC-DSL deck (`decks/asap7.drc`), not a curated
+`DrcRule` deck, and carries no `enclosing`/`enclosed` rule of the curated kind.
+Its via-level containment rules already report a fully orphan via:
+`V1.AUX.1`-`V3.AUX.1` and `V4.AUX.1`-`V7.AUX.1` are
+`via.not_inside(lower & upper)`, `V8.AUX.1`/`V9.AUX.1` the same against
+`M8 & M9` / `M9 & PAD`, and `V0.AUX.1` flags a V0 that does not interact with
+M1 and LISD/LIG. (A hand-drawn `V1` with no `M1`/`M2` nearby reports
+`V1.AUX.1` under `--engine klayout`.) The per-side `*.EN.*` rules there only
+measure a margin on vias that already land, so they need no flag.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
@@ -1610,7 +1638,10 @@ net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
   a layout instancing a foundry SRAM macro can show many `nwell.space.2`
   findings that the PDK's own `NW.b1` does not; the cause for a specific macro
   is *unverified* (the PDK rule uses its own net derivation and intersects with
-  PWell). Use `source_cell_rollup` and `--waivers` to make the policy call.
+  PWell). Use `source_cell_rollup` and `--waivers` to make the policy call;
+  both are curated-engine-only (a `--engine klayout` report carries
+  `source_cell`/`source_path` per marker to read by hand, but no rollup, and
+  refuses `--waivers`).
 - **Foundry `npn13G2` HBT cells** (issue #5386): the `metal1.space.1`,
   `metal2.space.1` and `via1.space.1` rules are plain flat spacing checks with
   no HBT-region exception. Measured with the real PDK `sg13g2_pr.gds` (PDK
@@ -1623,7 +1654,10 @@ net_spec=NetSpaceSpec(tap_and=..., chain=...))`. sg13cmos5l's `nwell.space.2`
   streams returned `coverage_unknown` (`unmeasured_rule_execution`), so no
   curated-vs-official comparison exists. If a stream does show markers whose
   `source_cell` is inside a PDK cell, treat the cause as unverified; use
-  `source_cell_rollup` and `--waivers` to make the policy call.
+  `source_cell_rollup` and `--waivers` to make the policy call. Both levers
+  are curated-engine-only: an `--engine klayout` stream still carries
+  `source_cell`/`source_path` per marker to read by hand, but no rollup, and
+  `--waivers` is refused there.
 - **Reporting**: ordinary edge-pair violations (`check: "net_space"`, real
   `bbox` and `polygon`, rule id, provenance), identical in shape to `"space"`.
   Evaluated flat per top cell. Corner-to-corner gaps use Euclidean distance;
@@ -1716,8 +1750,11 @@ layout** and reports where they differ. It is a comparison surface over the
 two existing engines, not a third verification engine: the response embeds
 both raw reports **verbatim** under `reports.curated` / `reports.native`
 (each keeps its own `status`, coverage and findings), and adds an `identity`
-block (layout `content_hash`, PDK, curated and native deck identity, klt and
-klayout versions) and a `comparison` block. If the two runs hashed different
+block (layout `content_hash`, PDK, curated and native deck identity, klt
+version, and both KLayout versions) and a `comparison` block.
+`identity.klayout_version` is the **curated** engine's KLayout version (the
+pip wheel); `identity.native_klayout_version` is the **native** binary's own
+`-v` version, which can differ (`null` when the native report records none). If the two runs hashed different
 layouts or resolved different PDK variants, the command fails (exit 1)
 rather than comparing them. `--rules` and `--waivers` are refused (the
 cross-check compares whole-deck reports); the native-engine flags
@@ -3746,7 +3783,7 @@ On a run with findings:
 | `violations`      | array\<object\>          | One entry per violating geometry, see below.                             |
 | `coverage`        | object                   | What was actually checked vs. what's present in the input stream, see below. |
 | `waived_count`, `waived_rule_counts`, `waived`, `unused_waivers` | integer, object\<string, int\>, array\<object\>, array\<object\> | Present only on a `--waivers` run (issue #3483): the markers a reviewed waiver file moved out of `violations`, with their justification; see "Waivers". Absent otherwise, so a default run's report is byte-identical. |
-| `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
+| `source_cell_rollup` | array\<object\> | Issue #4520. Sorted `{source_cell, rule, count, waived_count}` rows (`source_cell: null` last = unattributed): kept markers in `count`, waived ones in `waived_count`. Curated engine only: `--engine klayout` never emits it, even when its findings carry `source_cell`/`source_path` (and `--waivers` is refused there). On the curated engine, present only when some finding has a `source_cell` or on a `--waivers` run; absent for a flat layout, so a default report is unchanged. |
 | `runset_correspondence` | array\<object\> | Issue #4520. For each rule that produced a finding and carries a note (sg13g2 `nwell.enclosing.pactiv.1`, whose NW.c runset counterpart measures against `NWell_Nsram` -- NWell outside the 25/0 SRAM marker -- while this deck measures against plain NWell; its `SVaricap` carve-out *is* modelled (issue #5442, see Coverage); sg13cmos5l `nwell.space.2`, `nwell.enclosing.pactiv*.1`, `nwell.space.nactiv.1`; the NW.c/NW.d rules `nwell.enclosing.pactiv.1` and `nwell.space.nactiv.1` note that the runset exempts NWell inside SRAM marker layer 25/0 via `NWell_Nsram`, while NW.c1 does not): `{rule, implemented_by_pdk_runset, runset_file, pdk_revision, note}`. `pdk_revision` is the PDK commit the deck was read against (the `ihp-sg13cmos5l` commit for sg13cmos5l, the ihp-sg13g2 v0.3.0 commit for sg13g2). The PDK's NWell table (`5_1_nwell.drc`) runs only NW.b, NW.b1, NW.f1, NW.f1.digibnd; NW.c/c1/d live in the optional `sg13cmos5l_maximal.drc`. Absent when no noted rule fired. |
 | `rule_selection`  | object                   | Present only on a `--rules` run (issue #2768): `{"selectors", "selected", "omitted", "deck_rule_count", "subset"}`, relative to the full registered deck — see "Rule listing and selection" above. Absent otherwise, so a default run's report is unchanged. |
 | `provenance`      | object                   | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `--pdk` and/or `--pdk-root` was given (resolved via the same lookup `klt pdk find`/`klt sta`/`klt extract` use — this holds for both `--engine curated` and `--engine klayout`, in addition to `--engine klayout`'s own separate use of `--pdk`/`--pdk-root` to resolve the native deck script when `--deck-file` is omitted), else `null`; an unresolvable `--pdk`/`--pdk-root` fails the run the same as any other application error (exit 1), it does not silently fall back to `null`. `deck` pins the selected rule deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193) for whether that exact hash ships in any released `klayout-tools` version — `false` (non-fatal) flags a report generated against an unreleased/dev-edited deck, `null` when the answer can't be determined (e.g. the generated deck history table is missing); `input` pins the input layout file (`path`) by `sha256:` content hash. A deck hash is stable only per package version; to re-run under a previously pinned deck see [`deck.md`](deck.md#reproducing-a-run-under-a-pinned-deck). A `--waivers` run additionally carries `waivers` (issue #3483): `{"file", "content_hash"}` pinning the waiver file by `sha256:` hash. When `--engine klayout` was run with one or more `--deck-var NAME=VALUE` flags (issue #1302), `deck` additionally carries an `options` key (issue #1306) recording that mapping (e.g. `{"feol": "true"}`), so a committed report records which `--deck-var` configuration produced it — omitted entirely when no `--deck-var` was given. `klt drc` additionally carries `klayout_version_mismatch` (issue #1490, `true`\|`false`): whether the resolved `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". `klayout_version_mismatch: true` is informational: the rule evaluation and the verdict are not changed by it, but report details that depend on the engine build (the deck content hash, `rules_skipped`, category counts) may differ from a run on the tested version. Re-run on the tested version (`klt version`) to reproduce a report exactly. |
@@ -4225,6 +4262,21 @@ check stays failed (`match: false`, `status:
 `resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
 instead. Pass `--deck-file` to verify a vendor runset that has no packaged
 counterpart. `--rerun` on a curated report rejects `--deck-file`.
+
+**A missing input is named, not a bare `actual: null` (issue #6466).** When
+the report's echoed `file` (or the positional `<file>` override) resolves to a
+concrete path that names no existing file, the `provenance.input.content_hash`
+check stays failed (`match: false`, `actual: null`, `status: "drifted"`, exit
+3 -- all unchanged) and gains the additive `input_not_found` key `klt lvs
+--check` attaches (`path`, `resolved`, `found_relative_to_report`,
+`resolved_against`, `hint`); `--format text` prints `input not found:
+<resolved>`. A relative bare-string `file` still anchors to the current working
+directory, so a file found only beside the report is reported through
+`found_relative_to_report` and never silently used. The key is absent when the
+file exists (including when its bytes moved), and when the echoed `file` names
+no path at all (`scope: "external"`/`"absent"`, or no field). It applies to
+each `reports.curated.`/`reports.native.` side of an `--engine both` report.
+The `provenance.waivers.content_hash` line carries no such block.
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the

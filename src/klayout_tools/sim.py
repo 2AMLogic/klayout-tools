@@ -96,6 +96,7 @@ from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
     sim_corner_extremes,
@@ -189,7 +190,6 @@ from .sim_batch import (
     _validate_batch_pdk_root,
     attach_engine_build_comparison,
     attach_staged_model_comparison,
-    dry_run_runner_check,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import (
@@ -205,6 +205,8 @@ from .sim_batch_features import (
     pop_remote_diagnostics,
     worker_ngspice_binary,
 )
+from .sim_batch_plan import dry_run_job_ceiling
+from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -2536,12 +2538,14 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
 
-    **Dry run (issue #3064).** ``dry_run=True`` runs every pre-dispatch
-    check of a corner request (shape, Monte Carlo spec, measurement forms,
-    model/OSDI resolution, staging closure, off-host PDK check) and returns
+    **Dry run (issues #3064, #5674).** ``dry_run=True`` runs every
+    pre-dispatch check of a corner request (shape, Monte Carlo spec,
+    measurement forms, model/OSDI resolution, staging closure, off-host PDK
+    check, and on ``batch`` the whole-job ceiling/split plan) and returns
     :func:`_build_dry_run_report` -- the expanded unit list with its derived
-    seeds -- without running the fail-fast probe, taking an output-directory
-    lock, or invoking any backend (no ngspice, SSH, S3 or EC2).
+    seeds plus the batch ``job_ceiling`` assessment -- without running the
+    fail-fast probe, taking an output-directory lock, or invoking any
+    backend (no ngspice, SSH, S3 or EC2).
     """
     request = load_request(request_path)
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
@@ -2816,48 +2820,6 @@ def _dispatch_deck_request(
         (report.get("environment") or {}).get("engine_version"),
     )
     return report
-
-
-#: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
-#: a job that failed or was stopped by the harness, or a poll that gave up
-#: while the job may still be running (``sim_batch._unrun_corner_report``).
-_UNRUN_BATCH_CODES = frozenset(
-    {
-        "lost_shard",
-        "batch_job_failed",
-        "batch_job_timeout",
-        "batch_poll_timeout",
-        "batch_job_interrupted",
-    }
-)
-
-
-def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
-    """True when a corner report is a synthesized batch one (never ran)."""
-    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
-
-
-def _record_batch_checkpoint(
-    checkpoint: Any,
-    backend: str,
-    corners_new: list[dict[str, Any]],
-    engine_version: Any,
-) -> None:
-    """Record a ``batch`` run's returned corner reports into the checkpoint.
-
-    Issue #3367: `_run_batch` collects a shard's reports in one
-    ``report.json``, so there is nothing to record incrementally; record the
-    returned set after dispatch. A corner that never ran (``lost_shard``,
-    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
-    ``batch_job_interrupted``) is left out and stays outstanding for the next
-    ``--resume``; one that ran and genuinely errored is recorded as locally.
-    A no-op without a checkpoint or off ``batch``.
-    """
-    if checkpoint is None or backend != "batch":
-        return
-    for corner in corners_new:
-        if not _is_unrun_batch_corner(corner):
-            checkpoint.record(corner["corner_id"], corner, engine_version)
 
 
 def _refuse_unsupported_submit_only(
@@ -3833,6 +3795,36 @@ def _run_sim_corners(
         checkpoint_path, resume=bool(resume), **fingerprint_inputs
     )
 
+    # Issue #5775: a sharded batch run keeps its shard map even without
+    # `--resume` (issue #3896), so `--resume` harvests it *before* the
+    # dispatch set is computed -- collecting the shards whose remote jobs
+    # are already terminal and shrinking `dispatch_points` to what is
+    # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
+    # form), `--submit-only` (refused with `--resume` before any S3 write)
+    # and `--dry-run` (which must not touch S3 at all).
+    harvested_engine_version = sim_batch_resume.maybe_harvest_resume_shards(
+        resume=resume,
+        backend=backend,
+        checkpoint=checkpoint,
+        dry_run=dry_run,
+        submit_only=submit_only,
+        attach_job_id=attach_job_id,
+        artifacts_dir=artifacts_dir,
+        corner_points=corner_points,
+        request=request,
+        netlist_path=dispatch_netlist_path,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        measurements_spec=measurements_spec,
+        request_dir=request_dir,
+        pre_completed=pre_completed,
+    )
+    if loaded_engine_version is None:
+        # An all-harvested rerun dispatches nothing, so the harvested jobs'
+        # engine version is the only one this report can carry.
+        loaded_engine_version = harvested_engine_version
+
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
@@ -3968,24 +3960,16 @@ def _run_sim_corners(
     # `remote`/`batch` run whatever their provisioned box/job ships (the
     # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
     # above anyway), so the kwarg would be dead weight there. `ngspice_binary`
-    # (issue #2423) rides along the same way and for the same reason: a
-    # `remote`/`batch` shard re-invokes `klt sim` on a *different* host,
-    # which resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`
-    # fresh against its own PATH from the forwarded request document --
-    # this process's own resolution describes only this host.
-    # `fail_on_diagnostic` (issue #2492) rides along on exactly the same
-    # terms and for the same reason: an off-host shard re-invokes `klt sim`
-    # on another host *from the forwarded request document*, so it reads
-    # `options.fail_on_diagnostic` itself and grades its own corners
-    # inconclusive there -- passing this process's resolved value too would
-    # either be dead weight or, worse, double-grade. (A `--fail-on-diagnostic`
-    # CLI override is therefore local-backend-only, exactly like
-    # `--fail-fast-probe`; see docs/cli/sim.md.) `ngspice_init` (issue #2520)
-    # rides along on the same terms for the same reason: an off-host shard
-    # reads `options.ngspice_init` itself from the forwarded request
-    # document and writes its own `.spiceinit` on its own box -- this
-    # process's own resolved lines describe only this host's corner
-    # directories.
+    # (issue #2423), `fail_on_diagnostic` (issue #2492) and `ngspice_init`
+    # (issue #2520) ride along the same way and for the same reason: an
+    # off-host shard re-invokes `klt sim` on a *different* host, which
+    # resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`,
+    # `options.fail_on_diagnostic` (grading its own corners inconclusive
+    # there -- passing this process's resolved value would double-grade, so
+    # the CLI overrides are local-backend-only, like `--fail-fast-probe`)
+    # and `options.ngspice_init` (writing its own `.spiceinit`) fresh from
+    # the forwarded request document -- this process's own resolution
+    # describes only this host.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
     # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
@@ -4054,19 +4038,20 @@ def _run_sim_corners(
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
-        feature_diagnostic = (
-            dry_run_runner_check(
+        feature_diagnostic, job_ceiling = (
+            dry_run_job_ceiling(
                 request,
                 corner_count=len(dispatch_points),
                 timeout_s=timeout_s,
                 runner_out=published_runner,
             )
             if backend == "batch"
-            else None
+            else (None, None)
         )
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
+            job_ceiling=job_ceiling,
             bin_range_diagnostic=bin_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
@@ -4095,7 +4080,13 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
+    if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
+        # Issue #5775: an all-covered resume dispatches nothing -- never the
+        # off-host "hosts exceeds the units to dispatch" refusal over an
+        # empty fleet. (`attach_job_id is None` keeps #5777's "attach never
+        # fans out" single-job path authoritative for every attach.)
+        corners_new, backend_engine_version, remote_environment = [], None, None
+    elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is
@@ -4828,6 +4819,7 @@ def _build_dry_run_report(
     monte_carlo_info: dict[str, Any] | None,
     staged_model_environment: dict[str, Any],
     feature_diagnostic: dict[str, Any] | None = None,
+    job_ceiling: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4836,6 +4828,9 @@ def _build_dry_run_report(
 
     Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
     dispatches, so the per-sample seeds are exactly the ones a real run uses.
+    ``job_ceiling`` (issue #5674) is the submit path's own whole-job-ceiling
+    assessment, emitted additively under the ``environment.remote.job_ceiling``
+    name and shape; ``None`` leaves the field out.
     """
     if backend == "batch":
         # Issue #3917: a real batch submit refuses an unresolvable model
@@ -4843,11 +4838,10 @@ def _build_dry_run_report(
         _validate_batch_models_lib(request)
         # Issue #5449: and the same for a `models.pdk_root` that is a
         # directory on *this* host (issue #4097's refusal). The real submit
-        # raises it from `_resolve_batch_config`, which a dry run reaches
-        # only through `dry_run_runner_check` -- and that swallows every
-        # code but the two runner ones, and is skipped outright on a host
-        # with no resolvable batch config. Re-applying it here, beside the
-        # #3917 check, makes the dry run refuse what the submit refuses
+        # raises it from `_resolve_batch_config`, which the dry run reaches
+        # through `dry_run_runner_check` -- whose swallow-all-but-runner-
+        # refusals filter keeps such a host dry-running clean. Re-applying
+        # it here, beside the #3917 check, refuses what the submit refuses
         # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)
     units: list[dict[str, Any]] = []
@@ -4877,6 +4871,8 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if job_ceiling is not None:
+        report["job_ceiling"] = job_ceiling
     if published_runner is not None:
         report["published_runner"] = published_runner
     if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:

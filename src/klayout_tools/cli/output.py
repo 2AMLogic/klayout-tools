@@ -156,18 +156,18 @@ def _drift_check_label(entry: dict) -> str:
     return "  [" + " ".join(str(value) for value in check.values()) + "]"
 
 
-def _print_shape_mismatch(result: dict) -> None:
+def _print_shape_mismatch(mismatch: dict | None) -> None:
     """Print the ``shape_mismatch`` line of a ``--rerun`` drift report when
     the envelope carries one (issue #5829), nothing otherwise.
 
     A committed envelope that binds ``provenance.input`` with different keys
     than the fresh one is a cross-release envelope-shape change, not content
     drift; the line names both key sets and the regeneration remediation.
-    Lifted into a print-when-present module-level helper, like
-    :func:`_drift_check_label`, so the shared ``render_rerun_drift``
-    renderer does not accrue a branch per additive field (the C901 ratchet).
+    Takes the ``shape_mismatch`` value itself and returns early when absent,
+    the same print-when-present helper shape as main's
+    :func:`_print_build_skew`, so the shared ``render_rerun_drift`` renderer
+    does not accrue a branch per additive field (the C901 ratchet).
     """
-    mismatch = result.get("shape_mismatch")
     if not isinstance(mismatch, dict):
         return
     committed_keys = ", ".join(mismatch.get("keys_committed") or [])
@@ -178,26 +178,6 @@ def _print_shape_mismatch(result: dict) -> None:
         "envelope shape change, not content drift; Regenerate the envelope "
         "and re-commit it"
     )
-
-
-def _print_build_skew(result: dict) -> None:
-    """Print the ``build_skew`` line of a ``--rerun`` drift report when the
-    excluded ``build`` block differs (issue #5868), nothing otherwise.
-
-    One line naming what moved -- graded under a different ruleset vs
-    rendered by a different klt build (ruleset unchanged) -- and the field
-    names excluded from the verdict. Same print-when-present helper shape as
-    :func:`_print_shape_mismatch`.
-    """
-    skew = result.get("build_skew")
-    if not (isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset")):
-        return
-    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
-    if skew["state"] == "ruleset":
-        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
-    else:
-        what = "rendered by a different klt build (grading ruleset unchanged)"
-    print(f"build_skew: {what} -- excluded from the verdict: {names}")
 
 
 def render_rerun_drift(result: dict) -> None:
@@ -214,12 +194,12 @@ def render_rerun_drift(result: dict) -> None:
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
     still told the checklist's wording moved. It also carries ``build_skew``
-    (issue #5868): one line when the excluded ``build`` block
-    differs. Rendered only when present, so
-    every other verb's output is byte-identical to what it was, and rendered
-    as field *names* only: the values are whole paragraphs of checklist
-    prose, which is precisely what a consumer asked not to have dumped into
-    its gate output.
+    (issues #5868, #5852): one line when the excluded ``build`` block
+    differs -- or when its identity cannot be verified at all -- rendered
+    only when present, so every other verb's output is byte-identical to
+    what it was, and rendered as field *names* only: the values are whole
+    paragraphs of checklist prose, which is precisely what a consumer asked
+    not to have dumped into its gate output.
 
     ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
     entry that points at one ``attestation.checks[<i>]`` entry with an
@@ -247,7 +227,7 @@ def render_rerun_drift(result: dict) -> None:
     print(f"status: {result['status']}")
     if "doc_drift" in result:
         print(f"doc_drift: {str(result['doc_drift']).lower()}")
-    _print_shape_mismatch(result)
+    _print_shape_mismatch(result.get("shape_mismatch"))
     drift = result["drift"]
     if drift:
         print()
@@ -262,13 +242,36 @@ def render_rerun_drift(result: dict) -> None:
         print("not compared (provenance fields absent from the fresh report):")
         for entry in not_compared:
             print(f"  {entry['field']}")
-    _print_build_skew(result)
+    _print_build_skew(result.get("build_skew"))
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
         print("doc drift (checklist wording -- excluded from the verdict):")
         for entry in doc_drift_fields:
             print(f"  {entry['field']}")
+
+
+def _print_build_skew(skew: dict | None) -> None:
+    """The one ``build_skew:`` line of a signoff ``--check`` text render
+    (issues #5868, #5852), only when the excluded ``build`` block actually
+    differs -- or its identity cannot be verified at all."""
+    if not isinstance(skew, dict) or skew.get("state") not in (
+        "build_only",
+        "ruleset",
+        "unverifiable",
+    ):
+        return
+    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+    if skew["state"] == "ruleset":
+        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+    elif skew["state"] == "build_only":
+        what = "rendered by a different klt build (grading ruleset unchanged)"
+    else:
+        what = "build identity unverifiable (a +unknown install records no git facts)"
+    if names:
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    else:
+        print(f"build_skew: {what} -- excluded from the verdict")
 
 
 def render_check_text(result: dict) -> None:

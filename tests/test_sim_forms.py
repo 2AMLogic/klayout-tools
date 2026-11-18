@@ -1,8 +1,8 @@
 """Tests for the measurement-form registry in ``sim_forms`` (issue #5695).
 
-The seven exclusive form modules used to each carry a hand-maintained tuple of
+The exclusive form modules used to each carry a hand-maintained tuple of
 "every *other* exclusive form"; those tuples are now derived from one ordered
-registry. These tests are the assertion those 69 string literals stood in for:
+registry. These tests are the assertion those per-module string literals stood in for:
 that the exclusivity matrix is complete, and that it stays complete when a new
 form module is added.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -56,6 +57,19 @@ def test_other_forms_refuses_an_unregistered_form():
     """A new form module that forgets the registry fails loudly, not quietly."""
     with pytest.raises(ValueError, match="unknown measurement form"):
         sim_forms.other_forms("not_a_form")
+
+
+def test_measurements_request_row_does_not_list_forms():
+    doc = Path(__file__).resolve().parents[1] / "docs" / "cli" / "sim.md"
+    request = doc.read_text(encoding="utf-8").split("\n### Request\n", 1)[1]
+    request = request.split("\n### Response\n", 1)[0]
+    row = next(
+        line for line in request.splitlines() if line.startswith("| `measurements[]` ")
+    )
+
+    # These two names are still used in form-specific field restrictions.
+    mentioned_forms = {form for form in sim_forms.FORMS if f"`{form}`" in row}
+    assert mentioned_forms <= {"spice", "expr"}
 
 
 @pytest.mark.parametrize(
