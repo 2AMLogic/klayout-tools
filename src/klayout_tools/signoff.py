@@ -236,6 +236,7 @@ from .signoff_runset import (
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
+from .signoff_spec_row_table import _members_rows_declared, build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
@@ -4372,6 +4373,16 @@ def build_tier_report(
 
     tier = "T1" if total > 0 and met_count + not_applicable_count == total else None
 
+    # Issue #5691: per-spec-row projection of the same cited evidence.
+    spec_row_records = build_spec_row_records(
+        manifest,
+        read_spec_rows=_read_spec_rows,
+        parse_members=_parse_multi_members,
+        resolve_evidence=_resolve_evidence,
+        lookup_evidence=_lookup_evidence,
+        repo_root=repo_root,
+    )
+
     return {
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
         "block": manifest.get("block"),
@@ -4383,6 +4394,9 @@ def build_tier_report(
         # field existed (and therefore does not read as `--check` drift on an
         # upgrade alone). Never graded: see `_read_partition_boundary`.
         **({"partition_boundary": partition_boundary} if partition_boundary else {}),
+        # Additive (#5691), gated the same way as the echo above: present
+        # only when the manifest declared a top-level `spec_rows` map.
+        **({"spec_rows": spec_row_records} if spec_row_records else {}),
         "tier": tier,
         "t1_item_count": total,
         # Issue #2202: what this build's *own* doc would have rendered, so a
@@ -6365,7 +6379,7 @@ def _resolve_evidence(
         )
 
     actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified
+        check_kind, spec, file_label, actual_hash, input_verified, provenance
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
@@ -7195,24 +7209,6 @@ def _parse_multi_members(
                 return None, f"{where} 'rows' is not a non-empty list of strings"
         members.append((spec, rows))
     return members, None
-
-
-def _members_rows_declared(
-    members: list[tuple[dict[str, Any], list[str] | None]],
-    spec_rows: list[dict[str, Any]] | None,
-) -> bool:
-    """True unless a member names an undeclared (or declared-``gap`` --
-    either form, issue #5599) row."""
-    if spec_rows is None:
-        return True
-    declared = {row["id"]: row for row in spec_rows}
-    return all(
-        row_id in declared
-        and declared[row_id]["gap"] is None
-        and declared[row_id]["justified_gap"] is None
-        for _, rows in members
-        for row_id in rows or []
-    )
 
 
 def _record_envelope(

@@ -11,56 +11,77 @@ helper from an intermediate ``expr`` measurement, not the file-scope
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from klayout_tools import sim
 from test_sim import _write_body, _write_request
 
+#: The file-scope reject corpus: every card here is refused, and (issue
+#: #6444) the rewrite each refusal suggests must itself be accepted.
+_REJECT_CARDS = [
+    # Every signal position, from the measured failing fragments in
+    # issue #5651 (a): ngspice resolves no such vector for each.
+    ".meas tran t when v(a)-v(b)=0.3",
+    ".meas tran t when v(a) - v(b)=0.3",
+    ".meas tran t when v(a,b)=0.3",
+    ".meas tran t find v(a)-v(b) at=2u",
+    ".meas tran t avg v(a)-v(b) from=0 to=20u",
+    ".meas tran t max v(a)-v(b) from=0 to=20u",
+    ".meas tran t trig v(a)-v(b) val=0.3 rise=1 targ v(a) val=0.9 rise=1",
+    # an operator inside a par('...') span and another outside it
+    ".meas tran t when par('v(a)-v(b)')-v(c)=0.3",
+    # a lone reference bound to a non-reference operand
+    ".meas tran t when 2*v(a)=0.5",
+    ".meas tran t when v(a)*2=0.5",
+    # a call around the expression: the rewrite must wrap the whole
+    # call, not splice par('...') inside it (measured on ngspice-47:
+    # abs(par('v(a)-v(b)')) fatals; par('abs(v(a)-v(b))') works)
+    ".meas tran t when abs(v(a)-v(b))=0.1",
+    ".meas tran t when v(a)*abs(v(b))=0.1",
+    ".meas tran t when v(a)*2*par('v(b)')=0",
+    # a parenthesised difference straight after the signal-position
+    # keyword: the group is not a call, and the rewrite must keep the
+    # keyword outside the par('...') span (see the rewrite-text test
+    # below -- `par('when (v(a)-v(b))')` fatals ngspice-47)
+    ".meas tran t when (v(a)-v(b))=0.1",
+    ".meas tran t avg (v(a)-v(b))",
+    # a leading unary sign right after the keyword: the operand walk
+    # must not reach back over the keyword (see the rewrite-text tests
+    # below)
+    ".meas tran t when -v(a)=0.1",
+    ".meas tran t find -v(a) at=2u",
+    ".meas tran t avg -v(out) from=0 to=20u",
+    # a par('...') span still bound to an operator outside it -- the
+    # split-sign rewrites ngspice-47 fatals on (the review of 1d199cea2
+    # measured `-par('v(a)+v(b)')` and `2*par('abs(v(a)-v(b))')` at
+    # rc=1): the lint must keep refusing them, or the unary-sign span
+    # could turn one into an accepted card
+    ".meas tran t when -par('v(a)')=0.1",
+    ".meas tran t when 2*par('-v(a)')=0.1",
+    # An outer operator beside a group, a call or a two-node reference
+    # (issue #6444): the first suggestion must hold the whole expression.
+    ".meas tran t when 2*abs(v(a)-v(b))=0.1",
+    ".meas tran t when v(a)-v(b)*2=0.1",
+    ".meas tran t when 2*(v(a)-v(b))=0.1",
+    ".meas tran t when (v(a)-v(b))*2=0.1",
+    ".meas tran t when -v(a)+v(b)=0.1",
+    ".meas tran t when v(a,b)*2=0.1",
+    ".meas tran t when 2*v(a,b)=0.1",
+    # widened then extended again; a lone reference; a leading sign
+    ".meas tran t when 2*abs(v(a)-v(b)*3)=0.1",
+    ".meas tran t when abs(v(a)-v(b))*2=0.1",
+    ".meas tran t when 2*abs(v(a)*3)=0.1",
+    ".meas tran t when -v(a)*2=0.1",
+    # an author-written par('...') span with an outer operator beside it
+    ".meas tran t when par('v(a)-v(b)')*2=0.1",
+    ".meas tran t when 2*par('v(a)-v(b)')=0.1",
+    ".meas tran t when v(c)-par('v(a)-v(b)')=0.1",
+]
 
-@pytest.mark.parametrize(
-    "card",
-    [
-        # Every signal position, from the measured failing fragments in
-        # issue #5651 (a): ngspice resolves no such vector for each.
-        ".meas tran t when v(a)-v(b)=0.3",
-        ".meas tran t when v(a) - v(b)=0.3",
-        ".meas tran t when v(a,b)=0.3",
-        ".meas tran t find v(a)-v(b) at=2u",
-        ".meas tran t avg v(a)-v(b) from=0 to=20u",
-        ".meas tran t max v(a)-v(b) from=0 to=20u",
-        ".meas tran t trig v(a)-v(b) val=0.3 rise=1 targ v(a) val=0.9 rise=1",
-        # an operator inside a par('...') span and another outside it
-        ".meas tran t when par('v(a)-v(b)')-v(c)=0.3",
-        # a lone reference bound to a non-reference operand
-        ".meas tran t when 2*v(a)=0.5",
-        ".meas tran t when v(a)*2=0.5",
-        # a call around the expression: the rewrite must wrap the whole
-        # call, not splice par('...') inside it (measured on ngspice-47:
-        # abs(par('v(a)-v(b)')) fatals; par('abs(v(a)-v(b))') works)
-        ".meas tran t when abs(v(a)-v(b))=0.1",
-        ".meas tran t when v(a)*abs(v(b))=0.1",
-        ".meas tran t when v(a)*2*par('v(b)')=0",
-        # a parenthesised difference straight after the signal-position
-        # keyword: the group is not a call, and the rewrite must keep the
-        # keyword outside the par('...') span (see the rewrite-text test
-        # below -- `par('when (v(a)-v(b))')` fatals ngspice-47)
-        ".meas tran t when (v(a)-v(b))=0.1",
-        ".meas tran t avg (v(a)-v(b))",
-        # a leading unary sign right after the keyword: the operand walk
-        # must not reach back over the keyword (see the rewrite-text tests
-        # below)
-        ".meas tran t when -v(a)=0.1",
-        ".meas tran t find -v(a) at=2u",
-        ".meas tran t avg -v(out) from=0 to=20u",
-        # a par('...') span still bound to an operator outside it -- the
-        # split-sign rewrites ngspice-47 fatals on (the review of 1d199cea2
-        # measured `-par('v(a)+v(b)')` and `2*par('abs(v(a)-v(b))')` at
-        # rc=1): the lint must keep refusing them, or the unary-sign span
-        # could turn one into an accepted card
-        ".meas tran t when -par('v(a)')=0.1",
-        ".meas tran t when 2*par('-v(a)')=0.1",
-    ],
-)
+
+@pytest.mark.parametrize("card", _REJECT_CARDS)
 def test_validate_meas_card_rejects_signal_position_expression(card):
     # Issue #5651: a bare arithmetic expression in a .meas signal position
     # fails every corner ("no such vector"); refuse it before any corner
@@ -89,6 +110,7 @@ def test_validate_meas_card_rejects_signal_position_expression(card):
         ".meas tran t when v(c)=par('-v(a)')",
         ".meas tran t trig v(a) val=0.3 rise=1 targ v(b) val=0.9 rise=1",
         ".meas tran t when v(a)=0.5*1.62",  # #2826 RHS: runtime diagnostic
+        ".meas tran t when abs(v(a))*2=0.1",  # one reference in a call: not flagged
         ".meas tran t find v(a) at='1u+2n'",  # #2826: pinned accepted
         ".meas tran t max i(vout) from=0 to=1u",
         ".meas tran t when v(a)=0.5\n+ rise=1",  # + continuation line
@@ -99,6 +121,64 @@ def test_validate_meas_card_accepts_single_vector_signal_positions(card):
     # Issue #5651: the lint must fire on the measured failures and nothing
     # else -- no false positive on any known-good card shape.
     sim._validate_meas_card("t", card)  # must not raise
+
+
+def _file_scope_rewrite(card):
+    # The card the file-scope refusal of *card* suggests (issue #6444).
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t", card)
+    match = re.search(r"span: `(.*?)`\. For a whole", str(excinfo.value), re.S)
+    assert match is not None, str(excinfo.value)
+    return match.group(1)
+
+
+@pytest.mark.parametrize("card", _REJECT_CARDS)
+def test_validate_meas_card_suggested_rewrite_is_accepted(card):
+    # Issue #6444: the lint must never refuse its own first suggestion.
+    # Necessary, not sufficient: the exact pins below check the meaning.
+    sim._validate_meas_card("t", _file_scope_rewrite(card))  # must not raise
+
+
+@pytest.mark.parametrize(
+    ("expression", "quoted"),
+    [
+        # the author's whole local expression in one span, operands included
+        ("2*abs(v(a)-v(b))", "2*abs(v(a)-v(b))"),
+        ("v(a)-v(b)*2", "v(a)-v(b)*2"),
+        ("2*(v(a)-v(b))", "2*(v(a)-v(b))"),
+        ("(v(a)-v(b))*2", "(v(a)-v(b))*2"),
+        ("-v(a)+v(b)", "-v(a)+v(b)"),
+        ("2*abs(v(a)-v(b)*3)", "2*abs(v(a)-v(b)*3)"),
+        # a two-node ref or inner span: parentheses where an outer operator
+        # would rebind it ...
+        ("v(a,b)*2", "(v(a)-v(b))*2"),
+        ("2*v(a,b)", "2*(v(a)-v(b))"),
+        ("v(c)-v(a,b)", "v(c)-(v(a)-v(b))"),
+        ("par('v(a)-v(b)')*2", "(v(a)-v(b))*2"),
+        ("2*par('v(a)-v(b)')", "2*(v(a)-v(b))"),
+        ("v(c)-par('v(a)-v(b)')", "v(c)-(v(a)-v(b))"),
+        ("2/par('v(a)*v(b)')", "2/(v(a)*v(b))"),
+        ("-par('v(a)+v(b)')", "-(v(a)+v(b))"),
+        # ... and none where the grouping already holds
+        ("par('v(a)-v(b)')-v(c)", "v(a)-v(b)-v(c)"),
+        ("2*par('v(a)*v(b)')", "2*v(a)*v(b)"),
+        ("v(c)*par('v(a)*1e-3')", "v(c)*v(a)*1e-3"),  # an exponent sign
+    ],
+)
+def test_validate_meas_card_rewrite_quotes_whole_expression_once(expression, quoted):
+    # Issue #6444: pin the exact suggested card, and that it is accepted.
+    rewrite = _file_scope_rewrite(f".meas tran t when {expression}=0.1")
+    assert rewrite == f".meas tran t when par('{quoted}')=0.1"
+    sim._validate_meas_card("t", rewrite)  # must not raise
+
+
+def test_validate_meas_card_control_scope_let_helper_keeps_operand_parentheses():
+    # The let helper shares the quoted text (issue #6444).
+    card = ".meas tran c_x when 2*v(a,b)=0.1"
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("c_x", card, control_scope=True)
+    assert '"expr": "2*(v(a)-v(b))"' in str(excinfo.value)
+    assert "`.meas tran c_x when vdiff=0.1`" in str(excinfo.value)
 
 
 def test_validate_meas_card_rewrites_expression_in_message():
