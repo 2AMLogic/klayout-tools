@@ -31,6 +31,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   the case (raw `sha256` match + identity mismatch) as
   `normalization_changed`. The stamp format and JSON fields do not change.
   Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+- **`klt extract` now extracts a net labelled `nc_<name>` instead of failing
+  the netlist write** (#6732, 2026-11-18): KLayout's stock SPICE writer throws
+  `Unexpected text after numeric value` from `Netlist.write` for any net whose
+  name *starts with* lowercase `nc_` unless the rest is a number (`nc_a`,
+  `nc_ab`, `nc_A`, `nc_a,vss` failed; `nc_1`, `NC_a`, `nca`, `a_nc` did not), so
+  `klt extract` exited 1 with a header-only SPICE file, no report, and a message
+  naming neither the label nor the net. Only that one writer error now takes a
+  fallback: the affected nets are written under an unused placeholder prefix and
+  `nc_` is restored in the written SPICE, so the `.SUBCKT` pin and every device
+  terminal carry the layout's own label (the writer's usual escaping, such as
+  `-` → `\x2d`, still applies) and `nets[]`/`devices[]` in the JSON report are
+  unchanged. Netlists that wrote before are written exactly as before, and any
+  other write error keeps its own message. Not covered here: the separate
+  `--subcircuit` slice write still fails the same way for such a label, and the
+  `klt lvs` and runset-SPICE writers use the same writer setting and were not
+  changed.
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
