@@ -3380,8 +3380,11 @@ other layout is normalized to that shape.
 be written back. It is mutually exclusive with the envelope `<file>`
 arguments and with `--fleet`, `--attest`, `--check` and `--describe-grader` —
 each a mode that renders or checks something, where `--repin` writes. All of
-those are usage errors (exit `2`). `--repo-root` applies as it does to
-`--manifest`, since the same input-artifact resolution decides
+those are usage errors (exit `2`). So is `-o`/`--output` (#6147): `--repin`
+renders no report to put in a file, and exiting `0` with the file never
+written would silently discard output you asked for. The envelope goes to
+stdout; redirect it if you want it in a file. `--repo-root` applies as it
+does to `--manifest`, since the same input-artifact resolution decides
 `input_verified`.
 
 #### `--repin` JSON
