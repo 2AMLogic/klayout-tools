@@ -58,7 +58,8 @@
 # 2026-08-10 reclaim livelock on #509). That protection now lives in the
 # pinned scripts/claim-staleness.sh below (#1966 PR 1, covered by
 # scripts/tests/test-claim-staleness.sh T23-T32), which the upstream role
-# files already drive, so the three role files track upstream again.
+# files already drive, so the three role files track upstream again. T33
+# separately covers --help; T34 covers the ported upstream #11947 lease check.
 
 # #1292: hermit-patterns.md's `stateless_ceremony` AST detector carries two
 # local-only exclusions added by #1288 (closing #920) — exclusion 4 skips
@@ -166,7 +167,8 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # updated_at past CLAIMED_AT means /timeline is frozen, so the verdict is
 # downgraded to `fresh` (FROZEN_TIMELINE=true) -- one reclaim per frozen
 # CLAIMED_AT instead of the 30+ that hit #509 on 2026-08-10. The test's
-# T23-T32 cases reproduce #509 and the fail-safe paths. Upstream's
+# T23-T32 cases reproduce #509 and the fail-safe paths; T33 checks --help,
+# and T34 covers the ported upstream PR-lease check (#11947). Upstream's
 # defaults/scripts/claim-staleness.sh has no equivalent (verified 2026-10-02
 # against rjwalters/loom @ 65442ba48: no `updatedAt`/`frozen`/`RECLAIM`
 # anywhere in it), so an unpinned resync would silently revert it -- the same
@@ -183,9 +185,11 @@ scripts/tests/test-dep-recheck-fingerprint.sh
 # fallback (never print nothing for a live agent with LOOM_SWEEP_ID set); the
 # test's T16 was aligned to the #13134 contract (the "prints nothing" case now
 # scrubs LOOM_SWEEP_ID because this repo's suites run inside dispatched
-# sweeps). Delta remaining: the #1966 frozen-timeline protection only
-# (test-claim-staleness.sh 104/104). Upstream issue for the delta: pending,
-# tracked in #6306.
+# sweeps). #6326 (2026-11-18): ported upstream's lease stub and T23 verbatim
+# as T34 (nine assertion sites, eleven checks), preserving local T23-T33;
+# test-claim-staleness.sh now passes 115/115. The #11947 behaviour is ported
+# AND covered locally. Delta remaining: the #1966 frozen-timeline protection
+# only. Upstream issue for the delta: pending, tracked in #6306.
 scripts/claim-staleness.sh
 scripts/tests/test-claim-staleness.sh
 

@@ -969,11 +969,15 @@ real open_pdks install never pays for the extra probe.
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
   only whatever the deck's own `report(...)`/`.output(...)` calls named.
-- **No per-instance attribution.** `source_cell`/`source_path` are always
-  `null` for this engine — mapping a violation back to its originating
-  placed instance (see "Per-instance attribution" below) needs this
-  module's own instance-tree walk against the *input* layout, which an RDB
-  report does not carry.
+- **Per-instance attribution matches the curated engine.** `source_cell`/
+  `source_path` are filled by the same instance-tree walk the curated engine
+  uses (see "Per-instance attribution" below): a marker whose `bbox` lies
+  wholly inside one placed instance carries that instance's cell name and
+  placement path. Markers contained in no single instance — top-level
+  geometry, or a `bbox` straddling an instance boundary — stay `null`/`null`
+  with the top `cell` as the only honest attribution, and so do markers the
+  deck reported under an RDB `<cell>` other than the selected top cell
+  (their coordinates are in another frame than the walk's).
 - **`bbox`/`polygon` fidelity depends on the RDB value kind.** Every
   coordinate pair embedded in an item's reported geometry contributes to
   `bbox` (converted from the RDB's micrometre user units back to the input
@@ -4225,6 +4229,21 @@ check stays failed (`match: false`, `status:
 `resolved`, `name`, `packaged_dir`, `hint`); `--rerun` raises an exit-1 error
 instead. Pass `--deck-file` to verify a vendor runset that has no packaged
 counterpart. `--rerun` on a curated report rejects `--deck-file`.
+
+**A missing input is named, not a bare `actual: null` (issue #6466).** When
+the report's echoed `file` (or the positional `<file>` override) resolves to a
+concrete path that names no existing file, the `provenance.input.content_hash`
+check stays failed (`match: false`, `actual: null`, `status: "drifted"`, exit
+3 -- all unchanged) and gains the additive `input_not_found` key `klt lvs
+--check` attaches (`path`, `resolved`, `found_relative_to_report`,
+`resolved_against`, `hint`); `--format text` prints `input not found:
+<resolved>`. A relative bare-string `file` still anchors to the current working
+directory, so a file found only beside the report is reported through
+`found_relative_to_report` and never silently used. The key is absent when the
+file exists (including when its bytes moved), and when the echoed `file` names
+no path at all (`scope: "external"`/`"absent"`, or no field). It applies to
+each `reports.curated.`/`reports.native.` side of an `--engine both` report.
+The `provenance.waivers.content_hash` line carries no such block.
 
 **Both modes resolve the committed report's `file` field from *this*
 checkout (issue #2659).** Since `schema_version` 3 that field is the

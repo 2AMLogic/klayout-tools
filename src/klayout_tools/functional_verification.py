@@ -664,9 +664,8 @@ _REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
-    """Shared shape check for a JSON-decoded request, however it was sourced
-    (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
-    object" error for context."""
+    """Shared shape check for a JSON-decoded request, however sourced;
+    ``source`` is folded into the "must be a JSON object" error."""
     doc = _shared_validate_request_shape(
         data,
         source,
@@ -689,25 +688,29 @@ def load_request(request_path: str) -> dict[str, Any]:
     Raises :class:`FunctionalVerificationError` if the file is missing/
     unreadable, not valid JSON, or missing a required top-level field
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
-    ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
-    own ``load_request`` (user-authored input, never emitted by this tool).
+    ``schema`` field (user-authored input, never emitted by this tool).
     """
     request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
-    three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
-    JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
-    verb composes into ``klt eval``'s descriptor unchanged.
+    three forms ``klt lvs``'s own ``request`` argument accepts, so this
+    verb composes into ``klt eval``'s descriptor unchanged. ``base_dir``
+    optionally overrides that anchor so a request archived beside an
+    evidence record re-runs from the directory its paths were written
+    against (issue #5673); it must exist and be a directory.
     """
     doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
     return _require_sources(doc), request_dir
 
@@ -2487,10 +2490,9 @@ def _apply_sdf_physical_only_drop(
 
 
 def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
-    """Directory run artifacts are written to: ``output_dir`` (relative paths
-    resolve against the cwd, not the request directory) or, by default,
-    ``<request_dir>/.klt/functional-verification``.
-    """
+    """Directory run artifacts are written to: ``output_dir`` (relative
+    paths resolve against the cwd) or, by default,
+    ``<request_dir>/.klt/functional-verification``."""
     if output_dir:
         return os.path.abspath(output_dir)
     return os.path.join(request_dir, ".klt", "functional-verification")
@@ -2506,29 +2508,27 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str, output_dir: str | None = None, base_dir: str | None = None
 ) -> dict[str, Any]:
-    """Run the cocotb regression declared by ``request``.
+    """Run the cocotb regression declared by ``request`` -- accepting the
+    same three forms every other ``klt`` request argument does (see
+    :func:`load_request_arg`).
 
-    ``request`` accepts the same three forms every other ``klt`` request
-    argument does (see :func:`load_request_arg`): a path to a request JSON
-    file, ``"-"`` to read the request from stdin, or an inline JSON object
-    string.
+    ``base_dir`` optionally overrides that anchor (issue #5673): every
+    relative path (and the default artifact directory) resolves against
+    it, as the stdin form anchored there would; it must be a directory.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/functional-verification.md``). Raises
     :class:`FunctionalVerificationError` for anything that prevents a
-    trustworthy verdict from being produced at all -- a failing *test* is
-    never an error, it is ``status: "fail"`` in the returned report (which
-    the CLI turns into exit code 3).
+    trustworthy verdict -- a failing *test* is ``status: "fail"`` (exit 3).
 
-    Artifacts (the build directory, the raw ``results.xml``, the engine
-    transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
+    Artifacts (build directory, raw ``results.xml``, engine transcripts,
+    coverage ``.info``) are written to ``.klt/functional-verification/``
+    next to the request file (or under ``base_dir``) -- the same default
+    ``klt sim``/``klt synthesize`` use -- and kept, never deleted.
     """
-    request_doc, request_dir = load_request_arg(request)
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = _resolve_engine(request_doc)
