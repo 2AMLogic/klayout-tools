@@ -225,12 +225,14 @@ that cannot be determined or parsed also fails (closed). On `local` and
 front. `remote` and `batch` have no *submit-side* probe, but the pin is not
 post-run-only either: the job command is a plain
 `klt sim --backend local-parallel` on the runner, with the request
-forwarded verbatim, so a runner whose `klt` knows the field (0.8.0 and
+forwarded to the runner and the `engine_version` pin carried through
+unchanged, so a runner whose `klt` knows the field (0.8.0 and
 newer) enforces the pin there *before any corner simulates* and fails the
 job with `engine_version_unmet`. The refusal surfaces through the normal
 failed-job path — every unit of the job reports `batch_job_failed`, quoting
 the runner's error, with `runner_code: "engine_version_unmet"` — and,
-because the runner wrote no report, the submit-side check below then also
+because the recovered `report.json` is an error envelope carrying no
+`environment.engine_version`, the submit-side check below then also
 fails closed with a top-level `engine_version_unmet`. That submit-side
 comparison against the report's `environment.engine_version` stays as the
 backstop for a runner too old to know the field: a pre-0.8.0 runner ignores
@@ -1520,7 +1522,11 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   already-submitted jobs. If a held job never launches, the remaining unstarted
   members become `not_launched` entries naming that job id (with no job ids of
   their own) one more `--wait-for-capacity` window after the abandonment,
-  instead of being submitted; the set then terminates.
+  instead of being submitted -- but only once no live member remains to run
+  them ([#6278](https://github.com/2AMLogic/klayout-tools/issues/6278)):
+  while another started member is still running, its worker keeps draining the
+  unstarted members at the reduced concurrency rather than cutting them. Either
+  way the set then terminates.
   An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
