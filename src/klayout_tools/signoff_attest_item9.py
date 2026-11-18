@@ -1,25 +1,16 @@
 """Item 9 (testbenches shipped) inventory extensions (issue #4848).
 
-Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Three
-additive pieces on top of the original ``testbenches`` path list plus one
-top-level ``cold_start``:
+Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Extends
+the ``testbenches`` path list and top-level ``cold_start`` with per-bench
+``{"path", "cold_start"}`` entries, ``unbenched_rows`` with owner issues,
+and command start/finish progress on stderr.
 
-* a ``testbenches`` entry may be ``{"path", "cold_start"}`` so a failure
-  names the bench it belongs to;
-* ``unbenched_rows`` declares spec rows that have no bench, with an owner issue;
-* a start/finish progress line per command run, written to stderr only.
-
-Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
-item's reproducibility-pin checks, which live here for the same reason. Plus
-(issue #5641) a ``cold_start`` accepting a list: several named cold starts
-over one inventoried file, so a shared implementation module can carry every
-graded cold start without minting hollow wrapper files. Plus (issue #5701) a
-bench entry's ``sources`` -- the implementation modules the bench is spread
-across -- hashed as ``role: "source"`` ``present`` checks attributed to the
-bench(es) that declared them.
-
-Plus (issue #5850) a bench entry's ``depends_on`` declarations, which live in
-:mod:`klayout_tools.signoff_attest_item9_depends_on` for the same reason.
+Also handles reproducibility pins, ``documented_argv`` disclosure (#5463),
+and named cold-start lists over one inventoried file (#5641), avoiding hollow
+wrapper files. A bench's ``sources`` (#5701) are hashed as ``role: "source"``
+``present`` checks attributed to every bench that declares them.
+The ``depends_on`` declarations (#5850) live in
+:mod:`klayout_tools.signoff_attest_item9_depends_on`.
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
