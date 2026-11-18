@@ -1147,9 +1147,19 @@ to a uniform 0.2 µm on all four sides (`spacing_um` <= 0.4) leaves the
 `rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean from 2.08 µm — so
 the marker overhang is ruled out and the head-length fix is tracked in
 #5704. (The duplicated `poly.2` reports — "Distance between precision
-resistors < 0.21um" and "poly spacing < 0.21um" — seen on a standalone unit
-at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they are not
-tracked.) So the `high`/`xhigh` output is recognised by Magic but is
+resistors < 0.21um" and "poly spacing < 0.21um" — first seen on a standalone
+unit at klt 0.8.0, do still reproduce, though only on some lengths. Measured
+2026-11-18 (#6706: Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev1789` and `0.9.3.dev1792`), a `length_um: 9.765` `"high"` or
+`"xhigh"` body fires both, while 9.77 and 10.0 µm bodies draw no `poly.2`
+report at all; they still report the head rules above. 9.765 µm is an odd
+multiple of 5 nm, the class of the extraction note below, but the cause is
+**unverified**: the Magic geometry has not been instrumented, and Magic's
+"Input off lambda grid by 1/2" read warning also appears on the 9.77 and
+10.0 µm cells, so it does not tell them apart. Only those three lengths were
+checked. Not tracked separately: one length is too little to tell this from
+that odd-5 nm class; file it if a length outside the class fires `poly.2`.)
+So the `high`/`xhigh` output is recognised by Magic but is
 **not** Magic-DRC-clean; use `klt drc --engine klayout` for the independent
 check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
