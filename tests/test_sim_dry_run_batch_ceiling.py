@@ -18,6 +18,7 @@ import pytest
 from klayout_tools import sim
 from klayout_tools import sim_batch as sb
 from klayout_tools.cli import main
+from klayout_tools.sim_batch_contract import JOB_CEILING_BASIS_CALLER
 from klayout_tools.sim_batch_plan import preflight_batch_request
 
 FAKE_BUCKET = "fake-batch-jobs-000000000000"
@@ -225,6 +226,62 @@ def test_bound_equal_to_ceiling_is_not_exceeding(tmp_path):
     report = sim.run_sim(path, backend="batch", dry_run=True)
     assert report["status"] == "valid"
     assert report["job_ceiling"]["exceeds_ceiling"] is False
+
+
+# --- request.batch.job_timeout_s (#5544): same agreement in the new mode ---- #
+# A stated job bound replaces the whole serial assessment
+# (`assess_caller_job_timeout`), so the dry run's `job_ceiling` has a second
+# shape; the differential oracle must hold there too, not be assumed.
+
+
+def test_caller_job_timeout_in_ceiling_matches_the_submit_assessment(tmp_path):
+    # 90s stated vs the 3 x 60 + 120 = 300s the serial formula would give.
+    path = _write_request(tmp_path, batch={"job_timeout_s": 90})
+    report = sim.run_sim(path, backend="batch", dry_run=True)
+    assert report["status"] == "valid"
+    assert report["job_ceiling"] == preflight_batch_request(path)
+    ceiling = report["job_ceiling"]
+    assert ceiling["basis"] == JOB_CEILING_BASIS_CALLER
+    assert ceiling["job_bound_s"] == 90.0
+    assert ceiling["exceeds_ceiling"] is False
+    assert report["hosts"] == 1
+
+
+@pytest.mark.parametrize("check", ["enforce", "split"])
+def test_caller_job_timeout_over_ceiling_is_refused_like_the_submit(tmp_path, check):
+    # Splitting cannot help: every shard carries the same stated bound.
+    path = _write_request(
+        tmp_path,
+        batch={
+            "job_timeout_s": 500,
+            "max_job_seconds": 360,
+            "job_ceiling_check": check,
+        },
+    )
+    with pytest.raises(sim.SimError) as dry:
+        sim.run_sim(path, backend="batch", dry_run=True)
+    with pytest.raises(sim.SimError) as oracle:
+        preflight_batch_request(path)
+    assert dry.value.code == sb.BATCH_JOB_CEILING_CODE
+    assert str(dry.value) == str(oracle.value)
+    assert "batch.job_timeout_s" in str(dry.value)
+
+
+def test_caller_job_timeout_over_ceiling_warn_reports_like_the_submit(tmp_path, capsys):
+    path = _write_request(
+        tmp_path, batch={"job_timeout_s": 500, "max_job_seconds": 360}
+    )
+    report = sim.run_sim(path, backend="batch", dry_run=True)
+    assert report["status"] == "valid"
+    assert report["job_ceiling"] == preflight_batch_request(path)
+    ceiling = report["job_ceiling"]
+    assert ceiling["basis"] == JOB_CEILING_BASIS_CALLER
+    assert ceiling["exceeds_ceiling"] is True
+    assert ceiling["recommended_hosts"] is None
+    assert "batch.job_timeout_s" in ceiling["warning"]
+    # The caller-bound warning is the assessment's own text, printed once.
+    err = capsys.readouterr().err
+    assert err.count("klt sim: warning: batch.job_timeout_s 500s exceeds") == 1
 
 
 # --- warn and #4982: proceed, but say so ----------------------------------- #
