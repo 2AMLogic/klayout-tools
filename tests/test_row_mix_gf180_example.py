@@ -93,6 +93,15 @@ def test_committed_gds_matches_regeneration(tmp_path):
     assert _sha256(_write(gen.build_pair(), tmp_path / "pair.gds")) == _sha256(pair)
 
 
+def test_committed_drc_receipt_matches_layout():
+    report = run_drc(str(EXAMPLE_DIR / "row_mix_gf180.gds"), "gf180mcu")
+    report.pop("provenance")
+    report.pop("file")
+
+    expected = json.loads((EXAMPLE_DIR / "row_mix_gf180.drc.json").read_text())
+    assert report == expected
+
+
 # --------------------------------------------------------------------------- #
 # Device / connectivity equivalence, independent of the generator
 # --------------------------------------------------------------------------- #

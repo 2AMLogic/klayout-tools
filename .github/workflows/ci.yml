@@ -64,6 +64,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # Issue #6390: one run measured 599s in this step (full-history
+        # clone), tripping the job's 10-minute cap so the eight gates after
+        # it were skipped with no named failing step. A per-step timeout
+        # makes a hung clone fail here, named, without touching the job cap.
+        timeout-minutes: 4
         with:
           # Full history: the per-file size ratchet below (issue #2766)
           # computes a PR's merge-base against its actual target branch,
