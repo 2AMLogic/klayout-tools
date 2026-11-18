@@ -29,9 +29,10 @@ from . import macros as macro_spec
 from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
-    _NETLIST_BEHAVIOURAL_LATCH_RE,
+    _NETLIST_BEHAVIOURAL_RE,
     _NETLIST_SIGNED_DECL_RE,
     _NETLIST_X_CONSTANT_RE,
+    _behavioural_statement_message,
     _blank_verilog_comments,
     _strip_verilog_comments,
 )
@@ -1373,11 +1374,17 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     """Raise :class:`PlaceAndRouteError` naming the construct, the 1-based
     line number, and the offending line when ``netlist_path`` carries a
     ``signed`` port/wire qualifier, a bare ``x``-valued constant, or a
-    behavioural ``reg``/``always`` statement -- the three constructs that
+    behavioural ``reg``/``always``/``always_ff``/``always_comb``/
+    ``always_latch``/``initial`` statement -- the three constructs that
     deterministically fail a real OpenROAD run several stages in, with a
     diagnostic pointing at a generated file the caller never wrote (issues
-    #1973 and #5792; see this module's docstring "Netlist pre-flight"
+    #1973, #5792 and #6274; see this module's docstring "Netlist pre-flight"
     section for the full rationale).
+
+    A behavioural statement's message -- construct clause plus an
+    evidence-gated cause clause -- is composed by
+    :func:`netlist_construct_scan._behavioural_statement_message`
+    (issue #6274).
 
     Reports the **first** offending line in file order, whichever construct
     it is: all are already fatal, so there is nothing to gain from
@@ -1393,7 +1400,8 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     except OSError:
         return
 
-    for lineno, line in enumerate(_blank_verilog_comments(text), start=1):
+    lines = _blank_verilog_comments(text)
+    for lineno, line in enumerate(lines, start=1):
         signed_match = _NETLIST_SIGNED_DECL_RE.search(line)
         if signed_match is not None:
             raise PlaceAndRouteError(
@@ -1420,22 +1428,12 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
                 "remove the undriven source signal in the RTL."
             )
 
-        behavioural_match = _NETLIST_BEHAVIOURAL_LATCH_RE.search(line)
+        behavioural_match = _NETLIST_BEHAVIOURAL_RE.search(line)
         if behavioural_match is not None:
             raise PlaceAndRouteError(
-                f"netlist '{netlist_path}' line {lineno} is behavioural "
-                f"Verilog (a '{behavioural_match.group(1)}' statement): "
-                f"{line.strip()} -- OpenSTA's Verilog reader (used by the "
-                "'floorplan' stage) rejects behavioural statements with a "
-                "syntax error. This shape is how `write_verilog` renders a "
-                "gate-level latch that survived synthesis unmapped -- the "
-                "synthesis library had no latch cell to map it onto (see the "
-                "`klt synthesize` response's `structural.unexpected_latches` "
-                "and `instance_counts_by_type` `$_DLATCH_*_` counts; its "
-                "`warnings.netlist_behavioural_latch` names these lines). "
-                "Use a `cell_library` that has a latch cell, give `klt "
-                "synthesize`'s `latch_map` a target, or remove the inferred "
-                "latch from the RTL."
+                _behavioural_statement_message(
+                    netlist_path, lineno, line, behavioural_match.group(1), lines
+                )
             )
 
 

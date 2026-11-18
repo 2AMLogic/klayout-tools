@@ -121,7 +121,7 @@ import contextlib
 import fnmatch
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -132,7 +132,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
     content_hash,
     explicit_deck_options,
-    sha256_file,
     version_drift_advisories,
 )
 from ._report_verify import (
@@ -144,7 +143,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
-from ._report_verify_hints import input_not_found_entry
+from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
@@ -2092,73 +2091,6 @@ def _finish_response(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str,
-    expected: str | None,
-    echoed: Any,
-    report_path: str,
-    override: str | None = None,
-    hasher: Callable[[str | None], str | None] = sha256_file,
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an
-    input path the committed report echoes back (``layout``/``reference``/
-    the runset ``deck_file``), with issue #2595's ``input_not_found``
-    diagnostic attached when that path does not name an existing file.
-
-    :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
-    "the file is not there" and (vacuously) for "no path was recorded", so a
-    plain ``hash_check`` renders an unresolvable input as ``actual: null`` --
-    indistinguishable, to a reader, from a recorded hash that no longer
-    matches. That is exactly the confusing shape issue #2595 reported when a
-    committed request/report pair with *request-file-relative*
-    ``layout``/``reference`` paths is ``--check``ed from a different
-    directory.
-
-    This does **not** change where the path is resolved: ``--check`` still
-    anchors a relative echoed path to the current working directory, the
-    same convention ``klt drc --check``'s ``file`` field uses (re-anchoring
-    one verb and not the other would make the two silently disagree). It
-    only makes the failure legible, as an *additional*, optional key on the
-    entry -- ``expected``/``actual``/``match`` and the resulting ``status``
-    are byte-identical to before:
-
-    - ``path`` -- the echoed path verbatim, as the report recorded it.
-    - ``resolved`` -- the absolute path that was actually looked for.
-    - ``found_relative_to_report`` -- the absolute path the input *does*
-      occupy relative to the committed report's own directory, when it is
-      there; ``null`` otherwise (including for an echoed absolute path,
-      which has no report-relative candidate to try).
-
-    ``hasher`` is the recorded digest form: ``sha256_file`` (bare hex, default)
-    or ``content_hash`` (``sha256:``-prefixed; runset deck, issue #6223). Kept
-    local, not in ``hash_check``: ``klt drc --check`` needs it too (follow-up).
-
-    Issue #2659: ``echoed`` is resolved through
-    :func:`klayout_tools._report_verify.resolve_committed_path`, so the
-    ``{path, scope}`` object ``layout`` carries today is joined to the repo
-    root of the committed report's own directory -- which is precisely the
-    case the "known limitation" above describes, now *resolved* for the
-    layout side rather than merely diagnosed; ``reference`` too since #4984
-    (only a bare-string one keeps the cwd anchoring). An
-    entry naming no path at all (``scope: "external"``/``"absent"``, or a
-    report with no such field) resolves to ``None`` and renders exactly as
-    an absent one always has.
-    """
-    path = resolve_committed_path(echoed, report_path=report_path, override=override)
-    check = hash_check(field, expected, hasher(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report
-    )
-    return check
-
-
 def check_lvs_report(
     report_path: str, *, layout_path: str | None = None
 ) -> dict[str, Any]:
@@ -2202,14 +2134,14 @@ def check_lvs_report(
     """
     committed = _load_committed_report(report_path, LvsError)
     checks = [
-        _input_hash_check(
+        input_hash_check(
             "environment.layout_sha256",
             get_path(committed, ("environment", "layout_sha256")),
             committed.get("layout"),
             report_path,
             override=layout_path,
         ),
-        _input_hash_check(
+        input_hash_check(
             "environment.reference_sha256",
             get_path(committed, ("environment", "reference_sha256")),
             committed.get("reference"),
@@ -2234,7 +2166,7 @@ def check_lvs_report(
         # Issue #2849: the PDK runset is an input too -- a changed runset
         # can change the verdict without moving the layout or reference.
         checks.append(
-            _input_hash_check(
+            input_hash_check(
                 "provenance.runset.content_hash",
                 runset_hash,
                 committed.get("deck_file"),

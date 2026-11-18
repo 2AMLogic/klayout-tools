@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 918
+      "lines": 914
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 3876
+      "lines": 3834
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9856
+      "lines": 9853
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -341,7 +341,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3127
+      "lines": 3119
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -353,15 +353,15 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5108
+      "lines": 5078
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
-      "lines": 706
+      "lines": 702
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4946
+      "lines": 4940
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6448
+      "lines": 6380
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2204
+      "lines": 2202
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1148
+      "lines": 1142
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -805,7 +805,7 @@
     },
     {
       "path": "tests/test_drc.py",
-      "lines": 11048
+      "lines": 11042
     },
     {
       "path": "tests/test_drc_asap7_deck.py",
