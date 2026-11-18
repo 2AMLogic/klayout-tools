@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3524
+      "lines": 3517
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2249
+      "lines": 2204
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -533,7 +533,7 @@
     },
     {
       "path": "src/klayout_tools/power.py",
-      "lines": 2604
+      "lines": 2573
     },
     {
       "path": "src/klayout_tools/power_intent.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7281
+      "lines": 7268
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -585,7 +585,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12353
+      "lines": 12352
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -949,7 +949,7 @@
     },
     {
       "path": "tests/test_netlist_batch.py",
-      "lines": 1118
+      "lines": 1030
     },
     {
       "path": "tests/test_op_sanity.py",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15834
+      "lines": 15833
     },
     {
       "path": "tests/test_sim_batch.py",
