@@ -197,7 +197,7 @@ def _check_verilog_top_sdf(
 
 
 def _verilog_top_sdf_gate(
-    sdf: dict[str, str] | None,
+    sdf: dict[str, Any] | None,
     engine: str,
     build_log: str,
     test_log: str,
@@ -208,14 +208,17 @@ def _verilog_top_sdf_gate(
 
     Issue #5854: the raised error carries the same ``sdf.dropped`` accounting
     the success-path report emits -- both refusal sites build it through the
-    shared helper in ``functional_verification_sdf_steps``."""
+    shared helper in ``functional_verification_sdf_steps``, which (issue
+    #5769) also reads the annotation context stashed into the resolved
+    ``sdf`` dict to name confirmed-rejected non-zero bit-selected-input
+    arcs in the message."""
     if sdf is None:
         return {}
     diagnostics, scanned = _fv._scan_sdf_diagnostics(build_log, test_log)
     merged = {**sdf_pre_dropped_counts, **scanned}
     if diagnostics:
         raise _fv._sdf_refusal_error(
-            sdf["file"],
+            sdf,
             engine,
             diagnostics,
             _fv._sdf_dropped_report(merged, sdf_pre_dropped_arcs),

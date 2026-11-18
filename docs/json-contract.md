@@ -129,6 +129,17 @@ one) — the "new optional member, absent when not applicable" rule above.
 No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "Threshold-crossing time series (`measurements[].crossings`)".
 
+`measurements[].noise.top_n` (issue #5558) follows the same shape for a noise
+measurement's largest contributors. `value` stays the scalar the entry would
+return without `top_n` (graded, `monte_carlo`-aggregated and `limits`-checked
+unchanged); the ranked list rides an additive `contributors` member of the
+entry's `noise` object -- `[{name, value, mechanism}, ...]`, largest first --
+present only when `top_n` was requested and the list was computed. A
+`measurements[].noise.mechanism` entry already carries a `noise` object
+(issue #5553); `contributors` joins it, and an entry without `mechanism` gains a
+`noise` object holding only `contributors`. No `schema_version` bump. See
+[`docs/cli/sim.md`](cli/sim.md)'s "Largest contributors (`noise.top_n`)".
+
 `measurements[].search` (issue #4121) is a scalar form like `snm`: `value` stays
 a number (the midpoint of the converged bisection bracket) and is graded by
 `limits`, `monte_carlo` statistics and `klt yield` unchanged. The response
@@ -824,6 +835,18 @@ claim renders the new `reason` value `stale_artifact`, and a malformed one
 renders the existing `unanchored_evidence`. An envelope that makes no
 claim grades and renders exactly as before. No `schema_version` bump.
 
+Issue #5640 adds the item-1 coverage floor to the manifest grader: an
+item-1 `generic` citation whose envelope enumerates at least one `present`
+file in `attestation.checks[]` but declares no `provenance.input.paths`
+(the pre-0.9.0 producer's inventory-only binding) renders the new `reason`
+value `provenance_narrower_than_attested` with `detail` naming the breadth
+gap (`missing`, `attested_members`, `bound_paths`). Post-#4764 envelopes,
+hand-written envelopes without an `attestation` block, attestations with no
+`present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+design) are unaffected. A new value in the existing `reason` enum, additive
+like #2718's: no `schema_version` bump. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Item 1's coverage floor".
+
 Issue #3743 adds three additive, optional fields (no `schema_version`
 bump; absent they change nothing): `provenance.regeneration.hash_kind`
 (`"bytes"` default, or `"geometry"` to compare `regenerated_hash` with the
@@ -1046,11 +1069,28 @@ stability statement, concrete precedents, and drift-detection guidance, and
   (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
   "Reproducing a recorded pin". Both are
   excluded from `--rerun`/`--check` drift like `klt_version`.
-- `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
-  or `null` if unresolvable. To reproduce a recording byte-for-byte, pass
-  this recorded value to `uv`'s `--with "klayout==<klayout_version>"` next to
-  `klt_reinstall_spec` (issue #5884) — see
-  [`docs/cli/version.md`](cli/version.md)'s "Reproducing a recorded pin".
+- `klayout_version` — the KLayout engine that actually produced the run.
+  For `klt drc --engine klayout` (issue #5660) this is the standalone
+  application's own `-v` version — the binary the deck ran under, tracked
+  through `--klayout-binary`/`$KLT_KLAYOUT_BINARY`, probed once per run even
+  without `--min-klayout-version`, `null` when the probe fails softly and no
+  floor was declared — with the pip wheel's version recorded beside it as
+  the additive `klayout_module_version` (`--engine klayout` only); the
+  `--with "klayout==<klayout_version>"` pin (issue #5884) reproduces the
+  *wheel* axis of a recording, not that engine — see
+  [`docs/cli/drc.md`](cli/drc.md), 'Engine' -> 'klayout'. For every other
+  engine (`--engine curated`, `klt lvs`, `klt extract`, ...) this is the
+  KLayout Python engine build (`klayout.__version__`), or `null` if
+  unresolvable — the wheel genuinely is the engine there, and reproducing a
+  recording byte-for-byte passes this recorded value to `uv`'s
+  `--with "klayout==<klayout_version>"` next to `klt_reinstall_spec`
+  (issue #5884) — see [`docs/cli/version.md`](cli/version.md)'s
+  "Reproducing a recorded pin".
+- `klayout_module_version` (issue #5660, additive, `--engine klayout` only)
+  — `klayout.__version__`, the pip `klayout` wheel in klt's own environment,
+  recorded next to `klayout_version` so the wheel's version is not lost
+  without presenting it as the engine that ran the deck. Absent for every
+  other engine, so their provenance is byte-identical to before.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
   below) — `true` when this run's `klayout_version` differs from
   `klayout_version_expected` (`klt version --format json`, next section):
@@ -1059,8 +1099,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   version (e.g. an editable/dev checkout with no build-time record) renders
   as `false` — "no *confirmed* mismatch" — not a fabricated signal. A `true`
   result also prints a one-line warning to stderr, so the drift is visible
-  even without inspecting the JSON. See "Pinning the KLayout engine version"
-  below.
+  even without inspecting the JSON — for `--engine klayout` runs the warning
+  names the standalone application and its remedy, not `--with klayout==`
+  (issue #5660: pinning the wheel does not pin that engine). See "Pinning
+  the KLayout engine version" below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it
@@ -1920,7 +1962,11 @@ All eight share one contract:
   verb that the KLayout engine build does to `klt drc`. The engine *identity*
   (`engine`) is not excluded: swapping engines is a different run. For
   `signoff` the same rule lands on the field *its* reports carry tool
-  identity in — the whole `build` block (issue #2249).
+  identity in — the whole `build` block (issue #2249), which `--check`
+  additionally reports (report-only, never touching `status`) as the
+  additive `build_skew` field: `same`/`build_only`/`ruleset`/
+  `unverifiable`/`unknown` over the block's fields, with the difference
+  states naming what moved (issues #5868, #5852).
 - **A provenance field the fresh run does not emit is `not_compared`, not
   drift (issue #5866).** A committed report may carry `provenance` keys the
   re-running `klt` never writes — spliced in by a downstream wrapper
@@ -1945,7 +1991,13 @@ All eight share one contract:
   differs from the default (`bytes`), so absence there encodes a default
   *value*, not an unproducible field, and any leaf disagreement inside a
   declined claim still drifts (the explicit `--hash-kind` cross-check of
-  issue #5572). The
+  issue #5572). One further case files a field a report *does* carry
+  there: `klt drc --check --rerun` reports a committed
+  `provenance.klayout_version_mismatch` as `not_compared` when the
+  committed `--engine klayout` report predates issue #5660 (no
+  `provenance.klayout_module_version`) — that change redefined the flag's
+  input from the pip wheel to the standalone binary, so a pre- and a
+  post-change value are not comparable. The
   `--format text` renderer lists the skipped field names in a
   `not compared:` block, so a non-zero exit always means "something that
   could be compared did not match".
@@ -2332,7 +2384,7 @@ the exit code alone is authoritative.
   | `extract` | `finfet_dbu_mismatch` | A FinFET deck was run on a layout whose database unit differs from the deck's; it is refused rather than rescaled. See [docs/cli/extract.md](cli/extract.md) "ASAP7 FinFET extraction". |
   | `pex` | `schematic_flatten_cycle`, `schematic_flatten_pin_count_mismatch`, `schematic_flatten_unsupported_card`, `schematic_flatten_wrapper_pin_unconnected`, `schematic_flatten_malformed` | `--flatten-schematic` (issue #2889): the schematic DUT could not be flattened faithfully — a subcircuit instantiation cycle, an `X` call whose node count differs from the subcircuit's pin count, a card the flattener cannot rename safely, unbalanced/duplicate `.subckt` definitions, or (issue #4625) a fragment DUT with no net for a pin of the synthesized `.subckt <top>` wrapper. Raised before anything simulates; no partial flatten is written. Not retryable without changing the DUT netlist. See [docs/cli/pex.md](cli/pex.md) "Flattening a hierarchical schematic DUT". |
   | `drc` | `klayout_unavailable` | `--engine klayout` (issue #3076): the standalone `klayout` application binary is missing or could not be launched (run or `--min-klayout-version` probe) — the second opinion could not run. Exit `1`, never a verdict; not a bad-input error. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
-  | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` application (`--klayout-binary`, `$KLT_KLAYOUT_BINARY` or `PATH`; an override is recorded as additive `environment.klayout_binary`, issue #4950) is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
+  | `drc` | `klayout_version_too_old` | `--engine klayout`: the `klayout` application (`--klayout-binary`, `$KLT_KLAYOUT_BINARY` or `PATH`; the resolved binary is recorded as `environment.klayout_binary` on every run, issues #4950/#5844) is older than `--min-klayout-version`. Exit `1`; the deck is never launched. See [docs/cli/drc.md](cli/drc.md) "Machine-readable failure codes". |
   | `drc` | `negative_control_failed` | `--engine klayout --negative-control`: the known-bad fixture produced no violations (or missed a `--negative-control-categories` entry) under the same deck, so a clean verdict cannot be trusted. See [docs/cli/drc.md](cli/drc.md) "Negative control". |
   | `pex`, `sim`, `place-and-route` | `outdir_locked` | Another cooperating `klt` run owns this run's persistent output directory (or an ancestor/descendant of it). Exit `1`, empty stdout. Transient: retry after the owner finishes. See "Output-directory ownership" below. |
   | `pex`, `sim`, `place-and-route` | `outdir_lock_unavailable` | Ownership could not be established for a reason other than contention (unwritable lock registry, no `flock` on this platform or filesystem). Not retryable without changing the environment. Exit `1`, empty stdout. |

@@ -41,6 +41,7 @@ from .functional_verification_from_synthesize import (
     resolve_sources_with_synthesize,
     with_from_synthesize,
 )
+from .functional_verification_pdk import derive_pdk_defines, merge_pdk_input
 
 
 class RunInputs(NamedTuple):
@@ -48,6 +49,9 @@ class RunInputs(NamedTuple):
 
     from_synthesize: dict[str, Any] | None
     sources: list[dict[str, Any]]
+    #: Defines the ``pdk`` input derives (``FUNCTIONAL``, no SDF); the run
+    #: merges them *under* the caller's own ``options.defines`` (issue #5782).
+    pdk_defines: dict[str, str | None]
     #: The request's own RTL as resolved (issue #5550) -- a snapshot taken
     #: *before* the SDF/initial-state shims, escaped-divider renames, and
     #: scoped-define wrappers substitute generated files from the output
@@ -71,13 +75,22 @@ def resolve_run_inputs(
     request_dir: str,
     hdl_toplevel: str,
     envelope: Callable[[str | None], dict[str, Any]],
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> tuple[list[str], RunInputs]:
-    """:func:`resolve_sources_with_synthesize` plus the ``sources`` echo."""
+    """:func:`resolve_sources_with_synthesize` plus the ``sources`` echo.
+
+    ``pdk_variant``/``pdk_root`` (the CLI's ``--pdk``/``--pdk-root``, issue
+    #5782) merge over the request's ``pdk`` block here; with no pdk input at
+    all the result is byte-identical to before the issue."""
+    pdk_input = merge_pdk_input(request_doc, request_dir, pdk_variant, pdk_root)
     sources, synth_block = resolve_sources_with_synthesize(
-        request_doc, request_dir, hdl_toplevel, envelope
+        request_doc, request_dir, hdl_toplevel, envelope, pdk_input=pdk_input
     )
+    defines = derive_pdk_defines(pdk_input, request_doc.get("options"))
     return sources, RunInputs(
-        synth_block, sources_echo(sources, envelope), list(sources)
+        synth_block, sources_echo(sources, envelope), defines, list(sources)
     )
 
 
