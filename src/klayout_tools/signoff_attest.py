@@ -30,9 +30,9 @@ and 10"):
   numeric field of a cited envelope for every declared corner. Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
-- **Item 9 (Testbenches shipped)** -- every listed testbench exists; the
-  declared cold-start invocation exits ``0``; the PDK name + revision and at
-  least one tool version are pinned.
+- **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
+  ``depends_on``-declared dependency is hashed (#5850); the declared
+  cold-start exits ``0``; PDK name + revision and a tool version are pinned.
 - **Item 10 (Repo hygiene)** -- every listed hygiene artifact exists; every
   declared CI/audit command exits ``0``.
 
@@ -49,30 +49,25 @@ Two failure classes, deliberately distinct:
 
 Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
 :func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
-with. Nothing is normalised.
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
-from ._report_verify import (
-    VOLATILE_PROVENANCE_PATHS,
-    build_rerun_result,
-    load_committed_report,
-)
-from .build_identity import build_version
+from ._report_verify import load_committed_report
+from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
     _COMMAND_EVIDENCE_TIMEOUT_S,
@@ -85,15 +80,21 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_drift import drift_result
+from .signoff_attest_env import command_env, klt_shim_scope
+from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import input_binding
+from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
+from .signoff_attest_presence import file_check as _file_check
+from .signoff_attest_presence import path_checks, split_entries
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -145,9 +146,9 @@ _ITEM_TITLES = {
 _COMMON_KEYS = frozenset({"schema_version", "kind", "t1_item", "description"})
 _ITEM_KEYS: dict[int, frozenset[str]] = {
     1: frozenset({"sources", "derived"}),
-    # Item 2's inventory is optional (issue #4767) and declares only commands;
-    # the stream is always the ``--input`` artifact, never an inventory field.
-    2: frozenset({"checks"}),
+    # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
+    # generator's input files (``inputs``, #5724); the stream is the ``--input``.
+    2: frozenset({"checks", "inputs"}),
     8: frozenset(
         {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
     ),
@@ -166,11 +167,6 @@ _PATH_LISTS: dict[int, tuple[tuple[str, str], ...]] = {
     9: (("testbenches", "testbench"),),
     10: (("hygiene", "hygiene"),),
 }
-
-#: Volatile envelope paths ``--check`` excludes from drift: the producing
-#: build's version strings. A `klt` upgrade that attests byte-identical
-#: inputs with identical outcomes is not evidence drift.
-VOLATILE_ATTESTATION_PATHS = VOLATILE_PROVENANCE_PATHS
 
 
 class AttestationError(SignoffError):
@@ -301,6 +297,9 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 def _path_list(
     inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -310,14 +309,9 @@ def _path_list(
         )
     paths = []
     for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 
@@ -325,13 +319,17 @@ def _path_list(
 COMMAND_TIMEOUT_CEILING_S = 21600
 
 
-def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
+def _command_spec(
+    raw: Any, field: str, root: str, *, documented_argv: bool = False
+) -> dict[str, Any]:
     """Validate one declared command: ``{"argv": [str, ...], "cwd"?: path}``.
 
     ``argv`` is run directly (never through a shell) with ``cwd`` resolved
     against the repository root. Optional ``local_only: true`` marks a check
     that needs a toolchain the ``--check`` runner may lack: ``--attest`` runs
-    it, ``--attest --check`` skips it and carries the committed outcome."""
+    it, ``--attest --check`` skips it and carries the committed outcome.
+    ``documented_argv`` enables the item-9 ``documented_argv`` disclosure
+    (:func:`item9.documented_spec`); elsewhere the key is refused."""
     if not isinstance(raw, Mapping):
         raise AttestationError(f"'{field}' must be an object with an 'argv' list")
     argv = raw.get("argv")
@@ -357,9 +355,7 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
     if "timeout_s" in raw:
         timeout_s = raw["timeout_s"]
         if (
-            isinstance(timeout_s, bool)
-            or not isinstance(timeout_s, (int, float))
-            or not math.isfinite(timeout_s)
+            not is_finite_number(timeout_s)
             or timeout_s <= 0
             or timeout_s > COMMAND_TIMEOUT_CEILING_S
         ):
@@ -368,6 +364,7 @@ def _command_spec(raw: Any, field: str, root: str) -> dict[str, Any]:
                 f"no greater than {COMMAND_TIMEOUT_CEILING_S}"
             )
         spec["timeout_s"] = timeout_s
+    spec.update(item9.documented_spec(raw, field, documented_argv))
     return spec
 
 
@@ -404,13 +401,18 @@ def _validated_inventory(
     normalised form the checks run against. Raises :class:`AttestationError`
     for anything malformed."""
     _validate_header(inventory, item, source)
-    bench_specs: dict[str, Any] = {}
+    bench_extra: dict[str, Any] = {}
     if item == 9:
-        inventory, bench_specs = item9.split_testbenches(
+        inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
+    inventory, presence, yaml_selects = split_entries(
+        inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
+    )
     seen: dict[str, str] = {}
-    normalized: dict[str, Any] = {}
+    normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -420,7 +422,7 @@ def _validated_inventory(
     elif item == CHARACTERIZATION_ITEM:
         normalized.update(_validated_characterization(inventory, root))
     elif item == 9:
-        item9.validate_into(normalized, inventory, bench_specs, root, _command_spec)
+        item9.validate_into(normalized, inventory, bench_extra, root, _command_spec)
     else:
         normalized["checks"] = _validated_command_checks(inventory, root, 10)
     return normalized
@@ -698,17 +700,6 @@ def _validated_derived(
 # --------------------------------------------------------------------------- #
 
 
-def _file_check(root: str, path: str, role: str) -> dict[str, Any]:
-    digest = sha256_file(os.path.join(root, path))
-    return {
-        "check": "present",
-        "role": role,
-        "path": path,
-        "passed": digest is not None,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
-    }
-
-
 def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     """Compare the derived file and each recorded source against the digests
     the inventory recorded; no command is run. ``mismatches`` names every
@@ -773,23 +764,6 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -807,7 +781,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -837,6 +811,7 @@ def _command_check(
         check["error"] = error
     if spec.get("local_only"):
         check["local_only"] = True
+    check.update(item9.documented_fields(spec))
     return check
 
 
@@ -849,7 +824,8 @@ def _skipped_check(
     """A ``local_only`` command that ``--check`` did not run: the committed
     check with the same identity is carried through (its outcome is the
     attest-time one, never a result of this run) and marked ``skipped``. With
-    no committed counterpart the check is a failure -- nothing vouches for it."""
+    no committed counterpart the check is a failure -- nothing vouches for it.
+    The ``documented_argv`` disclosure is overlaid from the current spec."""
     for committed in committed_checks:
         if (
             committed.get("check") == "command"
@@ -857,7 +833,7 @@ def _skipped_check(
             and list(committed.get("argv") or []) == list(spec["argv"])
             and all(committed.get(key) == value for key, value in identity.items())
         ):
-            return {**committed, "local_only": True, "skipped": True}
+            return item9.carried_check(committed, spec)
     return {
         "check": "command",
         "role": role,
@@ -868,63 +844,16 @@ def _skipped_check(
         "passed": False,
         "local_only": True,
         "skipped": True,
+        **item9.documented_fields(spec),
     }
-
-
-def _pin_checks(pins: Any) -> list[dict[str, Any]]:
-    """Item 9's reproducibility pins: the PDK name + revision (or the explicit
-    ``{"none": true, "reason": "..."}`` no-PDK form -- an absent ``pdk`` never
-    means "no PDK"), and at least one tool version. A missing or empty pin is
-    a failed check, not a malformed inventory -- the inventory is well-formed,
-    it just does not yet say how to reproduce the run."""
-    pins = pins if isinstance(pins, Mapping) else {}
-    pdk_value = item9.pdk_pin(pins.get("pdk"))
-    tools = pins.get("tools")
-    tools_value = None
-    if (
-        isinstance(tools, Mapping)
-        and tools
-        and all(
-            isinstance(key, str) and key and isinstance(value, str) and value
-            for key, value in tools.items()
-        )
-    ):
-        tools_value = {key: tools[key] for key in sorted(tools)}
-    return [
-        {
-            "check": "pin",
-            "role": "pdk",
-            "passed": pdk_value is not None,
-            "value": pdk_value,
-        },
-        {
-            "check": "pin",
-            "role": "tools",
-            "passed": tools_value is not None,
-            "value": tools_value,
-        },
-    ]
 
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
     """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
-    try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    for segment in field.split("."):
-        if isinstance(node, Mapping) and segment in node:
-            node = node[segment]
-        elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
-            node = node[int(segment)]
-        else:
-            return None
+    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric.
+    The walk itself is shared with item 9's reference-form pins
+    (:func:`~.signoff_attest_pins.json_node`, issue #5563)."""
+    node = json_node(root, path, field)
     return node if is_number(node) else None
 
 
@@ -1028,9 +957,7 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
-        checks.extend(
-            _file_check(root, path, role) for path in sorted(normalized[field])
-        )
+        checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
@@ -1041,8 +968,11 @@ def _run_checks(
     elif item == CHARACTERIZATION_ITEM:
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
-        checks.extend(item9.item9_checks(normalized, command))
-        checks.extend(_pin_checks(normalized["pins"]))
+        checks.extend(item9.item9_checks(normalized, command, root, _file_check))
+        resolved_pins, pin_sources = resolve_pin_refs(
+            normalized["pins"], root, _normalize_repo_path
+        )
+        checks.extend(with_resolved_from(item9.pin_checks(resolved_pins), pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1086,7 +1016,8 @@ def build_attestation(
         )
     inventory_rel = os.path.relpath(absolute, root).replace(os.sep, "/")
     normalized = _validated_inventory(inventory, item, root, inventory_path)
-    checks = _run_checks(item, root, normalized, committed_checks)
+    with klt_shim_scope():
+        checks = _run_checks(item, root, normalized, committed_checks)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
     prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
@@ -1110,7 +1041,7 @@ def build_attestation(
         },
         "provenance": {
             "klt_version": build_version(),
-            "klayout_version": None,
+            "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
             "input": prov,
@@ -1177,10 +1108,11 @@ def check_attestation(
     plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
-    passing gate. Only the producing build's version strings are excluded
-    from the diff (:data:`VOLATILE_ATTESTATION_PATHS`); a change to the
-    inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift.
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried
@@ -1192,7 +1124,7 @@ def check_attestation(
         inventory_path,
         committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)
 
 
 def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
@@ -1204,33 +1136,3 @@ def _load_committed_attestation(committed_path: str) -> dict[str, Any]:
             "check the path"
         )
     return committed
-
-
-def _drift_result(
-    committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
-) -> dict[str, Any]:
-    # ``skipped`` marks a local_only check this run did not execute; its
-    # (carried-through) outcome is the committed one, so it is reported beside
-    # the diff rather than as a difference from the committed envelope.
-    skipped = []
-    for check in fresh["attestation"]["checks"]:
-        if check.pop("skipped", False):
-            skipped.append(
-                {
-                    key: check[key]
-                    for key in ("role", "name", "target", "argv", "cwd", "passed")
-                    if key in check
-                }
-            )
-    result = build_rerun_result(
-        report_path=committed_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
-        mode="check",
-    )
-    fresh_payload = result.pop("fresh")
-    result["fresh_status"] = fresh_payload["status"]
-    result["skipped_checks"] = skipped
-    result["fresh"] = fresh_payload
-    return result

@@ -9,7 +9,7 @@ Two tiers, per the issue's testing requirement (#91):
   exercised without ever invoking the real `ngspice` binary. These always
   run, everywhere, and are the ones a classification/parsing regression
   actually gets caught by.
-- **Integration tests** (`@pytest.mark.skipif(not HAVE_NGSPICE, ...)`) run
+- **Integration tests** (`@_SKIP_NO_NGSPICE`) run
   the real `ngspice -b` subprocess end to end -- corner expansion, `.lib`
   process-corner selection, `alter`-based supply sweep, `.temp`, `.meas`
   extraction, and the optional waveform artifact -- against tiny, synthetic,
@@ -40,26 +40,18 @@ from helpers.subprocess_fakes import (
     _stub_subprocess_run,
     fake_completed,
 )
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
 from klayout_tools import sim_measurement_results as smr
+from klayout_tools import sim_noise_mechanism as snm
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
     "real_build_identity_git", "bare_name_ngspice_resolution"
 )
 
-
-#: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
-#: by CI) opts a host with ngspice installed out of this slow tier too; see
-#: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).
-HAVE_NGSPICE = shutil.which("ngspice") is not None and (
-    os.environ.get("KLT_SKIP_NGSPICE_TESTS") != "1"
-)
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "sim"
 
@@ -649,7 +641,7 @@ def test_run_sim_netlist_source_invalid_value_raises(tmp_path):
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
-    with pytest.raises(sim.SimError, match="unsupported netlist_source"):
+    with pytest.raises(sim.SimError, match="unsupported netlist_source .*gate-level"):
         sim.run_sim(str(request))
 
 
@@ -943,16 +935,16 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
         )
 
 
-def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
-    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
-    before this issue -- the new uniqueness rule is scoped to `expr` so no
-    previously-accepted request starts failing."""
-    sim._validate_measurement_forms(
-        [
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
-        ]
-    )  # must not raise
+def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
+    with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+            ]
+        )
 
 
 def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():
@@ -4841,14 +4833,14 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     }
 
 
-@pytest.mark.parametrize("netlist_source", ["schematic", "extracted"])
+@pytest.mark.parametrize("netlist_source", ["schematic", "extracted", "gate-level"])
 def test_run_sim_stubbed_netlist_source_echoed_in_environment(
     tmp_path, monkeypatch, netlist_source
 ):
     # request.netlist_source, when present and valid, is echoed verbatim
     # into environment.netlist_source (see docs/cli/sim.md's "Post-layout
     # verification" section) -- this is how a caller distinguishes a
-    # pre-layout (S6) sim pass from a post-layout (S9) one.
+    # pre-layout (S6), post-layout (S9), or gate-level (#5638) sim pass.
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -6288,13 +6280,13 @@ def _stripped_report(report: dict) -> dict:
     compared for byte-identical equality (see docs/cli/sim.md's
     byte-exact-fixture caveat)."""
     clone = json.loads(json.dumps(report))
-    clone["environment"].pop("engine_version", None)
     # `environment.backend.source` (issue #2977) records how the backend was
     # chosen (flag/request/default), which differs by design between runs
     # that otherwise execute identically.
     clone["environment"].pop("backend", None)
-    # Issue #2970: legitimately differs between `local` and `local-parallel`.
-    clone["environment"].pop("threads_per_worker", None)
+    # Issues #2970/#5648: thread pin + its `.spiceinit` differ by backend.
+    for key in ("engine_version", "threads_per_worker", "ngspice_init"):
+        clone["environment"].pop(key, None)
     for corner in clone["corners"]:
         corner.pop("runtime_s", None)
     return clone
@@ -10830,10 +10822,8 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
-
-
 #: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr, snm)
 
 #: Emission sites where the code is supplied by the site's *caller* or by a
 #: table it iterates, so the literal cannot be read off the site itself --
@@ -12024,9 +12014,8 @@ def test_run_sim_runner_resolved_osdi_preload_goes_offhost_unchecked(
     assert seen["request_dir"] == str(tmp_path)
     environment = report["environment"]
     assert "osdi_preload" not in environment  # nothing hashed on this host
-    assert environment["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "env_var"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "env_var", "sha256": None}
+    assert environment["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monkeypatch):
@@ -12047,9 +12036,8 @@ def test_run_sim_osdi_preload_under_models_pdk_root_goes_offhost(tmp_path, monke
 
     report = sim.run_sim(str(request), backend="batch")
 
-    assert report["environment"]["osdi_preload_runner_resolved"] == [
-        {"entry": entry, "reason": "pdk_root"}
-    ]
+    expected = {"entry": entry, "index": 0, "reason": "pdk_root", "sha256": None}
+    assert report["environment"]["osdi_preload_runner_resolved"] == [expected]
 
 
 def test_run_sim_runner_resolved_osdi_keeps_a_host_default_batch_backend(

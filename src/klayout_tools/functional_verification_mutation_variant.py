@@ -3,7 +3,7 @@
 Split out of ``functional_verification_mutation.py``: the forked-child
 ``_build_and_test_variant`` and its bounded parent-side runner
 (:func:`_run_isolated_variant`). Names that stay in ``functional_verification.py``
-are reached as ``_fv.<name>`` at call time; every name is re-exported from there.
+are reached as ``_fv.<name>`` at call time.
 """
 
 from __future__ import annotations
@@ -97,7 +97,8 @@ def _mutation_subprocess_entry(kwargs: dict[str, Any], result_queue: Any) -> Non
         pass
     try:
         _build_and_test_variant(**kwargs)
-    except BaseException as exc:  # noqa: BLE001 - reported back, never raised across the process boundary
+    # - reported back, never raised across the process boundary
+    except BaseException as exc:
         try:
             result_queue.put(("error", f"{exc}"))
         except Exception:  # pragma: no cover - defensive: an unpicklable exc

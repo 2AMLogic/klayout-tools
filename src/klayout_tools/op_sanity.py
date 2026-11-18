@@ -100,15 +100,15 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance, sim_osdi_pin
-from ._jsonnum import is_number
+from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
+from ._jsonnum import is_finite_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
-    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
@@ -323,18 +323,10 @@ class ParsedNetlist:
 ALL_CORNERS = "all"
 
 
-def _strip_comment(line: str) -> str:
-    """Drop a trailing ``;``/``$`` SPICE inline comment."""
-    for marker in (";", "$ "):
-        index = line.find(marker)
-        if index >= 0:
-            line = line[:index]
-    return line.rstrip()
-
-
 def _logical_lines(text: str) -> list[str]:
     """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines.
+    ``*`` comment lines, with inline ``;``/``$`` comments removed by the
+    shared :func:`strip_spice_inline_comment`.
 
     A leading ``+`` line with nothing preceding it to fold onto (e.g. the
     very first non-blank/non-comment line of ``text`` starts with ``+``) is
@@ -346,7 +338,7 @@ def _logical_lines(text: str) -> list[str]:
     """
     lines: list[str] = []
     for raw in text.splitlines():
-        line = _strip_comment(raw.strip())
+        line = strip_spice_inline_comment(raw.strip())
         if not line or line.startswith("*"):
             continue
         lines.append(line)
@@ -970,10 +962,10 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if is_number(explicit):
+    if is_finite_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
-    if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):
+    if not is_finite_number(multiple):
         multiple = _DEFAULT_TRIODE_MARGIN_KT
     kelvin = float(temperature_c) + 273.15
     return float(multiple) * _KT_OVER_Q_V_PER_K * kelvin
@@ -1608,19 +1600,14 @@ def run_op_sanity(
             }
         )
 
-    for name in parsed.unexpanded:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "unsupported_hierarchy",
-                "message": (
-                    f"could not expand subcircuit instance {name}: its "
-                    "definition was not found in the netlist or its "
-                    "`.include`d files and it is not a recognised MOS model, "
-                    "so any devices inside it were not linted."
-                ),
-            }
+    # Issue #5644: the construction (and its model-library-aware wording)
+    # lives in `op_sanity_diagnostics` -- a pure move that keeps this file
+    # under its `file-size-baseline.json` ceiling.
+    diagnostics.extend(
+        op_sanity_diagnostics.unexpanded_instance_diagnostics(
+            parsed.unexpanded, models_lib
         )
+    )
 
     if parsed.expansion_truncated:
         diagnostics.append(
@@ -1702,6 +1689,7 @@ def run_op_sanity(
         },
         "corner_margins": corner_margins,
         "device_count": len(parsed.devices),
+        "unexpanded_instance_count": len(parsed.unexpanded),
         "finding_count": len(findings),
         "error_count": error_count,
         "warning_count": warning_count,

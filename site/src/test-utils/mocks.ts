@@ -1,28 +1,15 @@
 /**
- * Shared vitest mocks for the WebGL-backed gallery component suites
- * (issue #2337).
+ * Shared vitest mocks for the WebGL-backed gallery component suites:
+ * `makeFakeGL()` builds a fake WebGL context and `installFakeGLContext()`
+ * wires it into `HTMLCanvasElement.getContext()` (issue #2337, which
+ * consolidated these copy-pasted helpers into one shared home).
  *
- * `makeFakeGL()` and `mockFetchOk()` live here so there is exactly one
- * maintenance point (the former `components/em/` suites that shared them
- * were removed in issue #4641).
+ * The sole consumer is the `components/field` suite; the former
+ * `components/em/` suites that shared them were removed in issue #4641.
  *
  * This module is test-only: nothing in the app bundle imports it.
  */
 import { vi } from "vitest";
-
-/**
- * A resolved-JSON `fetch` mock: one `ok: true` response whose `json()`
- * yields `payload`. Generic over the payload type so both the
- * `EmSiteExport` gallery suites and any future consumer can use it.
- */
-export function mockFetchOk<T>(payload: T) {
-  return vi.fn(() =>
-    Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve(payload),
-    } as Response),
-  );
-}
 
 /**
  * A minimal fake WebGL context: known parameter/status getters return
@@ -32,7 +19,7 @@ export function mockFetchOk<T>(payload: T) {
  * without a real GPU — this is what a headless CI browser without WebGL
  * would otherwise force through the fallback branch only.
  */
-export function makeFakeGL(): WebGL2RenderingContext {
+function makeFakeGL(): WebGL2RenderingContext {
   const overrides: Record<string, (...args: unknown[]) => unknown> = {
     createShader: () => ({}),
     createProgram: () => ({}),

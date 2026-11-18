@@ -24,6 +24,8 @@ def assemble_extract_report(
     black_box_regions: Any,
     dbu_um: Any,
     dead_metal: Any,
+    dead_metal_omitted: Any,
+    dead_metal_summary: Any,
     deck: Any,
     deck_name: Any,
     deck_options: Any,
@@ -46,6 +48,7 @@ def assemble_extract_report(
     parasitics_report: Any,
     path: Any,
     pdk_info: Any,
+    report_parasitics_shape: Any,
     pin_renames: Any,
     pin_ties: Any,
     probe_results: Any,
@@ -169,6 +172,17 @@ def assemble_extract_report(
         # `LayoutToNetlist` shape database), which also appends its aggregate
         # `warnings[]` entry.
         "dead_metal": dead_metal,
+        # Additive fields (issue #5545): `dead_metal_omitted` echoes
+        # `--omit-dead-metal` -- `False` on every run that did not pass it,
+        # where `dead_metal[]` above is unchanged -- and
+        # `dead_metal_summary` is the per-layer roll-up of the *same*
+        # detection, byte-identical with and without the flag (a zeroed
+        # summary with an empty `by_layer` when there is no dead metal). The
+        # summary is what makes the flag safe: the counts a reader acts on
+        # survive the dropped rows. See run_extract's docstring and
+        # `summarize_dead_metal`.
+        "dead_metal_omitted": dead_metal_omitted,
+        "dead_metal_summary": dead_metal_summary,
         # Additive field (issue #1018): always a list, empty unless
         # `matched_device_groups` (--matched-group) was given -- see
         # run_extract's docstring and `_describe_matched_device_groups` for
@@ -282,5 +296,18 @@ def assemble_extract_report(
     # for the full contract. Never replaces `device_count`/`net_count`/
     # `pin_count`/`parasitics.*` above, which stay exactly as documented.
     result["metrics"] = _build_metrics(result, parasitics_report)
+
+    # `--report-parasitics slim` (issue #5816): swap in the slim shape of
+    # the `parasitics` block -- strictly last, so the SPEF writer (which
+    # consumed the full block back in `run_extract`) and `_build_metrics`
+    # above both read the un-slimmed data and slimming corrupts neither.
+    # Applied in place of the full block, never on it: `slim_parasitics_
+    # report` is a pure function and the full object stays untouched for
+    # any still-live reference. `full` (the default, and every run before
+    # this flag existed) never reaches this branch.
+    if report_parasitics_shape == "slim":
+        from .extract_parasitics_slim import slim_parasitics_report
+
+        result["parasitics"] = slim_parasitics_report(result["parasitics"])
 
     return result

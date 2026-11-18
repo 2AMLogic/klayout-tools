@@ -50,22 +50,25 @@ The value is computed by the same code path a real run records
 `klt drc --deck sky130 <layout>` would report in its
 `provenance.deck.content_hash`.
 
+This excerpt from `klt deck hash --deck sky130 --format json` uses
+`sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
-  "released": false
+  "content_hash": "sha256:..."
 }
 ```
 
 - `deck` / `content_hash` — the deck name and its `sha256:`-prefixed content
   hash, named exactly as `provenance.deck` names them so a consumer comparing
   against a committed report compares like with like.
-- `released` — the same tri-state signal `provenance.deck.released` carries
-  (`true`/`false`/`null`; see [`../json-contract.md`](../json-contract.md)),
-  from the generated release-history table. The *hash* never depends on that
-  table: a missing or malformed table yields `released: null`, not an error.
+- `released` — the full response includes the same tri-state signal as
+  `provenance.deck.released`. It is `true` when the generated release-history
+  table records the hash, `false` when the table has no matching entry, and
+  `null` when the table is missing or malformed. The hash is computed
+  independently of the table. See [`../json-contract.md`](../json-contract.md).
 
 An unknown deck name is a clean error (exit 1) through the standard envelope,
 and names what is available:
@@ -273,9 +276,11 @@ exit 1 with an error.
 ## `klt deck info`
 
 ```
-klt deck info                 # every registered deck (sky130, gf180mcu, sg13g2)
+klt deck info                # every registered deck
 klt deck info --deck gf180mcu # one deck only
 ```
+
+The example uses a placeholder hash and shows selected device classes.
 
 ```json
 {
@@ -283,15 +288,16 @@ klt deck info --deck gf180mcu # one deck only
   "decks": [
     {
       "deck": "gf180mcu",
-      "content_hash": "sha256:79e71a1e7d84be3cfc82e4c70afbdf7b743ac1f361fb8e981f57831014d2e8b0",
+      "content_hash": "sha256:...",
       "device_classes": [
-        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
-        "diode_nd2ps_06v0", "diode_pd2nw_06v0"
+        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3", "cap_pmos_03v3", "resistor", "diode_nd2ps_06v0",
+        "diode_pd2nw_06v0"
       ],
       "provides": ["curated_drc", "extraction"],
       "released": false,
       "release": null,
-      "unmodeled_rules": ["MSLOT.1", "MT.2b", "MT30.1a"]
+      "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
     }
   ]
 }
@@ -370,11 +376,14 @@ comment by hand, producing a copy that silently stops tracking the deck the
 moment the deck moves, and a citation ("0.15 µm, `poly.1a`") that no reviewer
 could re-check mechanically.
 
+This excerpt from `klt deck rules --deck sky130 --rule poly.width.1 --format json`
+uses `sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+  "content_hash": "sha256:...",
   "nominal_dbu_um": 0.001,
   "rules": [
     {
@@ -551,7 +560,7 @@ field by field, which two separate passes on a real design had to do
         "source_repo": "google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
         "source_path": "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
         "rule_id": "gf180mcu_fd_pr__diode_pd2nw_06v0",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]

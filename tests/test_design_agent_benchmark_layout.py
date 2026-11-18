@@ -521,7 +521,7 @@ def test_run_set_rejects_refine_worse_than_its_seed(runs: list[dict[str, Any]]) 
 
 
 def _klt(*argv: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 -- fixed argv, no shell
+    return subprocess.run(  # -- fixed argv, no shell
         [sys.executable, "-m", "klayout_tools.cli", *argv],
         capture_output=True,
         text=True,

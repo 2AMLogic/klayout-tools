@@ -20,7 +20,13 @@ def check_label(check: Mapping[str, Any]) -> str:
 
 
 def _what_present(c: dict) -> str:
-    return f"{c['role']} {c['path']} present"
+    if c.get("role") == "testbench_dependency":
+        return f"dependency {c['path']} of {c['testbench']} present"
+    what = f"{c['role']} {c['path']} present"
+    benches = c.get("testbenches")
+    if benches:
+        what += f" (bench: {', '.join(benches)})"
+    return what
 
 
 def _what_stream_readable(c: dict) -> str:
@@ -35,14 +41,29 @@ def _what_dbu(c: dict) -> str:
     return f"dbu on grid ({c['dbu']})"
 
 
+def documented_suffix(check: Mapping[str, Any]) -> str:
+    """The validation-only marker for a command check that carries a
+    ``documented_argv`` (issue #5463): the command that ran only validated the
+    bench, and this is the invocation that reproduces it. Empty otherwise."""
+    argv = check.get("documented_argv")
+    if not argv:
+        return ""
+    return f" (validates only; documented: {' '.join(argv)})"
+
+
 def _what_command(c: dict) -> str:
     label = check_label(c)
     status = c.get("error") or f"exit {c['exit_status']}"
-    return f"{c['role']} {label}: {' '.join(c['argv'])} ({status})"
+    argv = " ".join(c["argv"])
+    return f"{c['role']} {label}: {argv} ({status}){documented_suffix(c)}"
 
 
 def _what_unbenched(c: dict) -> str:
     return f"row {c['row']} has no testbench (issue #{c['issue']})"
+
+
+def _what_dependency_binding(c: dict) -> str:
+    return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
 
 
 def _what_citation(c: dict) -> str:
@@ -77,11 +98,21 @@ _WHAT_RENDERERS = {
     "dbu_on_grid": _what_dbu,
     "command": _what_command,
     "unbenched_row": _what_unbenched,
+    "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,
     "pin": _what_pin,
 }
+
+
+def note_lines(result: Mapping[str, Any]) -> list[str]:
+    """``[NOTE]`` text lines for a ``--check`` result's informational
+    notes (issue #5862: a yaml entry's raw bytes drifted while its
+    canonical hash held). Empty for a result carrying none."""
+    return [
+        f"[NOTE] {note['path']}: {note['note']}" for note in result.get("notes", [])
+    ]
 
 
 def attestation_check_line(check: dict) -> str:
@@ -94,4 +125,9 @@ def attestation_check_line(check: dict) -> str:
         tail = failed_output_tail(check)
         if tail:
             line += "\n" + "\n".join(f"    | {row}" for row in tail.splitlines())
+        # Live-only, and only ever present on a generate-mode result: see
+        # `signoff_attest_live.attach_record_check_hints` (issue #5538).
+        hint = check.get("hint")
+        if hint:
+            line += f"\n    hint: {hint}"
     return line

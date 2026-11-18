@@ -375,10 +375,8 @@ def _apply_mutant_edits(
     (``_all_offsets``/``_line_at`` to locate and uniqueness-check the anchor,
     ``MutationVariantPlan._resolve_one`` to resolve it to an exact byte span,
     ``_replace_exact`` to splice it) exactly as
-    ``functional_verification._resolve_mutation_proposals`` does, rather than
-    re-deriving byte-exact replacement here. Two deliberate differences from
-    that caller, both because a *netlist* mutant is a different unit than an
-    RTL proposal:
+    ``functional_verification_mutation_proposals._resolve_mutation_proposals`` does.
+    A *netlist* mutant differs from an RTL proposal in two ways:
 
     * **Whole-file anchor uniqueness.** ``_resolve_one`` requires the anchor
       to be unique on a declared line; issue #2254's requirement 1 is
@@ -1833,7 +1831,7 @@ def run_attempt(
     error: str | None = None
     try:
         descriptor_arg, candidate_arg = provider(task, attempt_index, repo_root)
-    except Exception as exc:  # noqa: BLE001 -- see docstring: any provider failure is a scored attempt failure, never a crash
+    except Exception as exc:  # see docstring: provider failure is scored, never a crash
         error = f"candidate provider failed: {exc}"
     else:
         cached = None
@@ -2628,7 +2626,7 @@ def _invoke_round_provider(
     try:
         before = _child_directories(scratch_root)
         descriptor_arg, candidate_arg = provider(round_task, round_index, repo_root)
-    except Exception as exc:  # noqa: BLE001 -- see run_attempt's identical rationale
+    except Exception as exc:  # -- see run_attempt's identical rationale
         return (
             None,
             None,

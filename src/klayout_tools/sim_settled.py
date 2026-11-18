@@ -65,8 +65,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_crossings, sim_cycle_mean, sim_window
+from . import sim_crossings, sim_cycle_mean, sim_measurement_kind, sim_window
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
+from .sim_forms import other_forms, validate_exclusive_form
 
 #: Reason tokens a failed ``settled`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -87,27 +89,10 @@ _SIGNAL_KEYS = frozenset({"signal", "tol_pct"})
 
 _VECTOR_PREFIX = "__klt_settled_"
 
-#: Every other measurement form an entry must not also declare.
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-    "search",
-    "eye",
-    "step_resolution",
-)
-
 
 def is_settled(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``settled``."""
-    return spec.get("settled") is not None
+    return sim_measurement_kind.declares(spec, "settled")
 
 
 def settled_measurements(
@@ -151,12 +136,7 @@ def _validate_tracked(name: Any, key: str, body: Any) -> None:
         )
     sim_crossings._validate_signal(name, body.get("signal"))
     tol = body.get("tol_pct")
-    if (
-        isinstance(tol, bool)
-        or not isinstance(tol, (int, float))
-        or not math.isfinite(tol)
-        or tol < 0
-    ):
+    if not is_finite_number(tol) or tol < 0:
         raise SimError(
             f"measurement '{name}': settled.{key}.tol_pct is required and "
             f"must be a finite number >= 0, in percent (got {tol!r})"
@@ -202,29 +182,21 @@ def validate_settled_spec(name: Any, body: Any) -> None:
     sim_window.window_bound(name, body, "from", form="settled")
 
 
-def validate_form_exclusive(spec: dict[str, Any]) -> bool:
-    """For an entry declaring ``settled``: refuse any other form beside it and
-    validate the body. Returns ``True`` for such an entry."""
-    if not is_settled(spec):
-        return False
-    name = spec.get("name")
-    if name is None:
-        raise SimError("each request.measurements[] entry requires 'name'")
-    others = [form for form in _FORMS if spec.get(form) is not None]
-    if others:
-        raise SimError(
-            f"measurement '{name}' declares 'settled' together with "
-            f"'{others[0]}': they are alternative forms of a measurement -- "
-            "declare exactly one (use a separate measurements[] entry for "
-            "the other)"
-        )
+def _validate_exclusive_body(name: Any, spec: dict[str, Any]) -> None:
     if spec.get("optional") is True:
         raise SimError(
             f"measurement '{name}': 'optional' is not supported on "
             "'settled' (a missing series is a read failure, not absent data)"
         )
     validate_settled_spec(name, spec["settled"])
-    return True
+
+
+def validate_form_exclusive(spec: dict[str, Any]) -> bool:
+    """For an entry declaring ``settled``: refuse any other form beside it and
+    validate the body. Returns ``True`` for such an entry."""
+    return validate_exclusive_form(
+        spec, "settled", other_forms("settled"), _validate_exclusive_body
+    )
 
 
 def validate_settled_context(
@@ -235,13 +207,13 @@ def validate_settled_context(
     declared = settled_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "tran":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'settled', which "
-            "compares transient windows and so requires "
-            f'analysis.kind "tran" (got {analysis.get("kind")!r})'
-        )
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="settled",
+        required="tran",
+        explanation="compares transient windows",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -249,9 +221,13 @@ def validate_settled_context(
 # --------------------------------------------------------------------------- #
 
 
+#: Prefix of the rawfile each settled measurement writes per corner.
+_RAWFILE_PREFIX = "settled"
+
+
 def rawfile_path(corner_dir: str, index: int) -> str:
     """Where settled measurement number ``index`` writes its rawfile."""
-    return os.path.join(corner_dir, f"settled_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, _RAWFILE_PREFIX, index)
 
 
 def control_lines(
@@ -417,14 +393,13 @@ def extract_corner_settleds(
     """``{position in measurements_spec: outcome}`` for every settled entry of
     one finished corner. Never raises: any rawfile problem becomes that
     measurement's own ``error``."""
-    outcomes: dict[int, SettledOutcome] = {}
-    index = 0
-    for position, spec in enumerate(measurements_spec):
-        if not is_settled(spec):
-            continue
-        outcomes[position] = _extract_one(spec, rawfile_path(corner_dir, index))
-        index += 1
-    return outcomes
+    return sim_measurement_kind.extract_indexed(
+        measurements_spec,
+        corner_dir,
+        prefix=_RAWFILE_PREFIX,
+        predicate=is_settled,
+        extractor=_extract_one,
+    )
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> SettledOutcome:

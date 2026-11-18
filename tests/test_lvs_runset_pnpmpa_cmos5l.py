@@ -21,7 +21,7 @@ def _pnpmpa_inputs():
 
     try:
         root = pdk.find_pdk(variant="ihp-sg13cmos5l")["assets"]["klayout"]
-    except Exception:  # noqa: BLE001 - any resolution failure means "absent"
+    except Exception:  # - any resolution failure means "absent"
         pytest.skip("no ihp-sg13cmos5l PDK install")
     lvs_dir = os.path.join(root, "tech", "lvs")
     case = os.path.join(lvs_dir, "testing", "testcases", "unit", "bjt_devices")

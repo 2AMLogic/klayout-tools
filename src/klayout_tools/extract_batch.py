@@ -46,7 +46,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from . import _batch_common, _provenance, remote_transport, sim_batch
+from . import _batch_collect, _batch_common, remote_transport, sim_batch
 from . import netlist_batch as _nb
 from .extract_spef import ExtractError
 from .netlist import NetlistError
@@ -274,62 +274,36 @@ def build_job_spec(
     ``klt extract request.json`` there under ``timeout`` (report to
     ``report.json``, stderr teed to ``stderr.log``), then copy the netlist to
     ``$EDA_OUTPUT_DIR``."""
-    version = (
-        client_version if client_version is not None else _provenance._klt_version()
+    command = _batch_common.build_job_command(
+        tree_member=BATCH_TREE_FILENAME,
+        run=(
+            f"{BACKEND_ENV}=local timeout --kill-after=30 "
+            f"{int(math.ceil(timeout_s))} "
+            f"klt extract {BATCH_REQUEST_FILENAME} --format json"
+        ),
+        err_cls=ExtractError,
+        stdout_target=sim_batch.BATCH_REPORT_FILENAME,
+        client_version=client_version,
+        version_check=version_check,
+        tree_root_subdir="",
+        extra_tail=(
+            ""
+            if no_netlist
+            else (
+                f"if [ -f {BATCH_NETLIST_FILENAME} ]; then "
+                f"cp {BATCH_NETLIST_FILENAME} "
+                f'"$EDA_OUTPUT_DIR/{BATCH_NETLIST_FILENAME}"; fi'
+            )
+        ),
     )
-    try:
-        preflight = sim_batch._runner_preflight_script(
-            version, enforce=version_check == "enforce"
-        )
-    except Exception as exc:  # SimError: a client version unsafe to embed
-        raise ExtractError(str(exc)) from exc
-    out = '"$EDA_OUTPUT_DIR/{}"'
-    setup = " && ".join(
-        [
-            'EDA_INPUT_DIR=$(cd "$EDA_INPUT_DIR" && pwd -P)',
-            'EDA_OUTPUT_DIR=$(cd "$EDA_OUTPUT_DIR" && pwd -P)',
-            "w=$(mktemp -d)",
-            f'tar -xzf "$EDA_INPUT_DIR/{BATCH_TREE_FILENAME}" -C "$w"',
-            'cd "$w"',
-            'printf \'%s\\n%s\\n\' "$w" "$(pwd -P)" >'
-            + out.format(_batch_common.BATCH_TREE_ROOT_FILENAME),
-        ]
-    )
-    run = (
-        f"{BACKEND_ENV}=local timeout --kill-after=30 {int(math.ceil(timeout_s))} "
-        f"klt extract {BATCH_REQUEST_FILENAME} --format json"
-        f' > "$EDA_OUTPUT_DIR/{sim_batch.BATCH_REPORT_FILENAME}"'
-        f' 2> >(tee "$EDA_OUTPUT_DIR/{sim_batch.BATCH_STDERR_FILENAME}" >&2)'
-    )
-    copy = (
-        ""
-        if no_netlist
-        else (
-            f"; if [ -f {BATCH_NETLIST_FILENAME} ]; then cp {BATCH_NETLIST_FILENAME} "
-            f"{out.format(BATCH_NETLIST_FILENAME)}; fi"
-        )
-    )
-    command = (
-        preflight
-        + setup
-        + " && "
-        + run
-        + "; rc=$?; wait $! 2>/dev/null"
-        + copy
-        + "; exit $rc"
-    )
-    return sim_batch.BatchJobSpec(
+    return _batch_common.build_job_spec(
         cmd=command,
         tool=BATCH_JOB_TOOL,
         pdk_variant=pdk,
-        timeout_seconds=_batch_common.job_timeout_seconds(timeout_s),
-        inputs=(
-            sim_batch.BatchJobInput(
-                name=BATCH_TREE_FILENAME,
-                label="layout tree",
-                local_path=tarball_path,
-            ),
-        ),
+        tree_member=BATCH_TREE_FILENAME,
+        tree_label="layout tree",
+        tarball_path=tarball_path,
+        timeout_s=timeout_s,
     )
 
 
@@ -409,32 +383,15 @@ def _collect(
     """Collect ``outputs/``. A job that did not finish ``done`` becomes an
     :class:`ExtractError` carrying the runner's own error, else the tail of
     its ``stderr.log`` (the ``--progress`` lines show how far it got)."""
-    done = status.get("state") == "done" and (
-        sim_batch._status_exit_code(status) in (0, None)
-    )
-    if done:
-        try:
-            sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        except sim_batch.BatchError as exc:
-            raise _transport_error(job_id, exc) from exc
-        return
-    runner_error: dict[str, Any] | None = None
-    stderr_tail = ""
-    try:
-        sim_batch.collect_outputs(config, job_id, collected, runner=runner)
-        runner_error, note = _nb._runner_error(collected)
-        if runner_error is None:
-            stderr_tail = _nb._remote_stderr_tail(collected)
-    except sim_batch.BatchError as exc:
-        note = str(exc)
-    raise _job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=sim_batch.report_job_uri(config, job_id).rstrip("/")
-        + "/harness.log",
+    _batch_collect.collect(
+        config,
+        job_id,
+        status,
+        collected,
+        runner=runner,
+        err_cls=ExtractError,
+        no_fallback=_NO_FALLBACK,
+        job_failure=_job_failure,
     )
 
 
@@ -444,30 +401,14 @@ def _collect(
 
 
 def _read_report(collected: str, job_id: str) -> dict[str, Any]:
-    try:
-        report = sim_batch.read_collected_report(collected)
-    except sim_batch.BatchError as exc:
-        raise ExtractError(
-            f"batch job {job_id}: {exc} {_NO_FALLBACK}",
-            code=_batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        ) from exc
-    kind, error = sim_batch._classify_collected_report(report)
-    if kind == "error" and error is not None:
-        raise ExtractError(
-            f"batch job {job_id}: the runner's klt reported: "
-            f"{error['message']} {_NO_FALLBACK}",
-            code=error.get("code") or _batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    if "netlist_path" not in report:
-        raise ExtractError(
-            f"batch job {job_id}: the collected {sim_batch.BATCH_REPORT_FILENAME} "
-            f"is not a `klt extract` report {_NO_FALLBACK}",
-            code=_batch_common.BATCH_JOB_FAILED_CODE,
-            job_id=job_id,
-        )
-    return report
+    return _batch_collect.read_collected_unit_report(
+        collected,
+        job_id,
+        err_cls=ExtractError,
+        no_fallback=_NO_FALLBACK,
+        validate=lambda report: "netlist_path" in report,
+        what="a `klt extract` report",
+    )
 
 
 def _write_collected_netlist(
@@ -575,7 +516,7 @@ def run_extract_batch(
             "input_bytes": tree.total_bytes,
             "timeout_s": timeout_s,
             "job_ceiling": ceiling,
-            "stderr_tail": _nb._remote_stderr_tail(collected),
+            "stderr_tail": _batch_collect.remote_stderr_tail(collected),
         }
     environment = report.get("environment")
     report["environment"] = {

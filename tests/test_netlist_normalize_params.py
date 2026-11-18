@@ -122,6 +122,39 @@ def test_sky130_diode_subckt_call_area_only_pj_and_mult():
         )
 
 
+def test_sg13g2_antenna_diode_subckt_call_derives_area_and_perimeter():
+    """Issue #5491: sg13g2's antenna-diode cells take `l`/`w`, not
+    `area`/`perim`, so the ingestion direction derives the `D` card's
+    `A`/`P` from the rectangle -- the exact inverse of the forward
+    direction's `equivalent_rectangle_um` recovery, which is what keeps
+    `klt lvs` matching an extract-written netlist read back."""
+    from klayout_tools.decks.sg13g2 import EXTRACTION_DECK
+
+    assert {d.name for d in EXTRACTION_DECK.diodes} == {"dantenna", "dpantenna"}
+    for diode in EXTRACTION_DECK.diodes:
+        out = normalize_reference_netlist(
+            f"X1 an ca {diode.name} l=4.5U w=4.5U\n", deck="sg13g2"
+        )
+        assert f"D1 an ca {diode.name} A=20.25P P=18U" in out, diode.name
+        # Auto-resolution (no deck) hits the same curated table.
+        auto = normalize_reference_netlist(f"XD2 an ca {diode.name} l=2U w=2U\n")
+        assert f"D2 an ca {diode.name} A=4P P=8U" in auto, diode.name
+
+
+def test_sg13g2_antenna_diode_subckt_call_non_square_and_errors():
+    out = normalize_reference_netlist("X1 an ca dantenna l=3U w=1U\n", deck="sg13g2")
+    assert "D1 an ca dantenna A=3P P=8U" in out
+    # Both dimensions are required together, as for resistors/capacitors.
+    with pytest.raises(NormalizeError, match="must be given together"):
+        normalize_reference_netlist("X1 an ca dantenna l=3U\n", deck="sg13g2")
+    with pytest.raises(NormalizeError, match="multi"):
+        normalize_reference_netlist("X1 an ca dantenna l=3U w=1U m=2\n", deck="sg13g2")
+    # A geometry-free call still converts, leaving A/P at the class default
+    # rather than inventing the subcircuit's own `l=780n w=780n` defaults.
+    bare = normalize_reference_netlist("X1 an ca dpantenna\n", deck="sg13g2")
+    assert "D1 an ca dpantenna" in bare and " A=" not in bare
+
+
 _OVERRIDE_REF = (
     ".subckt cell a b SCALE=1\n"
     "XM1 a b b b sky130_fd_pr__nfet_01v8 L=1 W=2 nf=1 m={SCALE}\n"

@@ -6,7 +6,7 @@ import argparse
 from collections.abc import Callable
 from typing import Any
 
-from . import sim_cmd
+from . import sim_check_cmd
 
 
 def add_wait_for_capacity_arg(parser: argparse.ArgumentParser, tail: str) -> None:
@@ -66,9 +66,12 @@ def add_sim_parser(
             "submit several independent request files to the batch fleet in "
             "one invocation (issue #2869) instead of the single positional "
             "request: at most --max-in-flight run at once, the rest queue, "
-            "and one aggregate JSON envelope reports every request. Always "
-            "backend `batch`; never falls back to local ngspice. See "
-            "docs/cli/sim.md 'Submitting a set of requests'."
+            "and one aggregate JSON envelope reports every request. Each "
+            "member gets its own directory under -o named after the request "
+            "stem (a trailing `.request.json` is stripped); read "
+            "`requests[].report` from the envelope to locate a member's "
+            "report. Always backend `batch`; never falls back to local "
+            "ngspice. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
@@ -86,8 +89,11 @@ def add_sim_parser(
         help=(
             "with --batch-set, re-submit a request refused for fleet capacity "
             "(batch_no_capacity / batch_concurrency_cap) up to N more times "
-            "with doubling backoff (default: 0, off); other failures are "
-            "never retried (issue #3520)"
+            "with doubling backoff; on a sharded single request, re-run the "
+            "shards lost to a capacity refusal in up to N more passes once "
+            "the other shards finish, each with a fresh --wait-for-capacity "
+            "budget (default: 0, off); other failures are never retried "
+            "(issues #3520, #5567)"
         ),
     )
     sim_parser.add_argument(
@@ -116,10 +122,13 @@ def add_sim_parser(
         default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -129,7 +138,15 @@ def add_sim_parser(
         help=(
             "override where per-corner logs/rawfiles are written when the "
             "request sets options.keep_artifacts "
-            "(default: a `.klt/sim/` directory next to the request file)"
+            "(default: a `.klt/sim/` directory next to the request file). "
+            "Without --report-out, a completed run also writes its report "
+            "envelope to <dir>/report.json (issue #5776); --report-out "
+            "chooses another path instead and wins when given. "
+            "With --batch-set, -o is instead the parent of one directory "
+            "per member, each named after its request's stem (a trailing "
+            "`.request.json` is stripped); `requests[].report` in the "
+            "aggregate envelope is the authoritative path to each member's "
+            "report. See docs/cli/sim.md 'Submitting a set of requests'."
         ),
     )
     sim_parser.add_argument(
@@ -155,7 +172,7 @@ def add_sim_parser(
             "of submitting a new one: "
             "waits for it (bounded by the request's `batch.poll_timeout_s`) "
             "and reports it, never re-launching. Pass the same request the "
-            "job was submitted from, with --backend batch. See "
+            "job was submitted from (and --hosts), with --backend batch. See "
             "docs/cli/sim.md."
         ),
     )
@@ -210,8 +227,9 @@ def add_sim_parser(
             "shard the expanded corner/Monte-Carlo unit list across this "
             "many hosts and merge the per-shard reports (default: 1, or "
             "the request's `remote.hosts` field); overrides the request "
-            "field when given. Currently implemented for `local`/"
-            "`local-parallel` only -- see docs/cli/sim.md."
+            "field when given. `local`/`local-parallel` shard in-process, "
+            "`remote` provisions this many instances, `batch` submits one "
+            "fleet job per shard -- see docs/cli/sim.md 'Fleet sharding'."
         ),
     )
     sim_parser.add_argument(
@@ -282,10 +300,12 @@ def add_sim_parser(
             "request's own `options.resume` when given. For a `decks` "
             "request, skips each unit whose <outdir>/<id>/unit.json "
             "completion record still matches and verifies (local, "
-            "local-parallel, batch). With --batch-set, forwarded to every "
-            "request: a sharded request re-attaches to the shard jobs "
-            "recorded in its own directory and resubmits only the lost "
-            "ones. See docs/cli/sim.md."
+            "local-parallel, batch). On a sharded `batch` run, first "
+            "harvests the retained shard map (batch-shards.json): shards "
+            "whose jobs already finished are collected, and only the "
+            "unlaunched/unfinished/failed ones are submitted again. With "
+            "--batch-set, forwarded to every request the same way. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -406,4 +426,22 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
-    sim_parser.set_defaults(func=sim_cmd.run)
+    sim_parser.add_argument(
+        "--check",
+        dest="check",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "instead of simulating, re-verify a finished klt sim report's "
+            "environment.netlist_closure/netlist_identity against the working "
+            "tree (no engine, network or PDK). Exit 0 match, 3 drifted, 1 "
+            "unreadable report. See docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
+        "--root",
+        dest="root",
+        default=None,
+        help="with --check: directory to anchor scope=repo closure entries to",
+    )
+    sim_parser.set_defaults(func=sim_check_cmd.run)

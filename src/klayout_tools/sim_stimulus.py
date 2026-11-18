@@ -34,13 +34,12 @@ netlist) take the caller's set of existing element names.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
 from . import _spice_number as spice_number
 from . import sim_steps, sim_supply_relative
-from ._jsonnum import is_number
+from ._jsonnum import require_finite_number
 
 #: Request key that carries the declaration, and the report key that echoes it.
 REQUEST_KEY = "stimulus"
@@ -78,11 +77,7 @@ class StimulusError(Exception):
 
 def _number(value: Any, field: str, *, minimum: float | None = None) -> float:
     """``value`` as a finite float; a bool or non-number is refused by name."""
-    if not is_number(value):
-        raise StimulusError(f"{field} must be a number (got {value!r})")
-    number = float(value)
-    if not math.isfinite(number):
-        raise StimulusError(f"{field} must be finite (got {value!r})")
+    number = require_finite_number(value, StimulusError, field)
     if minimum is not None and number < minimum:
         code = CODE_BAD_TIME if field.endswith("_s") else CODE_INVALID
         raise StimulusError(f"{field} must be >= {minimum:g} (got {number:g})", code)
@@ -387,7 +382,7 @@ def supply_key(supply_v: dict[str, Any] | None) -> tuple[tuple[str, float], ...]
     return tuple(sorted((str(k), float(v)) for k, v in (supply_v or {}).items()))
 
 
-class CornerStimulusLines(tuple):  # type: ignore[type-arg]
+class CornerStimulusLines(tuple):
     """Deck lines of a supply-relative schedule (issue #3918).
 
     As a tuple it holds the distinct lines across corners (so a checkpoint

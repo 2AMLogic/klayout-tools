@@ -97,7 +97,16 @@ def run_mypy(paths: list[str] | None = None) -> Counter[Key]:
             f"mypy exited {result.returncode}\n"
             f"stdout: {result.stdout}\nstderr: {result.stderr}"
         )
-    return parse_mypy_json(result.stdout)
+    counts = parse_mypy_json(result.stdout)
+    # Exit 1 *means* mypy reported errors, so zero parsed errors contradicts it:
+    # the tool did not run (e.g. `No module named mypy`). Never read that as a
+    # clean run -- it would pass the gate and write an empty baseline (#6368).
+    if result.returncode == 1 and not counts:
+        raise RuntimeError(
+            "mypy exited 1 but reported no errors; treating as a tool failure\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return counts
 
 
 def environment_problems(counts: Counter[Key]) -> list[Key]:
@@ -225,9 +234,12 @@ def main(argv: list[str] | None = None) -> int:
         help="regenerate the baseline from current mypy output instead of checking",
     )
     args = parser.parse_args(argv)
-    if args.update_baseline:
-        return _cmd_update_baseline(args)
-    return _cmd_check(args)
+    command = _cmd_update_baseline if args.update_baseline else _cmd_check
+    try:
+        return command(args)
+    except RuntimeError as exc:  # mypy could not be run / gave unusable output
+        _fail(str(exc))
+        return 2
 
 
 if __name__ == "__main__":

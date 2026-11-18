@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, replay_upload
 from klayout_tools import _provenance, place_and_route, sim_batch
 from klayout_tools import place_and_route_batch as par_batch
 from klayout_tools.cli import main
@@ -111,12 +111,12 @@ class _FakeRunner:
         elif "cp" in argv:
             source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
             if destination.startswith("s3://"):
-                self._upload_file(source, destination)
+                replay_upload(argv, source, destination, self._upload_file)
             else:
                 return self._download(source, destination)
         return fake_completed()
 
-    def _upload_file(self, source: str, destination: str) -> None:
+    def _upload_file(self, source: str | Path, destination: str) -> None:
         job_id, _, rest = destination.split("/", 4)[-1].partition("/")
         kept = self.upload(job_id, rest.removeprefix("inputs/"))
         kept.parent.mkdir(parents=True, exist_ok=True)
@@ -209,14 +209,6 @@ def test_resolve_backend_precedence(monkeypatch):
 def test_host_default_batch_yields_to_local_for_a_single_unit(monkeypatch):
     monkeypatch.setenv(par_batch.BACKEND_ENV, "batch")
     assert par_batch.resolve_backend(None, {}, units=1) == "local"
-
-
-def test_explicit_batch_on_a_single_unit_is_refused(monkeypatch):
-    monkeypatch.delenv(par_batch.BACKEND_ENV, raising=False)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend("batch", {}, units=1)
-    with pytest.raises(PlaceAndRouteError, match="at least two corners"):
-        par_batch.resolve_backend(None, {"backend": "batch"}, units=1)
 
 
 def test_unsupported_backend_is_refused(monkeypatch):

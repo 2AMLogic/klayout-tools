@@ -14,8 +14,14 @@ simulator invocation per grid point. The emitted file is parsed back through
 arc also carries `rise_power`/`fall_power` internal-energy tables and each
 cell its per-state `leakage_power` (issue #2503). A request's `cells` array
 characterizes several cells into ONE `.lib`; `--compare-to` diffs the result
-against a reference (vendor) library. Scope: one corner per invocation,
-combinational arcs only. Takes a request-document path (like `klt sim`/`klt
+against a reference (vendor) library. Scope: one corner per invocation; every
+combinational timing arc, plus -- for a cell declaring `cell.clock_pin` (edge-
+triggered) or `cell.enable_pin` (level-sensitive latch) -- clock-to-output and
+enable-to-output arcs (issues #4755, #5521), a latch's transparent data-to-
+output arcs, and setup/hold constraint arcs for each pin in
+`cell.constrained_pins` (issue #4756). Still not emitted: recovery/removal
+arcs, async set/reset arcs, the `ff`/`latch` state groups, latch time
+borrowing, min-pulse-width. Takes a request-document path (like `klt sim`/`klt
 sta`), not positional file args.
 
 positional arguments:

@@ -220,8 +220,9 @@ from typing import Any
 
 from . import env_provenance, output_lock, pex_async, pex_sim_evidence
 from ._jsonnum import is_number
-from ._paths import _resolve_relative, fold_spice_continuations
+from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
+from ._text import read_text as _read_text
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -240,10 +241,11 @@ from .pex_netlist_text import (
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
-    _read_text,
+    _logical_cards,
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
+from .pex_resistance_graph import _resistance_graph_echo
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -335,10 +337,6 @@ MEASUREMENT_MODE_EXTRACT_ONLY = "extract-only"
 #: Override per run with ``measure_timeout_s`` (``klt pex
 #: --measure-timeout-s``).
 MEASURE_COMMAND_TIMEOUT_S = 1800.0
-
-#: The two sides a ``--measure-command`` is invoked for, in invocation order
-#: -- also the two keys of the report's ``measurement.sides`` object.
-_MEASURE_SIDES = ("schematic", "extracted")
 
 #: A measurement document row's permitted ``status`` values -- the same three
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
@@ -555,30 +553,6 @@ def _parasitic_integrity_report(
         if isinstance(entry, dict) and entry.get("integrity") is not None
     ]
     return {**summary, "nets": nets}
-
-
-def _resistance_graph_echo(
-    parasitics: Mapping[str, Any], r_cut_ohm: float | None
-) -> dict[str, Any]:
-    """The ``extraction.resistance_graph`` block (issue #4037): the request
-    (``r_cut_ohm``) and, per net with a graph result, which scalar the
-    extracted netlist's lumped R used (``resistance_source``) next to both
-    candidate values. ``klt extract`` is the source of every value."""
-    nets = []
-    for entry in parasitics.get("nets") or []:
-        graph = entry.get("resistance_graph") if isinstance(entry, dict) else None
-        if not isinstance(graph, dict):
-            continue
-        nets.append(
-            {
-                "net": entry.get("net"),
-                "net_id": entry.get("net_id"),
-                "resistance_source": graph.get("resistance_source"),
-                "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
-                "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
-            }
-        )
-    return {"r_cut_ohm": r_cut_ohm, "nets": nets}
 
 
 def _strip_quotes(token: str) -> str:
@@ -1430,6 +1404,7 @@ def _device_only_fields(
 
 def _build_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     extracted_report: dict[str, Any],
@@ -1448,7 +1423,6 @@ def _build_delta_rows(
         schematic_measurements = schematic_index.get(corner_id, {})
         for extracted_measurement in corner["measurements"]:
             name = extracted_measurement["name"]
-            spec_row = name if spec_row_prefix is None else f"{spec_row_prefix}.{name}"
             schematic_measurement = schematic_measurements.get(name)
             schematic_value = (
                 schematic_measurement["value"]
@@ -1456,7 +1430,7 @@ def _build_delta_rows(
                 else None
             )
             row = {
-                "spec_row": spec_row,
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
                 "corner_id": corner_id,
                 "schematic_value": schematic_value,
                 "extracted_value": extracted_measurement["value"],
@@ -1518,6 +1492,7 @@ def _static_extracted_failure(
 
 def _unextracted_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     failure_message: str | None = None,
@@ -1540,9 +1515,7 @@ def _unextracted_delta_rows(
         for measurement in corner["measurements"]:
             name = measurement["name"]
             row = {
-                "spec_row": name
-                if spec_row_prefix is None
-                else f"{spec_row_prefix}.{name}",
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
                 "corner_id": corner["corner_id"],
                 "schematic_value": measurement["value"],
                 "extracted_value": None,
@@ -2064,7 +2037,7 @@ def _measure_both_sides(
     sim` calls, nothing else. ``spec_row_prefix`` is ``None`` because there
     is exactly one measurement pair in this mode (and no testbench file to
     name), so a row's ``spec_row`` is the measurement name the caller's own
-    document declared, bare -- the same as a single-testbench run's.
+    document declared, bare, and ``testbench`` is ``null`` (issue #5681).
     """
     side_reports: dict[str, dict[str, Any]] = {}
     sides: dict[str, Any] = {}
@@ -2094,6 +2067,7 @@ def _measure_both_sides(
         }
 
     rows = _build_delta_rows(
+        testbench=None,
         spec_row_prefix=None,
         schematic_report=side_reports["schematic"],
         extracted_report=side_reports["extracted"],
@@ -2421,18 +2395,6 @@ def _flatten_schematic_dut(
 
 
 _STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
-
-
-def _logical_cards(text: str) -> list[str]:
-    """``text``'s SPICE cards with ``+`` continuation lines joined and
-    comments dropped."""
-    return fold_spice_continuations(
-        [
-            line.strip()
-            for line in text.splitlines()
-            if line.strip() and not line.startswith("*")
-        ]
-    )
 
 
 def _device_only_parity(
@@ -3443,11 +3405,8 @@ def run_pex(
             label, schematic_report, extracted_report
         )
 
-        spec_row_prefix = (
-            None
-            if single_testbench
-            else os.path.splitext(os.path.basename(testbench_path))[0]
-        )
+        stem = os.path.splitext(os.path.basename(testbench_path))[0]
+        spec_row_prefix = None if single_testbench else stem
         if extracted_report is None:
             if extracted_failure is None:
                 extracted_failure = _static_extracted_failure(
@@ -3455,6 +3414,7 @@ def run_pex(
                 )
             delta.extend(
                 _unextracted_delta_rows(
+                    testbench=stem,
                     spec_row_prefix=spec_row_prefix,
                     schematic_report=schematic_report,
                     failure_message=extracted_failure[0] if extracted_failure else None,
@@ -3506,6 +3466,7 @@ def run_pex(
         )
 
         rows = _build_delta_rows(
+            testbench=stem,
             spec_row_prefix=spec_row_prefix,
             schematic_report=schematic_report,
             extracted_report=extracted_report,
