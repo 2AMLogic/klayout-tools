@@ -1,10 +1,14 @@
 """``blocks[].cell.ports_from_labels`` -- label-derived ports and the via-stack
 landing search (#2927). Synthetic sky130 macros only (open PDK layer numbers)."""
 
+import json
+
 import klayout.db as kdb
 import pytest
 
+from klayout_tools.cli import main
 from klayout_tools.gen_compose import GenComposeError, _parse_blocks, compose
+from klayout_tools.gen_compose_port_access import _parse_access
 from test_gen_compose import _isolate as _isolate
 from test_gen_compose import pdk_root as pdk_root
 
@@ -279,6 +283,72 @@ def test_access_validation(tmp_path, access, match):
     gds = _two_strip_macro(tmp_path)
     with pytest.raises(GenComposeError, match=match):
         _blocks(gds, _spec(["A"], access))
+
+
+@pytest.mark.parametrize("per_name", [False, True], ids=["shared", "per-name"])
+@pytest.mark.parametrize(
+    "grid",
+    [
+        pytest.param(10**400, id="huge"),
+        pytest.param(-(10**400), id="negative-huge"),
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+        pytest.param(True, id="true"),
+        pytest.param(False, id="false"),
+        pytest.param("1", id="string"),
+        pytest.param(0, id="zero"),
+        pytest.param(-0.5, id="negative"),
+    ],
+)
+def test_cli_access_grid_rejects_invalid_numbers(
+    tmp_path, pdk_root, capsys, per_name, grid
+):
+    access = {**ACCESS, "grid_um": grid}
+    spec = (
+        _spec([{"name": "A", "access": access}], ACCESS)
+        if per_name
+        else _spec(["A"], access)
+    )
+    request = {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "m",
+                "cell": {
+                    "gds_path": _two_strip_macro(tmp_path),
+                    "cell_name": "macro",
+                    "ports_from_labels": spec,
+                },
+            }
+        ],
+        "placement": {"strategy": "row", "order": ["m"]},
+        "options": {"output": str(tmp_path / "top.gds")},
+    }
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    assert main(["gen-compose", str(request_path), "--format", "json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    response = json.loads(captured.err)
+    where = "blocks[0] (id 'm').cell.ports_from_labels"
+    if per_name:
+        where += ".names[0]"
+    assert response["error"]["message"] == (
+        f"{where}.access.grid_um must be a number > 0"
+    )
+    assert "Traceback" not in captured.err
+    assert not (tmp_path / "top.gds").exists()
+
+
+@pytest.mark.parametrize(
+    "grid_fields", [{}, {"grid_um": None}, {"grid_um": 1}, {"grid_um": 0.25}]
+)
+def test_access_grid_optional_and_finite_controls(tmp_path, grid_fields):
+    access = {**ACCESS, **grid_fields}
+    assert _parse_access(access, "access")["grid_um"] == grid_fields.get("grid_um")
+    blocks = _blocks(_two_strip_macro(tmp_path), _spec(["A"], access))
+    assert blocks["m"]["derived_ports"][0]["landing"] is not None
 
 
 def test_compose_reports_derived_ports(tmp_path, pdk_root):

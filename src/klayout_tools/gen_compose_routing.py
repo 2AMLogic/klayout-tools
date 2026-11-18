@@ -62,7 +62,7 @@ import functools
 import math
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number, is_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
@@ -157,7 +157,7 @@ def _endpoint_stub_widen_um(
     if route_layer is None or _port_own_layer(port) != route_layer:
         return None
     pad_width_um = port.get("width_um")
-    if not isinstance(pad_width_um, (int, float)) or isinstance(pad_width_um, bool):
+    if not is_finite_number(pad_width_um):
         return None
     pad_width_um = float(pad_width_um)
     if pad_width_um <= width_um:
