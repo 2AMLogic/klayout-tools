@@ -532,7 +532,13 @@ merge result, so concurrent main changes are represented; the job's
 checkout uses `fetch-depth: 0` for the history) and pushes to main
 against the push's before SHA (covering multi-commit pushes). A missing
 comparison ref fails with fetch instructions instead of silently
-comparing against nothing.
+comparing against nothing. Pushes to `main` additionally get a dedicated
+per-commit verdict from `.github/workflows/file-size-ratchet-main.yml`
+(issue #6285): a merge commit can grow a file past the size either
+parent-side run measured, and the shared `ci.yml` main-run can be
+superseded while pending, so this sibling workflow keys its concurrency
+group on `github.sha` and runs only this checker against the push's
+before SHA.
 
 ## `check_import_boundaries.py`
 
