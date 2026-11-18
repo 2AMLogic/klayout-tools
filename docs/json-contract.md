@@ -1880,21 +1880,33 @@ All eight share one contract:
   the recorded `content_hash`/`layout_sha256`, so a file that disagrees
   reports `drifted`. With no explicit input the behaviour is unchanged
   (additive; no `schema_version` bump, no new response field).
-- **An unresolvable input path is named, not silently `null` (issue #2595,
-  `lvs` only so far).** A committed report that echoes an input back exactly
+- **An unresolvable input path is named, not silently `null` (issue #2595
+  for `lvs`, issue #6466 for `drc`; `erc` carries its own copy).** A
+  committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
   shared convention, not an oversight, and unchanged here. Since #2659 above
   this covers only `lvs`'s `reference` (and any pre-#2659 report's
   bare-string field). But a path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
-  lvs --check` therefore attaches an **additive, optional** `input_not_found`
-  block (`path`, `resolved`, `found_relative_to_report`) to such a
-  `checks[]` entry; `expected`/`actual`/`match`/`status` are unchanged, and
-  the key is absent on a genuine content mismatch. Additive by the envelope
+  lvs --check` (its layout, reference and runset-deck lines) and `klt drc
+  --check` (its `provenance.input.content_hash` line, on a top-level report
+  and on each `reports.curated.`/`reports.native.` side of an `--engine both`
+  envelope) therefore attach an **additive, optional** `input_not_found`
+  block (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
+  `hint`) to such a `checks[]` entry; `expected`/`actual`/`match`/`status` are
+  unchanged, and the key is absent on a genuine content mismatch, on an
+  echo that names no path (`scope: "external"`/`"absent"`, or no field) and
+  on a path that resolves to an existing file. An explicit input override
+  (`klt drc <file> --check`, `klt lvs --layout`) still wins and is the path
+  diagnosed when *it* is missing. `klt drc --check`'s other echoed-path line,
+  `provenance.waivers.content_hash`, carries no such block (it is not routed
+  through the same resolution); its deck line has its own `deck_not_found`
+  block. Additive by the envelope
   rules above — no `schema_version` bump, and a consumer that never reads the
   key sees the bytes it saw before. See
-  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`".
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`" and
+  [`cli/drc.md`](cli/drc.md).
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
