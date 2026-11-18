@@ -222,7 +222,6 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -234,7 +233,7 @@ from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._engine_proc import run_in_group
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -304,7 +303,7 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_x_scan import netlist_x_constant_warning
+from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -1446,7 +1445,7 @@ def run_synthesize(
                 constr_inputs=_ABC_CONSTR_INPUTS,
             ),
             **_missing_timing_warning(abc_log_path, timing),
-            **netlist_x_constant_warning(
+            **netlist_warnings(
                 _read_produced_netlist(netlist_path),
                 cell_library=cell_library,
                 has_tie_cells=cell_library in _TIE_CELLS,
@@ -2456,12 +2455,7 @@ def _resolve_abc_constr_request(
     if not isinstance(driving_cell, str) or not driving_cell:
         raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
     load_ff = raw["load_ff"]
-    if (
-        isinstance(load_ff, bool)
-        or not isinstance(load_ff, (int, float))
-        or not math.isfinite(load_ff)
-        or load_ff <= 0
-    ):
+    if not is_finite_number(load_ff) or load_ff <= 0:
         raise SynthesizeError(
             f"{where}.load_ff must be a finite number greater than zero "
             f"(femtofarads), got {load_ff!r}"
