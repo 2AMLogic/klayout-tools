@@ -48,6 +48,7 @@ def assemble_extract_report(
     parasitics_report: Any,
     path: Any,
     pdk_info: Any,
+    report_parasitics_shape: Any,
     pin_renames: Any,
     pin_ties: Any,
     probe_results: Any,
@@ -295,5 +296,18 @@ def assemble_extract_report(
     # for the full contract. Never replaces `device_count`/`net_count`/
     # `pin_count`/`parasitics.*` above, which stay exactly as documented.
     result["metrics"] = _build_metrics(result, parasitics_report)
+
+    # `--report-parasitics slim` (issue #5816): swap in the slim shape of
+    # the `parasitics` block -- strictly last, so the SPEF writer (which
+    # consumed the full block back in `run_extract`) and `_build_metrics`
+    # above both read the un-slimmed data and slimming corrupts neither.
+    # Applied in place of the full block, never on it: `slim_parasitics_
+    # report` is a pure function and the full object stays untouched for
+    # any still-live reference. `full` (the default, and every run before
+    # this flag existed) never reaches this branch.
+    if report_parasitics_shape == "slim":
+        from .extract_parasitics_slim import slim_parasitics_report
+
+        result["parasitics"] = slim_parasitics_report(result["parasitics"])
 
     return result
