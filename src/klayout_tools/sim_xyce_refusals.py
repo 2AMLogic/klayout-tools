@@ -18,6 +18,7 @@ def refuse_control_block_measurements(
     stress_declared: bool = False,
     transfer_declared: bool = False,
     snm_declared: bool = False,
+    slope_band_declared: bool = False,
     search_declared: bool = False,
     eye_declared: bool = False,
     step_resolution_declared: bool = False,
@@ -97,6 +98,14 @@ def refuse_control_block_measurements(
             "vectors are dumped by ngspice `let`/`write` commands inside a "
             "`.control` block, and the Xyce deck has none; use engine "
             "'ngspice'",
+        ),
+        (
+            slope_band_declared,
+            # Issue #5518: same `.control` let/write boundary as `snm`.
+            "measurements[].slope_band is not supported for engine 'xyce': "
+            "the sweep vectors are dumped by ngspice `let`/`write` commands "
+            "inside a `.control` block, and the Xyce deck has none; use "
+            "engine 'ngspice'",
         ),
         (
             search_declared,

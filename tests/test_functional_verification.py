@@ -2741,7 +2741,8 @@ def test_scan_sdf_diagnostics_drops_a_stdio_spliced_line(tmp_path):
     actionable, dropped = fv._scan_sdf_diagnostics(log)
 
     assert actionable == []
-    # The intact first line still counts; the spliced second one counts nowhere at all.
+    # The intact first line still counts; the spliced second one counts
+    # nowhere at all.
     assert dropped == {"timingcheck": 1}
 
 
@@ -4501,15 +4502,18 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # not find intermodpath!` -- enough to fail the diagnostic gate outright on
 # any real post-route SDF with router-inserted diodes.
 #
-# Reproduced live against Icarus 13.0 through this module (not just read off
-# the issue), which pinned down one thing the issue's own write-up does not
-# say: the failure needs the port bit's net to carry **more than one** entry.
-# A bus-port net whose single entry is the diode's own annotates cleanly even
-# before this fix -- #1619's deferral is enough for it -- but the moment that
-# same net carries a second entry, one of them fails, exactly as #1619 shape
-# (a) describes. That is why this fixture hangs *two* diodes off `ui_in[0]`
-# (a real router inserts one diode per violating pin, so a multi-load input
-# bit collects several) and why the pinned no-fix case
+# Reproduced live against Icarus 13.0 through this module (not just read
+# off the issue). The deciding variable is the port bit's net's *physical
+# fanout*, per issue #5705's one-variable controls on raw `iverilog`/`vvp`
+# 13.0: `$sdf_annotate` creates at most one interconnect modpath per
+# bit-selected top-level port net -- the **last-declared instance's**
+# destination -- and rejects every other load's entry. A bus-port net
+# whose only load is the diode annotates cleanly (fanout 1), but this
+# fixture hangs *two* diodes off `ui_in[0]` (one per violating pin, as a
+# real router inserts), and on that fanout-2 net the first-declared
+# diode's entry is rejected regardless of entry count -- a lone
+# non-last-declared entry fails too; the old "more than one entry"
+# reading is superseded. That is also why the pinned no-fix case
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable`, where the second load is a `specify`-bearing cell) keeps
 # failing: dropping the diode entry there leaves the ordinary shape (b) entry
@@ -4517,8 +4521,9 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 #
 # What makes this subset droppable where the *general* shape (b) case is not
 # is the destination: `klt_diode`'s model has no `specify` block and no
-# output pin at all, so no modpath the entry could annotate exists and no
-# logic observes the pin. `_drop_sdf_zero_delay_physical_only_interconnects`
+# output pin at all, no logic observes the pin, the entry can still be
+# the cap's survivor -- the drop rests on timing emptiness, not "no
+# modpath exists". `_drop_sdf_zero_delay_physical_only_interconnects`
 # removes exactly those entries and reports the count as its own
 # `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
 # identical pin, and *any* entry onto a `specify`-bearing destination, are
@@ -5300,27 +5305,23 @@ async def test_output_settles_within_two_ns(dut):
 def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
     """Issue #1619 shape (b), root-caused rather than fixed -- see the
     module-level comment above :func:`_split_sdf_bus_port_interconnects` for
-    the full writeup.
+    the full writeup and issue #5705 for the measured mechanism.
 
-    Live testing found this shape's failure mode is a *different* Icarus
-    behaviour than shape (a)'s, and not one `_split_sdf_bus_port_
-    interconnects`'s deferral strategy can work around: with a **no-op**
-    cocotb testbench (a test coroutine that returns immediately, never
-    `await`s a trigger), the exact same split fixture used here resolves
-    every entry cleanly -- but with *any* testbench that actually drives the
-    DUT and awaits a `Timer` (the realistic case, and every other test in
-    this file), the run deterministically raises with the deferred entry
-    unresolved, reproduced identically across a clean `.klt/` build
-    directory, a fresh Python interpreter, and a fresh `klt` CLI subprocess
-    invocation. The no-op-vs-driven-testbench split points at a genuine race
-    between Icarus's own `$sdf_annotate` intermodpath insertion and VPI
-    callback scheduling once the simulator actually advances past time 0 --
-    not something this module's own generated wrapper/shim/SDF-splitting
-    code can control from the outside. This test pins the *realistic*
-    (driven-testbench) outcome down: it must keep raising, not silently
-    start passing (which would mean either Icarus's own behaviour changed,
-    or a future change here papered over the failure without actually
-    resolving it)."""
+    The failure is Icarus's one-modpath-per-bit-selected-port-net cap, not
+    something `_split_sdf_bus_port_interconnects`'s deferral can work
+    around: on this fixture's fanout-2 `a[0]` net, `$sdf_annotate`
+    annotates only the last-declared instance's destination (`u_d`, the
+    diode); the `a[0] u1.in` entry is rejected deterministically, in
+    both SDF entry orders. (#5705 measured the same verdicts under both
+    an idle and a fully driving plain-Verilog bench; the cocotb
+    no-op-vs-driven flip recorded in #1619's era may still be real on
+    top of the cap, but no race is needed to explain the rejection.)
+    The survivor is fixed by netlist declaration order, which the split
+    never touches, so reordering or deferring cannot help. This test
+    pins this fixture's outcome down: it must keep raising, not
+    silently start passing (which would mean either Icarus's own
+    behaviour changed, or a future change here papered over the failure
+    without actually resolving it)."""
     tmp_path.joinpath("bus_fanout_in.v").write_text(
         _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
     )
