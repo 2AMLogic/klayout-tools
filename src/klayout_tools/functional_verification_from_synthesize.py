@@ -101,13 +101,24 @@ def _validate_option(raw: Any) -> tuple[str, str | None]:
 
 
 def resolve_from_synthesize(
-    options: Any, request_dir: str, hdl_toplevel: str, envelope
+    options: Any,
+    request_dir: str,
+    hdl_toplevel: str,
+    envelope,
+    *,
+    pdk_cell_library: str | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
     """Resolve and verify ``options.from_synthesize``.
 
     Returns ``(netlist_path, response_block)`` or ``None`` when the key is
     absent. Raises ``FunctionalVerificationError`` on any failure to verify;
     runs before any build.
+
+    ``pdk_cell_library`` (issue #5782, the request's ``pdk.cell_library``)
+    adds the deck cross-check against the loaded report's
+    ``provenance.deck.name`` prefix: models resolved for a library the
+    netlist does not instantiate would not elaborate, and the report is
+    already loaded here, so the check needs no second read.
     """
     if not has_from_synthesize(options):
         return None
@@ -121,6 +132,10 @@ def resolve_from_synthesize(
             f"options.from_synthesize.report '{report_rel}' is not a klt "
             "synthesize report (no netlist_path)"
         )
+    if pdk_cell_library is not None:
+        from .functional_verification_pdk import check_deck_cell_library
+
+        check_deck_cell_library(pdk_cell_library, report)
     report_top = report.get("hdl_toplevel")
     if report_top != hdl_toplevel:
         raise _err(
@@ -165,19 +180,49 @@ def resolve_from_synthesize(
 
 
 def resolve_sources_with_synthesize(
-    request_doc: dict[str, Any], request_dir: str, hdl_toplevel: str, envelope
+    request_doc: dict[str, Any],
+    request_dir: str,
+    hdl_toplevel: str,
+    envelope,
+    *,
+    pdk_input: Any = None,
 ) -> tuple[list[str], dict[str, Any] | None]:
-    """The effective ``sources`` (verified netlist first) and the response
-    block, or ``(sources, None)`` when ``options.from_synthesize`` is unused."""
+    """The effective ``sources`` and the response block, or ``(sources,
+    None)`` when ``options.from_synthesize`` is unused.
+
+    Composition order (issue #5782): ``[verified netlist, *resolved PDK cell
+    models, *caller sources]`` -- netlist and models both precede the
+    testbench's own sources, and the models' own order is the resolver's
+    dependency order (``primitives.v`` before ``<lib>.v``). A model the
+    caller already lists in ``sources`` verbatim is not prepended twice.
+
+    ``pdk_input`` is the merged :class:`~.functional_verification_pdk.PdkInput`
+    or ``None`` (no pdk input: byte-identical to before the issue)."""
     synth = resolve_from_synthesize(
-        request_doc.get("options"), request_dir, hdl_toplevel, envelope
+        request_doc.get("options"),
+        request_dir,
+        hdl_toplevel,
+        envelope,
+        pdk_cell_library=(pdk_input.cell_library if pdk_input is not None else None),
     )
     sources = _resolve_sources(
         request_doc.get("sources"), request_dir, optional=synth is not None
     )
+    if pdk_input is None:
+        if synth is None:
+            return sources, None
+        return [synth[0], *sources], synth[1]
+    from .functional_verification_pdk import resolve_pdk_cell_models
+
+    models, _info = resolve_pdk_cell_models(pdk_input)
+    # A model the caller already listed in ``sources`` compiles once, in the
+    # resolver's dependency order -- the caller's copy moves to the model
+    # block rather than staying put (which would leave ``<lib>.v`` compiling
+    # before the ``primitives.v`` UDPs it instantiates).
+    sources = [source for source in sources if source not in models]
     if synth is None:
-        return sources, None
-    return [synth[0], *sources], synth[1]
+        return [*models, *sources], None
+    return [synth[0], *models, *sources], synth[1]
 
 
 def with_from_synthesize(

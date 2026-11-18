@@ -10,10 +10,12 @@ from . import functional_verification_cmd
 
 def add_functional_verification_parser(
     subparsers: argparse._SubParsersAction,
+    _add_pdk_args: Callable[..., Any],
     _add_format_arg: Callable[..., Any],
 ) -> None:
     """Register the ``functional-verification`` verb: run a cocotb
-    regression against Icarus/Verilator.
+    regression against Icarus/Verilator. Issue #5782 added the
+    ``--pdk``/``--pdk-root`` args.
     """
     functional_verification_parser = subparsers.add_parser(
         "functional-verification",
@@ -87,6 +89,13 @@ def add_functional_verification_parser(
             "created if missing, relative paths resolve against the cwd. "
             "Request-relative source paths still resolve against the "
             "request's own directory (or the --base-dir override)"
+        ),
+    )
+    _add_pdk_args(
+        functional_verification_parser,
+        pdk_help=(
+            "PDK variant to resolve a request.pdk block's cell models from "
+            "(e.g. sky130A); overrides request.pdk.variant (issue #5782)"
         ),
     )
     _add_format_arg(functional_verification_parser)
