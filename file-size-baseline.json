@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4782
+      "lines": 4758
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -361,7 +361,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4940
+      "lines": 4936
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -609,7 +609,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1231
+      "lines": 1230
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
@@ -849,7 +849,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6586
+      "lines": 6564
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

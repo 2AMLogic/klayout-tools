@@ -41,8 +41,9 @@ set -euo pipefail
 # shellcheck source=scripts/_install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
-# Pinned release -- bump the tag, asset checksum, and CHANGELOG.md together
-# in the same change if this is ever refreshed. Fails closed on mismatch.
+# Pinned release -- bump the tag, asset checksum, and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed. Fails closed on mismatch.
 MAGIC_VERSION="8.3.683"
 # The exact commit the tag names, recorded for provenance only (the tag
 # archive, not this commit sha, is what is fetched and verified):

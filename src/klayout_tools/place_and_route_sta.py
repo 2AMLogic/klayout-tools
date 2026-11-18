@@ -6,20 +6,11 @@ subsystem: the post-route multi-corner setup/hold sweep
 (:func:`_run_corner_sweep`/:func:`_corner_sweep_script_lines`, issue #949)
 and the post-route SPEF-annotated STA pass
 (:func:`_post_route_spef_metrics`/:func:`_spef_sta_script_lines`, issue
-#948), including its own DEF-pin-name recovery helper
-(:func:`_def_pin_net_names`, issue #961). This mirrors the shape of the
-earlier ``extract.py``/``extract_abstract.py`` (#1303), ``gen.py``/
-``gen_pcells`` (#1698), and ``gen_compose.py``/``gen_compose_routing.py``
-(#1708) splits: a self-contained, single-purpose subsystem relocated
-verbatim out of a file that had grown past the point one module should hold
-stage orchestration *and* this.
-
-Both public entry points into this module
-(:func:`_run_corner_sweep`/:func:`_post_route_spef_metrics`) are called from
-exactly two sites in ``place_and_route.py``'s own
-:func:`~klayout_tools.place_and_route.run_place_and_route` -- everything
-upstream of those two call sites stays in ``place_and_route.py``; only this
-subsystem's own Tcl-generation/subprocess/report-parsing concern moved here.
+#948), including the DEF-pin-name recovery helper (:func:`_def_pin_net_names`,
+issue #961). Both public entry points are called by ``run_place_and_route``;
+stage orchestration stays in ``place_and_route.py``. This module owns Tcl
+generation, subprocess invocation and report parsing for these STA passes.
+Caller-supplied paths and corner names use the shared ``tcl_literal`` helper.
 
 Dependency surface is intentionally narrow and mostly one-directional, the
 same discipline ``gen_compose_routing.py`` documents for its own reverse
@@ -58,6 +49,7 @@ from ._openroad_engine import (
     write_sdf_line,
 )
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
+from ._tcl import tcl_literal as _tcl_literal
 
 
 def _corner_sweep_script_lines(
@@ -188,10 +180,14 @@ def _corner_sweep_script_lines(
         _wire_rc_lines,
     )
 
-    lines = [f"read_db {checkpoint_in}"]
-    lines += ["define_corners " + " ".join(corner["name"] for corner in corners)]
+    lines = [f"read_db {_tcl_literal(checkpoint_in)}"]
     lines += [
-        f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
+        "define_corners " + " ".join(_tcl_literal(corner["name"]) for corner in corners)
+    ]
+    lines += [
+        f"read_liberty -corner {_tcl_literal(corner['name'])} "
+        f"{_tcl_literal(corner['path'])}"
+        for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
     # Issue #1865: the same `set_input_delay`/`set_output_delay` pair the
@@ -317,7 +313,10 @@ def _spef_sta_script_lines(
         _violation_count_lines,
     )
 
-    lines = [f"read_db {checkpoint_in}", f"read_liberty {liberty_path}"]
+    lines = [
+        f"read_db {_tcl_literal(checkpoint_in)}",
+        f"read_liberty {_tcl_literal(liberty_path)}",
+    ]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
@@ -347,7 +346,7 @@ def _spef_sta_script_lines(
         'puts "$klt_spef_annotated [llength $klt_spef_nets]"',
         'puts "$klt_design_annotated $klt_design_total"',
         f'puts "{_SPEF_NET_CHECK_END}"',
-        f"read_spef {spef_path}",
+        f"read_spef {_tcl_literal(spef_path)}",
     ]
     if sdf_path is not None:
         lines.append(write_sdf_line(sdf_path))
