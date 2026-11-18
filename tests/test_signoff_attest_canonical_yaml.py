@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from klayout_tools.cli import main
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
     AttestationError,
@@ -212,6 +213,27 @@ def test_comment_reorder_and_reflow_edits_stay_at_match_with_a_note(tmp_path):
         f"[NOTE] {_CI}: raw bytes differ; canonical yaml hash unchanged "
         '(attest: "yaml")'
     ]
+
+
+def test_check_text_format_prints_the_note_line(tmp_path, capsys):
+    """AC: the raw-bytes-differ note reaches the live ``--format text``
+    output -- the text-path counterpart of the JSON ``notes`` assertions,
+    driven through ``_print_attestation_check_text`` (#5862)."""
+    repo = _repo(tmp_path)
+    inventory = _yaml_inv(repo, "jobs.signoff")
+    committed = _committed(repo, inventory)
+    _edit_workflow(repo, lambda text: "# comment-only edit\n" + text)
+
+    argv = ["signoff", "--attest", "10", "--inventory", inventory]
+    code = main([*argv, "--check", committed, "--format", "text"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert code == 0
+    assert "fresh_status: pass" in lines
+    assert (
+        f"[NOTE] {_CI}: raw bytes differ; canonical yaml hash unchanged "
+        '(attest: "yaml")'
+    ) in lines
 
 
 _STEP_ORIGINAL = (
