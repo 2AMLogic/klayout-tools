@@ -110,8 +110,8 @@ def _sever_terminal_enclosure_bands(
     The caller has already removed the bodies from ``bases``, so a sized
     body's conductor overlap is just the drawn enclosure band; each cut
     uses the same pre-cut conductor (nearby bodies can share the poly as
-    a series lead) and only the conductor within one enclosure width of
-    the ring: ``outer.sized(enc_dbu)``'s exact reach, at local cost (#6493).
+    a series lead) and, at local cost (#6493), only the whole conductor
+    polygons interacting with ``ring.sized(2 * enc_dbu)`` (#6688, no clipping).
     """
     import klayout.db as kdb
 
@@ -125,7 +125,7 @@ def _sever_terminal_enclosure_bands(
         # Per-component rings preserve the series lead between nearby bodies.
         for component in body.merged().each():
             ring = kdb.Region(component).sized(enc_dbu)
-            local = conductor & ring.sized(enc_dbu)
+            local = conductor.interacting(ring.sized(2 * enc_dbu))
             band = local & ring
             if band.is_empty():
                 continue
