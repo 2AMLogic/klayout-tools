@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4846
+      "lines": 4782
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -341,7 +341,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3148
+      "lines": 3127
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2249
+      "lines": 2204
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -529,11 +529,11 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4611
+      "lines": 4607
     },
     {
       "path": "src/klayout_tools/power.py",
-      "lines": 2604
+      "lines": 2573
     },
     {
       "path": "src/klayout_tools/power_intent.py",
@@ -585,7 +585,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12352
+      "lines": 12348
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -949,7 +949,7 @@
     },
     {
       "path": "tests/test_netlist_batch.py",
-      "lines": 1118
+      "lines": 1030
     },
     {
       "path": "tests/test_op_sanity.py",
@@ -1053,7 +1053,7 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8242
+      "lines": 8236
     },
     {
       "path": "tests/test_sim_batch_async.py",
