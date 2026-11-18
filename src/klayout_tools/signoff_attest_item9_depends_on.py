@@ -15,7 +15,7 @@ check builder takes the file-check helper, so this module need not import
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 
@@ -55,6 +55,19 @@ def validated_depends_on(
         seen.add(normalized)
         deps.append(normalized)
     return sorted(deps)
+
+
+def bench_depends_on_map(
+    bench_records: Mapping[str, Any], benches: Sequence[str]
+) -> dict[str, list[str]]:
+    """``{bench_path: [dependency, ...]}`` for the inventoried benches that
+    declared ``depends_on`` (issue #5850); a record whose path is not a bench
+    contributes nothing."""
+    return {
+        path: list(record["depends_on"])
+        for path, record in bench_records.items()
+        if "depends_on" in record and path in benches
+    }
 
 
 def dependency_present_checks(

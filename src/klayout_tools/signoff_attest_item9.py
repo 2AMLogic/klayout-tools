@@ -34,6 +34,7 @@ from typing import Any
 
 from ._jsonnum import is_int
 from .signoff_attest_item9_depends_on import (
+    bench_depends_on_map,
     dependency_binding_checks,
     dependency_present_checks,
     validated_depends_on,
@@ -218,6 +219,30 @@ def _validated_sources(
     return normalized
 
 
+def _bench_record(
+    entry: Mapping[str, Any],
+    field: str,
+    root: str,
+    normalize_path: Callable[[Any, str, str], str],
+    command_spec: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """One bench entry's validated ``cold_start``/``depends_on``/``sources``."""
+    record: dict[str, Any] = {}
+    if "cold_start" in entry:
+        record["cold_start"] = _cold_start_specs(
+            entry["cold_start"], f"{field}.cold_start", root, command_spec
+        )
+    if "depends_on" in entry:
+        record["depends_on"] = validated_depends_on(
+            entry["depends_on"], field, root, normalize_path
+        )
+    if "sources" in entry:
+        record["sources"] = _validated_sources(
+            entry["sources"], field, normalize_path, root
+        )
+    return record
+
+
 def split_testbenches(
     inventory: Mapping[str, Any],
     root: str,
@@ -264,19 +289,7 @@ def split_testbenches(
             )
         bench_paths.add(path)
         paths.append(entry["path"])
-        record: dict[str, Any] = {}
-        if "cold_start" in entry:
-            record["cold_start"] = _cold_start_specs(
-                entry["cold_start"], f"{field}.cold_start", root, command_spec
-            )
-        if "depends_on" in entry:
-            record["depends_on"] = validated_depends_on(
-                entry["depends_on"], field, root, normalize_path
-            )
-        if "sources" in entry:
-            record["sources"] = _validated_sources(
-                entry["sources"], field, normalize_path, root
-            )
+        record = _bench_record(entry, field, root, normalize_path, command_spec)
         if record:
             # A duplicate path is refused by the generic list validator.
             records.setdefault(path, record)
@@ -326,11 +339,7 @@ def validate_into(
         if "cold_start" in record
     }
     normalized["source_benches"] = _source_benches(bench_records, benches)
-    normalized["bench_depends_on"] = {
-        path: list(record["depends_on"])
-        for path, record in bench_records.items()
-        if "depends_on" in record and path in benches
-    }
+    normalized["bench_depends_on"] = bench_depends_on_map(bench_records, benches)
     normalized["unbenched_rows"] = validated_unbenched_rows(inventory)
     normalized["pins"] = inventory.get("pins")
     if "cold_start" in inventory:
@@ -460,11 +469,8 @@ def item9_checks(
                 )
             else:
                 checks.append(run(spec, "cold_start", testbench=path))
-    return (
-        checks
-        + unbenched_row_checks(normalized["unbenched_rows"])
-        + dependency_binding_checks(normalized)
-    )
+    checks += unbenched_row_checks(normalized["unbenched_rows"])
+    return checks + dependency_binding_checks(normalized)
 
 
 def pdk_pin(pdk: Any) -> dict[str, Any] | None:
