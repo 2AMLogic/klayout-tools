@@ -790,8 +790,9 @@ into the circuit.)
   the legal envelope for the strap's extent along the ring side: it is the
   opening inset by the deck's own same-layer spacing, so a strap whose
   along-side extent stays within it clears the ring metal on both cut ends
-  at every sweep point (`null` when the opening is narrower than two
-  spacings — no same-layer-legal strap fits). That window is reported in
+  at every sweep point (`null` when the along-side extent is narrower than
+  the layer's minimum width, or ≤ 0 after the spacing inset — no
+  same-layer-legal strap fits; issue #6425). That window is reported in
   the **block's own** (generator-report) frame — the same frame as the
   marker's own `x_um`/`y_um` in the `klt gen` report fed to
   `blocks[].generator_report`; it is never re-aimed into composed

@@ -69,6 +69,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the generic-evidence section, and in `docs/json-contract.md`'s
   `provenance.input` notes.
 
+- **`klt signoff --attest` inventory path lists accept `{"glob":
+  "<pattern>"}` members** (#5614, 2026-11-17): a `sources` (item 1) or
+  `hygiene` (item 10) entry may be a glob object instead of a literal path,
+  expanded at attest time to the **git-tracked** files matching it (never a
+  filesystem walk, so the envelope stays byte-deterministic across hosts).
+  Each expanded member gets its own `present` check and hash, so the
+  previously-undetectable case — a file added to a covered directory after
+  the envelope was committed — is now drift: `--attest --check` re-expands
+  and exits non-zero. A zero-match glob, a glob colliding with a literal
+  entry, an absolute/`..` pattern, a symlinked member, and a glob in a
+  `schema_version: 1` inventory are all refused; inventory schema version 2
+  carries the new form and this build reads `{1, 2}` (a v1 inventory attests
+  byte-identically to before).
+
 - **`klt sim --resume` harvests a retained shard map before dispatching**
   (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
   without `--resume` (issue #3896), but `--resume` only ever read
@@ -324,6 +338,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
   "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
   only; no `schema_version` bump.
+- **Fixed** (#6227, `klt route`; no JSON field changes): a `routing.width_um`
+  or `pins[].direction_deg` too large for a float (e.g. `10**400`) raised an
+  uncaught `OverflowError` instead of the contract's `RouteError`; both now
+  use the shared finite-number check. `width_um` of `inf`/`nan`, previously
+  accepted, is now rejected with the same `RouteError`.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
