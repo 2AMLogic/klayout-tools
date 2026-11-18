@@ -49,3 +49,36 @@ def test_units_supply_waveforms_validation(wf, match):
             },
             [],
         )
+
+
+class _SourceError(Exception):
+    pass
+
+
+def _find(text: str, name: str = "vdd"):
+    from klayout_tools import sim_supply_waveform
+
+    return sim_supply_waveform.find_source(
+        text, name, option="corners.supply_waveforms", error_cls=_SourceError
+    )
+
+
+@pytest.mark.parametrize(
+    "netlist",
+    [
+        "; just a comment\nvdd vdd 0 pwl(0 0 1n 1.8)\n.end\n",
+        "title\n   ; indented comment only\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
+        "vdd vdd 0 pwl(0 0 1n 1.8)\n; trailing comment-only line\n",
+        ".subckt cell a\n; comment inside subckt\n.ends\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
+        "$ dollar comment\nvdd vdd 0 pwl(0 0 1n 1.8)\n.end\n",
+        "title\n   $ indented dollar comment\nvdd vdd 0 pwl(0 0 1n 1.8)\n",
+    ],
+)
+def test_find_source_skips_comment_only_lines(netlist):
+    found = _find(netlist)
+    assert found["kind"] == "pwl"
+
+
+def test_find_source_comment_only_netlist_raises_error_cls():
+    with pytest.raises(_SourceError, match="vdd"):
+        _find("; just a comment\n")

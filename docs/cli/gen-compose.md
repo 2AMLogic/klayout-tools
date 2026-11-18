@@ -784,7 +784,26 @@ into the circuit.)
   never relaxed: with no opening declared, the behavior is exactly #199's.
   A `GAP_*` port itself is a marker for the absence of metal, not a
   conductor — naming one in `connectivity[]` or `pins[]` is an application
-  error (exit `1`).
+  error (exit `1`). For straps drawn *outside* `connectivity[]` — a hand
+  sized `rect_um` crossing the opening — the marker's `strap_window_um`
+  field (issue #5656, see [`klt gen`](gen.md)'s "Ring routing openings") is
+  the legal envelope for the strap's extent along the ring side: it is the
+  opening inset by the deck's own same-layer spacing, so a strap whose
+  along-side extent stays within it clears the ring metal on both cut ends
+  at every sweep point (`null` when the opening is narrower than two
+  spacings — no same-layer-legal strap fits). That window is reported in
+  the **block's own** (generator-report) frame — the same frame as the
+  marker's own `x_um`/`y_um` in the `klt gen` report fed to
+  `blocks[].generator_report`; it is never re-aimed into composed
+  coordinates. To check a strap drawn in the composed layout, transform
+  the box by the block's `blocks[].orientation` first — an axis-aligned
+  flip: negate `x` for `"mirror_x"`, `y` for `"mirror_y"`, both for
+  `"rotate_180"`, re-sorting the corners into min/max — and *then* add
+  the block's `offset_um` from this response's own `blocks[]` entry. A
+  bare `offset_um` translation is correct only under
+  `orientation: "none"`; translating an oriented block's window without
+  flipping it first puts the strap's legal envelope in the wrong place —
+  an error only `klt drc` catches, after the fact.
 
   ```bash
   # A guard-ringed pair whose ring is opened on the east side, on the row
