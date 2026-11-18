@@ -33,9 +33,9 @@ from .netlist_construct_scan import (
     _NETLIST_BEHAVIOURAL_RE,
     _NETLIST_SIGNED_DECL_RE,
     _NETLIST_X_CONSTANT_RE,
+    _behavioural_statement_message,
     _blank_verilog_comments,
     _strip_verilog_comments,
-    _unmapped_latch_rendering_line,
 )
 from .pdk import descriptor_views, lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
@@ -1402,13 +1402,10 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     #1973, #5792 and #6274; see this module's docstring "Netlist pre-flight"
     section for the full rationale).
 
-    A behavioural statement's message always names the construct, line and
-    offending text; its *cause* clause is the latch narrative only when the
-    netlist carries Yosys's unmapped-latch rendering
-    (:func:`_unmapped_latch_rendering_line`), and otherwise the generic
-    "behavioural source, not a structural netlist" clause -- a flop ``reg`` in
-    an RTL file handed over as the netlist is not a latch, and none of the
-    latch fixes apply to it (issue #6274).
+    A behavioural statement's message -- construct clause plus an
+    evidence-gated cause clause -- is composed by
+    :func:`netlist_construct_scan._behavioural_statement_message`
+    (issue #6274).
 
     Reports the **first** offending line in file order, whichever construct
     it is: all are already fatal, so there is nothing to gain from
@@ -1454,39 +1451,11 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
 
         behavioural_match = _NETLIST_BEHAVIOURAL_RE.search(line)
         if behavioural_match is not None:
-            construct = (
-                f"netlist '{netlist_path}' line {lineno} is behavioural "
-                f"Verilog (a '{behavioural_match.group(1)}' statement): "
-                f"{line.strip()} -- OpenSTA's Verilog reader (used by the "
-                "'floorplan' stage) rejects behavioural statements with a "
-                "syntax error. "
+            raise PlaceAndRouteError(
+                _behavioural_statement_message(
+                    netlist_path, lineno, line, behavioural_match.group(1), lines
+                )
             )
-            latch_lineno = _unmapped_latch_rendering_line(lines)
-            if latch_lineno is None:
-                cause = (
-                    "A structural netlist has only module/port/wire "
-                    "declarations and cell instances, and this file is "
-                    "behavioural Verilog, not a structural netlist -- did "
-                    "you pass RTL source instead of the gate-level netlist "
-                    "`klt synthesize` wrote (its report's `netlist_path`)? "
-                    "Synthesize the RTL with `klt synthesize` and pass that "
-                    "netlist, or replace the behavioural statements with "
-                    "cell instances."
-                )
-            else:
-                cause = (
-                    f"The `always @*` block at line {latch_lineno} is how "
-                    "`write_verilog` renders a gate-level latch that "
-                    "survived synthesis unmapped -- the synthesis library "
-                    "had no latch cell to map it onto (see the `klt "
-                    "synthesize` response's `structural.unexpected_latches` "
-                    "and `instance_counts_by_type` `$_DLATCH_*_` counts; its "
-                    "`warnings.netlist_behavioural_latch` names these "
-                    "lines). Use a `cell_library` that has a latch cell, "
-                    "give `klt synthesize`'s `latch_map` a target, or "
-                    "remove the inferred latch from the RTL."
-                )
-            raise PlaceAndRouteError(construct + cause)
 
 
 def _macro_instance_port_connections(

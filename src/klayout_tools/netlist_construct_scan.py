@@ -1,5 +1,6 @@
 """Scanner primitives for a written structural-Verilog netlist: the
-comment-aware blanker and the unsupported-construct regexes.
+comment-aware blanker, the unsupported-construct regexes, and the
+behavioural-statement rejection message composed from them.
 
 Shared verbatim by ``klt place-and-route``'s netlist pre-flight
 (``place_and_route_request._reject_unsupported_netlist_constructs``,
@@ -159,3 +160,58 @@ def _unmapped_latch_rendering_line(lines: list[str]) -> int | None:
                     return index + 1
                 break
     return None
+
+
+def _behavioural_statement_message(
+    netlist_path: str,
+    lineno: int,
+    line: str,
+    statement: str,
+    lines: list[str],
+) -> str:
+    """The composed rejection message for the behavioural statement at
+    ``lines[lineno - 1]``, a ``'reg'``/``'always*'``/``'initial'`` keyword
+    named by ``statement`` (issue #6274) -- shared verbatim by the P&R
+    pre-flight's rejection so the construct and cause clauses cannot drift
+    from the patterns that detect them.
+
+    The message always names the construct, line and offending text; its
+    *cause* clause is the latch narrative only when the netlist carries
+    Yosys's unmapped-latch rendering (:func:`_unmapped_latch_rendering_line`),
+    and otherwise the generic "behavioural source, not a structural netlist"
+    clause -- a flop ``reg`` in an RTL file handed over as the netlist is not
+    a latch, and none of the latch fixes apply to it.
+    """
+    construct = (
+        f"netlist '{netlist_path}' line {lineno} is behavioural "
+        f"Verilog (a '{statement}' statement): "
+        f"{line.strip()} -- OpenSTA's Verilog reader (used by the "
+        "'floorplan' stage) rejects behavioural statements with a "
+        "syntax error. "
+    )
+    latch_lineno = _unmapped_latch_rendering_line(lines)
+    if latch_lineno is None:
+        cause = (
+            "A structural netlist has only module/port/wire "
+            "declarations and cell instances, and this file is "
+            "behavioural Verilog, not a structural netlist -- did "
+            "you pass RTL source instead of the gate-level netlist "
+            "`klt synthesize` wrote (its report's `netlist_path`)? "
+            "Synthesize the RTL with `klt synthesize` and pass that "
+            "netlist, or replace the behavioural statements with "
+            "cell instances."
+        )
+    else:
+        cause = (
+            f"The `always @*` block at line {latch_lineno} is how "
+            "`write_verilog` renders a gate-level latch that "
+            "survived synthesis unmapped -- the synthesis library "
+            "had no latch cell to map it onto (see the `klt "
+            "synthesize` response's `structural.unexpected_latches` "
+            "and `instance_counts_by_type` `$_DLATCH_*_` counts; its "
+            "`warnings.netlist_behavioural_latch` names these "
+            "lines). Use a `cell_library` that has a latch cell, "
+            "give `klt synthesize`'s `latch_map` a target, or "
+            "remove the inferred latch from the RTL."
+        )
+    return construct + cause
