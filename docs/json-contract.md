@@ -301,6 +301,18 @@ before the flag existed — it does not even carry `engine`. So **no
 tell the two apart reads `engine`, whose absence means the curated engine.
 See `docs/cli/extract.md`'s "Engine" section.
 
+**An opt-in echo field, absent when its flag is, is additive.** Issue #5513
+added `klt extract --engine klayout-runset --device-param`, which carries a
+device class's measured parameters onto its `X` call. When the flag is given
+the report carries a top-level `device_params`
+(`{class: {PARAM: {"name", "suffix"}}}`, sorted), next to `device_models`; when
+it is not, the key is **absent** rather than `null`, so a report without the
+flag is byte-identical to one produced before it existed. `warnings[]`'s
+per-class dropped-parameter entries then name only what is *still* not
+carried. Every existing field keeps its meaning: **no `schema_version` bump**
+(`klt extract` stays at 4). See `docs/cli/extract.md`'s "Carrying measured
+parameters".
+
 **A new terminal key on one device class's `nets` map is additive by the
 same per-class reasoning.** Issue #2862 added an `"s"` (substrate) key to
 `devices[].nets` for a bipolar device class of a deck entry that declares
