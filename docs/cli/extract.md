@@ -2172,6 +2172,31 @@ same device. Every other resistor class keeps the default
 `topology="overlap"` (`body & marker`) unchanged; `klt deck devices`
 reports each resistor class's `topology`.
 
+gf180mcu's two poly entries (`ppolyf_u`, `ppolyf_u_1k`/`_2k`/`_3k`) declare
+`ResistorDevice.terminal_enclosure_um=0.22` (issue #5889): the DRM's own
+SB.10 (`poly2.enclosing.sab.1`) *mandates* that Poly2 extend >= 220 nm
+beyond every SAB edge, so a DRC-clean drawing necessarily surrounds the
+recognised body with an unmarked 220 nm Poly2 band on every side. That
+band wraps the body and touches it along its whole perimeter, so "the rest
+of the conductor" would merge both contacted leads into ONE terminal
+component and the resistor would silently vanish from the extracted
+netlist ("Expected two polygons on contacts interacting with one resistor
+shape") while `klt drc` reports the layout clean -- before #5889 a
+DRC-clean and an LVS-extractable poly resistor were mutually exclusive.
+With the field set, the terminal region is narrowed to the Poly2 lying
+within 220 nm of Poly2 drawn *beyond* the mandated band -- each lead plus
+its channel through the band -- and the band's side flanks are severed
+from the terminal conductor's connectivity, so each lead is its own
+terminal on its own net (and the severed flanks become isolated, floating
+salicided poly). A drawing with no band at all (exact-body markers, SB.10
+violated -- the fixture style every pre-#5889 test uses) extracts
+bit-for-bit as before; a drawing whose halo is itself part of a conductor
+path around the body (e.g. a poly bar uniformly wider than the dilated
+body) is genuinely shorted through its own conductor and still forms no
+device. `tests/test_extract_gf180mcu_sab_resistor.py` covers the
+compliant, exact-body, wide-lead and shared-halo (two SAB bodies at SB.2's
+0.42 µm minimum, in series through the gap) cases.
+
 sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
 in the real sky130 device library — only a bare `.model
 sky130_fd_pr__res_generic_mN r ...` card — so `--pdk` leaves them as the

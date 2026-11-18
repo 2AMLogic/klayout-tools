@@ -38,8 +38,18 @@ from .drc import (
     DrcError,
 )
 from .drc_deck_includes import _deck_script_files
-from .drc_klayout_abort import deck_abort_info, deck_aborted_error
-from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_abort import (
+    _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES,
+    _klayout_deck_error_detail,
+    deck_abort_info,
+    deck_aborted_error,
+)
+from .drc_klayout_app import (
+    _preflight_klayout_version,
+    _recorded_klayout_binary,
+    _resolve_klayout_executable,
+    _warn_binary_mismatch,
+)
 from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
@@ -308,98 +318,14 @@ def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
     return lines
 
 
-#: Cap on how many lines of klayout's own output a deck-abort error message
-#: carries (issue #2333). The whole captured stdout/stderr is surfaced below
-#: this size -- the point of the change is that a *non*-``ERROR``-prefixed
-#: line (``sh: pmap: command not found``) is usually the causal one -- but a
-#: deck that prints a per-rule progress line for thousands of rules should
-#: not turn a single error into a multi-megabyte message. When the cap trips,
-#: the **tail** is what survives (the abort is at the end of the run) and any
-#: ``ERROR`` line from the omitted head is repeated so the detection signal is
-#: never lost to truncation.
-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES = 500
-
-
-def _klayout_deck_error_detail(
-    stdout: str | None, stderr: str | None, error_lines: list[str]
-) -> str:
-    """The klayout output to quote in a deck-abort :class:`DrcError` (issue
-    #2333), stdout before stderr.
-
-    Deliberately **not** ``error_lines`` alone. ``_klayout_deck_error_lines``
-    keeps only lines starting with ``ERROR`` -- correct for *detecting* a
-    failed deck (a rule named ``ERROR_CHECK.1`` must not be misread as one),
-    but wrong for *explaining* it: the line that says why is routinely not
-    ``ERROR``-prefixed. The motivating case is a PDK driver that shells out
-    to a host utility the machine does not have, where klayout's captured
-    output is::
-
-        sh: pmap: command not found
-        ERROR: In main.drc: undefined method 'strip' for nil
-        ERROR: NoMethodError: undefined method 'strip' for nil in ...
-
-    Quoting only the ``ERROR`` lines drops the one line that identifies the
-    real cause and leaves a nil-dereference that reads like a broken rule
-    deck. So the full captured output is surfaced (subject to
-    :data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`), and ``error_lines`` is
-    used only as the fallback for the impossible-in-practice case of an empty
-    capture.
-    """
-    chunks = [
-        stream.strip() for stream in (stdout, stderr) if stream and stream.strip()
-    ]
-    combined = "\n".join(chunks)
-    if not combined:
-        return "\n".join(error_lines)
-
-    lines = combined.splitlines()
-    if len(lines) <= _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:
-        return combined
-
-    kept = lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]
-    kept_set = {line.rstrip() for line in kept}
-    dropped_errors = [line for line in error_lines if line.rstrip() not in kept_set]
-    head = [
-        f"... ({len(lines) - len(kept)} earlier lines omitted; "
-        "klt kept the tail, where the abort is)"
-    ]
-    if dropped_errors:
-        head.extend(dropped_errors)
-        head.append("... (end of ERROR lines recovered from the omitted section)")
-    return "\n".join(head + kept)
-
-
-#: What the run's temporary work directory is recorded as in the additive
-#: ``deck_output`` evidence field (issue #6613). The real path is a fresh
-#: ``tempfile.mkdtemp`` per run and decks routinely echo the ``-rd
-#: report=...`` path klt handed them, so storing it verbatim would make
-#: otherwise identical evidence text differ on every invocation (and make
-#: ``--rerun`` of a committed report drift on it).
 _DECK_OUTPUT_WORKDIR_PLACEHOLDER = "<klt-drc-klayout-workdir>"
 
 
 def _klayout_deck_output(stdout: str | None, work_dir: str) -> dict[str, Any]:
-    """The additive ``deck_output`` field for a successful run (issue
-    #6613): the deck's own captured stdout -- per-rule progress lines, a
-    deck's own ``DRC RESULT: ...`` summary -- which the report previously
-    dropped entirely on success.
+    """Keep the deck's stdout as evidence, replacing the temporary work path.
 
-    This is *evidence a human or downstream consumer can cite*, never a
-    status upgrade: a zero-finding, zero-category native-deck run stays
-    ``coverage_unknown`` (exit 4) with or without it, and klt parses
-    nothing out of the log.
-
-    Bounded by the same tail-keeping cap as deck-error detail
-    (:data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`, reused deliberately --
-    no new knob): a deck that logs a line per rule for thousands of rules
-    must not turn the JSON report into a multi-megabyte log, and the tail
-    is the part that carries a summary line. ``line_count`` is the line
-    count of the **whole** captured stdout, so when ``truncated`` is true a
-    consumer can tell exactly how many lines were dropped.
-
-    ``work_dir`` is replaced with :data:`_DECK_OUTPUT_WORKDIR_PLACEHOLDER`
-    before anything else, keeping the stored text deterministic across
-    runs of identical inputs.
+    Preserve short logs verbatim after scrubbing. For longer logs, retain the
+    tail (including any final summary) and report the original line count.
     """
     text = (stdout or "").replace(work_dir, _DECK_OUTPUT_WORKDIR_PLACEHOLDER)
     lines = text.splitlines()
@@ -1514,10 +1440,9 @@ def run_drc_klayout_engine(
     # names the wrong thing. Fail before the subprocess, naming the utility.
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
 
-    # Issue #2689: opt-in application-version floor, probed on the very
-    # executable launched below, before any deck work.
     klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
-    _preflight_klayout_version(klayout_exe, min_klayout_version)
+    klayout_app_version = _preflight_klayout_version(klayout_exe, min_klayout_version)
+    recorded_binary = _recorded_klayout_binary(klayout_exe, klayout_override)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1621,6 +1546,18 @@ def run_drc_klayout_engine(
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
+    provenance = build_provenance(
+        deck_name=os.path.basename(deck_file),
+        deck_path=deck_file,
+        pdk=pdk_info,
+        input_path=path,
+        deck_options=deck_vars,
+        include_klayout_version_mismatch=True,
+        klayout_version_override=klayout_app_version,
+        klayout_version_override_active=True,
+    )
+    _with_deck_tree(provenance, deck_file)  # adds deck.tree, in place
+    _warn_binary_mismatch(provenance)
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
@@ -1630,13 +1567,7 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
-        # Additive (issue #4950): present only when a binary override
-        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
-        **(
-            {"environment": {"klayout_binary": klayout_override}}
-            if klayout_override is not None
-            else {}
-        ),
+        "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing
@@ -1683,17 +1614,7 @@ def run_drc_klayout_engine(
             if negative_control_result is not None
             else {}
         ),
-        "provenance": _with_deck_tree(
-            build_provenance(
-                deck_name=os.path.basename(deck_file),
-                deck_path=deck_file,
-                pdk=pdk_info,
-                input_path=path,
-                deck_options=deck_vars,
-                include_klayout_version_mismatch=True,
-            ),
-            deck_file,
-        ),
+        "provenance": provenance,
     }
 
 

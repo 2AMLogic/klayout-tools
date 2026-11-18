@@ -135,7 +135,8 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
             return json.load(handle)
     except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read request '{request_path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # json's over-long-int parse error is a plain ValueError (issue #6233).
         raise error_cls(f"request '{request_path}' is not valid JSON: {exc}") from exc
 
 
@@ -158,7 +159,7 @@ def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any
             spec = json.load(f)
     except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise error_cls(f"spec '{spec_path}' is not valid JSON: {exc}") from exc
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
@@ -461,7 +462,7 @@ def load_request_arg(
     if value == "-":
         try:
             data = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             raise error_cls(f"stdin request is not valid JSON: {exc}") from exc
         return (
             validate_request_shape(
@@ -481,7 +482,7 @@ def load_request_arg(
 
     try:
         data = json.loads(value)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise error_cls(
             f"request '{value}' is neither an existing file (file not "
             f"found) nor valid inline JSON: {exc}"
