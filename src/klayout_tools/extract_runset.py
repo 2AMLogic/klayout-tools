@@ -444,6 +444,10 @@ def run_extract_klayout_runset(
         "device_models": dict(sorted(models.items())) if models else None,
         # Additive (issue #5513): present only when `--device-param` was given.
         **_device_params_echo(declared),
+        # Additive (issue #6559): the measured parameters each X call does NOT
+        # carry, per class -- the structured form of the `warnings[]` prose,
+        # `{}` once every parameter is declared. `klt pex` copies it.
+        "params_not_carried": {k: sorted(v) for k, v in sorted(uncarried.items())},
         # This engine extracts devices and connectivity only; `klt pex`
         # therefore cannot use it (docs/cli/extract.md, "Engine").
         "parasitics": None,

@@ -612,6 +612,8 @@
         "klayout_tools.pex_netlist_text",
         "klayout_tools.pex_resistance_graph",
         "klayout_tools.pex_asap7",
+    "klayout_tools.pex_body_bias",
+    "klayout_tools.pex_runset",
         "klayout_tools.pex_sim_evidence",
         "klayout_tools.spice_flatten",
         "klayout_tools.cli.parser_pex",
