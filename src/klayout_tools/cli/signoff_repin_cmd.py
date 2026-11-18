@@ -20,12 +20,16 @@ EXIT_OK = 0
 
 
 #: ``--repin`` refuses every flag that selects another mode, by name --
-#: ``(flag, attribute)``; a truthy attribute is the refusal.
+#: ``(flag, attribute)``; a truthy attribute is the refusal. ``-o/--output``
+#: is here too (issue #6147): ``--repin`` renders no report to put in a file,
+#: so honouring it would be a new feature and ignoring it silently discards
+#: output the user explicitly asked for.
 _REPIN_EXCLUSIVE_FLAGS = (
     ("--fleet", "fleet"),
     ("--attest", "attest"),
     ("--check", "check"),
     ("--describe-grader", "describe_grader"),
+    ("-o/--output", "output"),
 )
 
 
