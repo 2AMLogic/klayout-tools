@@ -2007,8 +2007,13 @@ the named algorithm `sha256-canonical-yaml-v1` (parsed with `yaml.safe_load`,
 mapping keys type-tagged so a workflow's YAML-1.1 boolean `on:` key sorts
 beside string keys, then serialised with sorted keys and compact separators):
 a comment-only, whitespace-only, key-reorder or anchor/alias refactor of the
-file is not drift, while every change to a key or value still is. That is
-the right pin for `.github/workflows/ci.yml` — the file that *runs* the
+file is not drift; drift is a change to the canonical representation of the
+selected YAML content. In v1, date/datetime values normalize to ISO strings
+and `!!binary` values to `"bytes:<hex>"` strings of the decoded bytes; equal
+canonical representations share a digest, so a date scalar `2026-11-15`
+and the string `"2026-11-15"` are not distinguished, nor are
+`!!binary "YWI="` and the string `"bytes:6162"`. That is the right pin for
+`.github/workflows/ci.yml` — the file that *runs* the
 attestation, where `presence` could not catch a `continue-on-error: true`
 added to the signoff job, a removed step or a changed command. `select`
 (optional) hashes only the named subtree (`jobs.signoff`, say), so edits to
