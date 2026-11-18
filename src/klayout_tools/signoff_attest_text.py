@@ -62,6 +62,10 @@ def _what_unbenched(c: dict) -> str:
     return f"row {c['row']} has no testbench (issue #{c['issue']})"
 
 
+def _what_uncited(c: dict) -> str:
+    return f"row {c['row']} has no citation yet (issue #{c['issue']})"
+
+
 def _what_dependency_binding(c: dict) -> str:
     return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
 
@@ -98,6 +102,7 @@ _WHAT_RENDERERS = {
     "dbu_on_grid": _what_dbu,
     "command": _what_command,
     "unbenched_row": _what_unbenched,
+    "uncited_row": _what_uncited,
     "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
     "recorded_hash": _what_recorded_hash,

@@ -63,6 +63,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
@@ -149,9 +150,7 @@ _ITEM_KEYS: dict[int, frozenset[str]] = {
     # Item 2's inventory is optional (#4767): commands (``checks``) and/or the
     # generator's input files (``inputs``, #5724); the stream is the ``--input``.
     2: frozenset({"checks", "inputs"}),
-    8: frozenset(
-        {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
-    ),
+    8: item8.ITEM8_KEYS,
     9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
 }
@@ -444,6 +443,7 @@ def _validated_characterization(
     report = _normalize_repo_path(inventory["report"], "report", root)
     rows = _validated_spec_rows(inventory)
     citations = _validated_citations(inventory, rows, root)
+    uncited = item8.validated_uncited_rows(inventory, rows, citations)
     cited = sorted({path for paths in citations.values() for path in paths})
     if report in cited:
         raise AttestationError(
@@ -456,6 +456,7 @@ def _validated_characterization(
         "report": report,
         "spec_rows": list(rows),
         "citations": citations,
+        "uncited_rows": uncited,
         "envelope_checks": envelope_checks,
         "corners": corners,
         "metrics": metrics,
@@ -861,23 +862,14 @@ def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
     """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
+    present, one check per spec row (a citation -- or a passing
+    ``uncited_row`` for a declared gap), each envelope's own freshness
     command, then (digital) one metric check per corner x required metric."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
     cited = sorted({p for paths in normalized["citations"].values() for p in paths})
     present = {path: _file_check(root, path, "evidence") for path in cited}
     checks.extend(present.values())
-    for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
-        checks.append(
-            {
-                "check": "citation",
-                "role": "spec_row",
-                "row": row,
-                "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
-            }
-        )
+    checks.extend(item8.row_checks(normalized, present))
     for path in cited:
         checks.append(
             command(
