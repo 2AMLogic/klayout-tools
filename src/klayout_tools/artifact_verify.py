@@ -717,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="artifact_verify.py",
         description="Verify an artifact manifest against the store through "
         "its broker (the standalone twin of `klt artifact verify`; see "
-        "docs/cli/artifact.md)",
+        "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/artifact.md)",
     )
     parser.add_argument("manifest", metavar="MANIFEST")
     parser.add_argument(

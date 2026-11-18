@@ -1,23 +1,15 @@
 """Tool derivation and execution for the generic ``klt mcp serve`` bridge.
 
-Issue #2830 (Phase 5, "agent surface"). This module is deliberately free of
-any MCP-SDK import: it walks the argparse registry built by
-:func:`klayout_tools.cli.parser.create_parser`, derives one tool definition
-per leaf verb (``klt_<verb>``, or ``klt_<verb>_<subcommand>`` for the nested
-verbs such as ``pdk``/``deck``/``wave``/``kb``), and executes a call by
-running ``klt <verb> ... --format json`` in a subprocess. The SDK-facing
-glue lives in :mod:`.mcp_server`; the schemas served as MCP resources are in
-:mod:`.mcp_resources`. This half is unit-testable without the ``[mcp]`` extra.
+Each leaf of :func:`klayout_tools.cli.parser.create_parser` becomes a tool
+with CLI documentation links. The MCP SDK integration lives in :mod:`.mcp_server`
+and schema resources in :mod:`.mcp_resources`. This module needs no SDK.
 
 Design rules (see ``docs/guides/mcp-server.md``):
 
-* **The CLI is the contract.** There is no in-process import path that could
-  fork from ``klt``: a call is exactly the subprocess a human would run, so
-  the envelope and exit codes of ``docs/json-contract.md`` hold unchanged.
-* **Exit-code mapping follows the contract.** Exit ``1``/``2`` -> MCP
-  ``isError`` (no report was written); exit ``0`` and every code ``>= 3`` ->
-  a report is on stdout and is returned as the structured result, with the
-  raw code carried in ``_meta.klt_exit_code``.
+* Calls run ``klt <verb> ... --format json`` in a subprocess, preserving the
+  envelope and exit codes of ``docs/json-contract.md``. Codes 1 and 2 set
+  ``isError``. Code 0 and codes >= 3 return the report on stdout as the
+  structured result, with the raw code in ``_meta.klt_exit_code``.
 * **Safety defaults.** Fleet-dispatching verbs are hidden unless opted in
   (:data:`HIDDEN_BY_DEFAULT`); ``--backend remote|batch`` is refused unless
   fleet dispatch is allowed; every subprocess runs with the workspace root
@@ -40,6 +32,9 @@ from ._jsonnum import is_int
 TOOL_PREFIX = "klt_"
 
 DOCS_BASE_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
+_DOC_POINTER = re.compile(
+    r"(?<![\w./\\-])docs/cli/([A-Za-z0-9_-]+\.md)(?![\w/\\-]|\.\w)"
+)
 
 #: Verbs that dispatch to a paid/remote fleet by design: not listed unless the
 #: operator opts in (``--enable-verb`` / ``--allow-fleet``).
@@ -85,6 +80,11 @@ def _subparsers_action(
         if isinstance(action, argparse._SubParsersAction):
             return action
     return None
+
+
+def _link_cli_docs(text: str) -> str:
+    """Use URLs for bare CLI doc references so remote clients can follow them."""
+    return _DOC_POINTER.sub(rf"{DOCS_BASE_URL}/\1", text)
 
 
 def _help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
@@ -169,7 +169,7 @@ def _input_schema(
         schema = _action_schema(action)
         help_text = _help_text(parser, action)
         if help_text:
-            schema["description"] = help_text
+            schema["description"] = _link_cli_docs(help_text)
         if (
             action.default is not None
             and action.default is not argparse.SUPPRESS
@@ -215,7 +215,7 @@ def _describe(
     verb_path: tuple[str, ...], parser: argparse.ArgumentParser, help_line: str
 ) -> str:
     body = (parser.description or help_line or "").strip()
-    body = re.sub(r"\s+", " ", body)
+    body = _link_cli_docs(re.sub(r"\s+", " ", body))
     doc = f"{DOCS_BASE_URL}/{verb_path[0]}.md"
     return f"klt {' '.join(verb_path)}: {body} (CLI docs: {doc})"
 
