@@ -697,14 +697,18 @@ host. `-o/--output`, `--no-netlist`, `--top`, `--device-model`,
 holds too: `--device-param` is refused under the default `--engine klayout`
 rather than silently ignored.
 
-**No parasitics, so `klt pex` cannot use this engine.** The result is a
-device-level netlist with `parasitics: null`. Combining runset devices with
-curated-deck parasitics would need a geometric net correspondence between two
-independent extractions that number their unlabelled nets independently
-(`\$1` above; see "Anonymous net numbering" below) — nothing in this repo
-provides that today. Consequently this engine does **not** by itself make
-`docs/design-evidence-tiers.md` T1 item 7 citable for such a block: item 7
-accepts only a `klt pex` report.
+**No parasitics.** The result is a device-level netlist with
+`parasitics: null`. Combining runset devices with curated-deck parasitics
+would need a geometric net correspondence between two independent extractions
+that number their unlabelled nets independently (`\$1` above; see "Anonymous
+net numbering" below) — nothing in this repo provides that today
+([#6606](https://github.com/2AMLogic/klayout-tools/issues/6606)).
+[`klt pex --engine klayout-runset`](pex.md) (issue #6559) does use this engine
+for its extracted leg, as a **device-level, parasitic-free** leg whose envelope
+says so (`extraction.parasitics_carried: false`, `extraction.params_not_carried`).
+That route does **not** by itself make `docs/design-evidence-tiers.md` T1 item
+7 citable for such a block: item 7 is parasitic verification, and a runset leg
+carries none. #6606 is what closes that.
 
 **Report.** Additive fields only, so `SCHEMA_VERSION` is unchanged (4): the
 report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
@@ -714,7 +718,10 @@ report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
 `--device-param` was given it also carries `device_params`
 (`{class: {PARAM: {"name", "suffix"}}}`, sorted); the key is **absent**, not
 `null`, otherwise, so a report without the flag is byte-identical to one from
-before it existed. `device_count`,
+before it existed. It always carries `params_not_carried` (issue #6559: `{class: [PARAM, …]}`,
+sorted — the measured parameters the `X` cards do not carry, the structured form
+of the per-class `warnings[]` prose; `{}` once every parameter is declared), which
+`klt pex` copies into its own `extraction` block. `device_count`,
 `device_counts`, `devices[]`, `nets[]`, `netlist_path`, `netlist_sha256`,
 `netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
 mean for the curated engine. **The exit status proves nothing** about the
