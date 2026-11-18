@@ -96,6 +96,7 @@ from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
     sim_corner_extremes,
@@ -205,6 +206,7 @@ from .sim_batch_features import (
     pop_remote_diagnostics,
     worker_ngspice_binary,
 )
+from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
@@ -2827,48 +2829,6 @@ def _dispatch_deck_request(
     return report
 
 
-#: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
-#: a job that failed or was stopped by the harness, or a poll that gave up
-#: while the job may still be running (``sim_batch._unrun_corner_report``).
-_UNRUN_BATCH_CODES = frozenset(
-    {
-        "lost_shard",
-        "batch_job_failed",
-        "batch_job_timeout",
-        "batch_poll_timeout",
-        "batch_job_interrupted",
-    }
-)
-
-
-def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
-    """True when a corner report is a synthesized batch one (never ran)."""
-    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
-
-
-def _record_batch_checkpoint(
-    checkpoint: Any,
-    backend: str,
-    corners_new: list[dict[str, Any]],
-    engine_version: Any,
-) -> None:
-    """Record a ``batch`` run's returned corner reports into the checkpoint.
-
-    Issue #3367: `_run_batch` collects a shard's reports in one
-    ``report.json``, so there is nothing to record incrementally; record the
-    returned set after dispatch. A corner that never ran (``lost_shard``,
-    ``batch_job_failed``, ``batch_job_timeout``, ``batch_poll_timeout``,
-    ``batch_job_interrupted``) is left out and stays outstanding for the next
-    ``--resume``; one that ran and genuinely errored is recorded as locally.
-    A no-op without a checkpoint or off ``batch``.
-    """
-    if checkpoint is None or backend != "batch":
-        return
-    for corner in corners_new:
-        if not _is_unrun_batch_corner(corner):
-            checkpoint.record(corner["corner_id"], corner, engine_version)
-
-
 def _refuse_unsupported_submit_only(
     backend: str, hosts: int, resume: bool | None, plot_dir: str | None
 ) -> None:
@@ -3842,6 +3802,36 @@ def _run_sim_corners(
         checkpoint_path, resume=bool(resume), **fingerprint_inputs
     )
 
+    # Issue #5775: a sharded batch run keeps its shard map even without
+    # `--resume` (issue #3896), so `--resume` harvests it *before* the
+    # dispatch set is computed -- collecting the shards whose remote jobs
+    # are already terminal and shrinking `dispatch_points` to what is
+    # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
+    # form), `--submit-only` (refused with `--resume` before any S3 write)
+    # and `--dry-run` (which must not touch S3 at all).
+    harvested_engine_version = sim_batch_resume.maybe_harvest_resume_shards(
+        resume=resume,
+        backend=backend,
+        checkpoint=checkpoint,
+        dry_run=dry_run,
+        submit_only=submit_only,
+        attach_job_id=attach_job_id,
+        artifacts_dir=artifacts_dir,
+        corner_points=corner_points,
+        request=request,
+        netlist_path=dispatch_netlist_path,
+        timeout_s=timeout_s,
+        keep_artifacts=keep_artifacts,
+        want_waveforms=want_waveforms,
+        measurements_spec=measurements_spec,
+        request_dir=request_dir,
+        pre_completed=pre_completed,
+    )
+    if loaded_engine_version is None:
+        # An all-harvested rerun dispatches nothing, so the harvested jobs'
+        # engine version is the only one this report can carry.
+        loaded_engine_version = harvested_engine_version
+
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
@@ -4104,7 +4094,13 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
-    if hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
+    if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
+        # Issue #5775: an all-covered resume dispatches nothing -- never the
+        # off-host "hosts exceeds the units to dispatch" refusal over an
+        # empty fleet. (`attach_job_id is None` keeps #5777's "attach never
+        # fans out" single-job path authoritative for every attach.)
+        corners_new, backend_engine_version, remote_environment = [], None, None
+    elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
         # new-since kwargs are identity no-ops then (`dispatch_points is

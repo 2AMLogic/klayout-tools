@@ -392,8 +392,8 @@ generated wrapper's `docker run` reference `openroad/orfs@sha256:…`, so every
 host and CI run executes the same OpenROAD build. Upstream publishes only a
 moving `:latest` tag, and before this pin two identically-provisioned fleet
 workers held different images under it (issue #2465). Bump the digest
-deliberately — with a `CHANGELOG.md` line, as with the pinned
-version + checksum in `install-yosys.sh`/`install-verilator.sh`/
+deliberately — with a [changelog fragment](../changelog.d/README.md), as with
+the pinned version + checksum in `install-yosys.sh`/`install-verilator.sh`/
 `install-magic.sh`/`install-icarus-verilog.sh`/`install-xyce.sh` — and record
 the new `openroad -version` string alongside it; the script's header comment
 carries the exact re-pin commands.
