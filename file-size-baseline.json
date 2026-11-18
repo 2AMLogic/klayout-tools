@@ -341,7 +341,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3148
+      "lines": 3127
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2249
+      "lines": 2204
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -585,7 +585,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12352
+      "lines": 12348
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -1053,7 +1053,7 @@
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8242
+      "lines": 8236
     },
     {
       "path": "tests/test_sim_batch_async.py",
