@@ -39,7 +39,7 @@ CONTACT_GAP_SAFE_UM = 0.3
 UNIT_MIN_W_UM = 0.42
 
 #: Smallest gate length (um) `mos_array`/`diff_pair` default their ``l_um``
-#: param to -- comfortably clear of both curated decks' rules with margin, so
+#: param to -- comfortably clear of the curated decks' rules with margin, so
 #: a caller who never touches ``l_um`` gets a device with no DRC risk at all.
 #: A request *below* this is no longer a DRC risk either (see
 #: :data:`SD_PAD_GATE_GAP_MIN_UM` -- issue #1187): :func:`_mos_finger_positions`
@@ -55,18 +55,18 @@ GATE_LENGTH_SAFE_MIN_UM = 0.28
 
 #: Smallest S/D-local-metal-pad-to-pad gap (um) :func:`_mos_finger_positions`
 #: guarantees across every poly gate stripe, regardless of the requested
-#: ``l_um`` (issue #1187). Exceeds both curated decks' same-layer
-#: metal-spacing rule with margin (gf180mcu ``metal1.space.1``: 0.23um is the
-#: binding one; sky130's ``li1.space.1`` is only 0.17um) -- the same pair
-#: :data:`GATE_LENGTH_SAFE_MIN_UM`'s own margin was sized against, but kept as
-#: its own named constant, strictly smaller than that default, so a caller's
-#: existing ``l_um >= GATE_LENGTH_SAFE_MIN_UM`` output never shifts by even a
-#: single dbu: at ``l_um == GATE_LENGTH_SAFE_MIN_UM`` the computed offset
-#: (below) is already zero. Below it, each side of every gate stripe is
+#: ``l_um`` (issue #1187). Exceeds the curated decks' same-layer metal-spacing
+#: rule (gf180mcu ``metal1.space.1``: 0.23um is the binding one; sky130's
+#: ``li1.space.1`` is 0.17um -- the pair :data:`GATE_LENGTH_SAFE_MIN_UM`'s
+#: margin was sized against -- and sg13g2's ``metal1.space.1`` 0.18um), but
+#: kept as its own named constant, strictly smaller than that default, so a
+#: caller's existing ``l_um >= GATE_LENGTH_SAFE_MIN_UM`` output never shifts
+#: by even a single dbu: at ``l_um == GATE_LENGTH_SAFE_MIN_UM`` the computed
+#: offset (below) is already zero. Below it, each side of every gate stripe is
 #: pushed out by ``max(0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2)`` -- padding
-#: the unit device's own pitch, never the requested gate length -- so the
-#: S/D pads stay legally spaced even at a PDK's absolute minimum gate length
-#: (e.g. sky130's 0.15um).
+#: the unit device's own pitch, never the requested gate length -- so the S/D
+#: pads stay legally spaced even at a PDK's absolute minimum gate length (e.g.
+#: sky130's 0.15um).
 SD_PAD_GATE_GAP_MIN_UM = 0.25
 
 #: Extra margin (um) `cap_array`'s bottom-plate conductor (sky130's `met3`)
