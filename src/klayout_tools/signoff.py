@@ -79,6 +79,7 @@ from .metrics import get_metric, is_registered
 # that requires them machine-derived (issue #5462); out of this file for its
 # size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
 from .signoff_attest_binding import attestation_record
+from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
@@ -5618,13 +5619,12 @@ def _anchored_input_refusal(
     return _attested_checks_refusal(resolution, repo_root, detail)
 
 
-def _attested_check_members(
-    envelope: Mapping[str, Any],
-) -> list[tuple[Any, str]]:
-    """``({path, scope}, recorded_hash)`` for every ``present`` check of a
-    ``klt signoff --attest`` envelope that recorded a ``sha256:`` content
-    hash (issue #4197) -- the inventory's listed ``sources`` and ``derived``
-    files. ``[]`` for an envelope with no ``attestation.checks[]``."""
+def _attested_check_members(envelope: Mapping[str, Any]) -> list[tuple[Any, str]]:
+    """``({path, scope}, recorded_hash)`` for every raw-byte ``present``
+    check of a ``--attest`` envelope that recorded a ``sha256:`` content
+    hash (issue #4197). ``attest: "yaml"`` checks belong to
+    :func:`.signoff_attest_canonical_yaml.rehash_checks` instead; ``[]``
+    when there are no ``attestation.checks[]``."""
     attestation = envelope.get("attestation")
     checks = attestation.get("checks") if isinstance(attestation, Mapping) else None
     if not isinstance(checks, list):
@@ -5640,6 +5640,7 @@ def _attested_check_members(
             and path
             and isinstance(recorded, str)
             and recorded.startswith("sha256:")
+            and check.get("attest") != "yaml"
         ):
             members.append(({"path": path, "scope": "repo"}, recorded))
     return members
@@ -5651,18 +5652,16 @@ def _attested_checks_refusal(
     detail: dict[str, Any] | None,
 ) -> str | None:
     """Re-hash the files an attestation's ``present`` checks recorded (issue
-    #4197). The envelope's ``provenance.input`` pins only the inventory, so
-    without this an edit to a listed source or derived file stays ``met``
-    until re-attested. A drifted file is :data:`_REASON_STALE_EVIDENCE`; one
-    that cannot be read from the grading context is
-    :data:`_REASON_UNVERIFIABLE_PROVENANCE`. ``None`` -- and nothing added to
-    the citation -- when every file re-hashes or the envelope carries none."""
+    #4197) -- raw bytes, or the canonical parse of an ``attest: "yaml"``
+    entry (issue #5862). ``provenance.input`` pins only the inventory, so
+    without this an edit to a listed file stays ``met`` until re-attested;
+    drift is :data:`_REASON_STALE_EVIDENCE`, an unreadable file
+    :data:`_REASON_UNVERIFIABLE_PROVENANCE`, all-matching ``None``."""
     members = _attested_check_members(resolution["envelope"])
-    if not members:
-        return None
     results = _verify_generic_input_set(
         members, resolution["spec"], resolution.get("file"), repo_root
     )
+    results.extend(_rehash_yaml(resolution, repo_root, _resolve_input_artifact_value))
     bad = [
         {
             "path": member["path"]["path"],
