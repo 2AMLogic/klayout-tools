@@ -5091,21 +5091,23 @@ lowered to `let` lines: the contributor vector names are hierarchical
 flattened instance paths unknown until the run, and `expr` has no vector glob.
 Instead the corner's deck dumps ngspice's spectra plot to a rawfile beside its
 other artifacts and `klt` reduces it in Python inside the corner run, so only
-the scalar leaves the corner -- the `batch`/`remote` backends work with
-`options.keep_artifacts: false`, as for `cycle_mean`. A request with no
-`mechanism` entry emits a byte-identical deck and an unchanged report.
+the scalar leaves the corner. This reduction needs no artifact retention
+(`options.keep_artifacts: false`), removing that structural constraint on
+`batch`/`remote`. End-to-end batch verification remains tracked in
+[#6470](https://github.com/2AMLogic/klayout-tools/issues/6470). A request with
+no `mechanism` entry emits a byte-identical deck and an unchanged report.
 
 ### Runner version
 
-The form is evaluated by `klt sim` itself, on whichever host runs the corner.
-A `remote`/`batch` runner must therefore run a `klt` release that includes
-this feature -- the first release after the one that predates #2938 -- and,
-like `measurements[].expr`, a runner older than that rejects the request
-(`batch_runner_version_mismatch` under `batch.runner_version_check:
-"enforce"`; see "Runner/client `klt` version skew"). The batch runner image
-(klt 0.5.0 at the time of writing) predates both `expr` and `noise`, so
-noise benches stay refused on the batch backend until the image is updated;
-there is no `.meas`-card form that older runners could accept.
+Noise measurements are evaluated by `klt sim` itself, on whichever host runs
+the corner. A `remote`/`batch` runner executing a `mechanism` entry must carry
+a `klt` release that includes `noise.mechanism`. As of 2026-11-18, no released
+version includes it (the latest release, v0.9.2, lacks it). A runner lacking
+`noise.mechanism` cannot execute mechanism benches; there is no `.meas`-card
+form that older runners could accept. The batch version-skew check rejects a
+known runner/client version mismatch with `batch_runner_version_mismatch`
+under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
+version skew"); passing that check does not establish mechanism support.
 
 ## Optional measurements (`measurements[].optional`)
 

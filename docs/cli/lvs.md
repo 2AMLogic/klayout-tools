@@ -1388,7 +1388,21 @@ deck — either `klt extract` the same GDS and read each device's `r_ohm`/
 the schematic's `L`/`W` — and update the reference cards. Narrowing the
 `options.compare_parameters` scope to drop `R` also restores a verdict, at
 the cost of no longer verifying resistance at all; prefer re-deriving the
-values. `tests/test_lvs_sg13g2_resistor_reference.py::test_sg13g2_resistor_value_drift_reports_the_class_cascade`
+values. Raising `options.parameter_tolerance` **on its own** does not
+restore a verdict for the measured cascade, even when wider than the
+resistance delta: the stale scoped `R` prevents pairing, leaving no pair
+for the tolerance retry and no `device.parameter_tolerated` entry in that
+request (a `0.15` tolerance against an ~11% resistance delta returns the
+same `status`, device counts and finding categories as no tolerance at
+all). For structureless cells with two or more out-of-agreement devices,
+also setting `options.anchor_top_level_pins: true` (and `hints.same_nets`
+for internal nets that are not declared pins) is the documented workaround:
+anchoring can enable pairing and tolerance recovery; see the **Known
+limit** under "`device.parameter_tolerated`". This workaround has not been
+tested against this sg13g2 request and verifies resistance only to the
+chosen tolerance, so prefer re-deriving the reference values. The
+single-pair recovery described in that section is unchanged.
+`tests/test_lvs_sg13g2_resistor_reference.py::test_sg13g2_resistor_value_drift_reports_the_class_cascade`
 pins this signature, and the
 `test_inline_extracted_sg13g2_resistor_pairs_plain_element_reference` /
 `test_mixed_sg13g2_mos_and_resistor_inline_pairs_plain_element_reference`
