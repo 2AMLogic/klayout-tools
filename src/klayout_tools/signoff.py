@@ -64,6 +64,7 @@ from .coverage import (
     coverage_skipped_work,
     coverage_state,
 )
+from .coverage_work import coverage_work_count
 from .design_evidence_tiers import (
     CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
@@ -3055,44 +3056,30 @@ def _generic_overstates_coverage(kind: str, envelope: _EvidenceEnvelope) -> bool
 
 
 def _partial_coverage_disclosure(envelope: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The cited envelope's own statement that it skipped requested work
-    (issue #2109) -- or ``None`` when it makes no such statement.
+    """Quote partial coverage in check details and manifest citations.
 
-    ``None`` for every row of the common rollup table except ``partial``,
-    including a legacy envelope whose verb-specific fields describe a gap
-    (`klt drc`'s ``rules_skipped``, surfaced separately and unchanged by
-    :func:`_drc_coverage_disclosure`). Re-reading those here would relabel
-    pre-contract data as a common partial claim, which is exactly the
-    "missing legacy coverage is not evidence either way" rule
-    :mod:`klayout_tools.coverage` exists to apply identically everywhere.
-
-    Quoted, not graded on, for every first-party kind: a `klt signoff`
-    verdict still rests on the producer's own status token (see
-    :func:`_non_passing_reason`). The one exception is ``generic``, which
-    has no adapter and is cross-checked against this block by
-    :func:`_generic_overstates_coverage` (issue #2906). Until a
-    verb's Phase 2 adapter lands, that token can still be the kind's
-    unconditional success word on a run whose common coverage says
-    ``partial`` -- and when it is, this key is what makes the gap visible in
-    the report rather than silent, on both the ``checks[]`` and the
-    ``"met"``-citation paths.
+    Totals include each represented unit, while the display cap applies to
+    records. The common coverage reader excludes legacy verb-specific gaps.
     """
     skipped = coverage_skipped_work(cast(dict[str, Any], envelope))
     if not skipped:
         return None
-    if len(skipped) <= _PARTIAL_COVERAGE_SKIPPED_CAP:
-        return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
     by_reason: dict[str, int] = {}
     for record in skipped:
-        reason = str(record.get("reason"))
-        by_reason[reason] = by_reason.get(reason, 0) + 1
-    return {
+        reason = record["reason"]
+        by_reason[reason] = by_reason.get(reason, 0) + coverage_work_count(record)
+    total = sum(by_reason.values())
+    truncated = len(skipped) > _PARTIAL_COVERAGE_SKIPPED_CAP
+    disclosure: dict[str, Any] = {
         "reason": _REASON_PARTIAL_COVERAGE,
         "skipped": skipped[:_PARTIAL_COVERAGE_SKIPPED_CAP],
-        "skipped_total": len(skipped),
-        "skipped_by_reason": dict(sorted(by_reason.items())),
-        "truncated": True,
     }
+    if truncated or total > len(skipped):
+        disclosure["skipped_total"] = total
+        disclosure["skipped_by_reason"] = dict(sorted(by_reason.items()))
+    if truncated:
+        disclosure["truncated"] = True
+    return disclosure
 
 
 def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:

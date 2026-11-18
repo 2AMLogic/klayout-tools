@@ -19,7 +19,7 @@ exit 0
 """
 
 
-def _install(tmp_path: Path, extra_env: dict[str, str]) -> list[str]:
+def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir()
     docker = stub_dir / "docker"
@@ -33,6 +33,9 @@ def _install(tmp_path: Path, extra_env: dict[str, str]) -> list[str]:
         "DOCKER_ARGV_LOG": str(log),
         **extra_env,
     }
+    # A None value unsets the key entirely (e.g. HOME, to prove the
+    # wrapper never dereferences it bare under `set -u`).
+    env = {k: v for k, v in env.items() if v is not None}
     # The installer ends by running `openroad -version` through the wrapper,
     # which hits the stub's `run` branch and records the argv.
     subprocess.run(
@@ -80,6 +83,73 @@ def _mounts(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
 
 
+def test_wrapper_mounts_default_klt_cache_root(tmp_path: Path) -> None:
+    """Issue #5626: with KLT_CACHE_DIR/XDG_CACHE_HOME unset the wrapper
+    mounts `${XDG_CACHE_HOME:-$HOME/.cache}/klt` at the identical path,
+    read-only."""
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    cache = str(tmp_path / ".cache" / "klt")
+    assert f"{cache}:{cache}:ro" in _mounts(argv)
+
+
+def test_wrapper_mounts_klt_cache_dir_itself(tmp_path: Path) -> None:
+    """Issue #5626: an explicit KLT_CACHE_DIR is mounted verbatim -- not
+    suffixed with /klt (the default's suffix) or /liberty-merged (the merge
+    subdir cache_dir() appends)."""
+    cache = tmp_path / "mycache"
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": str(cache)})
+    assert f"{cache}:{cache}:ro" in _mounts(argv)
+    assert not any("/klt:" in m or "/liberty-merged:" in m for m in _mounts(argv))
+
+
+def test_wrapper_mounts_xdg_cache_klt(tmp_path: Path) -> None:
+    """Issue #5626: XDG_CACHE_HOME relocates the default cache root."""
+    argv = _install(
+        tmp_path,
+        {"TMPDIR": str(tmp_path), "XDG_CACHE_HOME": str(tmp_path / "xdg")},
+    )
+    cache = str(tmp_path / "xdg" / "klt")
+    assert f"{cache}:{cache}:ro" in _mounts(argv)
+
+
+def test_wrapper_creates_cache_dir_as_caller(tmp_path: Path) -> None:
+    """Issue #5626: the wrapper mkdir -p's the cache root before docker run,
+    so Docker never plants a root-owned directory there (issue #3151)."""
+    cache = tmp_path / ".cache" / "klt"
+    assert not cache.exists()
+    _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    assert cache.is_dir()
+    assert cache.stat().st_uid == os.getuid()
+
+
+def test_wrapper_skips_cache_mount_duplicate_of_tmpdir(tmp_path: Path) -> None:
+    """Issue #5626: KLT_CACHE_DIR=$TMPDIR must not produce a second -v for
+    that path -- docker run rejects a duplicate mount point. The wrapper
+    still runs (the installer ends with `openroad -version`, check=True)."""
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": str(tmp_path)})
+    specs = [m for m in _mounts(argv) if m.startswith(f"{tmp_path}:{tmp_path}")]
+    assert specs == [f"{tmp_path}:{tmp_path}"]
+
+
+def test_wrapper_survives_unset_home(tmp_path: Path) -> None:
+    """Review of #6195: the cache-root resolution runs on EVERY invocation
+    under `set -euo pipefail`, so a bare `$HOME` must not make `openroad
+    -version` (the installer's final smoke run) exit 1 in an environment
+    with HOME unset."""
+    argv = _install(tmp_path, {"HOME": None})
+    assert argv  # the wrapper ran to completion and recorded its argv
+
+
+def test_wrapper_degrades_when_home_unwritable(tmp_path: Path) -> None:
+    """Review of #6195: an unwritable HOME must degrade to "no cache mount",
+    not a hard mkdir failure -- the cache root only matters for list-form
+    corners, which produce their own diagnostic. /proc is unwritable even
+    for root, so this holds however the suite is run."""
+    argv = _install(tmp_path, {"HOME": "/proc/nonexistent"})
+    assert argv
+    assert not any(m.startswith("/proc/nonexistent") for m in _mounts(argv))
+
+
 def test_wrapper_mounts_tmp_alongside_other_tmpdir(tmp_path: Path) -> None:
     argv = _install(tmp_path, {"TMPDIR": str(tmp_path)})
     mounts = _mounts(argv)
@@ -111,3 +181,15 @@ def test_wrapper_multi_trailing_slash_tmpdir_no_duplicate(tmp_path: Path) -> Non
     mounts = _mounts(argv)
     assert "/tmp//:/tmp//" in mounts
     assert "/tmp:/tmp" not in mounts
+
+
+def test_wrapper_skips_cache_mount_duplicate_of_extra_tmp_mount(
+    tmp_path: Path,
+) -> None:
+    """Issues #5626 + #5878: when $TMPDIR differs from /tmp the wrapper mounts
+    /tmp too, so KLT_CACHE_DIR=/tmp must not become a second, read-only -v for
+    it -- docker run rejects a duplicate mount point and every `openroad`
+    invocation would fail."""
+    argv = _install(tmp_path, {"TMPDIR": str(tmp_path), "KLT_CACHE_DIR": "/tmp"})
+    specs = [m for m in _mounts(argv) if m.startswith("/tmp:")]
+    assert specs == ["/tmp:/tmp"]
