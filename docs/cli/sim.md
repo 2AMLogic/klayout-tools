@@ -105,7 +105,9 @@ this document (and the code) win.
   simulating or submitting anything ([#3064](https://github.com/2AMLogic/klayout-tools/issues/3064)).
   Every pre-dispatch check a real run performs still runs (request shape,
   Monte Carlo spec, measurement forms, model/OSDI resolution, the
-  `stage_model_inputs` closure and the off-host PDK check), and a failure
+  `stage_model_inputs` closure, the off-host PDK check and, on `batch`, the
+  whole-job ceiling/split plan
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674))), and a failure
   exits 1 with the same message a real run gives. It then returns before
   the fail-fast probe, the output-directory lock and any backend, so no
   ngspice, SSH, S3 or EC2 is touched. A `decks` request is validated the same
@@ -122,7 +124,14 @@ this document (and the code) win.
   `staged_files[]` (the staged model inputs, as in
   `environment.staged_model_inputs`), and `warnings[]` (unknown top-level
   request keys and unknown keys under `corners`; a warning only, never an
-  error). `exclude` is a top-level request key, not a `corners` key: nested
+  error). On `batch`, when this host can resolve a batch configuration, the
+  report also carries `job_ceiling` -- the submit path's own whole-job
+  ceiling assessment, under the `environment.remote.job_ceiling` name and
+  shape, including `split` / `effective_hosts` when a split mode is active
+  ([#5674](https://github.com/2AMLogic/klayout-tools/issues/5674)); the planned job count it
+  reports never redefines `hosts` (still the request's `remote.hosts`), and
+  a `--format text` dry run prints a `batch plan:` line with the unit count
+  and planned job count. `exclude` is a top-level request key, not a `corners` key: nested
   under `corners` it is ignored (and warned about), so the full crossed
   matrix runs.
 - `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
@@ -2486,7 +2495,17 @@ the packaged `data/` copy. See
   client and published runner versions are in the error message
   ([#4680](https://github.com/2AMLogic/klayout-tools/issues/4680)). A host with no resolvable
   batch configuration (no bucket or provision script) skips the check and
-  dry-runs as before. `options.initial_conditions` has no
+  dry-runs as before. Since [#5674](https://github.com/2AMLogic/klayout-tools/issues/5674) the
+  dry run is not limited to the runner gate: when the batch configuration
+  resolves it also runs the submit path's own ceiling/split plan
+  (`plan_batch_job`), so a malformed `max_units_per_job` (or one combined
+  with `job_ceiling_check: "enforce"`) is refused with
+  `batch_max_units_per_job_invalid` and an over-ceiling request behaves
+  exactly as a submit would — refused under `"enforce"`, warned under the
+  default `"warn"`, planned under `"split"` — and the assessment is
+  reported as `job_ceiling` (see the `--dry-run` flag above). A configless
+  host skips the plan too, staying dry-run clean.
+  `options.initial_conditions` has no
   registry row: its first-supported runner release is not recorded, so a
   stale worker is still caught post-run by `initial_conditions_unsupported_worker`.
 - **Stderr progress.** The `submitting to` line shows the bucket as
@@ -4768,14 +4787,17 @@ expression. Verified on ngspice-46:
 ```
 
 The failing card logs `Error: measure  bad  when(WHEN) : Expressions like
-0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint
-card text (parameterized cards are valid); instead, when the log names the
-failing measurement, that error text is appended to its `measurement`
-diagnostic (`measurement 'bad' produced no value -- ngspice reported:
-Expressions like 0.5*1.62 are not supported.`), bounded in length and
+0.5*1.62 are not supported.` and no value is printed. `klt sim` does not lint a
+card's *right-hand side* (parameterized cards are valid there); instead, when
+the log names the failing measurement, that error text is appended to its
+`measurement` diagnostic (`measurement 'bad' produced no value -- ngspice
+reported: Expressions like 0.5*1.62 are not supported.`), bounded in length and
 available without `keep_artifacts`. An engine `.meas` error that cannot be
 matched to a missing measurement is reported once as a corner-level
-`measurement` diagnostic with severity `warning`; grading is unchanged.
+`measurement` diagnostic with severity `warning`; grading is unchanged. (An
+arithmetic expression in a **signal** position is a different case: it is
+decidable from the card text alone and is linted up front -- see the next
+section.)
 
 A `spice` `.meas ... when v(x)=<val>` card therefore cannot follow
 `corners.supply_v`: write the literal for each corner's supply, or declare the
@@ -4787,6 +4809,48 @@ threshold as `measurements[].crossings` with a supply-relative `level`
 literal time or a `.param` reference. This error follows the same
 `Error: measure <name> ...` log format, so it is attached to the measurement's
 diagnostic in the same way.
+
+### An expression in a `.meas` signal position must be wrapped in `par('...')`
+
+A `.meas` card's *signal* positions -- `WHEN`, `FIND`, `AVG`, `MAX`, `TRIG`,
+`TARG` -- accept only a single vector reference: `v(node)`, `i(source)`, or a
+bare vector name. An arithmetic expression over vectors fails **every**
+corner with `Error: no such vector as v(a)-v(b).` (the quoted
+`no such vector as 'v(a)-v(b)'` form on `AVG`/`TRIG`), while the failing
+measurement itself can even read `status=pass value=0.0` -- a wrong zero, not
+a loud failure.
+
+The same quantity is expressible in the same card: wrap the expression in
+`par('...')`. ngspice lifts the quoted expression into an internal helper
+vector, so `rise=`/`fall=`/`cross=` qualifiers keep working:
+
+```
+.meas tran bad  when v(a)-v(b)=0.3                 ; fails every corner
+.meas tran good when par('v(a)-v(b)')=0.3          ; works
+.meas tran diff avg par('v(a)-v(b)') from=0 to=20u ; works
+```
+
+`klt sim` refuses the bare form at request time (exit 1, before any corner
+runs -- `--dry-run` included), quoting the expression and the exact
+`par('...')` rewrite of the card, and also naming
+`measurements[].crossings` for the cases that form serves better: a whole
+crossing *series*, or a supply-relative `level`
+(`{"frac_of": "vdd", "fraction": 0.5}`) resolved per corner. Note a
+`crossings` entry's `value` is the **count** of crossings, not a time; the
+times are on its `crossings.times[]` array.
+
+Inside `.control` scope -- `analysis_steps[].measurements[].spice` cards --
+`par('...')` is **not** accepted (it is a file-scope `.meas` feature). There
+the remedy is a helper vector: declare the expression as an *intermediate*
+measurement before the card
+(`{"name": "vdiff", "expr": "v(a)-v(b)", "intermediate": true}`; `klt sim`
+emits it as a `let vdiff = v(a)-v(b)` control line, in declared order), then
+reference the name -- `meas tran t when vdiff=0.3`. The request-time refusal
+names that route for step-scoped cards.
+
+Two shapes are worse than a failed measurement and must not be used:
+`when 'v(a)-v(b)'=0.3` and `when {v(a)-v(b)}=0.3` each kill the whole deck
+(`ERROR: fatal error in ngspice, exit(1)`).
 
 ### `FIND ... AT=` at a `dc` sweep's end point
 
@@ -5091,21 +5155,23 @@ lowered to `let` lines: the contributor vector names are hierarchical
 flattened instance paths unknown until the run, and `expr` has no vector glob.
 Instead the corner's deck dumps ngspice's spectra plot to a rawfile beside its
 other artifacts and `klt` reduces it in Python inside the corner run, so only
-the scalar leaves the corner -- the `batch`/`remote` backends work with
-`options.keep_artifacts: false`, as for `cycle_mean`. A request with no
-`mechanism` entry emits a byte-identical deck and an unchanged report.
+the scalar leaves the corner. This reduction needs no artifact retention
+(`options.keep_artifacts: false`), removing that structural constraint on
+`batch`/`remote`. End-to-end batch verification remains tracked in
+[#6470](https://github.com/2AMLogic/klayout-tools/issues/6470). A request with
+no `mechanism` entry emits a byte-identical deck and an unchanged report.
 
 ### Runner version
 
-The form is evaluated by `klt sim` itself, on whichever host runs the corner.
-A `remote`/`batch` runner must therefore run a `klt` release that includes
-this feature -- the first release after the one that predates #2938 -- and,
-like `measurements[].expr`, a runner older than that rejects the request
-(`batch_runner_version_mismatch` under `batch.runner_version_check:
-"enforce"`; see "Runner/client `klt` version skew"). The batch runner image
-(klt 0.5.0 at the time of writing) predates both `expr` and `noise`, so
-noise benches stay refused on the batch backend until the image is updated;
-there is no `.meas`-card form that older runners could accept.
+Noise measurements are evaluated by `klt sim` itself, on whichever host runs
+the corner. A `remote`/`batch` runner executing a `mechanism` entry must carry
+a `klt` release that includes `noise.mechanism`. As of 2026-11-18, no released
+version includes it (the latest release, v0.9.2, lacks it). A runner lacking
+`noise.mechanism` cannot execute mechanism benches; there is no `.meas`-card
+form that older runners could accept. The batch version-skew check rejects a
+known runner/client version mismatch with `batch_runner_version_mismatch`
+under `batch.runner_version_check: "enforce"` (see "Runner/client `klt`
+version skew"); passing that check does not establish mechanism support.
 
 ## Optional measurements (`measurements[].optional`)
 
@@ -5233,12 +5299,13 @@ that does not understand it, so on such a runner give `level` as a literal
 number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
-`crossings` is a third measurement form: an entry declares **exactly one** of
-`spice`, `expr`, or `crossings` (declaring two is exit 1). It requires
-`analysis.kind: "tran"`; an unknown key, a missing `signal`/`level`, an
-unknown `edge`, a malformed window or `max` are all refused up front
-(`SimError`, exit 1) with a corrective message. Optional `unit`, `limits`,
-`plausible_range` and `k_sigma` apply to the entry's `value` (the count).
+`crossings` is a measurement form refused beside every other measurement form
+(an entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`; an unknown key, a missing
+`signal`/`level`, an unknown `edge`, a malformed window or `max` are all
+refused up front (`SimError`, exit 1) with a corrective message. Optional
+`unit`, `limits`, `plausible_range` and `k_sigma` apply to the entry's `value`
+(the count).
 
 ### Response
 
@@ -5372,11 +5439,11 @@ expression. These remain **unsupported**; `cycle_mean` is the supported way:
 | `from`   | no       | Earliest allowed window start, in seconds (a number or a SPICE literal such as `"10u"`); default 0. The window starts at the first reference edge at or after it. Named `from` to match `crossings`. |
 | `cycles` | yes      | Integer `>= 1`: the window spans this many reference periods (`cycles + 1` edges). |
 
-`cycle_mean` is a fourth measurement form, mutually exclusive with `spice`,
-`expr` and `crossings` (declaring two is exit 1). It requires `analysis.kind:
-"tran"`, is refused for `engine: "xyce"` and inside `analysis_steps[]`, and
-rejects unknown keys by name. Optional `unit`, `limits`, `plausible_range`
-and `k_sigma` apply to the mean.
+`cycle_mean` is a measurement form refused beside every other measurement form
+(an entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`, is refused for `engine: "xyce"`
+and inside `analysis_steps[]`, and rejects unknown keys by name. Optional
+`unit`, `limits`, `plausible_range` and `k_sigma` apply to the mean.
 
 ### Response
 
@@ -6189,12 +6256,12 @@ instead:
 | `voltage` | yes      | One-line ngspice vector for the source's positive-terminal voltage relative to ground (`"v(a)"`). |
 | `from`/`to` | no     | Window in seconds, a number or SPICE time literal. Default: the whole transient. Must lie inside the `tran` analysis and `from < to`. |
 
-`energy` is a further measurement form: an entry declares **exactly one** of
-`spice`, `expr`, `crossings`, `cycle_mean`, `transfer` or `energy` (two is exit 1). It requires
-`analysis.kind: "tran"`. Unknown keys, a missing `source`/`voltage`, a
-malformed or inverted window, or a window outside `analysis.args` are refused
-up front (`SimError`, exit 1). Optional `unit`, `limits`, `plausible_range`
-and `k_sigma` apply to `value` (the net energy).
+`energy` is a measurement form refused beside every other measurement form (an
+entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`. Unknown keys, a missing
+`source`/`voltage`, a malformed or inverted window, or a window outside
+`analysis.args` are refused up front (`SimError`, exit 1). Optional `unit`,
+`limits`, `plausible_range` and `k_sigma` apply to `value` (the net energy).
 
 ### Response
 
@@ -6286,13 +6353,12 @@ explicit rating in `limits`:
 | `b`         | no       | Reference node. Default: ground, i.e. `|v(a)|`. |
 | `from`/`to` | no       | Window in seconds, a number or SPICE time literal. Default: the whole transient. Must lie inside the `tran` analysis and `from < to`. |
 
-`stress` is a further measurement form: an entry declares **exactly one** of
-`spice`, `expr`, `crossings`, `cycle_mean`, `energy`, `noise`, `transfer`,
-`tian`, `snm`, `search` or `stress` (two is exit 1). It requires
-`analysis.kind: "tran"`. Unknown keys, a missing `a`, a malformed or inverted
-window, or a window outside `analysis.args` are refused up front (`SimError`,
-exit 1). Optional `unit`, `limits`, `plausible_range` and `k_sigma` apply to
-`value`. Declare one entry per node pair.
+`stress` is a measurement form refused beside every other measurement form (an
+entry declares **exactly one** form; see "Measurements that are not `.meas`
+cards"). It requires `analysis.kind: "tran"`. Unknown keys, a missing `a`, a
+malformed or inverted window, or a window outside `analysis.args` are refused
+up front (`SimError`, exit 1). Optional `unit`, `limits`, `plausible_range`
+and `k_sigma` apply to `value`. Declare one entry per node pair.
 
 ### Response
 
