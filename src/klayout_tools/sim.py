@@ -153,7 +153,7 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -2190,7 +2190,7 @@ def _validate_ngspice_options(value: Any) -> dict[str, Any]:
         if isinstance(item, bool):
             continue
         if isinstance(item, (int, float)):
-            if not math.isfinite(item):
+            if not is_finite_number(item):
                 raise SimError(
                     f"options.ngspice_options.{name} must be finite (got {item!r})"
                 )
@@ -3793,7 +3793,7 @@ def _run_sim_corners(
     # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
     # form), `--submit-only` (refused with `--resume` before any S3 write)
     # and `--dry-run` (which must not touch S3 at all).
-    harvested_engine_version = sim_batch_resume.maybe_harvest_resume_shards(
+    harvested_version, harvested_env = sim_batch_resume.maybe_harvest_resume_shards(
         resume=resume,
         backend=backend,
         checkpoint=checkpoint,
@@ -3814,7 +3814,7 @@ def _run_sim_corners(
     if loaded_engine_version is None:
         # An all-harvested rerun dispatches nothing, so the harvested jobs'
         # engine version is the only one this report can carry.
-        loaded_engine_version = harvested_engine_version
+        loaded_engine_version = harvested_version
 
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
@@ -4193,17 +4193,17 @@ def _run_sim_corners(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
+    remote_environment = sim_batch_resume.merge_resume_environment(
+        harvested_env, remote_environment
+    )
 
     if resume:
         # Reassemble the full corner list in the request's own order: a
         # corner is either freshly run just now (`corners_new`) or reused
         # verbatim from a matching checkpoint (`pre_completed`) -- every
         # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Only done under `resume`: every backend
-        # that reaches here is `local`/`local-parallel` (see the `remote`
-        # guard above), which always return exactly one report per
-        # dispatched point, keyed by that point's own `corner_id`. `batch`
-        # does too: lost shards are synthesized per point (`_lost_shard_corner`).
+        # `dispatch_points` above). Lost batch shards synthesize unrun reports
+        # per point, so every dispatched point still has a report.
         new_by_id = {corner["corner_id"]: corner for corner in corners_new}
         corners = [
             new_by_id[point.corner_id]
@@ -5121,7 +5121,7 @@ def _nodeset_match_process(value: Any, where: str) -> str:
 
 
 def _nodeset_match_number(value: Any, where: str) -> Any:
-    if not is_number(value) or not math.isfinite(value):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be a finite number")
     return value
 
@@ -5635,9 +5635,9 @@ def _resolve_mismatch_scale(
         return None
     value = mc_spec["mismatch_scale"]
     field = "request.monte_carlo.mismatch_scale"
-    if not is_number(value):
+    if not is_finite_number(value):
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    if not math.isfinite(value) or value < 0:
+    if value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     family = pdk_variant_family(pdk) if pdk else None
     param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")

@@ -20,14 +20,13 @@ inside the validators that read them.
 
 from __future__ import annotations
 
-import math
 import os
 import re
 from collections.abc import Callable
 from typing import Any
 
 from . import macros as macro_spec
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from .lef_header import read_lef_header, read_lef_macro_pin_ports
 from .netlist_construct_scan import (
     _NETLIST_BEHAVIOURAL_RE,
@@ -555,11 +554,7 @@ def _validate_floorplan_tracks(tracks: Any) -> None:
             raise PlaceAndRouteError(f"{where}.layer must be a non-empty string")
         for key in _TRACK_KEYS:
             value = entry.get(key)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-            ):
+            if not is_finite_number(value):
                 raise PlaceAndRouteError(f"{where}.{key} must be a finite number")
             if key.endswith("pitch_um") and value <= 0:
                 raise PlaceAndRouteError(f"{where}.{key} must be > 0")
@@ -709,12 +704,7 @@ def _validate_instance_group(entry: Any, where: str, seen: set[str]) -> dict[str
 
 
 def _check_max_extent_um(bound: Any, where: str) -> None:
-    if (
-        isinstance(bound, bool)
-        or not isinstance(bound, (int, float))
-        or not math.isfinite(bound)
-        or bound <= 0
-    ):
+    if not is_finite_number(bound) or bound <= 0:
         raise PlaceAndRouteError(f"{where}.max_extent_um must be a number > 0")
 
 
@@ -768,13 +758,7 @@ def _validate_pin_range(span: Any, where: str) -> list[Any]:
     if not (
         isinstance(span, list)
         and len(span) == 2
-        and all(
-            isinstance(v, (int, float))
-            and not isinstance(v, bool)
-            and math.isfinite(v)
-            and v >= 0
-            for v in span
-        )
+        and all(is_finite_number(v) and v >= 0 for v in span)
         and span[0] < span[1]
     ):
         raise PlaceAndRouteError(f"{where}.range_um must be [lo, hi] with 0 <= lo < hi")
@@ -1144,12 +1128,7 @@ def _validate_tapcell(
             "only distance_um is supported"
         )
     distance_um = tapcell.get("distance_um")
-    if (
-        not isinstance(distance_um, (int, float))
-        or isinstance(distance_um, bool)
-        or not math.isfinite(distance_um)
-        or distance_um <= 0
-    ):
+    if not is_finite_number(distance_um) or distance_um <= 0:
         raise PlaceAndRouteError(
             "request.power.tapcell.distance_um is required and must be a "
             "positive number"
@@ -1679,12 +1658,7 @@ _LIBRARY_KEYS = (
 
 
 def _positive_number(value: Any, where: str) -> float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise PlaceAndRouteError(f"{where} must be a positive number")
     return float(value)
 
