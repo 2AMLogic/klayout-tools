@@ -13,7 +13,8 @@ from test_signoff import (
     SIM_PASS_ENVELOPE,
     _write,
 )
-from test_signoff_derived_rows import _LIM, TWO_ROW_FAIL_SIM, _meas, _tagged_sim
+from test_signoff_derived_rows import _LIM, _meas, _tagged_sim
+from test_signoff_failed_sim_credit import TWO_ROW_FAIL_SIM
 
 
 def _item(item_id, entry):

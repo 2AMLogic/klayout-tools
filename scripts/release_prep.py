@@ -200,7 +200,9 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
             f"version {new} is older than the current base-version {current}"
         )
 
-    # Validate the changelog before any writes (issue #6086).
+    # Compute every write up front so a refusal (e.g. an empty '## Unreleased'
+    # section, issue #6086, or a stale availability-note anchor, issue #5582)
+    # leaves the tree untouched, pyproject.toml unbumped and fragments in place.
     new_py_text = bump_pyproject(py_text, new)
     changelog_text = changelog.read_text(encoding="utf-8")
     # An existing release heading means pending fragments are for a future cut.
@@ -212,18 +214,20 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
     new_log_text = add_changelog_heading(
         changelog_text, new, date, fragments="\n\n".join(fragments.values())
     )
+    # On an idempotent re-run `current == new`; the notes were already resolved.
+    new_signoff_text = None
+    if signoff.exists() and current != new:
+        new_signoff_text = update_signoff_notes(
+            signoff.read_text(encoding="utf-8"), current, new
+        )
+        check_signoff_note_anchors(new_signoff_text, current)
 
     pyproject.write_text(new_py_text, encoding="utf-8")
     changelog.write_text(new_log_text, encoding="utf-8")
     for path in fragments:
         path.unlink()
-    # On an idempotent re-run `current == new`; the notes were already resolved.
-    if signoff.exists() and current != new:
-        signoff_text = update_signoff_notes(
-            signoff.read_text(encoding="utf-8"), current, new
-        )
-        check_signoff_note_anchors(signoff_text, current)
-        signoff.write_text(signoff_text, encoding="utf-8")
+    if new_signoff_text is not None:
+        signoff.write_text(new_signoff_text, encoding="utf-8")
     return {"previous": current, "version": new, "date": date}
 
 

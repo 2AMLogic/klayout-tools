@@ -219,6 +219,63 @@ def test_pinned_root_non_variant_nested_dir_loses_to_the_root(tmp_path):
     assert client["stamp_sha256"] == hashlib.sha256(b"flat side").hexdigest()
 
 
+@pytest.mark.parametrize(
+    "layout,client_source,worker_source,status",
+    [
+        ("non_variant_nested", b"flat side", b"nested side", "mismatch"),
+        ("flat_only", b"flat side", None, "not_comparable"),
+        ("nested_variant", b"nested side", b"nested side", "match"),
+    ],
+    ids=["ambiguous-nested-stamp", "flat-only", "nested-variant-tree"],
+)
+def test_pinned_root_layout_stamp_comparison(
+    tmp_path, layout, client_source, worker_source, status
+):
+    """Characterize the accepted client/worker layout asymmetry (#6522).
+
+    These synthetic installs have no store metadata. Run the actual payload:
+    unlike the client, it reads root/<variant>/SOURCES without resolving the
+    variant tree, so a non-variant nested stamp can mislead the comparison.
+    """
+    root = tmp_path / "pdk"
+    (root / "libs.tech").mkdir(parents=True)
+    (root / "SOURCES").write_text("flat side\n", encoding="utf-8")
+    if layout != "flat_only":
+        nested = root / "gf180mcuD"
+        nested.mkdir()
+        (nested / "SOURCES").write_text("nested side\n", encoding="utf-8")
+        if layout == "nested_variant":
+            (nested / "libs.tech").mkdir()
+
+    client = pdk_store.client_pdk_stamp("gf180mcuD", str(root))
+    doc = _run_capture_program(
+        tmp_path,
+        ngspice_script=None,
+        args=("", "gf180mcuD", "0"),
+        env={"PDK_ROOT": str(root)},
+    )
+    worker = doc["pdk"]
+
+    assert client == {
+        "variant": "gf180mcuD",
+        "stamp_scheme": "sources-sha256",
+        "stamp_sha256": hashlib.sha256(client_source).hexdigest(),
+    }
+    assert worker["variant"] == "gf180mcuD"
+    comparison = sb._compare_pdk_stamps(worker, client)
+    assert comparison["status"] == status
+    if worker_source is None:
+        assert worker["stamp_scheme"] is None
+        assert worker["stamp_sha256"] is None
+        assert comparison["reason"] == "worker_stamp_unavailable"
+    else:
+        assert worker["stamp_scheme"] == "sources-sha256"
+        assert worker["stamp_sha256"] == hashlib.sha256(worker_source).hexdigest()
+        if status == "mismatch":
+            assert worker["stamp_sha256"] != client["stamp_sha256"]
+            assert comparison["warning"]
+
+
 def test_staged_model_comparison_carries_the_search_resolved_client_stamp(
     _searchable_home,
 ):

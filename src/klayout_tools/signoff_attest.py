@@ -57,7 +57,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -65,7 +64,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
 from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
@@ -83,17 +82,19 @@ from .signoff import (
 )
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
+from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import input_binding
+from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -296,6 +297,9 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 def _path_list(
     inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -305,14 +309,9 @@ def _path_list(
         )
     paths = []
     for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 
@@ -356,9 +355,7 @@ def _command_spec(
     if "timeout_s" in raw:
         timeout_s = raw["timeout_s"]
         if (
-            isinstance(timeout_s, bool)
-            or not isinstance(timeout_s, (int, float))
-            or not math.isfinite(timeout_s)
+            not is_finite_number(timeout_s)
             or timeout_s <= 0
             or timeout_s > COMMAND_TIMEOUT_CEILING_S
         ):
@@ -853,23 +850,10 @@ def _skipped_check(
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
     """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
-    try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    for segment in field.split("."):
-        if isinstance(node, Mapping) and segment in node:
-            node = node[segment]
-        elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
-            node = node[int(segment)]
-        else:
-            return None
+    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric.
+    The walk itself is shared with item 9's reference-form pins
+    (:func:`~.signoff_attest_pins.json_node`, issue #5563)."""
+    node = json_node(root, path, field)
     return node if is_number(node) else None
 
 
@@ -985,7 +969,10 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command, root, _file_check))
-        checks.extend(item9.pin_checks(normalized["pins"]))
+        resolved_pins, pin_sources = resolve_pin_refs(
+            normalized["pins"], root, _normalize_repo_path
+        )
+        checks.extend(with_resolved_from(item9.pin_checks(resolved_pins), pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks

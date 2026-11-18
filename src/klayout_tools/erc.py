@@ -100,11 +100,7 @@ from .erc_substrate import (
     substrate_coverage_work,
     substrate_provenance,
 )
-from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
-    REASON_DEGENERATE_TAP_DECLARATION,
-    REASON_DEGENERATE_WELL_ASSERTION,
-    REASON_DEGENERATE_WELL_SELECTION,
-    REASON_EMPTY_WELL_REGION,
+from .erc_ties import (
     _degenerate_tie_reasons,
     _tie_findings,
 )

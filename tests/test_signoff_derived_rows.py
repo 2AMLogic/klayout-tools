@@ -15,10 +15,9 @@ import json
 import pytest
 
 from klayout_tools.signoff import build_tier_report
+from klayout_tools.signoff_derived_rows import multi_row_info
 from test_signoff import (
-    FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
     STA_MULTI_CORNER_CLEAN_ENVELOPE,
-    STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE,
 )
 
 _LIM = {"min": 1.0}
@@ -342,154 +341,82 @@ def test_item5_asserted_rows_are_reported_before_missing_kinds(tmp_path):
     assert "missing_kinds" not in item["detail"]
 
 
-# Issue #6027: a failing `klt sim` envelope credits its passing rows -- the
-# citation still grades `unmet`/`check_failed`, but rows its tagged, limited,
-# passing measurements grade leave `failed_rows` and read `derived` in
-# `row_sources`.
+# --------------------------------------------------------------------------- #
+# Justified declared gaps (issue #5599): `multi_row_info` splits the declared
+# gap set into the free-text form (`declared_gaps`, shape unchanged) and the
+# justified object form (`justified_gaps`, new key, omitted when empty).
+# --------------------------------------------------------------------------- #
 
 
-def _failing_sim(measurements: list[dict]) -> dict:
-    return {**SIM_FAIL_ENVELOPE, "measurements": measurements}
-
-
-#: The issue's reproduction: row `tdec` tagged+limited+pass, `tdyn`
-#: tagged+limited+fail, one envelope, overall `status: "fail"`.
-TWO_ROW_FAIL_SIM = _failing_sim(
-    [
-        _meas("pa", "tdec", limits=_LIM, status="pass"),
-        _meas("pb", "tdyn", limits=_LIM, status="fail"),
-    ]
-)
-
-
-def test_item5_failing_sim_credits_only_its_passing_row(tmp_path):
-    bad = _write(tmp_path, "bad.json", TWO_ROW_FAIL_SIM)
-
-    item = _item5({"5": [{"file": bad, "rows": ["tdec"]}]}, [{"id": "tdec"}])
-
-    assert item["status"] == "unmet"
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_citations"] == [bad]
-    assert item["detail"]["failed_rows"] == []
-    assert item["detail"]["uncovered_rows"] == []
-    assert item["detail"]["row_sources"] == {"tdec": "derived"}
-
-    both = _item5(
-        {"5": [{"file": bad, "rows": ["tdec", "tdyn"]}]},
-        [{"id": "tdec"}, {"id": "tdyn"}],
-    )
-    assert both["detail"]["failed_rows"] == ["tdyn"]
-    assert both["detail"]["row_sources"] == {"tdec": "derived"}
-
-
-def test_item5_failing_sim_cited_alone_keeps_the_failing_row_failed(tmp_path):
-    bad = _write(tmp_path, "bad.json", TWO_ROW_FAIL_SIM)
-
-    item = _item5(
-        {"5": [{"file": bad, "rows": ["tdyn"]}]}, [{"id": "tdec"}, {"id": "tdyn"}]
-    )
-
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_rows"] == ["tdyn"]
-    assert item["detail"]["row_sources"] == {}
-    assert item["detail"]["uncovered_rows"] == ["tdec"]
-
-
-def test_item5_failing_untagged_sim_credits_nothing(tmp_path):
-    bad = _write(tmp_path, "bad.json", SIM_FAIL_ENVELOPE)
-
-    item = _item5({"5": [{"file": bad, "rows": ["tdec"]}]}, [{"id": "tdec"}])
-
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_rows"] == ["tdec"]
-    assert item["detail"]["row_sources"] == {}
-
-
-def test_item5_failing_sim_tag_without_limits_grades_nothing(tmp_path):
-    bad = _write(
-        tmp_path, "bad.json", _failing_sim([_meas("pa", "tdec", status="pass")])
-    )
-
-    item = _item5({"5": [{"file": bad, "rows": ["tdec"]}]}, [{"id": "tdec"}])
-
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_rows"] == ["tdec"]
-    assert item["detail"]["row_sources"] == {}
-
-
-def test_item5_failing_sim_untagged_measurement_credits_nothing_extra(tmp_path):
-    bad = _write(
-        tmp_path,
-        "bad.json",
-        _failing_sim(
-            [
-                _meas("pa", "tdec", limits=_LIM, status="pass"),
-                _meas("pz", limits=_LIM),
-            ]
-        ),
-    )
-
-    item = _item5({"5": [{"file": bad, "rows": ["tdec"]}]}, [{"id": "tdec"}])
-
-    assert item["detail"]["failed_rows"] == []
-    assert item["detail"]["row_sources"] == {"tdec": "derived"}
-
-
-def test_item5_row_cited_by_failed_and_met_members_reads_derived(tmp_path):
-    bad = _write(
-        tmp_path,
-        "bad.json",
-        _failing_sim([_meas("pb", "tdec", limits=_LIM, status="fail")]),
-    )
-    good = _write(
-        tmp_path, "good.json", _tagged_sim([_meas("pa", "tdec", limits=_LIM)])
-    )
-
-    item = _item5(
-        {"5": [{"file": bad, "rows": ["tdec"]}, {"file": good, "rows": ["tdec"]}]},
-        [{"id": "tdec"}],
-    )
-
-    assert item["status"] == "unmet"
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_rows"] == []
-    assert item["detail"]["row_sources"] == {"tdec": "derived"}
-
-
-def test_digital_item5_failing_sta_credits_nothing(tmp_path):
-    bad_sta = _write(tmp_path, "sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE)
-    fv = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
-    manifest = _manifest(
-        kind="digital",
-        evidence={"5.digital": [{"file": bad_sta, "rows": ["tclk"]}, {"file": fv}]},
-        spec_rows={"5": [{"id": "tclk"}]},
-    )
-
-    item = next(i for i in build_tier_report(manifest)["items"] if i["id"] == 5)
-
-    assert item["status"] == "unmet"
-    assert item["reason"] == "check_failed"
-    assert item["detail"]["failed_rows"] == ["tclk"]
-    assert item["detail"]["row_sources"] == {}
-
-
-def test_item5_stale_pinned_sim_credits_nothing(tmp_path):
-    good = _write(tmp_path, "good.json", _tagged_sim([_meas("t", "tdec", limits=_LIM)]))
-
-    item = _item5(
-        {
-            "5": [
-                {
-                    "file": good,
-                    "rows": ["tdec"],
-                    "content_hash": "sha256:stale-revision",
-                }
-            ]
+def _justified_row(row_id="pvt_ss_125c") -> dict:
+    """A *normalized* `spec_rows` row (as `_read_spec_rows` stores it): the
+    string `gap` is None and the object form rides in `justified_gap`."""
+    return {
+        "id": row_id,
+        "gap": None,
+        "justified_gap": {
+            "reason": "no liberty file ships for this PVT point",
+            "rationale": {
+                "file": "gaps/pvt_ss_125c.md",
+                "content_hash": "sha256:" + "0" * 64,
+            },
+            "issue": "#5858",
         },
-        [{"id": "tdec"}],
+        "ratified": True,
+        "timing_margin": False,
+    }
+
+
+def _free_text_row(row_id, gap=None, ratified=True) -> dict:
+    return {
+        "id": row_id,
+        "gap": gap,
+        "justified_gap": None,
+        "ratified": ratified,
+        "timing_margin": False,
+    }
+
+
+def test_multi_row_info_splits_free_text_and_justified_gaps():
+    info = multi_row_info(
+        [],
+        [],
+        [
+            _free_text_row("tdec"),
+            _free_text_row("zin", gap="later"),
+            _justified_row(),
+        ],
     )
 
-    assert item["status"] == "unmet"
-    assert item["reason"] == "stale_evidence"
-    assert item["detail"]["failed_rows"] == ["tdec"]
-    assert item["detail"]["row_sources"] == {}
+    assert info["declared_gaps"] == [{"id": "zin", "gap": "later"}]
+    assert info["justified_gaps"] == [
+        {
+            "id": "pvt_ss_125c",
+            "reason": "no liberty file ships for this PVT point",
+            "rationale": {
+                "file": "gaps/pvt_ss_125c.md",
+                "content_hash": "sha256:" + "0" * 64,
+            },
+            "issue": "#5858",
+        }
+    ]
+    # A justified gap is still a gap: it is never uncovered, never failed.
+    assert info["uncovered_rows"] == ["tdec"]
+    assert info["failed_rows"] == []
+
+
+def test_multi_row_info_omits_justified_gaps_when_only_free_text():
+    info = multi_row_info([], [], [_free_text_row("zin", gap="later")])
+
+    assert "justified_gaps" not in info
+
+
+def test_multi_row_info_justified_gap_without_issue_link_is_null():
+    row = _justified_row()
+    row["justified_gap"] = {
+        k: v for k, v in row["justified_gap"].items() if k != "issue"
+    }
+
+    info = multi_row_info([], [], [row])
+
+    assert info["justified_gaps"][0]["issue"] is None

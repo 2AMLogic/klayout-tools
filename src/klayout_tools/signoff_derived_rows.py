@@ -211,6 +211,15 @@ def multi_row_info(
     ``row_sources``. A failed member never contributes asserted rows, and a
     derived-only credit from it never masks the citation's own failure (the
     item still grades ``unmet`` on the failed member).
+
+    Issue #5599: a row whose ``gap`` is the justified object form
+    (``justified_gap`` set) is listed under ``justified_gaps`` --
+    ``[{id, reason, rationale, issue}]`` -- never in ``declared_gaps``, so
+    the free-text form's ``detail`` shape is unchanged and no consumer ever
+    meets an object where it expects a string. The key is omitted when no
+    justified row is declared, keeping a free-text-only report
+    byte-identical; a justified gap is still a gap (never covered, never
+    failed).
     """
     if spec_rows is None:
         return {}
@@ -230,12 +239,23 @@ def multi_row_info(
             if derived or r not in row_sources:
                 row_sources[r] = "derived" if derived else "asserted"
     failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    justified = [
+        {
+            "id": row["id"],
+            "reason": row["justified_gap"]["reason"],
+            "rationale": dict(row["justified_gap"]["rationale"]),
+            "issue": row["justified_gap"].get("issue"),
+        }
+        for row in spec_rows
+        if row["justified_gap"] is not None
+    ]
     return {
         "failed_rows": failed_rows,
         "uncovered_rows": [
             row["id"]
             for row in spec_rows
             if row["gap"] is None
+            and row["justified_gap"] is None
             and row["id"] not in covered
             and row["id"] not in failed_rows
         ],
@@ -244,8 +264,13 @@ def multi_row_info(
             for row in spec_rows
             if row["gap"] is not None
         ],
+        **({"justified_gaps": justified} if justified else {}),
         "unratified_rows": [
-            row["id"] for row in spec_rows if row["gap"] is None and not row["ratified"]
+            row["id"]
+            for row in spec_rows
+            if row["gap"] is None
+            and row["justified_gap"] is None
+            and not row["ratified"]
         ],
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
     }
