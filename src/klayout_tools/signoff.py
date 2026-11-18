@@ -6374,8 +6374,8 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, file_label, repo_root
         )
 
-    actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified, samples_basis
+    actual_hash, file_hash_basis, input_verified = rehash_evidence_file(
+        check_kind, spec, file_label, actual_hash, input_verified, provenance
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
@@ -6393,7 +6393,7 @@ def _resolve_evidence(
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
             "yield_samples_source": yield_samples_source,
-            "content_hash_basis": content_hash_basis,
+            "content_hash_basis": samples_basis or file_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
             "input_members": input_members,

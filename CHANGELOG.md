@@ -14,29 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **`klt signoff --manifest`: a `yield` evidence entry can pin its samples
-  companion through a committed artifact-store manifest, offline
-  (#5963, 2026-11-18)**: a file-backed entry may now carry
-  `artifact_manifest` (repo-relative path to a committed
-  `*.manifest.json`) plus optional `artifact_member`. When the samples
-  document the `klt yield` report names is not on disk, the grader reads
-  the named member's recorded `sha256` from the committed manifest — the
-  same manifest reader `klt artifact verify` uses — and compares it
-  against the entry's `content_hash` pin: `verified` or `stale_evidence`
-  exactly as a disk re-hash would, with no broker, no environment and no
-  network at grade time. The citation discloses
-  `content_hash_basis: "artifact_manifest"` and `input_verified: null`
-  (the bytes were not re-hashed; `klt artifact get`/`verify` remain the
-  byte-level check). A store-resolved hash never supplies a verdict: the
-  envelope itself stays committed and file-backed (operator ruling
-  2026-11-17, option `a`). An unreadable/invalid manifest, or a missing,
-  duplicate-named or basename-ambiguous member, leaves the hash unresolved
-  with a named `content_hash_unresolved` reason (`manifest_unreadable`,
-  `manifest_invalid`, `member_missing`, `duplicate_member`,
-  `ambiguous_member`); a non-string key value renders that one item
-  `invalid_evidence`. Entries without the new keys, and samples files
-  present on disk, grade byte-identically to before.
-
+- **`environment.netlist_identity` no longer truncates cards that use KLayout
+  `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
+  sim`'s netlist identity cut every line at the first whitespace-preceded `$`
+  or `;`, so `X$1 $3 $4 inv` and `X$1 $7 $4 nand` both collapsed to `x$1` —
+  two different circuits shared one identity, and `expect_netlist_identity`
+  passed when it should have refused. Normalization now strips inline comments
+  with the shared `_spice_text` rule (everything from the first `;`, or from
+  the first `$` that is a whole whitespace-delimited token; a `$` that only
+  begins a token, such as the `$3` of `X$1 $3 $4 inv`, is a net name and
+  survives; `R1 a b 1k; load` now matches
+  `R1 a b 1k`). **Identity stamps can change** for netlists whose bytes did
+  not move: a stored `expect_netlist_identity` from an older version that now
+  mismatches fails loudly with the existing mismatch error; refresh it from a
+  report generated with the corrected version. `klt sim --check` diagnoses
+  the case (raw `sha256` match + identity mismatch) as
+  `normalization_changed`. The stamp format and JSON fields do not change.
+  Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
@@ -187,6 +181,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   otherwise); a slim run's SPEF and written SPICE are byte-identical to a
   full run's. No `schema_version` bump: the default shape is unchanged and
   every new field is additive.
+
+- **`klt functional-verification`: the response records a shared `provenance`
+  block, and a signoff `content_hash` pin binds the RTL, not the report's
+  bytes** (#5550, 2026-11-17): the response carried no `provenance` key, so a
+  `klt signoff` manifest citing the report as item 5/7 evidence could only
+  hash-pin it through the #4893 evidence-file re-hash — binding the report's
+  own bytes, blind to any RTL edit underneath it, with command-backed pinned
+  citations grading `unverifiable_provenance`. The response now carries the
+  shared block: `provenance.input.content_hash` (role `source`) digests
+  `request.sources` as resolved *before* the SDF/initial-state shims,
+  escaped-divider renames, and scoped-define wrappers are substituted, using
+  the same content-only combined scheme `klt
+  synthesize`/`klt equiv` record — so the digest is byte-identical for the
+  same RTL under a different checkout path or `-o` directory, excludes the
+  cocotb testbench, the SDF, and every generated wrapper, and the report
+  joins `_provenance_consistency`'s per-role cross-check against
+  `synthesize`/`equiv` citations over the same sources. `options.from_synthesize`
+  runs record `input: null` (their netlist is already pinned by
+  `from_synthesize.netlist_sha256`). Grading change, disclosed: a pinned
+  citation now compares against the RTL digest; the `evidence_file` basis
+  applies only where the envelope has no `provenance.input` — a legacy
+  envelope with no `provenance` key, or an `options.from_synthesize` report
+  (which keeps the #4893 file-bytes binding it always had; a command-backed
+  pin of one stays `unverifiable_provenance`, with a note naming that cause)
+  — so a manifest pinned under #4893 (the report's byte hash) grades
+  `stale_evidence` against a new report that records a source digest —
+  re-pin against `provenance.input.content_hash`. No
+  `schema_version` bump: the block is additive by contract.
 
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to

@@ -38,19 +38,42 @@ def content_hash_pin_state(
 
 
 def unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str:
-    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893)."""
+    """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893,
+    #5550)."""
     if check_kind == "functional-verification":
+        provenance = (resolution.get("envelope") or {}).get("provenance") or {}
+        if provenance.get("input") is not None:
+            # A report from the klt that added the block (issue #5550): the
+            # pin *has* a field to compare against, but this run's digest is
+            # null -- a source could not be hashed.
+            return (
+                "functional-verification provenance.input.content_hash is "
+                "null (a source could not be hashed); the pin cannot be "
+                "compared"
+            )
+        # No digest to compare, for one of two reasons: a report from a klt
+        # predating the block (no ``provenance`` key), or an
+        # ``options.from_synthesize`` run from this klt (a block whose
+        # ``input`` is null by design -- its design input is the netlist).
+        subject = (
+            "this options.from_synthesize functional-verification envelope "
+            "(its design input is the synthesized netlist, pinned by "
+            "from_synthesize.netlist_sha256, so provenance.input is null)"
+            if provenance
+            else "this legacy functional-verification envelope (from a klt "
+            "predating the provenance block)"
+        )
         if resolution.get("command") is not None:
             return (
-                "functional-verification envelopes carry no "
-                "provenance.input.content_hash, and a command-backed citation's "
-                "stdout is not a stable file the grader can re-hash; cite the "
-                "envelope as a file to pin its bytes"
+                f"{subject} carries no provenance.input.content_hash, and a "
+                "command-backed citation's stdout is not a stable file the "
+                "grader can re-hash; cite the envelope as a file to pin its "
+                "bytes"
             )
         return (
-            "functional-verification envelopes carry no "
-            "provenance.input.content_hash, and the cited evidence file could "
-            "not be re-hashed; the pin cannot be compared"
+            f"{subject} carries no provenance.input.content_hash, and the "
+            "cited evidence file could not be re-hashed; the pin cannot be "
+            "compared"
         )
     return (
         f"{check_kind} envelopes carry no "
@@ -176,18 +199,26 @@ def rehash_evidence_file(
     file_label: str | None,
     actual_hash: str | None,
     input_verified: bool | None,
-    prior_basis: str | None = None,
+    provenance: Mapping[str, Any],
 ) -> tuple[str | None, str | None, bool | None]:
     """Issue #4893: a ``functional-verification`` envelope records no input
     hash, so a file-backed citation that the manifest pins is re-hashed and the
     pin binds the evidence file's own bytes. Hashed only when pinned, so an
     unpinned entry's output is unchanged. Returns ``(actual_hash, basis,
-    input_verified)``; ``basis`` is the caller's ``prior_basis`` (issue
-    #5963: a `klt yield` samples hash resolved from the committed store
-    manifest) whenever this re-hash does not fire, so exactly one site
-    decides which input a citation's ``content_hash`` was computed over."""
+    input_verified)``.
+
+    Since issue #5550 an envelope whose ``provenance.input`` is present pins
+    its *RTL* digest instead (``provenance.input.content_hash``), so the
+    re-hash applies only where the envelope has no ``input`` to compare: a
+    report committed by an older ``klt`` (no block, ``{}`` here) and an
+    ``options.from_synthesize`` report (a block whose ``input`` is ``null`` by
+    design -- its design input is the netlist). A present ``input`` -- even a
+    null-digest one (a source that could not be hashed) -- suppresses it,
+    keeping the pin's meaning from silently flipping back to the report's own
+    bytes."""
     if (
         actual_hash is None
+        and provenance.get("input") is None
         and check_kind == "functional-verification"
         and file_label is not None
         and spec.get("content_hash") is not None
@@ -199,7 +230,7 @@ def rehash_evidence_file(
                 CONTENT_HASH_BASIS_EVIDENCE_FILE,
                 True,
             )
-    return actual_hash, prior_basis, input_verified
+    return actual_hash, None, input_verified
 
 
 #: ``detail.missing`` vocabulary for an ``unanchored_evidence`` binding
