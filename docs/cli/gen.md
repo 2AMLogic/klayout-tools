@@ -867,6 +867,17 @@ here: it needs a real PDK enclosure rule this repo's curated decks do not
 carry (sg13g2's, for one, transcribes no implant rule of any kind), and a
 wrong margin would be caught by no existing check.
 
+**Marker over the ring's well (issue #6025).** With `add_guard_ring` on a
+`flavor="pfet"` array, the ring's own well tie is drawn around the array, so
+the `voltage_flavor` marker box is grown to enclose that well too (extra
+marker layer included; `mos_cap`'s mark is not touched) — sky130's
+`nwell.enclosed.hvi.1` needs the whole nwell inside `hvi`. Ring-less requests,
+`flavor="nfet"` rings (no well) and requests without `voltage_flavor` are
+unchanged. The widening applies on every family that draws a ring well:
+gf180mcu `medium_voltage` and sg13g2 `hv` PMOS ring variants stay clean on the
+curated decks (their real signoff Dualgate/ThickGateOx rules are not
+transcribed here and were *not* verified).
+
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
 `add_guard_ring` composes `guard_ring`'s ring-drawing (`ring_gap_side`/
@@ -1611,6 +1622,7 @@ and 4).
 | `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
 | `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
 | `add_well`               | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+| `voltage_flavor`         | string | `""`    | Optional device-class marker drawn over the ring's well tie (issue #6025), same names as `mos_array`'s (`"hvi"` on `sky130`, `"medium_voltage"` on `gf180mcu`, `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l`) — so a ring abutting a flavour-marked device keeps sky130's `nwell.enclosed.hvi.1` satisfied. Needs `add_well` on a family that checks a well; an unrecognised name, or no well to mark, draws nothing and is flagged via `drc_hints.notes`. Echoed as `drc_hints.voltage_flavor`/`voltage_flavor_mark_present`. `""` leaves the output unchanged. |
 
 For each axis, a resolved contact count (`contacts_per_side_ns`/
 `contacts_per_side_ew` when non-zero, else `contacts_per_side`) too large for
@@ -1669,9 +1681,10 @@ opening through the ring's band so a route can pass through it instead:
 - The same `GAP_<side>` entry carries `strap_window_um` (issue #5656) — the
   opening's own box inset **along the ring side** (never across it) by the
   resolved PDK deck's minimum same-layer spacing for the opening's layer
-  (`{x0, y0, x1, y1}` in the composed frame, like every port field, each
-  coordinate rounded to 6 decimals so exact-equality comparison is safe). A
-  hand drawn strap (`klt draw`, or a `rect_um` in a composed stream) whose
+  (`{x0, y0, x1, y1}` in the cell's own origin-relative frame, like every
+  port field, each coordinate rounded to 6 decimals so exact-equality
+  comparison is safe). A hand drawn strap (`klt draw`, or a `rect_um` in a
+  composed stream) whose
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
@@ -1684,7 +1697,13 @@ opening through the ring's band so a route can pass through it instead:
   the same curated deck `klt drc` judges with (e.g. sky130's `li1.space.1`
   0.17 µm, gf180mcu's `metal1.space.1` 0.23 µm); when the family or a
   spacing rule for the layer cannot be resolved, the window degrades to the
-  opening's own box (inset 0).
+  opening's own box (inset 0). The window stays in that cell-own frame even
+  when the report is fed to [`klt gen-compose`](gen-compose.md): a compose
+  consumer flips the box by the block's `blocks[].orientation` (an
+  axis-aligned flip, re-sorting the corners into min/max) and then adds its
+  `blocks[].offset_um` from the compose response before comparing against
+  composed coordinates — a bare translation is correct only under
+  `orientation: "none"`.
 - A `drc_hints.notes[]` entry records the opening (and that substrate
   isolation is interrupted there), or — when `ring_gap_side` is set on a
   block whose ring is switched off — that no opening was cut.
@@ -2526,7 +2545,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
-| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the composed frame, each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the cell's own origin-relative frame (like the port's own `x_um`/`y_um`; a `gen-compose` consumer flips it by the block's `orientation` and adds its `offset_um` before comparing against composed coordinates), each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
 
 #### `drc_hints` fields
 
@@ -2537,8 +2556,8 @@ family/variant split the resolver doesn't have. The response's
 | `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`, `cap_array`); always `null` for `resistor_strip`, `guard_ring`, `well_island`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
-| `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
-| `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair` only (issue #1054): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
+| `voltage_flavor` | string \| null | `mos_array`/`diff_pair`/`guard_ring` (issues #1054, #6025): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
+| `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair`/`guard_ring` (issues #1054, #6025): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
 | `sd_implant_present` | boolean | `mos_array` only (issue #2580): whether a real source/drain implant mask was drawn for the request's `flavor` on the resolved PDK family — `true` only on `gf180mcu` today (issue #1577); `false` on every family whose role-layer table declares no `"nplus"`/`"pplus"` (`sky130`/`sg13g2`/`sg13cmos5l`), whose request additionally carries a `notes` entry naming the omission. |
 | `well_net` | string \| null | `well_island` only (issue #1421): the net its tie carries (echo of `params.net`), or `null` when unnamed. |
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
