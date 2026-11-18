@@ -21,8 +21,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   two different circuits shared one identity, and `expect_netlist_identity`
   passed when it should have refused. Normalization now strips inline comments
   with the shared `_spice_text` rule (everything from the first `;`, or from
-  the first token-delimited `$`; a `$` glued to the previous token, such as
-  `$3`, is a net name and survives; `R1 a b 1k; load` now matches
+  the first `$` that is a whole whitespace-delimited token; a `$` that only
+  begins a token, such as the `$3` of `X$1 $3 $4 inv`, is a net name and
+  survives; `R1 a b 1k; load` now matches
   `R1 a b 1k`). **Identity stamps can change** for netlists whose bytes did
   not move: a stored `expect_netlist_identity` from an older version that now
   mismatches fails loudly with the existing mismatch error; refresh it from a

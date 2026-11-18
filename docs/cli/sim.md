@@ -10112,7 +10112,9 @@ request's `expect_netlist_identity`.
 
 **Existing stamps can change (issue #5438).** Normalization strips inline
 comments with the package's shared `_spice_text` rule: everything from the
-first `;`, or from the first whitespace-delimited `$`-prefixed token. Versions
+first `;`, or from the first `$` that is itself a whole whitespace-delimited
+token (a `$` that merely *begins* a token, as in the `$3` of an anonymous-net
+name or in `.include $PDK_ROOT/...`, is content and survives). Versions
 before #5438 instead cut each line at the first whitespace-preceded `$` or
 `;`, so a card using KLayout's anonymous-net names (`X$1 $3 $4 inv`) collapsed
 to its first token — two different circuits shared one identity — and a `;`
