@@ -109,11 +109,13 @@ from . import (
     sim_mismatch_declarations,
     sim_mismatch_gate,
     sim_noise,
+    sim_noise_mechanism,
     sim_op_args,
     sim_passes,
     sim_portable,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_spiceinit,
     sim_step_resolution,
@@ -169,7 +171,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk, list_corners
+from .pdk import PdkNotFoundError, find_pdk, list_corners, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -433,6 +435,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Waveform JSON conversion skipped over options.waveform_max_bytes
         # (issue #3211); always a warning.
         "waveform_too_large",
+        # Incomplete `noise.mechanism` decomposition (#5553); warning.
+        "noise_mechanism_incomplete",
         # Step-sequence outcomes (`analysis_steps[]`, issue #2482), synthesized
         # by `sim_steps.grade_step_measurements`: a step whose analysis
         # produced no plot, and a result whose inputs produced no value.
@@ -1674,6 +1678,7 @@ def _resolve_analysis_and_measurements(
     sim_tian.validate_tian_context(measurements_spec, analysis)
     # Issue #3895: and an snm margin is a DC-sweep quantity.
     sim_snm_meas.validate_snm_context(measurements_spec, analysis)
+    sim_slope_band_meas.validate_slope_band_context(measurements_spec, analysis)
     # Issue #4292: an eye fold is a transient-time quantity too.
     sim_eye.validate_eye_context(measurements_spec, analysis)
     # Issue #4773: a step-resolution report is a transient-time quantity too.
@@ -3416,6 +3421,9 @@ def _prepare_sim_request(
             sim_transfer_meas.transfer_measurements(measurements_spec)
         ),
         snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
+        slope_band_declared=bool(
+            sim_slope_band_meas.slope_band_measurements(measurements_spec)
+        ),
         search_declared=bool(sim_search.search_measurements(measurements_spec)),
         eye_declared=bool(sim_eye.eye_measurements(measurements_spec)),
         step_resolution_declared=bool(
@@ -4980,11 +4988,11 @@ def _resolve_param_file(points: list[CornerPoint], models: Any, request_dir: str
 def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
     """Apply ``models.lib``'s own resolution rule (see
     :func:`_resolve_models_lib`) to one library reference, without the
-    existence check -- shared with issue #2522's per-section corner libraries
-    so a ``corners.process`` bundle's ``{"lib": ...}`` entry resolves
-    *identically* to the ``models.lib`` it stands in for: joined against the
-    resolved PDK variant directory when the request names a PDK, otherwise
-    ``$VAR``/``~``-expanded and joined against the request file's directory.
+    existence check -- shared with #2522's per-section corner libraries
+    so a ``corners.process`` ``{"lib": ...}`` entry resolves *identically*:
+    joined against the layout-aware variant directory (``variant_dir_of``;
+    a flat install's variant *is* the root, #522/#6256) when the request
+    names a PDK, else ``$VAR``/``~``-expanded against the request dir.
     """
     pdk_variant = models.get("pdk")
     pdk_root = models.get("pdk_root")
@@ -4993,7 +5001,7 @@ def _resolve_lib_ref(lib: str, models: dict[str, Any], request_dir: str) -> str:
             resolution = find_pdk(variant=pdk_variant, root=pdk_root)
         except PdkNotFoundError as exc:
             raise SimError(str(exc)) from exc
-        variant_dir = os.path.join(resolution["root"], resolution["variant"])
+        variant_dir = variant_dir_of(resolution) or resolution["root"]
         return lib if os.path.isabs(lib) else os.path.join(variant_dir, lib)
     return _resolve_relative(lib, request_dir)
 
@@ -6522,6 +6530,7 @@ def _enforce_xyce_support_boundary(
     stress_declared: bool = False,
     transfer_declared: bool = False,
     snm_declared: bool = False,
+    slope_band_declared: bool = False,
     search_declared: bool = False,
     eye_declared: bool = False,
     step_resolution_declared: bool = False,
@@ -6596,6 +6605,7 @@ def _enforce_xyce_support_boundary(
         stress_declared=stress_declared,
         transfer_declared=transfer_declared,
         snm_declared=snm_declared,
+        slope_band_declared=slope_band_declared,
         search_declared=search_declared,
         eye_declared=eye_declared,
         step_resolution_declared=step_resolution_declared,
@@ -8502,12 +8512,16 @@ def _run_corner(
         measurements_spec, corner_dir
     )
     snms = sim_snm_meas.extract_corner_snms(measurements_spec, corner_dir)
+    slope_bands = sim_slope_band_meas.extract_corner_slope_bands(
+        measurements_spec, corner_dir
+    )
     eyes = sim_eye.extract_corner_eyes(measurements_spec, corner_dir)
     step_resolutions = sim_step_resolution.extract_corner_step_resolutions(
         measurements_spec, corner_dir
     )
     settleds = sim_settled.extract_corner_settleds(measurements_spec, corner_dir)
     searches = sim_search.extract_corner_searches(measurements_spec, log_text)
+    nzm = sim_noise_mechanism.extract_corner(measurements_spec, corner_dir, analysis)
     # Issue #3160: each pass's rawfile is decoded once, shared by the tian
     # reduction below and the corner's `passes` field.
     pass_results = (
@@ -8530,11 +8544,13 @@ def _run_corner(
             cycle_means=cycle_means,
             transfers=transfers,
             snms=snms,
+            slope_bands=slope_bands,
             eyes=eyes,
             step_resolutions=step_resolutions,
             settleds=settleds,
             searches=searches,
             tians=tians,
+            noise_mechanisms=nzm,
             engine_diagnostics=diagnostics,
         )
     )
@@ -9066,63 +9082,6 @@ def _cycle_mean_measurement_result(
         "status": m_status,
         "margin": margin,
         "cycle_mean": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
-def _snm_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_snm_meas.SnmOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``snm`` measurement's response entry (issue #3895).
-
-    ``value`` is the butterfly SNM in volts, graded through
-    :func:`_grade_measurement_value` like any scalar; the request echo and the
-    two per-eye sides ride the additive ``snm`` sibling. A failure is
-    ``status: "error"``, ``value: null`` (so it can never pass a limit) with a
-    ``code: "measurement"`` diagnostic whose message starts with a
-    ``[<reason>]`` token from :data:`klayout_tools.sim_snm_meas.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no snm value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "snm_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "snm_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "snm": outcome.report(spec),
     }
     return result, grading_diagnostics
 
@@ -9925,6 +9884,7 @@ def _corner_deck_control_lines(
        (:func:`klayout_tools.sim_snm_meas.control_lines`), after the transfer
        lines; same ``set filetype=ascii`` rule. None of this appears without
        an snm entry.
+    10. The ``mechanism`` noise-spectra dump (#5553): order-free, restores $curplot.
 
     An ``analysis_steps[]`` request (issue #2482) replaces step 3's analysis
     and 4's ``expr`` lines with the ordered step sequence
@@ -9976,6 +9936,7 @@ def _corner_deck_control_lines(
     cycle_mean_lines = sim_cycle_mean.control_lines(measurements_spec, corner_dir)
     transfer_lines = sim_transfer_meas.control_lines(measurements_spec, corner_dir)
     snm_lines = sim_snm_meas.control_lines(measurements_spec, corner_dir)
+    sband_lines = sim_slope_band_meas.control_lines(measurements_spec, corner_dir)
     eye_lines = sim_eye.control_lines(measurements_spec, corner_dir)
     step_resolution_lines = sim_step_resolution.control_lines(
         measurements_spec, corner_dir
@@ -9985,6 +9946,7 @@ def _corner_deck_control_lines(
     complex_vector_lines = sim_complex_vectors.control_lines(
         complex_vectors, corner_dir
     )
+    nz_lines = sim_noise_mechanism.control_lines(measurements_spec, corner_dir)
     if (
         raw_path is not None
         or crossings_lines
@@ -9993,10 +9955,12 @@ def _corner_deck_control_lines(
         or cycle_mean_lines
         or transfer_lines
         or snm_lines
+        or sband_lines
         or eye_lines
         or step_resolution_lines
         or settled_lines
         or complex_vector_lines
+        or nz_lines
     ):
         lines.append("set filetype=ascii")
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
@@ -10008,13 +9972,8 @@ def _corner_deck_control_lines(
         # `expr` lets, so time-weighted sums are not biased by the
         # adaptive timestep distribution.
         lines.append("linearize")
-    expr_specs = _expr_measurements(measurements_spec)
-    if expr_specs and analysis["kind"] == "noise":
-        # Issue #2893: after `noise`, ngspice's current plot is the integrated
-        # one (noise2: onoise_total/inoise_total); the spectra live in noise1.
-        # Alias them into the current plot (after any `write`, so the rawfile
-        # is unchanged) so bare names resolve while totals stay bare too.
-        lines.extend(f"let {vec} = noise1.{vec}" for vec in NOISE_SPECTRUM_VECTORS)
+    expr_specs = sim_noise.emittable_exprs(_expr_measurements(measurements_spec))
+    lines.extend(sim_noise.alias_lines(analysis, expr_specs))
     for spec in expr_specs:
         lines.extend(spec.get("expr_prelude", ()))
         lines.append(f"let {spec['name']} = {spec['expr']}")
@@ -10026,21 +9985,18 @@ def _corner_deck_control_lines(
     lines.extend(cycle_mean_lines)
     lines.extend(transfer_lines)
     lines.extend(snm_lines)
+    lines.extend(sband_lines)
     lines.extend(eye_lines)
     lines.extend(step_resolution_lines)
     lines.extend(settled_lines)
     lines.extend(complex_vector_lines)
+    lines.extend(nz_lines)
     # Issue #4121: last, so no later line reads the main analysis' plot after
     # the search has moved ngspice's current plot.
     lines.extend(search_lines)
     lines.append("quit")
     lines.append(".endc")
     return lines
-
-
-#: Spectrum vectors of ngspice's first noise plot, aliased by bare name into
-#: the current (totals) plot for ``expr`` measurements (issue #2893).
-NOISE_SPECTRUM_VECTORS = ("inoise_spectrum", "onoise_spectrum")
 
 
 def _write_xyce_deck(
