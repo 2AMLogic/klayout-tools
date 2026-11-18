@@ -10,12 +10,14 @@ form module is added.
 from __future__ import annotations
 
 import itertools
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
-from klayout_tools import sim_forms, sim_validate
+from klayout_tools import sim, sim_forms, sim_validate
+from klayout_tools.cli import main
 from klayout_tools.sim_errors import SimError
 
 #: A minimal body per form. Exclusivity is checked before any body validator
@@ -27,6 +29,72 @@ _BODY["expr"] = "v(a)"
 
 def _declare(*forms: str) -> dict[str, object]:
     return {"name": "m", **{form: _BODY[form] for form in forms}}
+
+
+_MALFORMED_MEASUREMENTS = [
+    (None, "request.measurements", "NoneType"),
+    ("notalist", "request.measurements", "str"),
+    ({}, "request.measurements", "dict"),
+    (1, "request.measurements", "int"),
+    (1.5, "request.measurements", "float"),
+    (False, "request.measurements", "bool"),
+    (["notadict"], "measurements[0]", "str"),
+    ([None], "measurements[0]", "NoneType"),
+    ([1], "measurements[0]", "int"),
+    ([True], "measurements[0]", "bool"),
+    ([[]], "measurements[0]", "list"),
+    ([_declare("expr"), None], "measurements[1]", "NoneType"),
+]
+
+
+@pytest.mark.parametrize("measurements,path,type_name", _MALFORMED_MEASUREMENTS)
+def test_malformed_measurements_raise_sim_error(measurements, path, type_name):
+    """Present null is invalid input, rather than an alias for an absent key."""
+    request = {"analysis": {"kind": "tran", "args": "1u 2m"}}
+    request["measurements"] = measurements
+    with pytest.raises(SimError) as excinfo:
+        sim._resolve_analysis_and_measurements(request)
+    assert path in str(excinfo.value)
+    assert type_name in str(excinfo.value)
+
+
+@pytest.mark.parametrize("measurements,path,type_name", _MALFORMED_MEASUREMENTS)
+def test_malformed_measurements_cli_json_error(
+    tmp_path, capsys, measurements, path, type_name
+):
+    netlist = tmp_path / "x.sp"
+    netlist.write_text("* minimal circuit\nV1 out 0 1\nR1 out 0 1k\n.end\n")
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": str(netlist),
+                "analysis": {"kind": "tran", "args": "1u 2m"},
+                "measurements": measurements,
+            }
+        )
+    )
+    assert main(["sim", str(request), "--dry-run", "--format", "json"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    envelope = json.loads(captured.err)
+    assert envelope["schema_version"] == 1
+    assert envelope["error"]["command"] == "sim"
+    assert path in envelope["error"]["message"]
+    assert type_name in envelope["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "fields", [{}, {"measurements": []}, {"measurements": [_declare("expr")]}]
+)
+def test_valid_measurements_preserve_resolution(fields):
+    analysis = {"kind": "tran", "args": "1u 2m"}
+    resolved_analysis, measurements = sim._resolve_analysis_and_measurements(
+        {"analysis": analysis, **fields}
+    )
+    assert resolved_analysis == analysis
+    assert measurements == fields.get("measurements", [])
 
 
 def test_registry_covers_exactly_the_registered_exclusive_validators():

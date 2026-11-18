@@ -326,6 +326,19 @@ def build_fleet_report(
                     if tier_report.get("t1_not_applicable_count")
                     else {}
                 ),
+                # Issue #5599: carried like `t1_not_applicable_count` above --
+                # omitted when zero, so a roll-up over manifests declaring no
+                # justified gap is byte-identical to the previous rendering.
+                **(
+                    {"t1_justified_gap_count": tier_report["t1_justified_gap_count"]}
+                    if tier_report.get("t1_justified_gap_count")
+                    else {}
+                ),
+                **(
+                    {"findings": tier_report["findings"]}
+                    if tier_report.get("findings")
+                    else {}
+                ),
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,
                 "ungraded_items": _ungraded_t1_items(tier_report["items"]),
