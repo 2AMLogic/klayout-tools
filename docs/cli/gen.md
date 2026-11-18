@@ -1717,10 +1717,15 @@ opening through the ring's band so a route can pass through it instead:
   route is held to the stricter per-cut-end clearance
   `width_um / 2 + drc_hints.min_spacing_um`, whose spacing term is the
   generic `0.4` µm same-layer margin every `klt gen` ring reports as its
-  `drc_hints.min_spacing_um` — a PDK-agnostic floor that exceeds every
-  curated same-layer spacing rule on both decks, used because a routed
-  crossing may run on any layer while the window's deck lookup is keyed
-  on the ring's own. On sky130 li1 the window insets 0.17 µm per cut end
+  `drc_hints.min_spacing_um` — a PDK-agnostic constant, not a deck
+  lookup, used because a routed crossing may run on any layer while the
+  window's deck lookup is keyed on the ring's own. It sits above the
+  ring's own layer's deck spacing on every curated deck (sky130 `li1`
+  0.17 µm, gf180mcu `metal1` 0.23 µm, sg13g2 `metal1` 0.18 µm), which is
+  why the window is the wider envelope — but it is not a guaranteed
+  upper bound on the layer a crossing runs on: sg13g2's `TopMetal1` and
+  `TopMetal2` spacing rules (`TM1.b` 1.64 µm, `TM2.b` 2.00 µm) exceed
+  it. On sky130 li1 the window insets 0.17 µm per cut end
   where a routed crossing needs `width_um / 2 + 0.4` µm, so a route whose
   footprint fits comfortably inside the window can still be rejected as
   too close to a cut end — the window is not the envelope a routed
