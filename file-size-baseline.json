@@ -197,7 +197,7 @@
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 548
+      "lines": 516
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
-      "lines": 3877
+      "lines": 3876
     },
     {
       "path": "src/klayout_tools/decks/history.py",
@@ -229,7 +229,7 @@
     },
     {
       "path": "src/klayout_tools/decks/rules.py",
-      "lines": 860
+      "lines": 856
     },
     {
       "path": "src/klayout_tools/decks/sg13cmos5l.py",
@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3737
+      "lines": 3735
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3524
+      "lines": 3517
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
@@ -365,11 +365,11 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3151
+      "lines": 3129
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2879
+      "lines": 2873
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -377,7 +377,7 @@
     },
     {
       "path": "src/klayout_tools/gen_pcells/mos_array.py",
-      "lines": 658
+      "lines": 642
     },
     {
       "path": "src/klayout_tools/kb.py",
@@ -533,7 +533,7 @@
     },
     {
       "path": "src/klayout_tools/power.py",
-      "lines": 2604
+      "lines": 2573
     },
     {
       "path": "src/klayout_tools/power_intent.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7281
+      "lines": 7268
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -585,7 +585,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12353
+      "lines": 12352
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -949,7 +949,7 @@
     },
     {
       "path": "tests/test_netlist_batch.py",
-      "lines": 1118
+      "lines": 1030
     },
     {
       "path": "tests/test_op_sanity.py",
@@ -1049,7 +1049,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15834
+      "lines": 15833
     },
     {
       "path": "tests/test_sim_batch.py",
