@@ -44,6 +44,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   `schema_version` bump: both fields are additive and
   `provenance`'s `$defs` block is `additionalProperties: true`.
 
+- **`klt signoff --repin -o FILE` is now a usage error instead of a silent
+  no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
+  stdout and never created `FILE` — the one mode that dropped a flag the user
+  typed, while every other `klt signoff` mode honours `-o`. `-o`/`--output`
+  now joins `--fleet`, `--attest`, `--check` and `--describe-grader` among the
+  forms `--repin` refuses by name (exit `2`, before the manifest is read or
+  rewritten). `--repin` still writes no output file; the JSON envelope is on
+  stdout as before. The other report/attest inputs `--repin` ignores
+  (`--tiers-doc`, `--inventory`, `--input`, `--allow-generator-exec`,
+  `--generator-approvals`) are unchanged.
+
+- **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
+  entries** (#5527, 2026-11-13): after an attestation inventory changed,
+  `klt signoff --attest` regenerated the envelope but the manifest's pin
+  still named the old input hash, so the next `--manifest` run silently
+  graded the item `unmet`/`stale_evidence` — and the only fix was a hand
+  edit of JSON. `klt signoff --repin --manifest <file>` now rewrites those
+  pins in place from the evidence they name. It rewrites a pin **only** when
+  the grader re-derived the live hash from the artifact itself
+  (`input_verified: true`); a stale pin it could not re-verify — the
+  `drc`/`lvs`/`extract`/`sim` case, where the pin is the manifest author's
+  independent claim about which revision was checked — is left intact and
+  reported as skipped, and an entry that pins nothing is never given a pin.
+  A manifest with nothing to re-pin is not written at all. The JSON payload
+  (`schema_version: 1`) lists one record per changed and per skipped entry;
+  `--repin` requires `--manifest` (not `-`) and is a usage error combined
+  with the envelope `<file>` arguments, `--fleet`, `--attest`, `--check` or
+  `--describe-grader`. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Re-pinning a stale hash"
+  section.
+
 - **`klt signoff --attest 2` inventories can pin the generator's input files**
   (#5724, 2026-11-17): an item-2 inventory may declare `inputs`, a non-empty
   list of repo-relative paths. Each becomes a hash-pinned `{"check": "present",
@@ -102,6 +133,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Behaviour change for consumers locating `klt synthesize` artifacts by
+  path: they moved from flat `.klt/synthesize/` to
+  `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
+  (#6228, 2026-11-17; the layout itself shipped with #2119): since #2119
+  each invocation exclusively creates its own directory beneath the request
+  file's `.klt/synthesize/`, so the artifacts that previously landed flat at
+  `<request-dir>/.klt/synthesize/<hdl_toplevel>_synth.v` and
+  `.klt/synthesize/synth_<hdl_toplevel>.ys` are now written at
+  `<request-dir>/.klt/synthesize/<run_id>/<same names>`. The response
+  carries that run's `run_id` (additively; a caller-supplied `run_id`
+  request key also exists and exclusively reserves the directory), and all
+  existing `{path, scope}` fields still point at this invocation's files —
+  including the `{"path": null, "scope": "external"}` shape an
+  out-of-repository request reports, where the artifacts are still at
+  `<request dir>/.klt/synthesize/<run_id>/`. A flow driver that resolves
+  its netlist by the old documented flat path now fails to find it, and one
+  that globs `.klt/synthesize/` newest-first can silently pick up a previous
+  run's netlist; resolve via the response's paths or `run_id` instead,
+  never by newest-mtime globbing. There is no mutable `latest` alias, by
+  design — it would reintroduce the cross-run ambiguity the per-invocation
+  isolation fixed; a pipeline that needs a stable path should set
+  `outputs.dir`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
+  "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
+  only; no `schema_version` bump.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -149,6 +205,41 @@ not `klt --version`, if you need to detect this kind of drift. See
   `error_count`/`category_error_counts` and the `status` now agree with the
   engine's own grade; `counts.pins` still reports structural pin presence,
   and a pin pair the comparer itself graded otherwise remains an error.
+- **`klt sim` accepts `request.netlist_source: "gate-level"`** (#5638,
+  2026-11-17): a third caller-declared provenance for `request.netlist`
+  beside `"schematic"` (pre-layout) and `"extracted"` (post-layout) — a
+  netlist assembled from a structural post-synthesis/post-route netlist plus
+  a timing library, i.e. event-driven primitives (XSPICE `d_*` models behind
+  `adc_bridge`/`dac_bridge`) whose delays were reduced from a Liberty deck,
+  the shape a digital block co-simulated beside an analog macro needs —
+  without claiming either that a schematic produced the netlist or that
+  layout extraction did. `klt sim` builds no such netlist itself; the value
+  only declares provenance, is echoed back verbatim in
+  `environment.netlist_source`, and every other field is unaffected (an
+  unrecognized value remains an application error, exit 1). Additive enum
+  value; no `schema_version` bump. See
+  [`docs/cli/sim.md`](docs/cli/sim.md)'s "Post-layout verification
+  (`netlist_source`)" section.
+- **`klt lvs --deck` is the command-line spelling of the request's
+  `layout.deck` field** (#5899, 2026-11-17): the curated extraction deck for
+  inline layout extraction, the same knob `klt extract --deck` sets (issue
+  #5733). A request document that already sets `layout.deck` is refused with
+  a clean error (exit 1) — a flag never silently overrides a request
+  document — and the flag is refused with `--check`. It never sets
+  `reference.deck` (the reference-netlist rewriting deck — a different knob,
+  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  surface; no `schema_version` bump.
+- **Inventory-driven `klt signoff --attest` envelopes record the klayout
+  engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
+  and 10, issue #5690) hardcoded `provenance.klayout_version: null` where its
+  stream twin (`--attest 2 --hash-kind …`) already recorded the engine. It
+  now populates the field the same way: the `klayout` build resolved into the
+  attesting process — the engine a declared `checks[].argv` command that
+  imports `klayout.db` actually ran against — and `null` when `klayout` is
+  not importable. Emission-affecting and additive; no `schema_version` bump.
+  Like `klt_version`, the field sits in the `--check`/`--rerun` exclusion
+  set, so committed evidence re-checked across a klayout upgrade still
+  reports `match`.
 - **`klt sim --attach <batch-shards.json>` accepts a map written by a
   `--hosts N` / `remote.hosts: N` run** (#5777, 2026-11-17): `--attach` and
   `--collect-partial` refused every `hosts != 1` request with "requires backend
@@ -176,6 +267,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt signoff --attest 9`: a `cold_start` may be a list — several named
+  cold starts over one inventoried file** (#5641, 2026-11-17): an item-9
+  `testbenches[]` entry's `cold_start` now also accepts a non-empty list of
+  `{name, argv, ...}` command objects (`name` a non-empty string, unique
+  within its entry; an empty list, a non-object member, a missing/empty
+  `name` or a duplicate `name` is refused, exit `1`). Each member yields its
+  own `command` check (`role: "cold_start"`) carrying `testbench` **and**
+  `name` with its own `exit_status`/`passed`, while the entry's file is still
+  inventoried exactly once — so N benches sharing one implementation module
+  can each have a graded cold start over the same file, instead of minting
+  one hollow wrapper file per bench (which carried the attested hashes while
+  the module implementing every graded behaviour carried none). Members are
+  emitted in `name` order after benches sorted by path; `name` joins the
+  carried-check identity, so `--attest --check` and `--skip-local-only`
+  deliver a `local_only` member's committed outcome to the right member even
+  when two members declare identical `argv`. Text output labels a listed cold
+  start by its `name` and the stderr progress lines carry it. Additive: the
+  single-object form emits the envelope it always did (no `name` key), so a
+  committed envelope re-checks `match`; no `schema_version` bump. Repeating
+  one path across item-9 object entries is still refused, and the refusal now
+  points at the list form. See `docs/cli/signoff.md`.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure
