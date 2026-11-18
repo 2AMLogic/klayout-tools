@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff`: a declared-but-never-checked evidence hash is now
+  disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
+  records `provenance.input.content_hash` but names nothing verification
+  can answer — no usable `provenance.input.path`, or a `paths` set that
+  never answered (malformed, empty, or on a `model-run` envelope, whose
+  set is not member-verified) — has that hash silently never re-hashed:
+  its `met` citation rendered `input_verified: null`
+  identically to an envelope declaring no hash at all. Those citations now
+  carry the additive `input_verified_note: "declared_hash_unbound"`
+  (`input_verified` unchanged at `null`, no item verdict moves, no
+  `schema_version` bump), and `--format text` prints an
+  `input note: declared_hash_unbound -- …` line under the `input:` one.
+  A well-formed `paths` set answers through its members and never carries
+  the note. Documented in `docs/cli/signoff.md`'s `input_verified` table
+  and the generic-evidence section, and in `docs/json-contract.md`'s
+  `provenance.input` notes.
+
 - **`klt sim --resume` harvests a retained shard map before dispatching**
   (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
   without `--resume` (issue #3896), but `--resume` only ever read
