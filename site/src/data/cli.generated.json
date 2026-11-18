@@ -4,8 +4,8 @@
     "version": "0.9.2",
     "date": "2026-11-14"
   },
-  "verb_count": 68,
-  "mcp_tool_count": 96,
+  "verb_count": 69,
+  "mcp_tool_count": 97,
   "decks": [
     "asap7",
     "gf180mcu",
@@ -417,6 +417,11 @@
           "name": "fill",
           "summary": "insert density fill shapes on a PDK's fill layers",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/fill.md"
+        },
+        {
+          "name": "em",
+          "summary": "field-solver wrapper (geode-fem quasi-static capacitance)",
+          "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/em.md"
         }
       ]
     }

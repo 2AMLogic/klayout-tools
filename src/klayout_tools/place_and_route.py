@@ -354,8 +354,8 @@ SCHEMA_VERSION = 1
 #: is an additive enum value, never a contract-shape change.
 SUPPORTED_ENGINES = ("openroad",)
 
-#: The four stages ``target_stage`` names, in execution order -- see this
-#: module's own docstring "Stage granularity and invocation shape".
+#: The four stages ``target_stage`` names, in execution order. See
+#: "Stage granularity and invocation shape" in docs/cli/place-and-route.md.
 STAGE_ORDER = ("floorplan", "place", "cts", "route")
 
 
@@ -897,21 +897,21 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
 #: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
-#: Same "not derivable from the resolved PDK install itself" posture as
-#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above -- a standard
-#: cell library name (LEF/liberty naming) and an extraction deck name
-#: (``klayout_tools.decks``' own family key) are two independent naming
-#: conventions this module has to bridge explicitly. Matches
-#: :func:`klayout_tools.decks.get_extraction_deck`'s/``get_parasitics_deck``'s
-#: own accepted names exactly (``"sky130"``/``"gf180mcu"``).
+#: Like :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above, this
+#: bridges LEF/liberty cell-library names to ``klayout_tools.decks`` family
+#: keys, matching ``get_parasitics_deck``'s own accepted names exactly.
 #:
 #: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
 #: family already registered in ``klayout_tools.decks.__init__`` (used
 #: today by ``klt extract``/``klt drc``/``klt lvs`` for this same PDK); no
 #: new deck family is introduced here, this table just bridges to it.
+#:
+#: ``gf180mcu_fd_sc_mcu7t5v0`` (issue #5825) -> ``"gf180mcu"`` -- 7t and 9t
+#: route over the same ``Metal2-Metal5`` stack, so one deck serves both.
 _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "sky130_fd_sc_hd": "sky130",
     "gf180mcu_fd_sc_mcu9t5v0": "gf180mcu",
+    "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
     "asap7sc7p5t_rvt": "asap7",
 }
@@ -1398,7 +1398,8 @@ def run_place_and_route(
     ``pdk.rebuild_corners`` units run; ``batch`` submits one job per corner
     to the Spot batch fleet (:mod:`klayout_tools.place_and_route_batch`) and
     never falls back to running a unit on this host. A single-unit request
-    stays local under a host-default ``batch``.
+    stays local under a host-default ``batch``; an explicit ``batch`` runs
+    the whole flow as one job (issue #5799).
 
     **Resume (issue #4411).** ``resume`` (``--resume``) skips each leading
     stage whose commit record (:mod:`klayout_tools.place_and_route_resume`)
@@ -1421,22 +1422,18 @@ def run_place_and_route(
             "re-runs in full)"
         )
 
-    from . import place_and_route_batch
+    from . import place_and_route_batch, place_and_route_batch_single
 
     selected = place_and_route_batch.resolve_backend(
         backend, request, units=len(rebuild_corners) if rebuild_corners else 1
     )
     if selected == "batch":
-        if "dir" in request.get("outputs", {}):
-            raise PlaceAndRouteError(
-                "request.outputs.dir is not supported with the batch backend "
-                "(the fleet copies artifacts back into .klt/place-and-route/)"
-            )
-        assert rebuild_corners is not None and _ownership is not None
-        return place_and_route_batch.run_rebuild_corners_batch(
+        assert _ownership is not None
+        return place_and_route_batch_single.run_batch(
             request_path,
             request,
             rebuild_corners,
+            resume=resume,
             pdk_variant=pdk_variant,
             ownership=_ownership,
         )
@@ -1733,8 +1730,8 @@ def _run_single_corner(
     # Issue #1973: fail here, naming the construct and its line, rather than
     # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
     # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See this module's docstring
-    # "Netlist pre-flight" section.
+    # `DRT-0305` a full route attempt later. See "Netlist pre-flight"
+    # in docs/cli/place-and-route.md.
     _reject_unsupported_netlist_constructs(netlist_path)
 
     hdl_toplevel = request["hdl_toplevel"]
@@ -2104,6 +2101,7 @@ def _run_single_corner(
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
     via_pad_trim_info: dict[str, Any] | None = None
+    pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
@@ -2132,6 +2130,7 @@ def _run_single_corner(
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
         via_pad_trim_info = merge_info.get("via_pad_trim")
+        pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -2195,8 +2194,8 @@ def _run_single_corner(
     # Additive field (issue #1091): reports what `request.power` actually
     # drove, so a caller can tell a signal-only "route" result from a
     # power-complete one without parsing the DEF for a missing
-    # `SPECIALNETS` section -- see this module's own docstring "Power
-    # delivery" section. `pdn`/`global_connect` are `True` once
+    # `SPECIALNETS` section. See "Power delivery" in
+    # docs/cli/place-and-route.md. `pdn`/`global_connect` are `True` once
     # `request.power` is present (both run unconditionally together, at the
     # end of the `"floorplan"` stage -- every run reaches at least that
     # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
@@ -2489,13 +2488,8 @@ def _run_single_corner(
         # "when is this populated" contract.
         "unrouted_def_path": unrouted_def_path,
         "gds_path": gds_path,
-        # Additive field (issue #1029): whether the DEF->GDS merge above
-        # actually applied a KLayout LEF/DEF layer-map file, and how it was
-        # resolved -- `resolve_klayout_layer_map` silently degrades to no map at
-        # all (`resolution: "none"`) when neither a variant-named nor a
-        # family-level map file exists, which previously left no trace in
-        # this response for a caller to notice. `null` unless
-        # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
+        # PDK source map and its resolution; null before route (#1029).
+        # No map means sequential default layer numbers, not PDK assignments.
         "layer_map": layer_map_info,
         # Additive field (issue #1488): what the DEF->GDS merge's own
         # single-pin net-name marker pass did, so a caller can tell an
@@ -2526,6 +2520,9 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
+        # Derived-map pin coverage on conductor; null before route (#5700).
+        # Status/layers/reason are documented in docs/cli/place-and-route.md.
+        "pin_conductor": pin_conductor_info,
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
         # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.

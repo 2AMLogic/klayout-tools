@@ -108,7 +108,10 @@ class CanonicalKind:
 #: (``signoff.py``) -- as are ``klt sim``/``klt pex``, which have no
 #: ``--rerun`` view to mirror.
 _KIND_SOURCES: dict[str, _KindSource] = {
-    "drc": _KindSource(("_report_verify", "VOLATILE_PROVENANCE_PATHS"), None),
+    "drc": _KindSource(
+        ("drc_report_check", "DRC_RERUN_EXCLUDE_PATHS"),
+        ("drc_report_check", "_rerun_diff_view"),
+    ),
     "lvs": _KindSource(("lvs", "_LVS_RERUN_EXCLUDE_PATHS"), None),
     "erc": _KindSource(("_report_verify", "VOLATILE_PROVENANCE_PATHS"), None),
     "extract": _KindSource(
@@ -180,6 +183,7 @@ def rerun_result_for(
     committed: dict[str, Any],
     fresh: dict[str, Any],
     extra_exclude: Iterable[tuple[str, ...]] = (),
+    fresh_view_exclude: Iterable[tuple[str, ...]] = (),
 ) -> dict[str, Any]:
     """``kind``'s ``--rerun`` payload: :func:`~klayout_tools._report_verify
     .build_rerun_result` with the exclusion set and canonicalizer this
@@ -191,19 +195,27 @@ def rerun_result_for(
     excludes fields the committed report never carried, issues #1952/#2692)
     -- deliberately a caller-supplied argument rather than a registry
     entry, because it is a function of the pair being diffed and so has no
-    single-report counterpart.
+    single-report counterpart. ``fresh_view_exclude`` is the other such
+    addition: paths dropped from the *fresh* view only, so the committed
+    value surfaces in ``not_compared`` instead of drifting (``klt drc`` across
+    the #5660 ``klayout_version_mismatch`` redefinition).
     """
     spec = kind_spec(kind)
     canonicalizer = spec.canonicalize
+    committed_view = None if canonicalizer is None else canonicalizer(committed)
+    fresh_view = None if canonicalizer is None else canonicalizer(fresh)
+    drop_from_fresh = frozenset(fresh_view_exclude)
+    if drop_from_fresh:
+        fresh_view = strip_path_patterns(
+            fresh if fresh_view is None else fresh_view, drop_from_fresh
+        )
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
         exclude=spec.exclude | frozenset(extra_exclude),
-        committed_for_diff=(
-            None if canonicalizer is None else canonicalizer(committed)
-        ),
-        fresh_for_diff=None if canonicalizer is None else canonicalizer(fresh),
+        committed_for_diff=committed_view,
+        fresh_for_diff=fresh_view,
     )
 
 

@@ -70,6 +70,7 @@ from ._report_verify import (
 )
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
+from .coverage_work import coverage_work_count
 from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
 from .decks import get_extraction_deck as _get_extraction_deck
 from .erc_disclosure import (
@@ -98,11 +99,7 @@ from .erc_substrate import (
     substrate_coverage_work,
     substrate_provenance,
 )
-from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
-    REASON_DEGENERATE_TAP_DECLARATION,
-    REASON_DEGENERATE_WELL_ASSERTION,
-    REASON_DEGENERATE_WELL_SELECTION,
-    REASON_EMPTY_WELL_REGION,
+from .erc_ties import (
     _degenerate_tie_reasons,
     _tie_findings,
 )
@@ -337,21 +334,26 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
     return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
 
 
-def _compact_antenna_records(
-    gates: list[dict[str, Any]], reason: str
+def _counted_antenna_records(
+    gates: list[dict[str, Any]], reason: str, checked_count: int, omit_tables: bool
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The aggregate ``(skipped, inapplicable)`` antenna records ``--compact``
-    emits in place of the per-(gate, level) and per-gate-reference ones."""
-    skipped = []
-    if sum(len(gate["levels"]) - 1 for gate in gates):
-        skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
-    inapplicable = [
+    """Each gate has one reference, and all unchecked non-reference levels
+    share the run's skip reason. The groups partition those two sets."""
+    skipped_count = sum(len(gate["levels"]) - 1 for gate in gates) - checked_count
+    skip_id = work_id("antenna") if omit_tables else work_id("antenna", "levels")
+    reference = "gate_reference_level" if omit_tables else "gate_reference_levels"
+    skipped = (
+        [{"id": skip_id, "reason": reason, "count": skipped_count}]
+        if skipped_count
+        else []
+    )
+    return skipped, [
         {
-            "id": work_id("antenna", "gate_reference_levels"),
+            "id": work_id("antenna", reference),
             "reason": "gate_reference_level",
+            "count": len(gates),
         }
     ]
-    return skipped, inapplicable
 
 
 def _antenna_coverage(
@@ -361,51 +363,36 @@ def _antenna_coverage(
     omit_tables: bool = False,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Grade coverage against actual non-gate antenna levels, not gate count.
-
-    ``omit_tables`` (issue #3011) collapses the per-gate/per-level
-    ``skipped`` and ``gate_reference_level`` ``inapplicable`` entries to one
-    aggregate entry each (same reason, distinct ids so the common validator's
-    one-category-per-identity rule holds). ``checked`` is left verbatim.
-
-    ``compact`` (issue #2965) collapses the per-(gate, level) ``skipped``
-    records and per-gate ``gate_reference_level`` ``inapplicable`` records
-    into one aggregate record each (counts live in the top-level
-    ``compact`` block), so the declined antenna work is still disclosed.
-    """
+    """Count skipped and reference work for graded runs and collapsed modes."""
     checked = []
-    skipped = []
-    inapplicable = []
+    if not findings_only:
+        checked = [
+            work_id("antenna", gate["gate_id"], level["layer"])
+            for gate in gates
+            for level in gate["levels"][1:]
+            if level["verdict"] in {"pass", "violate"}
+        ]
+    skipped: list[dict[str, Any]] = []
+    inapplicable: list[dict[str, Any]] = []
     reason = _antenna_skip_reason(pdk, findings_only)
-    if compact and gates:
-        compact_skipped, compact_inapplicable = _compact_antenna_records(gates, reason)
-        skipped += compact_skipped
-        inapplicable += compact_inapplicable
     if not gates:
         # (issue #2896) Nothing to accumulate against: inapplicable, not
         # skipped -- no antenna work was requested that failed to run.
         inapplicable.append({"id": work_id("antenna"), "reason": REASON_NO_GATES})
-    for gate in [] if compact else gates:
-        for index, level in enumerate(gate["levels"]):
-            identity = work_id("antenna", gate["gate_id"], level["layer"])
-            if index == 0:
-                inapplicable.append({"id": identity, "reason": "gate_reference_level"})
-            elif level["verdict"] in {"pass", "violate"}:
-                checked.append(identity)
-            else:
-                skipped.append({"id": identity, "reason": reason})
-    if omit_tables:
-        if skipped:
-            skipped = [{"id": work_id("antenna"), "reason": reason}]
-        if any(r["reason"] == "gate_reference_level" for r in inapplicable):
-            inapplicable = [
-                r for r in inapplicable if r["reason"] != "gate_reference_level"
-            ] + [
-                {
-                    "id": work_id("antenna", "gate_reference_level"),
-                    "reason": "gate_reference_level",
-                }
-            ]
+    elif checked or omit_tables or compact:
+        skipped, inapplicable = _counted_antenna_records(
+            gates, reason, len(checked), omit_tables
+        )
+    else:
+        for gate in gates:
+            for index, level in enumerate(gate["levels"]):
+                identity = work_id("antenna", gate["gate_id"], level["layer"])
+                if index == 0:
+                    inapplicable.append(
+                        {"id": identity, "reason": "gate_reference_level"}
+                    )
+                else:
+                    skipped.append({"id": identity, "reason": reason})
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -3331,7 +3318,9 @@ def run_erc(
     compact_block = (
         {
             "gate_count": len(gates),
-            "antenna_levels_skipped": sum(len(g["levels"]) - 1 for g in gates),
+            "antenna_levels_skipped": sum(
+                map(coverage_work_count, coverage["skipped"])
+            ),
             "antenna_reference_levels": len(gates),
             "floating_gate_checked": len(gates),
             "skipped_reason": REASON_FINDINGS_ONLY,

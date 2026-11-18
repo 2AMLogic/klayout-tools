@@ -26,7 +26,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src" / "klayout_tools"
 
 #: kind -> the module whose ``rerun_*_report`` must go through the registry.
 _VERB_MODULES = {
-    "drc": "drc.py",
+    "drc": "drc_report_check.py",  # `drc_rerun_result` (#5660) owns drc's call
     "lvs": "lvs.py",
     "erc": "erc.py",
     "extract": "extract.py",

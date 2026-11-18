@@ -89,8 +89,11 @@ def add_sim_parser(
         help=(
             "with --batch-set, re-submit a request refused for fleet capacity "
             "(batch_no_capacity / batch_concurrency_cap) up to N more times "
-            "with doubling backoff (default: 0, off); other failures are "
-            "never retried (issue #3520)"
+            "with doubling backoff; on a sharded single request, re-run the "
+            "shards lost to a capacity refusal in up to N more passes once "
+            "the other shards finish, each with a fresh --wait-for-capacity "
+            "budget (default: 0, off); other failures are never retried "
+            "(issues #3520, #5567)"
         ),
     )
     sim_parser.add_argument(
@@ -119,10 +122,13 @@ def add_sim_parser(
         default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -294,10 +300,12 @@ def add_sim_parser(
             "request's own `options.resume` when given. For a `decks` "
             "request, skips each unit whose <outdir>/<id>/unit.json "
             "completion record still matches and verifies (local, "
-            "local-parallel, batch). With --batch-set, forwarded to every "
-            "request: a sharded request re-attaches to the shard jobs "
-            "recorded in its own directory and resubmits only the lost "
-            "ones. See docs/cli/sim.md."
+            "local-parallel, batch). On a sharded `batch` run, first "
+            "harvests the retained shard map (batch-shards.json): shards "
+            "whose jobs already finished are collected, and only the "
+            "unlaunched/unfinished/failed ones are submitted again. With "
+            "--batch-set, forwarded to every request the same way. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
