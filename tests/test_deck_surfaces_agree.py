@@ -118,6 +118,10 @@ def test_deck_info_documented_example_matches_gf180mcu() -> None:
     assert "release" in example and example["release"] == actual["release"], (
         f"{context}: release differs from deck_info()"
     )
+    assert (
+        "enforced_rule_count" in example
+        and example["enforced_rule_count"] == actual["enforced_rule_count"]
+    ), f"{context}: enforced_rule_count differs from deck_info()"
 
 
 def test_asap7_rejected_with_route_hint() -> None:

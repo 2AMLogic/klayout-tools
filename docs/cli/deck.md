@@ -292,7 +292,7 @@ The example uses a placeholder hash and shows selected device classes.
         "diode_pd2nw_06v0"
       ],
       "provides": ["curated_drc", "extraction"],
-      "enforced_rule_count": 126,
+      "enforced_rule_count": 127,
       "released": false,
       "release": null,
       "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
