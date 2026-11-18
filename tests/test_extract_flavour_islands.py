@@ -12,7 +12,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.decks import get_extraction_deck
-from klayout_tools.extract import _flavour_recognised_islands
+from klayout_tools.extract_detect_markers import _flavour_recognised_islands
 from klayout_tools.extract_flavour import _flavour_split_island
 
 

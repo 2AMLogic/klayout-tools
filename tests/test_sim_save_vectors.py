@@ -130,6 +130,128 @@ def test_save_vectors_without_anything_to_save_emits_no_card(tmp_path):
     assert not any(line.startswith("save") for line in lines)
 
 
+# --------------------------------------------------------------------------- #
+# save_vectors: per-form augmentation (issue #5559)
+# --------------------------------------------------------------------------- #
+
+
+def _save_line(tmp_path, measurements, **overrides) -> str:
+    lines = _write_deck(
+        tmp_path,
+        _POINT,
+        measurements_spec=measurements,
+        save_vectors=("v(out)",),
+        **overrides,
+    )
+    assert "save all" not in lines
+    return lines[lines.index(".control") + 1]
+
+
+def test_save_vectors_adds_cycle_mean_signal_and_align(tmp_path):
+    measurements = [
+        {
+            "name": "p_avg",
+            "cycle_mean": {
+                "signal": "v(p)",
+                "align": "V(Clk)-0.5*v(vdd)",
+                "level": 0.0,
+                "edge": "rise",
+                "from": 0,
+                "cycles": 4,
+            },
+        }
+    ]
+    assert _save_line(tmp_path, measurements) == "save v(out) v(p) v(clk) v(vdd)"
+
+
+def test_save_vectors_adds_energy_voltage_and_implied_source_current(tmp_path):
+    measurements = [{"name": "e_vdd", "energy": {"source": "VDD", "voltage": "v(vdd)"}}]
+    assert _save_line(tmp_path, measurements) == "save v(out) v(vdd) i(vdd)"
+
+
+def test_save_vectors_adds_stress_node_voltages_with_and_without_b(tmp_path):
+    with_b = [{"name": "s", "stress": {"a": "D1", "b": "S1"}}]
+    assert _save_line(tmp_path, with_b) == "save v(out) v(d1) v(s1)"
+    without_b = [{"name": "s", "stress": {"a": "d1"}}]
+    assert _save_line(tmp_path, without_b) == "save v(out) v(d1)"
+
+
+def test_save_vectors_adds_snm_selectors(tmp_path):
+    measurements = [
+        {"name": "snm", "snm": {"x": "v(in)", "y1": "v(out_a)", "y2": "v(out_b)"}}
+    ]
+    assert _save_line(tmp_path, measurements) == ("save v(out) v(in) v(out_a) v(out_b)")
+
+
+def test_save_vectors_adds_eye_signal(tmp_path):
+    measurements = [{"name": "eye", "eye": {"signal": "v(rx)", "ui": "100p"}}]
+    assert _save_line(tmp_path, measurements) == "save v(out) v(rx)"
+
+
+def test_save_vectors_adds_transfer_num_and_den(tmp_path):
+    measurements = [{"name": "loop", "transfer": {"num": "v(out)", "den": "v(in)"}}]
+    assert _save_line(tmp_path, measurements) == "save v(out) v(in)"
+
+
+_PASSES_ANALYSIS = {
+    "kind": "ac",
+    "args": "dec 20 1 1e8",
+    "passes": [
+        {"name": "inj_v", "alter": []},
+        {"name": "inj_i", "alter": []},
+    ],
+}
+
+
+def test_save_vectors_adds_tian_tv_and_ti_selectors(tmp_path):
+    measurements = [
+        {
+            "name": "pm",
+            "tian": {
+                "voltage_pass": "inj_v",
+                "current_pass": "inj_i",
+                "tv": "v(fv)",
+                "ti": "i(vfi)",
+                "metric": "phase_margin_deg",
+            },
+        }
+    ]
+    # The passes decks read the same `save` card (emitted in the corner
+    # prefix ahead of the per-pass alter/ac/write groups).
+    assert _save_line(tmp_path, measurements, analysis=_PASSES_ANALYSIS) == (
+        "save v(out) v(fv) i(vfi)"
+    )
+
+
+def test_save_vectors_adds_tian_series_injection_vectors(tmp_path):
+    measurements = [
+        {
+            "name": "pm",
+            "tian": {
+                "voltage_pass": "inj_v",
+                "current_pass": "inj_i",
+                "series_injection": {"load_node": "B", "source": "VINJ"},
+                "metric": "phase_margin_deg",
+            },
+        }
+    ]
+    assert _save_line(tmp_path, measurements, analysis=_PASSES_ANALYSIS) == (
+        "save v(out) v(b) i(vinj)"
+    )
+
+
+def test_save_vectors_names_shared_vector_once_and_keeps_existing_forms(tmp_path):
+    measurements = [
+        _CARD,
+        {"name": "x", "crossings": {"signal": "i(VLoad)", "level": 0}},
+        {"name": "e", "energy": {"source": "vdd", "voltage": "v(out)"}},
+        {"name": "pk", "expr": "vecmax(vdb(amp,ref))"},
+    ]
+    assert _save_line(tmp_path, measurements) == (
+        "save v(out) i(vload) i(vdd) v(amp) v(ref)"
+    )
+
+
 @pytest.mark.parametrize("backend", ["local", "local-parallel"])
 def test_local_backends_honor_save_vectors(tmp_path, monkeypatch, backend):
     _write_body(tmp_path)

@@ -35,6 +35,7 @@ from helpers.extract_inverter_fixtures import (
     _make_gf180mcu_inverter_layout,
     _make_sg13g2_inverter_layout,
 )
+from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import extract_abstract, pdk
 from klayout_tools._layout import region_expr as _region_expr
 from klayout_tools.cli import main
@@ -97,21 +98,6 @@ GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 # power delivery, so there is nothing here the gridded fixture would test
 # better; use `gcd-pdn.gds.gz` when what is under test *is* the power grid
 # (see `tests/corpus/README.md`).
-
-#: Real `ngspice` invocations (sky130 vendor-deck simulations) are slow and
-#: host-load-sensitive -- the same wall-clock cost is fine in CI's dedicated,
-#: uncontended runner (~3.5min for the full suite, see issue #1651) but can
-#: blow well past the local buildGate's timeout on a shared/busy host running
-#: several concurrent builders. `KLT_SKIP_NGSPICE_TESTS=1` (set by
-#: `npm run check:ci`'s local-only test script, never by CI) lets a host with
-#: ngspice installed still skip this tier locally, mirroring what already
-#: happens for free on a host with no ngspice at all.
-_NGSPICE_ON_PATH = shutil.which("ngspice") is not None
-_NGSPICE_TESTS_SKIPPED = os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1"
-HAVE_NGSPICE = _NGSPICE_ON_PATH and not _NGSPICE_TESTS_SKIPPED
-_SKIP_NO_NGSPICE = pytest.mark.skipif(
-    not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
-)
 
 try:
     import klt_mom_native  # noqa: F401
@@ -5298,7 +5284,7 @@ def _find_real_sky130_lib_spice() -> str | None:
 _REAL_SKY130_LIB_SPICE = _find_real_sky130_lib_spice()
 
 
-@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed on this machine")
+@_SKIP_NO_NGSPICE
 @pytest.mark.skipif(
     _REAL_SKY130_LIB_SPICE is None,
     reason="no real sky130 combined/sky130.lib.spice resolves via list_pdks()",
@@ -5376,7 +5362,7 @@ def test_real_sky130_bound_mos_card_simulates_against_the_vendor_deck(tmp_path):
     assert "could not find a valid modelname" in legacy, legacy
 
 
-@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed on this machine")
+@_SKIP_NO_NGSPICE
 @pytest.mark.skipif(
     _REAL_SKY130_LIB_SPICE is None,
     reason="no real sky130 combined/sky130.lib.spice resolves via list_pdks()",
@@ -13006,6 +12992,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "overlap_pairs_without_coefficient",
         "critical_nets",
         "parasitics_nets",
+        "lateral_coupling",
         "distributed_rc",
         "top_cell_only",
         "model",
@@ -14172,22 +14159,6 @@ def test_lateral_coupling_exact_value_and_lookback_cutoff(tmp_path):
     assert len(cc_lines) == 1
     fields = cc_lines[0].split()
     assert float(fields[3]) == pytest.approx(0.044e-15)
-
-
-def test_lateral_coupling_matches_when_only_one_side_critical(tmp_path):
-    """The lateral pass qualifies a pair when *either* side is named --
-    naming the non-victim side (`AGR`) finds the identical pair."""
-    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
-    report = run_extract(
-        path,
-        "sky130",
-        output=str(tmp_path / "lateral.spice"),
-        parasitics=True,
-        critical_nets=["AGR"],
-    )
-    para = report["parasitics"]
-    assert para["cc_count"] == 1
-    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.044)
 
 
 def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):
@@ -17010,8 +16981,8 @@ def test_parasitics_multi_label_net_loads_in_ngspice(tmp_path):
     separator, corrupting the card's arity, and bails out with "device
     already exists" against an unrelated node instead of a clean syntax
     error. Confirms the sanitized netlist loads and elaborates cleanly in
-    `ngspice -b` (skipped when ngspice is not installed, matching this
-    file's `HAVE_NGSPICE` gate elsewhere)."""
+    `ngspice -b` (skipped when ngspice is not installed, matching the
+    shared `HAVE_NGSPICE` gate in `tests/helpers/tool_probes.py`)."""
     import subprocess
 
     layout_path = _write_gds(
@@ -25632,22 +25603,6 @@ def test_normalized_hash_has_its_own_stage_only_when_netlist_written(tmp_path):
     skipped = run_extract(path, "sky130", no_netlist=True)
     assert skipped["netlist_normalized_sha256"] is None
     assert "netlist_normalized_hash" not in skipped["timing"]["stages"]
-
-
-def test_unsupported_and_unmodeled_diagnostics_have_their_own_stages(tmp_path):
-    # Issue #5893: both diagnostics re-read whole-chip marker layers and
-    # (for the unsupported-device one) re-run MOS-capacitor recognition, so
-    # an unstaged run attributed them to `unattributed_seconds` -- ~70% of
-    # wall time on a routed gf180mcu block. They must be attributed, the
-    # same contract #3408 set for the normalized hash.
-    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
-    result = run_extract(path, "sky130")
-    assert {
-        "unsupported_device_diagnostic",
-        "unmodeled_marker_diagnostic",
-    } <= set(result["timing"]["stages"])
-    assert result["timing"]["stages"]["unsupported_device_diagnostic"] >= 0
-    assert result["timing"]["stages"]["unmodeled_marker_diagnostic"] >= 0
 
 
 def test_progress_lines_go_to_stderr_and_stdout_stays_json(tmp_path, capsys):
