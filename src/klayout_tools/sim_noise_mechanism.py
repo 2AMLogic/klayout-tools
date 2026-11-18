@@ -65,7 +65,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_noise_leaves
+from . import sim_noise_contributors, sim_noise_leaves
 
 #: The ``noise.mechanism`` values.
 NOISE_MECHANISMS = sim_noise_leaves.NOISE_MECHANISMS
@@ -97,11 +97,18 @@ def is_mechanism(spec: dict[str, Any]) -> bool:
     return isinstance(body, dict) and body.get("mechanism") is not None
 
 
-def mechanism_measurements(
+def reads_spectra(spec: dict[str, Any]) -> bool:
+    """Whether an entry is reduced from the spectra rawfile: a ``mechanism``
+    entry, or a ``noise`` entry asking for its ``top_n`` contributors (issue
+    #5558, :mod:`klayout_tools.sim_noise_contributors`)."""
+    return is_mechanism(spec) or sim_noise_contributors.requested(spec)
+
+
+def spectra_measurements(
     measurements_spec: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """The ``mechanism`` entries, in declaration order."""
-    return [spec for spec in measurements_spec if is_mechanism(spec)]
+    """The entries :func:`reads_spectra` selects, in declaration order."""
+    return [spec for spec in measurements_spec if reads_spectra(spec)]
 
 
 def has_pts_per_summary(analysis: dict[str, Any]) -> bool:
@@ -132,8 +139,8 @@ def control_lines(
     measurements_spec: list[dict[str, Any]], corner_dir: str
 ) -> list[str]:
     """The ``.control`` lines that dump the per-contributor spectra plot to an
-    ASCII rawfile. Empty when no ``mechanism`` entry is declared, so every
-    request without one emits a byte-identical deck.
+    ASCII rawfile. Empty when no ``mechanism`` or ``top_n`` entry is declared,
+    so every request without one emits a byte-identical deck.
 
     ngspice's current plot after ``noise`` is the *integrated* one (``noise2``);
     the spectra live in ``noise1`` (issue #2893). The dump therefore has to
@@ -143,7 +150,7 @@ def control_lines(
     ``let``) would read differently. Verified on ngspice-47: ``onoise_total``
     still resolves after the restore.
     """
-    if not mechanism_measurements(measurements_spec):
+    if not spectra_measurements(measurements_spec):
         return []
     return [
         "set __klt_nzm_plot = $curplot",
@@ -173,18 +180,23 @@ class NoiseMechanismOutcome:
     residual_relative: float | None = None
     #: Suffixes (or vector names) of unclassified leaves carrying power.
     unclassified_suffixes: tuple[str, ...] = ()
+    #: The ranked ``top_n`` leaves (issue #5558); None unless asked for.
+    contributors: list[dict[str, Any]] | None = None
     error: str | None = None
     code: str | None = None
 
     def report(self) -> dict[str, Any]:
         """The response's additive ``noise`` object for this measurement."""
-        return {
+        report: dict[str, Any] = {
             "mechanism": self.mechanism,
             "total": self.total,
             "unclassified": self.unclassified,
             "residual_relative": self.residual_relative,
             "unclassified_suffixes": list(self.unclassified_suffixes),
         }
+        if self.contributors is not None:
+            report["contributors"] = self.contributors
+        return report
 
     @property
     def incomplete(self) -> bool:
@@ -232,22 +244,23 @@ def extract_corner(
     measurements_spec: list[dict[str, Any]], corner_dir: str, analysis: dict[str, Any]
 ) -> dict[int, NoiseMechanismOutcome]:
     """``{position in measurements_spec: outcome}`` for every ``mechanism``
-    entry of one finished corner, read from the rawfile :func:`control_lines`
-    asked ngspice to write. Never raises: any rawfile problem becomes each
-    measurement's own ``error``."""
+    entry (and every total entry asking for ``top_n``, which carries only its
+    ``contributors``) of one finished corner, read from the rawfile
+    :func:`control_lines` asked ngspice to write. Never raises: any rawfile
+    problem becomes each measurement's own ``error``."""
     from . import sim_noise
 
-    if not mechanism_measurements(measurements_spec):
+    if not spectra_measurements(measurements_spec):
         return {}
     sweep = (sim_noise.swept_range(analysis) or ("lin", 0.0, 0.0))[0]
     plot, failure = _read_plot(rawfile_path(corner_dir))
     outcomes: dict[int, NoiseMechanismOutcome] = {}
     for position, spec in enumerate(measurements_spec):
-        if not is_mechanism(spec):
+        if not reads_spectra(spec):
             continue
         if failure is not None:
             outcomes[position] = NoiseMechanismOutcome(
-                mechanism=spec["noise"]["mechanism"],
+                mechanism=spec["noise"].get("mechanism"),
                 code=failure[0],
                 error=f"measurement '{spec['name']}': {failure[1]}",
             )
@@ -288,7 +301,7 @@ def _reduce_one(
     from . import sim_noise
 
     body = spec["noise"]
-    mechanism = body["mechanism"]
+    mechanism = body.get("mechanism")
     names = [variable["name"] for variable in plot["variables"]]
     columns = {
         name: [point[index] for point in plot["points"]]
@@ -298,6 +311,11 @@ def _reduce_one(
     if missing is not None:
         return missing
     leaves = sim_noise_leaves.classify_leaves(names)
+    contributors = sim_noise_contributors.rank(body, sweep, columns, leaves)
+    if mechanism is None:  # a total entry: only its ranked list is read here
+        if contributors is None:
+            return _no_value(spec)
+        return NoiseMechanismOutcome(contributors=contributors)
     points = len(plot["points"])
 
     def reduce_leaves(subset: list[sim_noise_leaves.Leaf]) -> float | None:
@@ -315,16 +333,9 @@ def _reduce_one(
     )
     every = reduce_leaves(leaves)
     if value is None or total is None:
-        return NoiseMechanismOutcome(
-            mechanism=mechanism,
-            code="noise_mechanism_no_value",
-            error=(
-                f"measurement '{spec['name']}': the noise spectra grid does "
-                "not bracket the requested frequency, so no value could be "
-                "reduced"
-            ),
-        )
+        return _no_value(spec)
     return NoiseMechanismOutcome(
+        contributors=contributors,
         value=value,
         mechanism=mechanism,
         total=total,
@@ -336,11 +347,22 @@ def _reduce_one(
     )
 
 
+def _no_value(spec: dict[str, Any]) -> NoiseMechanismOutcome:
+    return NoiseMechanismOutcome(
+        mechanism=spec["noise"].get("mechanism"),
+        code="noise_mechanism_no_value",
+        error=(
+            f"measurement '{spec['name']}': the noise spectra grid does "
+            "not bracket the requested frequency, so no value could be reduced"
+        ),
+    )
+
+
 def _refuse_plot(
     spec: dict[str, Any], columns: dict[str, list[float]], names: list[str]
 ) -> NoiseMechanismOutcome | None:
     """The rawfile parsed but cannot answer the question -- or None if it can."""
-    mechanism = spec["noise"]["mechanism"]
+    mechanism = spec["noise"].get("mechanism")
     if "onoise_spectrum" not in columns or "frequency" not in columns:
         return NoiseMechanismOutcome(
             mechanism=mechanism,

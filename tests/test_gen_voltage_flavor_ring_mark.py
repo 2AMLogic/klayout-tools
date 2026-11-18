@@ -8,7 +8,7 @@ import klayout.db as kdb
 import pytest
 
 from klayout_tools.drc import run_drc
-from klayout_tools.gen import generate
+from klayout_tools.gen import GenError, generate
 
 _NWELL = (64, 20)
 _HVI = (75, 20)
@@ -267,3 +267,160 @@ def test_other_families_flavour_with_ring_stay_drc_clean(
         f"{family}_{flavor}_ring",
     )
     assert _violations(output, family) == {}
+
+
+# --- Issue #6458: the same fix for ``diff_pair``'s own ``add_guard_ring`` ----
+# ``diff_pair`` defaults to ``add_guard_ring=True``, so a bare pfet+hvi request
+# (no ring param at all) hit the violation too -- hence the ``{}`` case below.
+
+_DP = {"w_um": 2, "l_um": 10}
+_DP_LVTN = (125, 44)
+
+
+def _raw_count(path, layer_datatype):
+    """Unmerged polygon count, to prove the marker is one shape, not two."""
+    layout = kdb.Layout()
+    layout.read(str(path))
+    index = layout.find_layer(*layer_datatype)
+    if index is None:
+        return 0
+    return kdb.Region(layout.top_cell().begin_shapes_rec(index)).count()
+
+
+@pytest.mark.parametrize(
+    "ring",
+    [
+        {"add_guard_ring": True},
+        {},  # the default is a ring
+        {"add_guard_ring": True, "ring_gap_side": "S", "ring_gap_um": 1.0},
+        {"add_guard_ring": True, "ring_gap_side": "W", "ring_gap_um": 1.0},
+    ],
+    ids=["ring", "default_ring", "gap_S", "gap_W"],
+)
+def test_diff_pair_hvi_ring_marker_encloses_ring_well_and_is_drc_clean(
+    tmp_path, pdk_root, ring
+):
+    """The issue's reproduction: one ``nwell.enclosed.hvi.1`` before the fix."""
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, **_PFET_HVI, **ring},
+        "dp_ring_hvi",
+        cell_name="dp",
+    )
+    assert (_region(output, _NWELL) - _region(output, _HVI)).is_empty()
+    assert _violations(output) == {}
+    # One unioned marker polygon, not a second shape laid over the ring well.
+    assert _raw_count(output, _HVI) == 1
+
+
+def test_diff_pair_hvi_without_ring_marker_matches_well_box(tmp_path, pdk_root):
+    """Ring-less requests are unchanged: marker box == the device well box."""
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, **_PFET_HVI, "add_guard_ring": False},
+        "dp_noring",
+    )
+    assert _region(output, _HVI).bbox() == _region(output, _NWELL).bbox()
+    assert _violations(output) == {}
+
+
+def test_diff_pair_ring_without_flavour_draws_no_marker(tmp_path, pdk_root):
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, "flavor": "pfet", "add_guard_ring": True},
+        "dp_ring_noflavour",
+    )
+    assert _region(output, _HVI).is_empty()
+
+
+def test_diff_pair_nfet_ring_marker_not_widened(tmp_path, pdk_root):
+    """An NMOS pair's ring draws no well, so there is nothing to widen to."""
+    ring_out, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, "flavor": "nfet", "voltage_flavor": "hvi", "add_guard_ring": True},
+        "dp_nfet_ring",
+    )
+    plain_out, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, "flavor": "nfet", "voltage_flavor": "hvi", "add_guard_ring": False},
+        "dp_nfet_plain",
+    )
+    assert _region(ring_out, _HVI).bbox() == _region(plain_out, _HVI).bbox()
+    assert _violations(ring_out) == {}
+
+
+def test_diff_pair_native_vt_is_nfet_only_so_no_ring_well_to_cover(tmp_path, pdk_root):
+    """sky130's native-Vt flavour (hvi + the extra lvtn marker) has no PMOS
+    counterpart, so a ring *well* and the extra marker never coexist: pfet is
+    rejected outright, and the nfet ring (no well) keeps both marker layers
+    on the same unwidened box."""
+    with pytest.raises(GenError, match="NMOS-only"):
+        _gen(
+            tmp_path,
+            pdk_root,
+            "sky130",
+            "diff_pair",
+            {**_DP, "flavor": "pfet", "voltage_flavor": "native"},
+            "dp_pfet_native",
+        )
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "diff_pair",
+        {**_DP, "flavor": "nfet", "voltage_flavor": "native", "add_guard_ring": True},
+        "dp_nfet_native",
+    )
+    assert _region(output, _HVI).bbox() == _region(output, _DP_LVTN).bbox()
+    assert _violations(output) == {}
+
+
+@pytest.mark.parametrize("family", ["gf180mcu", "sg13g2"])
+@pytest.mark.parametrize("flavor", ["pfet", "nfet"])
+def test_diff_pair_other_families_flavour_with_ring_stay_drc_clean(
+    tmp_path, pdk_root, family, flavor
+):
+    """``diff_pair``'s gf180mcu ``medium_voltage`` / sg13g2 ``hv`` ring variants
+    (the widening is family-agnostic) stay clean on the curated decks."""
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        family,
+        "diff_pair",
+        {
+            "flavor": flavor,
+            "voltage_flavor": _FLAVOURS[family],
+            "add_guard_ring": True,
+        },
+        f"dp_{family}_{flavor}_ring",
+    )
+    assert _violations(output, family) == {}
+
+
+def test_esd_device_hvi_ring_stays_drc_clean(tmp_path, pdk_root):
+    """``esd_device`` is always NMOS-style (no ring well), so it was never
+    affected; pinned so a future ring-well change there is noticed."""
+    output, _ = _gen(
+        tmp_path,
+        pdk_root,
+        "sky130",
+        "esd_device",
+        {"total_width_um": 20, "voltage_flavor": "hvi", "add_guard_ring": True},
+        "esd_ring_hvi",
+    )
+    assert _violations(output) == {}
