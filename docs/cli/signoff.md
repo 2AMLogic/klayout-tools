@@ -1662,7 +1662,9 @@ binding an author-written inventory leaves member edits undetected. Issue
 #3044 adds an optional `provenance.input.paths` for these: a non-empty list
 of members, each `{"path": <string | {"path", "scope": "repo"}>,
 "content_hash": "sha256:..."}`, with `path` resolved exactly as
-`provenance.input.path` is (including `--repo-root`).
+`provenance.input.path` is (including `--repo-root`). Members may also include
+an optional `role` key (`"stream"` or `"input"`) identifying an item-2 stream
+or declared generator input.
 
 ```json
 "input": {
@@ -2258,11 +2260,11 @@ attestation. `inputs` is a hash pin, not a rebuild: klt neither runs the
 generator nor verifies that the stream regenerates from the inputs (declare a
 `checks` command for that).
 
-`inputs` composes with repeated `--input`. It also composes with `--generator` /
-`--regenerated-hash` on a single stream, with one caveat: the grader compares
-`regenerated_hash` to the *bound* hash, which for an envelope that declares
-`inputs` is the set digest (`provenance.input.content_hash`), not the bare
-stream hash, and a `geometry` hash kind is unavailable for a set binding.
+`inputs` composes with repeated `--input`. For a single stream with
+`--generator` and `--regenerated-hash`, use `--hash-kind bytes` (the default)
+with the set digest (`provenance.input.content_hash`). A bare stream hash
+grades `unmet` / `stale_artifact`. `klt signoff --attest 2` refuses
+`--hash-kind geometry` with an inventory declaring `inputs` (exit `1`).
 
 > **Pin change.** An item-2 envelope that declares `inputs` reports
 > `provenance.input.paths` plus a set digest instead of a single
@@ -3266,9 +3268,9 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
     { "field": "source_doc_content_hash", "committed": "sha256:…", "fresh": "sha256:…" }
   ],
   "build_skew": {
-    "state": "build_only",
+    "state": "ruleset",
     "fields": [
-      { "field": "build.git_commit", "committed": "d5d57daf…", "fresh": "5dbbad05…" }
+      { "field": "build.grading_ruleset_id", "committed": "sha256:…", "fresh": "sha256:…" }
     ]
   },
   "fresh": { "…": "the full freshly-graded report" }
@@ -3282,16 +3284,30 @@ klt signoff --manifest manifest.json --check reports/block.signoff.json \
   `place-and-route` — see
   [`../json-contract.md`](../json-contract.md)'s "Verifying committed
   evidence"), and it renders through the same `--format text` drift report.
-- **`build_skew` names version skew without grading it** (issue #5868).
-  `--check` is the version-tolerant freshness gate; a raw diff of two
-  `--format json` renders is not, because the `build` block differs whenever
-  the rendering klt differs. `build_skew.state` is `"same"`, `"build_only"`
-  (some `build.*` field moved, the grading ruleset did not), `"ruleset"`
-  (`build.grading_ruleset_id` moved: graded under different rules, not just
-  rendered by a different build) or `"unknown"` (the committed report has no
-  `build` block). `fields` lists each differing field. It never changes
-  `status` or the exit code, and `--format text` prints one `build_skew:` line
-  when the state is `build_only` or `ruleset`.
+- **`build_skew` names build-block skew without grading it** (issues
+  #5868, #5852). `--check` is the version-tolerant freshness gate; a raw
+  diff of two `--format json` renders is not, because the `build` block
+  differs whenever the rendering klt differs. `build_skew.state` is
+  `"same"`, `"build_only"` (some `build.*` field moved, the grading
+  ruleset did not), `"ruleset"` (`build.grading_ruleset_id` moved: graded
+  under different rules, not just rendered by a different build),
+  `"unverifiable"` (at least one side's identity cannot be resolved
+  honestly — no `version`, or a `+unknown` one from a source-tarball
+  install — so neither `"same"` nor a difference state is an assertion the
+  evidence supports; two `+unknown` builds that agree on every recorded
+  field would otherwise read as `"same"`) or `"unknown"` (the committed
+  report has no `build` block). `"unverifiable"` takes precedence over
+  `"build_only"` and `"ruleset"`: a `+unknown` side that also moved
+  `build.grading_ruleset_id` reads `"unverifiable"`, so a consumer that
+  alarms specifically on a ruleset move must also look for
+  `build.grading_ruleset_id` in `fields`. `fields` lists each differing
+  field, kept even under `"unverifiable"` — there it is what the recorded
+  values say, not a claim. It never changes `status` or the exit code, and `--format
+  text` prints one `build_skew:` line when the state is `build_only`,
+  `ruleset` or `unverifiable`. This one field is the whole report-only
+  story of the excluded `build` block: gate on `.build_skew.state` — a
+  consumer that wants to warn (or fail) on "committed by a different
+  build" reads it; nothing else carries that fact.
 - **The tier verdict does not decide this mode's exit code.** A faithful
   report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
   question is drift, not tier. Gate on `status`.
@@ -3358,7 +3374,9 @@ What the exclusion is **not**:
   unchanged — see "Identifying the grading build" below. It lives in the
   `build` block, so like the rest of that block it does not by itself flip
   `--check`'s verdict, but it is still visible verbatim in the response's
-  embedded `fresh` report and from `--describe-grader`.
+  embedded `fresh` report, named (with the rest of the build identity) in
+  the response's `build_skew.fields` when it moved, and reported by
+  `--describe-grader`.
 
 ```bash
 # Fail on evidence drift; warn on a reworded checklist.
