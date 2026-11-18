@@ -855,6 +855,11 @@ same shared primitive `--check`'s layout normalization uses), so a parameter
 xschem wrapped onto a continuation line is present here — the whole point of
 the block, since `grep '^XM2'` on the written netlist shows neither form of
 the multiplier (see [The device multiplier](#the-device-multiplier-two-forms-both-load-bearing)).
+Comments, `.`-directives and `.control` … `.endc` blocks are not instances: a
+code symbol's ngspice commands (`run`, `write out.raw`, `let vgs = 0.5`) are
+skipped as a block, so they never inflate `instances` or appear as a device
+(`.control` / `.endc` match case-insensitively; a `.control` with no `.endc`
+skips through the end of the deck).
 
 | Field | Type | Description |
 | --- | --- | --- |
