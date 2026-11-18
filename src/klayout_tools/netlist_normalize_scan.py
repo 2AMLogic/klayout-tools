@@ -1,9 +1,8 @@
 """Read-only SPICE reference-netlist scans for ``klt lvs``.
 
 Split out of ``netlist_normalize.py`` (issue #4746) to keep that module under
-its per-file size ceiling. Pure move: every name is re-exported from
-``netlist_normalize`` unchanged. This module imports ``netlist_normalize``
-only inside the function that needs it, so the import graph stays acyclic.
+its per-file size ceiling. This module imports ``netlist_normalize`` only
+inside the function that needs it, so the import graph stays acyclic.
 """
 
 from __future__ import annotations
