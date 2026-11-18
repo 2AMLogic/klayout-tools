@@ -38,8 +38,6 @@ reuses this exact 0/1/2/3 trichotomy: exit 3 means "ran fine, found
 """
 
 import argparse
-from collections.abc import Callable
-from typing import Any
 
 from ..functional_verification import (
     FunctionalVerificationError,
@@ -53,82 +51,10 @@ EXIT_PASS = 0
 EXIT_TESTS_FAILED = 3
 
 
-def add_functional_verification_parser(
-    subparsers: argparse._SubParsersAction,
-    _add_pdk_args: Callable[..., Any],
-    _add_format_arg: Callable[[argparse.ArgumentParser], None],
-) -> None:
-    """Register the ``functional-verification`` subparser (moved out of
-    ``parser.py`` for the size ratchet, the ``add_sim_parser`` pattern --
-    issue #5782, which is also what adds ``--pdk``/``--pdk-root``)."""
-    parser = subparsers.add_parser(
-        "functional-verification",
-        help="run a cocotb regression against Icarus/Verilator",
-        description=(
-            "Run a cocotb testbench against RTL sources through Icarus "
-            "Verilog (default) or Verilator, reporting a per-test "
-            "passed/failed/skipped breakdown plus optional Verilator "
-            "coverage -- see docs/design/cocotb-verification-spike.md "
-            "section 7 for the request/response contract and "
-            "docs/cli/functional-verification.md for the CLI surface. Phase "
-            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
-            "field (#387). Invoked exclusively through cocotb 2.0's "
-            "first-party Python `Runner` API, never a generated Makefile; "
-            "the verdict is always derived from the run's own `results.xml`, "
-            "never from a simulator's exit code. Requires cocotb (`pip "
-            "install cocotb`) plus an `iverilog` or `verilator` binary on "
-            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
-            "Takes a request document (like `klt lvs`/`klt sim`), not "
-            "positional RTL file args."
-        ),
-    )
-    parser.add_argument(
-        "request",
-        help=(
-            "klt functional-verification request: a path to a JSON file, '-' "
-            "to read the request from stdin, or an inline JSON object string"
-        ),
-    )
-    parser.add_argument(
-        "--mutations",
-        metavar="PROPOSALS_PATH",
-        help=(
-            "run mutation testing (issue #1592): a path to a <proposals> "
-            "JSON document (schema "
-            "klt.functional_verification.mutation_proposals/1) naming "
-            "byte-exact source mutations to apply, one at a time, to an "
-            "isolated build+test of the same <request>. Aborts with exit 1 "
-            "if the request's own baseline run fails first -- see "
-            "docs/cli/functional-verification.md, '--mutations'"
-        ),
-    )
-    parser.add_argument(
-        "-o",
-        "--outdir",
-        default=None,
-        help=(
-            "write run artifacts (results XML, logs, simulator build "
-            "directory, coverage, trace, mutants/) here instead of "
-            "`.klt/functional-verification/` next to the request file; "
-            "created if missing, relative paths resolve against the cwd. "
-            "Request-relative source paths still resolve against the "
-            "request's own directory"
-        ),
-    )
-    _add_pdk_args(
-        parser,
-        pdk_help=(
-            "PDK variant to resolve a request.pdk block's cell models from "
-            "(e.g. sky130A); overrides request.pdk.variant (issue #5782)"
-        ),
-    )
-    _add_format_arg(parser)
-    parser.set_defaults(func=run)
-
-
 def run(args: argparse.Namespace) -> int:
     mutations_path = getattr(args, "mutations", None)
     outdir = getattr(args, "outdir", None)
+    base_dir = getattr(args, "base_dir", None)
     pdk_variant = getattr(args, "pdk", None)
     pdk_root = getattr(args, "pdk_root", None)
     try:
@@ -137,6 +63,7 @@ def run(args: argparse.Namespace) -> int:
                 args.request,
                 mutations_path,
                 output_dir=outdir,
+                base_dir=base_dir,
                 pdk_variant=pdk_variant,
                 pdk_root=pdk_root,
             )
@@ -144,6 +71,7 @@ def run(args: argparse.Namespace) -> int:
             report = run_functional_verification(
                 args.request,
                 output_dir=outdir,
+                base_dir=base_dir,
                 pdk_variant=pdk_variant,
                 pdk_root=pdk_root,
             )

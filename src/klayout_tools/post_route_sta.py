@@ -301,6 +301,7 @@ from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEG
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
+from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
@@ -343,6 +344,11 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _worst_path_record,
     _worst_paths,
     _worst_paths_by_group,
+)
+from .post_route_sta_stages import (
+    _attach_worst_path_stages,
+    _worst_path_lines,
+    _worst_path_stage_lines,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -694,6 +700,7 @@ def run_sta(
         request["constraints"], clock_port, input_transition_ns, input_transitions
     )
     report_ports = _validate_report_ports(request["constraints"], clock_port)
+    report_path_stages = _validate_report_path_stages(request["constraints"])
     false_path_from = _validate_false_path_from(request["constraints"], clock_port)
     report_instances = _validate_report_instances(request["constraints"])
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
@@ -784,6 +791,7 @@ def run_sta(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             report_instances=report_instances,
             spef_path=spef_path,
@@ -978,6 +986,7 @@ def _dispatch_sta(
     output_dir: str,
     input_path: str,
     basename: str,
+    report_path_stages: bool = False,
     write_sdf: bool = False,
 ) -> dict[str, Any]:
     """Run the single- or multi-corner analysis :func:`run_sta` resolved,
@@ -1011,6 +1020,7 @@ def _dispatch_sta(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             report_instances=report_instances,
             spef_path=spef_path,
@@ -1049,6 +1059,7 @@ def _dispatch_sta(
         input_transitions=input_transitions,
         boundary=boundary,
         report_ports=report_ports,
+        report_path_stages=report_path_stages,
         false_path_from=false_path_from,
         report_instances=report_instances,
         spef_path=spef_path,
@@ -1205,6 +1216,7 @@ def _run_corner_session(
     input_transitions: dict[str, float] | None,
     boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
+    report_path_stages: bool,
     false_path_from: list[str] | None,
     report_instances: list[str] | None,
     spef_path: str | None,
@@ -1319,6 +1331,7 @@ def _run_corner_session(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             report_instances=report_instances,
             propagated_clock=propagated_clock,
@@ -1350,6 +1363,7 @@ def _run_corner_session(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             report_instances=report_instances,
             power_activity=power_activity,
@@ -1386,6 +1400,10 @@ def _run_corner_session(
     clock_skew = metrics.get("clock__skew__setup")
     worst_setup_path, worst_hold_path = _worst_paths(
         completed.stdout or "", worst_slack, worst_hold_slack
+    )
+    stdout = completed.stdout or ""
+    worst_setup_path, worst_hold_path = _attach_worst_path_stages(  # issue #5783
+        stdout, worst_setup_path, worst_hold_path, enabled=report_path_stages
     )
 
     corner_fields: dict[str, Any] = {
@@ -1493,6 +1511,7 @@ def _run_multi_corner(
     input_transitions: dict[str, float] | None,
     boundary: dict[str, Any] | None,
     report_ports: list[str] | None,
+    report_path_stages: bool,
     false_path_from: list[str] | None,
     report_instances: list[str] | None,
     spef_path: str | None,
@@ -1583,6 +1602,7 @@ def _run_multi_corner(
             input_transitions=input_transitions,
             boundary=boundary,
             report_ports=report_ports,
+            report_path_stages=report_path_stages,
             false_path_from=false_path_from,
             report_instances=report_instances,
             spef_path=pair_spef,
@@ -2466,6 +2486,18 @@ def _validate_report_ports(
     return list(value) or None
 
 
+def _validate_report_path_stages(constraints: dict[str, Any]) -> bool:
+    """``constraints.report_path_stages`` (issue #5783): optional boolean;
+    ``False`` when omitted, so an unrequested session is byte-identical."""
+    field = "request.constraints.report_path_stages"
+    value = constraints.get("report_path_stages")
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise PostRouteStaError(f"{field} must be a boolean")
+    return value
+
+
 def _validate_false_path_from(
     constraints: dict[str, Any], clock_port: str
 ) -> list[str] | None:
@@ -2634,7 +2666,7 @@ def _clock_uncertainty_lines(
         return []
     return [
         f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
-        f"[get_clocks {clock_port}]"
+        f"[get_clocks {_tcl_literal(clock_port)}]"  # issue #5708: literal word
         for key in CLOCK_UNCERTAINTY_KEYS
         if clock_uncertainty.get(key) is not None
     ]
@@ -2892,8 +2924,8 @@ _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
     return [
         _UNIT_PIN_LINE,
-        f"create_clock -name {clock_port} -period {clock_period_ns} "
-        f"[get_ports {clock_port}]",
+        f"create_clock -name {_tcl_literal(clock_port)} "
+        f"-period {clock_period_ns} [get_ports {_tcl_literal(clock_port)}]",
     ]
 
 
@@ -2906,18 +2938,21 @@ def _propagated_clock_lines(clock_port: str) -> list[str]:
     after ``create_clock`` and before any I/O delay / SPEF / metric
     collection, so every report the session produces is the propagated
     analysis. The clock-port spelling matches :func:`_clock_lines`'s own
-    (plain interpolation -- the same string ``create_clock -name`` used)."""
-    return [f"set_propagated_clock [get_clocks {clock_port}]"]
+    (`_tcl_literal`-quoted -- the same string ``create_clock -name`` sees,
+    issue #5708)."""
+    return [f"set_propagated_clock [get_clocks {_tcl_literal(clock_port)}]"]
 
 
 def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
     """Issue #4241: one ``create_clock`` per secondary clock, then any
-    ``set_clock_groups -asynchronous``. Empty for a single-clock request."""
+    ``set_clock_groups -asynchronous``. Empty for a single-clock request.
+
+    Clock groups are braced Tcl words (no substitution)."""
     if not clock_extras:
         return []
     lines = [
-        f"create_clock -name {c['port']} -period {c['period_ns']} "
-        f"[get_ports {c['port']}]"
+        f"create_clock -name {_tcl_literal(c['port'])} -period {c['period_ns']} "
+        f"[get_ports {_tcl_literal(c['port'])}]"
         for c in clock_extras["clocks"]
     ]
     groups = clock_extras["groups"]
@@ -2970,31 +3005,18 @@ def _io_delay_lines(
     lines: list[str] = []
     if input_delay_ns is not None:
         lines += [
-            f"set klt_clock_port [get_ports {clock_port}]",
+            f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_non_clock_inputs "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
-            f"set_input_delay {input_delay_ns} -clock {clock_port} "
-            "$klt_non_clock_inputs",
+            f"set_input_delay {input_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} $klt_non_clock_inputs",
         ]
     if output_delay_ns is not None:
         lines.append(
-            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+            f"set_output_delay {output_delay_ns} "
+            f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
-
-
-_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
-
-
-def _tcl_literal(text: str) -> str:
-    """Backslash-quote ``text`` into one literal Tcl word: no word
-    splitting, no ``$``/``[...]``/backslash substitution, no brace
-    matching. Control characters never reach here
-    (:func:`_validate_port_delay_maps` rejects them), so only the
-    Tcl-special printable characters need escaping. Same idiom as
-    ``lvs_netgen.py``'s ``_tcl_word``, kept module-local per this module's
-    self-contained convention."""
-    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
 
 
 def _request_io_delay_lines(
@@ -3185,7 +3207,7 @@ def _port_io_delay_lines(
             mapped = " ".join(_tcl_literal(port) for port in mapping)
             if side == "input":
                 lines += [
-                    f"set klt_clock_port [get_ports {clock_port}]",
+                    f"set klt_clock_port [get_ports {_tcl_literal(clock_port)}]",
                     "set klt_input_candidates "
                     "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
                 ]
@@ -3202,14 +3224,16 @@ def _port_io_delay_lines(
                 "    }",
                 "}",
                 f"if {{[llength $klt_{side}_default_ports] > 0}} {{",
-                f"    {command} {scalar} -clock {clock_port} $klt_{side}_default_ports",
+                f"    {command} {scalar} "
+                f"-clock {_tcl_literal(clock_port)} $klt_{side}_default_ports",
                 "}",
             ]
         for port, bounds in mapping.items():
             for bound, flag in (("min_ns", "-min"), ("max_ns", "-max")):
                 if bound in bounds:
                     lines.append(
-                        f"{command} {flag} {bounds[bound]!r} -clock {clock_port} "
+                        f"{command} {flag} {bounds[bound]!r} "
+                        f"-clock {_tcl_literal(clock_port)} "
                         f"[dict get $klt_ports_by_name {_tcl_literal(port)}]"
                     )
     return lines
@@ -3231,7 +3255,7 @@ def _input_transition_lines(
     if input_transition_ns is not None:
         mapped = " ".join(_tcl_literal(port) for port in mapping)
         lines += [
-            f"set klt_transition_clock_port [get_ports {clock_port}]",
+            f"set klt_transition_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_transition_candidates "
             "[lsearch -inline -all -not -exact [all_inputs] "
             "$klt_transition_clock_port]",
@@ -3270,9 +3294,11 @@ def _boundary_lines(
     cells = boundary.get("driving_cells") or {}
 
     def drive_args(cell: dict[str, str]) -> str:
-        args = f"-lib_cell {cell['cell']} -pin {cell['pin']}"
+        args = (
+            f"-lib_cell {_tcl_literal(cell['cell'])} -pin {_tcl_literal(cell['pin'])}"
+        )
         if "input_pin" in cell:
-            args += f" -from_pin {cell['input_pin']}"
+            args += f" -from_pin {_tcl_literal(cell['input_pin'])}"
         return args
 
     default_cell = boundary.get("driving_cell")
@@ -3281,7 +3307,7 @@ def _boundary_lines(
             _tcl_literal(port) for port in [*cells, *(input_transitions or {})]
         )
         lines += [
-            f"set klt_drive_clock_port [get_ports {clock_port}]",
+            f"set klt_drive_clock_port [get_ports {_tcl_literal(clock_port)}]",
             "set klt_drive_candidates "
             "[lsearch -inline -all -not -exact [all_inputs] $klt_drive_clock_port]",
             f"set klt_drive_mapped [list {mapped}]",
@@ -3323,41 +3349,6 @@ def _boundary_lines(
             f"set_load {value!r} [dict get $klt_ports_by_name {_tcl_literal(port)}]"
         )
     return lines
-
-
-def _worst_path_lines() -> list[str]:
-    """Per-path-group worst setup (``max``) and hold (``min``) path ends,
-    marker-delimited (issue #2740).
-
-    ``find_timing_paths -group_path_count 1 -endpoint_path_count 1`` returns
-    the single worst constrained path end of every path group (data clock
-    groups, ``asynchronous``, ``gated clock``, ...); every constrained path
-    end belongs to exactly one group, so the minimum over these records is
-    the same population ``report_worst_slack_metric`` reduces over --
-    :func:`_worst_path_record` re-checks that equality per run rather than
-    assuming it. ``check_role`` is OpenSTA's own name for the check at the
-    endpoint (``setup``, ``recovery``, ``clock gating hold``, ...), so
-    recovery/removal are never relabelled as data setup/hold. Output is
-    bounded by the number of path groups, not design size. The whole query
-    is ``catch``-wrapped: an engine without these commands yields an
-    ``ERROR`` row (reported as ``status: "unavailable"``), never a fabricated
-    path."""
-    return [
-        f'puts "{_WORST_PATHS_BEGIN}"',
-        "if {[catch {",
-        "    foreach klt_path_side {max min} {",
-        "        foreach klt_pe [find_timing_paths -path_delay $klt_path_side "
-        "-group_path_count 1 -endpoint_path_count 1] {",
-        '            puts "PATH\\t$klt_path_side\\t[$klt_pe check_role]\\t'
-        "[$klt_pe slack]\\t[get_full_name [get_property $klt_pe startpoint]]\\t"
-        '[get_full_name [get_property $klt_pe endpoint]]"',
-        "        }",
-        "    }",
-        "} klt_worst_path_error]} {",
-        '    puts "ERROR\\t[string map [list \\n { } \\t { }] $klt_worst_path_error]"',
-        "}",
-        f'puts "{_WORST_PATHS_END}"',
-    ]
 
 
 def _port_path_lines(report_ports: list[str] | None) -> list[str]:
@@ -3697,6 +3688,7 @@ def _sta_script_lines(
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
+    report_path_stages: bool = False,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     propagated_clock: bool = False,
@@ -3752,15 +3744,15 @@ def _sta_script_lines(
     if sdf_path is not None and spef_path is None:
         raise ValueError("sdf_path requires spef_path")
     lines = [
-        f"read_lef {tech_lef}",
-        f"read_lef {cell_lef}",
+        f"read_lef {_tcl_literal(tech_lef)}",
+        f"read_lef {_tcl_literal(cell_lef)}",
     ]
-    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
     lines += [
-        f"read_def {def_path}",
-        f"read_liberty {liberty_path}",
+        f"read_def {_tcl_literal(def_path)}",
+        f"read_liberty {_tcl_literal(liberty_path)}",
     ]
-    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
@@ -3786,7 +3778,7 @@ def _sta_script_lines(
         lines += _spef_net_check_lines(spef_net_names or [])
         lines += _delay_fingerprint_lines(_DELAY_PRE_BEGIN, _DELAY_PRE_END)
         lines.append(f'puts "{_SPEF_READ_BEGIN}"')
-        lines.append(f"read_spef {spef_path}")
+        lines.append(f"read_spef {_tcl_literal(spef_path)}")  # issue #5708
         lines.append(f'puts "{_SPEF_READ_END}"')
         if sdf_path is not None:
             lines.append(write_sdf_line(sdf_path))
@@ -3808,6 +3800,7 @@ def _sta_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     # Before the completeness query, which must stay the script's last
@@ -3838,6 +3831,7 @@ def _sta_netlist_script_lines(
     input_transitions: dict[str, float] | None = None,
     boundary: dict[str, Any] | None = None,
     report_ports: list[str] | None = None,
+    report_path_stages: bool = False,
     false_path_from: list[str] | None = None,
     report_instances: list[str] | None = None,
     power_activity: dict[str, float] | None = None,
@@ -3878,20 +3872,20 @@ def _sta_netlist_script_lines(
     shapes throughout, differing only in ``geometry_source``/the estimate
     provenance fields.
     """
-    lines = [f"read_liberty {liberty_path}"]
+    lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
     # Issue #2635 (`request.macros`): each macro's corner-matching liberty
     # right after the standard-cell one, each macro's LEF right after the
     # cell LEF -- both necessarily before `read_verilog`/`link_design`,
     # which is where an undeclared macro surfaces as `ORD-2013`.
-    lines += [f"read_liberty {lib}" for lib in macro_liberty_paths or []]
+    lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
     lines += [
-        f"read_lef {tech_lef}",
-        f"read_lef {cell_lef}",
+        f"read_lef {_tcl_literal(tech_lef)}",
+        f"read_lef {_tcl_literal(cell_lef)}",
     ]
-    lines += [f"read_lef {lef}" for lef in macro_lefs or []]
+    lines += [f"read_lef {_tcl_literal(lef)}" for lef in macro_lefs or []]
     lines += [
-        f"read_verilog {verilog_path}",
-        f"link_design {hdl_toplevel}",
+        f"read_verilog {_tcl_literal(verilog_path)}",
+        f"link_design {_tcl_literal(hdl_toplevel)}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _extra_clock_lines(clock_extras)
@@ -3909,6 +3903,7 @@ def _sta_netlist_script_lines(
         report_instances,
         boundary,
     )
+    # Mode is enum-validated; model is a braced Tcl word (no substitution).
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:
@@ -3927,6 +3922,7 @@ def _sta_netlist_script_lines(
     ]
     lines += _violation_count_lines()
     lines += _worst_path_lines()
+    lines += _worst_path_stage_lines(report_path_stages)  # issue #5783
     lines += _port_path_lines(report_ports)
     lines += _instance_path_lines(report_instances)
     lines += _constraint_completeness_lines()

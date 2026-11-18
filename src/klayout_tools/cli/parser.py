@@ -33,7 +33,6 @@ from . import (
     evidence_cmd,
     fill_cmd,
     formal_cmd,
-    functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
     interface_check_cmd,
@@ -84,6 +83,7 @@ from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
 from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
+from .parser_functional_verification import add_functional_verification_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
@@ -295,7 +295,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_erc_parser(subparsers)
 
-    _add_functional_verification_parser(subparsers)
+    add_functional_verification_parser(subparsers, _add_pdk_args, _add_format_arg)
     _add_place_and_route_parser(subparsers)
     _add_wave_parser(subparsers)
 
@@ -2255,19 +2255,6 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
-
-
-def _add_functional_verification_parser(
-    subparsers: argparse._SubParsersAction,
-) -> None:
-    """Register the ``functional-verification`` verb: run a cocotb
-    regression against Icarus/Verilator. Body lives in the command module
-    (size ratchet, the ``add_sim_parser`` pattern); issue #5782 is what added
-    the ``--pdk``/``--pdk-root`` args.
-    """
-    functional_verification_cmd.add_functional_verification_parser(
-        subparsers, _add_pdk_args, _add_format_arg
-    )
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:

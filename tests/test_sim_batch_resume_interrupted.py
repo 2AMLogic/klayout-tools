@@ -296,3 +296,56 @@ def test_resume_resubmits_a_single_unit_job_that_had_failed(tmp_path, monkeypatc
     assert len(_launches(runner)) == launches_before + 1
     assert environment["job_id"] != stuck
     assert not _codes(corners)
+
+
+# --------------------------------------------------------------------------- #
+# `--resume` harvests the retained shard map (issue #5775)
+# --------------------------------------------------------------------------- #
+
+
+def test_shard_map_records_each_shards_unit_ids(tmp_path, monkeypatch):
+    """Issue #5775: each map entry carries its ordered corner ids, so a
+    later harvest (or `--attach`) can recover what a job ran without
+    re-deriving the partition that minted it."""
+    _, fleet, manifest_path = _shard_resume_fixture(tmp_path, monkeypatch)
+    fleet()
+
+    document = json.loads(manifest_path.read_text())
+    assert [entry["units"] for entry in document["shards"]] == [
+        ["tt/1.800V/0C", "tt/1.800V/1C"],
+        ["tt/1.800V/2C", "tt/1.800V/3C"],
+    ]
+
+
+def test_replanned_partition_does_not_reproduce_old_shards():
+    """The finding-4 measurement (issue #5775): a shrunken dispatch set
+    re-plans to *different* shard groupings -- even a contiguous suffix of
+    outstanding units regroups, because the split boundaries move -- so the
+    manifest's per-index digest gate cannot be what provides reuse. The
+    harvest (collect before planning) is."""
+    full = _corner_points(27)
+    from klayout_tools.sim_remote import _shard_corner_points
+
+    old_shards = [
+        [p.corner_id for p in points]
+        for points in _shard_corner_points(full, 14)
+        if points
+    ]
+    # Six outstanding units (a contiguous suffix, the friendliest case)...
+    outstanding = full[21:]
+    new_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(outstanding, 3)
+        if points
+    ]
+    # ...still regroup: no new shard equals an old one.
+    old_sets = [set(ids) for ids in old_shards]
+    assert not any(new in old_sets for new in new_shards)
+    # And a non-contiguous outstanding set regroups just the same.
+    scattered = [full[0], full[5], full[11]]
+    scattered_shards = [
+        {p.corner_id for p in points}
+        for points in _shard_corner_points(scattered, 2)
+        if points
+    ]
+    assert not any(new in old_sets for new in scattered_shards)
