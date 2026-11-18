@@ -141,6 +141,7 @@ REFUSED_FLAG_BY_PARAM: dict[str, str] = {
     "abstract_cell_lef_paths": "--abstract-cell-lef",
     "mom_net": "--mom-net",
     "spef_output": "--spef",
+    "report_parasitics": "--report-parasitics",
     "def_net_names": "--def-net-names",
     "critical_nets": "--critical-net",
     "parasitics_nets": "--parasitics-net",
@@ -199,6 +200,7 @@ def refused_flags(given: Mapping[str, Any]) -> list[str]:
     ``apply_resistor_fixed_offset`` is inverted: its ``run_extract`` default is
     ``True`` (the correction is applied) and the CLI flag opts *out*, so the
     flag was given exactly when the value is ``False``.
+    ``report_parasitics`` has the string default ``"full"``.
     """
     refused: list[str] = []
     for param, flag in REFUSED_FLAG_BY_PARAM.items():
@@ -207,6 +209,10 @@ def refused_flags(given: Mapping[str, Any]) -> list[str]:
         value = given[param]
         if param == "apply_resistor_fixed_offset":
             if value is False:
+                refused.append(flag)
+            continue
+        if param == "report_parasitics":
+            if value != "full":
                 refused.append(flag)
             continue
         if not _is_unset(value):
