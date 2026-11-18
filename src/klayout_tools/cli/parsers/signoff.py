@@ -147,7 +147,7 @@ def add_signoff_parser(
             "untouched and reported as skipped, and an entry that pins "
             "nothing is never given a pin. Requires --manifest (not '-'); "
             "mutually exclusive with <file>/--fleet/--attest/--check/"
-            "--describe-grader. See docs/cli/signoff.md's "
+            "--describe-grader/-o. See docs/cli/signoff.md's "
             "'Re-pinning a stale hash' section."
         ),
     )
@@ -257,7 +257,8 @@ def add_signoff_parser(
         help=(
             "with --attest: also write the envelope to FILE when it passes; "
             "--manifest/--fleet: also write the report's JSON envelope to "
-            "FILE (exit 0 or 3, always JSON), if bytes changed; refused with --check."
+            "FILE (exit 0 or 3, always JSON), if bytes changed; refused with "
+            "--check and --repin."
         ),
     )
     signoff_parser.add_argument(
