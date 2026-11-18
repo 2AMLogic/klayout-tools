@@ -43,10 +43,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_passes, sim_search_param, sim_twoport
+from . import sim_measurement_kind, sim_passes, sim_search_param, sim_twoport
 from ._jsonnum import is_finite_number, is_int
 from .sim_errors import SimError
-from .sim_forms import validate_exclusive_form
+from .sim_forms import other_forms, validate_exclusive_form
 from .sim_search_analysis import no_control_chars, validate_analysis
 from .sim_search_param import TARGET_KEYS, target_name
 
@@ -68,20 +68,6 @@ _TOL_RESOLUTION = 1e-5
 _KEYS = ("lo", "hi", "tol", "max_iter", "analysis", "predicate")
 _ALLOWED_KEYS = frozenset((*_KEYS, *TARGET_KEYS, "direction", "report"))
 _DIRECTIONS = ("rising", "falling")
-
-#: The other mutually exclusive measurement forms.
-_FORMS = (
-    "spice",
-    "expr",
-    "crossings",
-    "cycle_mean",
-    "energy",
-    "stress",
-    "noise",
-    "transfer",
-    "tian",
-    "snm",
-)
 
 # ngspice reads ``<`` and ``>`` in a control command as redirections; its
 # comparison operators are words.
@@ -124,7 +110,7 @@ def validate_form_exclusive(spec: dict[str, Any]) -> bool:
     return validate_exclusive_form(
         spec,
         "search",
-        _FORMS,
+        other_forms("search"),
         lambda name, spec: validate_search_spec(name, spec["search"]),
     )
 
@@ -270,15 +256,9 @@ def validate_search_context(
             "with analysis.passes or a twoport analysis -- use a scalar "
             "analysis"
         )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a search entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a search entry"
+    )
 
 
 def validate_search_targets(

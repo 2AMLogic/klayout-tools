@@ -10,24 +10,20 @@ import sys
 
 from .. import (
     arith_gen,
-    artifact_store,
     pdk_stackup,
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
-from ..signoff_attest_carry import add_skip_local_only_argument
 from . import (
     arith_gen_cmd,
     array_check_cmd,
-    artifact_cmd,
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
     deck_cmd,
     design_centering_cmd,
-    diff_cmd,
     draw_cmd,
     drc_cmd,
     env_provenance_cmd,
@@ -37,7 +33,6 @@ from . import (
     evidence_cmd,
     fill_cmd,
     formal_cmd,
-    functional_verification_cmd,
     gen_cmd,
     gen_compose_cmd,
     interface_check_cmd,
@@ -61,7 +56,6 @@ from . import (
     ring_check_cmd,
     route_cmd,
     seam_check_cmd,
-    signoff_cmd,
     sim_merge_cmd,
     sim_plan_cmd,
     size_cmd,
@@ -72,7 +66,6 @@ from . import (
     tap_distance_cmd,
     techmap_cmd,
     trajectory_cmd,
-    version_cmd,
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
@@ -84,15 +77,21 @@ from . import (
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
-from .color import add_color_args
+from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
+from .parser_diff import add_diff_parser
 from .parser_economy import add_economy_parser
+from .parser_functional_verification import add_functional_verification_parser
 from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
 from .parsers.components import add_components_parser
+from .parsers.em import add_em_parser
 from .parsers.extract import add_extract_parser
+from .parsers.signoff import add_signoff_parser
+from .parsers.version import add_version_parser
 
 
 def _add_format_arg(
@@ -213,7 +212,7 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = DocArgumentParser(
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
@@ -229,13 +228,12 @@ def create_parser() -> argparse.ArgumentParser:
     )
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
-
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
 
     _add_stats_parser(subparsers)
-    _add_diff_parser(subparsers)
+    add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
@@ -269,8 +267,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_deck_parser(subparsers)
     _add_env_provenance_parser(subparsers)
     _add_evidence_parser(subparsers)
-    _add_artifact_parser(subparsers)
-    _add_version_parser(subparsers)
+    add_artifact_parser(subparsers, _no_subcommand_handler, _add_format_arg)
+    add_version_parser(subparsers, _add_format_arg)
 
     add_extract_parser(
         subparsers,
@@ -298,7 +296,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_erc_parser(subparsers)
 
-    _add_functional_verification_parser(subparsers)
+    add_functional_verification_parser(subparsers, _add_pdk_args, _add_format_arg)
     _add_place_and_route_parser(subparsers)
     _add_wave_parser(subparsers)
 
@@ -333,13 +331,15 @@ def create_parser() -> argparse.ArgumentParser:
 
     _add_report_parser(subparsers)
 
-    _add_signoff_parser(subparsers)
+    add_signoff_parser(subparsers, _add_format_arg)
 
     _add_trajectory_parser(subparsers)
 
     _add_kb_parser(subparsers)
 
     _add_mom_parser(subparsers)
+
+    add_em_parser(subparsers, _add_format_arg)
 
     _add_power_parser(subparsers)
 
@@ -1741,16 +1741,13 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         metavar="REPORT",
         help=(
             "verify a previously committed 'klt lvs --format json' report "
-            "(REPORT) instead of running a fresh compare: mutually "
-            "exclusive with the positional 'request' argument, since "
-            "inputs are read from REPORT itself (issue #1106). Cheap mode "
-            "(default): re-hash REPORT's layout/reference netlists (and "
-            "extraction deck, when one was used) and compare against the "
-            "recorded environment.layout_sha256/reference_sha256/"
-            "provenance.deck.content_hash values, no compare engine "
-            "re-run. Combine with --rerun for full mode (re-run the "
-            "compare and diff verdict-bearing fields). Exits 0 if still "
-            "consistent, 3 if drifted -- see docs/cli/lvs.md, '--check'"
+            "(REPORT) instead of running a fresh compare: mutually exclusive "
+            "with the positional 'request', since inputs are read from "
+            "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
+            "REPORT's recorded inputs; combine with --rerun for full mode "
+            "(re-run the compare and diff verdict-bearing fields). Exits 0 "
+            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
+            "'--check'"
         ),
     )
     lvs_parser.add_argument(
@@ -1760,13 +1757,10 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "explicit layout/netlist input for --check/--rerun (issue "
             "#2699): overrides the layout path REPORT recorded, "
-            "unconditionally (same rule as the positional 'file' of 'klt "
-            "drc --check'/'klt extract --check'). Use it when REPORT's "
-            "layout is outside any repository (recorded as scope "
-            "'external', so it cannot be located) or the verifying clone "
-            "is laid out differently. A layout that no longer hashes to "
-            "the recorded value reports 'drifted'. Requires --check; a "
-            "clean error (exit 1) otherwise"
+            "unconditionally -- use it when REPORT's layout is outside any "
+            "repository or the verifying clone is laid out differently; a "
+            "layout that no longer hashes to the recorded value reports "
+            "'drifted'. Requires --check; a clean error (exit 1) otherwise"
         ),
     )
     lvs_parser.add_argument(
@@ -1776,12 +1770,19 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "full mode for --check (issue #1106): best-effort re-run of "
             "the compare REPORT names (reconstructed from REPORT's own "
             "echoed layout/reference/engine/deck/parameter_tolerance "
-            "fields -- see docs/cli/lvs.md, '--check', for reconstruction "
-            "limits) and diff verdict-bearing fields against the "
-            "committed report, excluding provenance.klt_version/"
-            "klayout_version/pdk.version. Requires --check; a clean error "
-            "(exit 1) otherwise"
+            "fields -- see docs/cli/lvs.md for reconstruction limits) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding the provenance version echoes. Requires --check; a "
+            "clean error (exit 1) otherwise"
         ),
+    )
+    lvs_parser.add_argument(
+        "--deck",
+        default=None,
+        metavar="NAME",
+        help=f"extraction deck to run (currently: {_deck_names_str()}); fills "
+        "the request's layout.deck only, never reference.deck (issue "
+        "#5733); a clean error (exit 1) if the request sets layout.deck too",
     )
     lvs_parser.add_argument(
         "--deck-file",
@@ -1805,8 +1806,8 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "extra '-rd NAME=VALUE' global passed to the runset (engine "
             "'klayout-runset' only; issue #3206). Repeatable; fills "
-            "request.deck_vars, and is a clean error (exit 1) if the "
-            "request already sets it or uses another engine"
+            "request.deck_vars; a clean error (exit 1) if the request "
+            "already sets it or uses another engine"
         ),
     )
     lvs_parser.add_argument(
@@ -1817,8 +1818,7 @@ def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
             "write stage start/finish lines and a periodic heartbeat for "
             "inline layout extraction to stderr (stdout stays the pure "
             "response). Default: heartbeat lines only (every 30s of a long "
-            "stage) when stderr is not a TTY, nothing on a TTY; "
-            "--no-progress forces off"
+            "stage) when stderr is not a TTY; --no-progress forces off"
         ),
     )
     _add_format_arg(lvs_parser)
@@ -1986,253 +1986,6 @@ def _add_formal_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(formal_parser)
     formal_parser.set_defaults(func=formal_cmd.run)
-
-
-def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``signoff`` verb for aggregating check results.
-
-    Aggregate klt drc/lvs/extract/sim results into a pass/fail verdict.
-    See docs/cli/signoff.md for full details.
-    """
-    from klayout_tools.signoff import describe_opt_in_kinds_text
-
-    signoff_parser = subparsers.add_parser(
-        "signoff",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Opt-in evidence kinds (non-native envelopes) and the T1 "
-            "checklist items each may satisfy; any other item rejects them "
-            "as wrong_kind. Also available as JSON via --describe-grader:\n"
-            + describe_opt_in_kinds_text()
-        ),
-        help=(
-            "aggregate klt drc/lvs/extract/sim JSON envelopes into one "
-            "pass/fail verdict, render a T1-T4 tier-verdict report with "
-            "--manifest, or a fleet-wide tier roll-up with --fleet"
-        ),
-        description=(
-            "Read one or more `klt` JSON envelope files (or '-' for stdin) "
-            "produced by `klt drc`/`klt lvs`/`klt extract`/`klt sim` and "
-            "combine them into a single signoff verdict: pass only if every "
-            "check's own status passed AND every input's `provenance` block "
-            "(issue #251) agrees on PDK/deck/input-layout identity -- a "
-            "mismatched-provenance input set is refused (status: "
-            "'refused'), never silently aggregated into a wrong verdict. "
-            "With --manifest instead, renders the T1-T4 evidence-tier item "
-            "skeleton mechanically parsed from docs/design-evidence-tiers.md, "
-            "graded against a block manifest's declared kind and per-item "
-            "evidence locations -- an item is 'met' only when it cites a "
-            "passing klt JSON envelope with fresh provenance; a missing or "
-            "stale check renders 'unmet', never assumed met. With --fleet "
-            "instead, grades every block named in a fleet manifest and "
-            "reports each block's current tier and, for any block not yet "
-            "T1, the single item still blocking it -- one query across the "
-            "whole fleet instead of opening each block's own report. "
-            "See docs/cli/signoff.md."
-        ),
-    )
-    signoff_parser.add_argument(
-        "files",
-        nargs="*",
-        default=[],
-        help=(
-            "path(s) to klt drc/lvs/extract/sim JSON envelope files, or "
-            "'-' to read one from stdin (mutually exclusive with "
-            "--manifest/--fleet)"
-        ),
-    )
-    signoff_parser.add_argument(
-        "--manifest",
-        metavar="FILE",
-        help=(
-            "path to a block manifest JSON file (or '-' for stdin) -- "
-            "renders the T1-T4 tier-verdict report instead of aggregating "
-            "envelope <file> arguments (mutually exclusive with them and "
-            "with --fleet). See docs/cli/signoff.md's 'Tier-verdict report' "
-            "section for the manifest shape."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--fleet",
-        metavar="FILE",
-        help=(
-            "path to a fleet manifest JSON file (or '-' for stdin) -- "
-            "grades every block it names (each a block manifest, inline or "
-            "by path) and renders a fleet-wide tier roll-up instead of a "
-            "single block's report (mutually exclusive with the envelope "
-            "<file> arguments and with --manifest). See "
-            "docs/cli/signoff.md's 'Fleet roll-up' section for the fleet "
-            "manifest shape."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--repo-root",
-        metavar="DIR",
-        help=(
-            'directory that `scope: "repo"` input paths resolve against, '
-            "instead of the nearest `.git` ancestor of the evidence file -- "
-            "for grading evidence copied outside any git checkout (a source "
-            "archive, a vendored copy, an unpacked CI artifact). Must be an "
-            "existing directory. Only meaningful with --manifest/--fleet. "
-            "See docs/cli/signoff.md's 'Grading outside a git checkout' "
-            "section."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--allow-generator-exec",
-        action="store_true",
-        help=(
-            "opt in (default off) to running an operator-approved T1 item "
-            "1/2 regeneration generator on the batch runner and "
-            "byte-comparing its output with the committed artifact. Needs "
-            "--generator-approvals (or $KLT_SIGNOFF_GENERATOR_APPROVALS): "
-            "a manifest can never approve its own generator. Trusted-code "
-            "policy, not isolation. Only meaningful with --manifest/--fleet. "
-            "See docs/cli/signoff.md's 'Executing approved generators' "
-            "section."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--generator-approvals",
-        metavar="FILE",
-        help=(
-            "trusted approvals JSON binding each runnable generator's "
-            "interpreter, script content hash, allowed arguments and "
-            "artifact -- operator configuration outside the manifest. Only "
-            "valid with --allow-generator-exec."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--tiers-doc",
-        metavar="PATH",
-        help=(
-            "path to the design-evidence-tiers Markdown doc to parse the "
-            "T1-T4 item skeleton from, instead of the copy this install "
-            "ships (or $KLT_TIERS_DOC, which this overrides) -- only "
-            "meaningful with --manifest/--fleet. See docs/cli/signoff.md's "
-            "'Where the tier doc comes from' section."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--check",
-        metavar="REPORT",
-        help=(
-            "path to a previously committed --manifest/--fleet report JSON "
-            "file -- re-grades the manifest and reports whether that report "
-            "still reproduces (status: 'match'/'drifted') instead of "
-            "rendering a fresh one. Exits 0 if it still holds, 3 if drifted, "
-            "1 if the committed report is missing/unparseable or was "
-            "produced by the other mode. The `build` block is excluded from "
-            "the comparison: it names how this install was provisioned, not "
-            "only which commit it came from, so two byte-legitimate installs "
-            "of the same pinned commit report different ones (issue #2249). "
-            "Use this rather than byte-comparing the committed file against "
-            "a fresh render. Only meaningful with --manifest/--fleet; see "
-            "docs/cli/signoff.md's '--check' section. With --attest, REPORT "
-            "is a committed attestation envelope instead: re-attests and "
-            "exits 0 only if it still reproduces and still passes, 3 "
-            "otherwise -- never rewriting it."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--attest",
-        metavar="ITEM",
-        type=int,
-        choices=[1, 2, 8, 9, 10],
-        help=(
-            "produce the artifact-anchored generic envelope for T1 item 1 "
-            "(Design sources), 8 (Characterization report), 9 (Testbenches "
-            "shipped) or 10 (Repo hygiene) from --inventory, by running the "
-            "item-specific checks the inventory declares (issue #2844); or "
-            "for item 2 (Layout) from --input STREAM, by checking the "
-            "committed layout stream (readable, non-empty top cell, dbu on "
-            "grid; issue #4188). Status is derived from those checks: exit "
-            "0 pass, 3 fail (nothing written), 1 malformed inventory. "
-            "Mutually exclusive with <file>/--manifest/--fleet/"
-            "--describe-grader/--tiers-doc. See docs/cli/signoff.md."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--inventory",
-        metavar="FILE",
-        help=(
-            "with --attest: the versioned attestation inventory (kind "
-            "'t1-attestation-inventory') in a git repo; the envelope pins its "
-            "sha256. Optional for --attest 2: declared layout 'checks'."
-        ),
-    )
-    add_skip_local_only_argument(signoff_parser)
-    signoff_parser.add_argument(
-        "--input",
-        dest="attest_input",
-        metavar="STREAM",
-        action="append",
-        help=(
-            "with --attest 2: committed GDS/OASIS stream in a git repo (issue "
-            "#4188); repeat for a per-cell library, bound as a set (issue #4935). "
-            "Refused with items 1, 8, 9 and 10, which take --inventory."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--generator",
-        metavar="CMD",
-        help=(
-            "with --attest 2: the command that regenerates the stream, recorded as "
-            "provenance.regeneration.generator. Echoed, never run; requires "
-            "--regenerated-hash. A flag-less --check re-checks the committed claim."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--regenerated-hash",
-        metavar="sha256:HEX",
-        help=(
-            "with --attest 2: the hash your own CI got after re-running the "
-            "generator, recorded as provenance.regeneration.regenerated_hash; "
-            "the grader flags the item stale_artifact if it differs from the "
-            "committed stream. Requires --generator."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--hash-kind",
-        choices=["bytes", "geometry"],
-        help=(
-            "with --attest 2 --regenerated-hash: what the regenerated hash "
-            "digests -- raw bytes (default) or the decoded geometry, which "
-            "ignores GDS/OASIS write timestamps."
-        ),
-    )
-    signoff_parser.add_argument(
-        "-o",
-        "--output",
-        metavar="FILE",
-        help=(
-            "with --attest: also write the envelope to FILE when it passes; "
-            "--manifest/--fleet: also write the report's JSON envelope to "
-            "FILE (exit 0 or 3, always JSON), if bytes changed; refused with --check."
-        ),
-    )
-    signoff_parser.add_argument(
-        "--describe-grader",
-        action="store_true",
-        help=(
-            "print which T1 checklist item ids this build has grading "
-            "rules for, plus the content hash identifying the grading code "
-            "itself, without reading source or running any check -- "
-            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc/"
-            "--attest "
-            "(this always reports the build's own shipped grading rules, "
-            "never an overridden doc's item list). See docs/cli/signoff.md's "
-            "'Identifying the grading build' section."
-        ),
-    )
-    _add_format_arg(signoff_parser)
-    # Issue #2227: `signoff` is the one verb that colours its `--format text`
-    # rendering, and the rendering it colours is also a *committed* artifact.
-    # `--color`/`--no-color` (plus $NO_COLOR and the isatty default) live in
-    # `.color` so a second colouring verb registers the same policy with one
-    # call rather than re-deriving it.
-    add_color_args(signoff_parser)
-    signoff_parser.set_defaults(func=signoff_cmd.run)
 
 
 def _add_clip_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2507,70 +2260,6 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
 
-def _add_functional_verification_parser(
-    subparsers: argparse._SubParsersAction,
-) -> None:
-    """Register the ``functional-verification`` verb: run a cocotb
-    regression against Icarus/Verilator.
-    """
-    functional_verification_parser = subparsers.add_parser(
-        "functional-verification",
-        help="run a cocotb regression against Icarus/Verilator",
-        description=(
-            "Run a cocotb testbench against RTL sources through Icarus "
-            "Verilog (default) or Verilator, reporting a per-test "
-            "passed/failed/skipped breakdown plus optional Verilator "
-            "coverage -- see docs/design/cocotb-verification-spike.md "
-            "section 7 for the request/response contract and "
-            "docs/cli/functional-verification.md for the CLI surface. Phase "
-            "3 of Epic #391, and the hard gate behind `klt eval`'s `valid` "
-            "field (#387). Invoked exclusively through cocotb 2.0's "
-            "first-party Python `Runner` API, never a generated Makefile; "
-            "the verdict is always derived from the run's own `results.xml`, "
-            "never from a simulator's exit code. Requires cocotb (`pip "
-            "install cocotb`) plus an `iverilog` or `verilator` binary on "
-            '`$PATH`. `options.coverage` requires `engine: "verilator"`. '
-            "Takes a request document (like `klt lvs`/`klt sim`), not "
-            "positional RTL file args."
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "request",
-        help=(
-            "klt functional-verification request: a path to a JSON file, '-' "
-            "to read the request from stdin, or an inline JSON object string"
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "--mutations",
-        metavar="PROPOSALS_PATH",
-        help=(
-            "run mutation testing (issue #1592): a path to a <proposals> "
-            "JSON document (schema "
-            "klt.functional_verification.mutation_proposals/1) naming "
-            "byte-exact source mutations to apply, one at a time, to an "
-            "isolated build+test of the same <request>. Aborts with exit 1 "
-            "if the request's own baseline run fails first -- see "
-            "docs/cli/functional-verification.md, '--mutations'"
-        ),
-    )
-    functional_verification_parser.add_argument(
-        "-o",
-        "--outdir",
-        default=None,
-        help=(
-            "write run artifacts (results XML, logs, simulator build "
-            "directory, coverage, trace, mutants/) here instead of "
-            "`.klt/functional-verification/` next to the request file; "
-            "created if missing, relative paths resolve against the cwd. "
-            "Request-relative source paths still resolve against the "
-            "request's own directory"
-        ),
-    )
-    _add_format_arg(functional_verification_parser)
-    functional_verification_parser.set_defaults(func=functional_verification_cmd.run)
-
-
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``place-and-route`` verb: place and route a synthesized
     netlist against a resolved PDK via OpenROAD.
@@ -2649,6 +2338,7 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         inputs="gate-level netlist and standard-cell liberty",
         engine="OpenROAD",
         docs="docs/cli/place-and-route.md",
+        rerun_extra=place_and_route_cmd.RERUN_HELP_EXTRA,
     )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
@@ -2661,16 +2351,14 @@ def _add_flow_verify_args(
     inputs: str,
     engine: str,
     docs: str,
+    rerun_extra: str = "",
 ) -> None:
     """Register the shared ``--check``/``--rerun`` committed-evidence
     verification flags on a *flow* verb (issue #2224).
 
-    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
-    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
-    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
-    report echoes outputs and provenance hashes only, so the positional
-    ``request`` stays required and supplies the inputs to re-hash/re-run
-    against. See ``_report_verify.py``'s module docstring.
+    Deliberately **not** the input-exclusive group ``klt drc``/``klt lvs``/
+    ``klt extract``/``klt erc`` use: their reports echo their own inputs; a flow
+    verb's report does not, so ``request`` stays required for the re-run inputs.
     """
     parser.add_argument(
         "--check",
@@ -2697,6 +2385,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+            + (f" {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -3483,155 +3172,6 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
 
 
-def _add_artifact_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``artifact`` verb with nested ``put``/``get``/``verify``/``delete``
-    subcommands (issues #4063, #4101): the client for the fleet artifact store's
-    broker. See docs/cli/artifact.md.
-    """
-    artifact_parser = subparsers.add_parser(
-        "artifact",
-        help="put/get/verify/delete evidence bytes in the fleet artifact store by "
-        "sha256, with a committed manifest",
-        description=(
-            "Evidence bytes go to the artifact store through its broker; git "
-            "keeps a manifest naming each object by sha256. The broker URL "
-            f"comes from --broker or ${artifact_store.ENV_BROKER}; there is "
-            "no default. No credential is held: the broker identifies the "
-            "caller by its network identity. Presigned URLs stay in-process "
-            "and are never printed."
-        ),
-    )
-    artifact_sub = artifact_parser.add_subparsers(
-        dest="artifact_command", metavar="<subcommand>"
-    )
-    artifact_parser.set_defaults(func=_no_subcommand_handler(artifact_parser))
-
-    put_parser = artifact_sub.add_parser(
-        "put",
-        help="store files and emit (or merge) manifest entries",
-        description=(
-            "Hash each file, ask the broker for a presigned PUT, upload with "
-            "exactly the headers it returned, and emit one manifest entry per "
-            "file. An object already stored is not re-sent and still succeeds."
-        ),
-    )
-    put_parser.add_argument("files", nargs="+", metavar="FILE", help="file(s) to store")
-    put_parser.add_argument(
-        "--manifest",
-        metavar="PATH",
-        default=None,
-        help="merge the entries into this manifest JSON (created if absent)",
-    )
-    put_parser.add_argument(
-        "--kind", choices=list(artifact_store.CLIENT_KINDS), default="evidence"
-    )
-    put_parser.add_argument(
-        "--name",
-        default=None,
-        help="entry name (single file only; default: the path relative to "
-        "its git checkout)",
-    )
-    put_parser.add_argument("--media-type", default=None, help="entry media_type")
-    put_parser.add_argument(
-        "--producer-tool", default=None, help="producer.tool (default: klt)"
-    )
-    put_parser.add_argument(
-        "--producer-version",
-        default=None,
-        help="producer.version (default: this klt's version)",
-    )
-    put_parser.add_argument(
-        "--commit",
-        default=None,
-        help="producer.commit (default: git HEAD of the current directory)",
-    )
-    _add_artifact_common_args(put_parser, repo=True)
-    put_parser.set_defaults(func=artifact_cmd.run_put)
-
-    get_parser = artifact_sub.add_parser(
-        "get",
-        help="fetch one object, writing it only if its sha256 verifies",
-        description=(
-            "REF is a sha256 (stored under --repo) or MANIFEST[#SHA256|NAME]. "
-            "The bytes are written only when their recomputed sha256 matches "
-            "both the manifest's digest and the key's. `-o -` writes the "
-            "verified bytes to stdout instead of a JSON envelope."
-        ),
-    )
-    get_parser.add_argument("ref", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]")
-    get_parser.add_argument(
-        "-o", "--output", required=True, help="destination file, or - for stdout"
-    )
-    get_parser.add_argument(
-        "--force", action="store_true", help="replace an existing output file"
-    )
-    _add_artifact_common_args(get_parser, repo=True)
-    get_parser.set_defaults(func=artifact_cmd.run_get)
-
-    verify_parser = artifact_sub.add_parser(
-        "verify",
-        help="check every manifest entry's size and sha256 against the store",
-        description=(
-            "stat each entry, then fetch and re-hash it. Exits 3 if any entry "
-            "is missing or mismatched, 1 on a broker refusal or bad manifest."
-        ),
-    )
-    verify_parser.add_argument("manifest", metavar="MANIFEST")
-    _add_artifact_common_args(verify_parser, repo=False)
-    verify_parser.set_defaults(func=artifact_cmd.run_verify)
-
-    delete_parser = artifact_sub.add_parser(
-        "delete",
-        help="delete stored objects through the broker (dry run unless --yes)",
-        description=(
-            "REF is a sha256 (under --repo) or MANIFEST[#SELECTOR], as for "
-            "`get`. Without --yes only `stat` is called and nothing is "
-            "deleted. Each --keep MANIFEST protects the objects it names: a "
-            "referenced target refuses the whole batch unless "
-            "--force-referenced. An absent object is success. The broker "
-            "decides whether the caller may delete."
-        ),
-    )
-    delete_parser.add_argument(
-        "refs", nargs="+", metavar="REF", help="sha256 or MANIFEST[#SELECTOR]"
-    )
-    delete_parser.add_argument(
-        "--keep",
-        metavar="MANIFEST",
-        action="append",
-        default=[],
-        help="manifest whose objects must not be deleted (repeatable)",
-    )
-    delete_parser.add_argument(
-        "--yes", action="store_true", help="actually delete (default: dry run)"
-    )
-    delete_parser.add_argument(
-        "--force-referenced",
-        action="store_true",
-        help="delete even objects a --keep manifest names",
-    )
-    _add_artifact_common_args(delete_parser, repo=True)
-    delete_parser.set_defaults(func=artifact_cmd.run_delete)
-
-
-def _add_artifact_common_args(parser: argparse.ArgumentParser, *, repo: bool) -> None:
-    parser.add_argument(
-        "--broker",
-        metavar="URL",
-        default=None,
-        help=f"artifact broker base URL (default: ${artifact_store.ENV_BROKER})",
-    )
-    if repo:
-        parser.add_argument(
-            "--repo",
-            metavar="OWNER/NAME",
-            default=None,
-            help=f"repo the objects are stored under (default: "
-            f"${artifact_store.ENV_REPO}, else the git origin remote)",
-        )
-    _add_format_arg(parser)
-
-
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``env-provenance`` verb with nested ``emit``/``scan``/
     ``lint-envelope`` subcommands (issues #1254, #2224), mirroring
@@ -3704,12 +3244,7 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
             "not itself be committed to the repo it scanned."
         ),
     )
-    scan_parser.add_argument(
-        "files",
-        nargs="+",
-        metavar="FILE",
-        help="files to scan",
-    )
+    scan_parser.add_argument("files", nargs="+", metavar="FILE", help="files to scan")
     _add_format_arg(scan_parser)
     scan_parser.set_defaults(func=env_provenance_cmd.run_scan)
 
@@ -3735,10 +3270,7 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     lint_parser.add_argument(
-        "files",
-        nargs="+",
-        metavar="FILE",
-        help="JSON envelope files to lint",
+        "files", nargs="+", metavar="FILE", help="JSON envelope files to lint"
     )
     lint_parser.add_argument(
         "--allow-prefix",
@@ -3753,35 +3285,14 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
             "/opt/pdk-scratch/... Repeatable."
         ),
     )
+    lint_parser.add_argument(
+        "--json-stream",
+        action="store_true",
+        help="treat each FILE as whitespace-separated JSON documents (default: each"
+        " FILE is a single JSON document); findings gain a 0-based `document` index",
+    )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
-
-
-def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``version`` verb (issue #1202).
-
-    A verb rather than only a flag, because the ``--version`` flag has no
-    ``--format`` of its own: a machine consumer gating on "is this build a
-    release?" needs the structured payload, not a string to re-parse.
-    """
-    version_parser = subparsers.add_parser(
-        "version",
-        help="report the running build's identity (release vs post-tag build)",
-        description=(
-            "Report which klayout-tools build is running: its version, the "
-            "git commit it was built from, and whether that commit is this "
-            "version's release tag. Only a clean build made exactly at the "
-            "release tag carries the bare `X.Y.Z`; any other build's "
-            "distribution version is a distinct PEP 440 dev version "
-            "(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted "
-            "changes), so it can never satisfy a `klayout-tools==X.Y.Z` "
-            "pin. Identifying the build never fails: an unrecoverable "
-            "identity is reported as `X.Y.Z.dev0+unknown` with "
-            "`is_release: null`, not as an error."
-        ),
-    )
-    _add_format_arg(version_parser)
-    version_parser.set_defaults(func=version_cmd.run)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -4020,7 +3531,7 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="also compute geometry_digest, a sha256 of the stream's decoded "
         "geometry (null otherwise; it re-reads the whole layout and "
-        "roughly 2.5x's the runtime on large flat layouts)",
+        "roughly 2.5x the runtime on large flat layouts)",
     )
     stats_parser.add_argument(
         "--top",
@@ -4047,36 +3558,6 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(stats_parser)
     stats_parser.set_defaults(func=stats_cmd.run)
-
-
-def _add_diff_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``diff`` verb: compare two layout streams for equal geometry."""
-    diff_parser = subparsers.add_parser(
-        "diff",
-        help="compare two GDSII/OASIS streams for equal geometry, labels and hierarchy",
-        description=(
-            "Compare two layout streams shape-for-shape. Ignores stream "
-            "timestamps, element order and library name; never ignores "
-            "coordinates, path widths, text, instance transforms, the "
-            "database unit or cell names. Exit 0 = equivalent, 3 = layouts "
-            "differ, 1 = unreadable file or unknown --top."
-        ),
-    )
-    diff_parser.add_argument("file_a", help="first GDSII or OASIS layout file")
-    diff_parser.add_argument("file_b", help="second GDSII or OASIS layout file")
-    diff_parser.add_argument(
-        "--top",
-        default=None,
-        help="compare only this cell's hierarchy (must exist in both streams)",
-    )
-    diff_parser.add_argument(
-        "--max-items",
-        type=int,
-        default=50,
-        help="cap on listed differences per list (counts stay exact; default 50)",
-    )
-    _add_format_arg(diff_parser)
-    diff_parser.set_defaults(func=diff_cmd.run)
 
 
 def _add_cells_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -56,13 +56,16 @@ test suite that used them before this split.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from collections.abc import Iterable
 from typing import Any
 
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
+from .place_and_route_pin_conductor import _stage_pin_conductor_layer_map
 from .place_and_route_via_pad import trim_via_pads
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
@@ -139,39 +142,37 @@ def _parse_def_die_area_um(def_path: str) -> tuple[float, float, float, float] |
 def _merge_gds_view(kdb: Any, main_layout: Any, gds_path: str) -> None:
     """Merge a GDS view (the standard-cell library GDS, or a macro's own
     declared ``gds``) into ``main_layout``, preserving ``main_layout``'s own
-    DBU regardless of ``gds_path``'s own declared DBU (issue #1090, a
-    follow-on to #1032's fix for the *first* DEF/LEF read's own DBU).
+    DBU regardless of ``gds_path``'s own declared DBU (issue #1090).
 
     A plain ``main_layout.read(gds_path)`` on an existing, non-empty
     ``Layout`` silently *adopts* the incoming GDS stream's own DBU whenever
-    it differs from ``main_layout.dbu`` -- confirmed directly against the
-    installed ``klayout`` build -- without rescaling any geometry already
-    present. Every DEF-derived shape (instance placements, routed wires,
-    vias -- correct at the DEF's own DBU, itself resolved from the tech LEF
-    per #1032) then gets silently *reinterpreted* at the GDS's own DBU on
-    this second read, doubling (or halving) every DEF-derived coordinate in
-    real microns while the standard-cell/macro geometry that arrives with
-    this same read stays correct -- a geometrically-plausible-looking but
-    wrong merged GDS that passes the "empty (unmatched) cells"/"orphan
-    cells" checks below.
+    it differs from ``main_layout.dbu``, without rescaling geometry already
+    present: every DEF-derived shape (correct at the DEF's own DBU, itself
+    resolved from the tech LEF per #1032) then gets silently *reinterpreted*
+    at the GDS's own DBU, doubling (or halving) every DEF-derived coordinate
+    in real microns while the standard-cell/macro geometry from this same
+    read stays correct -- a plausible-looking but wrong merged GDS that
+    passes the "empty (unmatched) cells"/"orphan cells" checks below.
 
-    Reading the incoming view into its own scratch ``Layout`` first,
-    rescaling it (only when its DBU actually differs) to
-    ``main_layout.dbu``, and re-serializing it in-memory before the real
-    merge keeps both sides in one coordinate system by construction: the
-    DBU-adoption behavior above can then only ever apply to the scratch
-    layout's own (already-rescaled) content, never to ``main_layout``'s
-    existing geometry, regardless of which DBU either side started at.
+    Reading the incoming view into its own scratch ``Layout``, rescaling it
+    (only when its DBU differs) to ``main_layout.dbu``, and re-serializing
+    it via a temp file keeps both sides in one coordinate system: the
+    DBU-adoption above then only ever applies to the scratch layout's own
+    (already-rescaled) content, never to ``main_layout``'s existing geometry.
     """
     scratch = kdb.Layout()
     scratch.read(gds_path)
     if scratch.dbu != main_layout.dbu:
-        scale = scratch.dbu / main_layout.dbu
-        scratch.transform(kdb.ICplxTrans(scale))
+        scratch.transform(kdb.ICplxTrans(scratch.dbu / main_layout.dbu))
         scratch.dbu = main_layout.dbu
-    save_opts = kdb.SaveLayoutOptions()
-    save_opts.format = "GDS2"
-    main_layout.read_bytes(scratch.write_bytes(save_opts), kdb.LoadLayoutOptions())
+    from .place_and_route import PlaceAndRouteError
+
+    # Temp-file round trip rather than ``Layout.write_bytes``/``read_bytes``:
+    # the in-memory byte API is 0.30-only (issue #5768).
+    with tempfile.TemporaryDirectory() as tmp:
+        scratch_path = os.path.join(tmp, "scratch.gds")
+        write_layout(scratch, scratch_path, PlaceAndRouteError)
+        main_layout.read(scratch_path, kdb.LoadLayoutOptions())
 
 
 def _cell_library_max_overhang_um(
@@ -504,6 +505,7 @@ def _merge_def_to_gds(
     the PDK's own ``*.area.*`` rules. ``via_pad_trim`` is
     :func:`~klayout_tools.place_and_route_via_pad.trim_via_pads`'s report
     (issue #4495), surfaced as the sibling ``via_pad_trim`` response field.
+    ``pin_conductor`` reports derived-map staging (issue #5700).
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -531,25 +533,10 @@ def _merge_def_to_gds(
     opts = kdb.LoadLayoutOptions()
     lefdef_config = opts.lefdef_config
     lefdef_config.lef_files = [tech_lef, cell_lef, *(macro["lef"] for macro in macros)]
-    if layer_map_path is not None:
-        lefdef_config.map_file = layer_map_path
-
-    # Issue #1032: KLayout's DEF reader silently proceeds when the target
-    # layout DBU it is configured for does not match the DEF file's own
-    # declared `UNITS DISTANCE MICRONS` value, producing wrong/lossy
-    # via-cut geometry as a side effect (only a `Warning:` line, never a
-    # raised error). Left unset, `lefdef_config.dbu` inherits KLayout's
-    # compiled-in default (0.001, i.e. `DATABASE MICRONS 1000`), which
-    # happens to match sky130 but is wrong for any PDK whose own tech LEF
-    # declares a different `DATABASE MICRONS` value (e.g. gf180mcu's 2000).
-    # Resolve the tech LEF's own declared value and set the reader's target
-    # DBU to match; when the tech LEF doesn't declare one (or the
-    # regex-based parser can't extract it), fall back to KLayout's existing
-    # default DBU behavior -- `read_lef_header` never raises on malformed
-    # input, so `database_microns is None` is a normal, expected case here.
-    # Captured as the full header (not just `database_microns`) so the
-    # post-merge DIEAREA guard below can reuse its own `sites` entry rather
-    # than re-parsing `tech_lef` a second time.
+    # Match the tech LEF's DATABASE MICRONS to avoid lossy via geometry
+    # when KLayout's default DBU differs (e.g. gf180mcu uses 2000).
+    # A missing/malformed declaration keeps the reader default. Retain the
+    # full header for the DIEAREA guard's site-height check below (#1032).
     tech_lef_header = read_lef_header(tech_lef)
     database_microns = tech_lef_header["database_microns"]
     if database_microns is not None:
@@ -557,7 +544,19 @@ def _merge_def_to_gds(
 
     main_layout = kdb.Layout()
     try:
-        main_layout.read(def_path, opts)
+        # Keep the PDK map unchanged; the derived map lives only for the read.
+        with tempfile.TemporaryDirectory(prefix="klt-pin-conductor-") as tmp:
+            staged_path = os.path.join(tmp, "layer.map")
+            pin_conductor_info = _stage_pin_conductor_layer_map(
+                layer_map_path, staged_path
+            )
+            if layer_map_path is not None:
+                lefdef_config.map_file = (
+                    staged_path
+                    if pin_conductor_info["status"] == "staged"
+                    else layer_map_path
+                )
+            main_layout.read(def_path, opts)
     except Exception as exc:  # klayout raises RuntimeError for bad/unknown streams
         raise PlaceAndRouteError(
             f"could not read DEF '{def_path}' for GDS merge: {exc}"
@@ -747,15 +746,15 @@ def _merge_def_to_gds(
 
     # Issue #4495: ASAP7-only trim of redundant VIA_* M1 landing pads (a
     # documented no-op, GDS untouched, for every other PDK family). Runs
-    # after the min-area pass so that pass keeps judging the router's own
-    # geometry; the pads dropped are fully covered by wire, so no polygon
-    # area the repair measured changes.
+    # after the min-area pass; the dropped pads are wire-covered, so the
+    # repair's areas are unchanged. #5740: the routed DEF rides along too.
     via_pad_info = trim_via_pads(
         kdb,
         layout=top_only,
         top_cell=top,
         variant=pdk_info["variant"],
         lef_to_gds=_lef_net_layer_gds_map(layer_map_path),
+        def_path=def_path,
     )
 
     # write_layout() (see _layout.py, #320) always disables KLayout's default
@@ -772,4 +771,5 @@ def _merge_def_to_gds(
         "def_net_names": def_net_names_info,
         "min_area_repair": min_area_info,
         "via_pad_trim": via_pad_info,
+        "pin_conductor": pin_conductor_info,
     }
