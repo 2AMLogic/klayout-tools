@@ -1140,7 +1140,12 @@ trailing — which the comparison ignores, as for every `X` card.
 **`klt signoff`.** An item-7 `pex` citation (and the aggregation-mode `detail`)
 carries the same three disclosure fields as `pex_extraction` — `engine`,
 `parasitics_carried`, `params_not_carried` — beside `body_bias`; absent for a
-curated-deck run. Reported, not graded on.
+curated-deck run. Reported, not graded on. The text rendering of item 7 prints
+both beside the citation: a `pex extraction:` line (`engine=klayout-runset,
+parasitics_carried=false, …` and what that means for the `delta[]` rows) and a
+`body bias: not_assessed (…)` line that reports **no count** — the counts are
+`null` (the signoff `body_bias` block carries `null` for `unbiased_device_count`
+and `unbiased_nets` alike), so nothing is rendered as a measured `0`.
 
 **`--attach`.** A `--submit-only` manifest records the engine arguments in its
 `request` (`--deck-file` as an absolute path), so a bare `--attach` rebuilds the

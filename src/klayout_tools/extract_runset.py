@@ -448,8 +448,10 @@ def run_extract_klayout_runset(
         # carry, per class -- the structured form of the `warnings[]` prose,
         # `{}` once every parameter is declared. `klt pex` copies it.
         "params_not_carried": {k: sorted(v) for k, v in sorted(uncarried.items())},
-        # This engine extracts devices and connectivity only; `klt pex`
-        # therefore cannot use it (docs/cli/extract.md, "Engine").
+        # This engine extracts devices and connectivity only, so there are no
+        # parasitics; `klt pex --engine klayout-runset` reports that as
+        # `extraction.parasitics_carried: false` (docs/cli/pex.md, "Runset
+        # engine").
         "parasitics": None,
         "pdk": None,
         "warnings": warnings,

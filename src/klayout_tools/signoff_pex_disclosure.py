@@ -40,6 +40,10 @@ def _pex_body_bias_disclosure(
       fabricated ``"biased"`` -- an old record must not read as a netlist
       that was checked and found clean.
 
+    ``status == "not_assessed"`` (a ``--engine klayout-runset`` leg, issue
+    #6559) carries ``null`` for both ``unbiased_device_count`` and
+    ``unbiased_nets`` -- the check never ran, so neither is a measured zero.
+
     ``unbiased_pmos_body_nets`` is deliberately **not** carried through: the
     per-device list can run to hundreds of entries on a real block, and a
     reader who needs it has the cited envelope. The count and the distinct
@@ -52,10 +56,16 @@ def _pex_body_bias_disclosure(
     if not isinstance(body_bias, dict):
         return None
     nets = body_bias.get("unbiased_nets")
+    unbiased_nets: list[Any] | None = list(nets) if isinstance(nets, list) else []
+    if body_bias.get("status") == "not_assessed":
+        # `null`, not `[]`, for a runset leg (issue #6559): an empty list reads
+        # as "looked, found no unbiased nets", the same measured-clean claim
+        # `unbiased_device_count: null` refuses beside it.
+        unbiased_nets = None
     return {
         "status": body_bias.get("status"),
         "unbiased_device_count": body_bias.get("unbiased_device_count"),
-        "unbiased_nets": list(nets) if isinstance(nets, list) else [],
+        "unbiased_nets": unbiased_nets,
     }
 
 

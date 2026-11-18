@@ -139,7 +139,7 @@ from ..signoff_attest_text import attestation_check_line as _attestation_check_l
 from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
-from ..signoff_details import _format_body_bias
+from ..signoff_details import _pex_citation_lines
 from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
@@ -893,11 +893,10 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # netlist with no DC bias path for its device bodies makes those
             # numbers physically wrong (docs/cli/extract.md), and `klt
             # signoff` does not grade on it, so a reviewer of item 7 needs it
-            # in the artifact they read. Absent for evidence committed before
-            # `klt pex` reported body bias.
-            body_bias = citation.get("body_bias")
-            if body_bias:
-                print(f"        body bias: {_format_body_bias(body_bias)}")
+            # in the artifact they read. Issue #6559: and, for a runset leg,
+            # that it carries no parasitics. Absent for older evidence.
+            for line in _pex_citation_lines(citation):
+                print(f"        {line}")
             # Issue #2025: T1 item 11's citation is compound -- the `cite:`
             # line above names its leading (`erc`) part, so every other
             # cited artifact gets its own line rather than being reachable
