@@ -91,6 +91,10 @@ def test_sg13g2_bjt_array_instantiates_pdk_hbt_cell(
     lay.read(str(output))
     top = lay.top_cell()
     assert sum(1 for _ in top.each_inst()) == 6
+    # Issue #5808: the reported scheme matches the produced hierarchy -- the
+    # sub-cell keeps the PDK cell's own name (no `__core` suffix).
+    assert report["subcell_naming_scheme"] == "pdk-cell-v1"
+    assert {top.layout().cell(i.cell_index).name for i in top.each_inst()} == {cell}
     m1 = lay.find_layer(8, 0)
     assert kdb.Region(top.begin_shapes_rec(m1)).count() == 6
     # Instances are disjoint (pitch = bbox + gap).

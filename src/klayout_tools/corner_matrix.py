@@ -16,11 +16,11 @@ so the matrix and a request can never disagree about what a tuple is called.
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from typing import Any
 
 from . import sim
+from ._jsonnum import is_finite_number
 from ._paths import _load_request_json
 
 #: The only top-level keys a matrix file may carry. Anything else is refused
@@ -79,11 +79,23 @@ def _duplicates(ids: list[str]) -> list[str]:
 
 
 def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
-    for measurement in corner.get("measurements") or []:
+    corner_id = corner.get("corner_id")
+    measurements = corner.get("measurements")
+    if measurements is None:
+        return False
+    if not isinstance(measurements, list) or not all(
+        isinstance(measurement, dict) for measurement in measurements
+    ):
+        # Route malformed shapes through CornerMatrixError so the CLI emits
+        # its documented error envelope instead of a traceback (issue #5872).
+        raise CornerMatrixError(
+            f"report corner {corner_id!r}: measurements must be an array of objects"
+        )
+    for measurement in measurements:
         value = measurement.get("value")
         if isinstance(value, bool):
             continue
-        if isinstance(value, (int, float)) and not math.isfinite(value):
+        if isinstance(value, (int, float)) and not is_finite_number(value):
             return True
         if value is None and measurement.get("status") != "error":
             # An absent value on a corner reported as simulated is not a

@@ -233,14 +233,13 @@ def test_threshold_is_parseable_from_this_repos_releasing_md() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_text_report_points_at_the_changelog_unreleased_section(
+def test_text_report_points_at_pending_changelog_entries(
     tmp_path: Path,
 ) -> None:
-    """A consumer pinned to the latest release needs to be told where to look
-    for what has landed since -- CHANGELOG.md's `## Unreleased` section."""
     repo = _tagged_repo(tmp_path, ahead=9, threshold=5)
     proc = _run("--repo", str(repo), "--ref", "HEAD")
     assert proc.returncode == 1
+    assert "changelog.d/" in proc.stdout
     assert "## Unreleased" in proc.stdout
 
 

@@ -52,7 +52,8 @@ def bare_name_ngspice_resolution(monkeypatch):
     would otherwise fail on a host with no ``ngspice``. Opt in per module with
     ``pytestmark = pytest.mark.usefixtures("bare_name_ngspice_resolution")``.
     Every other name still goes through the real ``which``, so tests gated on
-    their own ``shutil.which("ngspice")`` skip are unaffected.
+    the shared ngspice probe (``tests/helpers/tool_probes.py``, evaluated at
+    import time) are unaffected.
     """
     real_which = shutil.which
 

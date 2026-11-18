@@ -7,8 +7,10 @@ request or spec file), ``validate_request_shape`` / ``load_request_arg``
 (request dispatch and shape checks), ``_parse_layer_datatype`` and
 ``_validate_via_entries`` (spec parsing), ``_tcl_net_list`` and
 ``_count_spef_nets_annotated`` (OpenSTA Tcl helpers), ``resolve_tool_binary``
-(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``), and
-``fold_spice_continuations`` (SPICE ``+`` continuation fold).
+(``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> ``PATH``).
+
+SPICE line pre-processing (``+`` continuation folding and ``;``/``$`` inline
+comments) used to live here too; it now has its own module, ``_spice_text``.
 """
 
 from __future__ import annotations
@@ -120,9 +122,8 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
 
     Returns whatever :func:`json.load` produced, unvalidated -- callers
     still own the "is this a JSON object" and "are the required fields
-    present" checks, since those (and their exact wording) are genuinely
-    module-specific and some callers reuse them across non-file request
-    sources (stdin, inline JSON) that never reach this function.
+    present" checks (their exact wording is module-specific, and some
+    callers reuse them across stdin/inline sources that never reach here).
     """
     if not os.path.exists(request_path):
         raise error_cls(f"file not found: {request_path}")
@@ -134,30 +135,32 @@ def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:
             return json.load(handle)
     except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read request '{request_path}': {exc}") from exc
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # json's over-long-int parse error is a plain ValueError (issue #6233).
         raise error_cls(f"request '{request_path}' is not valid JSON: {exc}") from exc
 
 
 def _load_spec_json(spec_path: str, error_cls: type[Exception]) -> dict[str, Any]:
     """Read ``spec_path`` and decode it as a JSON object, raising
     ``error_cls`` for every failure mode ``erc.py``/``power.py``/``mom.py``'s
-    ``run_*`` entry points need to report: missing file, a directory instead
-    of a file, an unreadable/undecodable file, or a JSON value that isn't an
-    object.
+    ``run_*`` entry points report: missing file, a directory instead of a
+    file, an unreadable/undecodable file, invalid JSON, or a non-object.
 
     Unlike :func:`_load_request_json`, this also enforces "is this a JSON
-    object" itself -- all three ``_load_spec`` callers needed that exact
-    check, so it is folded in here rather than left to each caller.
+    object" itself -- all three callers need that exact check, folded in
+    here rather than left to each caller.
     """
     if not os.path.exists(spec_path):
         raise error_cls(f"spec file not found: {spec_path}")
     if os.path.isdir(spec_path):
         raise error_cls(f"not a file: {spec_path}")
     try:
-        with open(spec_path) as f:
+        with open(spec_path, encoding="utf-8") as f:
             spec = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise error_cls(f"could not read spec '{spec_path}': {exc}") from exc
+    except ValueError as exc:
+        raise error_cls(f"spec '{spec_path}' is not valid JSON: {exc}") from exc
     if not isinstance(spec, dict):
         raise error_cls(f"spec '{spec_path}' must be a JSON object")
     return spec
@@ -352,36 +355,6 @@ def _count_spef_nets_annotated(
     )
 
 
-def fold_spice_continuations(lines: list[str]) -> list[str]:
-    """Fold SPICE ``+`` continuation lines onto the entry they continue.
-
-    ``lines`` is whatever a caller's own pre-pass has already produced (raw
-    lines, comment-stripped lines, or comment-stripped-and-filtered lines --
-    this function does not care). For each entry, if it starts with ``+``
-    (after left-stripping) *and* there is already a previous entry to fold
-    onto, that previous entry is replaced with itself plus a single space
-    plus the continuation's own content (the ``+`` and any leading/trailing
-    whitespace around it dropped); otherwise the entry is appended as-is.
-
-    A ``+``-prefixed entry with nothing preceding it to fold onto (the first
-    entry in ``lines`` starts with ``+``, or every entry before it was
-    itself folded away) is appended verbatim, ``+`` prefix intact, rather
-    than raising or being silently dropped -- callers that want an orphan
-    continuation line dropped (as ``op_sanity.py`` does) filter such
-    unfolded ``+``-prefixed entries out of this function's return value
-    themselves; callers that want it kept as a literal line (``pex.py``,
-    ``netlist_normalize.py``) use the return value as-is.
-    """
-    folded: list[str] = []
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("+") and folded:
-            folded[-1] = f"{folded[-1]} {stripped[1:].strip()}"
-        else:
-            folded.append(line)
-    return folded
-
-
 def validate_request_shape(
     data: Any,
     source: str,
@@ -403,10 +376,9 @@ def validate_request_shape(
     return data
 
 
-#: How many leading bytes :func:`looks_like_request_document` reads off a
-#: candidate file to decide whether it is a JSON document. A request document
-#: may legitimately start with whitespace/newlines before its opening ``{``,
-#: so this is generous relative to the single byte actually needed.
+#: Leading bytes :func:`looks_like_request_document` reads off a candidate
+#: file to decide whether it is a JSON document -- generous (vs the single
+#: byte actually needed) because a request may open with whitespace.
 _REQUEST_SNIFF_BYTES = 512
 
 
@@ -415,44 +387,35 @@ def looks_like_request_document(value: str) -> bool:
     input *file* path?
 
     ``klt drc``/``klt extract`` (issue #1867) accept either shape in the same
-    positional slot -- unlike ``klt lvs``, whose positional has only ever been
-    a request document, they predate the convention and already take a layout
-    path there. argparse cannot disambiguate two optional positionals (the
-    first one always wins), so the two forms share one slot and are told apart
-    by *value shape*, never by argument position:
+    positional slot -- they predate the convention and already take a layout
+    path there. argparse cannot disambiguate two optional positionals, so the
+    two forms share one slot and are told apart by *value shape*, never by
+    argument position:
 
     - ``"-"`` -- always a request document read from stdin. A layout stream is
       never read from stdin (KLayout's reader needs a seekable file).
-    - an *existing* file whose first non-whitespace byte is ``{`` -- a request
-      document file. A GDSII stream starts with the binary record header
-      ``00 06 00 02`` and an OASIS stream with ``%SEMI-OASIS``, so no layout
-      this tool can read can be mistaken for one. This check is gated on
-      ``os.path.isfile`` running *first*, so a real layout whose bare
-      filename happens to start with ``{`` (e.g. ``{weird}.gds``, issue
-      #1922) is still routed here for content-sniffing rather than being
-      misread as inline JSON from its name alone.
-    - otherwise, a value whose first non-whitespace character is ``{`` -- an
-      inline JSON object string (or a mistyped/nonexistent path that merely
-      looks like one).
+    - an *existing* file whose first non-whitespace byte is ``{`` -- a
+      request document file (no readable layout starts with ``{``: GDSII
+      starts ``00 06 00 02``, OASIS ``%SEMI-OASIS``). Gated on
+      ``os.path.isfile`` running *first*, so a layout named ``{weird}.gds``
+      (issue #1922) is still content-sniffed, not misread as inline JSON.
+    - otherwise, a value whose first non-whitespace character is ``{`` --
+      inline JSON (or a mistyped/nonexistent path that merely looks like one).
 
-    Everything else (including a path that does not exist and does not start
-    with ``{``) is a layout path, so an unreadable/mistyped layout path still
-    produces the same "file not found" error it always has, rather than a
-    JSON parse error.
+    Everything else (a path that does not exist and does not start with
+    ``{``) is a layout path, so a mistyped one still gets the usual "file
+    not found" error rather than a JSON parse error.
     """
     if value == "-":
         return True
     if os.path.isfile(value):
         # An existing file always wins over the bare-string shape check --
-        # e.g. a layout named "{weird}.gds" must be content-sniffed, not
-        # misclassified as inline JSON just because its name starts with
-        # "{".
+        # e.g. "{weird}.gds" must be content-sniffed, not misread as JSON.
         try:
             with open(value, "rb") as handle:
                 head = handle.read(_REQUEST_SNIFF_BYTES)
         except OSError:
-            # Unreadable: fall through to the layout-path reader, which
-            # reports the read failure in its own vocabulary.
+            # Unreadable: fall through to the layout-path reader's error.
             return False
         return head.decode("utf-8", errors="replace").lstrip()[:1] == "{"
     return value.lstrip()[:1] == "{"
@@ -464,33 +427,42 @@ def load_request_arg(
     error_cls: type[Exception],
     required_fields: tuple[str, ...],
     load_request_fn: Callable[[str], dict[str, Any]],
+    base_dir: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Resolve a CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against.
 
     ``value`` is one of three forms (the convention shared by ``klt lvs``
-    and ``klt functional-verification``):
+    and ``klt functional-verification``): ``"-"`` reads the request JSON
+    document from stdin; a path to an existing, readable file is read via
+    the caller's ``load_request_fn``; anything else is parsed as an inline
+    JSON object string, mirroring ``gen.py``'s ``load_params_arg`` (an
+    existing file always wins first, so this only applies once
+    ``os.path.isfile`` has said no). Relative paths resolve against the
+    file's own directory for the file form, the cwd otherwise.
 
-    - ``"-"`` -- read the request JSON document from stdin. Relative paths
-      inside it resolve against the current working directory, since there
-      is no request *file* to anchor them to.
-    - a path to an existing, readable file -- read and parse that file via
-      the caller's own ``load_request_fn`` (unchanged). Relative paths
-      resolve against the file's own directory, exactly as before.
-    - anything else -- parsed as an inline JSON object string. This mirrors
-      ``klt gen --params``'s ``load_params_arg`` (``gen.py``): an existing
-      file always wins first, so this only applies once ``os.path.isfile``
-      has already said no. Relative paths resolve against the current
-      working directory, same as the stdin form.
+    ``base_dir``, when given, overrides that form-derived anchor for every
+    form; it must exist and be a directory, else ``error_cls`` is raised --
+    never a silent fallback. The request document itself is still read from
+    ``value``; the override changes where relative paths resolve, not where
+    the request is loaded from.
 
     Raises ``error_cls`` for any read/parse/shape failure -- the same
     exception type ``load_request_fn`` raises, so callers do not need to
     distinguish the three forms.
     """
+
+    def _anchor(default: str) -> str:
+        if base_dir is None:
+            return default
+        if not os.path.isdir(base_dir):
+            raise error_cls(f"base directory '{base_dir}' is not a directory")
+        return os.path.abspath(base_dir)
+
     if value == "-":
         try:
             data = json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
             raise error_cls(f"stdin request is not valid JSON: {exc}") from exc
         return (
             validate_request_shape(
@@ -499,18 +471,18 @@ def load_request_arg(
                 error_cls=error_cls,
                 required_fields=required_fields,
             ),
-            os.getcwd(),
+            _anchor(os.getcwd()),
         )
 
     if os.path.isfile(value):
-        return load_request_fn(value), os.path.dirname(os.path.abspath(value))
+        return load_request_fn(value), _anchor(os.path.dirname(os.path.abspath(value)))
 
     if os.path.isdir(value):
         raise error_cls(f"not a file: {value}")
 
     try:
         data = json.loads(value)
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise error_cls(
             f"request '{value}' is neither an existing file (file not "
             f"found) nor valid inline JSON: {exc}"
@@ -522,5 +494,5 @@ def load_request_arg(
             error_cls=error_cls,
             required_fields=required_fields,
         ),
-        os.getcwd(),
+        _anchor(os.getcwd()),
     )
