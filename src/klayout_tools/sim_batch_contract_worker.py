@@ -179,6 +179,7 @@ def pdk():
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
+    # root/<variant> only, deliberately: this standalone payload cannot import klayout_tools, so a flat install (#522) degrades to the "pdk stamp unreadable" diagnostic below, never a wrong stamp (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
         text = read(stamp, 16384)

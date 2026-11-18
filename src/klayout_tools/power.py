@@ -158,6 +158,7 @@ from ._paths import (
     _reject_unknown_keys,
     _validate_via_entries,
 )
+from ._power_em_sections import em_edge_verdicts
 from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
@@ -1914,42 +1915,10 @@ def _compute_em_verdict(
     if ir_drop_map is None:
         return None
 
-    # (net, island_id, edge_id) -> the base extraction edge, which carries
-    # `kind`/`layer`/`current_limit_a`/`current_limit_source` -- everything
-    # `ir_drop_map`'s own (deliberately slimmer) per-edge `current_a` does
-    # not repeat.
-    base_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for net_entry in networks:
-        for island in net_entry["islands"]:
-            for edge in island["edges"]:
-                base_edges[(net_entry["net"], island["island_id"], edge["id"])] = edge
-
-    def _edge_verdict(
-        net_name: str, island_id: str, edge: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """A single edge's checked verdict, or ``None`` when it cannot be
-        checked (no declared limit, or no solved current)."""
-        base = base_edges.get((net_name, island_id, edge["id"]))
-        if base is None:
-            return None
-        limit = base["current_limit_a"]
-        current = edge["current_a"]
-        if limit is None or current is None:
-            return None
-        current_abs = abs(current)
-        margin_a = limit - current_abs
-        return {
-            "net": net_name,
-            "island_id": island_id,
-            "edge_id": edge["id"],
-            "kind": base["kind"],
-            "layer": base["layer"],
-            "current_a": round(current_abs, 12),
-            "current_limit_a": round(limit, 12),
-            "current_limit_source": base["current_limit_source"],
-            "margin_a": round(margin_a, 12),
-            "status": "fail" if current_abs > limit else "pass",
-        }
+    # `(net, island_id, edge_id)` -> that edge's checked verdict, or `None`
+    # when it cannot be checked; the cross-section basis (issue #6449) lives
+    # in `_power_em_sections`.
+    verdicts = em_edge_verdicts(networks, ir_drop_map)
 
     net_reports: list[dict[str, Any]] = []
     overall_worst: dict[str, Any] | None = None
@@ -1967,7 +1936,7 @@ def _compute_em_verdict(
 
         for island in net_entry["islands"]:
             for edge in island["edges"]:
-                verdict = _edge_verdict(net_name, island["island_id"], edge)
+                verdict = verdicts[(net_name, island["island_id"], edge["id"])]
                 if verdict is None:
                     unchecked += 1
                     continue

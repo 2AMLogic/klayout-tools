@@ -404,6 +404,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics` | bool | `--parasitics` |
 | `mom_net` | string | `--mom-net` |
 | `spef` | string | `--spef` |
+| `report_parasitics` | string | `--report-parasitics` (issue #5816): `"full"` (the default) or `"slim"`; `"slim"` requires `spef` |
 | `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
 | `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
@@ -600,7 +601,7 @@ name with exit 1, never silently ignored — a caller who believes
 parasitic-annotated one. That covers `--deck`, `--pdk`/`--pdk-root`,
 `--parasitics` and everything built on it (`--critical-net*`,
 `--parasitics-net*`, `--distributed-rc`, `--resistance-graph*`,
-`--resistance-path*`, `--spef`, `--mom-net`, `--mom-rlc-*`,
+`--resistance-path*`, `--spef`, `--report-parasitics slim`, `--mom-net`, `--mom-rlc-*`,
 `--parasitic-variant`, `--substrate-spreading`, `--substrate-tie-ohms`),
 `--deck-option`, `--label-layer`, `--subcircuit`/`--subcircuit-output`,
 `--hierarchical-cells`, `--abstract-cells`/`--abstract-cell-lef`, `--probe`,
@@ -934,8 +935,9 @@ netlists.
 runs on the same pinned `klayout` build and `klt` commit; a pin recorded on a
 different one can change once even when every count matches, because the
 writer owns the `$N` labels (above) and `klt extract` does not renumber them.
-A numbering-independent hash field is not yet offered — it is tracked in
-#3407. Two consecutive runs on the same environment produce identical
+For a pin that must survive a `klayout` build change, use
+`netlist_normalized_sha256` (issue #3407), which is numbering-independent.
+Two consecutive runs on the same environment produce identical
 `netlist_sha256` (`test_consecutive_runs_give_identical_netlist_sha256`).
 
 Rather than hand-rolling this normalization, `klt extract --check <report>
@@ -6503,11 +6505,18 @@ from the same routed DEF `declared_pins` already reads.
 
 **Pair it with `--def-pins` (issue #3257).** `--def-net-connections` alone
 leaves every labelled net a top-level port, and OpenSTA resolves a bare-name
-port hub through the design's *pin* names, so most nets fail to attach
-(`STA-1656`) and timing comes out byte-identical to the unannotated run.
+port hub through the design's *pin* names. Whether such a net then attaches
+is **layout-dependent** -- it hinges on whether the label happens to match a
+real design pin or port name in the routed DEF (one layout drops every RC
+element, `STA-1656`; the #3560 `gcd` run annotated 537 / 537 with
+`delay_changed: true`), so the no-`--def-pins`/`--pins` annotation outcome
+is not a stable signature and must not be asserted on in either direction.
 Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
 response's `warnings[]` carries a `--def-net-connections without
---def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
+--def-pins/--pins` entry -- a pure function of the flags, and the stable
+invariant a `--def-pins`-omitted negative control should assert on (the
+SPEF's `*PORTS` count exceeding the routed DEF's `PINS` count is a second).
+The SPEF bytes are unchanged by the warning.
 
 **Live OpenSTA check (issue #3560).** Measured on the `gcd` corpus design
 (`klt place-and-route` to `route`, OpenROAD `26Q3-1510-g6cb3f2b704`, tt
@@ -6741,6 +6750,74 @@ genuine signal nets (never un-strapped this way in practice).
 Additive field: `spef_path` (top-level, alongside `netlist_path`) — the
 resolved SPEF path, or `null` when `--spef` was omitted (byte-identical to
 before this feature existed).
+
+### Slimming the parasitics report (`--report-parasitics {full,slim}`, issue #5816)
+
+`--spef` and the JSON report describe **the same measurement twice**: the
+SPEF is a format translation of the per-net R/C model `parasitics.nets[]`
+already reports (every `*CAP`/`*RES` value is copied verbatim from it), and
+each coupling capacitor appears in the JSON once *from each side of the
+pair* (so summing `coupled[].capacitance_ff` across `nets[]` double-counts
+— use `total_coupling_capacitance_ff`). On a routed block of a few hundred
+nets with ~6k coupling capacitors, ~94% of a ~4 MB pretty-printed report is
+`parasitics.nets[]` — and almost all of that is either a re-statement of
+the SPEF or one constant repeated per net. A caller who wants the complete
+measurement and a *committable* report should not have to commit the same
+bytes twice.
+
+`--report-parasitics slim` (requires `--spef`; meaningful only beside one)
+shapes the JSON `parasitics` block down to what the SPEF does **not**
+carry. Per `parasitics.nets[]` entry it drops:
+
+- `coupled[]` — the per-side copy of every coupling capacitor (the SPEF's
+  two-terminal `*CAP` rows carry the same values, bit-for-bit). The global
+  `parasitics.coupling_by_layer_pair` histogram summarizes the vertical
+  `levels` and same-layer `lateral_levels` from those entries.
+- `hub_net` — the net's hub node spelling, which the SPEF's own
+  `*D_NET`/`*CONN` node naming already encodes.
+- `terminals[]`/`segments[]`/`pin_order` — **only when empty/constant**
+  (the lumped model's defaults). A `--distributed-rc` net's populated
+  ladder fields are per-net data no SPEF row spells out and are kept, as
+  is any per-net `integrity` sub-key carrying a real finding.
+- the five vacuous lumped-model `integrity` sub-keys (`open` when its
+  status is the star model's `not_applicable`; `islands`/`orphan_nodes`/
+  `suspicious_resistors`/`short_candidates` when `count` is 0 with empty
+  `details`). The top-level `parasitics.integrity` summary — which already
+  aggregates the counts — is untouched; a net with a real finding keeps
+  that sub-key (and its `details[]`, which the summary does not carry).
+  `integrity.capacitance` (the net's own declared-vs-emitted
+  reconciliation) is always kept.
+
+Everything else is untouched: `net`/`net_id`, `resistance_ohm`,
+`capacitance_ff`, `inductance_nh`, the `--parasitics-top-cell-only` shares,
+`by_layer`, `resistance_graph` (`--resistance-graph`), every summary scalar
+and the whole `metrics` block. Two additive fields tell a reader which
+shape it is looking at:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.report_shape` | Always `"slim"` on a slimmed report; a `full` report carries no `report_shape` key at all (its shape is the documented default). |
+| `parasitics.coupling_by_layer_pair` | Maps `"<lower_metal_index>/<upper_metal_index>"` to `{"count", "capacitance_ff"}`. For same-layer coupling, both indices equal the level from `lateral_levels` (for example, `"1/1"`). The histogram is `{}` when no coupling was measured. |
+
+Each capacitor contributes one count and its full measured capacitance to
+every layer pair it spans, after deduplicating the two `coupled[]` entries
+for the same capacitor. A lateral-only capacitor contributes to its same-layer
+buckets. Summing across buckets can count a capacitor more than once. Read
+`cc_count` and `total_coupling_capacitance_ff` for the report's totals.
+
+```
+klt extract routed.gds --deck sky130 --parasitics --spef routed.spef \
+    --report-parasitics slim --format json
+```
+
+A slim run's SPEF and written SPICE are **byte-identical** to a full run's
+— the flag shapes the JSON only, and is applied strictly after the SPEF
+writer and the `metrics` re-keying have consumed the full block.
+`--report-parasitics full` (the default) is byte-identical to the output
+before this flag existed; given without `--spef`, `slim` is a clean
+`ExtractError`, the same convention `--def-net-connections requires
+--spef` follows. The request document carries the same choice as the
+`report_parasitics` string field.
 
 ### DEF-derived net names (`--def-net-names`, issue #951, Epic #700 Phase 3)
 
@@ -8828,6 +8905,12 @@ Both modes use the same 0/3 split described below: `0` when `status` is
 `"match"`, `3` when it is `"drifted"`. A missing or unparseable
 `<report.json>` exits `1` with a clean error message, same as any other
 application-level failure.
+
+Both modes accept plain JSON and gzip-compressed reports, such as
+`report.json.gz`. Compression is detected by the file's contents, so a
+compressed report renamed to `.json` also works. A damaged or truncated
+gzip file exits `1` with a clean error naming the file, including the usual
+error envelope under `--format json`.
 
 ## Exit codes
 

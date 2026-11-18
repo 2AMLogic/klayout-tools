@@ -20,6 +20,8 @@ def check_label(check: Mapping[str, Any]) -> str:
 
 
 def _what_present(c: dict) -> str:
+    if c.get("role") == "testbench_dependency":
+        return f"dependency {c['path']} of {c['testbench']} present"
     what = f"{c['role']} {c['path']} present"
     benches = c.get("testbenches")
     if benches:
@@ -64,6 +66,10 @@ def _what_uncited(c: dict) -> str:
     return f"row {c['row']} has no citation yet (issue #{c['issue']})"
 
 
+def _what_dependency_binding(c: dict) -> str:
+    return f"testbench {c['testbench']}: {c['declared']} dependencies declared"
+
+
 def _what_citation(c: dict) -> str:
     cited = ", ".join(c["envelopes"]) or "no envelope cited"
     return f"spec row {c['row']}: {cited}"
@@ -97,11 +103,21 @@ _WHAT_RENDERERS = {
     "command": _what_command,
     "unbenched_row": _what_unbenched,
     "uncited_row": _what_uncited,
+    "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,
     "pin": _what_pin,
 }
+
+
+def note_lines(result: Mapping[str, Any]) -> list[str]:
+    """``[NOTE]`` text lines for a ``--check`` result's informational
+    notes (issue #5862: a yaml entry's raw bytes drifted while its
+    canonical hash held). Empty for a result carrying none."""
+    return [
+        f"[NOTE] {note['path']}: {note['note']}" for note in result.get("notes", [])
+    ]
 
 
 def attestation_check_line(check: dict) -> str:
