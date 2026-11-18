@@ -158,6 +158,7 @@
         "klayout_tools.drc_deck_includes",
         "klayout_tools.drc_klayout_abort",
         "klayout_tools.drc_klayout_app",
+        "klayout_tools.drc_klayout_attribution",
         "klayout_tools.drc_layer_selection",
         "klayout_tools.drc_klayout_engine",
         "klayout_tools.drc_klayout_launch",
@@ -214,6 +215,7 @@
         "klayout_tools.erc_spec",
         "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
+        "klayout_tools.erc_substrate_bodies",
         "klayout_tools.erc_ties",
         "klayout_tools.erc_well_regions"
       ]
@@ -255,6 +257,7 @@
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
+        "klayout_tools.extract_parasitics_slim",
         "klayout_tools.extract_netlist_write",
         "klayout_tools.extract_detect_block",
         "klayout_tools.extract_detect_diode_near_miss",
@@ -298,6 +301,7 @@
       "modules": [
         "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
+        "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
         "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
@@ -306,6 +310,7 @@
         "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_sdf",
+        "klayout_tools.functional_verification_sdf_internal_bus",
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
@@ -355,9 +360,11 @@
         "klayout_tools.gen_pcells.res_array",
         "klayout_tools.gen_pcells.resistor_strip",
         "klayout_tools.gen_pcells.well_island",
+        "klayout_tools.gen_ring_layout",
         "klayout_tools.gen_ring_ports",
         "klayout_tools.gen_snap",
-        "klayout_tools.gen_spec"
+        "klayout_tools.gen_spec",
+        "klayout_tools.gen_voltage_flavor"
       ]
     },
     "gen_compose": {
@@ -529,6 +536,7 @@
         "klayout_tools.netlist_capacitor_recovery",
         "klayout_tools.netlist_digest",
         "klayout_tools.netlist_diagnostics",
+        "klayout_tools.netlist_instances",
         "klayout_tools.netlist_inputs",
         "klayout_tools.netlist_normalize",
         "klayout_tools.netlist_normalize_scan",
@@ -603,6 +611,7 @@
       "description": "`klt place_and_route` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.place_and_route_cmd",
+        "klayout_tools.netlist_construct_scan",
         "klayout_tools.place_and_route",
         "klayout_tools.place_and_route_clock",
         "klayout_tools.place_and_route_batch",
@@ -615,6 +624,7 @@
         "klayout_tools.place_and_route_macro_halo",
         "klayout_tools.place_and_route_min_area",
         "klayout_tools.place_and_route_pdn_fit",
+        "klayout_tools.place_and_route_pin_conductor",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_rerun",
@@ -634,6 +644,7 @@
       "kind": "verb",
       "description": "`klt power` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools._power_em_sections",
         "klayout_tools.cli.power_cmd",
         "klayout_tools.ir_solver",
         "klayout_tools.power"
@@ -720,6 +731,7 @@
         "klayout_tools._spice_number",
         "klayout_tools._spice_text",
         "klayout_tools._spice_tokens",
+        "klayout_tools._tcl",
         "klayout_tools._text",
         "klayout_tools._unionfind",
         "klayout_tools._vendor",
@@ -759,12 +771,14 @@
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
         "klayout_tools.signoff_attest_build",
+        "klayout_tools.signoff_attest_canonical_yaml",
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
         "klayout_tools.signoff_attest_item9",
+        "klayout_tools.signoff_attest_item9_depends_on",
         "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
@@ -802,12 +816,14 @@
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_job_status",
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
         "klayout_tools.cli.sim_pdk_text",
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
+        "klayout_tools._meas_lint",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -826,6 +842,7 @@
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_reattach",
+        "klayout_tools.sim_batch_resume",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
@@ -871,6 +888,8 @@
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_noise",
+        "klayout_tools.sim_noise_leaves",
+        "klayout_tools.sim_noise_mechanism",
         "klayout_tools.sim_op_args",
         "klayout_tools.sim_param_file",
         "klayout_tools.sim_passes",
@@ -965,7 +984,8 @@
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
-        "klayout_tools.post_route_sta_path_groups"
+        "klayout_tools.post_route_sta_path_groups",
+        "klayout_tools.post_route_sta_stages"
       ]
     },
     "stats": {
@@ -1709,7 +1729,7 @@
     {
       "consumer": "synthesize",
       "exporter": "place_and_route",
-      "reason": "Issue #5074: synthesize_x_scan reuses the netlist x-constant scanner (the same regex and comment blanker klt place_and_route's pre-flight rejects on) so the synthesize warning and the P&R rejection cannot disagree; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: synthesize_x_scan reuses the netlist construct-scanner primitives (the shared netlist_construct_scan module, which lives in the place_and_route group next to its only in-repo rejecter) so the synthesize warnings and the P&R rejection cannot disagree."
     },
     {
       "consumer": "synthesize",
@@ -1910,15 +1930,21 @@
     },
     {
       "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.place_and_route_request",
+      "exporter": "klayout_tools.netlist_construct_scan",
       "symbol": "_NETLIST_X_CONSTANT_RE",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
     },
     {
       "consumer": "klayout_tools.synthesize_x_scan",
-      "exporter": "klayout_tools.place_and_route_request",
+      "exporter": "klayout_tools.netlist_construct_scan",
       "symbol": "_blank_verilog_comments",
-      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; promote to a shared module when either is next reworked."
+      "reason": "Issue #5074: reuses the exact scanner place_and_route's netlist pre-flight uses, so the synthesize-time warning and the P&R rejection cannot drift; the primitives live in the shared netlist_construct_scan module (place_and_route group, next to its only in-repo rejecter) -- grant retargeted there from place_and_route_request."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_x_scan",
+      "exporter": "klayout_tools.netlist_construct_scan",
+      "symbol": "_NETLIST_BEHAVIOURAL_LATCH_RE",
+      "reason": "Issue #5792: reuses the exact behavioural-latch regex place_and_route's netlist pre-flight rejects on, so the synthesize-time warning and the P&R rejection cannot drift; lives in the shared netlist_construct_scan module (place_and_route group) alongside the other two scanner primitives."
     },
     {
       "consumer": "klayout_tools.characterize_osdi",

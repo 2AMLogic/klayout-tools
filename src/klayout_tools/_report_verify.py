@@ -146,7 +146,8 @@ def resolve_committed_path(
       still-plain-string field): returned verbatim, so the historical
       anchoring is byte-unchanged -- a relative value still resolves against
       the current process's cwd, the convention ``klt drc --check``
-      established and :func:`klayout_tools.lvs._input_hash_check` documents.
+      established and :func:`klayout_tools._report_verify_hints.input_hash_check`
+      documents.
     - the ``{path, scope}`` object :func:`~klayout_tools.env_provenance
       .repo_relative_path` builds: ``scope: "repo"`` is joined to the repo
       root discovered from **the committed report's own location**, which is
