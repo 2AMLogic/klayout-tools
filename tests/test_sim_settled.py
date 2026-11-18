@@ -138,6 +138,14 @@ def test_validation_errors():
             sim_settled.validate_settled_spec("m", bad)
 
 
+@pytest.mark.parametrize("tol", [10**400, -(10**400)])
+def test_huge_int_tol_pct_is_a_documented_error_not_overflow_error(tol):
+    # A 400-digit int literal parses to an int too large for a float
+    # (issue #5994): refused as the SimError envelope, not an OverflowError.
+    with pytest.raises(SimError, match=r"settled\.mean\.tol_pct is required"):
+        sim_settled._validate_tracked("m", "mean", {"signal": "v(a)", "tol_pct": tol})
+
+
 def test_exclusive_with_other_forms():
     with pytest.raises(SimError, match="alternative forms"):
         sim_validate._validate_measurement_form(

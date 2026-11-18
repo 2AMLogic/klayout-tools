@@ -8,6 +8,63 @@ Merged pull requests and closed issues from the last 30 days at initialization. 
 
 ### 2026-11-17
 
+- **Issue #6228** (closed): klt synthesize changed its artifact location to .klt/synthesize/run-<id>/ without a compatibility signal
+- **PR #6381**: docs(changelog): record klt synthesize per-run artifact layout as a consumer behaviour change
+- **Issue #6148** (closed): signoff --attest: a declared command cannot import a module installed into the tool venv (uvx --with), the mirror of #5565's klt case
+- **PR #6371**: docs(signoff): document uvx --with module limitation for declared attest commands
+- **PR #6307**: chore(loom): re-port 2026-10-14 pinned files onto upstream v0.19.1306
+- **Issue #6332** (closed): klt extract --spef without --def-pins: annotation outcome is layout-dependent, breaking expect-delays-unchanged negative controls
+- **PR #6358**: docs: mark def-pin-less SPEF annotation layout-dependent, name the warnings[] invariant
+- **Issue #6278** (closed): klt sim --batch-set: one held job ends every unstarted member even when other --max-in-flight workers are healthy
+- **PR #6435**: fix(sim): convert pending batch-set members to not_launched only when no live worker remains
+- **Issue #6127** (closed): Record additive request-enum additions in CHANGELOG.md as docs/json-contract.md requires (netlist_source gate-level, #5638)
+- **PR #6262**: docs: backfill CHANGELOG Unreleased entries for additive request-surface additions (#5899, #6043)
+- **Issue #5641** (closed): signoff --attest 9: one testbench = one file = one cold start, so a shared implementation can only be attested by minting hollow wrapper files
+- **PR #6093**: signoff --attest 9: cold_start accepts a list of named cold starts
+- **Issue #6421** (closed): test_live_engine_spef_name_map_annotation fails on a live-capable host: write_spef with no extraction data (RCX-0134)
+- **PR #6431**: fix: restore live OpenROAD SPEF annotation checks
+- **Issue #6223** (closed): klt lvs --check: the runset deck-hash line has no input_not_found diagnostic, unlike its two siblings
+- **PR #6375**: fix: add input_not_found diagnostic to lvs --check runset deck hash
+- **Issue #5625** (closed): klt-pdk.json liberty list-merge refuses split cell-group files differing only in the `date` attribute
+- **PR #6241**: fix: merge Liberty split-library headers field-by-field, ignoring date/revision/comment
+- **Issue #6313** (closed): decks/sg13g2: layout-side resistor class (rppd) stops pairing with the reference-side R-card class (RPPD) between klt 0.6.0 and 0.8.0 — resistor LVS falls from 275/275 de
+- **PR #6385**: docs(lvs): name the value-drift cause behind #6313's class-wide unmatched signature
+- **Issue #6455** (closed): loom:merge-conflict declared in labels.yml but not provisioned — orphans PRs the base-conflict reconciler touches
+- **Issue #5724** (closed): signoff --attest 2: an item-2 inventory cannot pin the generator's input files by hash
+- **PR #6182**: feat: pin an item-2 generator's input files via inventory inputs
+- **Issue #6100** (closed): via_pad_trim.tip_check: router_fill 0 conflates "no DRCFILL" with "scan skipped / items unresolved"
+- **PR #6292**: feat: report the DEF DRCFILL scan status as tip_check.router_fill_scan
+- **Issue #5798** (closed): klt synthesize: a timed-out yosys run orphans its yosys-abc grandchild — kill the whole process group
+- **PR #6012**: fix(synthesize): kill yosys's whole process group on timeout so yosys-abc cannot outlive the watchdog
+- **Issue #5711** (closed): Consolidate the duplicated batch _collect / report-reader half onto _batch_common (~45 LOC, 2 private grants)
+- **PR #6316**: refactor: share the batch collect half in _batch_collect
+- **Issue #5481** (closed): extract: add a klayout-runset engine so a device class only the PDK runset recognises can reach an extracted netlist
+- **PR #5496**: feat: add a klayout-runset engine to klt extract
+- **Issue #6460** (closed): place-and-route: single-unit requests cannot run on the batch fleet, so multi-hour routes are stuck on the dispatch host
+- **Issue #5705** (closed): functional-verification options.sdf: shape (b) is a one-modpath-per-bit-selected-port-net cap, not a testbench race -- fanout is the precondition, specify is not
+- **PR #5840**: docs: sdf shape (b) is a one-modpath-per-bit-select cap, not a testbench race
+- **Issue #6368** (closed): check_type_baseline.py reports OK when mypy is not installed (a check that cannot run looks like one that passed)
+- **PR #6411**: fix: fail the type ratchet when mypy exits 1 without reporting errors
+- **Issue #6419** (closed): Confirm what publishes the batch fleet's AMI manifest entries — open_pdks_commit may never reach a real image, and the build script's header claims an empty manifest
+- **PR #6432**: docs: correct stale empty-manifest claims in AMI build script and data/README
+- **Issue #6234** (closed): docs(sim): "the runner wrote no report" contradicts the recovered-envelope surfacing in the engine_version_unmet chain
+- **PR #6360**: docs(sim): correct engine_version pin prose — runner-side refusal returns an error envelope, not no report
+- **Issue #5837** (closed): signoff: a manifest citation pinned to the wrong hash degrades the item to unmet/stale_evidence with no diagnostic naming the mismatch
+- **PR #6107**: fix(signoff): stale-pin hint and envelope-own-hash flag for path-less provenance.input
+- **Issue #5597** (closed): klt signoff: T1 item 11's compound citation has no multi-member form, so a partition built from several blocks can cite only one of them
+- **PR #6361**: feat: grouped citations for T1 item 11 power delivery
+- **Issue #6214** (closed): test flake: CI wall-clock budget falls back to 700s fixed ceilings and fails every Tests (Python 3.1x) leg (PR #6006; sibling run passes at 1577s under the rolling model)
+- **PR #6311**: fix: retry transient Actions-API 5xx in the wall-clock history fetcher
+- **Issue #5555** (closed): klt gen res_array: document series=true + klt lvs combine_devices as the way to fold one long resistor body
+- **PR #6257**: docs: point series=true res_array folds at klt lvs combine_devices; pin recipe with a gen->LVS regression test
+- **Issue #5656** (closed): Friction: klt draw straps are absolute rect_um, so a composed cell swept over a device parameter silently breaks DRC (no port-anchored shape)
+- **PR #6033**: feat: report the ring-opening strap window on GAP_ ports
+- **Issue #6343** (closed): main is red: sg13g2 declares 5 curated upper-landing scope tokens missing from test_deck_surfaces_agree's frozen set
+- **Issue #6207** (closed): Two restatements of the openroad wrapper mount rule still omit /tmp after #5878
+- **PR #6433**: fix: name /tmp in the outside-cwd mount hint and scripts README
+- **Issue #5518** (closed): klt sim: no measurement form for a local-slope-band contiguous run over a swept waveform
+- **PR #5528**: feat: add measurements[].slope_band, a dc local-slope-band run reduction
+- **PR #6117**: feat(sim): batch.job_timeout_s, a caller-stated whole-job wall bound
 - **PR #6413**: test: assert resume grace per poll loop instead of a wall-clock bound
 - **Issue #6409** (closed): main red: 2 ruff failures on origin/main tip (I001 signoff.py, RUF100 test_netlist_pdk_variant_provenance.py)
 - **Issue #6398** (closed): main is red on BOTH required gates: 2 autofixable ruff errors + sg13g2 deck-scope test, blocking every open PR

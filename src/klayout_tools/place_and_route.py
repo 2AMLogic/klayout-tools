@@ -355,8 +355,8 @@ SCHEMA_VERSION = 1
 #: is an additive enum value, never a contract-shape change.
 SUPPORTED_ENGINES = ("openroad",)
 
-#: The four stages ``target_stage`` names, in execution order -- see this
-#: module's own docstring "Stage granularity and invocation shape".
+#: The four stages ``target_stage`` names, in execution order. See
+#: "Stage granularity and invocation shape" in docs/cli/place-and-route.md.
 STAGE_ORDER = ("floorplan", "place", "cts", "route")
 
 
@@ -1731,8 +1731,8 @@ def _run_single_corner(
     # Issue #1973: fail here, naming the construct and its line, rather than
     # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
     # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See this module's docstring
-    # "Netlist pre-flight" section.
+    # `DRT-0305` a full route attempt later. See "Netlist pre-flight"
+    # in docs/cli/place-and-route.md.
     _reject_unsupported_netlist_constructs(netlist_path)
 
     hdl_toplevel = request["hdl_toplevel"]
@@ -2102,6 +2102,7 @@ def _run_single_corner(
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
     via_pad_trim_info: dict[str, Any] | None = None
+    pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
@@ -2130,6 +2131,7 @@ def _run_single_corner(
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
         via_pad_trim_info = merge_info.get("via_pad_trim")
+        pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -2193,8 +2195,8 @@ def _run_single_corner(
     # Additive field (issue #1091): reports what `request.power` actually
     # drove, so a caller can tell a signal-only "route" result from a
     # power-complete one without parsing the DEF for a missing
-    # `SPECIALNETS` section -- see this module's own docstring "Power
-    # delivery" section. `pdn`/`global_connect` are `True` once
+    # `SPECIALNETS` section. See "Power delivery" in
+    # docs/cli/place-and-route.md. `pdn`/`global_connect` are `True` once
     # `request.power` is present (both run unconditionally together, at the
     # end of the `"floorplan"` stage -- every run reaches at least that
     # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
@@ -2487,13 +2489,8 @@ def _run_single_corner(
         # "when is this populated" contract.
         "unrouted_def_path": unrouted_def_path,
         "gds_path": gds_path,
-        # Additive field (issue #1029): whether the DEF->GDS merge above
-        # actually applied a KLayout LEF/DEF layer-map file, and how it was
-        # resolved -- `resolve_klayout_layer_map` silently degrades to no map at
-        # all (`resolution: "none"`) when neither a variant-named nor a
-        # family-level map file exists, which previously left no trace in
-        # this response for a caller to notice. `null` unless
-        # `stage_reached` is `"route"`, mirroring `gds_path`/`verilog_path`.
+        # PDK source map and its resolution; null before route (#1029).
+        # No map means sequential default layer numbers, not PDK assignments.
         "layer_map": layer_map_info,
         # Additive field (issue #1488): what the DEF->GDS merge's own
         # single-pin net-name marker pass did, so a caller can tell an
@@ -2524,6 +2521,9 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
+        # Derived-map pin coverage on conductor; null before route (#5700).
+        # Status/layers/reason are documented in docs/cli/place-and-route.md.
+        "pin_conductor": pin_conductor_info,
         # Additive field (issue #4482): the dbu (um) of the merged `gds_path`
         # -- the tech LEF's native dbu unless `request.output_dbu_um` refined
         # it. `null` unless `stage_reached` is `"route"`, mirroring `gds_path`.
