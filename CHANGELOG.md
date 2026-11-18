@@ -30,6 +30,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   Additive: no `schema_version` bump, and `em_verdict`, `coverage` and exit
   codes are byte-identical for identical inputs.
 
+- **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
+  resistor now extracts as a two-terminal device instead of silently
+  vanishing** (#5889, 2026-11-17). The DRM's own SB.10
+  (`poly2.enclosing.sab.1`) *mandates* that Poly2 extend >= 220 nm beyond
+  every SAB edge, so a DRC-clean `ppolyf_u`/`ppolyf_u_1k` drawing carries an
+  unmarked 220 nm Poly2 band around the recognised body on every side; that
+  band wraps the body and merged both contacted leads into ONE terminal
+  component, so `DeviceExtractorResistorWithBulk` found a single contact
+  region ("Expected two polygons on contacts interacting with one resistor
+  shape") and formed no device — the device count dropped (29 -> 27 on the
+  issue's block layout) while `klt drc` stayed clean. Both poly entries now
+  declare the new `ResistorDevice.terminal_enclosure_um=0.22`:
+  `_resolve_resistors` narrows the terminal region to the Poly2 within
+  220 nm of Poly2 drawn *beyond* the mandated band (each lead plus its
+  channel through the band) and severs the band's side flanks from the
+  terminal conductor's connectivity, so each lead lands on its own net and
+  the extracted L/W/R are exactly the marked body's own geometry (6.0
+  squares -> 2100 Ω at 350 Ω/□ on the reproducer). A drawing with no band
+  (exact-body markers, the pre-#5889 fixture style) extracts bit-for-bit as
+  before; a halo that is itself a conductor path around the body still
+  forms no device. Other decks are untouched (the field defaults to `0.0`).
+  No JSON field added or removed; `schema_version` unchanged.
+
 - **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
   item-1 envelope that enumerates attested members but binds only its
   inventory (the pre-0.9.0 producer's `provenance.input` shape, no
@@ -62,6 +85,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the generic-evidence section, and in `docs/json-contract.md`'s
   `provenance.input` notes.
 
+- **`klt signoff --attest` inventory path lists accept `{"glob":
+  "<pattern>"}` members** (#5614, 2026-11-17): a `sources` (item 1) or
+  `hygiene` (item 10) entry may be a glob object instead of a literal path,
+  expanded at attest time to the **git-tracked** files matching it (never a
+  filesystem walk, so the envelope stays byte-deterministic across hosts).
+  Each expanded member gets its own `present` check and hash, so the
+  previously-undetectable case — a file added to a covered directory after
+  the envelope was committed — is now drift: `--attest --check` re-expands
+  and exits non-zero. A zero-match glob, a glob colliding with a literal
+  entry, an absolute/`..` pattern, a symlinked member, and a glob in a
+  `schema_version: 1` inventory are all refused; inventory schema version 2
+  carries the new form and this build reads `{1, 2}` (a v1 inventory attests
+  byte-identically to before).
+
 - **`klt sim --resume` harvests a retained shard map before dispatching**
   (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
   without `--resume` (issue #3896), but `--resume` only ever read
@@ -80,6 +117,47 @@ not `klt --version`, if you need to detect this kind of drift. See
   that minted it. `--resume` alone is now enough for the
   `environment.remote.resumable: true` recovery the report advertises;
   `--attach <map> --collect-partial` remains the non-blocking form.
+  Harvested reuse is reported in `environment.resume.resumed_corners`,
+  not as `environment.remote.fleet[]` entries with `resumed: true`;
+  `fleet[]` lists only shards dispatched after the harvest. A zero-unit
+  off-host corner request now returns `status: "not_checked"`, empty
+  `corners`, and no `environment.remote` instead of submitting a billed
+  job, even without `--resume` (#6540).
+
+- **`klt drc --engine klayout`: `provenance.klayout_version` names the binary
+  that ran the deck, not klt's own pip wheel** (#5660, 2026-11-17): the
+  standalone `klayout` application `--engine klayout` launches and the
+  `klayout` wheel inside klt's own environment are separate installs, but the
+  envelope recorded the wheel's version for a deck the application ran -- so a
+  committed report misnamed its engine whenever the two diverged, and
+  `klayout_version_mismatch` fired (with a `--with klayout==` remedy that
+  cannot reproduce the run) on decks whose engine *was* the tested version.
+  The binary's own `-v` version is now probed exactly once per run and
+  recorded as `klayout_version` -- tracking `--klayout-binary`/
+  `$KLT_KLAYOUT_BINARY` -- with the mismatch advisory and its stderr warning
+  computed from that same value (the warning's remedy names the application,
+  not the wheel). The wheel's version survives as the additive
+  `provenance.klayout_module_version`, and `environment.klayout_binary`
+  (previously emitted only under an override) now records the resolved binary
+  on every `--engine klayout` run, as an absolute path where resolvable. A run
+  with no `--min-klayout-version` still probes but fails *soft*: an
+  unresolvable probe records `klayout_version: null` instead of failing; with
+  a floor declared, probe failures stay fatal exactly as before.
+  `--list-rule-categories --engine klayout` records the same fields.
+  `--engine curated`, `klt lvs` and every other provenance caller are
+  byte-identical (the wheel genuinely is the engine there), and `klt drc
+  --check` in cheap mode is unaffected (it compares content hashes only).
+  `klt drc --check --rerun` excludes both new fields
+  (`environment.klayout_binary`, a host-local path, and
+  `provenance.klayout_module_version`) from its drift diff, and -- because the
+  change also redefines the input of `provenance.klayout_version_mismatch`
+  (wheel before, binary after) -- reports that flag in `not_compared`, not as
+  drift, when the committed report predates the change. A report committed
+  before this change therefore still re-runs as `match`, including on a host
+  where the wheel and the binary disagree. Between two post-change reports
+  (and for `--engine curated`) the flag is compared as before. No
+  `schema_version` bump: both fields are additive and
+  `provenance`'s `$defs` block is `additionalProperties: true`.
 
 - **`klt extract --report-parasitics slim` slims the JSON `parasitics`
   report beside a `--spef` file** (#5816, 2026-11-17): `--spef` and the
@@ -102,6 +180,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   otherwise); a slim run's SPEF and written SPICE are byte-identical to a
   full run's. No `schema_version` bump: the default shape is unchanged and
   every new field is additive.
+
+- **`klt functional-verification`: the response records a shared `provenance`
+  block, and a signoff `content_hash` pin binds the RTL, not the report's
+  bytes** (#5550, 2026-11-17): the response carried no `provenance` key, so a
+  `klt signoff` manifest citing the report as item 5/7 evidence could only
+  hash-pin it through the #4893 evidence-file re-hash — binding the report's
+  own bytes, blind to any RTL edit underneath it, with command-backed pinned
+  citations grading `unverifiable_provenance`. The response now carries the
+  shared block: `provenance.input.content_hash` (role `source`) digests
+  `request.sources` as resolved *before* the SDF/initial-state shims,
+  escaped-divider renames, and scoped-define wrappers are substituted, using
+  the same content-only combined scheme `klt
+  synthesize`/`klt equiv` record — so the digest is byte-identical for the
+  same RTL under a different checkout path or `-o` directory, excludes the
+  cocotb testbench, the SDF, and every generated wrapper, and the report
+  joins `_provenance_consistency`'s per-role cross-check against
+  `synthesize`/`equiv` citations over the same sources. `options.from_synthesize`
+  runs record `input: null` (their netlist is already pinned by
+  `from_synthesize.netlist_sha256`). Grading change, disclosed: a pinned
+  citation now compares against the RTL digest; the `evidence_file` basis
+  applies only where the envelope has no `provenance.input` — a legacy
+  envelope with no `provenance` key, or an `options.from_synthesize` report
+  (which keeps the #4893 file-bytes binding it always had; a command-backed
+  pin of one stays `unverifiable_provenance`, with a note naming that cause)
+  — so a manifest pinned under #4893 (the report's byte hash) grades
+  `stale_evidence` against a new report that records a source digest —
+  re-pin against `provenance.input.content_hash`. No
+  `schema_version` bump: the block is additive by contract.
 
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
@@ -276,6 +382,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s
   "Artifacts written to `.klt/synthesize/<run_id>/`" section. Additive JSON
   only; no `schema_version` bump.
+- **Fixed** (#6227, `klt route`; no JSON field changes): a `routing.width_um`
+  or `pins[].direction_deg` too large for a float (e.g. `10**400`) raised an
+  uncaught `OverflowError` instead of the contract's `RouteError`; both now
+  use the shared finite-number check. `width_um` of `inf`/`nan`, previously
+  accepted, is now rejected with the same `RouteError`.
 - **`klt drc` gf180mcu deck: `DF.1c` (MOSCAP COMP min width) is now checked,
   and `comp.width.mv.1` exempts `MVSD`/`MVPSD`-marked LDMOS drains** (#5719,
   2026-11-17). New rule `comp.width.moscap.1` (`DF.1c`, 1.0 um,
@@ -297,9 +408,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/cli/drc.md`'s corrected waiver guidance; `DF.6_MV`/`PL.4_MV` remain
   disclosed unmodeled), and `DF.1c` flags the same narrow MOSCAP fixture both
   engines report. A consequence for `klt gen mos_array`: its MOSCAP-marked
-  devices now report the genuine `comp.width.moscap.1` finding (the native
-  deck flags the same shapes) — the generator cannot yet draw a MOSCAP that
-  passes it (#6170). No JSON field added or removed; `schema_version` unchanged.
+  devices reported the genuine `comp.width.moscap.1` finding (the native
+  deck flags the same shapes) until the generator fix (#6170). No JSON
+  field added or removed; `schema_version` unchanged.
 
 - **HDL verbs expand `$VAR` / `~` in request path fields** (#5678, 2026-11-17):
   `klt functional-verification`, `synthesize`, `formal` and `equiv` resolved
@@ -456,6 +567,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   committed envelope re-checks `match`; no `schema_version` bump. Repeating
   one path across item-9 object entries is still refused, and the refusal now
   points at the list form. See `docs/cli/signoff.md`.
+- **`klt sim --capacity-retries N` now works on a sharded single request**
+  (#5567, 2026-11-16): a sharded batch run whose `--wait-for-capacity` budget
+  ran out left the refused shards as `lost_shard` corners, recoverable only
+  by a second `--attach` / `--resume` invocation. With `--capacity-retries N`
+  the shards lost to `batch_no_capacity` / `batch_concurrency_cap` are
+  launched again, in up to `N` further passes after the other shards finish,
+  with doubling backoff and a fresh capacity-wait budget per pass; their
+  already-submitted jobs are launched, never re-submitted. Default `0` is
+  unchanged, and `--batch-set` behaves as before.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure
