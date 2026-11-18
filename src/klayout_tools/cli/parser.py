@@ -76,6 +76,7 @@ from . import (
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
@@ -211,7 +212,7 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = DocArgumentParser(
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
@@ -227,7 +228,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
-
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)

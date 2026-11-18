@@ -4878,6 +4878,14 @@ crossing *series*, or a supply-relative `level`
 `crossings` entry's `value` is the **count** of crossings, not a time; the
 times are on its `crossings.times[]` array.
 
+The suggested `par('...')` span always holds the author's *whole* local
+expression, outer operators and enclosing calls included
+(`2*abs(v(a)-v(b))` -> `par('2*abs(v(a)-v(b))')`), so the suggested card is
+itself accepted by the lint. A two-node `v(a,b)` (or an inner `par('...')`
+span) with an outer operator keeps its meaning by being parenthesised inside
+the span: `2*v(a,b)` -> `par('2*(v(a)-v(b))')`, not `par('2*v(a)-v(b)')`,
+which ngspice accepts but evaluates to a different number.
+
 Inside `.control` scope -- `analysis_steps[].measurements[].spice` cards --
 `par('...')` is **not** accepted (it is a file-scope `.meas` feature). There
 the remedy is a helper vector: declare the expression as an *intermediate*

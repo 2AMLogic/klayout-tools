@@ -63,6 +63,7 @@
         "klayout_tools.cli",
         "klayout_tools.cli.__main__",
         "klayout_tools.cli._argv_flags",
+        "klayout_tools.cli._doc_paths",
         "klayout_tools.cli._parsing",
         "klayout_tools.cli._request_document",
         "klayout_tools.cli._request_file",
@@ -822,6 +823,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_repin",
         "klayout_tools.signoff_runset",
+        "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
         "klayout_tools.signoff_unmet_reasons",
         "klayout_tools.signoff_yield_disclosure"
