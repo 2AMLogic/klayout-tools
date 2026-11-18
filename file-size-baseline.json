@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2204
+      "lines": 2202
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
