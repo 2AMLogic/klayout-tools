@@ -3710,15 +3710,22 @@ diagnostic that points at a generated file the caller never wrote:
 |---|---|---|
 | A `signed` port/wire qualifier (`output signed [15:0] sample;`) | `[ERROR STA-0171] <netlist> line N, syntax error` — OpenSTA's Verilog reader rejects the keyword outright, at the **floorplan** stage | The qualifier, the 1-based netlist line, the offending line, and the `$signed(...)`-cast fix |
 | A bare `x`-valued constant (`assign \foo$func$..o = 5'hxx;`) | `[ERROR DRT-0305] Net zero_ of signal type GROUND is not routable by TritonRoute` — after floorplan, placement **and** CTS have all already succeeded, so it costs a full route attempt to discover | The literal, the 1-based netlist line, the offending line, and the re-synthesize fix |
-| A behavioural `reg` declaration or `always` block — how `write_verilog` renders a latch that survived synthesis unmapped because the library has no latch cell (issue #5792) | `[ERROR STA-0171] <netlist> line N, syntax error` — OpenSTA's structural reader cannot read behavioural statements, pointing at the `reg` line, at the **floorplan** stage | The construct, the 1-based netlist line, the offending line, the latch-has-no-library-cell cause (cross-referencing the synthesize response's `structural.unexpected_latches` / `instance_counts_by_type` `$_DLATCH_*_` counts), and the fix |
+| A behavioural statement — `reg`, `always`, or the SystemVerilog `always_ff` / `always_comb` / `always_latch` / `initial` (issues #5792, #6274). The headline case is how `write_verilog` renders a latch that survived synthesis unmapped because the library has no latch cell | `[ERROR STA-0171] <netlist> line N, syntax error` — OpenSTA's structural reader cannot read behavioural statements, pointing at the offending line, at the **floorplan** stage | Always the construct, the 1-based netlist line and the offending line. The **cause** depends on the evidence: when the netlist carries Yosys's unmapped-latch rendering (an `always @*` block whose body is a bare `if (...)`, cited by line) it is the latch-has-no-library-cell cause (cross-referencing the synthesize response's `structural.unexpected_latches` / `instance_counts_by_type` `$_DLATCH_*_` counts) and its fix; otherwise it is the generic "behavioural Verilog, not a structural netlist — did you pass RTL instead of `klt synthesize`'s `netlist_path`?" |
 
 The scan is comment-aware (a construct quoted inside Yosys's own `/* ... */`
 header banner or a `//` comment is prose, not a construct), and the `signed`
 pattern is anchored to a preceding declaration keyword so an
 expression-level `$signed(...)` cast — valid everywhere downstream — is
-never flagged; the `reg`/`always` pattern is anchored to the line start so
-Yosys's own `_reg_0_` instance names and `regbank_out`-style nets are never
-flagged either. The first offending line in file order is reported; all
+never flagged; the behavioural pattern is anchored to the line start and
+keyword-terminated so Yosys's own `_reg_0_` instance names, `regbank_out`-style
+nets and `always_on_buf`-style module names are never flagged either. The
+latch narrative is deliberately **not** attached to every flagged `reg`: a
+flop `reg` in an RTL source handed over as the netlist is not a latch, and
+the latch fixes cannot apply to it. Yosys writes each latch's `reg`
+declaration in the declaration block, *not* next to its `always @*` block, so
+the evidence is the netlist carrying an `always @*` whose next line is a bare
+`if (...)` (flops render as `always @(posedge clk)`, combinational RTL as
+`always @(*)` + `begin`), not adjacency. The first offending line in file order is reported; all
 constructs are already fatal, so there is nothing to gain from enumerating
 every occurrence.
 

@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools._provenance import layout_geometry_digest, sha256_file
+from klayout_tools.cli import main
 from klayout_tools.signoff import input_set_digest
 from klayout_tools.signoff_attest import AttestationError, render_envelope
 from klayout_tools.signoff_attest_stream import (
@@ -55,8 +57,6 @@ def test_inputs_without_checks_accepted_neither_refused(tmp_path):
 
 
 def test_missing_input_fails_the_envelope_and_exit_3(tmp_path):
-    from klayout_tools.cli import main
-
     repo, stream = _inputs_repo(tmp_path)
     inv = _inv(repo, inputs=["tools/gone.py"])
     env = build_stream_attestation(stream, inventory_path=inv)
@@ -164,10 +164,14 @@ def test_inputs_compose_with_multi_stream(tmp_path):
 
 def test_inputs_compose_with_regeneration_claim_against_the_set_digest(tmp_path):
     repo, stream = _inputs_repo(tmp_path)
-    inv = _inv(repo, inputs=["tools/gen.py"])
+    inv = _inv(repo, inputs=["tools/gen.py"], checks=[_PASS])
     digest = _hash(build_stream_attestation(stream, inventory_path=inv))
     env = build_stream_attestation(
-        stream, inventory_path=inv, generator=_GENERATOR, regenerated_hash=digest
+        stream,
+        inventory_path=inv,
+        generator=_GENERATOR,
+        regenerated_hash=digest,
+        hash_kind="bytes",
     )
     assert env["provenance"]["regeneration"]["regenerated_hash"] == digest
     assert _bind(repo, env)["status"] == "met"
@@ -175,6 +179,94 @@ def test_inputs_compose_with_regeneration_claim_against_the_set_digest(tmp_path)
     committed.write_text(render_envelope(env))
     result = check_stream_attestation(stream, str(committed), inventory_path=inv)
     assert result["status"] == "match"
+
+
+def test_inputs_refuse_geometry_regeneration_hash(tmp_path):
+    repo, stream = _inputs_repo(tmp_path)
+    inv = _inv(repo, inputs=["tools/gen.py"])
+    digest = layout_geometry_digest(stream)
+    assert digest is not None
+
+    with pytest.raises(AttestationError, match="set binding.*--hash-kind bytes"):
+        build_stream_attestation(
+            stream,
+            inventory_path=inv,
+            generator=_GENERATOR,
+            regenerated_hash=digest,
+            hash_kind="geometry",
+        )
+
+
+def test_cli_refuses_geometry_hash_with_inputs_and_checks(tmp_path, capsys):
+    repo, stream = _inputs_repo(tmp_path)
+    inv = _inv(repo, inputs=["tools/gen.py"], checks=[_PASS])
+    digest = layout_geometry_digest(stream)
+    assert digest is not None
+    output = repo / "evidence" / "layout.json"
+
+    code = main(
+        [
+            "signoff",
+            "--attest",
+            "2",
+            "--input",
+            stream,
+            "--inventory",
+            inv,
+            "--generator",
+            _GENERATOR,
+            "--regenerated-hash",
+            digest,
+            "--hash-kind",
+            "geometry",
+            "--output",
+            str(output),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 1
+    stdout, stderr = capsys.readouterr()
+    assert stdout == ""
+    assert not output.exists()
+    error = json.loads(stderr)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "signoff"
+    assert "set binding" in error["error"]["message"]
+
+
+def test_checks_only_inventory_allows_geometry_regeneration_hash(tmp_path):
+    repo, stream = _inputs_repo(tmp_path)
+    inv = _inv(repo, checks=[_PASS])
+    digest = layout_geometry_digest(stream)
+    assert digest is not None
+
+    env = build_stream_attestation(
+        stream,
+        inventory_path=inv,
+        generator=_GENERATOR,
+        regenerated_hash=digest,
+        hash_kind="geometry",
+    )
+
+    assert env["provenance"]["regeneration"]["hash_kind"] == "geometry"
+    assert _bind(repo, env)["status"] == "met"
+
+
+def test_bare_stream_hash_against_input_set_grades_stale_artifact(tmp_path):
+    repo, stream = _inputs_repo(tmp_path)
+    inv = _inv(repo, inputs=["tools/gen.py"])
+    env = build_stream_attestation(
+        stream,
+        inventory_path=inv,
+        generator=_GENERATOR,
+        regenerated_hash=f"sha256:{sha256_file(stream)}",
+    )
+
+    item = _bind(repo, env)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_artifact"
 
 
 def test_no_inputs_envelope_is_unchanged(tmp_path):

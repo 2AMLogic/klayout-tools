@@ -40,6 +40,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   their precedence are untouched. See `docs/cli/drc.md`'s `--engine both`
   section.
 
+- **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
+  item-1 envelope that enumerates attested members but binds only its
+  inventory (the pre-0.9.0 producer's `provenance.input` shape, no
+  `provenance.input.paths`) now grades `unmet`/
+  `provenance_narrower_than_attested` instead of `met`, with `detail`
+  naming the breadth gap (`missing`, `attested_members`, `bound_paths`).
+  The floor is derived from the envelope's own `attestation.checks[]`, so
+  #4764's `paths`-binding envelopes are unaffected, as are hand-written
+  envelopes without an `attestation` block, attestations listing no
+  `present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+  design). **A committed pre-0.9.0 item-1 envelope flips `met` -> `unmet`;
+  the remedy is one re-attest with klt >= 0.9.0 plus the manifest re-pin.**
+  No `schema_version` bump: a new value in the existing `reason` enum, the
+  same additive class as #2718's `unanchored_evidence`/`wrong_item`.
+
 - **`klt signoff`: a declared-but-never-checked evidence hash is now
   disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
   records `provenance.input.content_hash` but names nothing verification
@@ -305,7 +320,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extract` / `sim` document, and an unset `$VAR` is a request error naming the
   variable instead of a bare "not found". Additive: a literal path keeps its
   meaning, no `schema_version` bump.
-
+- **`klt drc --deck gf180mcu` reports fully orphan cuts** (#5915, 2026-11-17):
+  the eight single-population conductor-over-cut enclosure rules
+  (`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+  `metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1`,
+  `metal5.enclosing.via4.1`) now set `require_containment` (#2726), so a
+  Contact/Via1-Via4 drawn entirely outside its conductor is reported instead
+  of passing `clean` (the legacy zero-overlap term only saw cuts that touch the
+  conductor). The four multi-population sides (`poly2.`/`comp.enclosing.contact.1`,
+  `metal4.enclosing.via4.1`, `mim.enclosing.via4.1`) keep the legacy behaviour.
+  A layout that previously reported `clean` with an unlanded gf180mcu cut can
+  now report `violations`. Both checked-in layout trees were enumerated at
+  merge base and at head: the three `tests/corpus/gf180mcu` cells are
+  unchanged, and of the 16 `blocks/gf180*/output/*.gds` snapshots only
+  `blocks/gf180-bandgap/output/bandgap_top.gds` moves (`clean` ->
+  `violations`, `metal1.enclosing.via1.1` 0 -> 1) — a true positive: a Via1
+  landed on Metal2 above with no Metal1 below, filed upstream
+  (2AMLogic/gf180-bandgap#504). `docs/cli/drc.md` also records that asap7
+  has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
+  field or `schema_version` changes; the deck's `provenance.deck` hash
+  changes.
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a

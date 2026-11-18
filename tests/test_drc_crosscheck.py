@@ -38,6 +38,7 @@ def _report(
     layout_hash=HASH,
     pdk="sky130A",
     known=True,
+    klayout_version="0.30",
 ):
     """A report with the fields the cross-check reads. ``known=False`` models
     a native run whose coverage is unmeasured (`coverage_unknown`, exit 4)."""
@@ -62,7 +63,7 @@ def _report(
         "coverage": coverage,
         "provenance": {
             "klt_version": "1",
-            "klayout_version": "0.30",
+            "klayout_version": klayout_version,
             "pdk": {"name": pdk, "source": "s", "version": "v"},
             "deck": {"name": engine, "content_hash": HASH},
             "input": {"content_hash": layout_hash, "role": "layout"},
@@ -256,6 +257,25 @@ def test_identity_block_records_shared_inputs(monkeypatch):
     assert ident["pdk"]["name"] == "sky130A"
     assert ident["curated_deck"]["content_hash"] == HASH
     assert ident["native_deck"]["content_hash"] == HASH
+
+
+def test_identity_reports_curated_and_native_klayout_versions_distinctly(monkeypatch):
+    # The curated engine is the pip wheel; the native engine is the standalone
+    # binary, which can report a different `-v` version (#5660, #6282).
+    c_kw, n_kw = _covered()
+    curated = _report(engine="curated", klayout_version="0.30.10", **c_kw)
+    native = _report(engine="native", klayout_version="0.30.12", **n_kw)
+    ident = _run(monkeypatch, curated, native)["identity"]
+    assert ident["klayout_version"] == "0.30.10"
+    assert ident["native_klayout_version"] == "0.30.12"
+
+
+def test_identity_native_klayout_version_absent_is_null(monkeypatch):
+    c_kw, n_kw = _covered()
+    native = _report(engine="native", **n_kw)
+    del native["provenance"]["klayout_version"]
+    out = _run(monkeypatch, _report(engine="curated", **c_kw), native)
+    assert out["identity"]["native_klayout_version"] is None
 
 
 def test_cli_engine_both_rejects_rules(tmp_path, capsys):
