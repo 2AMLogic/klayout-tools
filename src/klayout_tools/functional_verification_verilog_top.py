@@ -92,7 +92,7 @@ def _reject_verilog_top_options(engine: str, options: Any) -> None:
 
 
 def _resolve_verilog_top(
-    testbench: Any, sources: list[str], engine: str, options: Any
+    testbench: Any, sources: list[str] | None, engine: str, options: Any
 ) -> dict[str, Any] | None:
     """Validate the Verilog-bench form of ``request.testbench`` (issue #4083).
 
@@ -109,7 +109,8 @@ def _resolve_verilog_top(
     _reject_verilog_top_options(engine, options)
     top = resolved["verilog_top"]
     assert top is not None
-    require_module_declared(top, sources, _fv.FunctionalVerificationError)
+    if sources is not None:  # During a run, also check the module declaration.
+        require_module_declared(top, sources, _fv.FunctionalVerificationError)
     return resolved
 
 
