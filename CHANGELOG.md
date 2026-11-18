@@ -34,6 +34,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   An nfet MV ring gets the marker growth too, and still draws no Nwell.
   Other families resolve no ring margin; 3.3V-only gf180mcu rings and
   tap pads keep their 0.15um default.
+- **`klt signoff`: a declared-but-never-checked evidence hash is now
+  disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
+  records `provenance.input.content_hash` but names nothing verification
+  can answer — no usable `provenance.input.path`, or a `paths` set that
+  never answered (malformed, empty, or on a `model-run` envelope, whose
+  set is not member-verified) — has that hash silently never re-hashed:
+  its `met` citation rendered `input_verified: null`
+  identically to an envelope declaring no hash at all. Those citations now
+  carry the additive `input_verified_note: "declared_hash_unbound"`
+  (`input_verified` unchanged at `null`, no item verdict moves, no
+  `schema_version` bump), and `--format text` prints an
+  `input note: declared_hash_unbound -- …` line under the `input:` one.
+  A well-formed `paths` set answers through its members and never carries
+  the note. Documented in `docs/cli/signoff.md`'s `input_verified` table
+  and the generic-evidence section, and in `docs/json-contract.md`'s
+  `provenance.input` notes.
+
 - **`klt sim --resume` harvests a retained shard map before dispatching**
   (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
   without `--resume` (issue #3896), but `--resume` only ever read
@@ -275,8 +292,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   #5733). A request document that already sets `layout.deck` is refused with
   a clean error (exit 1) — a flag never silently overrides a request
   document — and the flag is refused with `--check`. It never sets
-  `reference.deck` (the reference-netlist rewriting deck — a different knob,
-  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  `reference.deck` (the reference-netlist rewriting deck, configured through
+  a separate request field). Additive request
   surface; no `schema_version` bump.
 - **Inventory-driven `klt signoff --attest` envelopes record the klayout
   engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
@@ -297,6 +314,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   attaching. A shard map now attaches under any `hosts` (the shard count is read
   from the map); a bare job id still requires `hosts = 1`. Additive: a call that
   used to fail now succeeds.
+- **`klt pex` `delta[]` rows are self-describing: new `testbench` and
+  `measurement` fields** (#5681, 2026-11-17): `spec_row` is the bare
+  measurement name for a one-testbench run but `<stem>.<name>` for several, so
+  a single-testbench row named no bench and a consumer keying on
+  `(bench, measurement)` matched nothing. Every `delta[]` row (including the
+  extraction-failed error rows) now also carries `testbench` -- the request's
+  filename stem, identical whether the bench ran alone or with others, `null`
+  for `--measure-command` (no testbench file) -- and `measurement`, the bare
+  `measurements[].name`. Additive: `spec_row`, `coverage`, `status` and the exit
+  code are unchanged and `schema_version` does not bump. See
+  [`docs/cli/pex.md`](docs/cli/pex.md) "`delta[]` entries".
 - **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
   2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
   entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
