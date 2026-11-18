@@ -8906,6 +8906,12 @@ Both modes use the same 0/3 split described below: `0` when `status` is
 `<report.json>` exits `1` with a clean error message, same as any other
 application-level failure.
 
+Both modes accept plain JSON and gzip-compressed reports, such as
+`report.json.gz`. Compression is detected by the file's contents, so a
+compressed report renamed to `.json` also works. A damaged or truncated
+gzip file exits `1` with a clean error naming the file, including the usual
+error envelope under `--format json`.
+
 ## Exit codes
 
 | Code | Meaning                                                                                          |
