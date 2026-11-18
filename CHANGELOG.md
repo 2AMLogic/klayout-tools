@@ -14,6 +14,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff --repin -o FILE` is now a usage error instead of a silent
+  no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
+  stdout and never created `FILE` — the one mode that dropped a flag the user
+  typed, while every other `klt signoff` mode honours `-o`. `-o`/`--output`
+  now joins `--fleet`, `--attest`, `--check` and `--describe-grader` among the
+  forms `--repin` refuses by name (exit `2`, before the manifest is read or
+  rewritten). `--repin` still writes no output file; the JSON envelope is on
+  stdout as before. The other report/attest inputs `--repin` ignores
+  (`--tiers-doc`, `--inventory`, `--input`, `--allow-generator-exec`,
+  `--generator-approvals`) are unchanged.
+
 - **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
   entries** (#5527, 2026-11-13): after an attestation inventory changed,
   `klt signoff --attest` regenerated the envelope but the manifest's pin
