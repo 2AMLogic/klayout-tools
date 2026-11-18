@@ -43,12 +43,45 @@ from typing import Any
 
 from .env_provenance import render_path_field
 
-__all__ = ["section_measurements"]
+__all__ = ["is_measurements_rollup", "section_measurements"]
 
 #: The absent-cell marker, matching the ``-`` both producers' own text
 #: output renders for a missing number (``klt sim``'s ``worst=-``;
 #: ``klt yield``'s ``_fmt``).
 _ABSENT = "-"
+
+
+def is_measurements_rollup(measurements: list[Any]) -> bool:
+    """Whether a top-level ``measurements`` list is a *graded rollup* this
+    module can render, as opposed to some other verb's list that happens to
+    share the key.
+
+    The structural marker is the per-entry graded verdict: at least one
+    entry carries a string ``status`` -- the very field the table's final
+    column quotes. Both rollup producers always emit it (``klt sim``:
+    ``measurements[].status``; ``klt yield``: ``measurements[].status``,
+    ``docs/cli/yield.md``), while ``klt yield-sensitivity``'s
+    ``measurements[]`` (a per-measurement parameter ranking, not graded
+    against any limits) carries none -- so it is refused as an unrecognized
+    shape rather than rendered as a table whose every evidence cell reads
+    ``-``, which would look like "measured, found nothing".
+
+    Deliberately *not* ``worst_case``: that is a ``klt sim`` field only
+    (``klt yield`` entries carry ``yield.empirical`` instead, and a sim
+    entry's ``worst_case`` is ``null`` for an all-absent measurement), so
+    keying on it would refuse the yield reports this kind exists for. Like
+    the rest of detection it is structural -- it never names
+    ``corner_count`` or ``campaign``.
+
+    An empty list classifies as a rollup: there is nothing to misrender, and
+    it renders the honest "No measurements found." message.
+    """
+    if not measurements:
+        return True
+    return any(
+        isinstance(m, dict) and isinstance(m.get("status"), str) for m in measurements
+    )
+
 
 _BASE_HEADERS = (
     "Measurement",

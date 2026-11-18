@@ -28,9 +28,11 @@ produced it:
   violations-style reports (a table of structured findings) under a
   different table schema (category/severity/side/description instead of
   rule/cell/layer/bbox/description).
-- an object with a top-level ``measurements`` list is a *measurements-style*
-  report -- the rollup shape ``klt sim`` (``schema_version=3``) and
-  ``klt yield`` (``schema_version=1``) share -- rendered as a
+- an object with a top-level ``measurements`` list whose entries carry a
+  graded ``status`` (or that is empty) is a *measurements-style* report --
+  the rollup shape ``klt sim`` (``schema_version=3``) and ``klt yield``
+  (``schema_version=1``) share; another verb's un-graded ``measurements[]``
+  (``klt yield-sensitivity``) is refused -- rendered as a
   Measurement/Unit/Limits/Worst/Margin/Corner/Status table (plus per-entry
   yield columns when present), built by ``report_measurements.py``; the
   builder lives in its own module only because this file sits against its
@@ -56,7 +58,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env_provenance import render_path_field
-from .report_measurements import section_measurements
+from .report_measurements import is_measurements_rollup, section_measurements
 
 __all__ = ["ReportError", "build_report"]
 
@@ -194,7 +196,8 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if isinstance(envelope.get("mismatches"), list):
         return "lvs"
 
-    if isinstance(envelope.get("measurements"), list):
+    measurements = envelope.get("measurements")
+    if isinstance(measurements, list) and is_measurements_rollup(measurements):
         return "measurements"
 
     if "slug" in envelope and "name" in envelope and "status" in envelope:
@@ -203,7 +206,8 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     raise ReportError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): no violations[], mismatches[], "
-        "measurements[], or layout-metrics-style (slug/name/status) fields found"
+        "a measurements[] rollup (entries carrying a status), or "
+        "layout-metrics-style (slug/name/status) fields found"
     )
 
 

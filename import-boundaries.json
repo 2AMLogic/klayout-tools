@@ -622,7 +622,8 @@
       "description": "`klt report` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.report_cmd",
-        "klayout_tools.report"
+        "klayout_tools.report",
+        "klayout_tools.report_measurements"
       ]
     },
     "ring_check": {

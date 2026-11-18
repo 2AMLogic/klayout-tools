@@ -12,11 +12,15 @@ end-to-end separately in tests/test_sim_examples.py-style manual checks.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.report import ReportError, build_report
+from klayout_tools.report_measurements import is_measurements_rollup
+
+_EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 #: The committed `klt sim` example, condensed to the fields this renderer
 #: reads (examples/sim-remote/matrix-local.report.json).
@@ -160,6 +164,108 @@ def test_measurements_that_is_not_a_list_is_a_hard_error(tmp_path):
 
     with pytest.raises(ReportError, match="unrecognized shape"):
         build_report([path])
+
+
+#: One `klt yield-sensitivity` entry, condensed (docs/cli/yield-sensitivity.md,
+#: "measurements[] entries"): a per-measurement parameter ranking -- no
+#: `status`, no `limits`, no `worst_case`.
+_SENSITIVITY_ENTRY = {
+    "name": "i_mismatch_pct",
+    "unit": "%",
+    "n": 24,
+    "parameter_count": 4,
+    "method": {"primary": "standardized_regression_coefficient"},
+    "ranking": [{"rank": 1, "parameter": "w_m1", "contribution": 0.82}],
+    "warnings": [],
+}
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [
+        pytest.param(
+            [_SENSITIVITY_ENTRY],
+            False,
+            id="sensitivity-ranking-entry-is-not-a-rollup",
+        ),
+        pytest.param(
+            [{"name": "ring_freq_hz", "status": "pass", "worst_case": {"value": 1.0}}],
+            True,
+            id="sim-entry-with-worst-case",
+        ),
+        pytest.param(
+            # An all-absent measurement: `klt sim` emits `worst_case: null`
+            # (sim.py's rollup). Keying on a `worst_case` *object* would
+            # refuse this real producer shape.
+            [{"name": "v_out", "status": "absent", "worst_case": None}],
+            True,
+            id="sim-entry-with-null-worst-case",
+        ),
+        pytest.param(
+            # `klt yield` entries never carry `worst_case` -- they carry
+            # `yield.empirical`. Keying on `worst_case` would refuse the
+            # very reports this kind exists for.
+            [{"name": "i_mismatch_pct", "status": "fail", "yield": {"empirical": {}}}],
+            True,
+            id="yield-entry-without-worst-case",
+        ),
+        pytest.param(
+            # One graded entry is enough; the rest render absent cells.
+            [_SENSITIVITY_ENTRY, {"name": "a", "status": "pass"}],
+            True,
+            id="one-graded-entry-among-ungraded-ones",
+        ),
+        pytest.param(
+            [{"name": "a", "status": None}, {"name": "b", "status": 3}],
+            False,
+            id="status-must-be-a-string-verdict",
+        ),
+        pytest.param(["oops", 42], False, id="only-non-dict-entries"),
+        pytest.param([], True, id="empty-list-renders-no-measurements-message"),
+    ],
+)
+def test_is_measurements_rollup_is_a_structural_graded_status_check(entries, expected):
+    assert is_measurements_rollup(entries) is expected
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "kind"),
+    [
+        pytest.param(
+            "sim-remote/matrix-local.report.json", "measurements", id="klt-sim-report"
+        ),
+        pytest.param(
+            "kb/pfd-charge-pump-tri-state/design-centering-validation/"
+            "baseline-yield-report.json",
+            "measurements",
+            id="klt-yield-report",
+        ),
+        pytest.param(
+            "yield/sim-report.json",
+            "measurements",
+            id="sim-shaped-report-whose-entries-have-no-worst-case",
+        ),
+        pytest.param(
+            "kb/pfd-charge-pump-tri-state/design-centering-validation/"
+            "sensitivity-ranking.json",
+            None,
+            id="klt-yield-sensitivity-report-is-refused",
+        ),
+    ],
+)
+def test_committed_examples_classify_as_documented(relative_path, kind):
+    """The real producer envelopes, not hand-built ones: the three rollups
+    render, and `klt yield-sensitivity`'s `measurements[]` -- which shares
+    the key but is not a rollup -- stays an honest refusal instead of
+    rendering a table whose every evidence cell reads `-` (#6003 review)."""
+    path = str(_EXAMPLES / relative_path)
+
+    if kind is None:
+        with pytest.raises(ReportError, match="unrecognized shape"):
+            build_report([path])
+        return
+
+    assert build_report([path])["sections"][0]["kind"] == kind
 
 
 # --------------------------------------------------------------------------- #

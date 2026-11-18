@@ -52,7 +52,7 @@ detected from its own JSON structure:
 | `drc`            | a top-level `violations` array (`klt drc`'s shape)             | status + a Rule/Cell/Layer/BBox/Description table         |
 | `lvs`            | a top-level `mismatches` array (`klt lvs`'s shape)              | status + a Category/Severity/Side/Description table       |
 | `layout-metrics` | top-level `slug` + `name` + `status` together (`klt layout-metrics`'s `layout.json` shape) | a Metric/Value key-metrics table, plus DRC/Renders/Signals summary lines when present |
-| `measurements`   | a top-level `measurements` array (the rollup shape `klt sim` and `klt yield` share) | status + a Measurement/Unit/Limits/Worst/Margin/Corner/Status table, plus per-entry yield columns when any entry carries them — see "Measurements sections" below |
+| `measurements`   | a top-level `measurements` array whose entries carry a graded `status` string, or that is empty (the rollup shape `klt sim` and `klt yield` share) | status + a Measurement/Unit/Limits/Worst/Margin/Corner/Status table, plus per-entry yield columns when any entry carries them — see "Measurements sections" below |
 | `error`          | a top-level `error` object with a `message` (any verb's own `--format json` error output, per `docs/json-contract.md`) | the failed command name and message               |
 
 A file matching none of these — including one with no `schema_version` at
@@ -81,10 +81,21 @@ header row and no data rows. A `measurements`-kind envelope with an empty
 
 One structural kind covers both of `klt`'s own measurement producers — a
 `klt sim` report (`schema_version=3`) and a `klt yield` report
-(`schema_version=1`) — because a top-level `measurements` list is the
-single structural marker they share and the rendered table is the same
-shape; keying on `corner_count` vs `campaign` would be a per-verb field by
-another name.
+(`schema_version=1`) — because a top-level `measurements` list of graded
+entries is the structural marker they share and the rendered table is the
+same shape; keying on `corner_count` vs `campaign` would be a per-verb
+field by another name.
+
+The marker is the per-entry **graded verdict**: at least one entry must
+carry a string `status` (the field the table's final column quotes), or the
+list must be empty. Both producers always emit it. It is deliberately not
+`worst_case` — that is a `klt sim` field only (`klt yield` entries carry
+`yield.empirical` instead, and a sim entry's `worst_case` is `null` for an
+all-absent measurement). Another verb's `measurements[]` that is *not* a
+graded rollup — `klt yield-sensitivity`'s per-measurement parameter
+ranking carries no `status` — is refused as an unrecognized shape (exit 1)
+rather than rendered as a table whose every evidence cell reads `-`, which
+would look like "measured, found nothing".
 
 Every cell quotes the producer envelope's own rollup fields verbatim —
 `worst_case.{value, corner_id, margin}` and, when present,
@@ -222,7 +233,7 @@ to stdout. No Python traceback is printed.
     "schema_version": 1,
     "error": {
       "command": "report",
-      "message": "envelope file 'bad.json' has an unrecognized shape (schema_version=1): no violations[], mismatches[], measurements[], or layout-metrics-style (slug/name/status) fields found"
+      "message": "envelope file 'bad.json' has an unrecognized shape (schema_version=1): no violations[], mismatches[], a measurements[] rollup (entries carrying a status), or layout-metrics-style (slug/name/status) fields found"
     }
   }
   ```
