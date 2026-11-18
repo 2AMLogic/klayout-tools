@@ -2737,7 +2737,8 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
   validation, but the per-gate/per-level `skipped` entries become a single
   entry (id `antenna:[]`, reason `findings_only`) and the
   `gate_reference_level` `inapplicable` entries a single entry (id
-  `antenna:["gate_reference_level"]`). A `no_gates` entry is kept as is.
+  `antenna:["gate_reference_level"]`). Each entry's `count` gives the number
+  of units it represents. A `no_gates` entry keeps its unit shape.
   `coverage_state` is unchanged.
 - `status`, `erc_status`, `erc_findings`, `erc_finding_count`,
   `erc_coverage`, `nets`, `provenance` and the exit code are identical to the
@@ -2768,10 +2769,11 @@ null by construction (`gates[].levels[]`, one `coverage.skipped` record per
   floating_gate_checked, skipped_reason}` (`skipped_reason` is
   `"findings_only"`).
 - `coverage.skipped` holds one aggregate record (id `antenna:["levels"]`,
-  reason `findings_only`) and `coverage.inapplicable` one
-  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`)
-  instead of one per gate/level — declined work is still disclosed, never
-  silently empty. A zero-gate cell reports `no_gates` exactly as before.
+  reason `findings_only`) when there are skipped levels. With at least one
+  gate, `coverage.inapplicable` holds one reference-level record
+  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`).
+  Each `count` records the units the group represents. A zero-gate cell
+  reports the unit `no_gates` entry.
 - `erc_coverage.checked` carries a single `erc.floating_gate:[]` id in place
   of one per gate (present iff a gate exists, so the roll-up is unchanged).
   Every other `erc_coverage` entry — ties, nets, assertions — is untouched.
@@ -2780,7 +2782,7 @@ null by construction (`gates[].levels[]`, one `coverage.skipped` record per
 identical to the non-compact findings-only run. `--compact` without
 `--findings-only` is a clean exit-1 error: a full-antenna run's per-gate rows
 carry real verdicts, so there is nothing null to summarise. Default output
-(no `--compact`) is byte-identical to before; the `compact` key is absent.
+omits the `compact` key.
 
 ## JSON schema (the contract)
 
@@ -3046,6 +3048,11 @@ declined the accumulation, the same shape of caller-side skip as omitting
 (passive-only, issue #2896) records one inapplicable entry, id `antenna:[]`,
 reason `no_gates` -- independent of `--pdk`/`--findings-only`.
 
+When at least one antenna level is graded, `coverage.skipped` groups the
+ungraded gate/level pairs by skip reason and `coverage.inapplicable` groups
+the gate reference levels separately. Each group's `count` gives its units
+of work. Checked IDs and `gates[].levels[]` keep the per-gate results.
+
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
 per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
@@ -3262,6 +3269,10 @@ it, or pin the producing version (`uvx --from "klayout-tools==X" klt erc
 `provenance.klt_git_commit`/`klt_reinstall_spec` (an older grader that predates
 their exclusion) or to a new `erc_coverage.inapplicable` entry is a tool-version
 signal, not layout drift.
+
+When rerunning an earlier ERC report with a build that emits counted antenna
+records, the coverage lists may differ in representation. The rerun diff
+reports that change even when the antenna verdicts agree.
 
 **Known limitation:** `--top` is not echoed in the ERC report, so `--rerun`
 cannot replay it and always runs with no top selected. A layout with more than
