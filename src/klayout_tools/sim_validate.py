@@ -20,6 +20,7 @@ from . import (
     sim_noise,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_stress,
@@ -203,9 +204,9 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     - **An ``expr`` name is unique across the whole ``measurements[]``
       list.** A duplicate ``let`` silently overwrites the earlier vector, so
       both response entries would report the *second* expression's value.
-      Only checked for entries involving an ``expr`` -- a request whose
-      duplicate names are all ``spice`` cards behaves exactly as it did
-      before this issue (ngspice's own ``.meas`` handling owns that case).
+      Byte-identical duplicates among any entries are refused as well
+      (issue #6289, by :func:`validate_case_variant_names`) -- before that
+      issue, a spice-only duplicate crashed coverage as an unhandled ``ValueError``.
 
     Does **not** validate the expression's ngspice syntax or that it reduces
     to a scalar: neither is knowable without running the engine, and both
@@ -298,6 +299,7 @@ def _require_measurement_form(name: Any, has_form: bool) -> None:
 
 
 _EXCLUSIVE_FORM_VALIDATORS = (
+    sim_slope_band_meas.validate_form_exclusive,
     sim_settled.validate_form_exclusive,
     sim_step_resolution.validate_form_exclusive,
     sim_eye.validate_form_exclusive,
