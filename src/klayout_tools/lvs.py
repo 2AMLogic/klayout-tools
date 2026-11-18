@@ -2921,39 +2921,38 @@ def _parse_layout_abstract_cells(
     ``--abstract-cell-lef`` (issue #620), forwarded to inline extraction so a
     mixed-level compare -- a transistor-level region next to placed cells
     extracted as pin-only black boxes -- runs as **one** ``klt lvs`` request
-    and keeps the deck-aware checks (``body_verification``) that need the
-    inline-extraction shape.
+    and keeps the deck-aware checks that need the inline-extraction shape.
 
     Same shape and validation as ``klt extract``'s request fields of the same
     names (``cli/extract_cmd.py``): each is a string or an array of strings
     (``fnmatch`` cell-name globs / LEF file paths, the latter resolved
     against the request document's directory). An empty array is a no-op,
-    as it is for ``klt extract``. ``abstract_cell_lef`` without a non-empty
-    ``abstract_cells`` is rejected, mirroring ``run_extract``'s own check (the
-    LEF is only ever a pin-resolution *fallback* for a matched cell type).
+    as it is for ``klt extract``. Inline-shape ``abstract_cell_lef`` without
+    a non-empty ``abstract_cells`` is rejected (the LEF only supplies pins
+    for a matched cell type; labels win per name, LEF-only pins merge, #3749).
 
-    **Extraction-only**, like ``layout.label_layers``: a non-empty value on
-    the pre-extracted ``layout.netlist`` shape is a clean :class:`LvsError`
-    -- that netlist's cells were already abstracted (or not) when it was
-    extracted, and silently accepting the field would read as "the
-    abstraction was applied".
+    ``abstract_cells`` is **extraction-only** (non-empty on the pre-extracted
+    ``layout.netlist`` shape is a clean :class:`LvsError` -- that netlist was
+    already abstracted or not at extraction time); ``abstract_cell_lef`` alone
+    is **disclosure-only** there (issue #5842): it only feeds
+    ``power_connectivity.excluded_pins`` (two-step disclosure).
     """
     patterns = _layout_str_list(layout_spec, "abstract_cells")
     lef_given = _layout_str_list(layout_spec, "abstract_cell_lef")
-    if (patterns or lef_given) and "netlist" in layout_spec:
-        given = "abstract_cells" if patterns else "abstract_cell_lef"
+    on_netlist = "netlist" in layout_spec
+    if patterns and on_netlist:
         raise LvsError(
-            f"request.layout.{given} applies only to inline extraction "
+            "request.layout.abstract_cells applies only to inline extraction "
             "(request.layout.file + request.layout.deck): a pre-extracted "
             "request.layout.netlist was already abstracted (or not) when it "
             "was extracted -- re-extract it with `klt extract "
             "--abstract-cells ...`, or give request.layout.file instead"
         )
-    if lef_given and not patterns:
+    if lef_given and not patterns and not on_netlist:
         raise LvsError(
             "request.layout.abstract_cell_lef was given but "
             "request.layout.abstract_cells is empty -- abstract_cell_lef only "
-            "has an effect as a pin-resolution fallback for a cell type "
+            "has an effect as a pin source for a cell type "
             "abstract_cells actually matches"
         )
     echo: dict[str, list[str]] = {}
@@ -2981,13 +2980,14 @@ def _layout_abstraction_echo(
     (``{"cell", "instance_count", "pin_count", "resolution_source",
     "lef_path"}``) -- an empty list when the patterns matched no instantiated
     cell, so "the glob matched nothing" is visible rather than silently
-    indistinguishable from a full abstraction. All three are omitted
-    entirely (not ``null``) when ``layout.abstract_cells`` was not given, so
-    every report from a request without it -- and every report committed
-    before it existed -- stays byte-identical.
+    indistinguishable from a full abstraction. All three are omitted entirely
+    (not ``null``) when ``layout.abstract_cells`` was not given, so reports
+    without it -- committed or new -- stay byte-identical.
     """
     if not abstraction.patterns:
-        return {}
+        # Issue #5842: LEF-only (disclosure-only, netlist shape) is echoed so
+        # `--check --rerun` replays it (no extraction ran, no abstracted_cells).
+        return dict(abstraction.echo)
     return {**abstraction.echo, "abstracted_cells": list(abstracted_cells)}
 
 
@@ -3219,8 +3219,8 @@ def _resolve_layout(
     ``layout.file`` shape -- every instantiated cell matching one of the
     patterns is extracted as a pin-only black box, exactly like ``klt extract
     --abstract-cells``. Already validated by
-    :func:`_parse_layout_abstract_cells` (which rejects it on the
-    ``layout.netlist`` shape, so it never reaches that branch). No PDK is
+    :func:`_parse_layout_abstract_cells` (which rejects ``abstract_cells`` on
+    the ``layout.netlist`` shape -- that shape runs no extraction). No PDK is
     resolved here (``klt lvs`` has no ``layout.pdk``), so an
     ``abstract_cell_lef`` port is probed the way ``klt extract
     --abstract-cell-lef`` probes it without ``--pdk``.

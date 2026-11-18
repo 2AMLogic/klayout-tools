@@ -25417,7 +25417,6 @@ def test_abstract_cells_null_or_empty_is_a_noop(tmp_path, value):
     [
         ("abstract_cells", ["SC_STUB"]),
         ("abstract_cells", "SC_STUB"),
-        ("abstract_cell_lef", ["cells.lef"]),
     ],
 )
 @pytest.mark.parametrize("with_deck", [False, True])
@@ -25436,8 +25435,8 @@ def test_abstract_cells_on_pre_extracted_netlist_is_rejected(
 
 
 def test_abstract_cell_lef_without_abstract_cells_is_a_clean_lvs_error(tmp_path):
-    """Mirrors `klt extract`: the LEF is only a pin-resolution fallback for a
-    matched cell type, so giving it alone is a request mistake."""
+    """Mirrors `klt extract`: the LEF only supplies pins for a matched cell
+    type, so giving it alone (inline shape) is a request mistake."""
     request = {
         "layout": {
             "file": str(tmp_path / "absent.gds"),
