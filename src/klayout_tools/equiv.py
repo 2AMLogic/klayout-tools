@@ -84,7 +84,6 @@ from ._verilog_params import (
 from .equiv_errors import EquivError
 from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public here
     CANONICAL_SIM_BACKEND,
-    CROSS_CHECK_SIM_BACKEND,
     DEFAULT_SIM_BACKEND,
     SUPPORTED_SIM_BACKENDS,
     confirm_counterexample,

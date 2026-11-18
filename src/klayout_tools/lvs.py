@@ -162,9 +162,7 @@ from .lvs_combine import (
     _combine_devices_safely,
     _correct_combine_parameters,
     _flatten_netlist_safely,  # noqa: F401
-    _parse_combine_devices,  # noqa: F401
     _parse_combine_devices_max_attempts,  # noqa: F401
-    _parse_combine_devices_per_circuit,  # noqa: F401
     _purge_emptied_nets,
     _resolve_combine_devices_per_circuit_targets,  # noqa: F401
     _series_fold_offset_absorbed_warnings,
@@ -180,33 +178,25 @@ from .lvs_finfet import (
     bulk_disclosures,
     finfet_bulk_replay_options,
     prepare_finfet_comparison,
-    prepare_finfet_request,  # noqa: F401
     reference_reader,
     sliced_reference_file,
 )
 from .lvs_gate_level import (
     _apply_gate_level_port_aliases,  # noqa: F401
-    _boundary_supply_nets,  # noqa: F401
-    _circuit_pin_names,  # noqa: F401
     _gate_level_power_pin_evidence,  # noqa: F401
     _gate_level_power_pin_evidence_detail,  # noqa: F401
     _gate_level_power_pin_names,  # noqa: F401
-    _instance_supply_nets,  # noqa: F401
     _is_power_only_circuit,  # noqa: F401
     _layout_supply_net_names,  # noqa: F401
     _name_or_none,  # noqa: F401
-    _power_only_pruned_mismatch,  # noqa: F401
     _prune_power_only_circuits,  # noqa: F401
-    _purge_named_circuits,  # noqa: F401
     _reference_power_only_masters,  # noqa: F401
     _reference_signal_pin_names,  # noqa: F401
     _subcircuit_parent_name,  # noqa: F401
     _subcircuit_ref_name,  # noqa: F401
-    _supply_net_spellings,  # noqa: F401
     _supply_pin_universe,  # noqa: F401
 )
-from .lvs_gate_level_convert import (  # noqa: F401
-    CATEGORY_REFERENCE_GATE_LEVEL_PIN_CASE_FOLDED,
+from .lvs_gate_level_convert import (
     _convert_gate_level_reference,
     _gate_level_port_case_fold_warnings,
 )
@@ -223,7 +213,6 @@ from .lvs_mismatch import (
     _flavour_selection_warnings,
     _make_compare_logger,
     _mismatch,
-    _parse_parameter_tolerance,  # noqa: F401
     _sort_key,
     _SupplyPinUniverse,  # noqa: F401
     _terminal_names,
@@ -235,12 +224,6 @@ from .lvs_mos_options import (
     apply_ignore_mos_bulk,
     parse_ignore_mos_bulk,  # noqa: F401
 )
-from .lvs_netgen import (  # noqa: F401  (re-exported: klayout_tools.lvs.<name>)
-    _NETGEN_DEFAULT_TIMEOUT_S,
-    _resolve_netgen_binary,
-    _resolve_netgen_setup,
-    _run_netgen_lvs,
-)
 from .lvs_netgen_branch import _run_netgen_engine_branch
 from .lvs_pin_anchors import (
     _apply_top_level_pin_anchors,
@@ -250,7 +233,6 @@ from .lvs_pin_anchors import (
 from .lvs_power import (
     _body_verification_report,
     _body_verification_unchecked,
-    _parse_power_connectivity,  # noqa: F401
     _power_connectivity_report,
     _power_connectivity_unchecked,
     _well_layer_lef_pins,
@@ -260,12 +242,10 @@ from .lvs_reference_stage import _read_reference_stage
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
-from .lvs_supply import parse_supply_nets, supply_fragmentation_findings  # noqa: F401
 from .lvs_timeout import (
     COMPARE_TIMEOUT_CODE,
     CompareTimeout,
     heartbeat,
-    parse_compare_timeout,  # noqa: F401
     run_with_deadline,
 )
 from .netlist_capacitor_recovery import (

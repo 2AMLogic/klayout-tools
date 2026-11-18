@@ -779,6 +779,7 @@
         "klayout_tools.signoff_attest_carry",
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
+        "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
         "klayout_tools.signoff_attest_item9",
@@ -1933,6 +1934,12 @@
       "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
     },
     {
+      "consumer": "klayout_tools.lvs_reference_stage",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_sim_model_classes",
+      "reason": "Issue #5676: the plain-element sim-model guard must read the exact curated MOS model table the netlist conversion pairs against so the guard and the conversion cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
       "consumer": "klayout_tools.sim_osdi_pin",
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
@@ -2128,6 +2135,12 @@
       "consumer": "klayout_tools.extract_spef_block",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.functional_verification_run_inputs",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
