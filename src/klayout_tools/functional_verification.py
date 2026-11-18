@@ -223,15 +223,18 @@ from .functional_verification_initial_state import (
     build_initial_state_verilog,
     count_d_nets,
 )
+from .functional_verification_pdk import (
+    _resolve_defines,
+)
 from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
-    _collect_sdf_alias_port_bits,
+    _collect_sdf_alias_port_bits,  # noqa: F401 -- tests reach it as fv._collect_sdf_alias_port_bits
     _collect_sdf_physical_only_instances,
     _drop_sdf_bit_selected_bus_iopaths,
     _drop_sdf_non_interconnect_entries,
     _drop_sdf_unsupported_edge_modpath_iopaths,
-    _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_zero_delay_alias_port_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_alias_port_interconnects
     _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
     _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
@@ -259,9 +262,11 @@ from .functional_verification_sdf_rename import (
 from .functional_verification_sdf_steps import (
     SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
     SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_alias_port_drop,
     _apply_sdf_bus_port_source_drop,
     _apply_sdf_cond_expression_drop,
     _apply_sdf_header_normalization,
+    _sdf_refusal_attribution,
     _sdf_refusal_error,
 )
 from .request_paths import RequestPaths
@@ -463,9 +468,9 @@ SDF_BUS_BIT_MODPATH_DROPPED_CLASS = "iopath_bus_bit_modpath"
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
 #: Keyed by the lowercased :data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS` member
-#: whose diagnostics were filtered out, plus
-#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` (issue #2285) for the one class that
-#: is dropped from the SDF text instead of from the transcript.
+#: whose diagnostics were filtered out, plus every ``SDF_*_DROPPED_CLASS``
+#: constant (a class handled in the SDF text, not the transcript); the class
+#: table in docs/cli/functional-verification.md lists them all.
 SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
     "timingcheck": (
         "Icarus Verilog implements SDF delay annotation (IOPATH/INTERCONNECT) "
@@ -664,9 +669,8 @@ _REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
-    """Shared shape check for a JSON-decoded request, however it was sourced
-    (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
-    object" error for context."""
+    """Shared shape check for a JSON-decoded request, however sourced;
+    ``source`` is folded into the "must be a JSON object" error."""
     doc = _shared_validate_request_shape(
         data,
         source,
@@ -689,25 +693,29 @@ def load_request(request_path: str) -> dict[str, Any]:
     Raises :class:`FunctionalVerificationError` if the file is missing/
     unreadable, not valid JSON, or missing a required top-level field
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
-    ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
-    own ``load_request`` (user-authored input, never emitted by this tool).
+    ``schema`` field (user-authored input, never emitted by this tool).
     """
     request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
-    three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
-    JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
-    verb composes into ``klt eval``'s descriptor unchanged.
+    three forms ``klt lvs``'s own ``request`` argument accepts, so this
+    verb composes into ``klt eval``'s descriptor unchanged. ``base_dir``
+    optionally overrides that anchor so a request archived beside an
+    evidence record re-runs from the directory its paths were written
+    against (issue #5673); it must exist and be a directory.
     """
     doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
     return _require_sources(doc), request_dir
 
@@ -1205,34 +1213,6 @@ def _write_initial_state_shim(
         "clock": clock,
     }
     return path, info
-
-
-def _resolve_defines(defines: Any) -> dict[str, str | None]:
-    """Validate the optional ``request.options.defines`` object and return it
-    unchanged (or ``{}`` when omitted).
-
-    Forwarded to ``Runner.build(defines=...)`` -- cocotb's own ``Runner``
-    accepts string values; a ``None`` value defines the macro with no value
-    (e.g. ``` `define USE_POWER_PINS ```). cocotb 2.x cannot serialise
-    ``None`` itself, so :func:`_run_build` emits those as ``-DNAME`` build args.
-    """
-    if defines is None:
-        return {}
-    if not isinstance(defines, dict):
-        raise FunctionalVerificationError(
-            "request.options.defines must be a JSON object of string -> string|null"
-        )
-    for key, value in defines.items():
-        if not isinstance(key, str) or not key:
-            raise FunctionalVerificationError(
-                "request.options.defines keys must be non-empty strings"
-            )
-        if value is not None and not isinstance(value, str):
-            raise FunctionalVerificationError(
-                f"request.options.defines[{key!r}] must be a string or null "
-                f"-- got a {type(value).__name__}"
-            )
-    return defines
 
 
 def _resolve_source_defines(
@@ -2424,9 +2404,9 @@ def _sdf_dropped_report(
 ) -> dict[str, dict[str, Any]]:
     """``environment.sdf.dropped``: per class, ``{count, reason}`` -- plus
     ``arcs`` for a class that recorded the specific cell arcs it dropped
-    (issue #2885's :data:`SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS` and issue
-    #2958's :data:`SDF_BUS_BIT_MODPATH_DROPPED_CLASS`; additive,
-    absent on every other class)."""
+    (any class whose pass populates ``sdf_pre_dropped_arcs``, e.g. issues
+    #2885, #2958 and #5296; additive, absent on a class that records no
+    arcs)."""
     report: dict[str, dict[str, Any]] = {}
     for klass, count in sorted(sdf_dropped_counts.items()):
         entry: dict[str, Any] = {
@@ -2487,10 +2467,9 @@ def _apply_sdf_physical_only_drop(
 
 
 def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
-    """Directory run artifacts are written to: ``output_dir`` (relative paths
-    resolve against the cwd, not the request directory) or, by default,
-    ``<request_dir>/.klt/functional-verification``.
-    """
+    """Directory run artifacts are written to: ``output_dir`` (relative
+    paths resolve against the cwd) or, by default,
+    ``<request_dir>/.klt/functional-verification``."""
     if output_dir:
         return os.path.abspath(output_dir)
     return os.path.join(request_dir, ".klt", "functional-verification")
@@ -2506,29 +2485,32 @@ def _resolve_engine(request_doc: dict[str, Any]) -> str:
 
 
 def run_functional_verification(
-    request: str, output_dir: str | None = None
+    request: str,
+    output_dir: str | None = None,
+    base_dir: str | None = None,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
-    """Run the cocotb regression declared by ``request``.
+    """Run the cocotb regression declared by ``request`` -- accepting the
+    same three forms every other ``klt`` request argument does (see
+    :func:`load_request_arg`).
 
-    ``request`` accepts the same three forms every other ``klt`` request
-    argument does (see :func:`load_request_arg`): a path to a request JSON
-    file, ``"-"`` to read the request from stdin, or an inline JSON object
-    string.
+    ``base_dir`` optionally overrides that anchor (issue #5673): every
+    relative path (and the default artifact directory) resolves against
+    it, as the stdin form anchored there would; it must be a directory.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/functional-verification.md``). Raises
     :class:`FunctionalVerificationError` for anything that prevents a
-    trustworthy verdict from being produced at all -- a failing *test* is
-    never an error, it is ``status: "fail"`` in the returned report (which
-    the CLI turns into exit code 3).
+    trustworthy verdict -- a failing *test* is ``status: "fail"`` (exit 3).
 
-    Artifacts (the build directory, the raw ``results.xml``, the engine
-    transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
+    Artifacts (build directory, raw ``results.xml``, engine transcripts,
+    coverage ``.info``) are written to ``.klt/functional-verification/``
+    next to the request file (or under ``base_dir``) -- the same default
+    ``klt sim``/``klt synthesize`` use -- and kept, never deleted.
     """
-    request_doc, request_dir = load_request_arg(request)
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
 
     engine = _resolve_engine(request_doc)
@@ -2539,8 +2521,14 @@ def run_functional_verification(
             "request.hdl_toplevel must be a non-empty string"
         )
     # Issue #5684: verify the synthesized netlist before anything is built.
+    # Issue #5782: the CLI's --pdk/--pdk-root merge over request.pdk here.
     sources, run_inputs = resolve_run_inputs(
-        request_doc, request_dir, hdl_toplevel, _path_envelope
+        request_doc,
+        request_dir,
+        hdl_toplevel,
+        _path_envelope,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
     )
 
     verilog_tb = _resolve_verilog_top(
@@ -2559,6 +2547,12 @@ def run_functional_verification(
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    # Issue #5782: defines the pdk input derives (FUNCTIONAL, only when no
+    # options.sdf) land *under* the caller's own -- caller values win, and
+    # the rejection inside _resolve_options ran on caller defines only, so
+    # a derived FUNCTIONAL (which exists only when sdf is None) can never
+    # trip it. Unconditional merge: {} under {} is the same dict.
+    defines = {**run_inputs.pdk_defines, **defines}
     _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
     initial_state = _resolve_initial_state(
         request_doc.get("options"), engine, request_dir
@@ -2760,28 +2754,21 @@ def run_functional_verification(
         # of the two confirmed mechanisms this actually fixes) is a no-op
         # for a design with only scalar top-level ports (#1069's own case)
         # -- `sdf_paths` stays a single-element list in that case.
-        # Issue #2285: an `INTERCONNECT` entry whose destination is a
-        # top-level port bit the netlist drives through an `assign` alias
-        # (a P&R backend's tie-cell shape, `assign uio_oe[0] = net0;`)
-        # cannot be annotated by Icarus at all -- and cannot be made
-        # annotatable by rewriting the endpoint either (verified live; see
-        # the module comment above
-        # :func:`_drop_sdf_zero_delay_alias_port_interconnects`). When such
-        # an entry is zero-delay at every corner, dropping it cannot change
-        # any simulated timing, so it is removed from the SDF text here and
-        # counted in `environment.sdf.dropped` instead of failing the run.
-        # A non-zero-delay entry is left in place and still fails the
-        # diagnostic gate loudly.
-        alias_port_bits = _collect_sdf_alias_port_bits(sources, hdl_toplevel)
-        alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
-            annotate_source_path, alias_port_bits
+        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the
+        # netlist drives through an `assign` alias (a P&R backend's
+        # tie-cell shape) cannot be annotated by Icarus at all and cannot
+        # be made annotatable by rewriting the endpoint either; a
+        # zero-delay-at-every-corner entry is dropped up front and counted
+        # in `environment.sdf.dropped` instead of failing the run (the
+        # helper carries the full write-up; non-zero entries stay in
+        # place and still fail the diagnostic gate loudly).
+        annotate_source_path = _apply_sdf_alias_port_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
-        if alias_drop is not None:
-            alias_text, alias_dropped_count = alias_drop
-            annotate_source_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
-            with open(annotate_source_path, "w", encoding="utf-8") as handle:
-                handle.write(alias_text)
-            sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
 
         vector_ports = {name for _, width, name in ports if width}
 
@@ -2841,6 +2828,11 @@ def run_functional_verification(
             with open(deferred_path, "w", encoding="utf-8") as handle:
                 handle.write(deferred_text)
             sdf_paths = [safe_path, deferred_path]
+        # Issue #5769: remember what Icarus actually reads -- a refusal
+        # resolves its intermodpath locators against these files (Icarus's
+        # line counter is cumulative across the calls above), never
+        # against the request's own SDF path.
+        sdf.update(_sdf_refusal_attribution(sdf_paths, ports))
 
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
@@ -2959,7 +2951,7 @@ def run_functional_verification(
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
             raise _sdf_refusal_error(
-                sdf["file"],
+                sdf,
                 engine,
                 diagnostics,
                 _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
@@ -3076,7 +3068,7 @@ def run_functional_verification(
             },
         }
     )
-    with_run_inputs(report, run_inputs)  # #5684/#5771, additive
+    with_run_inputs(report, run_inputs)
     report.local_paths = {
         "results_xml": results_xml,
         "test_log": test_log,
@@ -3087,41 +3079,26 @@ def run_functional_verification(
 
 # Re-exports of the subsystems split out of this module. Imported last so the
 # sibling modules (which reach back into this one lazily via ``_fv``) find
-# every name they need already defined; ``klayout_tools.functional_verification.<name>``
-# stays a working import path for every moved name.
+# every name they need already defined.
 from .functional_verification_mutation import (  # noqa: E402, F401
-    _write_mutant_combined_log,
     run_functional_verification_with_mutations,
 )
 from .functional_verification_mutation_proposals import (  # noqa: E402, F401
-    _MUTATION_PROPOSAL_REQUIRED_FIELDS,
-    _MUTATION_PROPOSALS_REQUIRED_FIELDS,
-    _load_mutation_proposals_json,
     _ProposalRecord,
-    _resolve_mutation_proposals,
     _validate_mutation_scope,
     _validate_proposal_indices,
     load_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _build_and_test_variant,
-    _first_new_failure,
-    _kill_process_tree,
-    _mutation_subprocess_entry,
     _run_isolated_variant,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
-    _VERILOG_TOP_REJECTED_OPTIONS,
-    VERILOG_TOP_FIELDS,
     _check_verilog_top_sdf,
     _reject_verilog_top_mutations,
-    _reject_verilog_top_options,
     _resolve_testbench_target,
     _resolve_verilog_top,
     _run_verilog_top,
     _sdf_annotate_scope,
     _sdf_extend_sources,
-    _verilog_top_error,
-    _verilog_top_fields,
-    _verilog_top_sdf_gate,
 )

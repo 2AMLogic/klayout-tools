@@ -3,8 +3,7 @@
 Option parsing, the KLayout-internal-error-tolerant ``combine_devices()``
 wrapper, the parameter-conservation/correction helpers, series-fold
 disclosure, and the netlist flatten/purge helpers. Split out of ``lvs.py``
-(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``); the
-names are re-imported there, so ``klayout_tools.lvs`` keeps exposing them.
+(the same decomposition as ``lvs_power.py``/``lvs_mismatch.py``).
 """
 
 from __future__ import annotations
