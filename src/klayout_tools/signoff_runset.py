@@ -12,11 +12,11 @@ engine's own envelope cannot assert about itself, all decided here:
   :data:`PINNED_RUNSETS`, mapping a runset's content hash to the PDK revision
   it was published at. A report whose ``provenance.runset.content_hash`` is not
   in the table is refused with :data:`REASON_RUNSET_NOT_PINNED`.
-- **Re-hash.** The runset file named by the report must still hash to the
-  recorded value, exactly like the layout/reference re-hash a curated-deck
+- **Re-hash.** A readable runset file named by the report must still hash to
+  the recorded value, exactly like the layout/reference re-hash a curated-deck
   report gets from ``klt lvs --check``. A drifted file is
-  :data:`REASON_RUNSET_HASH_MISMATCH`; a file that can no longer be read is not
-  a mismatch but an unverifiable one, left to the caller.
+  :data:`REASON_RUNSET_HASH_MISMATCH`. If the digest is unavailable, an
+  otherwise passing citation discloses that the re-hash was unverifiable.
 - **Full device recognition.** The engine reports ``status: "match"`` when the
   devices it *did* recognise agree, so a class it declared but never
   recognised (``coverage.declared_not_recognized``), or a per-class device count
@@ -118,31 +118,42 @@ def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
     return gaps
 
 
-def runset_refusal(envelope: dict[str, Any]) -> str | None:
-    """The reason a *passing* runset report must still be refused, or ``None``
-    (also for any non-runset report, which this never touches)."""
+def check_runset(envelope: dict[str, Any]) -> tuple[str | None, bool]:
+    """Return ``(refusal, rehash_unverifiable)`` for a passing LVS report.
+
+    The flag is true only when the recorded hash is pinned and no live
+    digest is available. Curated-deck reports need neither check.
+    """
     if not is_runset_report(envelope):
-        return None
+        return None, False
     recorded = runset_block(envelope).get("content_hash")
     if not isinstance(recorded, str) or recorded not in PINNED_RUNSETS:
-        return REASON_RUNSET_NOT_PINNED
+        return REASON_RUNSET_NOT_PINNED, False
     deck_file = envelope.get("deck_file")
-    live = sha256_file(deck_file) if isinstance(deck_file, str) else None
-    if live is not None and f"sha256:{live}" != recorded:
-        return REASON_RUNSET_HASH_MISMATCH
-    return None
+    try:
+        live = sha256_file(deck_file) if isinstance(deck_file, str) else None
+    except OSError:
+        live = None
+    if live is None:
+        return None, True
+    if f"sha256:{live}" != recorded:
+        return REASON_RUNSET_HASH_MISMATCH, False
+    return None, False
 
 
-def runset_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | None:
-    """``engine`` plus the runset's hash/pin, for a check's ``detail`` and a
-    ``met`` citation; ``None`` for a non-runset report so curated-deck output is
-    byte-for-byte unchanged."""
+def runset_disclosure(
+    envelope: dict[str, Any], *, rehash_unverifiable: bool = False
+) -> dict[str, Any] | None:
+    """Render runset provenance and any unavailable re-hash from grading."""
     if not is_runset_report(envelope):
         return None
     block = runset_block(envelope)
     recorded = block.get("content_hash")
-    return {
+    disclosure = {
         "engine": RUNSET_ENGINE,
         "runset_content_hash": recorded,
         "pdk_pin": PINNED_RUNSETS.get(recorded) if isinstance(recorded, str) else None,
     }
+    if rehash_unverifiable:
+        disclosure["runset_rehash_status"] = "unverifiable"
+    return disclosure
