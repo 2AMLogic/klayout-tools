@@ -185,8 +185,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   #5733). A request document that already sets `layout.deck` is refused with
   a clean error (exit 1) — a flag never silently overrides a request
   document — and the flag is refused with `--check`. It never sets
-  `reference.deck` (the reference-netlist rewriting deck — a different knob,
-  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  `reference.deck` (the reference-netlist rewriting deck, configured through
+  a separate request field). Additive request
   surface; no `schema_version` bump.
 - **Inventory-driven `klt signoff --attest` envelopes record the klayout
   engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
