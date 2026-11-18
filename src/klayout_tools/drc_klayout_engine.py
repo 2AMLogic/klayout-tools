@@ -40,6 +40,7 @@ from .drc import (
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import deck_abort_info, deck_aborted_error
 from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -130,10 +131,8 @@ def _parse_klayout_rdb_report(
     ``"external"`` (this module cannot recover a `width`/`space`/... kind
     from RDB XML alone), and ``violations[].layer`` echoes the same rule id
     (an external deck's own category naming is the only per-violation layer
-    identity available). ``source_cell``/``source_path`` are always ``None``
-    -- per-instance attribution (see :func:`_attribute_to_instance`) needs
-    this module's own instance-tree walk against the *input* layout, which an
-    RDB report does not carry.
+    identity available). ``source_cell``/``source_path`` are left ``None``
+    here; the caller fills them (``drc_klayout_attribution``).
 
     ``bbox``/``polygon`` are derived from every coordinate pair embedded in
     an item's ``<values><value>`` text (see :data:`_RDB_COORD_RE`), converted
@@ -1538,6 +1537,7 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
+        _attribute_violations_to_instances(violations, top_cells[0])  # issue #5661
         coverage_assertion = _evaluate_category_assertion(
             expected_rule_categories, rule_categories, deck_errored, expected_names
         )

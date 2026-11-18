@@ -49,7 +49,8 @@ Two failure classes, deliberately distinct:
 
 Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
 :func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
-with. Nothing is normalised.
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
 """
 
 from __future__ import annotations
@@ -83,7 +84,7 @@ from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_input import input_binding
 from .signoff_attest_presence import file_check as _file_check
-from .signoff_attest_presence import split_entries
+from .signoff_attest_presence import path_checks, split_entries
 
 #: The attestation-inventory schema versions this build reads. An inventory
 #: declaring any other version is refused (exit ``1``) rather than read with
@@ -405,11 +406,13 @@ def _validated_inventory(
         inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
-    inventory, presence = split_entries(
+    inventory, presence, yaml_selects = split_entries(
         inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
     )
     seen: dict[str, str] = {}
     normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -967,11 +970,7 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
-        presence = normalized.get("presence", ())
-        checks.extend(
-            _file_check(root, path, role, presence=path in presence)
-            for path in sorted(normalized[field])
-        )
+        checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
@@ -1119,11 +1118,11 @@ def check_attestation(
     plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
-    passing gate. Only the producing build's version strings are excluded
-    from the diff
-    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
-    the inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift.
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried

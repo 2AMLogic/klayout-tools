@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4846
+      "lines": 4782
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -285,7 +285,7 @@
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
-      "lines": 1244
+      "lines": 1250
     },
     {
       "path": "src/klayout_tools/eval.py",
@@ -349,7 +349,7 @@
     },
     {
       "path": "src/klayout_tools/gen.py",
-      "lines": 4334
+      "lines": 4184
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
-      "lines": 3129
+      "lines": 3128
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
@@ -497,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3705
+      "lines": 3704
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -517,7 +517,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_request.py",
-      "lines": 2178
+      "lines": 2204
     },
     {
       "path": "src/klayout_tools/place_and_route_script.py",
@@ -569,11 +569,11 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7268
+      "lines": 7267
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1149
+      "lines": 1148
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -589,7 +589,7 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4407
+      "lines": 4421
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -613,11 +613,11 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1304
+      "lines": 1313
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
-      "lines": 537
+      "lines": 541
     },
     {
       "path": "src/klayout_tools/sim_transfer.py",
@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
-      "lines": 534
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/size.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4641
+      "lines": 4647
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -909,7 +909,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26198
+      "lines": 26197
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -981,7 +981,7 @@
     },
     {
       "path": "tests/test_pex.py",
-      "lines": 7535
+      "lines": 7524
     },
     {
       "path": "tests/test_place_and_route.py",
