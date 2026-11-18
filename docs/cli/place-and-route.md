@@ -675,9 +675,9 @@ disabled (#4494), this was about 7 markers per block (4 `M4.AUX.2`, 3
 not a guarantee or a pass/fail threshold.
 
 These markers carry no `source_cell` / `source_path` (both `null`), so they
-cannot be traced to a net or router shape. That is a `klt drc` attribution
-limit, not a place-and-route field. Rule definitions are in
-[`drc.md`](drc.md).
+cannot be traced to a net or router shape: they sit on top-level router
+geometry, which has no containing instance to attribute (`drc.md`). Rule
+definitions are in [`drc.md`](drc.md).
 
 ## PDK / LEF / liberty resolution
 
