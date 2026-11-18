@@ -241,6 +241,7 @@
       "description": "`klt extract` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.extract_cmd",
+        "klayout_tools.cli.extract_text",
         "klayout_tools.cli.parsers.extract",
         "klayout_tools.cli.parsers.extract_args_part2",
         "klayout_tools.cli.parsers.extract_args_part3",
@@ -259,6 +260,10 @@
         "klayout_tools.extract_detect_diode_near_miss",
         "klayout_tools.extract_detect_markers",
         "klayout_tools.extract_detect_substrate_label",
+        "klayout_tools.extract_runset",
+        "klayout_tools.extract_runset_flags",
+        "klayout_tools.extract_runset_spice",
+        "klayout_tools.extract_netlist_target",
         "klayout_tools.extract_pdk_resolve",
         "klayout_tools.extract_pin_order",
         "klayout_tools.extract_netselect",
@@ -353,7 +358,8 @@
         "klayout_tools.gen_pcells.well_island",
         "klayout_tools.gen_ring_ports",
         "klayout_tools.gen_snap",
-        "klayout_tools.gen_spec"
+        "klayout_tools.gen_spec",
+        "klayout_tools.gen_voltage_flavor"
       ]
     },
     "gen_compose": {
@@ -692,6 +698,7 @@
       "modules": [
         "klayout_tools",
         "klayout_tools._annotation",
+        "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
         "klayout_tools._devices",
@@ -746,7 +753,10 @@
       "kind": "verb",
       "description": "`klt signoff` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.parsers.signoff",
         "klayout_tools.cli.signoff_cmd",
+        "klayout_tools.cli.signoff_flags",
+        "klayout_tools.cli.signoff_repin_cmd",
         "klayout_tools.signoff",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
@@ -755,6 +765,7 @@
         "klayout_tools.signoff_attest_drift",
         "klayout_tools.signoff_attest_env",
         "klayout_tools.signoff_attest_input",
+        "klayout_tools.signoff_attest_item2_inputs",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_live",
         "klayout_tools.signoff_attest_presence",
@@ -778,6 +789,7 @@
         "klayout_tools.signoff_output",
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
+        "klayout_tools.signoff_repin",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_sta_constraints",
         "klayout_tools.signoff_unmet_reasons",
@@ -792,6 +804,7 @@
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
+        "klayout_tools.cli.sim_job_status",
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
@@ -1066,6 +1079,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "extract",
+      "exporter": "lvs",
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` drives the *same* PDK-runset launcher `klt lvs --engine klayout-runset` built (binary resolution, -rd construction, timeout and error text), through lvs_runset's module-private helpers (`_resolve_klayout_binary`, `_run_runset`, `_application_version`, `_error_lines`) rather than a second copy, and converts its LvsError into an ExtractError. A copy would drift; the two engines must launch runsets identically."
+    },
     {
       "consumer": "artifact",
       "exporter": "cli-infra",
@@ -1787,11 +1805,6 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
-      "consumer": "place_and_route",
-      "exporter": "netlist",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
       "consumer": "sim",
       "exporter": "netlist",
       "reason": "Issue #4443: `klt sim` command-list requests ship their unit trees through the Spot batch backend and enforce the same batch tree size cap and error code as netlist_batch rather than duplicating them."
@@ -1838,6 +1851,36 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.cli.pex_text",
+      "exporter": "klayout_tools.cli.extract_text",
+      "symbol": "_print_label_layers",
+      "reason": "`klt pex` prints the extraction leg's `--label-layer` echo with `klt extract`'s own renderer so the two text surfaces cannot drift. Was a grandfathered pex_cmd -> extract_cmd exception (issue #2767); issue #5464 moved the importing code to cli/pex_text.py and issue #5481 moved the renderer into cli/extract_text.py, so this records the same single-symbol dependency against both new homes."
+    },
+    {
+      "consumer": "klayout_tools.extract_runset",
+      "exporter": "klayout_tools.lvs_runset",
+      "symbol": "_resolve_klayout_binary",
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.extract_runset",
+      "exporter": "klayout_tools.lvs_runset",
+      "symbol": "_run_runset",
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.extract_runset",
+      "exporter": "klayout_tools.lvs_runset",
+      "symbol": "_application_version",
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.extract_runset",
+      "exporter": "klayout_tools.lvs_runset",
+      "symbol": "_error_lines",
+      "reason": "Issue #5481: `klt extract --engine klayout-runset` must launch a PDK runset *identically* to `klt lvs --engine klayout-runset` -- same binary resolution, same -rd construction, same timeout/no-database/non-zero-exit error text -- so it calls lvs_runset's own launcher rather than a second copy that would drift. lvs_runset.py is exactly at its file-size ceiling, so these stay private there; promote them to public when it is next split."
+    },
     {
       "consumer": "klayout_tools.lvs_runset_reference",
       "exporter": "klayout_tools.netlist_normalize",
@@ -2063,25 +2106,7 @@
     {
       "consumer": "klayout_tools.netlist_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_classify_collected_report",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_runner_identity",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_read_stderr_envelope",
-      "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.netlist_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_status_exit_code",
       "reason": "Issue #3182: the netlist batch backend reuses sim_batch's job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2200,18 +2225,6 @@
     },
     {
       "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_remote_stderr_tail",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_runner_error",
-      "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.place_and_route_batch",
       "exporter": "klayout_tools.sim",
       "symbol": "_yield_host_default_backend",
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
@@ -2273,12 +2286,6 @@
     {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_remote_stderr_tail",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
       "symbol": "_require_selected",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
@@ -2286,12 +2293,6 @@
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.netlist_batch",
       "symbol": "_resolve_root",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.netlist_batch",
-      "symbol": "_runner_error",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2321,19 +2322,7 @@
     {
       "consumer": "klayout_tools.extract_batch",
       "exporter": "klayout_tools.sim_batch",
-      "symbol": "_classify_collected_report",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
       "symbol": "_read_runner_identity",
-      "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
-    },
-    {
-      "consumer": "klayout_tools.extract_batch",
-      "exporter": "klayout_tools.sim_batch",
-      "symbol": "_status_exit_code",
       "reason": "Issue #4613: `klt extract --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
@@ -2437,6 +2426,18 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_resolve_relative",
       "reason": "Issue #5464: `klt pex --dry-run` resolves a testbench's `netlist` field against its request directory with the same helper `pex.py`'s own first pass uses, so the dry run cannot resolve it differently; promote to public with the other _paths importers."
+    },
+    {
+      "consumer": "klayout_tools._batch_collect",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_classify_collected_report",
+      "reason": "Issue #5711: the shared collect half of the batch lifecycle (`_batch_collect`) classifies a collected report / stderr envelope exactly as `sim_batch` does -- one classifier, not a copy per verb. Replaces the per-verb grants for `extract_batch` and `netlist_batch`."
+    },
+    {
+      "consumer": "klayout_tools._batch_collect",
+      "exporter": "klayout_tools.sim_batch",
+      "symbol": "_read_stderr_envelope",
+      "reason": "Issue #5711: the shared collect half of the batch lifecycle (`_batch_collect`) classifies a collected report / stderr envelope exactly as `sim_batch` does -- one classifier, not a copy per verb. Replaces the per-verb grants for `extract_batch` and `netlist_batch`."
     }
   ],
   "legacy_exceptions": {
@@ -2458,12 +2459,6 @@
         "exporter": "klayout_tools._paths",
         "symbol": "_resolve_relative",
         "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module."
-      },
-      {
-        "consumer": "klayout_tools.cli.pex_text",
-        "exporter": "klayout_tools.cli.extract_cmd",
-        "symbol": "_print_label_layers",
-        "reason": "Grandfathered cross-group private import at policy seed (issue #2767); remove by making the symbol public or moving it to a shared module. Issue #5464 moved the importing code from `cli/pex_cmd.py` to `cli/pex_text.py` verbatim (size ratchet); the import itself is unchanged."
       },
       {
         "consumer": "klayout_tools.cli.yield_campaign_cmd",
