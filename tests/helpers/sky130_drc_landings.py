@@ -7,39 +7,24 @@ reported too. A fixture that draws a cut to exercise a width/space rule (or
 an unrelated enclosing/separation rule) therefore has to draw the flipped
 rules' landings as well, or the fixture reports cuts it never meant to
 test -- the same accommodation gf180mcu's #2726 fixtures already make (see
-`tests/golden_deck/generate_golden_deck.py`'s `_add_cut_landings`).
+`helpers/gf180mcu_landings.py` and `tests/golden_deck/generate_golden_deck.py`'s
+`_add_cut_landings`).
 
-The conductor sides per cut layer mirror `sky130.py`'s own
-`require_containment=True` rows exactly: `met3.enclosing.via3.1` and
-`met4.enclosing.via4.1` stay `False` (a capm via3 / capm2 via4 lands on its
-cap plate, not on the next metal down), so a capm-stack fixture needs only
-the one landing the flipped rule asks for.
+The conductor sides per cut layer are read off the deck's own
+`require_containment` rows rather than copied here, so the table cannot drift
+from `decks/sky130.py`: `met3.enclosing.via3.1` and `met4.enclosing.via4.1`
+stay `False` (a capm via3 / capm2 via4 lands on its cap plate, not on the
+next metal down), so a capm-stack fixture needs only the one landing the
+flipped rule asks for.
 """
 
 from __future__ import annotations
 
+import functools
+
 import klayout.db as kdb
 
-#: Conductors the flipped #5737 containment rules require around each
-#: single-population cut layer, `(layer, datatype)` -> conductor
-#: `(layer, datatype)`s, straight from `decks/sky130.py`.
-_SKY130_CUT_CONDUCTOR_LANDINGS: dict[tuple[int, int], tuple[tuple[int, int], ...]] = {
-    (66, 44): ((67, 20),),  # licon1 -> li1 (li1.enclosing.licon1.1)
-    (67, 44): ((68, 20),),  # mcon -> met1 (met1.enclosing.mcon.1)
-    (68, 44): ((68, 20), (69, 20)),  # via -> met1 + met2 (both flipped)
-    (69, 44): ((69, 20), (70, 20)),  # via2 -> met2 + met3 (both flipped)
-    (70, 44): ((71, 20),),  # via3 -> met4 only (capm via3s keep met3 False)
-    (71, 44): ((72, 20),),  # via4 -> met5 only (capm2 via4s keep met4 False)
-}
-
-_CONDUCTOR_NAMES: dict[tuple[int, int], str] = {
-    (67, 20): "li1.drawing",
-    (68, 20): "met1.drawing",
-    (69, 20): "met2.drawing",
-    (70, 20): "met3.drawing",
-    (71, 20): "met4.drawing",
-    (72, 20): "met5.drawing",
-}
+from klayout_tools.decks import get_deck
 
 #: Grown around a fixture's cuts on every landing pad; clears every flipped
 #: rule's margin with room to spare (the largest is met5/via4's 310 dbu) and
@@ -53,6 +38,25 @@ _PAD_DBU = 2000
 LI1_LANDING_ENCLOSURE_UM = 0.08
 
 
+@functools.cache
+def _landings() -> dict[tuple[int, int], tuple[tuple[int, int], ...]]:
+    """`(layer, datatype)` of each cut -> the conductors the deck requires."""
+    landings: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for rule in get_deck("sky130"):
+        if rule.require_containment and rule.other_layer is not None:
+            landings.setdefault(rule.other_layer, []).append(rule.layer)
+    return {cut: tuple(conductors) for cut, conductors in landings.items()}
+
+
+def _pad(
+    layout: kdb.Layout,
+    top: kdb.Cell,
+    conductor: tuple[int, int],
+    around_box: kdb.Box,
+) -> None:
+    top.shapes(layout.layer(*conductor)).insert(around_box.enlarged(_PAD_DBU, _PAD_DBU))
+
+
 def landed_cuts(
     layout: kdb.Layout,
     top: kdb.Cell,
@@ -61,28 +65,20 @@ def landed_cuts(
 ) -> None:
     """Insert `boxes` as cuts on `cut_layer_idx`, covered by their landings.
 
-    For every conductor the flipped #5737 rules require around this cut
-    layer, one pad spanning all the cuts (grown by `_PAD_DBU` on every side)
-    is drawn -- unless the fixture already draws that conductor itself (the
-    rule under test's own geometry stays the test subject; only the
-    not-under-test landings the fixture omitted get synthesized).
+    One pad spanning all the cuts is drawn per required conductor -- unless
+    the fixture already draws that conductor itself (the rule under test's
+    own geometry stays the test subject; only the not-under-test landings
+    the fixture omitted get synthesized).
     """
     for box in boxes:
         top.shapes(cut_layer_idx).insert(box)
-    if not boxes:
-        return
     info = layout.get_info(cut_layer_idx)
-    landings = _SKY130_CUT_CONDUCTOR_LANDINGS.get((info.layer, info.datatype), ())
-    left = min(box.left for box in boxes) - _PAD_DBU
-    bottom = min(box.bottom for box in boxes) - _PAD_DBU
-    right = max(box.right for box in boxes) + _PAD_DBU
-    top_edge = max(box.top for box in boxes) + _PAD_DBU
-    for num, datatype in landings:
-        idx = layout.layer(num, datatype)
-        if top.shapes(idx).size() == 0:
-            name = _CONDUCTOR_NAMES[(num, datatype)]
-            layout.set_info(idx, kdb.LayerInfo(num, datatype, name))
-            top.shapes(idx).insert(kdb.Box(left, bottom, right, top_edge))
+    bbox = kdb.Box()
+    for box in boxes:
+        bbox += box
+    for conductor in _landings().get((info.layer, info.datatype), ()):
+        if boxes and top.shapes(layout.layer(*conductor)).size() == 0:
+            _pad(layout, top, conductor, bbox)
 
 
 def insert_licon_with_li1_landing(

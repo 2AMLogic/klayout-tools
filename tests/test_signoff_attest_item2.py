@@ -169,8 +169,9 @@ def test_geometry_hash_kind_is_recorded(tmp_path):
 
 def _stats_geometry_digest(stream: str, capsys) -> str:
     """The digest an attester gets from the public CLI, as documented in
-    ``docs/cli/signoff.md``: ``klt stats --format json | jq -r .geometry_digest``."""
-    assert main(["stats", stream, "--format", "json"]) == 0
+    ``docs/cli/signoff.md``:
+    ``klt stats --geometry-digest --format json | jq -r .geometry_digest``."""
+    assert main(["stats", stream, "--geometry-digest", "--format", "json"]) == 0
     return json.loads(capsys.readouterr().out)["geometry_digest"]
 
 

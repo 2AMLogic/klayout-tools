@@ -44,7 +44,6 @@ from .sim_batch import (
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
 from .sim_set_runtime import (
-    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
@@ -77,15 +76,27 @@ SET_POLL_INTERVAL_S = 1.0
 def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
     """One distinct artifacts directory per request.
 
+    The member directory stem strips a trailing ``.request.json`` from the
+    request basename (the repo's own request naming convention, so
+    ``foo.request.json`` -> ``foo``) before falling back to
+    :func:`os.path.splitext` (``foo.sim.json`` -> ``foo.sim``); an empty stem
+    (a request literally named ``.request.json``) becomes ``request-<index>``.
+
     ``outdir`` given: ``<outdir>/<stem>``; else the single-request default
     (``.klt/sim/`` next to the request file) with ``<stem>`` appended, so
     requests sharing a directory never contend for one output lock. A repeated
-    stem gets its index appended.
+    stem gets its index appended. Each member's ``report.json`` sits in its
+    directory, so ``requests[].report`` is the authoritative path to it.
     """
     dirs: list[str] = []
     seen: set[str] = set()
     for index, path in enumerate(paths):
-        stem = os.path.splitext(os.path.basename(path))[0] or f"request-{index}"
+        name = os.path.basename(path)
+        if name.endswith(".request.json"):
+            stem = name[: -len(".request.json")]
+        else:
+            stem = os.path.splitext(name)[0]
+        stem = stem or f"request-{index}"
         base = (
             outdir
             if outdir is not None
@@ -284,7 +295,16 @@ def _execute_members(
     cannot hold the process open) while a replacement worker keeps the
     concurrency; an interrupt (``KeyboardInterrupt``/``SystemExit``) turns every
     unfinished member into a ``set_interrupted`` entry instead of exiting
-    silently."""
+    silently.
+
+    Issue #5849: the replacement is admitted only while no abandoned member
+    still holds a ``pending`` job -- the set then holds no more fleet capacity
+    than it has member threads. A job that never launches cannot starve the
+    set: past one more ``launch_budget`` the unstarted members become
+    ``not_launched`` entries instead of being submitted -- but, once no live
+    member remains to run them (#6278); while another member is still running,
+    its worker keeps draining the unstarted members at the reduced
+    concurrency."""
     return _MemberScheduler(
         paths, manifest, launch_budget, SET_POLL_INTERVAL_S, run_member
     ).run(workers)

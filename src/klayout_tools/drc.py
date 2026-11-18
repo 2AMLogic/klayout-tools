@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import env_provenance
+from ._drc_edge_pair_hull import _edge_pair_hull_points
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
 from ._paths import _load_request_json
@@ -52,7 +53,6 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     resolve_committed_path,
 )
@@ -96,7 +96,7 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import _report_hash_checks
+from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -1998,19 +1998,13 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-static, like `deck_layers` above: every distinct non-empty
-    # DrcRule.scope this deck's rules declare, regardless of what's actually
-    # present in `path` (#566).
+    # Deck-wide scopes, independent of stream geometry (#566).
     deck_scope = sorted({rule.scope for rule in deck if rule.scope})
 
-    # A rule omitted from a `--rules` subset (issue #2768) applied no
-    # threshold either, exactly like a skipped one.
     skipped_rule_ids = set(rules_skipped) | omitted_ids
     voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
 
-    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
-    # a `clean` cannot be read as covering them. Only when the rule's layer
-    # is actually in the stream.
+    # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
         {"rule": rule_id, "layer": _layer_str(layer), "description": description}
         for rule_id, (layer, description) in sorted(
@@ -2019,31 +2013,22 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         if layer in stream_layer_tuples
     ]
 
-    # Issue #3815: area-marker layers the deck accepts but does not model, so
-    # a result identical with and without the marker is not read as
-    # marker-aware. Informational only, like `unchecked_rules`.
+    # Area markers the deck accepts but does not model (#3815).
     marker_blind_layers_in_stream = sorted(
         _layer_str(layer)
         for layer in get_marker_blind_layers(deck_name)
         if layer in stream_layer_tuples
     )
 
-    # Issue #2110: the two common-coverage categories this engine's single
-    # "a layer it reads is absent" skip splits into -- see
-    # `_classify_skipped_rules` for why an empty assessment domain is
-    # inapplicable work rather than a skipped request, and why anything else
-    # stays a disclosed skip.
     skipped_records, inapplicable_records = _classify_skipped_rules(
         deck, rules_skipped, setup.layout, frozenset(state.empty_checked_region_ids)
     )
-    # Issue #2768: every deliberately omitted rule is requested work that did
-    # not run -- a skip, never inapplicable, even when its layers are absent
-    # (the full registered deck is what a DRC verdict is about).
+    # Omitted rules count as skipped work even with absent layers (#2768).
     skipped_records += [
         {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
         for rule_id in sorted(omitted_ids)
     ]
-    return {
+    coverage = {
         "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_layer_str(t) for t in sorted(layers_checked)],
         "layers_in_stream_without_rules": [
@@ -2055,12 +2040,8 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "unchecked_rules": unchecked_rules,
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
         "deck_scope": deck_scope,
-        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
-        # deck knowingly does not transcribe.
         "unmodeled_rules": get_unmodeled_rules(deck_name),
-        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
-        # refuse a "clean" verdict measured over nothing without re-deriving
-        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(
             checked=sorted(rules_checked),
             skipped=skipped_records,
@@ -2070,6 +2051,16 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
             ),
         ),
     }
+    checked_ids = set(rules_checked)
+    approximated_rules = [
+        {"rule": rule.id, **note}
+        for rule in sorted(deck, key=lambda rule: rule.id)
+        if rule.id in checked_ids
+        for note in (rule.approximations or ())
+    ]
+    if approximated_rules:
+        coverage["approximated_rules"] = approximated_rules
+    return coverage
 
 
 def _assemble_report(
@@ -2221,6 +2212,9 @@ def run_drc(
                 "unmodeled_rules": [<official rule id>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
+                "approximated_rules": [
+                    {"rule": str, "class": str, "description": str}, ...
+                ],
             },
             "rule_selection": {  # only when `rules` is given (issue #2768)
                 "selectors": [str, ...], "selected": [<rule id>, ...],
@@ -2372,6 +2366,10 @@ def run_drc(
     about was never curated at all; diffing ``deck_scope`` against the DRM's
     own table of contents surfaces that gap. A deck rule with no ``scope``
     set (the default, ``""``) contributes nothing to this list.
+
+    ``coverage.approximated_rules`` (#5805) lists approximations declared by
+    checked rules, sorted by rule id, even on a run with zero violations.
+    The key is omitted when no checked rule declares an approximation.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
@@ -2534,14 +2532,14 @@ def drc_exit_code(report: dict[str, Any]) -> int:
 
 
 def check_drc_report(
-    report_path: str, *, input_path: str | None = None
+    report_path: str, *, input_path: str | None = None, deck_path: str | None = None
 ) -> dict[str, Any]:
     """``klt drc --check`` (cheap mode, issue #1106): verify a previously
     committed ``klt drc --format json`` report at ``report_path`` still
     reproduces, without re-running the DRC engine at all.
 
     Re-hashes the input layout stream (``committed["file"]``) and the deck
-    (:func:`_deck_path_for_report`) named in the committed report and
+    (:func:`resolve_report_deck`; ``deck_path`` = ``--deck-file`` wins) and
     compares each against the ``sha256:``-prefixed digest already recorded
     in its own ``provenance.input.content_hash``/``provenance.deck
     .content_hash`` -- reusing :func:`klayout_tools._provenance
@@ -2560,33 +2558,13 @@ def check_drc_report(
     traceback.
     """
     committed = _load_committed_report(report_path, DrcError)
-    if committed.get("mode") == "crosscheck":
-        # Issue #4986: an ``--engine both`` envelope nests each engine's own
-        # report under ``reports.<engine>``; check each with the same logic,
-        # naming fields with the engine prefix. A null native side (engine
-        # failed / unavailable) is skipped, never reported as drift.
-        reports = committed.get("reports")
-        reports = reports if isinstance(reports, dict) else {}
-        checks = []
-        for engine in ("curated", "native"):
-            sub = reports.get(engine)
-            if isinstance(sub, dict):
-                checks.extend(
-                    _report_hash_checks(
-                        sub,
-                        report_path=report_path,
-                        input_path=input_path,
-                        prefix=f"reports.{engine}.",
-                    )
-                )
-        if not checks:
-            raise DrcError(
-                f"crosscheck report has no embedded 'reports.curated' report "
-                f"to check: {report_path}"
-            )
-    else:
-        checks = _report_hash_checks(
-            committed, report_path=report_path, input_path=input_path, prefix=""
+    checks = report_checks(
+        committed, report_path=report_path, input_path=input_path, deck_path=deck_path
+    )
+    if not checks:
+        raise DrcError(
+            f"crosscheck report has no embedded 'reports.curated' report "
+            f"to check: {report_path}"
         )
     return build_check_result(report_path=report_path, checks=checks)
 
@@ -2629,7 +2607,7 @@ def _recorded_tile(committed: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def rerun_drc_report(
-    report_path: str, *, input_path: str | None = None
+    report_path: str, *, input_path: str | None = None, deck_path: str | None = None
 ) -> dict[str, Any]:
     """``klt drc --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt drc --format json`` report at
@@ -2649,10 +2627,11 @@ def rerun_drc_report(
     others. Use ``--check`` (cheap mode) to avoid this if that matters.
 
     Diffs the fresh report against the committed one via
-    :func:`klayout_tools._report_verify.diff_verdict_fields`, excluding
-    :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`
-    (``provenance.klt_version``/``klayout_version``/``pdk.version`` --
-    fields that legitimately vary between runs of identical inputs).
+    :func:`klayout_tools.drc_report_check.drc_rerun_result`, excluding its
+    ``DRC_RERUN_EXCLUDE_PATHS``: the volatile ``provenance`` version strings
+    plus (issue #5660) the host-local ``environment.klayout_binary`` and the
+    wheel-axis ``provenance.klayout_module_version`` -- fields that
+    legitimately vary between runs of identical inputs.
     ``status: "drifted"`` names every other field that changed, including a
     changed ``violation_count``/``violations`` (the DRC-outcome-changed
     case) as well as a changed ``provenance.input.content_hash`` (the
@@ -2679,7 +2658,22 @@ def rerun_drc_report(
     if not deck:
         raise DrcError(f"committed report has no 'deck' field to rerun: {report_path}")
 
+    if deck_path is not None and committed.get("engine") != "klayout":
+        raise DrcError(
+            "--deck-file cannot be combined with --check --rerun on a curated report"
+        )
     if committed.get("engine") == "klayout":
+        # Issue #5709: same resolver as --check (override, recorded, packaged).
+        deck, missing = resolve_report_deck(committed, deck_path)
+        if missing is not None:
+            raise DrcError(
+                f"deck not found: {missing['resolved']} (packaged name "
+                f"{missing['name']!r}); {missing['hint']}"
+            )
+        if deck is None:
+            raise DrcError(
+                f"committed report has no resolvable deck to rerun: {report_path}"
+            )
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
         # A committed report carrying `engine_deck_errors` was produced with
@@ -2713,7 +2707,7 @@ def rerun_drc_report(
             tile=_recorded_tile(committed),
         )
 
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return drc_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
 
 
 def _attribute_to_instance(
@@ -3237,29 +3231,6 @@ def _run_width_max_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any | 
         return None
     max_d = round(rule.threshold_max_dbu * dbu_scale)
     return region.merged().with_bbox_max(0, max_d + 1, True)
-
-
-def _edge_pair_hull_points(edge_pair: Any) -> list[list[int]] | None:
-    """``violations[].polygon`` for one ``EdgePair`` violation marker: the
-    hull points of the quadrilateral spanning its two edges, or ``None`` when
-    the marker has no renderable outline.
-
-    Two ways a marker has none, both reported as ``null`` per the contract in
-    ``docs/cli/drc.md``:
-
-    - ``EdgePair.polygon(0)`` raises (a degenerate pair KLayout declines to
-      turn into a polygon at all) -- the long-standing case;
-    - it returns a polygon whose hull is *empty*, which is what a fully
-      degenerate single-point marker yields -- ``"ongrid"``'s per-vertex
-      markers are exactly that (issue #2642). Normalized to ``None`` here
-      rather than emitted as an empty array, which would be a third,
-      undocumented shape for this field.
-    """
-    try:
-        points = [[pt.x, pt.y] for pt in edge_pair.polygon(0).each_point_hull()]
-    except Exception:
-        return None
-    return points or None
 
 
 def _run_vertex_check(region: Any, rule: DrcRule, dbu: float) -> Any:

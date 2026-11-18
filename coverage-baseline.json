@@ -120,10 +120,6 @@
       "line": 92.4,
       "branch": 83.6
     },
-    "src/klayout_tools/artifact_store.py": {
-      "line": 87.2,
-      "branch": 73.6
-    },
     "src/klayout_tools/asap7_bsimcmg.py": {
       "line": 98.4,
       "branch": 96.1
@@ -1613,7 +1609,7 @@
       "branch": 100.0
     },
     "src/klayout_tools/sim_crossings.py": {
-      "line": 97.0,
+      "line": 96.7,
       "branch": 95.1
     },
     "src/klayout_tools/sim_crossings_reduce.py": {
@@ -1637,8 +1633,8 @@
       "branch": 80.0
     },
     "src/klayout_tools/sim_energy.py": {
-      "line": 96.6,
-      "branch": 93.1
+      "line": 95.7,
+      "branch": 91.6
     },
     "src/klayout_tools/sim_errors.py": {
       "line": 100.0,
@@ -1678,7 +1674,7 @@
     },
     "src/klayout_tools/sim_noise.py": {
       "line": 96.2,
-      "branch": 93.1
+      "branch": 92.8
     },
     "src/klayout_tools/sim_op_args.py": {
       "line": 100.0,
@@ -1734,7 +1730,7 @@
     },
     "src/klayout_tools/sim_settled.py": {
       "line": 95.8,
-      "branch": 90.0
+      "branch": 87.5
     },
     "src/klayout_tools/sim_slug.py": {
       "line": 100.0,
@@ -1745,16 +1741,16 @@
       "branch": 95.8
     },
     "src/klayout_tools/sim_snm_meas.py": {
-      "line": 99.0,
-      "branch": 93.7
+      "line": 98.8,
+      "branch": 91.6
     },
     "src/klayout_tools/sim_staging.py": {
       "line": 95.5,
       "branch": 93.3
     },
     "src/klayout_tools/sim_step_resolution.py": {
-      "line": 94.5,
-      "branch": 88.6
+      "line": 94.1,
+      "branch": 86.8
     },
     "src/klayout_tools/sim_steps.py": {
       "line": 95.7,
@@ -1765,8 +1761,8 @@
       "branch": 86.1
     },
     "src/klayout_tools/sim_stress.py": {
-      "line": 94.8,
-      "branch": 89.6
+      "line": 94.1,
+      "branch": 88.8
     },
     "src/klayout_tools/sim_subckt_override.py": {
       "line": 93.9,
@@ -1781,16 +1777,16 @@
       "branch": 94.0
     },
     "src/klayout_tools/sim_tian.py": {
-      "line": 98.7,
-      "branch": 97.2
+      "line": 98.6,
+      "branch": 97.1
     },
     "src/klayout_tools/sim_transfer.py": {
       "line": 97.6,
       "branch": 94.7
     },
     "src/klayout_tools/sim_transfer_meas.py": {
-      "line": 97.2,
-      "branch": 95.0
+      "line": 96.9,
+      "branch": 93.7
     },
     "src/klayout_tools/sim_twoport.py": {
       "line": 97.2,

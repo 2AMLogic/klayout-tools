@@ -283,7 +283,7 @@ def _def_name_to_spef(raw: str) -> str:
     return "".join(out)
 
 
-class DefNetConnections(dict):  # type: ignore[type-arg]
+class DefNetConnections(dict):
     """:func:`def_net_instance_pins`'s ``{net: ((inst, pin), ...)}`` mapping
     (a plain ``dict`` for every existing consumer) that also carries
     :attr:`port_pins` -- the top-level design-port names the DEF ``NETS``

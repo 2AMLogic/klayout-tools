@@ -17,10 +17,15 @@ version changes nothing):
 
 - ``pyproject.toml``: ``[tool.hatch.version] base-version``;
 - ``CHANGELOG.md``: inserts ``## X.Y.Z (date)`` directly below
-  ``## Unreleased`` (the unreleased entries become the release's entries and
-  ``## Unreleased`` stays, empty, for the next cycle);
+  ``## Unreleased``. Existing entries and fragments from ``changelog.d/``
+  become the release's entries, with fragments appended in filename order
+  and removed after assembly. ``## Unreleased`` stays empty for the next
+  cycle. With no entries from either source, the run refuses (``PrepError``,
+  before any file is written) to cut an empty release (issue #6086);
 - ``docs/cli/signoff.md``: "first release after `vPREV`" availability notes
-  become "`klt X.Y.Z`" (PREV is the version being superseded).
+  become "`klt X.Y.Z`" (PREV is the version being superseded). A placeholder
+  anchored on a release older than PREV can never be resolved again; the prep
+  run refuses (``PrepError``) naming the line rather than let it ship stale.
 
 The version defaults to the next *minor* (``vX.(Y+1).0``): that satisfies
 RELEASING.md's batch-runner rule (a contract change never ships in a patch)
@@ -33,7 +38,8 @@ with the ``(#NNN)`` suffix a squash merge appends, or the merge-commit subject
 produces) -- the tag job's gate for
 "tag this commit". It prints nothing and exits 0 otherwise.
 
-Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, ...).
+Exit codes: 0 ok; 2 bad input (bad version, no ``## Unreleased`` heading, an
+empty ``## Unreleased`` section, ...).
 """
 
 from __future__ import annotations
@@ -56,6 +62,9 @@ _MERGE_SUBJECT_RE = re.compile(
     rf"^Merge pull request #\d+ from \S+?/release/v({_VERSION})(?:\s|$)"
 )
 _UNRELEASED_RE = re.compile(r"^## Unreleased[ \t]*$", re.MULTILINE)
+_NOTE_PLACEHOLDER_RE = re.compile(
+    rf"(?:the )?(?:first|next) release after `?v?({_VERSION})`?"
+)
 
 
 class PrepError(Exception):
@@ -86,22 +95,90 @@ def bump_pyproject(text: str, new: str) -> str:
     return _BASE_VERSION_RE.sub(rf"\g<1>{new}\g<3>", text, count=1)
 
 
-def add_changelog_heading(text: str, new: str, date: str) -> str:
-    """Insert ``## new (date)`` below ``## Unreleased``; no-op if present."""
-    if re.search(rf"^## {re.escape(new)} \(", text, re.MULTILINE):
-        return text
+def _unreleased_entries(text: str) -> str | None:
+    """Body of the ``## Unreleased`` section (to the next ``## `` or EOF).
+
+    None when there is no ``## Unreleased`` heading at all.
+    """
     match = _UNRELEASED_RE.search(text)
     if match is None:
+        return None
+    next_heading = re.search(r"^## ", text[match.end() :], re.MULTILINE)
+    end = match.end() + next_heading.start() if next_heading else len(text)
+    return text[match.end() : end]
+
+
+def _has_release_heading(text: str, version: str) -> bool:
+    return re.search(rf"^## {re.escape(version)} \(", text, re.MULTILINE) is not None
+
+
+def _read_changelog_fragments(directory: Path) -> dict[Path, str]:
+    """Read pending entries in filename order, keyed by the files to remove."""
+    fragments: dict[Path, str] = {}
+    for path in sorted(directory.glob("*.md")):
+        if path.name == "README.md" or not path.is_file():
+            continue
+        entry = path.read_text(encoding="utf-8").strip("\n")
+        if entry.strip():
+            fragments[path] = entry
+    return fragments
+
+
+def add_changelog_heading(
+    text: str, new: str, date: str, *, fragments: str = ""
+) -> str:
+    """Insert ``## new (date)`` below ``## Unreleased``; no-op if present.
+
+    The already-present early return runs first so an idempotent re-run never
+    trips the empty-section gate (issue #6086). The new section must contain
+    entries from ``## Unreleased`` or from fragments.
+    """
+    if _has_release_heading(text, new):
+        return text
+    entries = _unreleased_entries(text)
+    if entries is None:
         raise PrepError("CHANGELOG.md has no '## Unreleased' heading")
-    return f"{text[: match.end()]}\n\n## {new} ({date}){text[match.end() :]}"
+    if not entries.strip() and not fragments:
+        raise PrepError(
+            "CHANGELOG.md '## Unreleased' section has no entries --"
+            " nothing to release; refusing to insert an empty release section"
+        )
+    match = _UNRELEASED_RE.search(text)
+    heading_end = match.end()
+    remaining = text[heading_end + len(entries) :]
+    if fragments:
+        legacy = entries.strip("\n")
+        body = f"{legacy}\n\n{fragments}" if legacy.strip() else fragments
+        entries = f"\n\n{body}\n" + ("\n" if remaining else "")
+    return f"{text[:heading_end]}\n\n## {new} ({date}){entries}{remaining}"
 
 
 def update_signoff_notes(text: str, previous: str, new: str) -> str:
     """Resolve "the first release after `vPREV`" notes to the release now cut."""
-    pattern = re.compile(
-        rf"(?:the )?(?:first|next) release after `?v?{re.escape(previous)}`?"
-    )
-    return pattern.sub(f"`klt {new}`", text)
+
+    def _resolve(match: re.Match[str]) -> str:
+        return f"`klt {new}`" if match.group(1) == previous else match.group(0)
+
+    return _NOTE_PLACEHOLDER_RE.sub(_resolve, text)
+
+
+def check_signoff_note_anchors(text: str, previous: str) -> None:
+    """Refuse availability-note placeholders the resolver can never match again.
+
+    A placeholder is only resolvable for the release being bumped *from*
+    (``previous``); once ``base-version`` moves past its anchor it is orphaned
+    for good. Raise instead of letting it ship silently stale (issue #5582).
+    """
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for match in _NOTE_PLACEHOLDER_RE.finditer(line):
+            if parse_version(match.group(1)) < parse_version(previous):
+                raise PrepError(
+                    f"docs/cli/signoff.md:{lineno}: availability note anchored"
+                    f" on v{match.group(1)}, older than the previous release"
+                    f" {previous} -- the note resolver can never match it again;"
+                    " resolve it by hand (e.g. '`klt X.Y.Z`')"
+                )
 
 
 def release_version_from_subject(subject: str) -> str | None:
@@ -123,17 +200,34 @@ def prepare(repo: Path, version: str | None, date: str) -> dict[str, str]:
             f"version {new} is older than the current base-version {current}"
         )
 
-    pyproject.write_text(bump_pyproject(py_text, new), encoding="utf-8")
-    changelog.write_text(
-        add_changelog_heading(changelog.read_text(encoding="utf-8"), new, date),
-        encoding="utf-8",
+    # Compute every write up front so a refusal (e.g. an empty '## Unreleased'
+    # section, issue #6086, or a stale availability-note anchor, issue #5582)
+    # leaves the tree untouched, pyproject.toml unbumped and fragments in place.
+    new_py_text = bump_pyproject(py_text, new)
+    changelog_text = changelog.read_text(encoding="utf-8")
+    # An existing release heading means pending fragments are for a future cut.
+    fragments = (
+        {}
+        if _has_release_heading(changelog_text, new)
+        else _read_changelog_fragments(repo / "changelog.d")
+    )
+    new_log_text = add_changelog_heading(
+        changelog_text, new, date, fragments="\n\n".join(fragments.values())
     )
     # On an idempotent re-run `current == new`; the notes were already resolved.
+    new_signoff_text = None
     if signoff.exists() and current != new:
-        signoff.write_text(
-            update_signoff_notes(signoff.read_text(encoding="utf-8"), current, new),
-            encoding="utf-8",
+        new_signoff_text = update_signoff_notes(
+            signoff.read_text(encoding="utf-8"), current, new
         )
+        check_signoff_note_anchors(new_signoff_text, current)
+
+    pyproject.write_text(new_py_text, encoding="utf-8")
+    changelog.write_text(new_log_text, encoding="utf-8")
+    for path in fragments:
+        path.unlink()
+    if new_signoff_text is not None:
+        signoff.write_text(new_signoff_text, encoding="utf-8")
     return {"previous": current, "version": new, "date": date}
 
 

@@ -48,6 +48,17 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   that one resolver, never a private lookup. Omitting both falls back to
   `$PDK`/`$PDK_ROOT`, same as `klt pdk find` with no flags.
 - `--cell-name` — name for the generated top cell (default: `<generator>_0`).
+  For generators that emit a PCell child — every generator except
+  `asap7_finfet` and `asap7_tap` (which flatten their output into the top
+  cell and carry no child) and `bjt_array` on sg13g2 (which instantiates the
+  PDK's own HBT cell under its PDK name, independent of `--cell-name`) —
+  that child is named `<cell-name>__core` (since v0.9.0, issue #4251;
+  earlier releases left it as the library cell name, e.g. `mos_array`). The
+  suffix keeps the children of streams generated under different
+  `--cell-name`s from merging when they are read into one `Layout`. This
+  naming is part of `klt gen`'s documented output: a change to it is a
+  CHANGELOG-recorded event, since structure names are written into the
+  stream.
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -787,11 +798,16 @@ tie is the guard ring's `TAP_*` ports, so `mos_cap` **requires
 `add_guard_ring: true`** and does not support `gate_contact`.
 `finger_topology` is ignored. The width floor is **not** the flat `0.42`
 µm of a plain transistor: it is the deck's own COMP min-width rule for the
-selected oxide (`comp.width.1` = 0.22 µm thin oxide, `comp.width.mv.1` = 0.30
-µm with `voltage_flavor: "medium_voltage"` on `gf180mcu`), and a `w_um` below
-it is rejected with an error naming the rule. Below the contact-plus-
-enclosure width each S/D segment grows a diffusion landing bump above the
-channel (channel width stays `w_um`) and the gate landing pad is lifted
+selected oxide *or* under the capacitor marker, whichever is larger. On
+`gf180mcu` that is `comp.width.moscap.1` (`DF.1c`) = 1.0 µm (above
+`comp.width.1` = 0.22 µm thin oxide and `comp.width.mv.1` = 0.30 µm with
+`voltage_flavor: "medium_voltage"`), and a `w_um` below it is rejected with an
+error naming the rule (issue #6170: the channel is `w_um` wide, so no S/D
+geometry can pass a 1 µm width rule below that). The marker covers the unit
+devices only, not the 0.42 µm guard ring. A `w_um` below the
+contact-plus-enclosure width (reachable only on a family whose floor is lower
+than that) grows a diffusion landing bump above the channel on each S/D
+segment (channel width stays `w_um`) and lifts the gate landing pad
 clear of it. A PDK family with no MOS-capacitor marker (everything but
 `gf180mcu` today) is rejected with a `GenError`. Plain `mos_array`
 (`mos_cap: false`, the default) is unchanged. `klt extract` does not yet
@@ -826,6 +842,15 @@ silently dropped. `voltage_flavor` is independent of `flavor`: requesting
 both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
 draws both the well and the marker with no conflict.
 
+**sky130's low-Vt devices (`sky130_fd_pr__nfet_01v8_lvt` / `pfet_01v8_lvt`,
+issue #5607).** `voltage_flavor="lvt"` on `sky130` draws `lvtn.drawing`
+(125/44) alone over the device footprint — the marker the `sky130_lvt` deck's
+`lvt` flavour keys on (no `hvi`, no `areaid_le`). Unlike `native`/`nvt` it is
+valid for both `flavor="nfet"` and `flavor="pfet"` on `mos_array` and
+`diff_pair`, and `klt extract --deck sky130` classifies the result as
+`sky130_fd_pr__nfet_01v8_lvt` / `sky130_fd_pr__pfet_01v8_lvt`. The 5 V lvt
+variants are not supported.
+
 **sky130's native-Vt NMOS (`sky130_fd_pr__nfet_05v0_nvt`, issue #3600).**
 `voltage_flavor="native"`/`"nvt"` on `sky130` draws **two** marker boxes over
 the same footprint: `hvi` (75/20) and `lvtn` (125/44) — the pair the deck's
@@ -855,6 +880,20 @@ correctly-enclosed implant on those families is deliberately *not* done
 here: it needs a real PDK enclosure rule this repo's curated decks do not
 carry (sg13g2's, for one, transcribes no implant rule of any kind), and a
 wrong margin would be caught by no existing check.
+
+**Marker over the ring's well (issues #6025, #6458).** With `add_guard_ring` on a
+`flavor="pfet"` `mos_array` or `diff_pair` (`diff_pair`'s default is a ring), the
+ring's own well tie is drawn around the device(s), so
+the `voltage_flavor` marker box is grown to enclose that well too (extra
+marker layer included; `mos_cap`'s mark is not touched) — sky130's
+`nwell.enclosed.hvi.1` needs the whole nwell inside `hvi`. Ring-less requests,
+`flavor="nfet"` rings (no well) and requests without `voltage_flavor` are
+unchanged, as is `esd_device` (always NMOS-style, no ring well). sky130's
+native-Vt flavours (`native`/`nvt`, which add an `lvtn` marker) are NFET-only,
+so they never meet a ring well. The widening applies on every family that
+draws a ring well: gf180mcu `medium_voltage` and sg13g2 `hv` PMOS ring variants
+stay clean on the curated decks (their real signoff Dualgate/ThickGateOx rules
+are not transcribed here and were *not* verified).
 
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
@@ -953,7 +992,7 @@ with their `.drc.json` reports checked in alongside).
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
 | `dummy_ports`  | bool   | `false`            | Also report each dummy unit's terminals (issue #2904) as `D<k>_S`/`D<k>_D`/`D<k>_G` (`finger_topology: "series"` with `fingers > 1`: `D<k>_S<n>`/`D<k>_D<n>`/`D<k>_G<n>`, matching the real units' naming), appended after every real-unit port. `k` counts dummies row by row, left to right (`D0` is row 0's leftmost dummy). Same layers, positions and directions as a real unit's ports, so `klt gen-compose` `connectivity[]` can tie dummy gates and S/D to a rail instead of leaving them floating (which `klt extract` reports as `dead_metal`). `false` (the default) leaves `ports[]` byte-for-byte unchanged. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
-| `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), or `"hvi"` on `sky130` (its `hvi.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
+| `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), `"hvi"` on `sky130` (its `hvi.drawing` layer), or `"lvt"` on `sky130` (its `lvtn.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 | `add_guard_ring` | bool | `false`           | Enclose the array in an automatically-sized tap/guard ring (issue #1493) — see above. Unlike `diff_pair`'s own param of the same name, defaults to `false`. |
 | `ring_gap_side` | string | `""`              | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
@@ -1010,21 +1049,42 @@ layer (the local-metal role for a poly body; the body layer for
 `metal_level > 0`), as wide as the pad is tall. Only the two outer terminals
 are reported as ports, `R0_A` and `R<num-1>_B`; interior ports are omitted.
 `device_count` stays `num` (`klt extract` reports the chain as `num` series
-devices; merging them into one logical device is not done). `drc_hints.notes`
-states the joint count and per-joint overhead.
+devices — merging them into one logical device is not done *there*; that is
+the compare's job, below). `drc_hints.notes` states the joint count and
+per-joint overhead.
+
+**Folding one long resistor (issue #5555).** The series string *is* the fold
+for a single body too long for the cell's other axis: to draw one logical
+resistor of total length `L`, request `length_um = L / k`, `num = k`,
+`series: true`, and `rows >= 2` — the jumpers above chain the `k` segments
+into one device spanning `k` rows instead of one strip `L` long. Keep the
+schematic netlist unmodified (one resistor sized for the full `L`) and
+compare with [`klt lvs`](lvs.md) `options.combine_devices: true`, which folds
+the chain back into one device and matches it (with `false`, the chain's `k`
+layout devices mismatch the reference's 1 — see the
+[`combine_devices` request field](lvs.md#request) for what combining does and
+why it is opt-in). Three limits: `klt extract` alone still reports `k`
+devices; the interior joints must stay unlabelled — the generator omits their
+ports, and a label on a joint promotes it to a declared pin (see the declared
+pin set, `--pins`, in [`klt extract`](extract.md)) and blocks the fold; and
+the folded device has `k` head pairs where the schematic device has one,
+which `klt lvs` discloses as a `device.series_fold_offset_absorbed` warning
+(issue #3017) instead of a mismatch.
 
 `rows` (default `1`, the original single-row layout) folds the `num` unit
 resistors into that many parallel rows in boustrophedon ("snake") order —
 row 0 runs left to right, row 1 right to left, and so on — instead of one
 long row, mirroring how `mos_array`/`bjt_array` use `rows`/`cols` to keep an
-array roughly square. Without it, a resistor string with a realistic
-unit-segment count (dummies and trim taps included) produces a bounding box
-dominated by one axis, which can blow a floorplan's area budget even though
-the drawn area itself is small (issue #415). Row-to-row pitch is fixed (unit
-height plus the same `MIN_SAME_LAYER_SPACING_UM` margin `mos_array` uses for
-its own row pitch), independent of `spacing_um`, which stays scoped to
-within-row unit spacing. Port naming keeps the physically-adjacent pad pair
-short across every row transition: on a right-to-left (odd) row, `R<i>_A`
+array roughly square. `rows` folds the unit *count*; it does not fold one
+unit's *length* — a single body that is too long is folded by `series: true`
+instead (see "Series strings" above). Without it, a resistor string with a
+realistic unit-segment count (dummies and trim taps included) produces a
+bounding box dominated by one axis, which can blow a floorplan's area budget
+even though the drawn area itself is small (issue #415). Row-to-row pitch is
+fixed (unit height plus the same `MIN_SAME_LAYER_SPACING_UM` margin
+`mos_array` uses for its own row pitch), independent of `spacing_um`, which stays
+scoped to within-row unit spacing. Port naming keeps the physically-adjacent pad
+pair short across every row transition: on a right-to-left (odd) row, `R<i>_A`
 and `R<i>_B` report the *opposite* physical pad from an even row (the unit's
 own drawn geometry never mirrors), so `R<i>_B` stays next to `R<i + 1>_A` in
 every row, not just even ones — the same short-hop connection a downstream
@@ -1079,9 +1139,19 @@ the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
 poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
 generator's heads are not drawn to the foundry cell's head geometry, and
 `klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
-"Precision-poly-resistor head rules are not checked"). So the `high`/`xhigh`
-output is recognised by Magic but is **not** Magic-DRC-clean; use `klt drc
---engine klayout` for the independent check. A reporter also saw Magic
+"Precision-poly-resistor head rules are not checked"). That head-geometry
+attribution is measured, not assumed (2026-11-15: Magic 8.3.683, open_pdks
+sky130A `c6d73a35f524`, klt `0.9.3.dev3+gd5d57daf9a14`): forcing the marker
+to a uniform 0.2 µm on all four sides (`spacing_um` <= 0.4) leaves the
+`rpm.1` verdict unchanged, while sweeping only the head length clears it —
+`rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean from 2.08 µm — so
+the marker overhang is ruled out and the head-length fix is tracked in
+#5704. (The duplicated `poly.2` reports — "Distance between precision
+resistors < 0.21um" and "poly spacing < 0.21um" — seen on a standalone unit
+at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they are not
+tracked.) So the `high`/`xhigh` output is recognised by Magic but is
+**not** Magic-DRC-clean; use `klt drc --engine klayout` for the independent
+check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
 (e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
 on one net when its left edge sat on the 10 nm grid, and correctly when
@@ -1305,6 +1375,13 @@ centre with a fixed `direction_deg` and a `drc_hints.notes` warning, mirroring
 `mos_array`'s interior gate-contact port.) `device_count` is `num`.
 `drc_hints.matched_group_id` is `"cap_array:<num>"`.
 
+Both ports are therefore reported on the MiM stack's **own** metal levels —
+the bottom-plate conductor for `C<i>_BOT` and the top-plate landing metal for
+`C<i>_TOP` — not on the base routing metal every other analog generator in
+this family reports its terminals on. Landing either terminal on another
+routing level takes no extra generator parameter and no hand-built riser: see
+"Landing a terminal on another routing level" below.
+
 `sky130`, `sg13g2` and `gf180mcu` are supported; requesting `cap_array` for
 any other PDK family raises a clear application error (exit code `1`) rather
 than silently drawing sky130's layer numbers onto the wrong stack. On
@@ -1370,6 +1447,111 @@ three are the identical drawn geometry, selected at extraction time with
 | `connect`      | string | `"independent"` | `"independent"` draws `num` separate capacitors (the output described above, unchanged). `"parallel"` draws one capacitor of `num × C_unit` — see below (#3022). |
 | `stack` | int | `1` | `1` draws one MiM level (unchanged). `2` (sky130 only, requires `connect: "parallel"`) stacks the `capm2`/met4 level over the `capm`/met3 one — see below (#3332). Other values and other families are rejected with a `GenError`. |
 | `top_via_pitch_um` | double | `0.0` | `connect: "parallel"` only: pitch (µm) of the top-plate via grid over each unit. `0.0` = twice the drawn via side. A nonzero value must be `>= 0.44`; rejected with `connect: "independent"`. |
+
+#### Landing a terminal on another routing level (#5556)
+
+Both terminals sit on the MiM stack's **own** metal levels, one level apart,
+while every sibling analog generator (`mos_array`, `diff_pair`, `res_array`,
+`guard_ring`) reports its terminals on the base routing metal (sky130 li1
+`67/20`, or poly `66/20` for a gate contact). Per family:
+
+| family | `C<i>_BOT` — bottom-plate conductor | `C<i>_TOP` — top-plate landing metal |
+| ------ | ----------------------------------- | ------------------------------------ |
+| `sky130` | met3 `70/20` | met4 `71/20` |
+| `gf180mcu` | Metal4 `46/0` | Metal5 `81/0` |
+| `sg13g2` | Metal5 `67/0` | TopMetal1 `126/0` |
+
+(`connect: "parallel"` reports the same two levels as `C_BOT`/`C_TOP`;
+`stack: 2` reports met5 `72/20` for `C_OUTER` and met4 `71/20` for `C_MID`.)
+
+**The supported way to land either terminal on another routing level is a
+[`klt gen-compose`](gen-compose.md) `connectivity[]` net** — not a hand-built
+riser in the caller's own geometry, and not a `cap_array` parameter (there is
+none, deliberately: it would be a second implementation of a via stack this
+repo already draws). Every level in the table above is a member of its
+family's own `ExtractionDeck.metals` stack — the stack (paired with its
+`.vias`) that `gen-compose`'s via ladder walks — so a backbone on a declared
+`routing.layer_role` reaches the terminal by dropping the **full** ladder at
+the pin's own composed-frame position: one via per hop, plus a landing pad on
+every level in between, each pad sized against the resolved family's own DRC
+deck (including the met3/met4 minimum-**area** rules, which bind well before
+minimum width at these sizes). See [`gen-compose.md` § "Multi-level via-drop
+(#1567)"](gen-compose.md#multi-level-via-drop-1567) for the ladder's own
+contract, and § "Via-drop routing (metal2/via, #454)" for how a single hop is
+drawn and sized.
+
+A minimal sky130A request landing `C0_TOP` (met4) on an li1-level
+transistor terminal. Both reports are `klt gen`'s **JSON** response, written
+next to the request file (a relative `generator_report` path resolves against
+the request's own directory):
+
+```sh
+klt gen cap_array --pdk sky130A -o caps.gds --format json \
+  --params '{"num":1,"plate_w_um":7.07,"plate_h_um":7.07}' > caps.json
+klt gen mos_array --pdk sky130A -o mos.gds --format json > mos.json
+```
+
+```json
+{
+  "pdk": { "variant": "sky130A" },
+  "blocks": [
+    { "id": "mos", "generator_report": "mos.json" },
+    { "id": "caps", "generator_report": "caps.json" }
+  ],
+  "placement": {
+    "strategy": "explicit",
+    "order": ["mos", "caps"],
+    "origins_um": {
+      "mos": { "x": 0.0, "y": 0.0 },
+      "caps": { "x": 10.0, "y": 0.0 }
+    }
+  },
+  "connectivity": [
+    {
+      "net": "CTERM",
+      "pins": [
+        { "block": "mos", "port": "U0_D" },
+        { "block": "caps", "port": "C0_TOP" }
+      ]
+    }
+  ],
+  "routing": { "layer_role": "metal", "width_um": 0.42 },
+  "options": { "cell_name": "cap_tap", "output": "cap_tap.gds" }
+}
+```
+
+`CTERM` comes back `status: "routed"` with `landed_on_block: true`, and the
+composed top cell carries the whole li1→met4 ladder it drew — a via cut on
+each of mcon `67/44`, via `68/44`, via2 `69/44` and via3 `70/44`, with a
+landing pad on li1, met1, met2, met3 and met4. `klt drc --deck sky130` on the output reports
+`violation_count: 0`, and `klt extract --deck sky130` returns the transistor's
+drain and the `sky130_fd_pr__model__cap_mim` device's top plate as **one**
+node, named `CTERM` — the connection is electrical, not just a clean stream
+(a riser that misses the plate passes DRC and shows up only as an extra
+dangling node in the extracted netlist). Naming `C0_BOT` (met3) instead does
+the same with one hop fewer, landing on the capacitor's bottom plate and
+leaving the top plate its own distinct node. Both directions are pinned by
+`test_compose_lands_cap_array_terminal_on_li1_via_ladder` in
+`tests/test_gen_compose_cap_ladder.py`.
+
+**Verified end to end on sky130 only.** `gf180mcu`'s and `sg13g2`'s terminal
+levels are members of their own decks' `metals` stacks too, so the same
+resolution applies there by construction — but neither family's ladder onto a
+MiM terminal is covered by a test, and neither has been checked for
+DRC-cleanliness or extracted connectivity on those upper levels. Treat a
+non-sky130 composition as unproven until it is.
+
+**Mind the terminal's declared direction when placing the neighbour.**
+`C<i>_BOT` faces `180` (due west, off the bottom plate's left edge) and
+`C<i>_TOP` faces `90` (due north, off the escape pad), so the neighbour has
+to sit on the faced side with a channel wide enough for the backbone's
+midpoint jog — hence `"explicit"` placement at a 10µm gap, rather than
+a tight `"row"`. Crowding the capacitor instead gets the net rejected for
+routing *topology* (approaching a pin from behind, threading the neighbour's
+own drawn metal), which is a placement problem and not a layer-stack one; see
+[`gen-compose.md`](gen-compose.md) § "Known limitations" and
+[`layout-plan-execute.md`](layout-plan-execute.md)'s mixed-device routing
+note.
 
 #### `connect: "parallel"` — one capacitor from many units (#3022)
 
@@ -1451,12 +1633,13 @@ and 4).
 | `inner_height_um`        | double | `3.0`   | Height of the protected inner area (µm). Must be `> 0`. |
 | `ring_width_um`          | double | `0.42`  | Tap ring thickness (µm). Must be `>= 0.42`. |
 | `contacts_per_side`      | int    | `4`     | Tap contacts evenly spaced along each ring side, applied uniformly to all four sides unless overridden per-axis below. Must be `>= 1`. |
-| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`, so existing single-scalar callers are unaffected. Must be `>= 0`. |
+| `contacts_per_side_ns`   | int    | `0`     | Tap contacts on the N/S (top/bottom) sides, spaced along `inner_width_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `contacts_per_side_ew`   | int    | `0`     | Tap contacts on the E/W (left/right) sides, spaced along `inner_height_um`. `0` (the default) inherits `contacts_per_side`. Must be `>= 0`. |
 | `ring_gap_side`          | string | `""`    | Cut one routing opening through the ring on this side: `""` (a closed ring), `"N"`, `"S"`, `"E"` or `"W"`. See "Ring routing openings" below. |
-| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). Required (and must be `>= 0.4`, the minimum same-layer spacing) when `ring_gap_side` is set; must be `0` otherwise. |
+| `ring_gap_um`            | double | `0.0`   | Length of the opening along its side (µm). With `ring_gap_side` set, the standalone GF180MCU minimum is `0.72` µm and the minimum on other families is `0.40` µm. Must be `0` for a closed ring. |
 | `ring_gap_offset_um`     | double | `0.0`   | Slide the opening off its side's midpoint (µm): `+x` on `"N"`/`"S"`, `+y` on `"E"`/`"W"`. The opening must stay inside the side's straight run. |
 | `add_well`               | bool   | `true`  | Enclose the ring in a well tie when the resolved PDK family checks one. |
+| `voltage_flavor`         | string | `""`    | Optional device-class marker drawn over the ring's well tie (issue #6025), same names as `mos_array`'s (`"hvi"` on `sky130`, `"medium_voltage"` on `gf180mcu`, `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l`) — so a ring abutting a flavour-marked device keeps sky130's `nwell.enclosed.hvi.1` satisfied. Needs `add_well` on a family that checks a well; an unrecognised name, or no well to mark, draws nothing and is flagged via `drc_hints.notes`. Echoed as `drc_hints.voltage_flavor`/`voltage_flavor_mark_present`. `""` leaves the output unchanged. |
 
 For each axis, a resolved contact count (`contacts_per_side_ns`/
 `contacts_per_side_ew` when non-zero, else `contacts_per_side`) too large for
@@ -1504,7 +1687,12 @@ opening through the ring's band so a route can pass through it instead:
   through the well.
 - Any tap contact the opening would clip is dropped, and the side's own
   `TAP_*`/`COLL_*` port is not reported when its midpoint lands in the
-  opening (there is no metal left under it there).
+  opening (there is no metal left under it there). On standalone GF180MCU
+  guard rings, the snapped Comp opening needs at least 0.72 µm to leave
+  0.40 µm of Nplus or Pplus spacing after the implant extends 0.16 µm
+  past each cut face. The generator rejects narrower widths before writing
+  a layout and drops contacts that would have less than 0.07 µm of Comp
+  enclosure at either face after grid snapping.
 - The opening is reported as a `GAP_<side>` entry in `ports[]` on the layer a
   route would cross the ring on: `x_um`/`y_um` is the opening's centre on the
   ring's own centre line, **`width_um` is the opening's length along that
@@ -1512,6 +1700,42 @@ opening through the ring's band so a route can pass through it instead:
   marks the *absence* of metal, so it is a marker rather than a connectable
   port — `klt gen-compose` rejects any attempt to wire (`connectivity[]`) or
   label (`pins[]`) one.
+- The same `GAP_<side>` entry carries `strap_window_um` (issue #5656) — the
+  opening's own box inset **along the ring side** (never across it) by the
+  resolved PDK deck's minimum same-layer spacing for the opening's layer
+  (`{x0, y0, x1, y1}` in the cell's own origin-relative frame, like every
+  port field, each coordinate rounded to 6 decimals so exact-equality
+  comparison is safe). A hand drawn strap (`klt draw`, or a `rect_um` in a
+  composed stream) whose
+  extent **along the ring side** stays within the window is spacing-clean
+  against the ring metal on both sides of the opening — so a caller can
+  assert clearance up front, per sweep point, instead of discovering a
+  violation in `klt drc` after the fact. The window's extent across the
+  side is the ring band's full thickness (a strap crossing the ring is
+  constrained only along it, so its footprint extends past the window
+  across the side by construction). The field is `null` when the
+  along-side extent is narrower than the layer's minimum width (or ≤ 0
+  after the spacing inset) — no same-layer-legal strap fits, because a
+  strap filling the window is only as wide as the window's along-side
+  extent. So a non-null window means a strap at least the layer's minimum
+  width wide fits: a window of exactly the minimum width still reports
+  (issue #6425). The inset and the width floor are looked up from the same
+  curated deck `klt drc` judges with (e.g. sky130's `li1.space.1` and
+  `li1.width.1`, both 0.17 µm, so an opening reports a window only from
+  0.51 µm up; gf180mcu's `metal1.space.1` and `metal1.width.1`, both
+  0.23 µm, from 0.69 µm up — a standalone GF180MCU `guard_ring` already
+  needs `ring_gap_um` ≥ 0.72 µm, so its reported windows clear that floor);
+  when the family or a spacing rule for the
+  layer cannot be resolved, the window degrades to the opening's own box
+  (inset 0), and when the deck has no width rule for the layer no width
+  floor applies, so the field is then `null` only when the extent is ≤ 0.
+  The window stays in that cell-own frame even
+  when the report is fed to [`klt gen-compose`](gen-compose.md): a compose
+  consumer flips the box by the block's `blocks[].orientation` (an
+  axis-aligned flip, re-sorting the corners into min/max) and then adds its
+  `blocks[].offset_um` from the compose response before comparing against
+  composed coordinates — a bare translation is correct only under
+  `orientation: "none"`.
 - A `drc_hints.notes[]` entry records the opening (and that substrate
   isolation is interrupted there), or — when `ring_gap_side` is set on a
   block whose ring is switched off — that no opening was cut.
@@ -1782,7 +2006,7 @@ above for why, and the hand-drawn-recipe workaround.
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
-| `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"` resolves on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
+| `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"`/`"lvt"` resolve on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
 | `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
@@ -2287,6 +2511,7 @@ family/variant split the resolver doesn't have. The response's
   "pdk": { "name": "sky130A", "variant": "sky130A", "version": "open_pdks 0fe599b" },
   "dbu_um": 0.001,
   "bbox_um": { "x0": 0.0, "y0": 0.0, "x1": 9.68, "y1": 0.42 },
+  "subcell_naming_scheme": "core-suffix-v1",
   "device_count": 4,
   "ports": [
     {
@@ -2352,6 +2577,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the cell's own origin-relative frame (like the port's own `x_um`/`y_um`; a `gen-compose` consumer flips it by the block's `orientation` and adds its `offset_um` before comparing against composed coordinates), each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent is narrower than the layer's minimum width (or ≤ 0 after the spacing inset) — no same-layer-legal strap fits the opening (issue #6425; a window of exactly the minimum width still reports). Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck, and applies no width floor when the deck has no width rule for the layer. |
 
 #### `drc_hints` fields
 
@@ -2362,13 +2588,20 @@ family/variant split the resolver doesn't have. The response's
 | `matched_group_id` | string \| null | Identifier tying together instances that must remain matched. Non-null for the array/matched-device generators (`mos_array`, `res_array`, `diff_pair`, `bjt_array`, `cap_array`); always `null` for `resistor_strip`, `guard_ring`, `well_island`, `bond_pad`, and `esd_device`, none of which has a matching concept. |
 | `snapped_to_grid` | boolean | Whether any requested dimension was rounded to the technology grid (`true`) or used exactly as given (`false`). |
 | `notes` | array\<string\> | Free-form, generator-specific DRC-adjacent notes — e.g. a `params` value that is legal but risks violating the target PDK's DRC deck (the spike's "advisory, not authoritative" semantics: such a value is *not* rejected, only flagged here). Always present, empty when there is nothing to report. |
-| `voltage_flavor` | string \| null | `mos_array`/`diff_pair` only (issue #1054): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
-| `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair` only (issue #1054): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
+| `voltage_flavor` | string \| null | `mos_array`/`diff_pair`/`guard_ring`/`esd_device` (issues #1054, #6025, #4299): echo of the request's `params.voltage_flavor`, or `null` when omitted/empty — lets a downstream tool (`klt gen-compose`, `klt extract`, `klt lvs`) see the requested device-class marker without re-deriving it from raw geometry. |
+| `voltage_flavor_mark_present` | boolean | `mos_array`/`diff_pair`/`guard_ring`/`esd_device` (issues #1054, #6025, #4299): whether a real marker layer was drawn for `voltage_flavor` on the resolved PDK family. `false` both when `voltage_flavor` is omitted/empty and when it was requested but not recognised (see `notes` for the latter case). |
 | `sd_implant_present` | boolean | `mos_array` only (issue #2580): whether a real source/drain implant mask was drawn for the request's `flavor` on the resolved PDK family — `true` only on `gf180mcu` today (issue #1577); `false` on every family whose role-layer table declares no `"nplus"`/`"pplus"` (`sky130`/`sg13g2`/`sg13cmos5l`), whose request additionally carries a `notes` entry naming the omission. |
 | `well_net` | string \| null | `well_island` only (issue #1421): the net its tie carries (echo of `params.net`), or `null` when unnamed. |
 | `well_box_um` | object \| null | `well_island` only: `{x0, y0, x1, y1}` of the well rectangle actually drawn, at the resolved (possibly trimmed) enclosure. `null` on a PDK family with no well layer. |
 | `well_separation_um` | number \| null | `well_island` only: the well-to-well clearance actually enforced against `params.isolate_from` — the resolved family's own different-potential rule unless `params.separation_um` raised it. |
 | `well_keepout_box_um` | object \| null | `well_island` only: `well_box_um` grown by `well_separation_um` on every side — the region no *other* well may enter. |
+
+`subcell_naming_scheme` (issue #5808) is a stable id of how the written
+stream names its sub-cells: `"core-suffix-v1"` (`<cell_name>__core`),
+`"pdk-cell-v1"` (sg13g2 `bjt_array`: the PDK cell's own name) or `null`
+(flattened output, no sub-cell). It changes whenever the naming changes, so a
+caller committing GDS can compare it across klt versions instead of diffing
+bytes.
 
 ### Semantics and guarantees
 

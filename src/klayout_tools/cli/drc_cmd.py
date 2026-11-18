@@ -250,10 +250,8 @@ def _run_check(args: argparse.Namespace) -> int:
             args.format,
         )
     try:
-        if args.rerun:
-            result = rerun_drc_report(args.check, input_path=args.file)
-        else:
-            result = check_drc_report(args.check, input_path=args.file)
+        run = rerun_drc_report if args.rerun else check_drc_report
+        result = run(args.check, input_path=args.file, deck_path=args.deck_file)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
     except pdk_module.PdkNotFoundError as exc:
@@ -460,9 +458,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         )
     if args.waivers is not None:
         raise DrcError(
-            "--waivers is not supported with --engine klayout: waivers "
-            "match a marker's source_cell, which only the curated engine "
-            "attributes (see docs/cli/drc.md, 'Waivers')"
+            "--waivers is not supported with --engine klayout: "
+            "only the curated engine matches waivers and reports waived violations "
+            "(see docs/cli/drc.md, 'Waivers')"
         )
     if args.rules is not None:
         # Issue #2768: a native runset's rules are not the curated

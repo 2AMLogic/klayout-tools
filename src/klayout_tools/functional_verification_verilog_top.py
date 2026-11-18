@@ -4,8 +4,7 @@ functional-verification flow.
 Split out of ``functional_verification.py`` (the #1909 SDF-split precedent).
 Names that stay in ``functional_verification.py`` are reached as
 ``_fv.<name>`` at call time, so monkeypatching them on
-``klayout_tools.functional_verification`` still takes effect; every name is
-re-exported from there.
+``klayout_tools.functional_verification`` still takes effect.
 """
 
 from __future__ import annotations
@@ -172,8 +171,7 @@ def _check_verilog_top_sdf(
 ) -> None:
     """``testbench.dut_instance`` is the SDF scope, so it is required with
     ``options.sdf`` and meaningless without it. ``request.parameters`` is
-    rejected: it would have to target the bench, not the DUT. A no-op on the
-    cocotb path (``verilog_tb is None``)."""
+    rejected (it would target the bench, not the DUT). A no-op on cocotb."""
     if verilog_tb is None:
         return
     if parameters:
@@ -198,27 +196,33 @@ def _check_verilog_top_sdf(
 
 
 def _verilog_top_sdf_gate(
-    sdf: dict[str, str] | None,
+    sdf: dict[str, Any] | None,
     engine: str,
     build_log: str,
     test_log: str,
     sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
 ) -> dict[str, int]:
-    """Raise on SDF back-annotation diagnostics; return the dropped counts."""
+    """Raise on SDF back-annotation diagnostics; return the dropped counts.
+
+    Issue #5854: the raised error carries the same ``sdf.dropped`` accounting
+    the success-path report emits -- both refusal sites build it through the
+    shared helper in ``functional_verification_sdf_steps``, which (issue
+    #5769) also reads the annotation context stashed into the resolved
+    ``sdf`` dict to name confirmed-rejected non-zero bit-selected-input
+    arcs in the message."""
     if sdf is None:
         return {}
     diagnostics, scanned = _fv._scan_sdf_diagnostics(build_log, test_log)
+    merged = {**sdf_pre_dropped_counts, **scanned}
     if diagnostics:
-        shown = " | ".join(diagnostics[:5])
-        more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-        raise _fv.FunctionalVerificationError(
-            f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-            f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-            f"-- {shown}{more}. The simulator exits 0 after skipping an "
-            "annotation it cannot apply, so this run's verdict would have "
-            "been a zero-delay one reported as if it were annotated."
+        raise _fv._sdf_refusal_error(
+            sdf,
+            engine,
+            diagnostics,
+            _fv._sdf_dropped_report(merged, sdf_pre_dropped_arcs),
         )
-    return {**sdf_pre_dropped_counts, **scanned}
+    return merged
 
 
 def _verilog_top_error(
@@ -310,7 +314,7 @@ def _run_verilog_top(
         transcript = handle.read()
 
     sdf_dropped_counts = _verilog_top_sdf_gate(
-        sdf, engine, build_log, test_log, sdf_pre_dropped_counts
+        sdf, engine, build_log, test_log, sdf_pre_dropped_counts, sdf_pre_dropped_arcs
     )
     error_message = _verilog_top_error(
         ran.returncode, transcript, pass_marker, fail_marker
@@ -350,6 +354,7 @@ def _run_verilog_top(
                 "build_log": _hashed_path_envelope(build_log),
                 "random_seed": None,
                 "source_defines": source_defines,
+                "parameters": {},  # issue #5697; always `{}` -- rejected upstream
                 "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
                 "sdf": (

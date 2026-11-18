@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from ._jsonnum import is_int
+from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
 from .gen_compose_routing import (
@@ -119,11 +119,7 @@ def _parse_access(raw: Any, where: str) -> dict[str, Any]:
     if max(via_array) > _MAX_ARRAY_SIDE:
         raise _err(f"{where}.via_array sides must be <= {_MAX_ARRAY_SIDE}")
     grid_um = raw.get("grid_um")
-    if grid_um is not None and (
-        isinstance(grid_um, bool)
-        or not isinstance(grid_um, (int, float))
-        or grid_um <= 0
-    ):
+    if grid_um is not None and (not is_finite_number(grid_um) or grid_um <= 0):
         raise _err(f"{where}.grid_um must be a number > 0")
     max_candidates = raw.get("max_candidates", DEFAULT_MAX_CANDIDATES)
     if not is_int(max_candidates) or max_candidates < 1:

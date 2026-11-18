@@ -15,7 +15,8 @@ from __future__ import annotations
 import os
 import re
 
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_tokens import split_spice_tokens
 from .op_sanity import INCLUDE_CARD_RE, IncludeState, expand_includes
 from .pex_asap7 import DEVICE_MODEL_CARD_PREFIXES
 
@@ -25,26 +26,27 @@ from .pex_asap7 import DEVICE_MODEL_CARD_PREFIXES
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 
 
-def _read_text(path: str) -> str | None:
-    """``path``'s text, or ``None`` if it cannot be read -- every caller here
-    is building a *diagnostic*, so an unreadable file degrades the diagnostic
-    rather than raising over it."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
 def _logical_lines(netlist_text: str) -> list[str]:
-    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
-    into the line they continue, and inline ``$``/``;`` comments stripped --
-    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines = [
-        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        for raw in netlist_text.splitlines()
-    ]
+    """``netlist_text``'s lines with ``+`` continuations folded onto the line
+    they continue and inline ``$``/``;`` comments stripped by the shared
+    rule in ``_spice_text`` -- so :func:`_subckt_interfaces` sees each
+    `.subckt` header whole, and a ``$PDK_ROOT``-style ``.include`` reaches
+    :func:`_has_include_card`/:func:`_expand_reference_includes` unmangled."""
+    lines = [strip_spice_inline_comment(raw) for raw in netlist_text.splitlines()]
     return fold_spice_continuations(lines)
+
+
+def _logical_cards(text: str) -> list[str]:
+    """``text``'s SPICE cards with ``+`` continuation lines joined and
+    full-line ``*`` comments dropped (inline comments are *not* stripped
+    here -- unlike :func:`_logical_lines`)."""
+    return fold_spice_continuations(
+        [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and not line.startswith("*")
+        ]
+    )
 
 
 def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
@@ -108,39 +110,6 @@ def _dut_declares_a_circuit(text: str) -> bool:
     return False
 
 
-def _split_spice_tokens(line: str) -> list[str]:
-    """Split a SPICE card on whitespace, keeping a quoted ``'...'``/``"..."``
-    or braced ``{...}`` expression (which may contain spaces, e.g.
-    ``ad='int((nf+1)/2) * W/nf * 0.18u'``) inside its ``name=value`` token."""
-    tokens: list[str] = []
-    current: list[str] = []
-    quote = ""
-    depth = 0
-    for ch in line:
-        if quote:
-            current.append(ch)
-            if ch == quote:
-                quote = ""
-        elif ch in "'\"":
-            quote = ch
-            current.append(ch)
-        elif ch == "{":
-            depth += 1
-            current.append(ch)
-        elif ch == "}":
-            depth = max(depth - 1, 0)
-            current.append(ch)
-        elif ch.isspace() and depth == 0:
-            if current:
-                tokens.append("".join(current))
-                current = []
-        else:
-            current.append(ch)
-    if current:
-        tokens.append("".join(current))
-    return tokens
-
-
 def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
     """``{lowercased model/subcircuit name: (name as written, instance
     count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
@@ -169,7 +138,7 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
         stripped = line.strip()
         if not stripped or stripped[0].upper() not in DEVICE_MODEL_CARD_PREFIXES:
             continue
-        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
+        parts = [token for token in split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue  # no nodes/model at all -- not a real device instance
         name = parts[-1]
@@ -205,7 +174,7 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
         stripped = line.strip()
         if not stripped or stripped[0].upper() != "X":
             continue
-        parts = [token for token in _split_spice_tokens(stripped) if "=" not in token]
+        parts = [token for token in split_spice_tokens(stripped) if "=" not in token]
         if len(parts) < 2:
             continue
         if parts[-1].lower() in local_subckts:

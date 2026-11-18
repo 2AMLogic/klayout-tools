@@ -15,6 +15,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_guard_ring_voltage_flavor_params,
+    declare_ring_well_margin,
+    declare_tap_and_well_layers,
+    declare_well_present,
+)
+
 
 def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``guard_ring`` reference generator's PCell -- a substrate/well
@@ -39,6 +47,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _snap_ring_box_um,
         _well_box_um,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
     class _GuardRingPCell(kdb.PCellDeclarationHelper):
         """Substrate/well tap guard ring (spike section 4's family 3): a
@@ -46,9 +55,16 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         :func:`_ring_layout`), optionally enclosed by a well tie on PDK
         families whose curated deck checks one (see ``well_present``)."""
 
-        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
-        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        # Declared via ``self.param(...)`` below (including the shared
+        # param-declaration helpers); the PCellDeclarationHelper stubs
+        # cannot see them, so annotate for mypy.
         mfg_grid_um: float
+        contact_fixed_size_um: float
+        gap_contact_enclosure_um: float
+        voltage_flavor_mark_layer: kdb.LayerInfo
+        voltage_flavor_mark_present: bool
+        voltage_flavor_extra_mark_layer: kdb.LayerInfo
+        voltage_flavor_extra_mark_present: bool
 
         def __init__(self) -> None:
             super().__init__()
@@ -82,8 +98,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "contacts_per_side_ns",
                 self.TypeInt,
                 "Tap contacts on the N/S (top/bottom) sides, spaced along "
-                "inner_width_um -- 0 (default) inherits contacts_per_side, "
-                "so existing single-scalar callers are unaffected",
+                "inner_width_um -- 0 (default) inherits contacts_per_side",
                 default=0,
             )
             self.param(
@@ -115,41 +130,21 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 default=0.0,
             )
             self.param(
+                "gap_contact_enclosure_um",
+                self.TypeDouble,
+                "Harness-resolved minimum Comp enclosure of contacts at the cut",
+                default=0.0,
+            )
+            self.param(
                 "add_well",
                 self.TypeBoolean,
                 "Enclose the ring in a well tie when the resolved PDK checks one",
                 default=True,
             )
-            self.param(
-                "tap_layer",
-                self.TypeLayer,
-                "Substrate/well tap drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_layer",
-                self.TypeLayer,
-                "Well drawing layer (only used when well_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_present",
-                self.TypeBoolean,
-                "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
-                default=False,
-            )
+            declare_guard_ring_voltage_flavor_params(self, kdb)
+            declare_tap_and_well_layers(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
+            declare_well_present(self)
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
@@ -173,33 +168,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_present)",
                 default=0.0,
             )
-            self.param(
-                "ring_well_margin_um",
-                self.TypeDouble,
-                "Harness-resolved nwell enclosure of the n-tap guard ring "
-                "(see _PDK_RING_WELL_MARGIN_UM)",
-                default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
-            self.param(
-                "mfg_grid_um",
-                self.TypeDouble,
-                "Manufacturing grid (um) every cut on contact_layer is "
-                "snapped onto (issue #2648) -- 0.0 leaves cut positions "
-                "unchanged",
-                default=0.0,
-            )
+            declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
 
         def display_text_impl(self) -> str:
             return f"guard_ring({self.inner_width_um}x{self.inner_height_um})"
@@ -219,6 +188,10 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.ring_gap_side,
                 self.ring_gap_um,
                 self.ring_gap_offset_um,
+                gap_contact_enclosure_um=self.gap_contact_enclosure_um,
+                dbu=dbu,
+                mfg_grid_um=self.mfg_grid_um,
+                contact_fixed_size_um=self.contact_fixed_size_um,
             )
             gap_box = info["gap"]["box_um"] if info["gap"] is not None else None
             _insert_ring(
@@ -250,6 +223,10 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     dbu,
                 )
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
+                # Issue #6025: the flavour marker covers the well tie, so a
+                # deck rule needing the whole well inside it (sky130 nwell.9)
+                # holds for a ring abutting a flavour-marked device.
+                _draw_voltage_flavor_marks(self, dbu, well_box)
             if self.ring_implant_present:
                 # Tracks the tap ring, extended `ring_implant_margin_um`
                 # past every one of its edges (issue #2369's NP.5b/PP.5b

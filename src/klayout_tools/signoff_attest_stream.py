@@ -29,13 +29,19 @@ from .signoff_attest import (
     AttestationError,
     _audit_command_checks,
     _command_check,
-    _drift_result,
     _load_committed_attestation,
     _read_inventory,
     _self_check,
     _skipped_check,
     _validate_header,
-    _validated_command_checks,
+)
+from .signoff_attest_drift import drift_result
+from .signoff_attest_env import klt_shim_scope
+from .signoff_attest_item2_inputs import (
+    bound_input,
+    input_checks,
+    validated_checks,
+    validated_inputs,
 )
 
 #: ``--hash-kind`` values a stream attestation's regeneration claim accepts.
@@ -206,10 +212,15 @@ def _input_binding(
 def _inventory_checks(
     inventory_path: str,
     absolute: str,
+    stream_rels: Sequence[str],
     committed_checks: Sequence[Mapping[str, Any]] | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Run the item-2 inventory's declared checks; return them with the
-    ``attestation.inventory`` block."""
+    *,
+    hash_kind: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Run the item-2 inventory's declarations; return ``(input checks, audit
+    command checks, attestation.inventory block)``. The input checks are the
+    hash-pinned ``role: "input"`` pins of ``inputs`` (issue #5724); empty when
+    the inventory declares none."""
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
@@ -220,7 +231,14 @@ def _inventory_checks(
             "repository as the stream"
         )
     _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
-    specs = _validated_command_checks(inventory, root, STREAM_ATTESTABLE_ITEM)
+    inputs = validated_inputs(inventory, root, stream_rels)
+    if inputs and hash_kind == _HASH_KIND_GEOMETRY:
+        raise AttestationError(
+            "--hash-kind geometry cannot be used with an inventory set binding. "
+            "Use --hash-kind bytes with the set digest or remove 'inputs' "
+            "from the inventory"
+        )
+    specs = validated_checks(inventory, root, inputs)
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         if committed_checks is not None and spec.get("local_only"):
@@ -235,7 +253,7 @@ def _inventory_checks(
         "content_hash": inventory_hash,
         "schema_version": inventory["schema_version"],
     }
-    return _audit_command_checks(specs, command), block
+    return input_checks(root, inputs), _audit_command_checks(specs, command), block
 
 
 def build_stream_attestation(
@@ -243,7 +261,7 @@ def build_stream_attestation(
     *,
     generator: str | None = None,
     regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
+    hash_kind: str | None = None,
     inventory_path: str | None = None,
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -254,16 +272,25 @@ def build_stream_attestation(
     ``generator`` and ``regenerated_hash`` must be given together; they
     populate ``provenance.regeneration`` exactly as the grader reads it
     (:func:`~.signoff._regeneration_claim`). The generator is echoed, never
-    run. Raises :class:`AttestationError` for a missing, symlinked or
-    non-repository stream or a malformed regeneration claim.
+    run. ``hash_kind`` defaults to ``"bytes"`` here rather than at the call
+    boundary, so an absent ``--hash-kind`` stays distinguishable from an
+    explicit ``--hash-kind bytes`` for :func:`check_stream_attestation`
+    (issue #5572). Raises :class:`AttestationError` for a missing, symlinked
+    or non-repository stream or a malformed regeneration claim.
 
     ``inventory_path`` (issue #4767) is an optional item-2 inventory declaring
     ``checks`` -- the user's own geometric / net-width checkers, run as item-10
-    style commands (``role: "audit"``) after the three built-in checks. The
-    stream is not an inventory field: a command names it in its own ``argv``.
+    style commands (``role: "audit"``) after the three built-in checks -- and/or
+    ``inputs`` (issue #5724): the generator's input files, pinned by hash as
+    ``role: "input"`` checks and folded into the set-bound
+    ``provenance.input.paths`` so editing one grades the item stale. This set
+    binding requires ``hash_kind="bytes"``. Audit commands can name the stream
+    in their own ``argv``.
     ``committed_checks`` is passed only by :func:`check_stream_attestation`
     (``local_only`` commands skip). Without an inventory the envelope is
     unchanged."""
+    if hash_kind is None:
+        hash_kind = _HASH_KIND_BYTES
     _validate_regeneration_claim(generator, regenerated_hash, hash_kind)
     stream_paths = [stream_path] if isinstance(stream_path, str) else list(stream_path)
     if not stream_paths:
@@ -282,19 +309,32 @@ def build_stream_attestation(
         absolute, stream_rel = streams[0][1], streams[0][2]
     checks = _member_checks(streams, multi)
     inventory_block: dict[str, Any] | None = None
+    declared_inputs: list[dict[str, Any]] = []
     if inventory_path is not None:
-        extra, inventory_block = _inventory_checks(
-            inventory_path, absolute, committed_checks
-        )
-        checks.extend(extra)
+        with klt_shim_scope():
+            declared_inputs, audit, inventory_block = _inventory_checks(
+                inventory_path,
+                absolute,
+                [s[2] for s in streams],
+                committed_checks,
+                hash_kind=hash_kind,
+            )
+        checks.extend(declared_inputs)
+        checks.extend(audit)
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
+    if declared_inputs:
+        input_binding, stream_hash = bound_input(
+            [(rel, h) for _g, _a, rel, h in streams], declared_inputs
+        )
+    else:
+        input_binding = _input_binding(streams, multi, stream_hash)
     provenance: dict[str, Any] = {
         "klt_version": build_version(),
         "klayout_version": klayout_version(),
         "pdk": None,
         "deck": None,
-        "input": _input_binding(streams, multi, stream_hash),
+        "input": input_binding,
     }
     if generator is not None:
         regeneration: dict[str, Any] = {
@@ -329,19 +369,77 @@ def build_stream_attestation(
     return envelope
 
 
+def _adopted_regeneration_claim(
+    committed: Mapping[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """The committed ``provenance.regeneration`` claim as ``(generator,
+    regenerated_hash, hash_kind)``, for a ``--check`` that passed none of the
+    three flags (issue #5572).
+
+    ``provenance.regeneration`` is part of what ``--check`` compares, but
+    :func:`build_stream_attestation` only ever writes it from its arguments --
+    so without this a flag-less check builds a claim-less fresh envelope and
+    reports drift on an envelope that is actually fresh. Re-checking "what was
+    claimed" means reading the claim back out of the one place it is already
+    committed. ``(None, None, None)`` when there is no claim, so a claim-less
+    envelope checks exactly as it did before.
+
+    Whether the claim is *true* is not decided here and never was: the grader
+    compares ``regenerated_hash`` against the bound stream
+    (:func:`~.signoff._regeneration_claim`, ``stale_artifact``). This only
+    refuses a claim too malformed to re-attest from, so a bad committed block
+    can never read as ``status: "match"``."""
+    provenance = committed.get("provenance")
+    if not isinstance(provenance, Mapping):
+        return None, None, None
+    claim = provenance.get("regeneration")
+    if claim is None:
+        return None, None, None
+    if not isinstance(claim, Mapping):
+        raise AttestationError(
+            "committed provenance.regeneration must be an object holding the "
+            "regeneration claim; got "
+            f"{type(claim).__name__} -- re-attest the envelope"
+        )
+    adopted: list[str] = []
+    for field, value in (
+        ("generator", claim.get("generator")),
+        ("regenerated_hash", claim.get("regenerated_hash")),
+        ("hash_kind", claim.get("hash_kind", _HASH_KIND_BYTES)),
+    ):
+        if not isinstance(value, str):
+            raise AttestationError(
+                f"committed provenance.regeneration.{field} must be a string; "
+                f"got {type(value).__name__} -- re-attest the envelope, or pass "
+                "--generator/--regenerated-hash to check against explicit values"
+            )
+        adopted.append(value)
+    return adopted[0], adopted[1], adopted[2]
+
+
 def check_stream_attestation(
     stream_path: str | Sequence[str],
     committed_path: str,
     *,
     generator: str | None = None,
     regenerated_hash: str | None = None,
-    hash_kind: str = _HASH_KIND_BYTES,
+    hash_kind: str | None = None,
     inventory_path: str | None = None,
 ) -> dict[str, Any]:
     """``klt signoff --attest 2 --input STREAM --check COMMITTED``: re-attest
     and diff against the committed envelope, writing nothing. Same result
-    shape as :func:`check_attestation`."""
+    shape as :func:`check_attestation`.
+
+    With none of ``generator`` / ``regenerated_hash`` / ``hash_kind`` given,
+    the committed ``provenance.regeneration`` claim is adopted as recorded
+    (:func:`_adopted_regeneration_claim`), so a bare ``--check`` re-checks
+    what was attested instead of requiring the claim to be retyped on the
+    command line (issue #5572). Given any of the three, the fresh envelope is
+    built from the arguments alone exactly as before, which makes passing
+    them an explicit cross-check of the committed claim."""
     committed = _load_committed_attestation(committed_path)
+    if generator is None and regenerated_hash is None and hash_kind is None:
+        generator, regenerated_hash, hash_kind = _adopted_regeneration_claim(committed)
     committed_checks = (committed.get("attestation") or {}).get("checks")
     fresh = build_stream_attestation(
         stream_path,
@@ -351,4 +449,4 @@ def check_stream_attestation(
         inventory_path=inventory_path,
         committed_checks=committed_checks if isinstance(committed_checks, list) else [],
     )
-    return _drift_result(committed_path, committed, fresh)
+    return drift_result(committed_path, committed, fresh)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
+    _REQUIRED_METRICS,
     AttestationError,
     attach_output_tails,
     build_attestation,
@@ -196,6 +198,58 @@ def test_digital_non_numeric_metric_field_fails(tmp_path):
     assert _failed(envelope) == [("metric", "power")]
 
 
+def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
+    repo = _repo(tmp_path)
+    payload = json.dumps(
+        {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+    )
+    for corner in ("tt", "ss"):
+        (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
+            gzip.compress(payload.encode())
+        )
+    inventory = _digital_inventory()
+    inventory["citations"] = {
+        "gain": ["evidence/sim_tt.json.gz"],
+        "bandwidth": ["evidence/sim_tt.json.gz", "evidence/sim_ss.json.gz"],
+    }
+    inventory["envelope_checks"] = {
+        "evidence/sim_tt.json.gz": _PASS,
+        "evidence/sim_ss.json.gz": _PASS,
+    }
+    inventory["metrics"] = {
+        corner: {
+            name: {
+                "envelope": f"evidence/sim_{corner}.json.gz",
+                "field": f"result.{name}",
+            }
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "1e999"])
+def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({"status": "pass", "result": {"fmax": 0}}).replace(
+            '"fmax": 0', f'"fmax": {literal}'
+        )
+    )
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "fail"
+    assert _failed(envelope) == [("metric", name) for name in _REQUIRED_METRICS]
+
+
 def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
     repo = _repo(tmp_path)
     inventory = _digital_inventory()
@@ -363,3 +417,53 @@ def test_text_line_per_check_kind():
     )
     with pytest.raises(ValueError):
         attestation_check_line({"check": "bogus", "passed": True})
+
+
+# --------------------------------------------------------------------------- #
+# `--attest --check` drift names the check, not only its list index
+# (issue #5460). Item 8 is the shape with two identity keys: a metric check is
+# one per corner x metric, so the corner alone would not name it.
+# --------------------------------------------------------------------------- #
+
+
+def _committed_item8(repo: Path, inventory: dict) -> str:
+    committed = repo / "evidence" / "item8.json"
+    committed.write_text(render_envelope(_attest(repo, inventory)))
+    return str(committed)
+
+
+def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    committed = _committed_item8(repo, inventory)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+    )
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
+    assert value["check"] == {"role": "digital", "corner": "tt", "metric": "fmax"}
+    assert (value["committed"], value["fresh"]) == (100, 120)
+    # The evidence file's own presence check names the path that moved.
+    (hashed,) = [
+        e
+        for e in result["drift"]
+        if e["field"].startswith("attestation.checks.")
+        and e["field"].endswith(".content_hash")
+    ]
+    assert hashed["check"] == {"role": "evidence", "path": "evidence/sim_tt.json"}
+
+
+def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    committed = _committed_item8(repo, inventory)
+    inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
+    (repo / "inventory.json").write_text(json.dumps(inventory))
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
+    assert rows, result["drift"]
+    assert {e["check"]["row"] for e in rows} == {"gain"}

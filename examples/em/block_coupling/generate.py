@@ -71,7 +71,10 @@ _DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _DIR.parent.parent.parent
 _DRIVER_SRC = _DIR / "geode_driver"
 
+sys.path.insert(0, str(_DIR.parent))
 sys.path.insert(0, str(_REPO_ROOT / "src"))
+from _geode_fem import geode_fem_commit, geode_fem_version  # noqa: E402
+
 from klayout_tools._provenance import sha256_file  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -181,7 +184,7 @@ def resolve_stackup(profile: PdkProfile) -> dict[str, Any]:
                             f" (height {profile.magic_height_layer})"
                         ),
                     }
-    except Exception:  # noqa: BLE001 -- any resolution failure falls back
+    except Exception:  # -- any resolution failure falls back
         pass
     bottom, thickness = profile.stackup_fallback
     return {
@@ -628,23 +631,9 @@ def run_driver(
     subprocess.run(args, cwd=geode_fem_dir, check=True)
 
 
-def geode_fem_commit(geode_fem_dir: Path) -> str:
-    out = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=geode_fem_dir,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return out.stdout.strip()
-
-
-def geode_fem_version(geode_fem_dir: Path) -> str | None:
-    text = (geode_fem_dir / "Cargo.toml").read_text(encoding="utf-8")
-    m = re.search(r'^\s*version\s*=\s*"([^"]+)"', text, re.MULTILINE)
-    return m.group(1) if m else None
-
-
+# `geode_fem_commit`/`geode_fem_version` come from the sibling
+# `examples/em/_geode_fem.py`, shared by all four EM benchmark drivers
+# (imported above).
 # --------------------------------------------------------------------------
 # PDK oracle cross-check (this repo's own curated open-PDK parasitics deck).
 # --------------------------------------------------------------------------
@@ -714,7 +703,7 @@ def build_export(
 ) -> dict[str, Any]:
     slice_ = driver_result["slice"]
     # Round to a compact-but-lossless-for-visualization precision, the same
-    # convention `examples/em/patch_antenna/generate.py`'s `_compact_mesh`
+    # convention `examples/em/_geode_fem.py`'s `_compact_mesh`
     # and `interconnect_coupling`'s own export use, to keep the committed
     # JSON a reasonable size.
     vertices = [[round(v[0], 4), round(v[1], 4), 0.0] for v in slice_["vertices_yz_um"]]

@@ -8,7 +8,7 @@ import json
 import os
 from typing import Any
 
-from . import sim_batch
+from . import _batch_common, sim_batch
 
 #: ``request.batch`` fields that steer submission only (how long to wait for
 #: spot capacity, how many jobs to keep in flight) and never change what a
@@ -198,7 +198,7 @@ def gate_partial_shard(fleet: Any, index: int, prior: dict[str, Any]) -> None:
             status = sim_batch._read_status(
                 fleet.config, job_id, sim_batch._run_subprocess
             )
-        except Exception:  # noqa: BLE001 - an unreadable status is "unknown"
+        except Exception:  # - an unreadable status is "unknown"
             status = None
         raw = status.get("state") if status else None
         state = str(raw) if raw else "unknown"
@@ -219,14 +219,16 @@ def with_unfinished(
     manifest: Any,
 ) -> dict[str, Any] | None:
     """``environment`` plus ``unfinished_shards[]`` (index order),
-    ``resumable`` and ``shard_map`` when ``--collect-partial`` left shards."""
+    ``resumable`` and ``shard_map`` when ``--collect-partial`` left shards.
+    ``shard_map`` is repo-relative when the map lies inside a git repo
+    (issue #5542)."""
     if not unfinished:
         return environment
     return {
         **(environment or {}),
         "unfinished_shards": [unfinished[i] for i in sorted(unfinished)],
         "resumable": True,
-        "shard_map": str(manifest.path),
+        "shard_map": _batch_common.repo_relative_str(manifest.path),
     }
 
 

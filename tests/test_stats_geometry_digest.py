@@ -23,7 +23,7 @@ def test_geometry_digest_equals_layout_geometry_digest(tmp_path):
     path = tmp_path / "design.gds"
     _make_layout().write(str(path))
 
-    report = stats_report(str(path))
+    report = stats_report(str(path), geometry_digest=True)
 
     assert report["geometry_digest"] == layout_geometry_digest(str(path))
     assert report["geometry_digest"].startswith("sha256:")
@@ -54,8 +54,8 @@ def test_geometry_digest_ignores_the_embedded_write_timestamp(tmp_path):
     assert with_stamp.read_bytes() != without_stamp.read_bytes()
 
     assert (
-        stats_report(str(with_stamp))["geometry_digest"]
-        == stats_report(str(without_stamp))["geometry_digest"]
+        stats_report(str(with_stamp), geometry_digest=True)["geometry_digest"]
+        == stats_report(str(without_stamp), geometry_digest=True)["geometry_digest"]
     )
 
 
@@ -69,15 +69,15 @@ def test_geometry_digest_is_format_independent(tmp_path):
 
     assert gds.read_bytes() != oas.read_bytes()
     assert (
-        stats_report(str(gds))["geometry_digest"]
-        == stats_report(str(oas))["geometry_digest"]
+        stats_report(str(gds), geometry_digest=True)["geometry_digest"]
+        == stats_report(str(oas), geometry_digest=True)["geometry_digest"]
     )
 
 
 def test_geometry_digest_changes_when_geometry_changes(tmp_path):
     path = tmp_path / "base.gds"
     _make_layout().write(str(path))
-    baseline = stats_report(str(path))["geometry_digest"]
+    baseline = stats_report(str(path), geometry_digest=True)["geometry_digest"]
 
     changed_path = tmp_path / "changed.gds"
     changed = _make_layout()
@@ -86,7 +86,10 @@ def test_geometry_digest_changes_when_geometry_changes(tmp_path):
     )
     changed.write(str(changed_path))
 
-    assert stats_report(str(changed_path))["geometry_digest"] != baseline
+    assert (
+        stats_report(str(changed_path), geometry_digest=True)["geometry_digest"]
+        != baseline
+    )
 
 
 def test_geometry_digest_is_whole_stream_not_scoped_by_top(tmp_path):
@@ -96,8 +99,8 @@ def test_geometry_digest_is_whole_stream_not_scoped_by_top(tmp_path):
     path = tmp_path / "multi.oas"
     _make_multi_top_layout().write(str(path))
 
-    scoped = stats_report(str(path), top="BLOCK_A")
-    other = stats_report(str(path), top="BLOCK_B")
+    scoped = stats_report(str(path), top="BLOCK_A", geometry_digest=True)
+    other = stats_report(str(path), top="BLOCK_B", geometry_digest=True)
 
     assert scoped["geometry_digest"] == other["geometry_digest"]
 
@@ -106,7 +109,7 @@ def test_geometry_digest_reported_for_empty_layout(tmp_path):
     path = tmp_path / "empty.gds"
     kdb.Layout().write(str(path))
 
-    report = stats_report(str(path))
+    report = stats_report(str(path), geometry_digest=True)
 
     assert report["top_cell"] is None
     assert report["geometry_digest"].startswith("sha256:")
@@ -115,9 +118,9 @@ def test_geometry_digest_reported_for_empty_layout(tmp_path):
 def test_geometry_digest_in_text_output(tmp_path, capsys):
     path = tmp_path / "design.gds"
     _make_layout().write(str(path))
-    expected = stats_report(str(path))["geometry_digest"]
+    expected = stats_report(str(path), geometry_digest=True)["geometry_digest"]
 
-    assert main(["stats", str(path)]) == 0
+    assert main(["stats", str(path), "--geometry-digest"]) == 0
 
     assert f"geometry_digest: {expected}" in capsys.readouterr().out
 
@@ -127,7 +130,7 @@ def test_schema_rejects_a_non_digest_geometry_digest(tmp_path, capsys):
     against it catches a raw hex `canonical_hash` substituted in."""
     path = tmp_path / "design.gds"
     _make_layout().write(str(path))
-    assert main(["stats", str(path), "--format", "json"]) == 0
+    assert main(["stats", str(path), "--geometry-digest", "--format", "json"]) == 0
     data = json.loads(capsys.readouterr().out)
 
     jsonschema.validate(data, _SCHEMA, cls=jsonschema.Draft202012Validator)
@@ -137,3 +140,29 @@ def test_schema_rejects_a_non_digest_geometry_digest(tmp_path, capsys):
     data["geometry_digest"] = "2e572c0e" + "0" * 56
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(data, _SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def test_geometry_digest_is_null_by_default_and_not_computed(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #5583: the digest is opt-in; without the flag it is `null` and
+    `layout_geometry_digest` is never called."""
+    import klayout_tools.stats as stats_mod
+
+    path = tmp_path / "design.gds"
+    _make_layout().write(str(path))
+
+    def _boom(_path):
+        raise AssertionError("layout_geometry_digest must not run by default")
+
+    monkeypatch.setattr(stats_mod, "layout_geometry_digest", _boom)
+
+    assert stats_report(str(path))["geometry_digest"] is None
+
+    assert main(["stats", str(path), "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["geometry_digest"] is None
+    jsonschema.validate(payload, _SCHEMA)
+
+    assert main(["stats", str(path)]) == 0
+    assert "geometry_digest: -" in capsys.readouterr().out

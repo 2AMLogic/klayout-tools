@@ -15,10 +15,8 @@ import os
 from typing import Any
 
 from .functional_verification_mutation_proposals import (
+    _load_request_and_proposals,
     _resolve_mutation_proposals,
-    _validate_mutation_scope,
-    _validate_proposal_indices,
-    load_mutation_proposals,
 )
 from .functional_verification_mutation_variant import (
     _first_new_failure,
@@ -57,8 +55,56 @@ def _write_mutant_combined_log(
         pass
 
 
+def _reject_from_synthesize_with_mutations(options: Any) -> None:
+    """The fifth sibling of the trace/coverage/initial_state/sdf refusals
+    (issue #5684): the baseline below goes through
+    ``_fv.run_functional_verification`` and so resolves netlist +
+    ``request.sources`` via ``options.from_synthesize``, while this
+    module's own per-mutant builds resolve ``request.sources`` alone --
+    every mutant would elaborate without the DUT the baseline tested, a
+    build that diverges from the baseline's own in a way nothing here
+    would catch. Refusing up front also keeps the base contract's "sources
+    may be empty only with from_synthesize" rule from contradicting this
+    path's own non-empty-sources requirement."""
+    if _fv.has_from_synthesize(options):
+        raise _fv.FunctionalVerificationError(
+            "options.from_synthesize cannot currently be combined with "
+            "--mutations -- not yet designed (the baseline elaborates the "
+            "synthesize netlist while per-mutant builds do not)"
+        )
+
+
+def _reject_pdk_with_mutations(
+    request_doc: dict[str, Any], pdk_variant: str | None, pdk_root: str | None
+) -> None:
+    """Sixth sibling of the trace/coverage/initial_state/sdf/
+    from_synthesize refusals (issue #5782): the baseline below resolves
+    ``request.pdk``'s cell models and derives their ``FUNCTIONAL`` define,
+    while this module's own per-mutant builds resolve ``request.sources``
+    alone -- every mutant would elaborate without the std-cell models the
+    baseline tested, the same divergence the from_synthesize refusal above
+    names."""
+    if (
+        request_doc.get("pdk") is not None
+        or pdk_variant is not None
+        or pdk_root is not None
+    ):
+        raise _fv.FunctionalVerificationError(
+            "a pdk input (request.pdk / --pdk / --pdk-root) cannot currently "
+            "be combined with --mutations -- not yet designed (the baseline "
+            "elaborates the resolved cell models while per-mutant builds do "
+            "not)"
+        )
+
+
 def run_functional_verification_with_mutations(
-    request: str, proposals_path: str, output_dir: str | None = None
+    request: str,
+    proposals_path: str,
+    output_dir: str | None = None,
+    base_dir: str | None = None,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt functional-verification --mutations`` end to end (issue
     #1592, spike section 3): the unmodified baseline run from
@@ -67,6 +113,13 @@ def run_functional_verification_with_mutations(
     per resolved proposal in ``proposals_path`` (spike §1a's ported seam),
     classified ``killed``/``survived``/``rejected`` (spike §1a/§3c) into the
     additive ``mutation_testing`` response block (spike §3c).
+
+    ``base_dir`` forwards into every request-relative resolution and the
+    baseline run (issue #5673) -- the same override
+    :func:`run_functional_verification` accepts, which on this path is the
+    only way to combine an archived request with mutation testing (the
+    stdin workaround is unavailable: ``--mutations`` consumes stdin before
+    the baseline re-reads the request).
 
     Raises :class:`FunctionalVerificationError` (CLI exit 1) for every
     whole-run failure mode: anything the base contract already raises for
@@ -88,18 +141,13 @@ def run_functional_verification_with_mutations(
     module's own docstring's "Exit codes" table replicated in
     ``docs/cli/functional-verification.md``.
     """
-    # Cheap, whole-document validation first -- before the (expensive)
-    # baseline ever runs. Order matters: a malformed proposals document or
-    # an out-of-scope entry should never cost a full build+test cycle to
-    # discover.
-    scope, proposal_records = load_mutation_proposals(proposals_path)
-    _validate_proposal_indices(proposal_records)
-
-    request_doc, request_dir = _fv.load_request_arg(request)
-    _fv._reject_verilog_top_mutations(request_doc.get("testbench"))
-    raw_sources = request_doc.get("sources")
-    _validate_mutation_scope(
-        scope, raw_sources if isinstance(raw_sources, list) else []
+    # Cheap, whole-document validation of both input documents first -- before
+    # the (expensive) baseline ever runs; see
+    # :func:`.functional_verification_mutation_proposals._load_request_and_proposals`
+    # (issue #5679: one run names every failure, in both documents at once).
+    # ``base_dir`` re-anchors the request's relative paths (issue #5673).
+    request_doc, request_dir, scope, proposal_records = _load_request_and_proposals(
+        request, proposals_path, base_dir=base_dir
     )
 
     engine = request_doc.get("engine", _fv.DEFAULT_ENGINE)
@@ -158,8 +206,10 @@ def run_functional_verification_with_mutations(
             "not yet designed (docs/design/mutation-testing-spike.md, "
             "'Open questions')"
         )
+    _reject_from_synthesize_with_mutations(request_doc.get("options"))
+    _reject_pdk_with_mutations(request_doc, pdk_variant, pdk_root)
 
-    sources = _fv._resolve_sources(request_doc["sources"], request_dir)
+    sources = _fv._resolve_sources(request_doc.get("sources"), request_dir)
     hdl_toplevel = request_doc["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
         raise _fv.FunctionalVerificationError(
@@ -188,7 +238,13 @@ def run_functional_verification_with_mutations(
     # The baseline-must-pass gate (spike §3d): the exact same request the
     # caller already used for an ordinary (non-mutation) run, reused
     # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = _fv.run_functional_verification(request, output_dir)
+    baseline = _fv.run_functional_verification(
+        request,
+        output_dir,
+        base_dir=base_dir,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+    )
     if baseline["status"] != "pass":
         failing_names = ", ".join(
             test["name"] for test in baseline["tests"] if test["status"] == "failed"

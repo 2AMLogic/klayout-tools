@@ -62,8 +62,9 @@ from functools import partial
 from typing import Any
 
 from . import liberty_writer, sim
-from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._paths import _load_request_json, _resolve_relative
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -102,8 +103,7 @@ from .characterize_sequential import (
 from .characterize_split import resolve_split_grid, run_cell_legs
 from .env_provenance import repo_relative_path
 
-#: Version of this command's JSON response shape (per-command, per
-#: ``docs/json-contract.md``).
+#: Version of this command's JSON response shape (per ``docs/json-contract.md``).
 SCHEMA_VERSION = 1
 
 #: Name of the native extension whose Liberty reader the round-trip check
@@ -740,9 +740,8 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     """Return ``subckt``'s terminal names, in declaration order.
 
     The order is load-bearing: a SPICE ``X`` instance line is positional, so
-    the generated testbench binds nodes by the position each terminal
-    appears in here, never by the order the request happens to list pins in.
-    """
+    the generated testbench binds nodes by the position each terminal appears
+    in here, never by the order the request happens to list pins in."""
     try:
         with open(netlist_path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
@@ -750,7 +749,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
     for line in fold_spice_continuations(lines):
-        match = _SUBCKT_RE.match(line.split("$")[0])
+        match = _SUBCKT_RE.match(strip_spice_inline_comment(line))
         if match is None:
             continue
         if match.group(1) != subckt:
@@ -2131,6 +2130,7 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
             "runtime_s": corner_entry["runtime_s"],
             "engine": environment.get("engine"),
             "engine_version": environment.get("engine_version"),
+            "engine_build": environment.get("engine_build"),
             "window": {
                 "settle_ns": window["rise_start_ns"],
                 "tran_step_ns": window["step_ns"],
@@ -2209,15 +2209,15 @@ def _build_response(
         "leakage": single["leakage"] if single else None,
         "cells": entries,
         "liberty": {
-            # Plain absolute string, not the `{path, scope}` envelope: this is
-            # a *generated artifact a caller chains onward* (into `klt sta`'s
-            # `pdk.liberty`, say), the same role `klt extract`'s
-            # `netlist_path` and `klt sim`'s `corners[].artifacts.*` fill --
-            # see docs/json-contract.md's "Path fields: envelope vs.
-            # plain string" table, which lists both shapes and which fields
-            # use each. `cell.netlist` above is an *input* and does use the
-            # envelope, matching `klt sim`'s own `netlist`.
+            # Plain absolute string, not the `{path, scope}` envelope: this
+            # is a *generated artifact a caller chains onward*, the same
+            # role `klt extract`'s `netlist_path` and `klt sim`'s
+            # `corners[].artifacts.*` fill -- see docs/json-contract.md's
+            # "Path fields: envelope vs. plain string" table. `cell.netlist`
+            # above is an *input* and does use the envelope, matching
+            # `klt sim`'s own `netlist`.
             "path": emitted_path,
+            "sha256": sha256_file(emitted_path),
             "library_name": library.name,
             "cell_count": len(library.cells),
             "time_unit": library.time_unit,

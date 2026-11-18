@@ -135,6 +135,31 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--device-param",
+        dest="device_params",
+        action="append",
+        default=None,
+        metavar="CLASS:PARAM=NAME[:SUFFIX]",
+        help=(
+            "with --engine klayout-runset, carry the measured KLayout "
+            "parameter PARAM of device CLASS onto every `X` call of that "
+            "class as `NAME=<value><SUFFIX>` (issue #5513), repeatable, e.g. "
+            "`--device-param sg13_hv_nmos:W=w:u`. <value> is the extractor's "
+            "measured value written unscaled (12 significant digits), in the "
+            "micron units devices[].params reports; SUFFIX is a SPICE scale suffix "
+            "(letters only) appended verbatim, empty if omitted -- `klt` "
+            "never guesses a PDK's unit or parameter spelling, so you state "
+            "both. Without it each call is parameter-free and the PDK "
+            "subcircuit's own defaults apply (the default, byte-identical to "
+            "before this flag existed). PARAM is case-sensitive and must be "
+            "one the class defines (an unknown one is an error, exit 1); "
+            "parameters left undeclared are still named in warnings[]. A "
+            "clean error (exit 1) under any other engine. The declarations "
+            "are echoed in the JSON response's `device_params` field. See "
+            "docs/cli/extract.md, 'Engine'."
+        ),
+    )
+    extract_parser.add_argument(
         "--probe",
         dest="probes",
         action="append",
@@ -174,6 +199,28 @@ def add_extract_args_part3(extract_parser: argparse.ArgumentParser) -> None:
             "with no `fixed_offset_ohm`-opted-in resistor class (everything "
             "except sky130's res_high_po today) is unaffected either way. "
             "See docs/cli/extract.md."
+        ),
+    )
+    extract_parser.add_argument(
+        "--omit-dead-metal",
+        dest="omit_dead_metal",
+        action="store_true",
+        help=(
+            "emit the JSON response's `dead_metal` as an empty list and set "
+            "`dead_metal_omitted: true` (issue #5545), keeping only the "
+            "always-present per-layer `dead_metal_summary` "
+            "{clusters, shapes, area_um2, by_layer[]}. Use this when the "
+            "report is committed as a provenance record: under "
+            "--abstract-cells every abstracted cell's internal wiring joins "
+            "no extracted net, so `dead_metal[]` scales with the instance "
+            "count and can dominate the response. Detection is unchanged -- "
+            "the summary and the aggregate dead-metal warning carry the same "
+            "counts either way, and only the per-cluster rows are dropped. "
+            "Off by default: `dead_metal[]` and `warnings[]` are "
+            "byte-identical to before this flag existed. `--check <report> "
+            "--rerun` replays the flag from the committed "
+            "`dead_metal_omitted`, so a report committed with it shows no "
+            "drift. See docs/cli/extract.md's 'Dead metal' section."
         ),
     )
     extract_parser.add_argument(

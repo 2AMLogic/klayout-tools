@@ -7,14 +7,13 @@
   "deck": "sky130",
   "dbu_um": 0.001,
   "status": "violations",
-  "violation_count": 6,
+  "violation_count": 5,
   "rule_counts": {
     "diff.enclosing.licon.1": 4,
-    "li1.enclosing.licon1.1": 1,
     "poly.width.1": 1
   },
   "metrics": {
-    "drc__error__count": 6
+    "drc__error__count": 5
   },
   "violations": [
     {
@@ -150,39 +149,6 @@
       ]
     },
     {
-      "rule": "li1.enclosing.licon1.1",
-      "description": "li1 (local interconnect) must cover licon1 (approximates the official two-adjacent-edges enclosure rule as its zero-margin floor)",
-      "check": "enclosing",
-      "layer": "li1.drawing",
-      "cell": "TOP",
-      "source_cell": null,
-      "source_path": null,
-      "bbox": {
-        "left": 3010,
-        "bottom": 10,
-        "right": 3190,
-        "top": 190
-      },
-      "polygon": [
-        [
-          3010,
-          10
-        ],
-        [
-          3010,
-          190
-        ],
-        [
-          3190,
-          190
-        ],
-        [
-          3190,
-          10
-        ]
-      ]
-    },
-    {
       "rule": "poly.width.1",
       "description": "minimum poly width",
       "check": "width",
@@ -264,6 +230,7 @@
       "65/20",
       "66/20",
       "66/44",
+      "67/20",
       "68/20"
     ],
     "layers_in_stream_without_rules": [],
@@ -273,7 +240,11 @@
       "diff.ongrid.1",
       "diff.space.1",
       "diff.width.1",
+      "li1.angle.1",
       "li1.enclosing.licon1.1",
+      "li1.ongrid.1",
+      "li1.space.1",
+      "li1.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
@@ -310,10 +281,6 @@
       "hvtp.ongrid.1",
       "hvtr.angle.1",
       "hvtr.ongrid.1",
-      "li1.angle.1",
-      "li1.ongrid.1",
-      "li1.space.1",
-      "li1.width.1",
       "lvtn.angle.1",
       "lvtn.ongrid.1",
       "mcon.angle.1",
@@ -809,7 +776,11 @@
       "diff.ongrid.1",
       "diff.space.1",
       "diff.width.1",
+      "li1.angle.1",
       "li1.enclosing.licon1.1",
+      "li1.ongrid.1",
+      "li1.space.1",
+      "li1.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
@@ -902,22 +873,6 @@
       },
       {
         "id": "hvtr.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.angle.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.space.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.width.1",
         "reason": "no_applicable_geometry"
       },
       {
