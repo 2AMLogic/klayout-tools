@@ -1174,7 +1174,7 @@ def _mos_unit_strapped_layout(
     drawn bottom to top on the single role pair the phase-2 generators have.
     There is no second routing metal to cross on, so the two S/D rails go on
     *opposite* sides of the diffusion and the gate stripes cross **under**
-    the drain rail on ``poly`` to reach their comb -- legal on both curated
+    the drain rail on ``poly`` to reach their comb -- legal on all curated
     decks, and no contact there means no connection::
 
         y = 0                    source rail  (metal, full width)
