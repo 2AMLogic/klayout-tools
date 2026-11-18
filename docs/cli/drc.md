@@ -770,8 +770,11 @@ exits `0` and writes a well-formed, *empty* `.lyrdb` report — a false
 `"status": "clean"` verdict indistinguishable from a genuinely clean layout.
 `--deck-var` is opt-in and additive: omitting it leaves the zero-config
 `input`/`report`-only invocation unchanged, so a self-contained deck (e.g.
-sky130A's `sky130A.lydrc`) needs no new flag. A value missing the `=`
-separator is a clean error (exit 1). `--deck-var` is a klayout-engine-only
+sky130A's `sky130A.lydrc`) needs no new flag. An entry missing the `=`
+separator, or with a blank name (`=v`), is a clean error (exit 1); whitespace
+around the name and value is stripped, a later repeat of a name wins, and only
+the first `=` splits (issue #6738 -- the same parser `klt lvs` and `klt
+extract` use). `--deck-var` is a klayout-engine-only
 flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
