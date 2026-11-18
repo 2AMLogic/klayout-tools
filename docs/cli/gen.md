@@ -1704,13 +1704,23 @@ opening through the ring's band so a route can pass through it instead:
   violation in `klt drc` after the fact. The window's extent across the
   side is the ring band's full thickness (a strap crossing the ring is
   constrained only along it, so its footprint extends past the window
-  across the side by construction), and the field is `null` when the
-  along-side extent would be ≤ 0 — the opening is narrower than two
-  spacings, so no same-layer-legal strap fits. The inset is looked up from
-  the same curated deck `klt drc` judges with (e.g. sky130's `li1.space.1`
-  0.17 µm, gf180mcu's `metal1.space.1` 0.23 µm); when the family or a
-  spacing rule for the layer cannot be resolved, the window degrades to the
-  opening's own box (inset 0). The window stays in that cell-own frame even
+  across the side by construction). The field is `null` when the
+  along-side extent is narrower than the layer's minimum width (or ≤ 0
+  after the spacing inset) — no same-layer-legal strap fits, because a
+  strap filling the window is only as wide as the window's along-side
+  extent. So a non-null window means a strap at least the layer's minimum
+  width wide fits: a window of exactly the minimum width still reports
+  (issue #6425). The inset and the width floor are looked up from the same
+  curated deck `klt drc` judges with (e.g. sky130's `li1.space.1` and
+  `li1.width.1`, both 0.17 µm, so an opening reports a window only from
+  0.51 µm up; gf180mcu's `metal1.space.1` and `metal1.width.1`, both
+  0.23 µm, from 0.69 µm up — a standalone GF180MCU `guard_ring` already
+  needs `ring_gap_um` ≥ 0.72 µm, so its reported windows clear that floor);
+  when the family or a spacing rule for the
+  layer cannot be resolved, the window degrades to the opening's own box
+  (inset 0), and when the deck has no width rule for the layer no width
+  floor applies, so the field is then `null` only when the extent is ≤ 0.
+  The window stays in that cell-own frame even
   when the report is fed to [`klt gen-compose`](gen-compose.md): a compose
   consumer flips the box by the block's `blocks[].orientation` (an
   axis-aligned flip, re-sorting the corners into min/max) and then adds its
@@ -2558,7 +2568,7 @@ family/variant split the resolver doesn't have. The response's
 | `x_um`/`y_um` | number | Port location in micrometres, relative to the cell origin. |
 | `width_um` | number | Port width. |
 | `direction_deg` | number | Outward-facing direction in degrees (`0`/`90`/`180`/`270`). |
-| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the cell's own origin-relative frame (like the port's own `x_um`/`y_um`; a `gen-compose` consumer flips it by the block's `orientation` and adds its `offset_um` before comparing against composed coordinates), each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent would be ≤ 0 — no same-layer-legal strap fits the opening. Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck. |
+| `strap_window_um` | object \| null | `GAP_*` markers only (issue #5656; absent on every other port): `{x0, y0, x1, y1}` — the ring opening's box inset along the ring side by the resolved deck's minimum same-layer spacing for the marker's layer, in the cell's own origin-relative frame (like the port's own `x_um`/`y_um`; a `gen-compose` consumer flips it by the block's `orientation` and adds its `offset_um` before comparing against composed coordinates), each coordinate rounded to 6 decimals. A strap whose extent along the ring side stays within the window is spacing-clean against the ring metal on both sides of the opening; `null` when the along-side extent is narrower than the layer's minimum width (or ≤ 0 after the spacing inset) — no same-layer-legal strap fits the opening (issue #6425; a window of exactly the minimum width still reports). Degenerates to the opening's own box (inset 0) when no spacing rule for the layer can be resolved from the family's deck, and applies no width floor when the deck has no width rule for the layer. |
 
 #### `drc_hints` fields
 
