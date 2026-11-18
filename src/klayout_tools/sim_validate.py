@@ -16,6 +16,7 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_forms,
     sim_noise,
     sim_search,
     sim_settled,
@@ -27,7 +28,7 @@ from . import (
     sim_transfer_meas,
 )
 from ._meas_lint import check_meas_signal_position
-from .sim_case_names import validate_case_variant_names
+from .sim_case_names import validate_case_variant_names, validate_measurement_shapes
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
@@ -217,7 +218,7 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     Split into helpers so no one function carries the whole rule set's
     branch count (see ``scripts/check_complexity_baseline.py``).
     """
-    for spec in measurements_spec:
+    for spec in validate_measurement_shapes(measurements_spec):
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
     validate_case_variant_names(measurements_spec)
@@ -284,19 +285,16 @@ def _validate_rawfile_form(
 
 
 def _require_measurement_form(name: Any, has_form: bool) -> None:
-    """A ``measurements[]`` entry needs a ``name`` and one declared form."""
+    """A ``measurements[]`` entry needs a ``name`` and one declared form.
+
+    The option list is rendered from :data:`sim_forms.FORMS`, the single form
+    registry, so a newly registered form cannot ship missing from it (#6328 --
+    ``eye``/``step_resolution``/``settled`` once were)."""
     if name is None or not has_form:
+        forms = ", ".join(f"'{form}'" for form in sim_forms.FORMS)
         raise SimError(
-            "each request.measurements[] entry requires 'name' and exactly one of "
-            "'spice' (a verbatim .meas card), 'expr' (an ngspice expression evaluated "
-            "after the analysis), 'crossings' (a threshold-crossing time series), "
-            "'cycle_mean' (a mean over whole reference cycles), 'energy' (a source's "
-            "energy over a transient window), 'stress' (a node pair's worst |V| over a "
-            "transient window), 'noise' (a spot/band-integrated noise-spectrum value) "
-            "or 'transfer' (an AC return-ratio metric), 'tian' (a dual-injection AC "
-            "stability metric) or 'snm' (a butterfly static noise margin of a DC "
-            "sweep) or 'slope_band' (a local-slope-band run over a DC sweep) or "
-            "'search' (a bisection boundary over a source value)"
+            "each request.measurements[] entry requires 'name' and "
+            f"exactly one of {forms}"
         )
 
 

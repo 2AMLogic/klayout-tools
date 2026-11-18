@@ -31,13 +31,48 @@ def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mar
             "declared for it)"
         )
     floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
+    marker_floor = _moscap_marker_min_width_um(family, pair)
+    if marker_floor is not None and (floor is None or marker_floor[0] > floor[0]):
+        floor = marker_floor
     if floor is not None and params["w_um"] < floor[0]:
         raise GenError(
             f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
             f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
-            "minimum COMP width for the selected oxide)"
+            "minimum COMP width for the selected oxide or under the "
+            "MOS-capacitor marker)"
         )
     return kdb.LayerInfo(*pair)
+
+
+def _moscap_marker_min_width_um(
+    family: str, marker: tuple[int, int]
+) -> tuple[float, str] | None:
+    """``(min COMP width in um, deck rule id)`` of the family's width rule
+    scoped to ``COMP`` under the MOS-capacitor ``marker`` (gf180mcu ``DF.1c``),
+    or ``None``. Issue #6170: the channel is ``w_um`` wide, so no S/D geometry
+    can make a narrower capacitor pass this rule -- the floor is the rule's."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+    from .gen_layer_params import _PDK_ROLE_LAYERS
+
+    try:
+        rules = get_deck(family)
+        dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    active = _PDK_ROLE_LAYERS[family]["active"]
+    hits = [
+        r
+        for r in rules
+        if r.check == "width"
+        and r.layer == active
+        and not r.other_layer
+        and r.derived_layer is not None
+        and r.derived_layer.intersect_with == marker
+    ]
+    if not hits:
+        return None
+    rule = max(hits, key=lambda r: r.threshold_dbu)
+    return round(rule.threshold_dbu * dbu_um, 6), rule.id
 
 
 def check_dogbone_width(family: str, params: dict[str, Any]) -> None:

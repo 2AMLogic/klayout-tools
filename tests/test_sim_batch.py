@@ -7301,16 +7301,16 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     monkeypatch.setattr(sb, "_run_subprocess", still_failed)
     resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
 
-    # Issue #5775: the finished shard's two units are harvested from the
-    # map (reused, never re-billed); only the failed shard's two units are
-    # re-dispatched, as two one-unit shards under hosts=2.
+    # Issue #5775: the finished shard's two units are harvested (reused, never
+    # re-billed); the failed shard's two re-dispatch as one-unit shards (hosts=2).
     assert len(_launches(runner)) == launches_before + 2
     entry = resumed["requests"][0]
     assert entry["status"] == "pass"
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    assert [shard["resumed"] for shard in fleet] == [False, False]
+    # Issue #6423: harvested entry first, then dispatch order; failed shard: none.
+    assert [shard["resumed"] for shard in fleet] == [True, False, False]
     assert report["environment"]["resume"]["resumed_corners"] == 2
     assert all(c["status"] == "pass" for c in report["corners"])
     assert not manifest_path.exists()  # swept clean: nothing left to re-attach

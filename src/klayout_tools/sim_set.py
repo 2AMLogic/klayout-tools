@@ -44,7 +44,6 @@ from .sim_batch import (
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
 from .sim_set_runtime import (
-    MANIFEST_SCHEMA_VERSION,  # noqa: F401  (re-exported)
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
     _Manifest,
