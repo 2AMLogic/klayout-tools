@@ -2383,6 +2383,25 @@ command's interpreter already sees. Verified 2026-11-17 on klt 0.9.x
 `["python3", "-c", "import tomli_w"]` fails as above, and the same check with
 the absolute path of a separate venv that has `tomli_w` passes.
 
+A third option keeps the bare `python3` in `argv`: put an **exec-wrapper**
+`python3` in a directory of your own on `PATH`, mirroring the symlink-dir
+recipe consumer READMEs give for exposing a pinned `klt`. The wrapper is a
+two-line script — `#!/bin/sh`, then
+`exec /abs/path/to/venv/bin/python3 "$@"` — which re-execs the venv
+interpreter by its real path, so venv detection (it looks for `pyvenv.cfg`
+beside the executable as invoked) still finds the venv. A **symlink** to the
+venv's `python3` in that directory does not work: invoked by its symlink
+path, the interpreter finds no `pyvenv.cfg` beside that path and the check
+fails with `ModuleNotFoundError` with or without `-I` (measured 2026-11-18 on
+Linux, CPython 3.12.3: the symlinked `python3 -I -c 'import <module>'` fails,
+the same check through the wrapper passes, and the venv's own `python3 -I`
+passes). The strip stays deliberate (#4192, #5860, #5565): klt removes only
+the tool venv's own `bin` directory from `PATH`, and the wrapper directory is
+the consumer's, so it survives — putting the venv's `bin` itself on `PATH`
+changes nothing, that being the one directory stripped. The absolute
+interpreter path remains the more explicit choice: the wrapper changes what
+every bare `python3` in the inventory means.
+
 ##### Minting above the grading pin
 
 The item-2 mint path first ships in `klt` 0.9.0 (PyPI), so a consumer that
