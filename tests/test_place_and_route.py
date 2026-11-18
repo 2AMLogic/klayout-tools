@@ -4277,15 +4277,15 @@ def test_post_route_spef_not_run_before_route_stage(tmp_path, monkeypatch):
     assert report["spef_sta"] is None
 
 
-def test_asap7_cell_library_resolves_to_the_asap7_extract_deck():
-    """Issue #4559: ASAP7 is accepted at validation time; the refusal message
-    for an unknown library lists it among the supported ones."""
-    assert (
-        place_and_route._require_extract_deck_for_cell_library("asap7sc7p5t_rvt")
-        == "asap7"
-    )
+def test_cell_libraries_resolve_to_their_extract_decks():
+    """Issues #4559/#5825: ASAP7 and both gf180mcu cell families (7t and 9t)
+    are accepted at validation time; unknown libraries are refused loudly."""
+    resolve = place_and_route._require_extract_deck_for_cell_library
+    assert resolve("asap7sc7p5t_rvt") == "asap7"
+    assert resolve("gf180mcu_fd_sc_mcu7t5v0") == "gf180mcu"
+    assert resolve("gf180mcu_fd_sc_mcu9t5v0") == "gf180mcu"
     with pytest.raises(PlaceAndRouteError, match=r"supported: .*asap7sc7p5t_rvt"):
-        place_and_route._require_extract_deck_for_cell_library("nope")
+        resolve("nope")
 
 
 def test_post_route_spef_unsupported_cell_library_raises(tmp_path, monkeypatch):
@@ -6549,7 +6549,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR" in message
+    assert "$PWD, $PDK_ROOT and $TMPDIR (plus /tmp when $TMPDIR differs)" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"
@@ -8736,7 +8736,7 @@ def _skipped_via_pad_trim(variant: str) -> dict:
     }
     counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
     tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip["router_fill_violations"] = 0
+    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
     return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
