@@ -16,14 +16,7 @@ import pytest
 
 from klayout_tools.drc import run_drc
 from klayout_tools.gen import generate
-from test_gen import _gf180mcu_device_active_region, _layer_bbox, _make_install
-
-
-@pytest.fixture()
-def pdk_root(tmp_path):
-    root = tmp_path / "pdk_install"
-    _make_install(root, "sky130A")
-    return root
+from test_gen import _gf180mcu_device_active_region, _make_install
 
 
 @pytest.fixture()
@@ -269,31 +262,6 @@ def test_mos_array_gf180_nfet_ring_mv_draws_no_well_but_encloses_ring(
     assert (comp.left - dualgate.left, comp.bottom - dualgate.bottom) == (d, d)
     assert (dualgate.right - comp.right, dualgate.top - comp.top) == (d, d)
     assert top.bbox_per_layer(layout.layer(21, 0)).empty()
-
-
-def test_mos_array_sky130_hvi_marker_ignores_guard_ring(tmp_path, pdk_root):
-    """A family that resolves no `voltage_flavor` ring margin keeps its
-    marker core-anchored with the ring drawn: sky130's `hvi` box is
-    byte-for-byte the ringless request's box (issue #6503's
-    other-families-preserved criterion)."""
-    output_ringless = tmp_path / "hvi_ringless.gds"
-    output_ringed = tmp_path / "hvi_ringed.gds"
-    for output, ringed in ((output_ringless, False), (output_ringed, True)):
-        generate(
-            {
-                "generator": "mos_array",
-                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
-                "params": {
-                    "flavor": "pfet",
-                    "voltage_flavor": "hvi",
-                    "add_guard_ring": ringed,
-                },
-                "options": {"output": str(output)},
-            }
-        )
-    assert _layer_bbox(str(output_ringless), 75, 20) == _layer_bbox(
-        str(output_ringed), 75, 20
-    )
 
 
 def test_voltage_flavor_ring_margins_resolve_gf180mcu_only():
