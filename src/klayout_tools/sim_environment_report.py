@@ -32,13 +32,16 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from . import device_multiplier_lint, env_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
+from ._provenance import sha256_file
 
 __all__ = [
+    "NetlistDigests",
     "backend_environment",
     "budget_environment",
     "device_multiplier_environment",
@@ -76,6 +79,79 @@ def netlist_closure_environment(
         }
     except sim_staging.IncludeStagingError as exc:
         return {"netlist_closure_error": str(exc)}
+
+
+@dataclass(frozen=True)
+class NetlistDigests:
+    """The netlist byte digests a report cites, captured once, before the
+    sweep dispatches any corner (issue #5569).
+
+    ``environment.netlist_sha256``, the ``.include`` closure and
+    ``provenance.input.content_hash`` all pin the bytes the job was staged
+    with. Re-reading the file at report assembly -- minutes to hours after a
+    ``batch`` submit -- would let an edit in between change what the report
+    claims to pin, or crash the epilogue on a file deleted meanwhile.
+
+    ``closure`` is the :func:`netlist_closure_environment` fragment, so the
+    ``netlist_closure``/``netlist_closure_error`` disclosure is unchanged;
+    only the moment of capture moved. ``sha256`` is ``None`` when the file
+    could not be hashed at capture time.
+    """
+
+    sha256: str | None
+    closure: dict[str, Any]
+
+    @classmethod
+    def capture(
+        cls, request: dict[str, Any], netlist_path: str, *, repo_root: str | None
+    ) -> NetlistDigests:
+        return cls(
+            sha256=sha256_file(netlist_path),
+            closure=netlist_closure_environment(
+                request, netlist_path, repo_root=repo_root
+            ),
+        )
+
+    def environment(
+        self,
+        attach_job_id: str | None,
+        resume: bool,
+        remote_environment: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """``environment.netlist_sha256`` and ``netlist_sha256_scope``.
+
+        ``client-at-collection`` describes the request resolved by an attach
+        or a batch resume that only collected previously dispatched jobs.
+        """
+        collection_only = attach_job_id is not None
+        if not collection_only and resume and remote_environment is not None:
+            jobs = remote_environment.get("fleet", [remote_environment])
+            # A missing shard report or timestamp leaves dispatch unknown.
+            collection_only = bool(jobs) and all(
+                job is not None
+                and job.get("client_submitted_at", False) is None
+                and job.get("client_launched_at", False) is None
+                for job in jobs
+            )
+        return {
+            "netlist_sha256": self.sha256,
+            "netlist_sha256_scope": (
+                "client-at-collection" if collection_only else "staged"
+            ),
+        }
+
+    def pin_provenance_input(self, provenance: dict[str, Any]) -> None:
+        """Re-pin ``provenance.input.content_hash`` to the captured digest.
+
+        ``build_provenance`` hashes the path it is handed at call time; this
+        makes the block equal ``sha256:<environment.netlist_sha256>`` by
+        construction, even when the file changed (or vanished) mid-run --
+        ``klt signoff --manifest``'s staleness gate reads the former. A
+        no-op when nothing was captured, leaving the hash-the-path value.
+        """
+        block = provenance.get("input")
+        if block is not None and self.sha256 is not None:
+            block["content_hash"] = f"sha256:{self.sha256}"
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:

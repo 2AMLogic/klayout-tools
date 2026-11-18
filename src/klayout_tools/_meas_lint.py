@@ -20,6 +20,7 @@ cards (emitted as ``meas`` commands inside a generated ``.control`` block).
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .sim_errors import SimError
@@ -48,12 +49,20 @@ _MEAS_LINE_CONTINUATION_RE = re.compile(r"(?m)^[ \t]*\+")
 
 #: ngspice's two-node voltage reference: ``v(a,b)``. Accepted in a
 #: ``print``/plot context but resolved as no vector in a `.meas` signal
-#: position (issue #5651); the expressible equivalent is ``v(a)-v(b)``.
-_MEAS_TWO_NODE_REF_RE = re.compile(r"([vViI])\s*\(\s*([^,()\s]+)\s*,\s*([^()]+?)\s*\)")
+#: position (issue #5651); the expressible equivalent is ``v(a)-v(b)``. The
+#: leading ``\b`` keeps a longer name (``rev(a,b)``) from matching mid-word
+#: when the rewrite scans a whole expression for these references.
+_MEAS_TWO_NODE_REF_RE = re.compile(
+    r"\b([vViI])\s*\(\s*([^,()\s]+)\s*,\s*([^()]+?)\s*\)"
+)
 
 #: The arithmetic operators a `.meas` signal-position expression may be
 #: built from.
 _MEAS_ARITH_OPS = ("+", "-", "*", "/")
+
+#: A number written with an exponent (``1e-3``): its sign belongs to the
+#: operand, so the operator scan neutralises it first (issue #6444).
+_MEAS_EXPONENT_NUMBER_RE = re.compile(r"(?<![\w.])(?:\d+\.?\d*|\.\d+)[eE][+-]\d+")
 
 #: Words of a `.meas` card that are keywords, never functions: a signal
 #: position's keyword (``when``, ``find``, ``avg``, ...) and the card's
@@ -100,14 +109,6 @@ def _par_span_inner(span: str) -> str:
     return span[span.index("'") + 1 : span.rindex("'")]
 
 
-def _unwrap_par_spans(text: str) -> str:
-    """Replace every ``par('...')`` span in *text* with its quoted
-    expression, so a suggested rewrite holds one ``par('...')`` wrapper
-    around the whole expression (``par('v(a)-v(b)')-v(c)`` ->
-    ``v(a)-v(b)-v(c)``)."""
-    return _MEAS_PAR_SPAN_RE.sub(lambda m: _par_span_inner(m.group(0)), text)
-
-
 def _two_node_difference(text: str) -> str:
     """``v(a,b)`` -- ngspice's two-node voltage -- as the ``v(a)-v(b)`` a
     ``par('...')`` wrapper can hold (issue #5651: ``v(a,b)`` resolves no
@@ -118,6 +119,72 @@ def _two_node_difference(text: str) -> str:
         return text
     func, first, second = match.group(1), match.group(2), match.group(3)
     return f"{func}({first})-{func}({second})"
+
+
+def _top_level_operators(text: str) -> set[str]:
+    """The binary arithmetic operators of *text* outside every parenthesis.
+    A sign with no operand before it (``-v(a)``) is unary and not counted."""
+    found: set[str] = set()
+    depth = 0
+    previous = ""  # the last non-space character seen
+    for ch in _MEAS_EXPONENT_NUMBER_RE.sub("0", text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif (
+            ch in _MEAS_ARITH_OPS
+            and depth == 0
+            and previous not in ("", *_MEAS_ARITH_OPS, "(")
+        ):
+            found.add(ch)
+        if not ch.isspace():
+            previous = ch
+    return found
+
+
+def _needs_parentheses(inner: str, before: str, after: str) -> bool:
+    """Whether *inner*, put between the characters *before* and *after*
+    (the neighbours of the text it replaces, an operator or not), must keep
+    parentheses to mean what it meant as one operand: a ``+``/``-`` inside
+    it rebinds under an outer ``-``, ``*`` or ``/`` before it or ``*``/``/``
+    after it, and a ``*``/``/`` inside it under an outer ``/`` before it
+    (``2/(a*b)`` is not ``2/a*b``)."""
+    operators = _top_level_operators(inner)
+    if operators & {"+", "-"}:
+        return before in ("-", "*", "/") or after in ("*", "/")
+    return bool(operators) and before == "/"
+
+
+def _substitute_operands(
+    text: str, pattern: re.Pattern[str], expand: Callable[[re.Match[str]], str]
+) -> str:
+    """*text* with every match of *pattern* replaced by ``expand(match)``,
+    parenthesised where the operators around the match would otherwise
+    rebind its terms (issue #6444: ``2*par('v(a)-v(b)')`` must become
+    ``2*(v(a)-v(b))``, not ``2*v(a)-v(b)``)."""
+
+    def replace(match: re.Match[str]) -> str:
+        inner = expand(match)
+        before = text[: match.start()].rstrip()[-1:]
+        after = text[match.end() :].lstrip()[:1]
+        return f"({inner})" if _needs_parentheses(inner, before, after) else inner
+
+    return pattern.sub(replace, text)
+
+
+def _quoted_expression(expression: str) -> str:
+    """The author's *expression* as the one text a ``par('...')`` span holds:
+    every inner ``par('...')`` span is unwrapped and every two-node
+    ``v(a,b)`` becomes ``v(a)-v(b)``, each parenthesised when an outer
+    operator would otherwise change its meaning (``par('v(a)-v(b)')-v(c)``
+    -> ``v(a)-v(b)-v(c)``, but ``v(a,b)*2`` -> ``(v(a)-v(b))*2``)."""
+    unwrapped = _substitute_operands(
+        expression, _MEAS_PAR_SPAN_RE, lambda m: _par_span_inner(m.group(0))
+    )
+    return _substitute_operands(
+        unwrapped, _MEAS_TWO_NODE_REF_RE, lambda m: _two_node_difference(m.group(0))
+    )
 
 
 def _balanced_close(spice: str, open_at: int) -> int | None:
@@ -240,8 +307,8 @@ def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
 
 
 def _extend_over_operands(spice: str, start: int, end: int) -> tuple[int, int]:
-    """Widen a lone flagged reference over the operand it is bound to by an
-    outer arithmetic operator (``2*v(a)`` or ``v(a)*2``), so the refusal's
+    """Widen a flagged span over the operand it is bound to by an outer
+    arithmetic operator (``2*v(a)`` or ``v(a)*2``), so the refusal's
     example rewrite wraps the whole local expression in ``par('...')``
     rather than only the reference."""
     while True:
@@ -286,6 +353,21 @@ def _widen_over_enclosing_call(spice: str, start: int, end: int) -> tuple[int, i
             return start, end
 
 
+def _expand_to_local_expression(spice: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a flagged span over its operands and enclosing calls until
+    neither moves it (issue #6444). One pass of each is not enough: the call
+    a group widens to (``abs(v(a)-v(b))``) can itself be an operand of an
+    outer operator (``2*abs(...)``), and an operand taken in can sit in a
+    call of its own. A span left with an outer operator beside it would be
+    refused again as a rewrite."""
+    while True:
+        lo, hi = _extend_over_operands(spice, start, end)
+        lo, hi = _widen_over_enclosing_call(spice, lo, hi)
+        if (lo, hi) == (start, end):
+            return lo, hi
+        start, end = lo, hi
+
+
 def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
     """Locate an arithmetic expression in a `.meas` card's signal position.
 
@@ -325,14 +407,15 @@ def _find_meas_signal_expression(spice: str) -> tuple[int, int, str] | None:
                 continue
         groups.append(_MeasGroup(start, end, comma=comma))
     for group in groups:
-        if group.count >= 2 or group.comma:
-            lo, hi = _widen_over_enclosing_call(spice, group.start, group.end)
-            return (lo, hi, spice[lo:hi])
         before = blanked[: group.start].rstrip()
         after = blanked[group.end :].lstrip()
-        if before.endswith(_MEAS_ARITH_OPS) or after.startswith(_MEAS_ARITH_OPS):
-            lo, hi = _extend_over_operands(spice, group.start, group.end)
-            lo, hi = _widen_over_enclosing_call(spice, lo, hi)
+        if (
+            group.count >= 2
+            or group.comma
+            or before.endswith(_MEAS_ARITH_OPS)
+            or after.startswith(_MEAS_ARITH_OPS)
+        ):
+            lo, hi = _expand_to_local_expression(spice, group.start, group.end)
             return (lo, hi, spice[lo:hi])
     return None
 
@@ -370,7 +453,7 @@ def check_meas_signal_position(
     if found is None:
         return
     start, end, expression = found
-    inner = _two_node_difference(_unwrap_par_spans(expression))
+    inner = _quoted_expression(expression)
     rewrite = _splice_replacement(spice, start, end, f"par('{inner}')")
     if control_scope:
         reference = _splice_replacement(spice, start, end, "vdiff")
