@@ -55,7 +55,7 @@ _FLAVOUR_SEPARATOR = flavoured_mos_class_name("", "")
 def _device_body_net_name(device: Any) -> str | None:
     """The expanded name of ``device``'s body/bulk terminal net (KLayout's
     ``DeviceExtractorMOS4Transistor`` names it ``"B"`` -- the same
-    ``terminal.name.lower()`` convention ``extract.py``'s ``nets[]`` uses),
+    ``terminal.name.lower()`` convention ``extract_report.py``'s ``nets[]`` uses),
     or ``None`` if the device class declares no such terminal, or the
     terminal reaches no net at all."""
     device_class = device.device_class()
@@ -96,8 +96,8 @@ def _is_unresolved_body_net(name: str | None) -> bool:
     it (``"$<n>"`` -- no label reached the net, so nothing biases the body),
     or the terminal reached no net at all (``None``).
 
-    The in-memory counterpart of ``extract.py``'s
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, which
+    The in-memory counterpart of
+    :func:`~klayout_tools.extract_report._detect_unbiased_pmos_body_nets`, which
     makes the same per-device determination against the already-escaped
     ``"\\$<n>"`` spelling it reports in ``klt extract``/``klt pex`` JSON --
     see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
@@ -228,13 +228,12 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     well-tie shape still resolves each such PMOS body to an anonymous,
     KLayout-synthesized ``"$<n>"`` net with no DC bias path -- and that went
     unflagged here while ``klt pex``'s ``body_bias`` block, built from
-    ``extract.py``'s per-device
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, reported
+    :func:`~klayout_tools.extract_report._detect_unbiased_pmos_body_nets`, reported
     the very same layout as ``"unbiased"``. The PMOS warning now counts
     exactly the devices whose body terminal reached such a placeholder net
     (or no net at all); see :func:`_is_unresolved_body_net`, and
     :data:`_RAW_ANONYMOUS_NET_PREFIX` for why this in-memory path matches a
-    raw ``$`` where ``extract.py`` matches an escaped ``\\$``. A deck with a
+    raw ``$`` where ``extract_report.py`` matches an escaped ``\\$``. A deck with a
     real well-tap mechanism (sky130's drawn ``tap``/``well_label``) still
     emits no PMOS warning on a well-labelled layout -- but now because each
     PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because

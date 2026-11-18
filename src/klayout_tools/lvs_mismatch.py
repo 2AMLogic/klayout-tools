@@ -48,10 +48,7 @@ from .lvs_mismatch_tolerance import (  # noqa: F401  (re-exported)
     _apply_tolerance_snaps,
     _collect_tolerance_snaps,
     _parse_parameter_tolerance,
-    _relative_delta,
     _tolerance_disclosure,
-    _tolerated_device_pair,
-    _ToleratedParam,
 )
 from .lvs_net_identity import (
     lookup,
