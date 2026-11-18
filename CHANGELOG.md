@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen mos_array`'s auto tap ring now meets gf180mcu's native
+  medium-voltage well/Dualgate rules** (#6503, 2026-11-18): a `pfet` +
+  `medium_voltage` array's ring Nwell was sized off the ring's *nominal*
+  outer box, so on the emitted GDS it sat 10nm inside the drawn `Comp` edge
+  -- short of the `gf180mcu.drc` runset's `DF.4d_MV` (0.16um Nwell overlap
+  of NCOMP) at the default `ring_padding_um`, a further manufacturing-grid
+  step short on off-grid paddings (also tripping `nwell_OFFGRID`), while the
+  core-anchored `Dualgate` marker traded `DV.6` (0.24um enclose COMP) for
+  `DV.7`/`DV.3` inside a 1.05..1.28um rule-swapping window no padding
+  sweep could monotonically escape. The ring's well is now grown from the
+  ring's final grid-snapped edge (the same snap-then-grow discipline
+  `_insert_implant_ring` uses) by an MV-gated 0.16um margin, and the marker
+  grows to enclose that same edge by `DV.6`'s 0.24um -- clearing
+  `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` at every padding from 0.5 to 2.0um while
+  leaving ringless, non-medium-voltage, non-pfet, and non-gf180mcu arrays
+  byte-for-byte unchanged (`sky130`/`sg13g2`/`sg13cmos5l` resolve no ring
+  margin, and the 3.3V-only gf180mcu ring keeps its 0.15um default).
 - **`klt signoff --repin` re-pins a block manifest's stale `content_hash`
   entries** (#5527, 2026-11-13): after an attestation inventory changed,
   `klt signoff --attest` regenerated the envelope but the manifest's pin

@@ -380,6 +380,9 @@ _HIDDEN_PARAMS = {
     # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
     # above, never part of the request schema.
     "voltage_flavor_mark_margin_um",
+    # `mos_array`'s issue #6503 harness-computed marker-past-ring margin,
+    # resolved per PDK family the same way as the #1577 knobs above.
+    "voltage_flavor_ring_margin_um",
     "contact_gate_offset_um",
     "bottom_endcap_um",
     "top_endcap_um",

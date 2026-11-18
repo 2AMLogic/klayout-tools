@@ -452,6 +452,35 @@ def _voltage_flavor_mark_margin_um(family: str) -> float:
     return _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
 
 
+#: Per-PDK-family margin (um) the ``voltage_flavor`` marker box extends past
+#: the guard ring's final tap edge when both are drawn -- ``0.0`` (marker
+#: stays anchored to the array core alone, byte-for-byte) for a family
+#: absent here.
+#:
+#: ``gf180mcu`` only (issue #6503): the native ``gf180mcu.drc`` runset makes
+#: the ``Dualgate`` marker's relationship to the ring's own ``Comp`` band
+#: load-bearing -- ``DV.6`` ("Min. Dualgate enclose COMP (except substrate
+#: tap)", 0.24um) fails a marker sitting inside the band with less than
+#: 0.24um of enclosure at the default padding, ``DV.7`` (partial overlap)
+#: fires while the growing band crosses the marker edge, and once the band
+#: escapes it entirely ``DV.3`` ("Min. Dualgate to COMP space [unrelated]",
+#: 0.24um) takes over -- a rule-swapping window in ``ring_padding_um`` no
+#: single padding choice avoids. Enclosing the ring's final (grid-snapped)
+#: edge by exactly the ``DV.6`` margin resolves enclosure and spacing
+#: together at every padding; the deck measures with a strict less-than, so
+#: exactly the threshold passes (the same no-headroom convention
+#: ``_insert_implant_ring`` documents for ``NP.5b``/``PP.5b``).
+_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM: dict[str, float] = {
+    "gf180mcu": 0.24,  # DV.6 (Dualgate enclose COMP) is 0.24um
+}
+
+
+def _voltage_flavor_ring_margin_um(family: str) -> float:
+    """Return ``family``'s voltage-flavor marker margin past the guard ring
+    (see :data:`_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM`), or ``0.0``."""
+    return _PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM.get(family, 0.0)
+
+
 #: Per-family nwell enclosure margin (um) of the n-tap guard ring
 #: (:data:`WELL_ENCLOSURE_MARGIN_UM` for a family absent here, byte-for-byte).
 #:
@@ -475,6 +504,31 @@ def _ring_well_margin_um(family: str) -> float:
     from .gen import WELL_ENCLOSURE_MARGIN_UM
 
     return _PDK_RING_WELL_MARGIN_UM.get(family, WELL_ENCLOSURE_MARGIN_UM)
+
+
+#: Per-PDK-family nwell enclosure margin (um) of the n-tap guard ring when
+#: the ``voltage_flavor`` marker is *also* drawn (issue #6503) -- applied on
+#: top of :func:`_ring_well_margin_um` only for a request whose marker
+#: actually resolves. ``0.0`` for a family absent here.
+#:
+#: ``gf180mcu`` only: the native ``gf180mcu.drc`` runset's ``DF.4d_MV``
+#: ("Min. (Nwell overlap of NCOMP) outside DNWELL", 0.16um) holds the
+#: ``Comp`` the ``Dualgate`` marker covers to the MV column, and a ``pfet``
+#: + ``medium_voltage`` array's marker covers the automatically-sized n-tap
+#: ring (see :data:`_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM`) -- so the ring's
+#: well needs 0.16um there, not the 0.15um default. Keyed apart from
+#: :data:`_PDK_RING_WELL_MARGIN_UM` so the 3.3V-only array (whose ring only
+#: needs ``DF.4d_LV``'s 0.12um, cleared by the 0.15um default) keeps its
+#: geometry byte-for-byte.
+_PDK_MV_RING_WELL_MARGIN_UM: dict[str, float] = {
+    "gf180mcu": 0.16,  # DF.4d_MV (Nwell overlap of NCOMP) is 0.16um
+}
+
+
+def _mv_ring_well_margin_um(family: str) -> float:
+    """Return ``family``'s medium-voltage n-tap ring nwell enclosure margin
+    (see :data:`_PDK_MV_RING_WELL_MARGIN_UM`), or ``0.0``."""
+    return _PDK_MV_RING_WELL_MARGIN_UM.get(family, 0.0)
 
 
 def _cap_geometry_min_um(family: str) -> dict[str, float]:
@@ -2582,17 +2636,30 @@ def _mos_array_layer_params(
     ``*_layer``-without-a-``*_present``-gate default in this module."""
     import klayout.db as kdb
 
+    family = _pdk_family(pdk_info["variant"])
     layer_params = _device_layer_params(pdk_info, params)
     # Issue #3648: a family with a tap-distance rule gets tap pads even
     # without a ring, which need the ring role's tap/implant layers.
-    if params.get("add_guard_ring") or _tap_pads_wanted(
-        _pdk_family(pdk_info["variant"])
-    ):
+    if params.get("add_guard_ring") or _tap_pads_wanted(family):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
         )
+        if layer_params["voltage_flavor_mark_present"]:
+            # Issue #6503: once the voltage-flavor marker is drawn, gf180mcu's
+            # native runset scopes the ring's own Comp to the MV nwell-overlap
+            # column (``DF.4d_MV``, 0.16um -- the marker encloses the ring, see
+            # ``_PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM``), one notch above the
+            # 0.15um default that already clears the 3.3V-only ``DF.4d_LV``.
+            mv_margin = _mv_ring_well_margin_um(family)
+            if mv_margin > layer_params["ring_well_margin_um"]:
+                layer_params["ring_well_margin_um"] = mv_margin
     else:
         layer_params.setdefault("tap_layer", kdb.LayerInfo(0, 0))
+    # Issue #6503: gf180mcu's marker must enclose the ring's final tap edge
+    # (DV.6/DV.7/DV.3); 0.0 keeps every other family's marker core-anchored.
+    layer_params["voltage_flavor_ring_margin_um"] = _voltage_flavor_ring_margin_um(
+        family
+    )
     return layer_params
 
 

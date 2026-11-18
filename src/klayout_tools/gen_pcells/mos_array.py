@@ -56,12 +56,14 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _close_implant_gaps,
         _draw_npc_over_poly_contacts,
         _draw_pcell_tap_pads,
+        _grow_box_um,
         _insert_boxes,
         _insert_implant_ring,
         _insert_ring,
         _mos_array_layout,
         _pcell_tap_reach_um,
         _shift_box,
+        _snap_ring_box_um,
     )
 
     class _MosArrayPCell(kdb.PCellDeclarationHelper):
@@ -112,6 +114,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         voltage_flavor_mark_layer: kdb.LayerInfo
         voltage_flavor_mark_present: bool
         voltage_flavor_mark_margin_um: float
+        voltage_flavor_ring_margin_um: float
         voltage_flavor_extra_mark_layer: kdb.LayerInfo
         voltage_flavor_extra_mark_present: bool
 
@@ -264,6 +267,15 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the array's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+            )
+            self.param(
+                "voltage_flavor_ring_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the voltage_flavor marker box "
+                "additionally grows past the guard ring's final tap edge "
+                "when both are drawn (0.0 keeps the marker anchored to the "
+                "array alone; see _PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM)",
+                default=0.0,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
             declare_mos_array_extra_params(self, kdb)
@@ -550,14 +562,26 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 if self.well_present and self.flavor == "pfet":
                     li_well = self.layout.layer(self.well_layer)
                     margin = self.ring_well_margin_um
-                    ring_well_box = (
-                        -margin,
-                        -margin,
-                        ring["outer_w_um"] + margin,
-                        ring["outer_h_um"] + margin,
+                    # Issue #6503: reference the ring's *final* Comp edge,
+                    # not the nominal outer box -- `_insert_ring` snaps that
+                    # box outward onto the manufacturing grid (issue #3364),
+                    # so a well sized off the nominal geometry sits inside
+                    # the drawn Comp edge and loses its overlap one grid
+                    # step at a time (plus drawing the well itself
+                    # off-grid, `nwell_OFFGRID`). The same snap-then-grow
+                    # discipline `_insert_implant_ring` already applies to
+                    # its own extension, with `_grow_box_um`'s dbu
+                    # quantization keeping the drawn margin exact.
+                    snapped_outer_um = _snap_ring_box_um(
+                        _shift_box(ring["outer_box_um"], ox, oy),
+                        self.mfg_grid_um,
+                        dbu,
                     )
                     _insert_boxes(
-                        self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
+                        self.cell,
+                        li_well,
+                        dbu,
+                        [_grow_box_um(snapped_outer_um, margin, dbu)],
                     )
                 if self.ring_implant_present:
                     # Tracks the tap ring, extended `ring_implant_margin_um`
@@ -592,16 +616,45 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # signoff deck needs the marker to reach further than the well's
             # own margin does -- see `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s
             # own docstring.
+            #
+            # Issue #6503: when the automatically-sized tap ring is drawn
+            # too, the marker additionally grows to enclose the ring's
+            # final (grid-snapped) tap edge by the harness-resolved
+            # `voltage_flavor_ring_margin_um`. A marker sized off the array
+            # core alone ends up *inside* the ring band with less than
+            # DV.6's 0.24um of enclosure at the default padding, partially
+            # overlaps the band as `ring_padding_um` grows (DV.7), and once
+            # the band escapes it sits inside DV.3's 0.24um marker-to-COMP
+            # space -- a rule-swapping window no single padding avoids.
+            # Covering the ring resolves enclosure and spacing together at
+            # every padding; a family that resolves 0.0 keeps the
+            # core-anchored box byte-for-byte.
             if self.voltage_flavor_mark_present:
                 li_voltage_flavor_mark = self.layout.layer(
                     self.voltage_flavor_mark_layer
                 )
-                _insert_boxes(
-                    self.cell,
-                    li_voltage_flavor_mark,
-                    dbu,
-                    [info["voltage_flavor_mark_box_um"]],
-                )
+                mark_box = info["voltage_flavor_mark_box_um"]
+                if (
+                    self.voltage_flavor_ring_margin_um > 0.0
+                    and info["ring"] is not None
+                ):
+                    rox, roy = info["ring_offset_um"]
+                    cover_box = _grow_box_um(
+                        _snap_ring_box_um(
+                            _shift_box(info["ring"]["outer_box_um"], rox, roy),
+                            self.mfg_grid_um,
+                            dbu,
+                        ),
+                        self.voltage_flavor_ring_margin_um,
+                        dbu,
+                    )
+                    mark_box = (
+                        min(mark_box[0], cover_box[0]),
+                        min(mark_box[1], cover_box[1]),
+                        max(mark_box[2], cover_box[2]),
+                        max(mark_box[3], cover_box[3]),
+                    )
+                _insert_boxes(self.cell, li_voltage_flavor_mark, dbu, [mark_box])
             if (
                 self.voltage_flavor_mark_present
                 and self.voltage_flavor_extra_mark_present
@@ -610,7 +663,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     self.cell,
                     self.layout.layer(self.voltage_flavor_extra_mark_layer),
                     dbu,
-                    [info["voltage_flavor_mark_box_um"]],
+                    [mark_box],
                 )
 
             _insert_mos_cap_mark(self, info, dbu)
