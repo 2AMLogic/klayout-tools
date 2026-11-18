@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`environment.netlist_identity` no longer truncates cards that use KLayout
+  `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
+  sim`'s netlist identity cut every line at the first whitespace-preceded `$`
+  or `;`, so `X$1 $3 $4 inv` and `X$1 $7 $4 nand` both collapsed to `x$1` —
+  two different circuits shared one identity, and `expect_netlist_identity`
+  passed when it should have refused. Normalization now strips inline comments
+  with the shared `_spice_text` rule (everything from the first `;`, or from
+  the first `$` that is a whole whitespace-delimited token; a `$` that only
+  begins a token, such as the `$3` of `X$1 $3 $4 inv`, is a net name and
+  survives; `R1 a b 1k; load` now matches
+  `R1 a b 1k`). **Identity stamps can change** for netlists whose bytes did
+  not move: a stored `expect_netlist_identity` from an older version that now
+  mismatches fails loudly with the existing mismatch error; refresh it from a
+  report generated with the corrected version. `klt sim --check` diagnoses
+  the case (raw `sha256` match + identity mismatch) as
+  `normalization_changed`. The stamp format and JSON fields do not change.
+  Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
