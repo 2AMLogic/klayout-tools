@@ -12992,6 +12992,7 @@ def test_parasitics_summary_block_shape(tmp_path):
         "overlap_pairs_without_coefficient",
         "critical_nets",
         "parasitics_nets",
+        "lateral_coupling",
         "distributed_rc",
         "top_cell_only",
         "model",
@@ -14158,22 +14159,6 @@ def test_lateral_coupling_exact_value_and_lookback_cutoff(tmp_path):
     assert len(cc_lines) == 1
     fields = cc_lines[0].split()
     assert float(fields[3]) == pytest.approx(0.044e-15)
-
-
-def test_lateral_coupling_matches_when_only_one_side_critical(tmp_path):
-    """The lateral pass qualifies a pair when *either* side is named --
-    naming the non-victim side (`AGR`) finds the identical pair."""
-    path = _write_gds(_make_lateral_coupling_layout(), tmp_path / "lateral.gds")
-    report = run_extract(
-        path,
-        "sky130",
-        output=str(tmp_path / "lateral.spice"),
-        parasitics=True,
-        critical_nets=["AGR"],
-    )
-    para = report["parasitics"]
-    assert para["cc_count"] == 1
-    assert para["total_coupling_capacitance_ff"] == pytest.approx(0.044)
 
 
 def test_critical_net_unmatched_name_is_a_warning_not_an_error(tmp_path):

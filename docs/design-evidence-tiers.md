@@ -229,7 +229,13 @@ written to every block.
    nothing compares them against what the claim actually disclosed, so a
    `met` verdict from `klt signoff` is still not evidence that the gaps were
    disclosed. A reviewer must read the reported `coverage` against the claim
-   themselves.
+   themselves. **Opt-in exception (#5789)**: a manifest that sets
+   `require_coverage_disclosure: true` and enumerates its gaps on item 3's
+   evidence entry (`coverage_disclosed`) has the comparison graded — a
+   declaration that is not set-equal to the reported coverage renders the
+   item `unmet` / `coverage_undisclosed`. The default remains
+   claimant-enforced; the tool-enforced form is something a project opts
+   into per manifest.
    **Disclosed exception for unmodified foundry cells** (operator ruling
    2026-10-28): DRC violations inside an unmodified foundry-library cell
    (a stock I/O pad, a foundry SRAM macro) do not block `met`, provided all
@@ -442,12 +448,16 @@ written to every block.
    row set under `spec_rows."6"` and cite one `klt yield` report per row set
    (`rows` on each citation). Item 6 grades `met` only when every declared
    row is covered by a passing citation against a ratified target. A row with
-   no citation (`uncovered_rows`), a row declared a `gap` because no evidence
-   can exist yet (`declared_gaps`), or a row declared `ratified: false`
-   (`unratified_rows`, evidence against a proposed limit is provisional)
-   grades `unmet` / `partial_coverage`, never `met`. Without a declaration
-   the item grades as before; a `not_applicable` entry contradicts a declared
-   row set and is `invalid_evidence`.
+   no citation (`uncovered_rows`), a row declared a `gap` (`declared_gaps` —
+   pending work that a named issue should close, never a permanent pass;
+   issue #5599 adds a justified form carrying a hash-bound rationale
+   artifact and the issue that would close the gap, and an operator ruling
+   on #5858, 2026-11-17 settled that a gap keeps blocking T1), or a row
+   declared `ratified: false` (`unratified_rows`, evidence against a
+   proposed limit is provisional) grades `unmet` / `partial_coverage`, never
+   `met`. Without a declaration the item grades as before; a
+   `not_applicable` entry contradicts a declared row set and is
+   `invalid_evidence`.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction

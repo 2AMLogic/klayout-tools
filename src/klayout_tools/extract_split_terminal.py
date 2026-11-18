@@ -32,35 +32,17 @@ def resistor_body_region(
     base: kdb.Region | None = None,
     heads: kdb.Region | None = None,
 ) -> kdb.Region:
-    """The recognised device-body region for one :class:`ResistorDevice`
-    entry against this layout: ``body & marker``, narrowed by ``requires``
-    (every layer must also cover it) and ``excludes`` (each subtracted) --
-    see :class:`ResistorDevice`'s own docstring.
+    """Recognise the same resistor body in extraction and ERC (#2204).
 
-    Factored out of :func:`_resolve_resistors`'s own inline computation
-    (issue #2204) so ``erc.py``'s deck-driven device-body auto-detection
-    computes the *exact same* region this deck's own extraction recognises
-    a resistor body as, rather than a second, potentially drifting
-    reimplementation -- the issue's own "Marker-to-role mapping" design
-    note's explicit requirement ("the same one `klt extract` uses").
+    Intersect the body conductor, marker and every required layer, then
+    subtract each excluded layer. For ``abutting_heads`` (#2679), start
+    from the marker and keep components touching two separate heads.
+    Extraction supplies the possibly black-box-masked ``base`` and ``heads``.
+    Otherwise read the drawn body conductor and terminal layer directly,
+    defaulting the terminal layer to the body layer.
 
-    ``base`` is the conductor region to intersect the marker against.
-    :func:`_resolve_resistors` passes its own (possibly black-box-masked)
-    ``poly``/``active``/metal region here, so this refactor changes nothing
-    about its result. Omitted (the default, every caller outside the main
-    extraction pipeline), this recomputes ``resistor.body`` fresh via
-    :func:`_region` -- there is no black-box masking to inherit outside
-    ``run_extract``'s own pipeline.
-
-    For a ``topology="abutting_heads"`` entry (issue #2679) the region is
-    instead ``marker & requires - excludes`` restricted to components that
-    touch the head conductor (``heads``, defaulting to the entry's
-    ``terminal``/``body`` layer) in two or more
-    separate regions; ``extract`` and ``erc`` share this one definition.
-
-    Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
-    drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
-    own "no PDK marker drawn" convention.
+    A split-terminal entry (``anode_marker`` set, #4312) returns the link
+    from :func:`split_terminal_regions` instead.
     """
     if resistor.anode_marker is not None:
         if base is None:
