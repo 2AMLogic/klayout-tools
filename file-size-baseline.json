@@ -181,7 +181,7 @@
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
-      "lines": 918
+      "lines": 914
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9856
+      "lines": 9853
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5108
+      "lines": 5078
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6448
+      "lines": 6380
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -497,7 +497,7 @@
     },
     {
       "path": "src/klayout_tools/pex.py",
-      "lines": 3705
+      "lines": 3704
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
@@ -569,11 +569,11 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7268
+      "lines": 7267
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1152
+      "lines": 1151
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -629,7 +629,7 @@
     },
     {
       "path": "src/klayout_tools/sim_validate.py",
-      "lines": 534
+      "lines": 532
     },
     {
       "path": "src/klayout_tools/size.py",
@@ -909,7 +909,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26198
+      "lines": 26197
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -981,7 +981,7 @@
     },
     {
       "path": "tests/test_pex.py",
-      "lines": 7535
+      "lines": 7524
     },
     {
       "path": "tests/test_place_and_route.py",

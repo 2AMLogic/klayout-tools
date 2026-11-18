@@ -10,8 +10,8 @@ import os
 from typing import Any
 
 from ._provenance import content_hash
-from ._report_verify import get_path, hash_check, resolve_committed_path
-from ._report_verify_hints import deck_not_found_entry
+from ._report_verify import get_path, hash_check
+from ._report_verify_hints import deck_not_found_entry, input_hash_check
 from .decks import deck_source_path
 
 
@@ -95,16 +95,15 @@ def _report_hash_checks(
     if deck_missing is not None:
         deck_check["deck_not_found"] = deck_missing
     checks = [
-        hash_check(
+        # Issue #6466: an echoed `file` naming no existing file carries the
+        # same additive `input_not_found` block `klt lvs --check` attaches.
+        input_hash_check(
             f"{prefix}provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            content_hash(
-                resolve_committed_path(
-                    committed.get("file"),
-                    report_path=report_path,
-                    override=input_path,
-                )
-            ),
+            committed.get("file"),
+            report_path,
+            override=input_path,
+            hasher=content_hash,
         ),
         deck_check,
     ]
