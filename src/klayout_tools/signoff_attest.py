@@ -83,7 +83,7 @@ from .signoff import (
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_input import input_binding
-from .signoff_attest_pins import json_node, resolve_pin_refs
+from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import split_entries
 
@@ -977,7 +977,7 @@ def _run_checks(
         resolved_pins, pin_sources = resolve_pin_refs(
             normalized["pins"], root, _normalize_repo_path
         )
-        checks.extend(item9.pin_checks(resolved_pins, pin_sources))
+        checks.extend(with_resolved_from(item9.pin_checks(resolved_pins), pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks

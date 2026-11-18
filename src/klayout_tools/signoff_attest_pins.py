@@ -151,3 +151,18 @@ def resolve_pin_refs(
         if tool_sources:
             sources["tools"] = tool_sources
     return resolved, sources
+
+
+def with_resolved_from(
+    checks: list[dict[str, Any]], sources: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Item 9's pin ``checks`` (from ``pin_checks``) with each check's
+    ``resolved_from`` set to the ``{"from", "key"}`` declarations that
+    :func:`resolve_pin_refs` resolved for its ``role`` -- only for a check that
+    used a reference, so a literal-only inventory emits the checks it always
+    did. Lives here, not on ``pin_checks``, so :mod:`signoff_attest_item9`
+    stays under the per-file size limit."""
+    for check in checks:
+        if sources.get(check["role"]):
+            check["resolved_from"] = sources[check["role"]]
+    return checks

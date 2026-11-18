@@ -8,27 +8,29 @@ from pathlib import Path
 
 import pytest
 
+from helpers.signoff_item9 import OK_ARGV, PINS, make_inventory, make_repo
 from klayout_tools.cli import main
 from klayout_tools.signoff_attest import (
     AttestationError,
     build_attestation,
     render_envelope,
 )
-from test_signoff_attest_item9 import _OK, _PINS, _inv, _repo
 
 _TOOLCHAIN = {"tools": {"ngspice": {"commit": "a1b2c3d4e5f6"}}}
 _NG_REF = {"from": "config/toolchain.json", "key": "tools.ngspice.commit"}
 
 
 def _pin_repo(tmp_path, pins, files) -> tuple[Path, str]:
-    repo = _repo(tmp_path)
+    repo = make_repo(tmp_path)
     for name, content in files.items():
         target = repo / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
     return (
         repo,
-        _inv(repo, pins=pins, testbenches=["tb/a.spice"], cold_start={"argv": _OK}),
+        make_inventory(
+            repo, pins=pins, testbenches=["tb/a.spice"], cold_start={"argv": OK_ARGV}
+        ),
     )
 
 
@@ -170,15 +172,15 @@ def test_escaping_from_is_refused(tmp_path, from_value, message):
 
 
 def test_symlinked_from_is_refused(tmp_path):
-    repo = _repo(tmp_path)
+    repo = make_repo(tmp_path)
     (repo / "config").mkdir()
     (repo / "config" / "toolchain.json").write_text(json.dumps(_TOOLCHAIN))
     (repo / "config" / "link.json").symlink_to("toolchain.json")
-    inventory = _inv(
+    inventory = make_inventory(
         repo,
         pins={"tools": {"ngspice": {"from": "config/link.json", "key": "x"}}},
         testbenches=["tb/a.spice"],
-        cold_start={"argv": _OK},
+        cold_start={"argv": OK_ARGV},
     )
 
     with pytest.raises(AttestationError, match="symlink"):
@@ -186,10 +188,10 @@ def test_symlinked_from_is_refused(tmp_path):
 
 
 def test_literal_only_pins_keep_the_envelope_unchanged(tmp_path):
-    repo = _repo(tmp_path)
-    inventory = _inv(
-        repo, testbenches=["tb/a.spice"], cold_start={"argv": _OK}
-    )  # the default _PINS fixture: literal-only
+    repo = make_repo(tmp_path)
+    inventory = make_inventory(
+        repo, testbenches=["tb/a.spice"], cold_start={"argv": OK_ARGV}
+    )  # the default PINS fixture: literal-only
 
     envelope = build_attestation(9, inventory)
 
@@ -197,7 +199,7 @@ def test_literal_only_pins_keep_the_envelope_unchanged(tmp_path):
         "check": "pin",
         "role": "pdk",
         "passed": True,
-        "value": _PINS["pdk"],
+        "value": PINS["pdk"],
     }
     assert _pin_check(envelope, "tools") == {
         "check": "pin",
