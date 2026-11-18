@@ -21,8 +21,10 @@ from . import (
     sim_cycle_mean,
     sim_energy,
     sim_eye,
+    sim_noise_mechanism,
     sim_search,
     sim_settled,
+    sim_slope_band_meas,
     sim_snm_meas,
     sim_step_resolution,
     sim_steps,
@@ -65,6 +67,7 @@ def _corner_measurement_results(
     cycle_means: dict[int, sim_cycle_mean.CycleMeanOutcome] | None = None,
     transfers: dict[int, sim_transfer_meas.TransferOutcome] | None = None,
     snms: dict[int, sim_snm_meas.SnmOutcome] | None = None,
+    slope_bands: dict[int, sim_slope_band_meas.SlopeBandOutcome] | None = None,
     eyes: dict[int, sim_eye.EyeOutcome] | None = None,
     step_resolutions: (
         dict[int, sim_step_resolution.StepResolutionOutcome] | None
@@ -72,6 +75,9 @@ def _corner_measurement_results(
     settleds: dict[int, sim_settled.SettledOutcome] | None = None,
     searches: dict[int, sim_search.SearchOutcome] | None = None,
     tians: dict[int, sim_tian.TianOutcome] | None = None,
+    noise_mechanisms: (
+        dict[int, sim_noise_mechanism.NoiseMechanismOutcome] | None
+    ) = None,
     engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """One corner's ``(measurement_results, diagnostics, extra_corner_fields)``
@@ -137,7 +143,12 @@ def _corner_measurement_results(
         ),
         (sim_transfer_meas.is_transfer, _transfer_measurement_result, transfers),
         (sim_tian.is_tian, _sim._tian_measurement_result, tians),
-        (sim_snm_meas.is_snm, _sim._snm_measurement_result, snms),
+        (sim_snm_meas.is_snm, sim_snm_meas.snm_measurement_result, snms),
+        (
+            sim_slope_band_meas.is_slope_band,
+            sim_slope_band_meas.slope_band_measurement_result,
+            slope_bands,
+        ),
         (sim_eye.is_eye, _sim._eye_measurement_result, eyes),
         (
             sim_step_resolution.is_step_resolution,
@@ -146,6 +157,11 @@ def _corner_measurement_results(
         ),
         (sim_settled.is_settled, _sim._settled_measurement_result, settleds),
         (sim_search.is_search, _search_measurement_result, searches),
+        (
+            sim_noise_mechanism.is_mechanism,
+            sim_noise_mechanism.measurement_result,
+            noise_mechanisms,
+        ),
     )
     for position, spec in enumerate(measurements_spec):
         sidecar = next(
