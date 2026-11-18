@@ -190,10 +190,11 @@ def test_crosscheck_override_applies_to_native_side_only(tmp_path):
     assert "deck_not_found" not in native_check
 
 
-def test_override_ignored_for_curated_report(tmp_path):
-    assert (
-        check_drc_report(_curated_report(tmp_path), deck_path=DECK)["status"] == "match"
-    )
+def test_override_rejected_for_curated_report(tmp_path):
+    # Issue #6070: --check agrees with --rerun -- a curated single report has
+    # no deck override, so the flag is an error, never a silent no-op.
+    with pytest.raises(DrcError, match="--deck-file"):
+        check_drc_report(_curated_report(tmp_path), deck_path=DECK)
 
 
 def test_nonexistent_override_is_a_failed_check_with_diagnostic(tmp_path):

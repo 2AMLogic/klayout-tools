@@ -214,6 +214,8 @@ def _inventory_checks(
     absolute: str,
     stream_rels: Sequence[str],
     committed_checks: Sequence[Mapping[str, Any]] | None,
+    *,
+    hash_kind: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Run the item-2 inventory's declarations; return ``(input checks, audit
     command checks, attestation.inventory block)``. The input checks are the
@@ -230,6 +232,12 @@ def _inventory_checks(
         )
     _validate_header(inventory, STREAM_ATTESTABLE_ITEM, inventory_path)
     inputs = validated_inputs(inventory, root, stream_rels)
+    if inputs and hash_kind == _HASH_KIND_GEOMETRY:
+        raise AttestationError(
+            "--hash-kind geometry cannot be used with an inventory set binding. "
+            "Use --hash-kind bytes with the set digest or remove 'inputs' "
+            "from the inventory"
+        )
     specs = validated_checks(inventory, root, inputs)
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
@@ -275,8 +283,9 @@ def build_stream_attestation(
     style commands (``role: "audit"``) after the three built-in checks -- and/or
     ``inputs`` (issue #5724): the generator's input files, pinned by hash as
     ``role: "input"`` checks and folded into the set-bound
-    ``provenance.input.paths`` so editing one grades the item stale. The
-    stream is not an inventory field: a command names it in its own ``argv``.
+    ``provenance.input.paths`` so editing one grades the item stale. This set
+    binding requires ``hash_kind="bytes"``. Audit commands can name the stream
+    in their own ``argv``.
     ``committed_checks`` is passed only by :func:`check_stream_attestation`
     (``local_only`` commands skip). Without an inventory the envelope is
     unchanged."""
@@ -304,7 +313,11 @@ def build_stream_attestation(
     if inventory_path is not None:
         with klt_shim_scope():
             declared_inputs, audit, inventory_block = _inventory_checks(
-                inventory_path, absolute, [s[2] for s in streams], committed_checks
+                inventory_path,
+                absolute,
+                [s[2] for s in streams],
+                committed_checks,
+                hash_kind=hash_kind,
             )
         checks.extend(declared_inputs)
         checks.extend(audit)

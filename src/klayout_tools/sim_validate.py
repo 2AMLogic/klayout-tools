@@ -28,7 +28,7 @@ from . import (
     sim_transfer_meas,
 )
 from ._meas_lint import check_meas_signal_position
-from .sim_case_names import validate_case_variant_names
+from .sim_case_names import validate_case_variant_names, validate_measurement_shapes
 from .sim_errors import SimError
 
 #: A `.meas` card's declared analysis type (the token right after
@@ -218,7 +218,7 @@ def _validate_measurement_forms(measurements_spec: list[dict[str, Any]]) -> None
     Split into helpers so no one function carries the whole rule set's
     branch count (see ``scripts/check_complexity_baseline.py``).
     """
-    for spec in measurements_spec:
+    for spec in validate_measurement_shapes(measurements_spec):
         _validate_measurement_form(spec)
     _validate_expr_names_unique(measurements_spec)
     validate_case_variant_names(measurements_spec)

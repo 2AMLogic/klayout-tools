@@ -1142,6 +1142,30 @@ keeps the legacy behaviour (TopVia1 is shared between the MIM-cap population
 and ordinary Metal5->TopMetal1 routing) and its Cont lower side stays
 uncovered exactly as sg13cmos5l's does above.
 
+gf180mcu is opted in (#5915) on every single-population cut side:
+`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+`metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1` and
+`metal5.enclosing.via4.1` (plus the pre-existing non-cut
+`ldmos_xtor.enclosing.mvpsd.1`). Four sides stay on the legacy behaviour
+because the cut lands on one of several disjoint populations and the engine
+has no compound-layer expression for "one of": `poly2.enclosing.contact.1` /
+`comp.enclosing.contact.1` (a contact lands on poly2 *or* comp), and
+`metal4.enclosing.via4.1` / `mim.enclosing.via4.1` (a MiM via4 lands on the
+`mim` plate rather than on Metal4). A fully orphan cut is therefore still not
+reported by those four rules. sky130 has its own opt-in issue (#5737) and
+keeps the legacy behaviour until it lands.
+
+asap7 has **no** cut-containment gap, and `require_containment` does not apply
+to it: it is a native KLayout DRC-DSL deck (`decks/asap7.drc`), not a curated
+`DrcRule` deck, and carries no `enclosing`/`enclosed` rule of the curated kind.
+Its via-level containment rules already report a fully orphan via:
+`V1.AUX.1`-`V3.AUX.1` and `V4.AUX.1`-`V7.AUX.1` are
+`via.not_inside(lower & upper)`, `V8.AUX.1`/`V9.AUX.1` the same against
+`M8 & M9` / `M9 & PAD`, and `V0.AUX.1` flags a V0 that does not interact with
+M1 and LISD/LIG. (A hand-drawn `V1` with no `M1`/`M2` nearby reports
+`V1.AUX.1` under `--engine klayout`.) The per-side `*.EN.*` rules there only
+measure a margin on vias that already land, so they need no flag.
+
 ### Sized/derived-layer rules (`DerivedLayer`)
 
 Some DRM rules are defined against a derived geometry rather than a single
@@ -4222,10 +4246,11 @@ replayed). The two honoured overrides are the positional `<file>` (input) and
 
 **Deck resolution order (issue #5709)**, shared by `--check`, `--check
 --rerun` and both sides of an `--engine both` report: (1) `--deck-file
-<path>`, which wins for a `klayout`-engine report only -- a curated report
-(curated side included) ignores it and keeps resolving its recorded deck
-*name*, the same treatment `--rerun` already gives the flag -- and only when
-it names an existing file; (2) the report's recorded `deck` -- a deck name for
+<path>`, which wins for a `klayout`-engine report only, and only when it
+names an existing file. On a curated single-engine report `--check
+--deck-file` is a clean exit-1 error (issue #6070), the same as `--rerun`;
+the curated side of an `--engine both` report keeps resolving its recorded
+deck *name* and ignores the flag; (2) the report's recorded `deck` -- a deck name for
 `--engine curated`, the producing host's script path for `--engine klayout` --
 when it exists; (3) for `--engine klayout`, `provenance.deck.name` looked up as
 a plain basename among the decks packaged with klt (`asap7.drc`). Resolution
