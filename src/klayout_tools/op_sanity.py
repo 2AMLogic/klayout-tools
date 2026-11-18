@@ -119,10 +119,10 @@ from ._jsonnum import is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
-    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
@@ -336,18 +336,10 @@ class ParsedNetlist:
 ALL_CORNERS = "all"
 
 
-def _strip_comment(line: str) -> str:
-    """Drop a trailing ``;``/``$`` SPICE inline comment."""
-    for marker in (";", "$ "):
-        index = line.find(marker)
-        if index >= 0:
-            line = line[:index]
-    return line.rstrip()
-
-
 def _logical_lines(text: str) -> list[str]:
     """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines.
+    ``*`` comment lines, with inline ``;``/``$`` comments removed by the
+    shared :func:`strip_spice_inline_comment`.
 
     A leading ``+`` line with nothing preceding it to fold onto (e.g. the
     very first non-blank/non-comment line of ``text`` starts with ``+``) is
@@ -359,7 +351,7 @@ def _logical_lines(text: str) -> list[str]:
     """
     lines: list[str] = []
     for raw in text.splitlines():
-        line = _strip_comment(raw.strip())
+        line = strip_spice_inline_comment(raw.strip())
         if not line or line.startswith("*"):
             continue
         lines.append(line)

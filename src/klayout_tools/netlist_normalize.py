@@ -143,7 +143,7 @@ from . import _spice_number as spice_number
 from ._capacitor_mf import capacitor_mf_is_m_alias
 from ._diode_card import convert_diode_card
 from ._jsonnum import is_number
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
