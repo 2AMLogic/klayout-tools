@@ -1,5 +1,27 @@
 {
   "coverage": {
+    "approximated_rules": [
+      {
+        "class": "whole_polygon_selection",
+        "description": "D1: selection is of whole active polygons that do not interact with the tap reach region, so a long active with one end near a tap is legal; the check under-reports monotonically and a violation count of 0 does not establish the DRM DF.13/DF.14 every-point-within-distance form",
+        "rule": "comp.tap_distance.nwell.lv.1"
+      },
+      {
+        "class": "non_complement_voltage_selection",
+        "description": "D3: the lv (touching neither v5_xtor nor dualgate) and mv (overlapping dualgate) selections are not complements; active touching v5_xtor without dualgate is evaluated by neither voltage column",
+        "rule": "comp.tap_distance.nwell.lv.1"
+      },
+      {
+        "class": "whole_polygon_selection",
+        "description": "D1: selection is of whole active polygons that do not interact with the tap reach region, so a long active with one end near a tap is legal; the check under-reports monotonically and a violation count of 0 does not establish the DRM DF.13/DF.14 every-point-within-distance form",
+        "rule": "comp.tap_distance.psub.lv.1"
+      },
+      {
+        "class": "non_complement_voltage_selection",
+        "description": "D3: the lv (touching neither v5_xtor nor dualgate) and mv (overlapping dualgate) selections are not complements; active touching v5_xtor without dualgate is evaluated by neither voltage column",
+        "rule": "comp.tap_distance.psub.lv.1"
+      }
+    ],
     "checked": [
       "comp.coverage.1",
       "comp.enclosing.contact.1",
@@ -79,6 +101,7 @@
       "117/10",
       "125/5",
       "127/5",
+      "166/5",
       "167/5",
       "204/0",
       "210/0",
@@ -130,6 +153,10 @@
       {
         "id": "comp.tap_distance.psub.mv.1",
         "reason": "inapplicable_empty_checked_region"
+      },
+      {
+        "id": "comp.width.moscap.1",
+        "reason": "no_applicable_geometry"
       },
       {
         "id": "comp.width.mv.1",
@@ -511,6 +538,7 @@
       "comp.space.mv.1",
       "comp.tap_distance.nwell.mv.1",
       "comp.tap_distance.psub.mv.1",
+      "comp.width.moscap.1",
       "comp.width.mv.1",
       "diode_mk.ongrid.1",
       "dnwell.ongrid.1",
