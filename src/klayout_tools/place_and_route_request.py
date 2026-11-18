@@ -193,10 +193,9 @@ _FLOORPLAN_METHOD_FIELDS: dict[str, tuple[str, ...]] = {
 #:   docstring's own "Scope deliberately excluded" note).
 #:
 #: Each entry's ``cell_library`` is the standard-cell library the recipe was
-#: written for; a preset naming a different library than
-#: ``request.pdk.cell_library`` is rejected by
-#: :func:`_resolve_pdn_preset` rather than handed to ``pdngen``, where a
-#: ``Metal4`` strap on a sky130 stack would surface as an obscure engine
+#: written for; a preset naming a different library than ``request.pdk.cell_library``
+#: is rejected by :func:`_resolve_pdn_preset` rather than handed to ``pdngen``,
+#: where a ``Metal4`` strap on a sky130 stack would surface as an obscure engine
 #: error (or, worse, an empty grid the audit then grades ``"partial"``).
 _PDN_PRESETS: dict[str, dict[str, Any]] = {
     "gf180mcu_7t_6M": {
@@ -282,6 +281,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
+        "also_cell_libraries": ("asap7sc7p5t_rvt",),
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "
@@ -815,7 +815,7 @@ def _resolve_pdn_preset(
     (when known): a ``gf180mcu_*`` recipe's ``Metal4``/``Metal5`` straps on a
     sky130 stack would otherwise reach ``pdngen`` as an obscure engine error
     or, worse, draw nothing at all and grade ``"partial"`` under issue
-    #2086's audit.
+    #2086's audit. ``also_cell_libraries`` (issues #6029, #4559) adds same-stack names.
     """
     preset_name = power.get("preset")
     if preset_name is None:
@@ -836,13 +836,13 @@ def _resolve_pdn_preset(
             "-- supply one or the other, not both"
         )
     preset = _PDN_PRESETS[preset_name]
-    if cell_library not in (None, preset["cell_library"]):
+    accepted = (preset["cell_library"], *preset.get("also_cell_libraries", ()))
+    if cell_library not in (None, *accepted):
         raise PlaceAndRouteError(
-            f"request.power.preset '{preset_name}' is a "
-            f"'{preset['cell_library']}' recipe ({preset['source']}), but "
-            f"request.pdk.cell_library is '{cell_library}' -- a preset may "
-            "only be used with the standard-cell library it was transcribed "
-            "for"
+            f"request.power.preset '{preset_name}' is a '{preset['cell_library']}'"
+            f" recipe ({preset['source']}), but request.pdk.cell_library is "
+            f"'{cell_library}' -- a preset may only be used with the transcribed "
+            f"standard-cell library (accepted: {', '.join(accepted)})"
         )
     if "connects" in power:
         # Issue #4348: an explicit `connects` list replaces the preset's
