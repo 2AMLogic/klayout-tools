@@ -776,8 +776,11 @@ into the circuit.)
   centre lines (located from the ring's own `TAP_*`/`COLL_*`/`GAP_*` ports)
   inside the block's placed bbox, and the net is still reported unroutable
   when the backbone: crosses a side that declares no opening; crosses the
-  gapped side outside the opening, or closer to either cut end than half the
-  route width plus the block's own reported `drc_hints.min_spacing_um`; or
+  gapped side outside the opening, or closer to either cut end than the
+  crossing clearance `width_um / 2 + drc_hints.min_spacing_um` (half the
+  route's own width plus the block's reported `drc_hints.min_spacing_um`,
+  which for a `klt gen` ring is the generic `0.4` µm same-layer floor, not
+  a deck lookup); or
   runs *along* a ring side (metal laid on the ring is a short however wide
   the opening is). A ring that does not report where all four of its sides
   run is rejected rather than assumed clear. So the ring check is *widened*,
@@ -792,7 +795,14 @@ into the circuit.)
   along-side extent stays within it clears the ring metal on both cut ends
   at every sweep point (`null` when the along-side extent is narrower than
   the layer's minimum width, or ≤ 0 after the spacing inset — no
-  same-layer-legal strap fits; issue #6425). That window is reported in
+  same-layer-legal strap fits; issue #6425). The window is deliberately
+  wider than that crossing clearance — inset by the deck's own per-layer
+  spacing (0.17 µm on sky130 li1) where a routed crossing must clear each
+  cut end by `width_um / 2 + drc_hints.min_spacing_um` — so a route whose
+  footprint fits inside the window can still be rejected as too close to
+  a cut end: the window is the envelope for a hand-drawn strap, not for a
+  routed crossing, and [`klt gen`](gen.md)'s "Ring routing openings"
+  states the divergence. That window is reported in
   the **block's own** (generator-report) frame — the same frame as the
   marker's own `x_um`/`y_um` in the `klt gen` report fed to
   `blocks[].generator_report`; it is never re-aimed into composed

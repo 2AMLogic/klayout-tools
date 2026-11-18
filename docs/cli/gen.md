@@ -1710,7 +1710,22 @@ opening through the ring's band so a route can pass through it instead:
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
-  violation in `klt drc` after the fact. The window's extent across the
+  violation in `klt drc` after the fact. That makes the window the
+  DRC-clean envelope for a **hand-drawn** strap only, and deliberately
+  wider than the clearance [`klt gen-compose`](gen-compose.md) requires
+  of a *routed* crossing through the same opening: a `connectivity[]`
+  route is held to the stricter per-cut-end clearance
+  `width_um / 2 + drc_hints.min_spacing_um`, whose spacing term is the
+  generic `0.4` µm same-layer margin every `klt gen` ring reports as its
+  `drc_hints.min_spacing_um` — a PDK-agnostic floor that exceeds every
+  curated same-layer spacing rule on both decks, used because a routed
+  crossing may run on any layer while the window's deck lookup is keyed
+  on the ring's own. On sky130 li1 the window insets 0.17 µm per cut end
+  where a routed crossing needs `width_um / 2 + 0.4` µm, so a route whose
+  footprint fits comfortably inside the window can still be rejected as
+  too close to a cut end — the window is not the envelope a routed
+  crossing is judged by (see gen-compose.md's "Routing through a ring
+  opening"). The window's extent across the
   side is the ring band's full thickness (a strap crossing the ring is
   constrained only along it, so its footprint extends past the window
   across the side by construction). The field is `null` when the
