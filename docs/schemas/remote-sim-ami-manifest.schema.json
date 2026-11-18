@@ -68,6 +68,11 @@
             "items": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
             "description": "The PDK variant directory names this image ships (e.g. ['gf180mcuD']) (issue #3251). The `batch` backend refuses a request whose `models.pdk` variant is not listed, before any S3 write, when every candidate image publishes this field. Optional: absent on historical entries, which means unknown."
           },
+          "open_pdks_commit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "description": "The open_pdks commit the image's PDK (sky130A/gf180mcu, fetched through ciel/volare) was pinned to when it was built (issue #6156) -- the same value scripts/aws/build-remote-sim-ami.sh's `PDK_VERSION` pins. Lets a client tell which PDK build an image carries before spending a fleet run. Absent when unknown: historical entries are not back-filled, and sg13g2 images have no single commit (their identity is `pdk_snapshot`'s klt ref plus the scripts it pins). Publication metadata, not proof of the bytes a job executes. Optional."
+          },
           "notes": {
             "type": ["string", "null"],
             "description": "Free-form build notes (e.g. base AMI id, packer/build-tool version). Optional."

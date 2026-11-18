@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations
 
 
 def defined_subckt_names(text: str) -> set[str]:

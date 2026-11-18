@@ -2,7 +2,12 @@
 standalone ``klayout`` application is mocked at the ``subprocess.run``
 boundary -- the fake "runset" writes a *real* ``.lvsdb`` (built with the pip
 ``klayout.db`` API) so the verdict-from-database path is exercised end to end;
-a real-binary smoke test is skipped when ``klayout`` is not on PATH."""
+a real-binary smoke test is skipped when ``klayout`` is not on PATH.
+
+The fixture preamble lives in ``helpers/lvs_runset_fixtures.py``, shared with
+``tests/test_lvs_klayout_runset_pins.py`` (issue #5664, split for the
+file-size ratchet).
+"""
 
 from __future__ import annotations
 
@@ -16,115 +21,20 @@ import klayout.db as kdb
 import pytest
 
 import lvs_tmp_repo
+from helpers import lvs_runset_fixtures as fx
+from helpers.lvs_runset_fixtures import SPICE_ONE
+from helpers.lvs_runset_fixtures import request as _request
 from klayout_tools import lvs_runset
 from klayout_tools.coverage import coverage_validation_error
 from klayout_tools.env_provenance import find_absolute_path_fields
 from klayout_tools.lvs import LvsError, check_lvs_report, run_lvs
 
 tmp_path = lvs_tmp_repo.tmp_path  # pytest collects the fixture by module-level name
-SPICE_ONE = ".subckt TOP\nM1 c b a d NMOS L=0.2u W=0.4u\n.ends\n"
-
-
-def _make_gds(path: str, n_dev: int) -> None:
-    ly = kdb.Layout()
-    ly.dbu = 0.001
-    top = ly.create_cell("TOP")
-    act, poly, bulk = ly.layer(1, 0), ly.layer(2, 0), ly.layer(9, 0)
-    top.shapes(bulk).insert(kdb.Box(-1000, -1000, 100000, 2000))
-    for i in range(n_dev):
-        x = i * 2000
-        top.shapes(act).insert(kdb.Box(x, 0, x + 1000, 400))
-        top.shapes(poly).insert(kdb.Box(x + 400, -100, x + 600, 500))
-    ly.write(path)
-
-
-def _write_lvsdb(
-    gds: str, schem: str, out: str, extract: bool = True, compare: bool = True
-) -> None:
-    ly = kdb.Layout()
-    ly.read(gds)
-    l2n = kdb.LayoutVsSchematic(kdb.RecursiveShapeIterator(ly, ly.top_cell(), []))
-    act = l2n.make_layer(ly.layer(1, 0), "act")
-    poly = l2n.make_layer(ly.layer(2, 0), "poly")
-    bulk = l2n.make_layer(ly.layer(9, 0), "bulk")
-    gate, sd = act & poly, act - poly
-    if extract:
-        l2n.extract_devices(
-            kdb.DeviceExtractorMOS4Transistor("NMOS"),
-            {"SD": sd, "G": gate, "tG": poly, "W": bulk},
-        )
-    l2n.connect(sd)
-    l2n.connect(poly)
-    l2n.connect(gate)
-    l2n.connect(bulk)
-    l2n.extract_netlist()
-    ref = kdb.Netlist()
-    # The stock reader needs a C-card value the deck's reader doesn't (#4817).
-    patched = schem + ".stock.sp"
-    with open(schem) as src, open(patched, "w") as dst:
-        dst.write(src.read().replace(" sky130_fd_pr__model", " 0 sky130_fd_pr__model"))
-    ref.read(patched, kdb.NetlistSpiceReader())
-    l2n.reference = ref
-    if compare:
-        l2n.compare(kdb.NetlistComparer())
-    l2n.write(out)
 
 
 @pytest.fixture
 def fake_klayout(monkeypatch, tmp_path):
-    """Replace the subprocess boundary; ``state`` controls the fake runset."""
-    state = {
-        "returncode": 0,
-        "write_db": True,
-        "extract": True,
-        "compare": True,
-        "stdout": "",
-    }
-    fake_bin = tmp_path / "klayout"
-    fake_bin.write_text("#!/bin/sh\n")
-    fake_bin.chmod(0o755)
-    monkeypatch.setenv("KLT_KLAYOUT_BINARY", str(fake_bin))
-    real_run = subprocess.run
-
-    def fake_run(cmd, *a, **kw):
-        if cmd[0] != str(fake_bin):
-            return real_run(cmd, *a, **kw)
-        if cmd[1:] == ["-v"]:
-            return subprocess.CompletedProcess(cmd, 0, "KLayout 0.30.12\n", "")
-        args = dict(c.split("=", 1) for c in cmd if "=" in c and c != "-rd")
-        state["cmd"] = cmd
-        if state["write_db"]:
-            _write_lvsdb(
-                args["input"],
-                args["schematic"],
-                args["report"],
-                state["extract"],
-                state["compare"],
-            )
-        # The driver exits 0 even when the netlists do not match.
-        return subprocess.CompletedProcess(
-            cmd, state["returncode"], state["stdout"], ""
-        )
-
-    monkeypatch.setattr(lvs_runset.subprocess, "run", fake_run)
-    return state
-
-
-def _request(tmp_path, n_dev, **extra):
-    gds = tmp_path / "l.gds"
-    _make_gds(str(gds), n_dev)
-    sp = tmp_path / "ref.sp"
-    sp.write_text(SPICE_ONE)
-    deck = tmp_path / "pdk.lvs"
-    deck.write_text("# runset\n")
-    request = {
-        "engine": "klayout-runset",
-        "layout": {"file": str(gds)},
-        "reference": {"netlist": str(sp)},
-        "deck_file": str(deck),
-        **extra,
-    }
-    return json.dumps(request)
+    return fx.install_fake_klayout(monkeypatch, tmp_path)
 
 
 def test_match_verdict_from_database(tmp_path, fake_klayout):
@@ -477,6 +387,20 @@ def test_check_hashes_runset(tmp_path, fake_klayout):
     assert "provenance.runset.content_hash" in [c["field"] for c in result["checks"]]
     (tmp_path / "pdk.lvs").write_text("# changed\n")
     assert check_lvs_report(str(path))["status"] != "match"
+
+
+def test_check_names_missing_runset_deck(tmp_path, fake_klayout):
+    """Issue #6223: a moved runset deck gets the `input_not_found` block."""
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(run_lvs(_request(tmp_path, 1))))
+    by_field = {c["field"]: c for c in check_lvs_report(str(path))["checks"]}
+    ok = by_field["provenance.runset.content_hash"]
+    assert ok["match"] and ok["actual"].startswith("sha256:")
+    assert "input_not_found" not in ok
+    (tmp_path / "pdk.lvs").rename(tmp_path / "moved.lvs")
+    gone = {c["field"]: c for c in check_lvs_report(str(path))["checks"]}[ok["field"]]
+    assert gone["actual"] is None and not gone["match"]
+    assert gone["input_not_found"]["path"] == str(tmp_path / "pdk.lvs")
 
 
 @pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")
