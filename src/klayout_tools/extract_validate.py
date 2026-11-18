@@ -25,10 +25,39 @@ class ValidatedExtractArgs(NamedTuple):
     net_selectors: Any
 
 
+#: The ``--report-parasitics`` shapes (issue #5816). ``full`` is the
+#: documented default (byte-identical to the pre-#5816 output); ``slim``
+#: drops the data a `--spef` file beside the report already carries.
+_REPORT_PARASITICS_SHAPES = ("full", "slim")
+
+
+def _validate_report_parasitics(report_parasitics: Any, spef_output: Any) -> None:
+    """``--report-parasitics`` (issue #5816) validation, in a helper so
+    :func:`validate_run_extract_args`'s own (baselined) complexity does not
+    grow -- the same route ``--resistance-path``'s checks above already
+    take.
+
+    The CLI form is argparse-``choices``-constrained, but the request form
+    carries the value as a plain string, so the value check runs here where
+    both forms meet -- same "a flag naming something invalid is an error,
+    not a silent no-op" convention as ``--mom-net`` above. ``slim`` is
+    meaningful only beside a SPEF -- its whole point is dropping the JSON
+    data the ``--spef`` file already carries -- so it requires ``--spef``,
+    the same convention as ``--def-net-connections``.
+    """
+    if report_parasitics not in _REPORT_PARASITICS_SHAPES:
+        raise ExtractError(
+            f"--report-parasitics must be 'full' or 'slim' (got {report_parasitics!r})"
+        )
+    if report_parasitics == "slim" and spef_output is None:
+        raise ExtractError("--report-parasitics slim requires --spef")
+
+
 def validate_run_extract_args(
     *,
     mom_net: Any,
     spef_output: Any,
+    report_parasitics: Any,
     substrate_spreading_net: Any,
     substrate_tie_ohms: Any,
     critical_nets: Any,
@@ -74,6 +103,10 @@ def validate_run_extract_args(
     # without the lumped-RC pass this flag reuses (see :func:`_write_spef`).
     if spef_output is not None and not parasitics:
         raise ExtractError("--spef requires --parasitics")
+
+    # `--report-parasitics` (issue #5816): validated up front in a helper so
+    # this function's own (baselined) complexity does not grow.
+    _validate_report_parasitics(report_parasitics, spef_output)
 
     # `--substrate-spreading` (issue #2561) requires `--parasitics`: its
     # estimate is reported inside the `parasitics` block, alongside the
