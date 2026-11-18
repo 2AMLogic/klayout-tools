@@ -16,6 +16,7 @@ from typing import Any
 
 from . import place_and_route_clock as _vclk
 from ._openroad_engine import _timing_violation_report_lines
+from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
@@ -54,37 +55,11 @@ def _write_script(script_path: str, lines: list[str]) -> None:
 # the metric procs read back are Liberty-``time_unit``-independent (#4089).
 _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
-_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
-
-
-def _tcl_literal(text: str) -> str:
-    """Backslash-quote ``text`` into one literal Tcl word: no word
-    splitting, no ``$``/``[...]``/backslash substitution, no brace
-    matching. Module-local copy of ``post_route_sta._tcl_literal`` /
-    ``lvs_netgen._tcl_word`` per this module's self-contained convention
-    (issue #5708): every caller-supplied string interpolated into a
-    generated script here -- ``link_design``'s ``hdl_toplevel`` and the
-    ``hdl_toplevel``-bearing checkpoint paths -- goes through it, so a
-    Yosys ``$paramod\\...`` escaped identifier reaches OpenROAD verbatim.
-    Ordinary spellings contain no Tcl-special character and pass through
-    unchanged, so pre-#5708 scripts are byte-identical."""
-    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
-
 
 def _clock_lines(clock_port: str | None, clock_period_ns: float | None) -> list[str]:
-    """``create_clock`` (OpenROAD's minimal SDC-equivalent input, contract
-    spike section 5's ``constraints`` field) -- must run only **after** the
-    design is linked (``link_design``, or a ``read_db`` that already
-    restored a linked network): ``create_clock``'s own ``[get_ports ...]``
-    lookup raises ``STA-1570 No network has been linked`` otherwise
-    (confirmed live for issue #425's own worked example -- see
-    :func:`_stage_script_lines`'s call sites, never before ``link_design``).
-    """
+    """Create a clock after link_design/read_db resolves [get_ports] (#425)."""
     if clock_port is None:
         return _vclk.virtual_clock_lines(clock_period_ns, _UNIT_PIN_LINE)  # issue #4913
-    # Issue #5708: one literal Tcl word, byte-identical for ordinary names
-    # -- kept spelling-identical to `post_route_sta._clock_lines` (the two
-    # copies' drift is asserted by the test suite).
     return [
         _UNIT_PIN_LINE,
         f"create_clock -name {_tcl_literal(clock_port)} "
@@ -1044,11 +1019,6 @@ def _stage_script_lines(
             f"read_lef {_tcl_literal(cell_lef)}",
         ]
         lines += [f"read_lef {_tcl_literal(macro['lef'])}" for macro in macros]
-        # Issue #5708: `hdl_toplevel` is one literal Tcl word -- a Yosys
-        # `$paramod\...` escaped identifier must reach `link_design` exactly
-        # as written, never `$`-substituted. Same for the checkpoint paths
-        # below, which embed `hdl_toplevel` in their filename (the
-        # orchestrator names `{hdl_toplevel}_{stage}.odb` after it).
         lines += [
             f"read_verilog {_tcl_literal(netlist_path)}",
             f"link_design {_tcl_literal(hdl_toplevel)}",
@@ -1090,8 +1060,6 @@ def _stage_script_lines(
         if power is not None:
             lines += _power_delivery_lines(power, cell_library, library, macros)
         lines += _metrics_report_lines(include_fmax=False, include_power=False)
-        # Issue #5708: `checkpoint_out` embeds `hdl_toplevel` in its
-        # filename -- one literal Tcl word, same reason as `link_design`.
         lines += [f"write_db {_tcl_literal(checkpoint_out)}"]
         return lines
 

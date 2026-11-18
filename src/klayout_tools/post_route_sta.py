@@ -301,6 +301,7 @@ from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEG
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
+from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
@@ -2921,12 +2922,6 @@ _UNIT_PIN_LINE = "set_cmd_units -time ns -capacitance pF"
 
 
 def _clock_lines(clock_port: str, clock_period_ns: float) -> list[str]:
-    # Issue #5708: the caller-supplied clock port reaches Tcl as one literal
-    # word -- a `$paramod\...`-style escaped identifier must never be
-    # substituted or word-split by Tcl before OpenSTA sees it. Ordinary
-    # names (no Tcl-special characters) pass through `_tcl_literal`
-    # unchanged, so the emitted line is byte-identical to the pre-#5708
-    # spelling for every name the earlier requests used.
     return [
         _UNIT_PIN_LINE,
         f"create_clock -name {_tcl_literal(clock_port)} "
@@ -2952,11 +2947,7 @@ def _extra_clock_lines(clock_extras: dict[str, Any] | None) -> list[str]:
     """Issue #4241: one ``create_clock`` per secondary clock, then any
     ``set_clock_groups -asynchronous``. Empty for a single-clock request.
 
-    Each secondary clock's port is ``_tcl_literal``-quoted like the
-    primary's (issue #5708). The ``-group`` lists are emitted inside Tcl
-    braces, which already suppress ``$``/``[...]``/backslash substitution --
-    only a name containing an unbalanced ``{``/``}`` could break that
-    braced word, so no further quoting is applied there."""
+    Clock groups are braced Tcl words (no substitution)."""
     if not clock_extras:
         return []
     lines = [
@@ -3026,30 +3017,6 @@ def _io_delay_lines(
             f"-clock {_tcl_literal(clock_port)} [all_outputs]"
         )
     return lines
-
-
-_TCL_SPECIAL = frozenset(' \t\r\n\\"$[]{};#')
-
-
-def _tcl_literal(text: str) -> str:
-    """Backslash-quote ``text`` into one literal Tcl word: no word
-    splitting, no ``$``/``[...]``/backslash substitution, no brace
-    matching. Control characters never reach here
-    (:func:`_validate_port_delay_maps` rejects them), so only the
-    Tcl-special printable characters need escaping. Same idiom as
-    ``lvs_netgen.py``'s ``_tcl_word``, kept module-local per this module's
-    self-contained convention.
-
-    Since issue #5708 this is the one quoting mechanism for *every*
-    caller-supplied string this module interpolates into a generated
-    script -- ``link_design``'s ``hdl_toplevel``, every ``clock_port``
-    occurrence, the driving-cell/pin names, and the ``read_*``/``read_spef``
-    file paths -- not just the port names it originally covered. Ordinary
-    spellings (``top``, ``clk``, ``/pdk/lib.lib``) contain no Tcl-special
-    character and pass through unchanged, so the emitted script is
-    byte-identical to the pre-#5708 output for every name a pre-#5708
-    request could express."""
-    return "".join("\\" + ch if ch in _TCL_SPECIAL else ch for ch in text)
 
 
 def _request_io_delay_lines(
@@ -3327,8 +3294,6 @@ def _boundary_lines(
     cells = boundary.get("driving_cells") or {}
 
     def drive_args(cell: dict[str, str]) -> str:
-        # Issue #5708: `_LIBERTY_IDENT_RE` allows `$`, which Tcl would
-        # substitute in a bare word -- each name is one literal word.
         args = (
             f"-lib_cell {_tcl_literal(cell['cell'])} -pin {_tcl_literal(cell['pin'])}"
         )
@@ -3778,10 +3743,6 @@ def _sta_script_lines(
     """
     if sdf_path is not None and spef_path is None:
         raise ValueError("sdf_path requires spef_path")
-    # Issue #5708: every caller-supplied string below -- the resolved PDK
-    # paths (rooted at the request's `pdk.root`), the request's own
-    # def/spef paths, and the clock port -- is interpolated as one literal
-    # Tcl word. Ordinary spellings pass through `_tcl_literal` unchanged.
     lines = [
         f"read_lef {_tcl_literal(tech_lef)}",
         f"read_lef {_tcl_literal(cell_lef)}",
@@ -3911,14 +3872,6 @@ def _sta_netlist_script_lines(
     shapes throughout, differing only in ``geometry_source``/the estimate
     provenance fields.
     """
-    # Issue #5708: every caller-supplied string below is interpolated as one
-    # literal Tcl word. `link_design`'s `hdl_toplevel` is the reported case:
-    # a Yosys `$paramod\...` escaped identifier contains `$`/backslashes
-    # that bare interpolation would substitute or drop before OpenSTA ever
-    # saw the name. The `read_*` arguments are paths under the request's
-    # `pdk.root`/request dir -- quoted for the same reason. Ordinary
-    # spellings pass through `_tcl_literal` unchanged, so the script for a
-    # pre-#5708 request is byte-identical.
     lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
     # Issue #2635 (`request.macros`): each macro's corner-matching liberty
     # right after the standard-cell one, each macro's LEF right after the
@@ -3950,12 +3903,7 @@ def _sta_netlist_script_lines(
         report_instances,
         boundary,
     )
-    # `wire_load_mode` is one of `_WIRE_LOAD_MODES` (enum-validated, a
-    # Tcl-safe charset by construction) and `wire_load_model` is a
-    # non-empty string emitted inside Tcl braces -- braces already suppress
-    # `$`/`[...]`/backslash substitution, so neither is quoted with
-    # `_tcl_literal` (a backslash-escape inside braces would be literal,
-    # not an escape).
+    # Mode is enum-validated; model is a braced Tcl word (no substitution).
     if wire_load_mode is not None:
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:

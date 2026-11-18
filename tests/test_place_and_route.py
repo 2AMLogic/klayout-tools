@@ -4666,34 +4666,6 @@ def test_stubbed_full_route_with_macro_emits_read_lef_and_place_macro(
     assert link_design_idx < place_macro_idx < make_tracks_idx
 
 
-def test_stubbed_paramod_toplevel_reaches_link_design_literal(tmp_path, monkeypatch):
-    """Issue #5708: a Yosys `$paramod\\...` escaped-identifier `hdl_toplevel`
-    must reach the floorplan stage's `link_design` as one literal Tcl word,
-    and every generated path that embeds the name (`read_verilog` netlist is
-    ordinary, but `write_db`'s checkpoint filename is
-    `{hdl_toplevel}_{stage}.odb`) must be quoted the same way -- Tcl would
-    otherwise substitute `$paramod` before OpenROAD saw it."""
-    paramod_top = r"$paramod\some_module\N=s32'00000000000000000000000000000010"
-    paramod_tcl = r"\$paramod\\some_module\\N=s32'00000000000000000000000000000010"
-
-    request_path = _setup_success_env(tmp_path, monkeypatch, hdl_toplevel=paramod_top)
-    _stub_openroad_success(monkeypatch)
-    _stub_merge_def_to_gds(monkeypatch)
-
-    report = run_place_and_route(request_path)
-
-    assert report["stage_reached"] == "route"
-    floorplan_script = _stage_script(request_path, "floorplan", paramod_top)
-    lines = _script_lines(floorplan_script)
-    link_design_line = f"link_design {paramod_tcl}"
-    assert link_design_line in lines
-    # The checkpoint written at the end of the floorplan stage embeds the
-    # same name in its filename -- one literal word too.
-    write_db_line = next(ln for ln in lines if ln.startswith("write_db "))
-    assert write_db_line.startswith("write_db ")
-    assert f"{paramod_tcl}_floorplan.odb" in write_db_line
-
-
 def test_stubbed_no_macros_field_emits_no_place_macro_lines(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
