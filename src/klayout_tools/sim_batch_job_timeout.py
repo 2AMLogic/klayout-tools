@@ -23,9 +23,9 @@ for typing), so :mod:`klayout_tools.sim_batch` can import it freely.
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
+from ._jsonnum import is_finite_number
 from .sim_batch_contract import (
     _BATCH_PROVISION_SLACK_S,
     BATCH_MAX_UNITS_CODE,
@@ -49,12 +49,7 @@ def resolve_job_timeout_s(batch_spec: dict[str, Any]) -> float | None:
     value = batch_spec.get("job_timeout_s")
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value <= 0
-    ):
+    if not is_finite_number(value) or value <= 0:
         raise SimError(
             "request.batch.job_timeout_s must be a positive number of "
             f"seconds (got {value!r})"

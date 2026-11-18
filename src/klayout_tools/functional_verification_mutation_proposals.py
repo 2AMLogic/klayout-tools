@@ -4,7 +4,7 @@ Split out of ``functional_verification_mutation.py`` (itself split out of
 ``functional_verification.py``, the #1909 SDF-split precedent): the
 ``<proposals>`` document loader/validators and the resolution of proposals
 against the request's sources. Names that stay in ``functional_verification.py``
-are reached as ``_fv.<name>`` at call time; every name is re-exported from there.
+are reached as ``_fv.<name>`` at call time.
 """
 
 from __future__ import annotations
@@ -131,8 +131,7 @@ def _raise_all_collected(errors: list[str]) -> NoReturn:
     if len(errors) == 1:
         raise _fv.FunctionalVerificationError(errors[0])
     raise _fv.FunctionalVerificationError(
-        f"mutation proposals document has {len(errors)} validation errors: "
-        + "; ".join(errors)
+        f"--mutations input has {len(errors)} validation errors: " + "; ".join(errors)
     )
 
 
