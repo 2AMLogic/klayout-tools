@@ -104,6 +104,7 @@ def _report_hash_checks(
             report_path,
             override=input_path,
             hasher=content_hash,
+            override_hint="an absolute path as the positional <file> argument",
         ),
         deck_check,
     ]
