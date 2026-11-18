@@ -7350,7 +7350,12 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    assert [shard["resumed"] for shard in fleet] == [False, False]
+    # Issue #6423: a partial resume reports both phases' provenance. The
+    # harvested shard's entry (stamped ``resumed``) comes first -- harvested
+    # map order, then dispatch order -- followed by the two re-dispatched
+    # one-unit shards. The terminally failed shard is not harvested, so it
+    # contributes no entry of its own.
+    assert [shard["resumed"] for shard in fleet] == [True, False, False]
     assert report["environment"]["resume"]["resumed_corners"] == 2
     assert all(c["status"] == "pass" for c in report["corners"])
     assert not manifest_path.exists()  # swept clean: nothing left to re-attach
