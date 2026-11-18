@@ -423,8 +423,20 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt synthesize`/`klt equiv` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
+
+**Verilog-top functional-verification citations (issue #6488).** On the
+`testbench.verilog_top` path the Verilog bench is itself a `request.sources`
+entry, so the report's `input.content_hash` digests the bench together with
+the DUT sources — it can never agree with a `klt synthesize`/`klt equiv`
+citation over the DUT alone, and bundling both in one `klt signoff` run
+renders `provenance_consistency.ok: false` and `status: "refused"` for the
+whole run. That disagreement is structural, not a staleness signal: no re-run
+or re-pin makes the bundle grade. Cite the cocotb-path functional-verification
+report instead (its digest covers the DUT sources only), or keep the
+Verilog-top citation out of any bundle that also cites a `source`-role
+`synthesize`/`equiv` report.
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
 envelope — which carries no `provenance` block at all as of its current
