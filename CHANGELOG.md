@@ -446,6 +446,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   committed envelope re-checks `match`; no `schema_version` bump. Repeating
   one path across item-9 object entries is still refused, and the refusal now
   points at the list form. See `docs/cli/signoff.md`.
+- **`klt sim --capacity-retries N` now works on a sharded single request**
+  (#5567, 2026-11-16): a sharded batch run whose `--wait-for-capacity` budget
+  ran out left the refused shards as `lost_shard` corners, recoverable only
+  by a second `--attach` / `--resume` invocation. With `--capacity-retries N`
+  the shards lost to `batch_no_capacity` / `batch_concurrency_cap` are
+  launched again, in up to `N` further passes after the other shards finish,
+  with doubling backoff and a fresh capacity-wait budget per pass; their
+  already-submitted jobs are launched, never re-submitted. Default `0` is
+  unchanged, and `--batch-set` behaves as before.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure
