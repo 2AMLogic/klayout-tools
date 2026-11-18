@@ -877,8 +877,8 @@ def _validate_power(
     """Validate the optional ``request.power`` block (issue #1091) -- power
     delivery net names and PDN strap geometry, driving ``tapcell``/
     ``add_global_connection``/``global_connect``/``pdngen``/
-    ``filler_placement`` -- see this module's own docstring "Power delivery"
-    section. ``None`` (the default, field omitted) preserves this module's
+    ``filler_placement``. See "Power delivery" in ``docs/cli/place-and-route.md``.
+    ``None`` (the default, field omitted) preserves this module's
     original v1 behavior byte-for-byte: no power-delivery Tcl is ever
     emitted, unchanged from before this field existed.
 
@@ -1181,13 +1181,13 @@ def _validate_macros(
 ) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #438). Each
     entry fixes one hard-macro instance at a caller-given location during
-    the ``"floorplan"`` stage -- see this module's docstring "Hard-macro
-    placement" section. Returns ``[]`` when the field is omitted/``None``
-    (unchanged behavior -- purely additive).
+    the ``"floorplan"`` stage. See "Hard-macro placement" in
+    ``docs/cli/place-and-route.md``. Returns ``[]`` when the field is
+    omitted/``None`` (unchanged behavior -- purely additive).
 
     ``netlist_path`` (issue #464) additionally cross-checks each macro's LEF
     pins with no ``PORT`` geometry at all against the netlist's own wiring --
-    see this module's docstring "Macro-pin routability cross-check" section.
+    see "Macro-pin routability cross-check" in ``docs/cli/place-and-route.md``.
     ``None`` (the default, used by this module's own direct unit tests below
     that exercise validation in isolation, with no netlist in hand) skips
     that cross-check entirely -- it is purely additive to the pre-existing
@@ -1210,8 +1210,8 @@ def _validate_macros(
         halo, and -- when ``request.power`` is also given -- as a
         ``define_pdn_grid -macro ... -halo`` macro PDN grid. See
         :func:`_macro_blockage_lines` / :func:`_macro_pdn_grid_lines`, and
-        this module's docstring "Power delivery" section (whose v1 exclusion
-        of macro PDN grids this closes).
+        "Power delivery" in ``docs/cli/place-and-route.md`` for the original
+        v1 exclusion of macro PDN grids that this closes.
     ``keepout`` (issue #5313)
         Same shape and validation as ``halo``, but a *placement-only* keep-out:
         it widens the ``create_blockage`` rectangle (per-side ``max(halo,
@@ -1399,8 +1399,8 @@ def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
     ``always_latch``/``initial`` statement -- the three constructs that
     deterministically fail a real OpenROAD run several stages in, with a
     diagnostic pointing at a generated file the caller never wrote (issues
-    #1973, #5792 and #6274; see this module's docstring "Netlist pre-flight"
-    section for the full rationale).
+    #1973, #5792 and #6274). See "Netlist pre-flight" in
+    ``docs/cli/place-and-route.md`` for the rationale.
 
     A behavioural statement's message -- construct clause plus an
     evidence-gated cause clause -- is composed by
@@ -1520,8 +1520,8 @@ def _reject_wired_port_less_pins(
     """Raise :class:`PlaceAndRouteError` when any of ``no_port_pin_names``
     (macro pins with no ``PORT`` geometry at all in the declared LEF) is
     actually wired to a real net in the netlist's own instantiation of this
-    macro -- see this module's docstring "Macro-pin routability cross-check"
-    section. A no-op when the netlist cannot be confidently parsed for this
+    macro. See "Macro-pin routability cross-check" in
+    ``docs/cli/place-and-route.md``. A no-op when parsing is inconclusive for this
     instance, or when every no-``PORT`` pin is left unconnected there."""
     connections = _macro_instance_port_connections(
         netlist_path, macro_cell_name, instance
