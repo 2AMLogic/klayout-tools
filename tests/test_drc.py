@@ -10415,7 +10415,10 @@ def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
         capsys,
         [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
     )
-    assert "--waivers is not supported with --engine klayout" in message
+    assert message == (
+        "--waivers is not supported with --engine klayout: only the curated engine "
+        "matches waivers and reports waived violations (see docs/cli/drc.md, 'Waivers')"
+    )
 
 
 def test_waived_report_check_and_rerun_replay_waivers(tmp_path):
