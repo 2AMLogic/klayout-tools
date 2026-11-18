@@ -395,7 +395,8 @@ are always the real, unmodified DRM values:
   covered by neither; **D7** only upstream's ``flat`` mode was compared, not
   its ``deep``/tiled modes. ``DF.13`` measures with octagon steps and
   ``DF.14`` with a Euclidean separation, so the two rules do not share one
-  boundary metric.
+  boundary metric. Checked rules report D1 and D3 in
+  ``coverage.approximated_rules`` (issue #5805), even with zero violations.
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -655,6 +656,48 @@ def _gf180mcu_klayout_deck_provenance(source_file: str, rule_id: str) -> RulePro
 # results against a layout written at a different dbu (see DrcRule's
 # docstring).
 NOMINAL_DBU_UM = 0.001
+
+
+def _tap_distance_spec(
+    well_domain: str, voltage: str, max_distance_um: float
+) -> TapDistanceSpec:
+    return TapDistanceSpec(
+        well_domain=well_domain,
+        voltage=voltage,
+        max_distance_um=max_distance_um,
+        nwell=(21, 0),
+        dnwell=(12, 0),
+        lvpwell=(204, 0),
+        nplus=(32, 0),
+        pplus=(31, 0),
+        res_mk=(110, 5),
+        dualgate=(55, 0),
+        v5_xtor=(112, 1),
+    )
+
+
+# D1 and D3 from the module's known approximations, disclosed per checked rule.
+_TAP_DISTANCE_APPROXIMATIONS = (
+    {
+        "class": "whole_polygon_selection",
+        "description": (
+            "D1: selection is of whole active polygons that do not interact "
+            "with the tap reach region, so a long active with one end near a "
+            "tap is legal; the check under-reports monotonically and a "
+            "violation count of 0 does not establish the DRM DF.13/DF.14 "
+            "every-point-within-distance form"
+        ),
+    },
+    {
+        "class": "non_complement_voltage_selection",
+        "description": (
+            "D3: the lv (touching neither v5_xtor nor dualgate) and mv "
+            "(overlapping dualgate) selections are not complements; active "
+            "touching v5_xtor without dualgate is evaluated by neither "
+            "voltage column"
+        ),
+    },
+)
 
 DECK: list[DrcRule] = [
     DrcRule(
@@ -1421,19 +1464,7 @@ DECK: list[DrcRule] = [
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
         threshold_dbu=0,  # no dbu threshold: the distance is in the spec
-        region_spec=TapDistanceSpec(
-            well_domain="inside",
-            voltage="lv",
-            max_distance_um=20.0,
-            nwell=(21, 0),
-            dnwell=(12, 0),
-            lvpwell=(204, 0),
-            nplus=(32, 0),
-            pplus=(31, 0),
-            res_mk=(110, 5),
-            dualgate=(55, 0),
-            v5_xtor=(112, 1),
-        ),
+        region_spec=_tap_distance_spec("inside", "lv", 20.0),
         # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
         # Nwell) from (PCOMP inside Nwell)" (3.3V column, 20 um). Re-derived from
         # the PDK's executable `comp.rb` (pactive not interacting
@@ -1441,6 +1472,7 @@ DECK: list[DrcRule] = [
         # approximations" note on `comp.tap_distance.nwell.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.psub.lv.1",
@@ -1451,19 +1483,7 @@ DECK: list[DrcRule] = [
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
         threshold_dbu=0,  # no dbu threshold: the distance is in the spec
-        region_spec=TapDistanceSpec(
-            well_domain="outside",
-            voltage="lv",
-            max_distance_um=20.0,
-            nwell=(21, 0),
-            dnwell=(12, 0),
-            lvpwell=(204, 0),
-            nplus=(32, 0),
-            pplus=(31, 0),
-            res_mk=(110, 5),
-            dualgate=(55, 0),
-            v5_xtor=(112, 1),
-        ),
+        region_spec=_tap_distance_spec("outside", "lv", 20.0),
         # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
         # outside Nwell) from (NCOMP outside Nwell)" (3.3V column, 20 um).
         # Re-derived from the PDK's executable `comp.rb` (nactive minus a diamond
@@ -1471,6 +1491,7 @@ DECK: list[DrcRule] = [
         # docstring's "Known approximations" note on `comp.tap_distance.psub.lv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_LV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.nwell.mv.1",
@@ -1481,19 +1502,7 @@ DECK: list[DrcRule] = [
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
         threshold_dbu=0,  # no dbu threshold: the distance is in the spec
-        region_spec=TapDistanceSpec(
-            well_domain="inside",
-            voltage="mv",
-            max_distance_um=15.0,
-            nwell=(21, 0),
-            dnwell=(12, 0),
-            lvpwell=(204, 0),
-            nplus=(32, 0),
-            pplus=(31, 0),
-            res_mk=(110, 5),
-            dualgate=(55, 0),
-            v5_xtor=(112, 1),
-        ),
+        region_spec=_tap_distance_spec("inside", "mv", 15.0),
         # DRM 7.5 Comp, rule "DF.13": "Max distance of Nwell tap (NCOMP inside
         # Nwell) from (PCOMP inside Nwell)" (5V/6V column, 15 um). Re-derived
         # from the PDK's executable `comp.rb` (pactive overlapping dualgate and
@@ -1501,6 +1510,7 @@ DECK: list[DrcRule] = [
         # "Known approximations" note on `comp.tap_distance.nwell.mv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.13_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="comp.tap_distance.psub.mv.1",
@@ -1511,19 +1521,7 @@ DECK: list[DrcRule] = [
         layer=(22, 0),  # Comp -- the checked layer
         check="tap_distance",
         threshold_dbu=0,  # no dbu threshold: the distance is in the spec
-        region_spec=TapDistanceSpec(
-            well_domain="outside",
-            voltage="mv",
-            max_distance_um=15.0,
-            nwell=(21, 0),
-            dnwell=(12, 0),
-            lvpwell=(204, 0),
-            nplus=(32, 0),
-            pplus=(31, 0),
-            res_mk=(110, 5),
-            dualgate=(55, 0),
-            v5_xtor=(112, 1),
-        ),
+        region_spec=_tap_distance_spec("outside", "mv", 15.0),
         # DRM 7.5 Comp, rule "DF.14": "Max distance of substrate tap (PCOMP
         # outside Nwell) from (NCOMP outside Nwell)" (5V/6V column, 15 um).
         # Re-derived from the PDK's executable `comp.rb` (nactive overlapping
@@ -1532,6 +1530,7 @@ DECK: list[DrcRule] = [
         # `comp.tap_distance.psub.mv.1`.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_klayout_deck_provenance("comp", "DF.14_MV"),
+        approximations=list(_TAP_DISTANCE_APPROXIMATIONS),  # D1/D3 (#5805)
     ),
     DrcRule(
         id="nplus.width.1",
