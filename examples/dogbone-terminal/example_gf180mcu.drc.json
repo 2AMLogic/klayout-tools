@@ -858,6 +858,18 @@
     ],
     "unknown": [],
     "nothing_checked": false,
-    "nothing_checked_reasons": []
+    "nothing_checked_reasons": [],
+    "approximated_rules": [
+      {
+        "rule": "comp.tap_distance.psub.lv.1",
+        "class": "whole_polygon_selection",
+        "description": "D1: selection is of whole active polygons that do not interact with the tap reach region, so a long active with one end near a tap is legal; the check under-reports monotonically and a violation count of 0 does not establish the DRM DF.13/DF.14 every-point-within-distance form"
+      },
+      {
+        "rule": "comp.tap_distance.psub.lv.1",
+        "class": "non_complement_voltage_selection",
+        "description": "D3: the lv (touching neither v5_xtor nor dualgate) and mv (overlapping dualgate) selections are not complements; active touching v5_xtor without dualgate is evaluated by neither voltage column"
+      }
+    ]
   }
 }

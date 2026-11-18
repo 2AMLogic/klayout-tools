@@ -74,6 +74,13 @@ def run_in_group(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
     we kill, but the group persists while any grandchild lives, so
     ``killpg(pid)`` still reaches it. Callers that mock ``subprocess.run``
     simply never record a pid and nothing is killed.
+
+    The pid recording patches :attr:`subprocess.Popen` process-globally for
+    the duration of the call: ``_install()`` replaces any value already in
+    place (including a third-party patch), and ``_uninstall()`` restores the
+    import-time ``Popen`` when the refcount reaches zero, so patches applied
+    before or during the call do not survive it. Code that patches
+    ``subprocess.Popen`` should not run concurrently with this function.
     """
     kwargs["start_new_session"] = True
     previous = getattr(_local, "pids", None)
