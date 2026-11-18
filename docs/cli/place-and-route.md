@@ -3124,15 +3124,14 @@ tiny routed block, `output_dbu_um` 0.00025, M4/M5 track offsets 0.012 and
 M6/M7 0.016 per #4493): the ORFS-width `M5` strap lands a 24 nm `V4` cut in
 a 120 nm strap, so `V4.M5.AUX.2` fired 1,332 times, with `M4.AUX.1`/`M4.AUX.2`
 from the off-grid `M3`/`M4` stub and `M5.AUX.1`/`M6.AUX.1` from strap edges.
-The shipped recipe clears those families: `M5` is 0.216 um wide, the only
+The shipped recipe uses a 0.216 µm `M5` strap, the only
 width for which the tech LEF has a wide `V4` bar (`VIARULE
-M5_M4widePWR0p864`); `ongrid {M3 M4}` snaps the stub onto the tracks;
-`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits; widths plus
-spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
-edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
-`M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
-`V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
-(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+M5_M4widePWR0p864`). `ongrid {M3 M4}` snaps the stub onto the tracks and
+`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits. Both strap-edge
+checks were clean on the original seven-inverter block (24 µm core, reported
+origin 0.96 µm, PR #4499). The wide `V4` bar's zero `M4` enclosure left
+369 `V4.M4.EN.1` and 13 `V4.M5.EN.2` markers. The request exposes no control
+for that enclosure. That run also had two `M5.W.3` markers.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
 markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
 count that scales with block size, not a fixed number). They sit on
@@ -3145,9 +3144,34 @@ re-introduces the families above), `split_cuts` is measured DRC-dirty on
 gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
 This is an upstream
 OpenROAD `pdngen` limitation; the preset is unchanged here.
-`pdngen` offsets are core-origin relative: the edge-grid result was measured
-with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
-hits (adjust `power.straps` explicitly in that case).
+
+**Strap edges depend on the snapped core origin.** At `core_margin_um: 0.96`,
+the 97-inverter chain using the `place_and_route_drcfill` request (20% utilization)
+had zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`, `M4.W.3`, `M5.AUX.1` and
+`M6.AUX.1`. The first routed DEF `ROW` started at (972, 1080) nm. The
+following runs varied only the requested margin (2026-11-18, klayout-tools
+`94950eeee`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12, packaged
+`asap7.drc`, lambdapdk v0.2.17).
+
+| `core_margin_um` | First row x, y (nm) | `M5.AUX.1` | `M6.AUX.1` |
+| ---: | ---: | ---: | ---: |
+| 0.864 | 864, 1080 | 8 | 0 |
+| 0.918 | 918, 1080 | 8 | 0 |
+| 0.96 | 972, 1080 | 0 | 0 |
+| 1.0 | 1026, 1080 | 8 | 0 |
+| 1.188 | 1188, 1350 | 0 | 8 |
+
+Among these origins, M5 was clean at x = 972 and 1188 nm, both 12 nm modulo
+the deck's 24 nm grid. At x = 1026 nm the first strap's edges were at 1230
+and 1446 nm, both 6 nm off grid. M6 checks the horizontal edges against a
+32 nm grid. At the 1.0 µm margin, a 32-output fan-out also had eight
+`M5.AUX.1` markers at both 20% and 40% utilization. Rerun the same request
+with `power` omitted to isolate the PDN contribution. All three 1.0 µm runs
+then had zero `M5.AUX.1` markers. To confirm attribution, compare the marker
+coordinates with the strap edges in the routed DEF's `SPECIALNETS`. To move
+a strap, expand the preset into explicit `power.straps` and `power.connects`
+and adjust the affected layer's `power.straps[].offset_um` relative to the
+snapped origin.
 
 **`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a
