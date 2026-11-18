@@ -123,16 +123,13 @@ jobs:
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
       - name: Per-file size ratchet (merge-base)
-        # scripts/check_file_size_baseline.py (issue #2766). Stricter than
-        # the complexity ratchet above in WHOSE baseline is trusted: that
-        # one reads complexity-baseline.json from the checkout, this one
-        # reads file-size-baseline.json from the COMPARISON REVISION, so a
-        # PR cannot loosen its own gate by editing the baseline. Fails on
-        # growth above a trusted per-file ceiling, a new oversized file, a
-        # proposed ceiling that is not exactly the file's current size, a
-        # surviving entry for a shrunken/deleted file, and new or
-        # byte-mismatched vendor content-hash exemptions. Policy and the
-        # vendor-update path: scripts/README.md.
+        # scripts/check_file_size_baseline.py (issue #2766). It reads
+        # file-size-baseline.json from the comparison revision to
+        # identify allowed debt and caps growth at the sizes measured there.
+        # Existing oversized paths can carry forward a larger trusted entry
+        # after a shrink. Edited entries must match the candidate size. At
+        # or below the hard limit, or after deletion, remove the entry.
+        # Full policy and vendor-update path are in scripts/README.md.
         #
         # Comparison revision (see also fetch-depth: 0 on this job's
         # checkout): PRs use the merge-base with their ACTUAL target

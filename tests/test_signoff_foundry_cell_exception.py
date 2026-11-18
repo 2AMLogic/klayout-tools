@@ -177,6 +177,30 @@ def test_source_path_without_excepted_cell_is_unmet(tmp_path):
     )
 
 
+def test_klayout_engine_attribution_now_lapses_outside_cell(tmp_path):
+    # Pin the native-deck grading change (issue #5661): the RDB `klayout`
+    # engine used to always report `source_cell: null`, so an exception
+    # applied on per-rule counts alone. Now that the engine attributes
+    # markers, the same report with an attributed marker outside the
+    # excepted cell lapses.
+    (tmp_path / "null").mkdir()
+    (tmp_path / "set").mkdir()
+    ok = _with_violations(
+        tmp_path / "null",
+        [{"rule": "met4.2", "source_cell": None, "source_path": None}],
+    )
+    assert ok["status"] == "met"
+    bad = _with_violations(
+        tmp_path / "set",
+        [{"rule": "met4.2", "source_cell": "ROUTER", "source_path": None}],
+    )
+    assert bad["status"] == "unmet"
+    assert (
+        "violation_outside_excepted_cell"
+        in bad["detail"]["foundry_cell_exceptions"]["lapsed"]
+    )
+
+
 def test_null_source_path_falls_back_to_source_cell(tmp_path):
     (tmp_path / "ok").mkdir()
     (tmp_path / "bad").mkdir()
