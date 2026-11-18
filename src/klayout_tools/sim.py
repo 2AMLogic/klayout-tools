@@ -4142,7 +4142,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
             request=request,
-            hosts=hosts,
+            hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
             measurements_spec=measurements_spec,
             request_dir=request_dir,
             **shard_kwargs,
