@@ -38,6 +38,7 @@ from typing import Any
 
 from . import signoff_attest_canonical_yaml as canonical_yaml
 from ._provenance import sha256_file
+from .signoff_attest_glob import is_glob_entry
 
 #: The mapping-entry keys a path-list entry accepts.
 ENTRY_KEYS = frozenset({"path", "attest", "select"})
@@ -117,8 +118,10 @@ def split_entries(
     yaml_selects)`` -- ``yaml_selects`` maps each ``attest: "yaml"`` entry's
     normalised path to its ``select`` (``None`` = whole document). String
     entries pass through untouched, so an old-form inventory is returned as
-    an equal mapping and validates exactly as before. A malformed container
-    is left for the generic path-list validator to refuse."""
+    an equal mapping and validates exactly as before; a ``{"glob": ...}``
+    member (issue #5614) passes through too, for the glob-aware path-list
+    validator. A malformed container is left for the generic path-list
+    validator to refuse."""
     out = dict(inventory)
     presence: set[str] = set()
     yaml_selects: dict[str, str | None] = {}
@@ -128,7 +131,12 @@ def split_entries(
             continue
         paths: list[Any] = []
         for index, entry in enumerate(entries):
-            if not isinstance(entry, Mapping):
+            if not isinstance(entry, Mapping) or is_glob_entry(entry):
+                # Not a presence candidate: a non-mapping entry is left for
+                # the generic path-list validator, and a ``{"glob": ...}``
+                # member passes through untouched so the glob-aware
+                # validator validates, expands and claims it alongside the
+                # literals.
                 paths.append(entry)
                 continue
             where = f"{field}[{index}]"
