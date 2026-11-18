@@ -124,6 +124,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **Added** (#5850): an item 9 `testbenches` entry may declare `depends_on` —
+  repo-relative paths the bench depends on (a helper it imports, a model
+  card it includes) — and each declared dependency is hashed into the
+  envelope as its own `present` check (role `testbench_dependency`,
+  carrying its bench), so editing a helper a shipped testbench depends on
+  is caught by `klt signoff --attest 9 --check` (exit 3) instead of
+  passing green. Member binding stays shallow — undeclared dependencies
+  are not resolved — and every member now emits a passing
+  `dependency_binding` check recording how many edges it declared, so the
+  envelope says whether binding happened instead of implying completeness.
+  A dependency may be shared across entries (and may itself be an
+  inventoried member); a repeat within one entry is refused (exit 1).
+  An envelope committed before this change no longer reproduces under
+  `--check` (every member now emits the `dependency_binding` disclosure
+  row that older envelopes lack), so it is drift until re-attested once:
+  run `klt signoff --attest 9 --inventory <inv> -o <envelope>` and commit
+  the new envelope. Additive; `schema_version` unchanged. First ships in
+  the first release after `v0.9.2` (which refuses `depends_on` as an
+  unknown field).
 - **Behaviour change for consumers locating `klt synthesize` artifacts by
   path: they moved from flat `.klt/synthesize/` to
   `.klt/synthesize/<run_id>/`, and the response now carries `run_id`**
