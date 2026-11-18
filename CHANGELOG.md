@@ -14,6 +14,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt signoff`: a declared-but-never-checked evidence hash is now
+  disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
+  records `provenance.input.content_hash` but names nothing verification
+  can answer — no usable `provenance.input.path`, or a `paths` set that
+  never answered (malformed, empty, or on a `model-run` envelope, whose
+  set is not member-verified) — has that hash silently never re-hashed:
+  its `met` citation rendered `input_verified: null`
+  identically to an envelope declaring no hash at all. Those citations now
+  carry the additive `input_verified_note: "declared_hash_unbound"`
+  (`input_verified` unchanged at `null`, no item verdict moves, no
+  `schema_version` bump), and `--format text` prints an
+  `input note: declared_hash_unbound -- …` line under the `input:` one.
+  A well-formed `paths` set answers through its members and never carries
+  the note. Documented in `docs/cli/signoff.md`'s `input_verified` table
+  and the generic-evidence section, and in `docs/json-contract.md`'s
+  `provenance.input` notes.
+
+- **`klt sim --resume` harvests a retained shard map before dispatching**
+  (#5775, 2026-11-17): a sharded `batch` run keeps `batch-shards.json` even
+  without `--resume` (issue #3896), but `--resume` only ever read
+  `checkpoint.json` -- which a run without `--resume` never writes -- so
+  resuming a partial sharded run reported `resume: reused 0 checkpointed
+  corner(s)` and re-submitted every shard as a new job, re-billing the units
+  that had already passed. `--resume` now harvests the map first: each
+  recorded shard's remote `status.json` is read once (never waited on, never
+  launched), a terminal shard is collected through the plain attach
+  machinery, and its units are recorded into the checkpoint and counted in
+  the `resume: reused N` summary; only unlaunched/unfinished/failed shards
+  are submitted again. A map written for a different request still refuses
+  with `error.code: "resume_fingerprint_mismatch"`. Shard map entries now
+  also record their ordered unit ids (`units`, additive), so a later harvest
+  or `--attach` can recover a job's units without re-deriving the partition
+  that minted it. `--resume` alone is now enough for the
+  `environment.remote.resumable: true` recovery the report advertises;
+  `--attach <map> --collect-partial` remains the non-blocking form.
+
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
   stdout and never created `FILE` — the one mode that dropped a flag the user
@@ -236,8 +272,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   #5733). A request document that already sets `layout.deck` is refused with
   a clean error (exit 1) — a flag never silently overrides a request
   document — and the flag is refused with `--check`. It never sets
-  `reference.deck` (the reference-netlist rewriting deck — a different knob,
-  reached through the runset's `--deck-file`/`--deck-var`). Additive request
+  `reference.deck` (the reference-netlist rewriting deck, configured through
+  a separate request field). Additive request
   surface; no `schema_version` bump.
 - **Inventory-driven `klt signoff --attest` envelopes record the klayout
   engine version** (#6043, 2026-11-17): `build_attestation` (items 1, 8, 9
@@ -258,6 +294,17 @@ not `klt --version`, if you need to detect this kind of drift. See
   attaching. A shard map now attaches under any `hosts` (the shard count is read
   from the map); a bare job id still requires `hosts = 1`. Additive: a call that
   used to fail now succeeds.
+- **`klt pex` `delta[]` rows are self-describing: new `testbench` and
+  `measurement` fields** (#5681, 2026-11-17): `spec_row` is the bare
+  measurement name for a one-testbench run but `<stem>.<name>` for several, so
+  a single-testbench row named no bench and a consumer keying on
+  `(bench, measurement)` matched nothing. Every `delta[]` row (including the
+  extraction-failed error rows) now also carries `testbench` -- the request's
+  filename stem, identical whether the bench ran alone or with others, `null`
+  for `--measure-command` (no testbench file) -- and `measurement`, the bare
+  `measurements[].name`. Additive: `spec_row`, `coverage`, `status` and the exit
+  code are unchanged and `schema_version` does not bump. See
+  [`docs/cli/pex.md`](docs/cli/pex.md) "`delta[]` entries".
 - **`openroad` Docker wrapper mounts the klt cache root** (issue #5626,
   2026-11-17): the merged `.lib` that a descriptor's list-form `liberty`
   entry produces is written under the klt cache root (`$KLT_CACHE_DIR`
@@ -355,6 +402,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   Sub-cell naming itself changed earlier (#4251) from KLayout's default
   variant name (e.g. `mos_array`, or `$N`-suffixed in older builds) to
   `<cell_name>__core`. The scheme id must change whenever the naming changes.
+
+- **`klt erc`: a substrate assertion reaching over a drawn well can no longer
+  fabricate a `erc.supply_short`, and substrate shorts name the geometry that
+  performed the merge** (#5745, 2026-11-17): the substrate/well body-merge
+  pass attributed a tie's tap sites to bodies without asking where each site
+  physically was. A `ties[]` entry declaring the #2255 form
+  (`well_layer: null` + `well_boxes`) whose asserted region reached over a
+  *different* supply's drawn well captured that net's own well tap into the
+  shared `vsubs` body -- a tap inside a drawn well taps the well (junction-
+  isolated from the substrate), not the substrate -- so the union-find welded
+  the two supply clusters and reported a fabricated `erc.supply_short` via
+  `substrate` on inputs that grade clean. Non-drawn-well ties now subtract
+  every drawn-well tie's (selected) well region before attributing substrate
+  bodies, so the repro shape grades clean; drawn-well ties keep their own
+  sites by construction. Additively, every `erc.supply_short` via
+  `"substrate"` now carries `body.joins` -- one `{net, tie, bbox}` entry per
+  tap site that welded that net to the body, with `well_box` (0-based index
+  into that tie's `well_boxes`, lowest when several overlap) when the site
+  came from an assertion -- so a finding names its evidence instead of
+  inviting a pass/fail bisection. Existing fields are unchanged; a spec
+  without the repro shape grades byte-identically except for the new
+  `joins` key. `schema_version` is unaffected (additive, per
+  `docs/json-contract.md`); `provenance.klt_version` tells which build
+  graded a committed report.
 
 - **`klt sim` refuses `measurements[].transfer` declared beside `noise`**
   (#5695, 2026-11-14): the mutually exclusive measurement forms each carried a

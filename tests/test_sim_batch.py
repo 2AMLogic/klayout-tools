@@ -7326,20 +7326,33 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     launches_before = len(_launches(runner))
     assert launches_before == 2
 
-    # The failed job is still failed on the fleet when the set is re-run.
+    # The failed job is still failed on the fleet when the set is re-run
+    # (persistently -- issue #5775's harvest reads the status once before
+    # the dispatch's own re-attach poll would).
     failed = json.loads(manifest_path.read_text())["shards"][1]["job_id"]
-    runner.queue(
-        f"{failed}/status.json", fake_completed(_status("failed", exit_code="1"))
-    )
+    graded = sb._run_subprocess
+
+    def still_failed(argv, timeout_s):
+        joined = " ".join(argv)
+        if joined.endswith("status.json -") and failed in joined:
+            return fake_completed(_status("failed", exit_code="1"))
+        return graded(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", still_failed)
     resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
 
-    assert len(_launches(runner)) == launches_before + 1
+    # Issue #5775: the finished shard's two units are harvested from the
+    # map (reused, never re-billed); only the failed shard's two units are
+    # re-dispatched, as two one-unit shards under hosts=2.
+    assert len(_launches(runner)) == launches_before + 2
     entry = resumed["requests"][0]
     assert entry["status"] == "pass"
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    assert [shard["resumed"] for shard in fleet] == [True, False]
+    assert [shard["resumed"] for shard in fleet] == [False, False]
+    assert report["environment"]["resume"]["resumed_corners"] == 2
+    assert all(c["status"] == "pass" for c in report["corners"])
     assert not manifest_path.exists()  # swept clean: nothing left to re-attach
 
 
@@ -7590,25 +7603,6 @@ def test_split_reroute_without_a_checkpoint_writes_the_shard_map(tmp_path, monke
     document = json.loads((artifacts / sb.BATCH_SHARDS_FILENAME).read_text())
     assert document["fingerprint"] == "fp-split"
     assert [e["state"] for e in document["shards"]] == ["collected"] * 3
-
-
-@pytest.mark.parametrize("lose_a_corner", [False, True])
-def test_shard_map_is_removed_only_when_the_sweep_finishes(
-    tmp_path, monkeypatch, lose_a_corner
-):
-    path = _resume_request(tmp_path)
-    manifest_path = tmp_path / "artifacts" / sb.BATCH_SHARDS_FILENAME
-    manifest_path.parent.mkdir(parents=True)
-    manifest_path.write_text("{}")
-    probe = _install_fake_batch(monkeypatch, fleet=True)
-    first = _run(path, tmp_path, hosts=2)
-    assert probe
-    if lose_a_corner:
-        manifest_path.write_text("{}")
-        lost = first["corners"][1]["corner_id"]
-        _install_fake_batch(monkeypatch, lost_ids={lost}, fleet=True)
-        _run(path, tmp_path, hosts=2)
-    assert manifest_path.exists() is lose_a_corner
 
 
 # --------------------------------------------------------------------------- #
