@@ -161,6 +161,29 @@ def test_no_manifest_flag_is_artifact_unavailable(tmp_path):
     _assert_artifact_unmet(item, uri, "no_manifest")
 
 
+def test_unavailable_citation_with_spec_rows_does_not_escape(tmp_path):
+    """The #5691 spec-row projection re-resolves the citation grading just
+    refused. It must read that as "did not resolve" (the row is
+    `no_evidence`; the item axis carries the cause), not let
+    `ArtifactUnavailable` escape `build_tier_report` as a raw traceback."""
+    uri = f"artifact:{_key(REPO, 'a' * 64)}"
+    manifest = {
+        "block": "demo",
+        "kind": "analog",
+        "evidence": {"5": {"file": uri, "rows": ["t_dec"]}},
+        "spec_rows": {"5": [{"id": "t_dec"}]},
+    }
+
+    with artifact_resolution([]):  # no --artifact-manifest given
+        report = build_tier_report(manifest, repo_root=str(tmp_path))
+
+    item = next(i for i in report["items"] if i["id"] == 5)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "artifact_unavailable"
+    (row,) = report["spec_rows"]
+    assert (row["id"], row["item"], row["state"]) == ("t_dec", 5, "no_evidence")
+
+
 def test_uri_missing_from_manifest(broker, tmp_path):
     _, other = _store(broker, b"other\n")
     uri = f"artifact:{_key(REPO, 'a' * 64)}"

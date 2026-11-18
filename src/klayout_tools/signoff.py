@@ -81,6 +81,7 @@ from .signoff_artifact import (
     input_artifact_value,
     materialize_citation,
     report_artifact_unavailable,
+    unavailable_is_unresolved,
 )
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
@@ -4386,7 +4387,7 @@ def build_tier_report(
         manifest,
         read_spec_rows=_read_spec_rows,
         parse_members=_parse_multi_members,
-        resolve_evidence=_resolve_evidence,
+        resolve_evidence=unavailable_is_unresolved(_resolve_evidence),
         lookup_evidence=_lookup_evidence,
         repo_root=repo_root,
     )

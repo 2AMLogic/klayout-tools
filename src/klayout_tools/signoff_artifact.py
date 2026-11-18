@@ -119,6 +119,27 @@ def report_artifact_unavailable(
     return wrapped
 
 
+_Resolve = Callable[..., tuple[dict[str, Any] | None, str | None]]
+
+
+def unavailable_is_unresolved(resolve: _Resolve) -> _Resolve:
+    """Adapt an evidence resolver for the static spec-row projection (#5691).
+
+    Grading reports an unavailable artifact on the item axis
+    (:func:`report_artifact_unavailable`); the projection re-resolves the same
+    citation and must read it as "did not resolve", never raise.
+    """
+
+    @wraps(resolve)
+    def wrapped(*args: Any, **kwargs: Any) -> tuple[dict[str, Any] | None, str | None]:
+        try:
+            return resolve(*args, **kwargs)
+        except ArtifactUnavailable:
+            return None, "artifact_unavailable"
+
+    return wrapped
+
+
 class _ArtifactResolver:
     def __init__(self, manifests: list[str], directory: str) -> None:
         self.manifests = manifests
