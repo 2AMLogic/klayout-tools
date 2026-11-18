@@ -302,13 +302,11 @@ def _landing_pad_conflict_reason(
 
     The message names the three things the caller needs to reconcile the
     conflict: the pad footprint (the effective drawn side for this
-    ``(landing, via)`` pair), the terminal pitch (centre-to-centre: the
-    pad centre's distance to the nearest point of the other net's
-    already-accepted metal on that plane, plus half the pad side -- exact
-    for a like-sized square neighbour -- 0 for an outright overlap), and
-    the resolved deck's own spacing rule when the
-    layer carries one -- plus the ``routing.landing_pad_size_um`` override
-    as the escape hatch where the deck's floors allow a smaller pad.
+    ``(landing, via)`` pair), the terminal pitch (centre-to-centre, see
+    :func:`_terminal_pitch_um`; 0 for an outright overlap), and the
+    resolved deck's own spacing rule when the layer carries one -- plus the
+    ``routing.landing_pad_size_um`` override as the escape hatch where the
+    deck's floors allow a smaller pad.
     """
     import klayout.db as kdb
 
@@ -365,30 +363,7 @@ def _landing_pad_conflict_reason(
     drop = pad_drops[0]
     side_um = drawn_side_um(drop)
     px, py = float(drop["x_um"]), float(drop["y_um"])
-    centre = kdb.Point(int(round(px / dbu)), int(round(py / dbu)))
-    if (pad_region & other_region).is_empty():
-        # ``Edge.distance(point)`` is the *signed* distance to the edge's
-        # infinite line, so some edge of any region the point sits
-        # outside always scores <= 0 and a ``min`` over ``max(0, ...)``
-        # reports pitch 0 on this no-overlap branch -- use the true
-        # point-to-segment distance instead, and report terminal pitch
-        # centre-to-centre (pad centre to the nearest point of the other
-        # net's metal, plus half the pad side) so it pairs with the
-        # ``side + spacing`` requirement below; exact for a like-sized
-        # square neighbour.
-        half_dbu = int(round(side_um / 2.0 / dbu))
-        pitch_dbu = (
-            int(
-                min(
-                    (edge.euclidian_distance(centre) for edge in other_region.edges()),
-                    default=0,
-                )
-            )
-            + half_dbu
-        )
-    else:
-        pitch_dbu = 0
-    pitch_um = pitch_dbu * dbu
+    pitch_um = _terminal_pitch_um(pad_region, other_region, px, py, side_um, dbu)
     spacing = spacing_lookup(pad_layer)
     spacing_note = ""
     if spacing is not None:
@@ -418,6 +393,30 @@ def _landing_pad_conflict_reason(
         "where the deck's floors allow a smaller pad, or land one of the "
         "two nets on another plane"
     )
+
+
+def _terminal_pitch_um(
+    pad_region: Any, other_region: Any, px: float, py: float, side_um: float, dbu: float
+) -> float:
+    """Centre-to-centre terminal pitch of a pad vs ``other_region``, in um.
+
+    0 on an outright overlap; otherwise the pad centre's distance to the
+    nearest point of ``other_region`` plus half the pad side -- exact for a
+    like-sized square neighbour, and commensurable with the ``side +
+    spacing`` requirement. ``Edge.distance(point)`` is the *signed* distance
+    to the edge's infinite line, so some edge of any region the point sits
+    outside always scores <= 0 and a ``min`` over ``max(0, ...)`` would
+    report 0 here -- use the true point-to-segment distance instead.
+    """
+    import klayout.db as kdb
+
+    if not (pad_region & other_region).is_empty():
+        return 0.0
+    centre = kdb.Point(int(round(px / dbu)), int(round(py / dbu)))
+    nearest = min(
+        (edge.euclidian_distance(centre) for edge in other_region.edges()), default=0
+    )
+    return (int(nearest) + int(round(side_um / 2.0 / dbu))) * dbu
 
 
 def _drawn_leg_intermediate_pad_regions(
