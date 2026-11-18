@@ -169,6 +169,7 @@ Recognised today:
   family :class:`~klayout_tools.decks.CapacitorDevice` cannot represent --
   see "MoM capacitors" below and ``EXTRACTION_DECK``'s own
   ``mom_capacitors`` note for the full derivation.
+- **Spiral inductor** (#6726) -- ``inductor`` (``inductor2``), ``sg13g2_inductor.py``.
 
 Still unrecognised, each tracked as its own follow-on issue rather than left
 a silent gap (a device class this deck cannot recognise extracts as ordinary
@@ -184,7 +185,7 @@ device, never a wrong device with a plausible value):
   are now a standalone follow-on rather than a blocked one.
 - ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
   investigated, declined" below -- plus the ``isolbox`` isolation device,
-  the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF MOS
+  the ``sg13_hv_svaricap`` varactor, ``inductor3``, ESD devices, and the RF MOS
   variants, none of which is tracked yet. (ESD devices were investigated in
   issue #3858 and declined natively -- see ``UNMODELED_DEVICE_MARKERS``
   below: ``klt extract`` warns when ``Recog.esd`` 99/30 carries shapes, and
@@ -482,6 +483,7 @@ from . import (
     RuleProvenance,
     UnmodelledDeviceFamily,
 )
+from .sg13g2_inductor import INDUCTOR
 from .sg13g2_unmodeled import (  # noqa: F401  (size-split re-export, #5916)
     UNMODELED_DEVICE_MARKERS,
     UNMODELED_RULES,
@@ -2389,18 +2391,15 @@ EXTRACTION_DECK = ExtractionDeck(
     # here the way they are for `cap_cmim` above, since the two ports can be
     # side by side *or* stacked on adjacent metals). `l`/`w` are read off the
     # marker's own bounding-box width/height -- not a plate-overlap area --
-    # and the extractor does **not** compute a capacitance value at all: its
-    # own source comment states "the LVS extractor does NOT compute C; LVS
-    # matches devices on topology; the value C_total =
-    # density[N]*active_area + Cfeed is supplied by the SPICE/Verilog-A
-    # model." `MomCapacitorDevice.metal_pins` therefore has one entry per
-    # `metals` level (`Metal1.pin` 8/2 through `Metal5.pin` 67/2, `None` for
-    # `TopMetal1`/`TopMetal2` -- upstream's own `cap_extraction.lvs` call
-    # only ever wires up `m1p`..`m5p`, never a `TopMetal1`/`TopMetal2` pin
-    # layer, since this device family lives entirely on the g2 thin-metal
-    # stack), and each entry reports only `w_um`/`l_um` in `devices[].params`
-    # -- no `c_f`/`area_um2`/`perimeter_um` keys, since none of those apply
-    # to a topologically-matched, dimension-only device (see
+    # and the extractor does **not** compute a capacitance value: its own
+    # source comment states "the LVS extractor does NOT compute C; LVS
+    # matches devices on topology; the value C_total = density[N]*active_area
+    # + Cfeed is supplied by the SPICE/Verilog-A model." `metal_pins`
+    # therefore has one entry per `metals` level (`Metal1.pin` 8/2 through
+    # `Metal5.pin` 67/2, `None` for `TopMetal1`/`TopMetal2`: upstream's
+    # `cap_extraction.lvs` only wires up `m1p`..`m5p`, this family living on
+    # the thin-metal stack), and reports only `w_um`/`l_um` in
+    # `devices[].params` -- no `c_f`/`area_um2`/`perimeter_um` keys (see
     # `docs/json-contract.md`'s "MoM capacitor devices" note).
     mom_capacitors=(
         MomCapacitorDevice(
@@ -2778,6 +2777,7 @@ EXTRACTION_DECK = ExtractionDeck(
             provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dpantenna"),
         ),
     ),
+    inductors=(INDUCTOR,),  # `inductor2` (issue #6726)
     # Device families this deck deliberately does not recognise (issue
     # #3137): the SiGe HBT (see "SiGe HBTs -- investigated, declined" in the
     # module docstring). A drawn HBT's Activ matches the `dantenna` predicates
