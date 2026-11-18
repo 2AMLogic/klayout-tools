@@ -199,6 +199,123 @@ def test_mv_rule_ignores_active_outside_dualgate(tmp_path, rule, build):
     assert _found(report, rule) == []
 
 
+# --------------------------------------------------------------------------
+# Issue #5805: `coverage.approximated_rules` -- the D1/D3 approximation
+# disclosure. A checked `tap_distance` rule contributes its declared
+# approximations whether or not it fired, because the caveat is about the
+# rule's fidelity, not its outcome; a skipped/inapplicable rule contributes
+# nothing, and a deck whose rules declare no approximations emits no
+# `approximated_rules` key at all.
+# --------------------------------------------------------------------------
+
+APPROX_CLASSES = {"whole_polygon_selection", "non_complement_voltage_selection"}
+
+
+def _approximations_for(report, rule):
+    return [
+        entry
+        for entry in report["coverage"].get("approximated_rules", [])
+        if entry["rule"] == rule
+    ]
+
+
+@pytest.mark.parametrize("rule,build", LAYOUTS)
+def test_checked_zero_violation_rule_discloses_approximations(tmp_path, rule, build):
+    # The exact regression #5805 is about: a clean count on a rule whose
+    # selection is per whole polygon is not evidence of the DRM's
+    # every-point-within-reach form, so the run must say so itself.
+    report = _run(tmp_path, build(10000))
+    assert _found(report, rule) == []
+    entries = _approximations_for(report, rule)
+    assert {entry["class"] for entry in entries} == APPROX_CLASSES
+    assert all(entry["description"] for entry in entries)
+    assert all(set(entry) == {"rule", "class", "description"} for entry in entries)
+
+
+@pytest.mark.parametrize("rule,build", MV_LAYOUTS)
+def test_mv_checked_zero_violation_rule_discloses_approximations(tmp_path, rule, build):
+    report = _run(tmp_path, _under_dualgate(build(1000 + D_MV)))
+    assert _found(report, rule) == []
+    entries = _approximations_for(report, rule)
+    assert {entry["class"] for entry in entries} == APPROX_CLASSES
+
+
+@pytest.mark.parametrize("rule,build", LAYOUTS)
+def test_checked_firing_rule_still_discloses_approximations(tmp_path, rule, build):
+    report = _run(tmp_path, build(0, tap=False))
+    assert len(_found(report, rule)) == 1
+    assert {entry["class"] for entry in _approximations_for(report, rule)} == (
+        APPROX_CLASSES
+    )
+
+
+@pytest.mark.parametrize("marker", [DUALGATE, V5_XTOR])
+def test_inapplicable_rule_contributes_no_approximation_entry(tmp_path, marker):
+    shapes = _nwell_layout(0, tap=False) + [(marker, [-500, -500, 1500, 1500])]
+    report = _run(tmp_path, shapes)
+    assert NWELL_RULE not in report["coverage"]["rules_checked"]
+    assert _approximations_for(report, NWELL_RULE) == []
+
+
+def test_absent_comp_layer_contributes_no_approximation_entry(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(*NWELL)).insert(kdb.Box(0, 0, 1000, 1000))
+    path = tmp_path / "f.gds"
+    layout.write(str(path))
+    report = run_drc(str(path), "gf180mcu")
+    for rule in (NWELL_RULE, PSUB_RULE, NWELL_MV_RULE, PSUB_MV_RULE):
+        assert rule not in report["coverage"]["rules_checked"]
+        assert _approximations_for(report, rule) == []
+
+
+def test_omitted_rule_contributes_no_approximation_entry(tmp_path):
+    report = run_drc(
+        _write(tmp_path, _nwell_layout(10000)),
+        "gf180mcu",
+        rules=[PSUB_RULE],
+    )
+    assert _approximations_for(report, NWELL_RULE) == []
+    assert _approximations_for(report, PSUB_RULE) == []
+
+
+def test_all_four_tap_rules_disclose_when_all_checked(tmp_path):
+    # nwell inside a well + substrate devices outside it: all four rules have
+    # geometry, all four disclose, sorted by rule id.
+    shapes = [(NWELL, [-5000, -5000, 80000, 6000])]
+    shapes += _device(PPLUS, 0) + _device(NPLUS, 10000)  # in-well pair
+    shapes += _device(NPLUS, 20000) + _device(PPLUS, 30000)  # substrate pair
+    shapes += [(DUALGATE, [-500, -500, 45000, 7000])]  # mv column applies too
+    report = _run(tmp_path, shapes)
+    checked_tap = {
+        rule
+        for rule in (NWELL_RULE, PSUB_RULE, NWELL_MV_RULE, PSUB_MV_RULE)
+        if rule in report["coverage"]["rules_checked"]
+    }
+    assert checked_tap
+    disclosed = {
+        entry["rule"]
+        for entry in report["coverage"]["approximated_rules"]
+        if entry["rule"] in checked_tap
+    }
+    assert disclosed == checked_tap
+
+
+def test_deck_without_approximations_emits_no_approximated_rules_key(tmp_path):
+    # No sky130 rule declares approximations, so its `coverage` block is
+    # byte-identical to pre-#5805: no empty-key churn.
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(66, 20)).insert(kdb.Box(0, 0, 500, 500))  # poly
+    path = tmp_path / "f.gds"
+    layout.write(str(path))
+    report = run_drc(str(path), "sky130")
+    assert report["coverage"]["rules_checked"]
+    assert "approximated_rules" not in report["coverage"]
+
+
 def test_mv_rules_do_not_trigger_wrong_column_warnings(tmp_path):
     report = _run(tmp_path, _under_dualgate(_nwell_layout(5000)))
     for warning in report["coverage"]["voltage_domain_warnings"]:

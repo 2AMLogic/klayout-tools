@@ -347,26 +347,16 @@ class CompCoverageSpec:
 
 @dataclass(frozen=True)
 class TapDistanceSpec:
-    """Descriptor for ``DrcRule(check="tap_distance")`` (issue #3607): gf180mcu's
-    ``DF.13`` / ``DF.14`` -- every active polygon must lie within
-    ``max_distance_um`` of a tap. The checked layer (``DrcRule.layer``) is
-    ``comp``; the other layers this rule reads are named here so the deck, not
-    the evaluator, owns the layer numbers.
+    """Deck-owned layer and distance inputs for ``tap_distance`` (#3607).
 
-    ``well_domain="inside"`` is ``DF.13`` (PCOMP inside a well, measured to
-    NCOMP well taps by ``step_um`` octagon steps clipped to ``nwell``);
-    ``"outside"`` is ``DF.14`` (NCOMP outside any well, measured to PCOMP
-    substrate taps by a diamond candidate filter plus Euclidean separation).
-    ``voltage="lv"`` selects active touching neither ``v5_xtor`` nor
-    ``dualgate``; ``"mv"`` selects active overlapping ``dualgate``. Selection
-    is of *whole polygons* that do not interact with the tap reach region --
-    see ``docs/design/gf180mcu-comp-checks-spike.md`` sections 3, 5 and 7 for
-    the upstream derivation and the recorded discrepancies.
+    ``inside`` (DF.13) uses ``step_um`` octagon steps clipped to Nwell.
+    ``outside`` (DF.14) uses a diamond filter and Euclidean separation.
+    The check selects whole active polygons outside tap reach. See the
+    voltage selectors and limitations in ``docs/cli/drc.md`` and the upstream
+    derivation in ``docs/design/gf180mcu-comp-checks-spike.md`` (§§3, 5, 7).
 
-    Every non-``comp`` layer may be absent from a stream and is then read as an
-    empty region (zero taps with active present *is* the violation).
-    Malformed descriptors raise :class:`ValueError` at construction, i.e. when
-    the deck module is imported.
+    Missing non-COMP layers are empty regions. Active with no taps is a
+    violation. Invalid descriptors raise :class:`ValueError` at construction.
     """
 
     well_domain: str
@@ -821,6 +811,11 @@ class DrcRule:
     the enclosing one in other directions (gf180mcu's ``SB.10``: poly must
     extend 0.22um past the SAB edge, while the SAB routinely overhangs the
     poly sideways). Meaningless, and ignored, for every other check kind.
+
+    ``approximations`` (#5805) declares known fidelity gaps as ``{"class",
+    "description"}`` records. ``coverage.approximated_rules`` includes them for
+    checked rules, even with zero violations. ``runset_note`` is reported for
+    rules that produced a finding. ``None`` declares no approximations.
     """
 
     id: str
@@ -854,6 +849,7 @@ class DrcRule:
     # `implemented_by_pdk_runset` (bool), `runset_file`, `pdk_revision`, `note`.
     runset_note: dict[str, Any] | None = None
     text_exempt: Any = None  # `drc_text_exempt.TextMarkerDeviceSpec` (#5442)
+    approximations: list[dict[str, str]] | None = None
 
 
 class UnknownDeckError(Exception):
