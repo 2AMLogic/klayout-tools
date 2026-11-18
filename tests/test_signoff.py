@@ -13787,10 +13787,7 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: `is_release: null` identity. Nothing about `dirty` can collapse this case
 #: -- the facts were never present to record -- which is why the report-side
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
-#: comparable across provisioning routes. The grading id is sourced from the
-#: running build: the same commit ships the same grading code (issue #2216),
-#: so a hard-coded placeholder here would read as a *different* ruleset to
-#: `build_skew` (issue #6016).
+#: comparable across provisioning routes.
 _TARBALL_ROUTE_BUILD_BLOCK = {
     "version": "0.5.0+unknown",
     "package_version": "0.5.0",
@@ -13798,11 +13795,13 @@ _TARBALL_ROUTE_BUILD_BLOCK = {
     "git_tag": None,
     "dirty": None,
     "is_release": None,
-    "grading_ruleset_id": grading_ruleset_id(),
+    "grading_ruleset_id": grading_ruleset_id(),  # same commit, same grading code
 }
 
 
-def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+def _committed_from_other_provisioning_route(
+    tmp_path, report: dict, name: str = "committed.json"
+) -> str:
     """``report`` as it would have been committed by an install of the *same
     commit* provisioned differently: identical grading, a different `build`
     block (issue #2249)."""
@@ -13817,24 +13816,19 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
     drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
     manifest = _manifest(evidence={"3": drc_path})
     fresh = build_tier_report(manifest)
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
 
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
-    committed_build = json.loads(Path(committed_path).read_text())["build"]
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert committed_build != fresh["build"]
-    # ...but the grading id is the one build field that must agree: an
-    # install of the same commit ships the same grading code (issue #2216),
-    # whatever route provisioned it. Its disagreement would make `build_skew`
-    # report "ruleset" below, not the "build_only" this fixture represents.
-    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
+    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
 
-    result = check_tier_report(committed_path, manifest)
+    skew_fields = [  # fresh values are install-specific, so derived, not hard-coded
+        {"field": f"build.{k}", "committed": v, "fresh": fresh["build"][k]}
+        for k, v in sorted(_TARBALL_ROUTE_BUILD_BLOCK.items() - fresh["build"].items())
+    ]
 
-    assert result == {
+    assert check_tier_report(committed_path, manifest) == {
         "schema_version": 1,
         "mode": "check",
         "report": committed_path,
@@ -13842,18 +13836,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_skew": {
-            "state": "build_only",
-            "fields": [
-                {
-                    "field": f"build.{name}",
-                    "committed": _TARBALL_ROUTE_BUILD_BLOCK[name],
-                    "fresh": fresh["build"][name],
-                }
-                for name in sorted(_TARBALL_ROUTE_BUILD_BLOCK)
-                if _TARBALL_ROUTE_BUILD_BLOCK[name] != fresh["build"][name]
-            ],
-        },
+        "build_skew": {"state": "build_only", "fields": skew_fields},
         "fresh": fresh,
     }
 
@@ -13866,9 +13849,7 @@ def test_check_reports_drift_in_a_graded_field(tmp_path):
     stale = build_tier_report(manifest)
     stale["t1_met_count"] = 11
     stale["tier"] = "T1"
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, stale, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, stale)
 
     result = check_tier_report(committed_path, manifest)
 
@@ -13981,9 +13962,7 @@ def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", manifest)
     fresh = build_tier_report(manifest)
     assert fresh["tier"] is None  # rendering this manifest exits 3
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
 
     exit_code = main(
         ["signoff", "--manifest", manifest_path, "--check", committed_path]
