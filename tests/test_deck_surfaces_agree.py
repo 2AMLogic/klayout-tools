@@ -20,6 +20,26 @@ from klayout_tools.decks import sg13g2_cont_grid as sg13g2_cont_grid_module
 from klayout_tools.decks.history import deck_info
 
 
+def _deck_doc_example(command: str) -> dict:
+    doc = Path(__file__).resolve().parents[1] / "docs/cli/deck.md"
+    context = f"docs/cli/deck.md: klt deck {command} example"
+    section = re.search(
+        rf"^## `klt deck {re.escape(command)}`[ \t]*\n(.*?)(?=^## |\Z)",
+        doc.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"{context}: missing section heading"
+    block = re.search(
+        r"^```json[ \t]*\n(.*?)^```[ \t]*$",
+        section[1],
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert block is not None, f"{context}: missing fenced JSON block"
+    example = json.loads(block[1])
+    assert isinstance(example, dict), f"{context}: expected a JSON object"
+    return example
+
+
 def _help(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
     with pytest.raises(SystemExit):
         main([*argv, "--help"])
@@ -120,6 +140,36 @@ def test_deck_rules_asap7_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["deck", "rules", "--deck", "asap7", "--format", "json"]) == 1
     captured = capsys.readouterr()
     assert "--engine klayout --deck-file" in captured.out + captured.err
+
+
+def test_deck_hash_documented_example_matches_sky130(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    example = _deck_doc_example("hash")
+    assert main(["deck", "hash", "--deck", "sky130", "--format", "json"]) == 0
+    actual = json.loads(capsys.readouterr().out)
+
+    assert example.pop("content_hash", None) == "sha256:..."
+    assert example == {field: actual[field] for field in ("schema_version", "deck")}
+
+
+def test_deck_rules_documented_example_matches_sky130(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    example = _deck_doc_example("rules")
+    rule_id = "poly.width.1"
+    args = ["deck", "rules", "--deck", "sky130", "--rule", rule_id, "--format", "json"]
+    assert main(args) == 0
+    actual = json.loads(capsys.readouterr().out)
+
+    assert example.pop("content_hash", None) == "sha256:..."
+    (example_rule,) = example.pop("rules")
+    fields = ("schema_version", "deck", "nominal_dbu_um")
+    assert example == {field: actual[field] for field in fields}
+
+    (actual_rule,) = actual["rules"]
+    assert example_rule["id"] == actual_rule["id"] == rule_id
+    assert example_rule == {field: actual_rule[field] for field in example_rule}
 
 
 #: deck -> the exact `DrcRule.scope` token set its rules declare (issue
