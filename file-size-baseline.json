@@ -125,7 +125,7 @@
     },
     {
       "path": "scripts/design_agent_benchmark.py",
-      "lines": 3454
+      "lines": 3452
     },
     {
       "path": "scripts/design_agent_benchmark_interactive.py",
@@ -193,11 +193,11 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1071
+      "lines": 1050
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
-      "lines": 516
+      "lines": 512
     },
     {
       "path": "src/klayout_tools/components.py",
@@ -217,7 +217,7 @@
     },
     {
       "path": "src/klayout_tools/decks/extraction.py",
-      "lines": 2256
+      "lines": 2250
     },
     {
       "path": "src/klayout_tools/decks/gf180mcu.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1104
+      "lines": 1103
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -281,7 +281,7 @@
     },
     {
       "path": "src/klayout_tools/erc.py",
-      "lines": 3517
+      "lines": 3513
     },
     {
       "path": "src/klayout_tools/erc_spec.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9853
+      "lines": 9835
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -317,7 +317,7 @@
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
-      "lines": 1173
+      "lines": 1160
     },
     {
       "path": "src/klayout_tools/extract_report.py",
@@ -341,7 +341,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3119
+      "lines": 3104
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5078
+      "lines": 5075
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -405,11 +405,11 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6380
+      "lines": 6360
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1569
+      "lines": 1568
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
@@ -421,11 +421,11 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2423
+      "lines": 2419
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
-      "lines": 914
+      "lines": 910
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
@@ -465,7 +465,7 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2246
+      "lines": 2245
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
@@ -529,7 +529,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4607
+      "lines": 4600
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -569,11 +569,11 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7267
+      "lines": 7242
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1142
+      "lines": 1141
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
@@ -585,11 +585,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12348
+      "lines": 12339
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4421
+      "lines": 4333
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4583
+      "lines": 4577
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -813,7 +813,7 @@
     },
     {
       "path": "tests/test_drc_klayout_engine.py",
-      "lines": 3318
+      "lines": 3315
     },
     {
       "path": "tests/test_economy.py",
@@ -849,7 +849,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6589
+      "lines": 6586
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",

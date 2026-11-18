@@ -3,7 +3,8 @@
 A ``hygiene`` entry ``{"path": ..., "attest": "yaml", "select"?}`` binds its
 file by a *canonical parse* instead of raw bytes, so a comment-only,
 whitespace-only or key-reorder edit of a pinned workflow is not drift --
-while every change to a key or value still is. That is the right instrument
+drift is a change to the canonical representation of the selected YAML
+content. That is the right instrument
 for ``.github/workflows/ci.yml``: the file that *runs* the attestation, so
 a ``continue-on-error: true`` added to the signoff step, a removed step or a
 changed command must keep failing item 10 (#5615's presence-only mode cannot
@@ -25,9 +26,13 @@ named algorithm, never a silent change to ``sha256-raw-bytes``):
    reorder *inside* a list element -- a step of ``steps:`` -- is not
    load-bearing either), and each non-JSON scalar gets its canonical
    string: ``datetime.date``/``datetime`` the ISO string, ``!!binary``
-   bytes the hex of the decoded value;
+   bytes the ``"bytes:<hex>"`` string of the decoded value;
 4. ``json.dumps(..., sort_keys=True, separators=(",", ":"))`` and SHA-256
    the UTF-8 bytes.
+
+Values with equal canonical representations share a digest in v1: a date
+scalar ``2026-11-15`` and the string ``"2026-11-15"`` are not distinguished,
+nor are ``!!binary "YWI="`` and the string ``"bytes:6162"``.
 
 Grading-time counterpart: :func:`rehash_checks` re-hashes a committed
 envelope's yaml checks through this same digest, exactly as

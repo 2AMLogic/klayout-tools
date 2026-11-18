@@ -153,7 +153,7 @@ from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
 from . import sim_staging as sim_staging
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
@@ -297,8 +297,10 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
     _refuse_corner_only_flags,
+    _with_capacity_retries_override,
     _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -2188,7 +2190,7 @@ def _validate_ngspice_options(value: Any) -> dict[str, Any]:
         if isinstance(item, bool):
             continue
         if isinstance(item, (int, float)):
-            if not math.isfinite(item):
+            if not is_finite_number(item):
                 raise SimError(
                     f"options.ngspice_options.{name} must be finite (got {item!r})"
                 )
@@ -2289,6 +2291,7 @@ def run_sim(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     command_approvals: str | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
@@ -2617,6 +2620,7 @@ def run_sim(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         pdk_root=pdk_root,
         collect_partial=collect_partial,
         timeout_s=timeout_s,
@@ -2892,23 +2896,6 @@ def _stamp_netlist_identity(
         environment["netlist_identity_error"] = netlist_identity_error
 
 
-def _check_capacity_wait_applies(
-    capacity_wait_s: Any, backend: str, attach_job_id: Any
-) -> None:
-    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
-    if capacity_wait_s is None:
-        return
-    if backend != "batch":
-        raise SimError(
-            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-        )
-    if attach_job_id is not None:
-        raise SimError(
-            "--wait-for-capacity cannot be combined with --attach: attach "
-            "launches nothing, so there is no capacity to wait for"
-        )
-
-
 @dataclass(frozen=True)
 class _ResolvedSimRequest:
     """Everything :func:`_prepare_sim_request` validated and resolved, before any
@@ -2991,6 +2978,7 @@ def _prepare_sim_request(
     capacity_wait_s: float | None,
     dry_run: bool,
     pdk_root: str | None = None,
+    capacity_retries: int | None = None,
     timeout_s: float | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
@@ -3001,6 +2989,7 @@ def _prepare_sim_request(
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
+    request = _with_capacity_retries_override(request, capacity_retries)
     request = _with_pdk_root_override(request, pdk_root)
     request = _with_timeout_override(request, timeout_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -3673,6 +3662,7 @@ def _run_sim_corners(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
     timeout_s: float | None = None,
@@ -3696,6 +3686,7 @@ def _run_sim_corners(
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         dry_run=dry_run,
         pdk_root=pdk_root,
         timeout_s=timeout_s,
@@ -3802,7 +3793,7 @@ def _run_sim_corners(
     # genuinely outstanding. Skipped for `--attach` (the explicit re-attach
     # form), `--submit-only` (refused with `--resume` before any S3 write)
     # and `--dry-run` (which must not touch S3 at all).
-    harvested_engine_version = sim_batch_resume.maybe_harvest_resume_shards(
+    harvested_version, harvested_env = sim_batch_resume.maybe_harvest_resume_shards(
         resume=resume,
         backend=backend,
         checkpoint=checkpoint,
@@ -3823,7 +3814,7 @@ def _run_sim_corners(
     if loaded_engine_version is None:
         # An all-harvested rerun dispatches nothing, so the harvested jobs'
         # engine version is the only one this report can carry.
-        loaded_engine_version = harvested_engine_version
+        loaded_engine_version = harvested_version
 
     dispatch_points = (
         [point for point in corner_points if point.corner_id not in pre_completed]
@@ -4202,17 +4193,17 @@ def _run_sim_corners(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
+    remote_environment = sim_batch_resume.merge_resume_environment(
+        harvested_env, remote_environment
+    )
 
     if resume:
         # Reassemble the full corner list in the request's own order: a
         # corner is either freshly run just now (`corners_new`) or reused
         # verbatim from a matching checkpoint (`pre_completed`) -- every
         # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Only done under `resume`: every backend
-        # that reaches here is `local`/`local-parallel` (see the `remote`
-        # guard above), which always return exactly one report per
-        # dispatched point, keyed by that point's own `corner_id`. `batch`
-        # does too: lost shards are synthesized per point (`_lost_shard_corner`).
+        # `dispatch_points` above). Lost batch shards synthesize unrun reports
+        # per point, so every dispatched point still has a report.
         new_by_id = {corner["corner_id"]: corner for corner in corners_new}
         corners = [
             new_by_id[point.corner_id]
@@ -5130,7 +5121,7 @@ def _nodeset_match_process(value: Any, where: str) -> str:
 
 
 def _nodeset_match_number(value: Any, where: str) -> Any:
-    if not is_number(value) or not math.isfinite(value):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be a finite number")
     return value
 
@@ -5644,9 +5635,9 @@ def _resolve_mismatch_scale(
         return None
     value = mc_spec["mismatch_scale"]
     field = "request.monte_carlo.mismatch_scale"
-    if not is_number(value):
+    if not is_finite_number(value):
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
-    if not math.isfinite(value) or value < 0:
+    if value < 0:
         raise SimError(f"{field} must be a finite non-negative number (got {value!r})")
     family = pdk_variant_family(pdk) if pdk else None
     param = sim_mismatch_gate.MISMATCH_SWITCH.get(family or "")

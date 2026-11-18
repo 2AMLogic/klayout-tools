@@ -211,6 +211,8 @@ def _stub_klayout_drc_subprocess(
     """
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         if captured_cmds is not None:
             captured_cmds.append(cmd)
         if side_effect is not None:
@@ -1078,6 +1080,8 @@ def test_klayout_engine_top_prunes_stream_for_deck(tmp_path, monkeypatch):
     seen: dict = {}
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         cmds.append(cmd)
         pruned = kdb.Layout()
         pruned.read(_input_arg(cmd))
@@ -1106,6 +1110,8 @@ def test_klayout_engine_top_child_of_single_top_prunes_stream(tmp_path, monkeypa
     seen: dict = {}
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         cmds.append(cmd)
         pruned = kdb.Layout()
         pruned.read(_input_arg(cmd))
@@ -2820,10 +2826,7 @@ def _stub_versioned_klayout(
 
 
 def _inputs(tmp_path):
-    return (
-        _write_gds(tmp_path / "test.gds"),
-        _write_deck_file(tmp_path / "deck.lydrc"),
-    )
+    return _write_gds(tmp_path / "test.gds"), _write_deck_file(tmp_path / "deck.lydrc")
 
 
 def _deck_launches(calls):
@@ -2924,23 +2927,21 @@ def test_min_version_probe_failures_are_actionable(
     assert _deck_launches(calls) == []
 
 
-def test_min_version_omitted_never_probes(tmp_path, monkeypatch):
+def test_min_version_omitted_probes_soft_and_records(tmp_path, monkeypatch):
     calls = _stub_versioned_klayout(monkeypatch, version_stdout="garbage")
     gds, deck = _inputs(tmp_path)
 
-    run_drc_klayout_engine(gds, deck)
+    report = run_drc_klayout_engine(gds, deck)
 
-    assert all(c[1:] != ["-v"] for c in calls)
-    assert len(_deck_launches(calls)) == 1
+    assert sum(1 for c in calls if c[1:] == ["-v"]) == 1
+    assert report["provenance"]["klayout_version"] is None
 
 
 def test_cli_min_klayout_version_text_and_json_errors(tmp_path, monkeypatch, capsys):
     calls = _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.28.16")
     gds, deck = _inputs(tmp_path)
-    argv = [
-        "drc", gds, "--engine", "klayout", "--deck-file", deck,
-        "--min-klayout-version", "0.30.12",
-    ]  # fmt: skip
+    argv = ["drc", gds, "--engine", "klayout", "--deck-file", deck,
+            "--min-klayout-version", "0.30.12"]  # fmt: skip
 
     assert main(argv) == 1
     captured = capsys.readouterr()
@@ -2962,12 +2963,8 @@ def test_cli_min_klayout_version_permission_denied_probe_emits_json_error(
     )
     gds, deck = _inputs(tmp_path)
 
-    code = main(
-        [
-            "drc", gds, "--engine", "klayout", "--deck-file", deck,
-            "--min-klayout-version", "0.30.12", "--format", "json",
-        ]
-    )  # fmt: skip
+    code = main(["drc", gds, "--engine", "klayout", "--deck-file", deck,
+                 "--min-klayout-version", "0.30.12", "--format", "json"])  # fmt: skip
 
     assert code == 1
     text = capsys.readouterr().err
@@ -2979,12 +2976,8 @@ def test_cli_min_klayout_version_satisfied_runs(tmp_path, monkeypatch, capsys):
     calls = _stub_versioned_klayout(monkeypatch, version_stdout="KLayout 0.30.12")
     gds, deck = _inputs(tmp_path)
 
-    main(
-        [
-            "drc", gds, "--engine", "klayout", "--deck-file", deck,
-            "--min-klayout-version", "0.30.9", "--format", "json",
-        ]
-    )  # fmt: skip
+    main(["drc", gds, "--engine", "klayout", "--deck-file", deck,
+          "--min-klayout-version", "0.30.9", "--format", "json"])  # fmt: skip
 
     assert len(_deck_launches(calls)) == 1
 
@@ -3121,6 +3114,8 @@ def test_directory_deck_provenance_and_check_detect_helper_drift(
             return real_run(
                 cmd, capture_output=capture_output, text=text, timeout=timeout
             )
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
         Path(report_path).write_text(_CLEAN_WITH_CATEGORIES_RDB, encoding="utf-8")
         return fake_completed()
@@ -3146,6 +3141,8 @@ def _stub_by_input(monkeypatch, rdb_by_input_name: dict[str, str]):
     """Stub klayout so the report depends on the ``input=`` layout name."""
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         input_path = next(a for a in cmd if a.startswith("input=")).split("=", 1)[1]
         report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
         Path(report_path).write_text(

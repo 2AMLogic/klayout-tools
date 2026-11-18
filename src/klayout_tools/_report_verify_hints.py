@@ -18,10 +18,15 @@ from ._report_verify import hash_check, resolve_committed_path
 #: ``hash_check.field`` for a yield citation (issue #5392): its report has no
 #: ``provenance.input``; the compared value is the samples document's sha256.
 _YIELD_HASH_FIELD = "samples (sha256 of the named samples document)"
+_LVS_OVERRIDE_HINT = "--layout/an absolute path"
 
 
 def input_not_found_entry(
-    path: str, report_path: str, found_relative_to_report: str | None
+    path: str,
+    report_path: str,
+    found_relative_to_report: str | None,
+    *,
+    override_hint: str = _LVS_OVERRIDE_HINT,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -39,9 +44,8 @@ def input_not_found_entry(
     hint = (
         None
         if found_relative_to_report is None
-        else "run --check from the report's directory, or pass --layout/"
-        "an absolute path; request-file-relative paths resolve against "
-        f"{report_dir}"
+        else f"run --check from the report's directory, or pass {override_hint}; "
+        f"request-file-relative paths resolve against {report_dir}"
     )
     return {
         "path": path,
@@ -59,6 +63,8 @@ def input_hash_check(
     report_path: str,
     override: str | None = None,
     hasher: Callable[[str | None], str | None] = sha256_file,
+    *,
+    override_hint: str = _LVS_OVERRIDE_HINT,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
@@ -119,7 +125,7 @@ def input_hash_check(
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
     check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report
+        path, report_path, found_relative_to_report, override_hint=override_hint
     )
     return check
 
