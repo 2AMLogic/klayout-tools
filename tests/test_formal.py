@@ -23,6 +23,7 @@ import textwrap
 
 import pytest
 
+from klayout_tools import _provenance
 from klayout_tools.cli.parser import create_parser
 from klayout_tools.formal import FormalError, run_formal
 
@@ -213,6 +214,23 @@ def test_same_basename_inputs_do_not_collide(tmp_path, fake_solver):
     report = run_formal(req)
     files = open(report["artifacts"]["sby_path"]).read().split("[files]")[1].split()
     assert files[0] != files[2]
+
+
+def test_multi_source_content_hash_matches_shared_hash_in_either_order(
+    tmp_path, fake_solver
+):
+    (tmp_path / "helper.v").write_text("module helper; endmodule\n")
+    sources = ["d.v", "helper.v"]
+    sby = _fake_sby(tmp_path, _PASS_BODY)
+    report = run_formal(_request(tmp_path, sby, sources=sources))
+    reversed_report = run_formal(_request(tmp_path, sby, sources=sources[::-1]))
+
+    expected = _provenance._combined_content_hash(
+        [str(tmp_path / name) for name in sources]
+    )
+    assert expected is not None
+    assert report["provenance"]["input"]["content_hash"] == expected
+    assert reversed_report["provenance"]["input"] == report["provenance"]["input"]
 
 
 def test_missing_sby_is_structured_error(tmp_path, fake_solver, monkeypatch):
