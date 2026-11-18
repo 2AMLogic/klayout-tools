@@ -102,51 +102,9 @@ def _run_stated(
     return corners, environment, documents
 
 
-# --------------------------------------------------------------------------- #
-# Validation (resolve_job_timeout_s)
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [0, -1, -3400.0, float("nan"), float("inf"), float("-inf"), "3400", [3400]]
-    + [10**400, -(10**400)]
-    + [True, False],
-)
-def test_invalid_job_timeout_s_is_rejected(tmp_path, raw):
-    """The same-shaped SimError as the other ``batch.*`` resolvers, before
-    any S3 write."""
-    with pytest.raises(SimError) as excinfo:
-        sb._resolve_batch_config(
-            _ceiling_request(tmp_path, job_timeout_s=raw),
-            corner_count=UNITS,
-            timeout_s=PER_UNIT_TIMEOUT_S,
-            check_runner=False,
-        )
-    assert "request.batch.job_timeout_s" in str(excinfo.value)
-    assert getattr(excinfo.value, "code", None) is None
-
-
-@pytest.mark.parametrize("raw", [3400, 3400.0, 3.4e3])
-def test_valid_job_timeout_s_resolves_to_float(tmp_path, raw):
-    config = sb._resolve_batch_config(
-        _ceiling_request(tmp_path, job_timeout_s=raw),
-        corner_count=UNITS,
-        timeout_s=PER_UNIT_TIMEOUT_S,
-        check_runner=False,
-    )
-    assert config.job_timeout_s == 3400.0
-
-
-def test_absent_job_timeout_s_resolves_to_none(tmp_path):
-    config = sb._resolve_batch_config(
-        _ceiling_request(tmp_path),
-        corner_count=UNITS,
-        timeout_s=PER_UNIT_TIMEOUT_S,
-        check_runner=False,
-    )
-    assert config.job_timeout_s is None
-
+# Validation of the key itself (``resolve_job_timeout_s``) lives in
+# ``tests/test_sim_batch_job_timeout_validation.py``, split out so this file
+# keeps headroom under the 500-line file-size ratchet.
 
 # --------------------------------------------------------------------------- #
 # The worked shape: fits the ceiling
