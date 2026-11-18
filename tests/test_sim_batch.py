@@ -7341,20 +7341,15 @@ def test_sim_set_resume_reattaches_finished_shards_and_resubmits_the_missing_one
     monkeypatch.setattr(sb, "_run_subprocess", still_failed)
     resumed = sim_set.run_sim_set(paths, outdir=outdir, resume=True)
 
-    # Issue #5775: the finished shard's two units are harvested from the
-    # map (reused, never re-billed); only the failed shard's two units are
-    # re-dispatched, as two one-unit shards under hosts=2.
+    # Issue #5775: the finished shard's two units are harvested (reused, never
+    # re-billed); the failed shard's two re-dispatch as one-unit shards (hosts=2).
     assert len(_launches(runner)) == launches_before + 2
     entry = resumed["requests"][0]
     assert entry["status"] == "pass"
     assert resumed["status"] == "pass"
     report = json.loads(Path(entry["report"]).read_text())
     fleet = report["environment"]["remote"]["fleet"]
-    # Issue #6423: a partial resume reports both phases' provenance. The
-    # harvested shard's entry (stamped ``resumed``) comes first -- harvested
-    # map order, then dispatch order -- followed by the two re-dispatched
-    # one-unit shards. The terminally failed shard is not harvested, so it
-    # contributes no entry of its own.
+    # Issue #6423: harvested entry first, then dispatch order; failed shard: none.
     assert [shard["resumed"] for shard in fleet] == [True, False, False]
     assert report["environment"]["resume"]["resumed_corners"] == 2
     assert all(c["status"] == "pass" for c in report["corners"])
