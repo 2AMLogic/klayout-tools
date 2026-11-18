@@ -62,6 +62,7 @@ def _error_text(tmp_path: Path, doc, sources=("dut.v",)) -> str:
 
 def test_empty_document_reports_both_top_level_fields(tmp_path):
     text = _error_text(tmp_path, {})
+    assert text.startswith("--mutations input has 2 validation errors: ")
     assert "missing required field: scope" in text
     assert "missing required field: proposals" in text
 
@@ -132,11 +133,13 @@ def test_proposals_not_an_array_and_bad_scope_both_reported(tmp_path):
 
 def test_malformed_request_still_reports_proposals_errors(tmp_path):
     bad_request = _write(tmp_path / "request.json", {"sources": ["dut.v"]})
-    proposals = _write(tmp_path / "p.json", {"proposals": []})
+    proposals = _write(tmp_path / "p.json", {})
     with pytest.raises(FunctionalVerificationError) as excinfo:
         fv.run_functional_verification_with_mutations(bad_request, proposals)
     text = str(excinfo.value)
+    assert text.startswith("--mutations input has 3 validation errors: ")
     assert "missing required field: scope" in text
+    assert "missing required field: proposals" in text
     assert "missing required field: hdl_toplevel" in text
 
 

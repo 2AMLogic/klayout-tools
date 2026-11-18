@@ -181,6 +181,16 @@
         "klayout_tools.economy_whatif"
       ]
     },
+    "em": {
+      "kind": "verb",
+      "description": "`klt em` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.em_cmd",
+        "klayout_tools.cli.parsers.em",
+        "klayout_tools._geode",
+        "klayout_tools.em"
+      ]
+    },
     "env_provenance": {
       "kind": "verb",
       "description": "`klt env_provenance` implementation: core modules plus CLI adapter.",
@@ -1046,6 +1056,7 @@
       "kind": "verb",
       "description": "`klt version` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.parsers.version",
         "klayout_tools.cli.version_cmd"
       ]
     },
@@ -1876,6 +1887,16 @@
       "consumer": "route",
       "exporter": "gen_compose",
       "reason": "`klt route` deliberately reuses gen_compose's router, landing-pad sizing and label-port derivation so labelled-pin routing in a placed layout matches klt gen-compose output (issue #5205); promote the private helpers to a shared module when either is next reworked."
+    },
+    {
+      "consumer": "em",
+      "exporter": "cli-infra",
+      "reason": "`klt em` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "em",
+      "exporter": "functional_verification",
+      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
     }
   ],
   "shared_private_permissions": [
@@ -1932,6 +1953,12 @@
       "exporter": "klayout_tools.netlist_normalize",
       "symbol": "_tokenize",
       "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_reference_stage",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_sim_model_classes",
+      "reason": "Issue #5676: the plain-element sim-model guard must read the exact curated MOS model table the netlist conversion pairs against so the guard and the conversion cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
     },
     {
       "consumer": "klayout_tools.sim_osdi_pin",
@@ -2129,6 +2156,12 @@
       "consumer": "klayout_tools.extract_spef_block",
       "exporter": "klayout_tools._provenance",
       "symbol": "_klt_version",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.functional_verification_run_inputs",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
@@ -2478,6 +2511,12 @@
       "exporter": "klayout_tools.build_identity",
       "symbol": "_recorded_klayout_version_expected",
       "reason": "Issue #5660: the binary-worded --engine klayout mismatch warning must quote the exact build-time expected KLayout version that _provenance (same shared-core group) used to compute klayout_version_mismatch, so the warning cannot name an expected version the envelope did not; both call sites read it via the build_identity attribute, exactly as _provenance does."
+    },
+    {
+      "consumer": "klayout_tools.em",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5616: loads the em request with the same error handling as sim/corner_matrix; promote to a public name when _paths is next reworked."
     }
   ],
   "legacy_exceptions": {
