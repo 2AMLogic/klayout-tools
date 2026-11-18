@@ -2001,19 +2001,13 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
     layers_checked = deck_layer_tuples & stream_layer_tuples
     layers_in_stream_without_rules = stream_layer_tuples - deck_layer_tuples
 
-    # Deck-static, like `deck_layers` above: every distinct non-empty
-    # DrcRule.scope this deck's rules declare, regardless of what's actually
-    # present in `path` (#566).
+    # Deck-wide scopes, independent of stream geometry (#566).
     deck_scope = sorted({rule.scope for rule in deck if rule.scope})
 
-    # A rule omitted from a `--rules` subset (issue #2768) applied no
-    # threshold either, exactly like a skipped one.
     skipped_rule_ids = set(rules_skipped) | omitted_ids
     voltage_domain_warnings = _voltage_domain_warnings(setup, skipped_rule_ids)
 
-    # Issue #3012: foundry rules the deck knows but cannot evaluate, named so
-    # a `clean` cannot be read as covering them. Only when the rule's layer
-    # is actually in the stream.
+    # Unimplemented foundry rules for layers present in the stream (#3012).
     unchecked_rules = [
         {"rule": rule_id, "layer": _layer_str(layer), "description": description}
         for rule_id, (layer, description) in sorted(
@@ -2022,31 +2016,22 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         if layer in stream_layer_tuples
     ]
 
-    # Issue #3815: area-marker layers the deck accepts but does not model, so
-    # a result identical with and without the marker is not read as
-    # marker-aware. Informational only, like `unchecked_rules`.
+    # Area markers the deck accepts but does not model (#3815).
     marker_blind_layers_in_stream = sorted(
         _layer_str(layer)
         for layer in get_marker_blind_layers(deck_name)
         if layer in stream_layer_tuples
     )
 
-    # Issue #2110: the two common-coverage categories this engine's single
-    # "a layer it reads is absent" skip splits into -- see
-    # `_classify_skipped_rules` for why an empty assessment domain is
-    # inapplicable work rather than a skipped request, and why anything else
-    # stays a disclosed skip.
     skipped_records, inapplicable_records = _classify_skipped_rules(
         deck, rules_skipped, setup.layout, frozenset(state.empty_checked_region_ids)
     )
-    # Issue #2768: every deliberately omitted rule is requested work that did
-    # not run -- a skip, never inapplicable, even when its layers are absent
-    # (the full registered deck is what a DRC verdict is about).
+    # Omitted rules count as skipped work even with absent layers (#2768).
     skipped_records += [
         {"id": rule_id, "reason": SKIP_REASON_NOT_SELECTED}
         for rule_id in sorted(omitted_ids)
     ]
-    return {
+    coverage = {
         "deck_layers": [_layer_str(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_layer_str(t) for t in sorted(layers_checked)],
         "layers_in_stream_without_rules": [
@@ -2058,12 +2043,8 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
         "unchecked_rules": unchecked_rules,
         "marker_blind_layers_in_stream": marker_blind_layers_in_stream,
         "deck_scope": deck_scope,
-        # Issue #3031: deck-static, like `deck_scope` -- official rule ids the
-        # deck knowingly does not transcribe.
         "unmodeled_rules": get_unmodeled_rules(deck_name),
-        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
-        # refuse a "clean" verdict measured over nothing without re-deriving
-        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        # Shared coverage rollup used by klt signoff (#1996).
         **build_check_coverage(
             checked=sorted(rules_checked),
             skipped=skipped_records,
@@ -2073,6 +2054,16 @@ def _build_coverage(setup: _DrcSetup, state: _DrcState) -> dict[str, Any]:
             ),
         ),
     }
+    checked_ids = set(rules_checked)
+    approximated_rules = [
+        {"rule": rule.id, **note}
+        for rule in sorted(deck, key=lambda rule: rule.id)
+        if rule.id in checked_ids
+        for note in (rule.approximations or ())
+    ]
+    if approximated_rules:
+        coverage["approximated_rules"] = approximated_rules
+    return coverage
 
 
 def _assemble_report(
@@ -2224,6 +2215,9 @@ def run_drc(
                 "unmodeled_rules": [<official rule id>, ...],
                 "nothing_checked": bool,
                 "nothing_checked_reasons": [<reason code>, ...],
+                "approximated_rules": [
+                    {"rule": str, "class": str, "description": str}, ...
+                ],
             },
             "rule_selection": {  # only when `rules` is given (issue #2768)
                 "selectors": [str, ...], "selected": [<rule id>, ...],
@@ -2383,6 +2377,10 @@ def run_drc(
     about was never curated at all; diffing ``deck_scope`` against the DRM's
     own table of contents surfaces that gap. A deck rule with no ``scope``
     set (the default, ``""``) contributes nothing to this list.
+
+    ``coverage.approximated_rules`` (#5805) lists approximations declared by
+    checked rules, sorted by rule id, even on a run with zero violations.
+    The key is omitted when no checked rule declares an approximation.
 
     Every ``DrcRule.threshold_dbu`` in ``deck_name`` is authored against that
     deck's nominal dbu (see :func:`klayout_tools.decks.get_nominal_dbu`), not
