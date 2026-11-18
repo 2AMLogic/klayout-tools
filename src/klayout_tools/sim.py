@@ -190,7 +190,6 @@ from .sim_batch import (
     _validate_batch_pdk_root,
     attach_engine_build_comparison,
     attach_staged_model_comparison,
-    dry_run_runner_check,
 )
 from .sim_batch import _resolve_batch_config as _resolve_batch_config
 from .sim_batch_async import (
@@ -206,6 +205,7 @@ from .sim_batch_features import (
     pop_remote_diagnostics,
     worker_ngspice_binary,
 )
+from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
 
@@ -297,8 +297,10 @@ from .sim_remote import (
 from .sim_remote import _run_remote_dispatch as _run_remote_dispatch
 from .sim_remote import _shard_corner_points as _shard_corner_points
 from .sim_request_overrides import (
+    _check_capacity_wait_applies,
     _refuse_corner_only_deck_flags,
     _refuse_corner_only_flags,
+    _with_capacity_retries_override,
     _with_capacity_wait_override,
 )
 from .sim_request_overrides import (
@@ -2289,6 +2291,7 @@ def run_sim(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     command_approvals: str | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
@@ -2538,12 +2541,14 @@ def run_sim(
     (``run_pex``'s) is inherited, never re-acquired. ``_ownership`` is
     internal: the exit stack that releases the lock when the run ends.
 
-    **Dry run (issue #3064).** ``dry_run=True`` runs every pre-dispatch
-    check of a corner request (shape, Monte Carlo spec, measurement forms,
-    model/OSDI resolution, staging closure, off-host PDK check) and returns
+    **Dry run (issues #3064, #5674).** ``dry_run=True`` runs every
+    pre-dispatch check of a corner request (shape, Monte Carlo spec,
+    measurement forms, model/OSDI resolution, staging closure, off-host PDK
+    check, and on ``batch`` the whole-job ceiling/split plan) and returns
     :func:`_build_dry_run_report` -- the expanded unit list with its derived
-    seeds -- without running the fail-fast probe, taking an output-directory
-    lock, or invoking any backend (no ngspice, SSH, S3 or EC2).
+    seeds plus the batch ``job_ceiling`` assessment -- without running the
+    fail-fast probe, taking an output-directory lock, or invoking any
+    backend (no ngspice, SSH, S3 or EC2).
     """
     request = load_request(request_path)
     # Issue #2892: the engine runs with ``cwd=<corner dir>``, so a relative
@@ -2615,6 +2620,7 @@ def run_sim(
         submit_only=submit_only,
         attach_job_id=attach_job_id,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         pdk_root=pdk_root,
         collect_partial=collect_partial,
         timeout_s=timeout_s,
@@ -2890,23 +2896,6 @@ def _stamp_netlist_identity(
         environment["netlist_identity_error"] = netlist_identity_error
 
 
-def _check_capacity_wait_applies(
-    capacity_wait_s: Any, backend: str, attach_job_id: Any
-) -> None:
-    """Refuse ``--wait-for-capacity`` where it has nothing to wait for."""
-    if capacity_wait_s is None:
-        return
-    if backend != "batch":
-        raise SimError(
-            f"--wait-for-capacity requires backend 'batch' (got '{backend}')"
-        )
-    if attach_job_id is not None:
-        raise SimError(
-            "--wait-for-capacity cannot be combined with --attach: attach "
-            "launches nothing, so there is no capacity to wait for"
-        )
-
-
 @dataclass(frozen=True)
 class _ResolvedSimRequest:
     """Everything :func:`_prepare_sim_request` validated and resolved, before any
@@ -2989,6 +2978,7 @@ def _prepare_sim_request(
     capacity_wait_s: float | None,
     dry_run: bool,
     pdk_root: str | None = None,
+    capacity_retries: int | None = None,
     timeout_s: float | None = None,
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
@@ -2999,6 +2989,7 @@ def _prepare_sim_request(
     request = _with_max_units_override(load_request(request_path), max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
+    request = _with_capacity_retries_override(request, capacity_retries)
     request = _with_pdk_root_override(request, pdk_root)
     request = _with_timeout_override(request, timeout_s)
     request_dir = os.path.dirname(os.path.abspath(request_path))
@@ -3671,6 +3662,7 @@ def _run_sim_corners(
     submit_only: bool = False,
     attach_job_id: str | None = None,
     capacity_wait_s: float | None = None,
+    capacity_retries: int | None = None,
     pdk_root: str | None = None,
     collect_partial: bool = False,
     timeout_s: float | None = None,
@@ -3694,6 +3686,7 @@ def _run_sim_corners(
         max_units_per_job=max_units_per_job,
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
+        capacity_retries=capacity_retries,
         dry_run=dry_run,
         pdk_root=pdk_root,
         timeout_s=timeout_s,
@@ -3958,24 +3951,16 @@ def _run_sim_corners(
     # `remote`/`batch` run whatever their provisioned box/job ships (the
     # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
     # above anyway), so the kwarg would be dead weight there. `ngspice_binary`
-    # (issue #2423) rides along the same way and for the same reason: a
-    # `remote`/`batch` shard re-invokes `klt sim` on a *different* host,
-    # which resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`
-    # fresh against its own PATH from the forwarded request document --
-    # this process's own resolution describes only this host.
-    # `fail_on_diagnostic` (issue #2492) rides along on exactly the same
-    # terms and for the same reason: an off-host shard re-invokes `klt sim`
-    # on another host *from the forwarded request document*, so it reads
-    # `options.fail_on_diagnostic` itself and grades its own corners
-    # inconclusive there -- passing this process's resolved value too would
-    # either be dead weight or, worse, double-grade. (A `--fail-on-diagnostic`
-    # CLI override is therefore local-backend-only, exactly like
-    # `--fail-fast-probe`; see docs/cli/sim.md.) `ngspice_init` (issue #2520)
-    # rides along on the same terms for the same reason: an off-host shard
-    # reads `options.ngspice_init` itself from the forwarded request
-    # document and writes its own `.spiceinit` on its own box -- this
-    # process's own resolved lines describe only this host's corner
-    # directories.
+    # (issue #2423), `fail_on_diagnostic` (issue #2492) and `ngspice_init`
+    # (issue #2520) ride along the same way and for the same reason: an
+    # off-host shard re-invokes `klt sim` on a *different* host, which
+    # resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`,
+    # `options.fail_on_diagnostic` (grading its own corners inconclusive
+    # there -- passing this process's resolved value would double-grade, so
+    # the CLI overrides are local-backend-only, like `--fail-fast-probe`)
+    # and `options.ngspice_init` (writing its own `.spiceinit`) fresh from
+    # the forwarded request document -- this process's own resolution
+    # describes only this host.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
     # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
@@ -4044,19 +4029,20 @@ def _run_sim_corners(
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
-        feature_diagnostic = (
-            dry_run_runner_check(
+        feature_diagnostic, job_ceiling = (
+            dry_run_job_ceiling(
                 request,
                 corner_count=len(dispatch_points),
                 timeout_s=timeout_s,
                 runner_out=published_runner,
             )
             if backend == "batch"
-            else None
+            else (None, None)
         )
         return _build_dry_run_report(
             request,
             feature_diagnostic=feature_diagnostic,
+            job_ceiling=job_ceiling,
             bin_range_diagnostic=bin_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
@@ -4824,6 +4810,7 @@ def _build_dry_run_report(
     monte_carlo_info: dict[str, Any] | None,
     staged_model_environment: dict[str, Any],
     feature_diagnostic: dict[str, Any] | None = None,
+    job_ceiling: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4832,6 +4819,9 @@ def _build_dry_run_report(
 
     Built from the same ``corner_points`` / ``monte_carlo_info`` the real run
     dispatches, so the per-sample seeds are exactly the ones a real run uses.
+    ``job_ceiling`` (issue #5674) is the submit path's own whole-job-ceiling
+    assessment, emitted additively under the ``environment.remote.job_ceiling``
+    name and shape; ``None`` leaves the field out.
     """
     if backend == "batch":
         # Issue #3917: a real batch submit refuses an unresolvable model
@@ -4839,11 +4829,10 @@ def _build_dry_run_report(
         _validate_batch_models_lib(request)
         # Issue #5449: and the same for a `models.pdk_root` that is a
         # directory on *this* host (issue #4097's refusal). The real submit
-        # raises it from `_resolve_batch_config`, which a dry run reaches
-        # only through `dry_run_runner_check` -- and that swallows every
-        # code but the two runner ones, and is skipped outright on a host
-        # with no resolvable batch config. Re-applying it here, beside the
-        # #3917 check, makes the dry run refuse what the submit refuses
+        # raises it from `_resolve_batch_config`, which the dry run reaches
+        # through `dry_run_runner_check` -- whose swallow-all-but-runner-
+        # refusals filter keeps such a host dry-running clean. Re-applying
+        # it here, beside the #3917 check, refuses what the submit refuses
         # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)
     units: list[dict[str, Any]] = []
@@ -4873,6 +4862,8 @@ def _build_dry_run_report(
         "staged_files": staged_model_environment.get("staged_model_inputs", []),
         "warnings": warnings,
     }
+    if job_ceiling is not None:
+        report["job_ceiling"] = job_ceiling
     if published_runner is not None:
         report["published_runner"] = published_runner
     if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:

@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
+  item-1 envelope that enumerates attested members but binds only its
+  inventory (the pre-0.9.0 producer's `provenance.input` shape, no
+  `provenance.input.paths`) now grades `unmet`/
+  `provenance_narrower_than_attested` instead of `met`, with `detail`
+  naming the breadth gap (`missing`, `attested_members`, `bound_paths`).
+  The floor is derived from the envelope's own `attestation.checks[]`, so
+  #4764's `paths`-binding envelopes are unaffected, as are hand-written
+  envelopes without an `attestation` block, attestations listing no
+  `present` check, and items 2, 8, 9 and 10 (single-artifact binding by
+  design). **A committed pre-0.9.0 item-1 envelope flips `met` -> `unmet`;
+  the remedy is one re-attest with klt >= 0.9.0 plus the manifest re-pin.**
+  No `schema_version` bump: a new value in the existing `reason` enum, the
+  same additive class as #2718's `unanchored_evidence`/`wrong_item`.
+
 - **`klt signoff`: a declared-but-never-checked evidence hash is now
   disclosed** (#6403, 2026-11-17). A `generic`/`model-run` envelope that
   records `provenance.input.content_hash` but names nothing verification
@@ -49,6 +64,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   that minted it. `--resume` alone is now enough for the
   `environment.remote.resumable: true` recovery the report advertises;
   `--attach <map> --collect-partial` remains the non-blocking form.
+  Harvested reuse is reported in `environment.resume.resumed_corners`,
+  not as `environment.remote.fleet[]` entries with `resumed: true`;
+  `fleet[]` lists only shards dispatched after the harvest. A zero-unit
+  off-host corner request now returns `status: "not_checked"`, empty
+  `corners`, and no `environment.remote` instead of submitting a billed
+  job, even without `--resume` (#6540).
+
+- **`klt extract --report-parasitics slim` slims the JSON `parasitics`
+  report beside a `--spef` file** (#5816, 2026-11-17): `--spef` and the
+  JSON report describe the same measurement twice — the SPEF's
+  `*CAP`/`*RES` rows are a verbatim translation of `parasitics.nets[]`, and
+  each coupling capacitor appears in the JSON once from *each side of the
+  pair* — so a caller who wants the complete measurement and a committable
+  report had to commit the same numbers in two formats (~94% of a ~4 MB
+  report was `parasitics.nets[]`, almost all of it SPEF-carried data or one
+  constant repeated per net). The new `--report-parasitics {full,slim}` flag
+  (default `full`, byte-identical to the pre-#5816 output; request-form
+  field `report_parasitics`) drops from each `nets[]` entry the data the
+  SPEF beside it already carries (`coupled[]`, `hub_net`, and the
+  empty/constant lumped-model `terminals`/`segments`/`pin_order` and
+  `integrity` sub-keys — populated distributed-ladder fields and real
+  integrity findings are kept), and adds `parasitics.report_shape: "slim"`
+  plus a `parasitics.coupling_by_layer_pair` histogram that counts each
+  capacitor once per layer pair it spans, including same-layer coupling.
+  `slim` requires `--spef` (a clean `ExtractError`
+  otherwise); a slim run's SPEF and written SPICE are byte-identical to a
+  full run's. No `schema_version` bump: the default shape is unchanged and
+  every new field is additive.
 
 - **`klt signoff --repin -o FILE` is now a usage error instead of a silent
   no-op** (#6147, 2026-11-17): `--repin` exited `0`, printed the envelope to
@@ -160,6 +203,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   trailing-slash forms like `/tmp/` or `/tmp//`, since docker rejects a
   duplicate mount point). Hosts with an older wrapper should re-run
   `scripts/install-openroad-docker.sh` to upgrade it in place.
+- **`klt sim --dry-run` runs the batch ceiling/split plan** (#5674,
+  2026-11-17): the single-request batch dry run now reaches the same
+  `plan_batch_job` the submit path runs, so a request the fleet would
+  refuse is refused by the dry run with the submit path's own
+  `error.code` and message — `batch_max_units_per_job_invalid` for a
+  malformed `batch.max_units_per_job` or one combined with
+  `job_ceiling_check: "enforce"` (both used to dry-run clean), and
+  `batch_job_ceiling_exceeded` for a request whose bound exceeds
+  `max_job_seconds` under `"enforce"` (never checked on this path at
+  all). The dry-run report gains an additive `job_ceiling` field — the
+  `environment.remote.job_ceiling` name and shape, including
+  `split`/`effective_hosts` when a split mode is active — present only
+  when a batch configuration resolves on this host, so a configless host
+  dry-runs clean exactly as before. The warn / serial-bound (#4982) /
+  split stderr notices print as a submit would print them. `hosts` keeps
+  its meaning (the request's `remote.hosts`; the planned shard count is
+  `job_ceiling.effective_hosts`, never a redefinition), and `--format
+  text` prints a `batch plan:` line with the unit count and planned job
+  count. `schema_version` is unchanged; the field is additive.
 - **Added** (#5850): an item 9 `testbenches` entry may declare `depends_on` —
   repo-relative paths the bench depends on (a helper it imports, a model
   card it includes) — and each declared dependency is hashed into the
@@ -238,7 +300,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `extract` / `sim` document, and an unset `$VAR` is a request error naming the
   variable instead of a bare "not found". Additive: a literal path keeps its
   meaning, no `schema_version` bump.
-
+- **`klt drc --deck gf180mcu` reports fully orphan cuts** (#5915, 2026-11-17):
+  the eight single-population conductor-over-cut enclosure rules
+  (`metal1.enclosing.contact.1`, `metal1.`/`metal2.enclosing.via1.1`,
+  `metal2.`/`metal3.enclosing.via2.1`, `metal3.`/`metal4.enclosing.via3.1`,
+  `metal5.enclosing.via4.1`) now set `require_containment` (#2726), so a
+  Contact/Via1-Via4 drawn entirely outside its conductor is reported instead
+  of passing `clean` (the legacy zero-overlap term only saw cuts that touch the
+  conductor). The four multi-population sides (`poly2.`/`comp.enclosing.contact.1`,
+  `metal4.enclosing.via4.1`, `mim.enclosing.via4.1`) keep the legacy behaviour.
+  A layout that previously reported `clean` with an unlanded gf180mcu cut can
+  now report `violations`. Both checked-in layout trees were enumerated at
+  merge base and at head: the three `tests/corpus/gf180mcu` cells are
+  unchanged, and of the 16 `blocks/gf180*/output/*.gds` snapshots only
+  `blocks/gf180-bandgap/output/bandgap_top.gds` moves (`clean` ->
+  `violations`, `metal1.enclosing.via1.1` 0 -> 1) — a true positive: a Via1
+  landed on Metal2 above with no Metal1 below, filed upstream
+  (2AMLogic/gf180-bandgap#504). `docs/cli/drc.md` also records that asap7
+  has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
+  field or `schema_version` changes; the deck's `provenance.deck` hash
+  changes.
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -365,6 +446,15 @@ not `klt --version`, if you need to detect this kind of drift. See
   committed envelope re-checks `match`; no `schema_version` bump. Repeating
   one path across item-9 object entries is still refused, and the refusal now
   points at the list form. See `docs/cli/signoff.md`.
+- **`klt sim --capacity-retries N` now works on a sharded single request**
+  (#5567, 2026-11-16): a sharded batch run whose `--wait-for-capacity` budget
+  ran out left the refused shards as `lost_shard` corners, recoverable only
+  by a second `--attach` / `--resume` invocation. With `--capacity-retries N`
+  the shards lost to `batch_no_capacity` / `batch_concurrency_cap` are
+  launched again, in up to `N` further passes after the other shards finish,
+  with doubling backoff and a fresh capacity-wait budget per pass; their
+  already-submitted jobs are launched, never re-submitted. Default `0` is
+  unchanged, and `--batch-set` behaves as before.
 - **Added** (#5644, 2026-11-16): `klt sim --op-lint` now reports an additive
   top-level `unexpanded_instance_count` — the number of `X` instances whose
   `.subckt` was found in neither the netlist body nor its `.include` closure

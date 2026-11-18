@@ -31,6 +31,10 @@ ngspice's per-device decomposition after the run by
 completeness assertion and refusals. Everything below describes the total
 form.
 
+A ``top_n`` key (issue #5558) asks either form for its largest contributors by
+name; the list rides an additive ``noise.contributors`` member and ``value`` is
+untouched (:mod:`klayout_tools.sim_noise_contributors`).
+
 How it is computed
 ------------------
 Lowered, before the deck is written, into ngspice ``let`` lines in the
@@ -48,7 +52,7 @@ import math
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import sim_measurement_kind, sim_noise_mechanism
+from . import sim_measurement_kind, sim_noise_contributors, sim_noise_mechanism
 from .sim_errors import SimError
 
 #: Spectrum vectors of ngspice's first noise plot, aliased by bare name
@@ -58,7 +62,7 @@ NOISE_SPECTRUM_VECTORS = ("inoise_spectrum", "onoise_spectrum")
 #: The ``noise.quantity`` values: input- or output-referred.
 NOISE_QUANTITIES = ("inoise", "onoise")
 
-_ALLOWED_KEYS = frozenset({"quantity", "at_hz", "band_hz", "mechanism"})
+_ALLOWED_KEYS = frozenset({"quantity", "at_hz", "band_hz", "mechanism", "top_n"})
 
 
 def is_noise(spec: dict[str, Any]) -> bool:
@@ -110,6 +114,7 @@ def validate_noise_spec(name: Any, body: Any) -> None:
             f"{list(NOISE_QUANTITIES)} (got {body.get('quantity')!r})"
         )
     _validate_mechanism(name, body)
+    sim_noise_contributors.validate_top_n(name, body)
     has_at, has_band = "at_hz" in body, "band_hz" in body
     if has_at == has_band:
         raise SimError(
@@ -204,7 +209,8 @@ def _refuse_missing_pts_per_summary(
     declared: list[dict[str, Any]], analysis: dict[str, Any]
 ) -> None:
     """Issue #5553: a ``mechanism`` measurement needs the trailing
-    ``pts_per_summary`` argument on the analysis line.
+    ``pts_per_summary`` argument on the analysis line -- and, issue #5558, so
+    does a ``top_n`` one.
 
     Without it ngspice's spectra plot holds exactly ``frequency``,
     ``inoise_spectrum`` and ``onoise_spectrum`` -- no per-contributor vector
@@ -214,15 +220,21 @@ def _refuse_missing_pts_per_summary(
     cost to accept. Refused before any run so the request can never come back
     with a null value instead.
     """
-    mechanisms = [spec for spec in declared if sim_noise_mechanism.is_mechanism(spec)]
-    if not mechanisms or sim_noise_mechanism.has_pts_per_summary(analysis):
+    needing = [spec for spec in declared if sim_noise_mechanism.reads_spectra(spec)]
+    if not needing or sim_noise_mechanism.has_pts_per_summary(analysis):
         return
+    first = needing[0]
+    key = (
+        f"noise.mechanism {first['noise']['mechanism']!r}"
+        if sim_noise_mechanism.is_mechanism(first)
+        else f"noise.top_n {first['noise']['top_n']!r}"
+    )
     args = str(analysis.get("args", "")).strip()
     raise SimError(
-        f"measurement '{mechanisms[0]['name']}' declares noise.mechanism "
-        f"{mechanisms[0]['noise']['mechanism']!r}, which needs ngspice's "
-        "per-device noise decomposition -- but analysis.args has no trailing "
-        "pts_per_summary argument, so ngspice emits only the total spectrum. "
+        f"measurement '{first['name']}' declares {key}, which needs "
+        "ngspice's per-device noise decomposition -- but analysis.args has "
+        "no trailing pts_per_summary argument, so ngspice emits only the "
+        "total spectrum. "
         f"Append it: analysis.args = {args + ' 1'!r} (the trailing 1 is "
         "pts_per_summary)"
     )
