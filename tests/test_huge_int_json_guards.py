@@ -196,7 +196,9 @@ CASES = [
     (
         "synthesize_abc_constr",
         lambda: synthesize._resolve_abc_constr_request(
-            {"abc_constr": {"driving_cell": "X", "load_ff": HUGE}}, ""
+            {"abc_constr": {"driving_cell": "X", "load_ff": HUGE}},
+            "",
+            resolved_globs=(),
         ),
         synthesize.SynthesizeError,
         "load_ff",
