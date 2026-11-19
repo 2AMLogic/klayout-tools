@@ -216,11 +216,17 @@ two steps:
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
    (`klt drc`/`klt extract`, `klt lvs`, and `klt pex`, which pins its own
-   extracted layout the same way — see [`pex.md`](pex.md)) must
+   extracted layout the same way — see [`pex.md`](pex.md) — plus `klt erc`,
+   `klt power`, `klt lef-abstract`, `klt place-and-route`, `klt sim`,
+   `klt sta`, `klt synthesize` and `klt functional-verification`, the full
+   set the "Provenance consistency" table below lists) must
    agree on `input.content_hash` **with the other checks declaring the same
    `input.role`** (issue #2027 — a `klt lvs` run given a pre-extracted
    netlist hashes a SPICE file, not a layout stream, so its digest is never
-   compared against a layout digest); any two
+   compared against a layout digest; the roles the code records are
+   `layout`, `netlist` and `source`, and digests are compared only within
+   one role, so a netlist and a layout describing the same design
+   legitimately carry different hashes); any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
    produce a pass/fail verdict at all (`status: "refused"`) — a "clean" DRC
@@ -423,7 +429,7 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt erc` (role `layout`), `klt power` (role `layout`), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt place-and-route` and `klt sim` (role `netlist`), `klt sta` (role `layout` when driven by a DEF request, `netlist` when driven by a Verilog netlist), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 **Verilog-top functional-verification citations (issue #6488).** On the
