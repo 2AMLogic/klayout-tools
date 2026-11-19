@@ -2321,11 +2321,7 @@ def _same_layer_short_reason(
                     )
 
             pad_w = other_port.get("width_um")
-            if (
-                not isinstance(pad_w, (int, float))
-                or isinstance(pad_w, bool)
-                or (pad_w <= 0)
-            ):
+            if not is_finite_number(pad_w) or pad_w <= 0:
                 # no reported pad size -- fall back to trace width
                 pad_w = effective_width_um
             half = float(pad_w) / 2.0 + route_half_um
