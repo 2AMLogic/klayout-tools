@@ -320,7 +320,7 @@ docker run --rm -i \\
     \${ENV_ARGS[@]+"\${ENV_ARGS[@]}"} \\
     "\${MOUNTS[@]}" \\
     $IMAGE \\
-    $IN_IMAGE_BINARY "\$@" &
+    $IN_IMAGE_BINARY "\$@" 0<&0 &
 CLIENT_PID=\$!
 (
     # Emit the container id on stderr as soon as the runtime records it,

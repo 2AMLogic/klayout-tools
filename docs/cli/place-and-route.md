@@ -127,7 +127,7 @@ docker run --rm -i \
   --cidfile "$CID_FILE" \
   -v "$PWD":"$PWD" -w "$PWD" \
   openroad/orfs:latest \
-  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@" &
+  /OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad "$@" 0<&0 &
 CLIENT_PID=$!
 STATUS=0
 wait "$CLIENT_PID" || STATUS=$?

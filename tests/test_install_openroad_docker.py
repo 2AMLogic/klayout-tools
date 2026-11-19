@@ -35,6 +35,10 @@ for a in "$@"; do
     fi
     prev="$a"
 done
+# Drain the client's stdin into a sink when asked: the wrapper must forward it.
+if [[ "$1" == "run" && -n "${DOCKER_STDIN_SINK:-}" ]]; then
+    cat >>"$DOCKER_STDIN_SINK"
+fi
 # Hold only on `run`: the "container" is what runs long; a kill must
 # complete immediately like the real runtime's.
 if [[ "$1" == "run" && -n "${DOCKER_HOLD_S:-}" ]]; then
@@ -152,6 +156,26 @@ def test_wrapper_forwards_client_exit_code_without_kill(tmp_path: Path) -> None:
     # container, so the trap must not fire a `docker kill`.
     argv = (tmp_path / "argv.log").read_text().splitlines()
     assert "kill" not in argv
+
+
+def test_wrapper_forwards_stdin_to_the_container_client(tmp_path: Path) -> None:
+    """The client is backgrounded, and bash gives an asynchronous command
+    /dev/null for stdin: without the explicit `0<&0` a script piped into the
+    drop-in `openroad` reaches the container as an immediate EOF."""
+    _install(tmp_path, {"TMPDIR": str(tmp_path)})
+    sink = tmp_path / "stdin.sink"
+    env = _wrapper_env(
+        tmp_path, {"DOCKER_STDIN_SINK": str(sink), "DOCKER_EXIT_CODE": "7"}
+    )
+    completed = subprocess.run(
+        [str(tmp_path / "dest" / "openroad"), "-no_init"],
+        input=b"puts hello-stdin\n",
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    assert sink.read_bytes() == b"puts hello-stdin\n"
+    assert completed.returncode == 7  # the client's exit code is still forwarded
 
 
 def _wrapper_env(tmp_path: Path, extra: dict[str, str]) -> dict[str, str]:
