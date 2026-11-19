@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import _openroad_engine as engine
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
@@ -187,3 +189,305 @@ def test_one_unwritable_log_keeps_other_stream_and_primary_failure(
         with result.diagnostics(EngineError):
             raise EngineError("original engine diagnosis")
     assert "Permission denied" in str(exc.value)
+
+
+def test_timeout_keeps_partial_byte_streams_without_adding_timeout(
+    tmp_path, monkeypatch
+):
+    class _TimingOutProc:
+        pid = 424242
+
+        def __init__(self, argv, **kwargs):
+            assert kwargs.get("start_new_session") is True
+            assert "timeout" not in kwargs
+            self.argv = argv
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            assert timeout is None
+            raise subprocess.TimeoutExpired(
+                self.argv, 2, output=b"partial out\n", stderr=b"partial err\n"
+            )
+
+    monkeypatch.setattr(engine, "Popen", _TimingOutProc)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    with pytest.raises(EngineError, match="timed out") as exc:
+        engine._run_openroad(
+            str(tmp_path / "run.tcl"),
+            "metrics",
+            error_cls=EngineError,
+            container_id_wait_s=0.0,
+        )
+    record_path = next(tmp_path.glob("openroad-logs/*/invocation.json"))
+    assert record_path.with_name("stdout.log").read_bytes() == b"partial out\n"
+    assert record_path.with_name("stderr.log").read_bytes() == b"partial err\n"
+    assert json.loads(record_path.read_text())["invocation_id"] in str(exc.value)
+
+
+def test_success_discloses_retention_failure_without_changing_engine_status(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "openroad-logs").write_text("blocked")
+    result = _invoke(tmp_path, monkeypatch)
+    assert result.returncode == 0
+    assert result.engine_log["retention_errors"]
+
+
+def test_launch_and_retention_failure_preserve_primary_diagnosis(tmp_path, monkeypatch):
+    (tmp_path / "openroad-logs").write_text("blocked")
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("original missing executable")
+
+    monkeypatch.setattr(engine, "Popen", missing)
+    with pytest.raises(
+        EngineError, match="could not launch openroad: original missing executable"
+    ) as exc:
+        engine._run_openroad(
+            str(tmp_path / "run.tcl"), "metrics", error_cls=EngineError
+        )
+    assert "retention_errors" in str(exc.value)
+
+
+def test_interrupt_retains_available_data_and_remains_an_interrupt(
+    tmp_path, monkeypatch
+):
+    interruption = KeyboardInterrupt("original interrupt")
+    interruption.stdout = b"available partial stdout\n"
+    interruption.stderr = b"available partial stderr\n"
+
+    class _InterruptedProc:
+        pid = 424242
+
+        def __init__(self, argv, **kwargs):
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            raise interruption
+
+    monkeypatch.setattr(engine, "Popen", _InterruptedProc)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    with pytest.raises(KeyboardInterrupt) as exc:
+        engine._run_openroad(
+            str(tmp_path / "run.tcl"),
+            "metrics",
+            error_cls=EngineError,
+            container_id_wait_s=0.0,
+        )
+    assert exc.value is interruption
+    record_path = next(tmp_path.glob("openroad-logs/*/invocation.json"))
+    assert record_path.with_name("stdout.log").read_bytes() == interruption.stdout
+    assert record_path.with_name("stderr.log").read_bytes() == interruption.stderr
+    assert json.loads(record_path.read_text())["outcome"] == "interrupted"
+
+
+def test_transcripts_exist_and_grow_while_process_runs(tmp_path, monkeypatch):
+    seen = {}
+
+    class _LiveProc:
+        pid = 424242
+
+        def __init__(self, argv, **kwargs):
+            self._stdout = kwargs["stdout"]
+            self._stderr = kwargs["stderr"]
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            self._stdout.write(b"progress line\n")
+            directory = Path(self._stdout.name).parent
+            seen["stdout"] = (directory / "stdout.log").read_bytes()
+            seen["stderr_exists"] = (directory / "stderr.log").exists()
+            seen["metadata_exists"] = (directory / "invocation.json").exists()
+            self._stderr.write(b"warn\n")
+            self.returncode = 0
+            return None, None
+
+    monkeypatch.setattr(engine, "Popen", _LiveProc)
+    result = engine._run_openroad(
+        str(tmp_path / "run.tcl"),
+        "metrics",
+        error_cls=EngineError,
+        container_id_wait_s=0.0,
+    )
+    assert seen == {
+        "stdout": b"progress line\n",
+        "stderr_exists": True,
+        # The launch-time snapshot (issue #5726) deliberately puts
+        # invocation.json on disk while the stage still runs.
+        "metadata_exists": True,
+    }
+    assert result.stdout == "progress line\n"
+    assert result.stderr == "warn\n"
+
+
+def test_interrupt_keeps_transcript_written_before_it(tmp_path, monkeypatch):
+    class _FlushedInterruptProc:
+        pid = 424242
+
+        def __init__(self, argv, **kwargs):
+            self._stdout = kwargs["stdout"]
+            self.returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            self._stdout.write(b"flushed before ctrl-c\n")
+            raise KeyboardInterrupt("stop")
+
+    monkeypatch.setattr(engine, "Popen", _FlushedInterruptProc)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    with pytest.raises(KeyboardInterrupt):
+        engine._run_openroad(
+            str(tmp_path / "run.tcl"),
+            "metrics",
+            error_cls=EngineError,
+            container_id_wait_s=0.0,
+        )
+    record_path = next(tmp_path.glob("openroad-logs/*/invocation.json"))
+    assert (
+        record_path.with_name("stdout.log").read_bytes() == b"flushed before ctrl-c\n"
+    )
+    assert json.loads(record_path.read_text())["outcome"] == "interrupted"
+
+
+def _caller_request(tmp_path, monkeypatch, command):
+    import test_place_and_route as pnr_tests
+    import test_post_route_sta as sta_tests
+
+    if command == "place-and-route":
+        return pnr_tests._setup_success_env(
+            tmp_path, monkeypatch, target_stage="floorplan"
+        )
+    return sta_tests._setup_success_env(tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("command", ["place-and-route", "sta"])
+@pytest.mark.parametrize("failure", ["nonzero", "launch", "missing_metrics"])
+def test_cli_failure_points_to_logs_and_never_accepts_partial_artifact(
+    tmp_path, monkeypatch, capsys, command, failure
+):
+    from klayout_tools.cli import main
+
+    request = _caller_request(tmp_path, monkeypatch, command)
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    real_run = subprocess.run
+
+    def failing_process(argv, **kwargs):
+        if argv[1:] == ["-version"]:
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="stub-version\n", stderr=""
+            )
+        if failure == "launch":
+            raise FileNotFoundError("original launch diagnosis")
+        return real_run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import sys; "
+                "Path('partial.def').write_text('partial routed artifact'); "
+                "print('first stdout line'); print('last stdout line'); "
+                "print('[ERROR STA-9999] original engine diagnosis', file=sys.stderr); "
+                "print('last stderr line', file=sys.stderr); "
+                f"sys.exit({0 if failure == 'missing_metrics' else 23})",
+            ],
+            **kwargs,
+        )
+
+    patch_openroad_run(monkeypatch, failing_process)
+    assert main([command, request, "--format", "json"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    message = json.loads(output.err)["error"]["message"]
+    diagnosis, marker, raw = message.partition(" -- openroad invocation: ")
+    assert marker
+    expected = {
+        "nonzero": "original engine diagnosis",
+        "launch": "original launch diagnosis",
+        "missing_metrics": "did not produce",
+    }[failure]
+    assert expected in diagnosis
+    record = json.loads(raw)
+    directory = tmp_path / record["directory"]["path"]
+    assert record["invocation_id"] == directory.name
+    assert json.loads((directory / "invocation.json").read_text()) == record
+    if failure != "launch":
+        assert (tmp_path / "partial.def").read_text() == "partial routed artifact"
+        assert (
+            directory / "stdout.log"
+        ).read_text() == "first stdout line\nlast stdout line\n"
+        assert (
+            (directory / "stderr.log").read_text()
+            == "[ERROR STA-9999] original engine diagnosis\nlast stderr line\n"
+        )
+
+
+def test_pnr_success_includes_stage_sweep_and_spef_logs(tmp_path, monkeypatch):
+    import test_place_and_route as fixture
+    from klayout_tools.place_and_route import run_place_and_route
+
+    request = fixture._setup_success_env(tmp_path, monkeypatch, post_route_spef=True)
+    fixture._make_pdk_install(tmp_path / "install", "sky130A", corner="ss_100C_1v60")
+    fixture._stub_openroad_success_with_post_route_spef(monkeypatch)
+    fixture._stub_merge_def_to_gds(monkeypatch)
+    fixture._stub_run_extract_for_post_route_spef(monkeypatch)
+    report = run_place_and_route(request)
+    logs = report["engine_logs"]
+    names = {entry["script_name"] for entry in logs}
+    assert {
+        f"pnr_gcd_{stage}.tcl" for stage in ("floorplan", "place", "cts", "route")
+    } <= names
+    assert "pnr_gcd_route_corners.tcl" in names
+    assert "pnr_gcd_route_spef.tcl" in names
+    assert "pnr_gcd_route_corner_tt_025C_1v80.tcl" in names
+    assert "pnr_gcd_route_corner_ss_100C_1v60.tcl" in names
+    assert len({entry["invocation_id"] for entry in logs}) == len(logs)
+    assert all(
+        entry["returncode"] == 0 and not entry["retention_errors"] for entry in logs
+    )
+
+
+@pytest.mark.parametrize("multi_corner", [False, True])
+def test_sta_success_exposes_each_invocation(tmp_path, monkeypatch, multi_corner):
+    import test_post_route_sta as fixture
+    from klayout_tools.post_route_sta import run_sta
+
+    if multi_corner:
+        request = fixture._setup_multi_corner_env(tmp_path, monkeypatch)
+        fixture._stub_openroad_multi_corner(monkeypatch)
+    else:
+        request = fixture._setup_success_env(tmp_path, monkeypatch)
+        fixture._stub_openroad_success(monkeypatch)
+    report = run_sta(request)
+    entries = report["corners"] if multi_corner else [report]
+    logs = [entry["engine_log"] for entry in entries]
+    assert len({entry["invocation_id"] for entry in logs}) == len(entries)
+    for entry in logs:
+        directory = tmp_path / ".klt" / "sta" / "openroad-logs" / entry["invocation_id"]
+        assert (directory / "stdout.log").is_file()
