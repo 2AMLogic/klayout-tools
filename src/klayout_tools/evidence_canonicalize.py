@@ -67,9 +67,12 @@ from ._report_verify import (
 
 class EvidenceCanonicalizeError(Exception):
     """A report that cannot be canonicalized at all -- missing, unreadable,
-    not JSON, or a JSON value that is not an object. Mirrors every other
-    verb's single-exception contract so the CLI adapter has one ``except``
-    clause and the shared error envelope (``docs/json-contract.md``)."""
+    not JSON, a JSON value that is not an object, or a JSON object whose
+    field shapes the kind's canonicalizer cannot read (e.g. an ``extract``
+    report whose ``nets[]`` entries do not carry scalar names). Mirrors
+    every other verb's single-exception contract so the CLI adapter has one
+    ``except`` clause and the shared error envelope
+    (``docs/json-contract.md``)."""
 
 
 @dataclass(frozen=True)
@@ -236,26 +239,46 @@ def _with_sorted_keys(value: Any) -> Any:
 
 
 def canonicalize(report: Mapping[str, Any], kind: str) -> dict[str, Any]:
-    """``report`` reduced to exactly the view ``klt <kind> --check …
-    --rerun`` diffs: ``kind``'s canonicalizer applied, then its by-path
+    """``report`` reduced to exactly the *static* view ``klt <kind> --check
+    … --rerun`` diffs: ``kind``'s canonicalizer applied, then its by-path
     exclusion set removed (subtree included), then every mapping rebuilt in
     sorted-key order.
 
-    Two canonical views of the same kind compare equal exactly when that
-    kind's ``--rerun`` reports no drift between the two reports (the static
-    part of its exclusion set -- see this module's ``lvs`` caveat), so a
-    consumer can commit this document and diff it whole instead of
-    re-implementing the exclusion list. Verdict-bearing fields are untouched:
-    nothing outside the kind's exclusion set / canonicalizer is removed or
-    rewritten.
+    The guarantee on that view is one-directional: two canonical views of
+    the same kind comparing equal implies that kind's ``--rerun`` reports
+    no drift between the two reports. The converse does not hold --
+    ``--rerun``'s comparison is directional and pair-dependent, and this
+    view is built from the static exclusion set and per-report
+    normalization alone. Three documented exceptions
+    (``docs/cli/evidence.md``): a scalar ``provenance`` leaf only the
+    committed report carries is ``match`` (surfaced as ``not_compared``,
+    issue #5866) while the two views differ; ``klt drc`` across the #5660
+    ``klayout_version_mismatch`` redefinition drops the flag from the
+    fresh view only (``match``, views differ); and the ``lvs``
+    pair-dependent tolerance (this module's ``lvs`` caveat). A whole-file
+    diff of canonical views is therefore the *stricter* check.
+    Verdict-bearing fields are untouched: nothing outside the kind's
+    exclusion set / canonicalizer is removed or rewritten.
 
     Idempotent -- ``canonicalize(canonicalize(r, k), k) == canonicalize(r,
     k)``: both steps only remove and reorder.
+
+    Raises :class:`EvidenceCanonicalizeError` when ``kind``'s
+    canonicalizer cannot read ``report`` -- a JSON object, but not one
+    shaped like a ``kind`` report (e.g. ``extract``'s ``nets[]`` entries
+    without scalar names, a list-valued ``devices[].nets``) -- so the
+    consumer gets the shared error envelope, never a traceback.
     """
     spec = kind_spec(kind)
     view: Any = report
     if spec.canonicalize is not None:
-        view = spec.canonicalize(dict(report))
+        try:
+            view = spec.canonicalize(dict(report))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise EvidenceCanonicalizeError(
+                f"committed report is not a well-formed {kind} "
+                f"--format json report: {exc}"
+            ) from exc
     stripped = strip_path_patterns(view, spec.exclude)
     canonical: dict[str, Any] = _with_sorted_keys(stripped)
     return canonical

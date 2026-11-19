@@ -84,14 +84,15 @@ options:
 
 --- klt evidence canonicalize ---
 
-Emit a klt report reduced to exactly the fields `klt <kind> --check REPORT
+Emit a klt report reduced to the static view `klt <kind> --check REPORT
 --rerun` compares: run-scoped artifact paths and machine-local provenance
 removed, verdict fields untouched, keys sorted. Commit this instead of hand-
-maintaining a copy of the exclusion list (issue #5541). Two canonical views of
-one kind compare equal exactly when --rerun reports no drift. REPORT is a path
-or `-` for stdin. Caveat: `klt lvs --rerun` also tolerates fields the
-committed report never carried, which depends on the pair and cannot be
-expressed on one report -- see docs/cli/evidence.md.
+maintaining a copy of the exclusion list (issue #5541). Equal canonical views
+of one kind mean its --rerun reports no drift; the converse does not hold
+(--rerun also tolerates directional, pair-dependent differences a whole-file
+diff of canonical views flags: committed-only provenance leaves, drc's
+version-mismatch boundary, lvs pair exclusions), so the whole-file diff is the
+stricter check. REPORT is a path or `-` for stdin. See docs/cli/evidence.md.
 
 positional arguments:
   REPORT klt --format json report, or `-` for stdin

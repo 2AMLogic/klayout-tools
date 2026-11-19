@@ -1132,10 +1132,13 @@ not `klt --version`, if you need to detect this kind of drift. See
   staleness guard report a difference on every run, including two back-to-back
   runs of a byte-identical request. `provenance.pdk.ambiguous_sources` (#2564),
   present only on a machine carrying more than one PDK store for the variant,
-  is removed for every kind. Two canonical views of one kind compare equal
-  exactly when that kind's `--rerun` reports no drift; `klt lvs`'s additional
-  *pair-dependent* tolerance (#1952/#2692) cannot be expressed on a single
-  report and is documented as a caveat in
+  is removed for every kind. Equal canonical views of one kind mean that
+  kind's `--rerun` reports no drift; the converse does not hold — `--rerun`'s
+  comparison is directional and pair-dependent (committed-only `provenance`
+  leaves surface as `not_compared` per #5866, `drc` drops the redefined
+  `klayout_version_mismatch` flag across the #5660 boundary, and `klt lvs`'s
+  pair-dependent tolerance #1952/#2692), so a whole-file diff of canonical
+  views is the stricter check; the caveats are documented in
   [`docs/cli/evidence.md`](docs/cli/evidence.md). The pairing of a kind with
   its exclusion set and canonicalizer now lives in exactly one place
   (`src/klayout_tools/evidence_canonicalize.py`) which every verb's own

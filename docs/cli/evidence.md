@@ -249,9 +249,14 @@ anonymous-`$N` net renaming). Verdict-bearing fields are untouched.
 
 Guarantees:
 
-- **Equivalence with `--rerun`.** Two canonical views of the same kind
-  compare equal exactly when that kind's `--rerun` reports no drift between
-  the two reports (see the `lvs` caveat below).
+- **Relationship with `--rerun` (one-directional).** If two canonical
+  views of the same kind compare equal, that kind's `--rerun` reports no
+  drift between the two reports. The converse does not hold — `--rerun`'s
+  comparison is directional and pair-dependent, while the canonical view is
+  the static exclusion set plus per-report normalization alone — so a
+  whole-file diff of canonical views is the *stricter* check. The three
+  exceptions are documented below: committed-only provenance, DRC's version
+  boundary, and the `lvs` caveat.
 - **One definition.** `src/klayout_tools/evidence_canonicalize.py` is the
   single place a kind is paired with its exclusion set and canonicalizer,
   and every verb's own `--rerun` assembles its payload through it — so a key
@@ -265,6 +270,25 @@ Guarantees:
   resolving machine carries more than one PDK store holding the variant) is
   removed for every kind, as is the rest of the machine/tool-build
   provenance.
+
+**Committed-only provenance (#5866).** `--rerun` reports a scalar leaf
+under `provenance` that the *committed* report carries and the fresh run
+does not as `not_compared`, not drift — a downstream wrapper may splice in
+`gds_sha256`, or a different klt build wrote fields this run does not. Each
+canonical view keeps the field on the report that carries it, so the two
+documents differ while `--rerun` reports `match`. In the other direction —
+a leaf the *fresh* report grew and the committed one never had — the same
+two canonical views differ and `--rerun` reports `drifted`; whole-file
+equality cannot express that directionality. Diffing two canonical views
+flags committed-only provenance that `--rerun` tolerates: compare documents
+that both came from `klt evidence canonicalize`, not a hand-edited report.
+
+**DRC version boundary (#5660).** `provenance.klayout_version_mismatch` is
+computed from a different input on each side of #5660, so across that
+boundary `klt drc --check … --rerun` drops the flag from the fresh view
+(the committed value lands in `not_compared`) and reports `match` — while
+each canonical view keeps its own report's flag, so the two canonical
+documents differ.
 
 **`lvs` caveat.** `klt lvs --check … --rerun` additionally tolerates fields
 the *committed* report never carried (issues #1952/#2692 — e.g. an `options`
@@ -281,13 +305,15 @@ Not covered: `klt signoff --check` (one mode, its own two-stage strip) and
 Committing and checking a canonical report:
 
 ```sh
-klt drc block.gds --deck sky130A --format json -o drc.json
+klt drc block.gds --deck sky130 --format json -o drc.json
 klt evidence canonicalize drc.json --kind drc > evidence/drc.canonical.json
 # later, in CI:
-klt drc block.gds --deck sky130A --format json -o fresh.json
+klt drc block.gds --deck sky130 --format json -o fresh.json
 klt evidence canonicalize fresh.json --kind drc | diff - evidence/drc.canonical.json
 ```
 
 Exit `0` and the document on stdout; `1` with the shared error envelope on
-stderr (and stdout empty) for a missing, unparseable, or non-object report;
+stderr (and stdout empty) for a missing, unparseable, or non-object report,
+or one whose field shapes the kind's canonicalizer cannot read (e.g. a
+report that is not shaped like an `extract` report under `--kind extract`);
 `2` for usage errors, including an unknown `--kind`.
