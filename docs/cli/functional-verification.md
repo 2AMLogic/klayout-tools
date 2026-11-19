@@ -379,7 +379,13 @@ verified netlist when `options.from_synthesize` is used:
 `path`/`scope` is the repo-relative `{path, scope}` shape
 ([`docs/json-contract.md`](../json-contract.md)): a source outside the repo
 reads `{"path": null, "scope": "external", "sha256": "…"}` — the absolute host
-path is never emitted. `sha256` is the digest of the file's bytes at run time,
+path is never emitted. "The repo" is the one containing the **request** — the
+request file's directory, or `--base-dir` — never the directory `klt` was
+invoked from, so the same run yields the same `environment.sources` and
+`environment.{results_xml,test_log,build_log}` / mutation `log_path` envelopes
+from any working directory (issue #6762). A request that sits in no repo
+reports everything `external`, and so does an `-o/--outdir` outside the
+request's repo. `sha256` is the digest of the file's bytes at run time,
 so two runs of one testbench against different sources (an RTL run and a
 gate-level run) produce reports that differ in-band, and a source edited after
 the run can be detected by re-hashing it. The list names the caller's own
