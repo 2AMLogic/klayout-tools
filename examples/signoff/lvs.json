@@ -89,6 +89,7 @@
       ]
     }
   ],
+  "mismatches_omitted": false,
   "mismatch_count": 0,
   "error_count": 0,
   "category_counts": {},

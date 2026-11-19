@@ -10,7 +10,7 @@
     "power_connectivity", "body_verification", "device_parameter_coverage",
     "mismatch_count", "error_count", "category_counts", "category_error_counts",
     "counts", "device_classes", "environment", "provenance", "mismatches",
-    "net_correspondence"
+    "mismatches_omitted", "net_correspondence"
   ],
   "properties": {
     "schema_version": {"type": "integer", "const": 3},
@@ -73,6 +73,7 @@
       "items": {"$ref": "#/$defs/device_parameter_coverage_entry"}
     },
     "mismatch_count": {"type": "integer", "minimum": 0},
+    "mismatches_omitted": {"type": "boolean"},
     "error_count": {"type": "integer", "minimum": 0},
     "category_counts": {"$ref": "#/$defs/count_map"},
     "category_error_counts": {"$ref": "#/$defs/count_map"},
