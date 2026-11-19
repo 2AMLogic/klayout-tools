@@ -70,6 +70,30 @@ EXIT_MATCH = 0
 EXIT_DRIFTED = 3
 
 
+def configure(parser: argparse.ArgumentParser) -> None:
+    """Add ``--yosys-timeout-s`` (issue #5773) and bind ``run`` as the handler.
+
+    Lives here, not in ``parser.py``, to keep that file under its size
+    ratchet -- the same split as :func:`.lvs_cmd.configure`.
+    """
+    parser.add_argument(
+        "--yosys-timeout-s",
+        dest="yosys_timeout_s",
+        type=float,
+        default=None,
+        help=(
+            "per-invocation Yosys wall-clock budget in seconds for this run "
+            "(default: 300; cap 3600) -- overrides the request document's "
+            "`yosys_timeout_s` field. The KLT_YOSYS_TIMEOUT_S environment "
+            "variable also overrides the request field; the flag wins over "
+            "the env var. Must be re-passed with `--check --rerun`, like "
+            "`--equiv-timeout-s`. See docs/cli/synthesize.md's 'Yosys "
+            "budget overrides' section."
+        ),
+    )
+    parser.set_defaults(func=run)
+
+
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
         return _run_check(args)
@@ -91,6 +115,7 @@ def run(args: argparse.Namespace) -> int:
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
             equiv_engine=args.equiv_engine,
+            yosys_timeout_s=args.yosys_timeout_s,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
@@ -129,6 +154,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
                 equiv_engine=args.equiv_engine,
+                yosys_timeout_s=args.yosys_timeout_s,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )

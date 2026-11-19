@@ -2257,7 +2257,7 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    synthesize_cmd.configure(synthesize_parser)  # --yosys-timeout-s + func=run
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
