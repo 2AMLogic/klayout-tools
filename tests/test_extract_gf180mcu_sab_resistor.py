@@ -57,13 +57,6 @@ def _box_um(x0: float, y0: float, x1: float, y1: float) -> kdb.Box:
     )
 
 
-def _poly_um(points: list[tuple[float, float]]) -> kdb.Polygon:
-    """A polygon from um-space vertices (non-Manhattan conductor fixtures)."""
-    return kdb.Polygon(
-        [kdb.Point(round(x / _DBU_UM), round(y / _DBU_UM)) for x, y in points]
-    )
-
-
 def _new_layout() -> tuple[kdb.Layout, kdb.Cell]:
     layout = kdb.Layout()
     layout.dbu = _DBU_UM

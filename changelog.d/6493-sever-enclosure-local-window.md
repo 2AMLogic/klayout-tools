@@ -14,7 +14,8 @@
   that bridged two conductor components the reference keeps apart).
   Regression-gated by an empty-symmetric-difference equivalence test against
   the previous full-layer loop over randomised Manhattan, 45-degree and
-  off-axis staircase fixtures (`tests/test_extract_gf180mcu_sab_resistor.py`),
+  off-axis staircase fixtures
+  (`tests/test_extract_sever_enclosure_local_window.py`),
   while the helper-level cost stays ~flat per body: median 5-repeat timings
   on synthetic separated halo+lead structures (Python 3.14.9, KLayout
   0.30.12, `scripts/sever_enclosure_bench.py`) went from 2.83 s total at 500
