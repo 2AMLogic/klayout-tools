@@ -1,0 +1,18 @@
+{
+  "provenance": {
+    "schema_version": 1,
+    "geode_version": "0.4.0",
+    "git_sha": "fixture",
+    "backend": "scalar",
+    "threads": null,
+    "spec_path": "spec.json"
+  },
+  "kind": "capacitance",
+  "status": "ok",
+  "terminals": ["S1", "S2"],
+  "c_farad": [[2.0e-14, -1.5e-14], [-1.5e-14, 3.0e-14]],
+  "c_sigma_farad": [0.5e-14, 1.5e-14],
+  "max_rel_asymmetry": 0.0,
+  "maxwell_sign_structure": true,
+  "solver": {"method": "energy", "inner": "direct_lu", "wall_time_s": 0.01}
+}

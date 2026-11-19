@@ -285,10 +285,10 @@ was rejected.
 
 ## Pinning the KLayout engine version
 
-Pinning `klayout-tools` to an exact git commit SHA does not, by itself, pin
-the `klayout` engine version that commit resolves —
+Pinning `klayout-tools` — to an exact git commit SHA *or* to a released
+version — does not, by itself, pin the `klayout` engine version it resolves —
 `pyproject.toml`'s `klayout>=0.30` dependency is an unbounded floor, so the
-same commit installed on different days can resolve different `klayout`
+same pin installed on different days can resolve different `klayout`
 versions, and DRC/LVS report internals (deck content hash, `rules_skipped`,
 `category_counts`) can shift alongside it even though the verdict itself
 does not (issue #1490).
@@ -303,10 +303,16 @@ There are two pinning cases with two different targets:
   never `klayout_version_expected`.
 
 In both cases the fix is `uv`'s own dependency override, no
-`klt`-specific flag needed:
+`klt`-specific flag needed. For the expected case, use the install form
+matching how the build you are replacing was installed (`reinstall_spec`
+above already names it):
 
 ```bash
-# expected: install under the tested-against engine
+# expected, released install: install under the tested-against engine
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# expected, dev/git checkout: install under the tested-against engine
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 
@@ -319,9 +325,10 @@ The recorded form is the canonical reconstruction recipe — see
 null`, `reinstall_spec: null`).
 
 `klt drc`/`klt lvs` reports compare the two fields automatically —
-`provenance.klayout_version_mismatch` — with a stderr warning on drift; see
-[`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine
-version" section.
+`provenance.klayout_version_mismatch` — with a stderr warning on drift whose
+remedy prints whichever of the two forms matches the running build (issue
+#5601); see [`../json-contract.md`](../json-contract.md)'s "Pinning the
+KLayout engine version" section.
 
 ## Gating a build before doing work
 
