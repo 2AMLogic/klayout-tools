@@ -2,11 +2,13 @@
 as a committable document (issue #5541).
 
 Built from small hand-written report dicts: no engine run, no PDK, no KLayout.
-The verb's core guarantee is one-directional -- equal canonical views of one
-kind mean that kind's ``--rerun`` reports no drift -- so the central test
-asserts that direction over a mutation matrix, and separate tests pin the
-directional exceptions (``match`` from ``--rerun`` with unequal views:
-committed-only provenance, DRC's #5660 boundary, the ``lvs`` pair tolerance).
+This module covers the registry/single-source structure, what the view
+removes and keeps, determinism, and the CLI; the verb's one-directional
+relationship with ``--rerun`` (equal views imply no drift; the directional
+exceptions -- committed-only provenance #5866, DRC's #5660 boundary, the
+``lvs`` pair tolerance) lives in
+``test_evidence_canonicalize_rerun_equivalence.py``, split for the per-file
+size ratchet. Shared fixtures: ``helpers/evidence_reports``.
 """
 
 from __future__ import annotations
@@ -18,11 +20,11 @@ from typing import Any
 
 import pytest
 
+from helpers.evidence_reports import KINDS
+from helpers.evidence_reports import base_report as _base_report
+from helpers.evidence_reports import rerun_drift as _rerun_drift
 from klayout_tools import evidence_canonicalize as ec
-from klayout_tools._report_verify import diff_verdict_fields
 from klayout_tools.cli import main
-
-KINDS = list(ec.CANONICAL_KINDS)
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "klayout_tools"
 
@@ -36,117 +38,6 @@ _VERB_MODULES = {
     "place-and-route": "place_and_route.py",
     "equiv": "equiv.py",
 }
-
-
-_PROVENANCE: dict[str, Any] = {
-    "klt_version": "0.9.1",
-    "klt_git_commit": "deadbeef",
-    "klt_reinstall_spec": "klayout-tools==0.9.1",
-    "klayout_version": "0.29.0",
-    "pdk": {
-        "variant": "sky130A",
-        "version": "v1",
-        "commit": "cafe",
-        "linked_trees": ["/opt/pdk"],
-        "ambiguous_sources": ["/opt/pdk", "/usr/share/pdk"],
-        "source": "/opt/pdk",
-    },
-}
-
-
-def _base_report(kind: str) -> dict[str, Any]:
-    """A minimal report of ``kind`` carrying every field class: verdict,
-    excluded-by-path, and -- for a kind with a canonicalizer -- run-scoped
-    bookkeeping both top-level and nested inside a verdict object."""
-    report: dict[str, Any] = {
-        "schema_version": 1,
-        "status": "clean",
-        "provenance": json.loads(json.dumps(_PROVENANCE)),
-        "timing": {"elapsed_s": 1.5},
-    }
-    if kind in {"drc", "erc"}:
-        report |= {
-            "file": {"path": "block.gds", "scope": "repo"},
-            "violation_count": 0,
-            "violations": [],
-        }
-    elif kind == "lvs":
-        report |= {
-            "mismatch_count": 0,
-            "mismatches": [],
-            "environment": {
-                "engine_version": "netgen 1.5",
-                "layout_sha256": "aa",
-                "reference_sha256": "bb",
-                "extracted_netlist": "/tmp/run-1/extracted.spice",
-                "netgen_binary": "/usr/local/bin/netgen",
-                "klayout_binary": "/usr/local/bin/klayout",
-            },
-        }
-    elif kind == "extract":
-        report |= {
-            "device_count": 1,
-            "net_count": 2,
-            "devices": [
-                {"name": "M1", "class": "nmos", "nets": {"S": "\\$1", "D": "vout"}}
-            ],
-            "nets": [
-                {"name": "\\$1", "net_id": 7, "device_count": 1},
-                {"name": "vout", "net_id": 2, "device_count": 1},
-            ],
-        }
-    elif kind == "synthesize":
-        report |= {
-            "engine": "yosys",
-            "engine_version": "yosys 0.38",
-            "instance_count": 12,
-            "area_um2": 34.5,
-            "run_id": "11111111-1111-1111-1111-111111111111",
-            "netlist_path": ".klt/synthesize/1111/netlist.v",
-            "script_path": ".klt/synthesize/1111/run.ys",
-            "equivalence": {
-                "status": "equivalent",
-                "artifacts": {"script_path": ".klt/synthesize/1111/equiv.ys"},
-            },
-            "macros": [{"name": "sram", "lef": "sram.lef", "blackbox_path": "bb.v"}],
-        }
-    elif kind == "place-and-route":
-        report |= {
-            "engine": "openroad",
-            "engine_version": "openroad 2.0",
-            "def_path": ".klt/place-and-route/block.def",
-            "wns_ns": -0.1,
-            "engine_logs": [{"invocation_id": "abc", "directory": "/tmp/abc"}],
-            "stages": {"detailed_route": {"engine_logs": [{"invocation_id": "d"}]}},
-        }
-    elif kind == "equiv":
-        report |= {
-            "engine": "yosys",
-            "engine_version": "yosys 0.38",
-            "elapsed_s": 2.25,
-            "resume": {"resumed_stage": "miter"},
-            "yosys_binary": "/usr/local/bin/yosys",
-            "counterexample": {
-                "found": False,
-                "simulation": {
-                    "iverilog_binary": "/usr/bin/iverilog",
-                    "vvp_binary": "/usr/bin/vvp",
-                },
-            },
-        }
-    return report
-
-
-def _set_path(report: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-    """Set ``path`` in ``report``, creating intermediate objects."""
-    node = report
-    for key in path[:-1]:
-        child = node.get(key)
-        if not isinstance(child, dict):
-            child = {}
-            node[key] = child
-        node = child
-    node[path[-1]] = value
 
 
 def _canonical_bytes(report: dict[str, Any], kind: str) -> str:
@@ -231,130 +122,6 @@ def test_adding_an_excluded_path_reaches_both_readers(
     )
     assert "mismatch_count" not in ec.canonicalize(committed, "lvs")
     assert _rerun_status("lvs", committed, fresh) == "match"
-
-
-# --- Equivalence with --rerun ---
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_excluded_only_difference_canonicalizes_equal(kind: str) -> None:
-    """Differ in *every* excluded path and nowhere else: views stay equal."""
-    spec = ec.kind_spec(kind)
-    committed = _base_report(kind)
-    fresh = _base_report(kind)
-    for index, path in enumerate(sorted(spec.exclude)):
-        _set_path(committed, path, f"committed-{index}")
-        _set_path(fresh, path, f"fresh-{index}")
-
-    assert ec.canonicalize(committed, kind) == ec.canonicalize(fresh, kind)
-    assert not _rerun_drift(kind, committed, fresh)
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_verdict_difference_canonicalizes_unequal(kind: str) -> None:
-    """Differ in one verdict-bearing field: views differ, and only there."""
-    committed = _base_report(kind)
-    fresh = _base_report(kind)
-    fresh["status"] = "drifted-value"
-
-    assert ec.canonicalize(committed, kind) != ec.canonicalize(fresh, kind)
-    drift = _rerun_drift(kind, committed, fresh)
-    assert [entry["field"] for entry in drift] == ["status"]
-
-
-def _rerun_drift(
-    kind: str, committed: dict[str, Any], fresh: dict[str, Any]
-) -> list[dict[str, Any]]:
-    """What ``klt <kind> --rerun`` would report for this pair."""
-    spec = ec.kind_spec(kind)
-    view = spec.canonicalize or (lambda report: report)
-    return diff_verdict_fields(view(committed), view(fresh), exclude=spec.exclude)
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_canonical_equality_implies_no_rerun_drift(kind: str) -> None:
-    """The one-directional guarantee over a matrix of mutations, in both
-    comparison directions: equal canonical views mean no drift. The
-    committed-only provenance row is a directional exception on purpose
-    (#5866: ``match`` with unequal views -- pinned explicitly below)."""
-    spec = ec.kind_spec(kind)
-    excluded = sorted(spec.exclude)
-    mutations: list[tuple[str, str, Any, Any]] = [
-        ("none", "fresh", "status", None),
-        ("verdict", "fresh", "status", "other"),
-        ("excluded-first", "fresh", excluded[0], "moved"),
-        ("excluded-last", "fresh", excluded[-1], "moved"),
-        ("provenance-committed-only", "committed", ("provenance", "gds_sha256"), "aa"),
-        ("provenance-fresh-only", "fresh", ("provenance", "gds_sha256"), "aa"),
-    ]
-    for label, side, target, value in mutations:
-        committed = _base_report(kind)
-        fresh = _base_report(kind)
-        if value is not None:
-            path = (target,) if isinstance(target, str) else target
-            _set_path(committed if side == "committed" else fresh, path, value)
-        equal = ec.canonicalize(committed, kind) == ec.canonicalize(fresh, kind)
-        clean = not _rerun_drift(kind, committed, fresh)
-        assert not equal or clean, f"{kind}/{label}: equal but drifting"
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_committed_only_provenance_leaf_is_match_but_unequal(kind: str) -> None:
-    """#5866 directionality: a scalar ``provenance`` leaf only the committed
-    report carries is ``match`` (surfaced as ``not_compared``) while the two
-    canonical views differ -- the whole-file diff is the stricter check."""
-    committed = _base_report(kind)
-    fresh = _base_report(kind)
-    committed["provenance"]["gds_sha256"] = "aa"
-
-    result = ec.rerun_result_for(kind, "r.json", committed=committed, fresh=fresh)
-
-    assert result["status"] == "match"
-    assert result["not_compared"] == [
-        {"field": "provenance.gds_sha256", "committed": "aa"}
-    ]
-    assert ec.canonicalize(committed, kind) != ec.canonicalize(fresh, kind)
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_fresh_only_provenance_leaf_drifts_and_is_unequal(kind: str) -> None:
-    """The other direction: a ``provenance`` leaf the fresh report grew and
-    the committed one never had drifts. Same unequal canonical views, so
-    whole-file equality cannot express the direction."""
-    committed = _base_report(kind)
-    fresh = _base_report(kind)
-    fresh["provenance"]["gds_sha256"] = "aa"
-
-    result = ec.rerun_result_for(kind, "r.json", committed=committed, fresh=fresh)
-
-    assert result["status"] == "drifted"
-    assert [entry["field"] for entry in result["drift"]] == ["provenance.gds_sha256"]
-    assert "not_compared" not in result
-    assert ec.canonicalize(committed, kind) != ec.canonicalize(fresh, kind)
-
-
-def test_drc_mismatch_flag_across_5660_boundary_is_match_but_unequal() -> None:
-    """``klt drc --rerun`` drops ``provenance.klayout_version_mismatch``
-    from the fresh view across the #5660 redefinition (the committed value
-    lands in ``not_compared``), while the canonical view keeps each report's
-    own flag: ``match`` with different canonical documents."""
-    from klayout_tools import drc_report_check
-
-    committed = _base_report("drc")
-    fresh = _base_report("drc")
-    committed["provenance"]["klayout_version_mismatch"] = True
-    fresh["provenance"]["klayout_version_mismatch"] = False
-    fresh["provenance"]["klayout_module_version"] = "0.29.123"
-
-    result = drc_report_check.drc_rerun_result(
-        report_path="r.json", committed=committed, fresh=fresh
-    )
-
-    assert result["status"] == "match"
-    assert [entry["field"] for entry in result["not_compared"]] == [
-        "provenance.klayout_version_mismatch"
-    ]
-    assert ec.canonicalize(committed, "drc") != ec.canonicalize(fresh, "drc")
 
 
 # --- What is removed, what survives ---
