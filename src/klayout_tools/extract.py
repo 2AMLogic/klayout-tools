@@ -180,7 +180,7 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
     get_parasitics_deck,
 )
@@ -227,9 +227,7 @@ from .extract_detect_block import build_detection_findings
 # `_diode_required_terms` and `_is_synthesized_substrate_net_name` are
 # re-exported for `tests/test_extract.py`, `extract_parasitics.py` and (with
 # `_extraction_deck_name`) `extract_finfet.py`.
-from .extract_detect_diode_near_miss import (
-    _collect_diode_near_miss_warnings,
-)
+from .extract_detect_diode_near_miss import _collect_diode_near_miss_warnings
 from .extract_detect_diode_near_miss import (
     _diode_required_terms as _diode_required_terms,
 )
@@ -1618,6 +1616,7 @@ def run_extract(
     engine: str = "klayout",
     deck_file: str | None = None,
     deck_vars: Mapping[str, str] | None = None,
+    device_params: Mapping[str, Mapping[str, tuple[str, str]]] | None = None,
     runset_timeout: float | None = None,
     klayout_binary: str | None = None,
 ) -> dict[str, Any]:
@@ -1627,9 +1626,9 @@ def run_extract(
     runs. ``"klayout"`` (the default) is the curated-deck engine every
     paragraph below describes, byte-identical to this function before the
     parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
-    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
-    only, with every curated-engine-specific parameter refused by name. See
-    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
+    runset (``deck_file``, ``deck_vars``, ``device_params``) instead -- devices
+    and connectivity only, with every curated-engine-specific parameter refused
+    by name. See :mod:`klayout_tools.extract_runset` and docs/cli/extract.md, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -2930,13 +2929,14 @@ def run_extract(
             top=top,
             deck_vars=deck_vars,
             device_models=device_models,
+            device_params=device_params,
             no_netlist=no_netlist,
             runset_timeout_s=runset_timeout,
             klayout_binary=klayout_binary,
         )
-    if runset_timeout is not None or klayout_binary is not None:
+    if runset_timeout is not None or klayout_binary is not None or device_params:
         raise ExtractError(
-            "runset_timeout/klayout_binary are only used by engine "
+            "runset_timeout/klayout_binary/device_params are only used by engine "
             f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
         )
 
@@ -3690,13 +3690,12 @@ def check_extract_report(
     ``klt extract`` up to the same shared ``_report_verify.py`` machinery
     issue #1106 built for those two verbs: re-hashes the input layout stream
     (``committed["file"]``) and the deck
-    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    (:func:`~klayout_tools.decks.deck_content_hash`, resolved from
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance.content_hash`) -- reusing
-    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
-    hashing. Returns the shared ``--check`` payload built by
+    using the same hash functions as the original report. Returns the
+    shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
     "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
     otherwise.
@@ -3716,7 +3715,7 @@ def check_extract_report(
     extract --deck`` is required for every run, so ``provenance.deck`` is
     always populated for a genuine committed report; an unresolvable deck
     name (e.g. the deck module was since renamed/removed) hashes to ``None``
-    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    via :func:`~klayout_tools.decks.deck_content_hash`, which likewise never
     counts as a match.
 
     Under ``--engine klayout-runset`` the deck entry is replaced by a runset
@@ -3749,7 +3748,7 @@ def check_extract_report(
             ),
         ),
         extract_runset.provenance_hash_check(
-            committed, deck_source_path=deck_source_path
+            committed, deck_content_hash=deck_content_hash
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -6567,7 +6566,6 @@ def _connect_mos_capacitors(
 def _mos_capacitor_entry_index(
     island: kdb.Region,
     deck: ExtractionDeck,
-    poly: kdb.Region,
     nwell: kdb.Region,
     region_of: Callable[[tuple[int, int]], kdb.Region],
 ) -> int | None:
@@ -6641,7 +6639,7 @@ def _resolve_mos_capacitors(
     for component in active.merged().each():
         island = kdb.Region(component)
         chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+            _mos_capacitor_entry_index(island, deck, nwell, region_of)
             if not (island & poly).is_empty()
             else None
         )

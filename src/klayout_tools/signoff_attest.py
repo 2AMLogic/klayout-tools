@@ -63,6 +63,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
@@ -82,18 +83,19 @@ from .signoff import (
 )
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
-from .signoff_attest_input import input_binding
+from .signoff_attest_glob import expand_entry
+from .signoff_attest_input import attestation_block, input_binding
 from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -296,6 +298,9 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 def _path_list(
     inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -305,14 +310,9 @@ def _path_list(
         )
     paths = []
     for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 
@@ -861,22 +861,21 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
-    """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
-    command, then (digital) one metric check per corner x required metric."""
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation per spec row, each freshness command, then (digital) metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
-    cited = sorted({p for paths in normalized["citations"].values() for p in paths})
-    present = {path: _file_check(root, path, "evidence") for path in cited}
-    checks.extend(present.values())
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(root, cites, _file_check)
+    checks.extend((*present.values(), *envelopes.values()))
     for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
+        paths = cites[row]
         checks.append(
             {
                 "check": "citation",
                 "role": "spec_row",
                 "row": row,
                 "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
+                "passed": bool(paths) and all(envelopes[p]["passed"] for p in paths),
             }
         )
     for path in cited:
@@ -1032,14 +1031,13 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
             "klt_version": build_version(),
             "klayout_version": klayout_version(),

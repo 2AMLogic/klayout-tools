@@ -42,8 +42,9 @@ set -euo pipefail
 # shellcheck source=scripts/_install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
-# Pinned release -- bump the tag, asset checksum, and CHANGELOG.md together
-# in the same change if this is ever refreshed. Fails closed on mismatch.
+# Pinned release -- bump the tag, asset checksum, and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed. Fails closed on mismatch.
 ICARUS_VERSION="13.0"
 ICARUS_TAG="v13_0"
 ICARUS_ASSET_URL="https://github.com/steveicarus/iverilog/archive/refs/tags/${ICARUS_TAG}.tar.gz"

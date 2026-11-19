@@ -33,6 +33,7 @@ from klayout_tools import signoff as signoff_module
 from klayout_tools import signoff_attest as attest_module
 from klayout_tools._provenance import layout_geometry_digest
 from klayout_tools._report_verify import strip_path_patterns
+from klayout_tools.build_identity import grading_ruleset_id
 from klayout_tools.cli import main
 from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import (
@@ -13782,17 +13783,19 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
 #: exclusion, not a `dirty` fix alone, is what makes a committed report
 #: comparable across provisioning routes.
 _TARBALL_ROUTE_BUILD_BLOCK = {
-    "version": "0.5.0+unknown",
+    "version": "0.5.0+unknown",  # unresolved identity: build_skew is "unverifiable"
     "package_version": "0.5.0",
     "git_commit": None,
     "git_tag": None,
     "dirty": None,
     "is_release": None,
-    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+    "grading_ruleset_id": grading_ruleset_id(),  # same commit, same grading code
 }
 
 
-def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+def _committed_from_other_provisioning_route(
+    tmp_path, report: dict, name: str = "committed.json"
+) -> str:
     """``report`` as it would have been committed by an install of the *same
     commit* provisioned differently: identical grading, a different `build`
     block (issue #2249)."""
@@ -13807,18 +13810,19 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
     drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
     manifest = _manifest(evidence={"3": drc_path})
     fresh = build_tier_report(manifest)
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
-
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
+    committed_build = json.loads(Path(committed_path).read_text())["build"]
     # The premise: these two files are NOT byte-identical, so the documented
     # "re-render and byte-compare" gate would fail between them.
     assert json.loads(Path(committed_path).read_text()) != fresh
-    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+    assert committed_build != fresh["build"]
+    assert committed_build["grading_ruleset_id"] == fresh["build"]["grading_ruleset_id"]
+    skew_fields = [  # fresh values are install-specific, so derived, not hard-coded
+        {"field": f"build.{k}", "committed": v, "fresh": fresh["build"][k]}
+        for k, v in sorted(_TARBALL_ROUTE_BUILD_BLOCK.items() - fresh["build"].items())
+    ]
 
-    result = check_tier_report(committed_path, manifest)
-
-    assert result == {
+    assert check_tier_report(committed_path, manifest) == {
         "schema_version": 1,
         "mode": "check",
         "report": committed_path,
@@ -13826,7 +13830,7 @@ def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path
         "drift": [],
         "doc_drift": False,
         "doc_drift_fields": [],
-        "build_skew": result["build_skew"],
+        "build_skew": {"state": "unverifiable", "fields": skew_fields},
         "fresh": fresh,
     }
 
@@ -13839,9 +13843,7 @@ def test_check_reports_drift_in_a_graded_field(tmp_path):
     stale = build_tier_report(manifest)
     stale["t1_met_count"] = 11
     stale["tier"] = "T1"
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, stale, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, stale)
 
     result = check_tier_report(committed_path, manifest)
 
@@ -13954,9 +13956,7 @@ def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", manifest)
     fresh = build_tier_report(manifest)
     assert fresh["tier"] is None  # rendering this manifest exits 3
-    committed_path = _committed_from_other_provisioning_route(
-        tmp_path, fresh, "committed.json"
-    )
+    committed_path = _committed_from_other_provisioning_route(tmp_path, fresh)
 
     exit_code = main(
         ["signoff", "--manifest", manifest_path, "--check", committed_path]
@@ -16261,7 +16261,7 @@ def test_attest_commands_run_in_the_declared_repo_relative_cwd(tmp_path):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"schema_version": 2}, "schema_version 2"),
+        ({"schema_version": 3}, "schema_version 3"),
         ({"schema_version": _DROP}, "schema_version"),
         ({"schema_version": True}, "schema_version"),
         ({"kind": "manifest"}, "t1-attestation-inventory"),

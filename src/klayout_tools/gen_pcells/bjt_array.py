@@ -138,6 +138,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Emitter/base/collector diffusion (COMP) drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_cut_and_metal_params(self, kdb)
             self.param(
@@ -146,12 +147,14 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Base-tie tap drawing layer, covering each unit's base-tie "
                 "contact so the base terminal resolves to a real net",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Shared base well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_well_present(self)
             self.param(
@@ -162,6 +165,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "extension beyond every edge of it (only used when "
                 "add_collector_ring and ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "ring_implant_present",
@@ -169,6 +173,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the collector ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "ring_implant_margin_um",
@@ -177,6 +182,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring's own band on every edge (only used when "
                 "ring_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "bjt_mark_layer",
@@ -184,6 +190,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Per-unit bipolar device-mark drawing layer, enclosing only "
                 "the emitter pad (only used when bjt_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "bjt_mark_present",
@@ -191,6 +198,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether bjt_mark_layer is a real layer this PDK's extraction "
                 "deck (and, on some families, its DRC deck too) keys off",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "unit_emitter_implant_layer",
@@ -198,6 +206,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Implant drawn over each unit's emitter pad (P+; only used "
                 "when unit_implant_margin_um > 0)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "unit_base_implant_layer",
@@ -205,6 +214,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Implant drawn over each unit's base-tie pad (N+; only used "
                 "when unit_implant_margin_um > 0)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "unit_implant_margin_um",
@@ -212,6 +222,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved margin each unit emitter/base-tie implant extends "
                 "beyond its pad (0.0 = no unit implants drawn)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "dummy_layer",
@@ -220,6 +231,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "unit device's recognised base-mark footprint (only used "
                 "when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_dummy_marker_params(self)
 
