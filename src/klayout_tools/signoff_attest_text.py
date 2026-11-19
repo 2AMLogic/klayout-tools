@@ -51,6 +51,13 @@ def documented_suffix(check: Mapping[str, Any]) -> str:
     return f" (validates only; documented: {' '.join(argv)})"
 
 
+def _what_envelope(c: dict) -> str:
+    what = f"{c['role']} {c['path']} envelope"
+    return (
+        f"{what} ({c['kind']})" if c["passed"] else f"{what}: not a recognised envelope"
+    )
+
+
 def _what_command(c: dict) -> str:
     label = check_label(c)
     status = c.get("error") or f"exit {c['exit_status']}"
@@ -88,7 +95,8 @@ def _what_metric(c: dict) -> str:
 
 
 def _what_pin(c: dict) -> str:
-    return f"pin {c['role']}: {c['value'] if c['passed'] else 'missing'}"
+    shown = c["value"] if c["passed"] else c.get("reason", "missing")
+    return f"pin {c['role']}: {shown}"
 
 
 _WHAT_RENDERERS = {
@@ -100,6 +108,7 @@ _WHAT_RENDERERS = {
     "unbenched_row": _what_unbenched,
     "dependency_binding": _what_dependency_binding,
     "citation": _what_citation,
+    "envelope": _what_envelope,
     "recorded_hash": _what_recorded_hash,
     "metric": _what_metric,
     "pin": _what_pin,

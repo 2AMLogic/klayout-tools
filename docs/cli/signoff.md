@@ -345,8 +345,8 @@ pin authored under #4893 (the report's byte hash) therefore grades
 report's `provenance.input.content_hash`. In exchange, a pin now detects an
 RTL edit the moment the report is re-run, a command-backed pinned citation
 grades instead of rendering `unverifiable_provenance`, and the report joins
-the provenance-consistency cross-check against `synthesize`/`equiv` citations
-over the same sources.
+the provenance-consistency cross-check against `synthesize` citations over the
+same sources.
 
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
@@ -423,20 +423,41 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt synthesize`/`klt equiv` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 **Verilog-top functional-verification citations (issue #6488).** On the
 `testbench.verilog_top` path the Verilog bench is itself a `request.sources`
 entry, so the report's `input.content_hash` digests the bench together with
-the DUT sources — it can never agree with a `klt synthesize`/`klt equiv`
-citation over the DUT alone, and bundling both in one `klt signoff` run
-renders `provenance_consistency.ok: false` and `status: "refused"` for the
-whole run. That disagreement is structural, not a staleness signal: no re-run
-or re-pin makes the bundle grade. Cite the cocotb-path functional-verification
-report instead (its digest covers the DUT sources only), or keep the
-Verilog-top citation out of any bundle that also cites a `source`-role
-`synthesize`/`equiv` report.
+the DUT sources — it can never agree with a `klt synthesize` citation over the
+DUT alone, and bundling both in one `klt signoff` run renders
+`provenance_consistency.ok: false` and `status: "refused"` for the whole run.
+That disagreement is structural, not a staleness signal: no re-run or re-pin
+makes the bundle grade. Cite the cocotb-path functional-verification report
+instead (its digest covers the DUT sources only), or keep the Verilog-top
+citation out of any bundle that also cites a `source`-role `synthesize`
+report.
+
+**Layout-free `klt lef-abstract` citations (issue #6671).** With
+`--no-layout` there is no layout to pin, so the report's `input.content_hash`
+digests the socket descriptor under role `source` — the same comparison bucket
+as the RTL digest of a `klt synthesize` or provenance-bearing
+`klt functional-verification` report, but a different file. Even fresh reports
+for the same design therefore disagree, and bundling a layout-free
+`lef-abstract` report with either renders `provenance_consistency.ok: false`
+and `status: "refused"` for the whole run. As with the Verilog-top case that is
+structural, not a staleness signal: no re-run or re-pin makes the bundle grade.
+Cite the layout-free `lef-abstract` report and the RTL-digest reports in
+separate `klt signoff` bundles. A layout-bearing `lef-abstract` report pins its
+layout under role `layout` and is compared only against other `layout`-role
+checks.
+
+**`klt equiv` is not a signoff evidence kind.** It records the same
+role-`source` RTL digest as `klt synthesize`, but `klt signoff` has no `equiv`
+recognizer: an `equiv` report is rejected as an unrecognized envelope
+(envelope-aggregation mode exits `1`; `--manifest` grading renders the citing
+item `"unmet"` with `reason: "unrecognized_envelope"`) before any hash
+comparison, so it never joins this cross-check.
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
 envelope — which carries no `provenance` block at all as of its current
@@ -2476,16 +2497,16 @@ an inventory the author did not write.
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
-| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) |
+| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688) |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
-| | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check` |
+| | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
 | **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 

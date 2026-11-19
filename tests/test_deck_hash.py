@@ -47,7 +47,7 @@ def test_deck_identity_rejects_a_non_deck_sibling_module():
     ("name", "sources"),
     [
         ("gf180mcu", ("gf180mcu.py",)),
-        ("sky130", ("sky130.py", "sky130_unmodeled.py")),
+        ("sky130", ("sky130.py", "sky130_offgrid.py", "sky130_unmodeled.py")),
         (
             "sg13g2",
             (

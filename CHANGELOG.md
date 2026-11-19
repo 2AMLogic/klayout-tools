@@ -36,6 +36,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
   before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
   AC vectors" section.
+- **`klt mcp serve` tool descriptions for `klt_sim_merge` and `klt_sim_plan`
+  link to their manual sections** (#6793, 2026-11-19): both descriptions ended
+  in `(CLI docs: …/docs/cli/sim-merge.md)` / `…/sim-plan.md`, pages that do not
+  exist. They now point at the "Merging per-request reports" and "Planning
+  shards" sections of `docs/cli/sim.md`; every other tool's link, including
+  `klt_sim`'s plain `sim.md`, is unchanged. Description text only: no tool name,
+  input schema or JSON field moves. A test now checks every catalog docs link
+  against the checkout, fragment included.
 - **`klt sim --resume` no longer refuses a sharded resume that has fewer
   outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
   reused finished shards, the replacement dispatch still asked for the
@@ -488,6 +496,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
   field or `schema_version` changes; the deck's `provenance.deck` hash
   changes.
+- **`klt gen-compose` gains `routing.landing_pad_size_um` — a request-level
+  landing-pad size override — and names pad-vs-pitch conflicts as such**
+  (#5803, 2026-11-17): every via-drop's landing pad was a fixed 0.42 µm
+  square (contact-enclosure convention, grown per `(landing, via)` pair by
+  the #2072/#2074 area/enclosure floors), independent of the route's own
+  width — so a generator family whose terminals are pitched *finer* than
+  that footprint (e.g. `mos_array`'s 0.335 µm terminal columns) deposited
+  overlapping pads on every plane the ladders share, with no parameter on
+  either side to reconcile them, and the resulting rejections surfaced as
+  generic "crosses already-routed net" / "comes within N um" messages that
+  read as backbone problems:
+  - **`routing.landing_pad_size_um`** sets the pad side from the caller's
+    side. Validated against each drawn `(landing, via)` pair's own deck
+    floor — an override below the floor is an application error (exit 1)
+    naming the binding rule id and threshold (a smaller pad would be a
+    guaranteed `klt drc` violation, so it is never silently grown back);
+    where the floors allow it, pads draw at exactly the override, and the
+    route-vs-route collision checks measure the same footprint. Omitted ⇒
+    default pads, byte-for-byte unchanged.
+  - **Pad-vs-pitch conflicts are named.** A route-vs-route conflict whose
+    geometry is a landing pad now reports the pad footprint, the terminal
+    pitch, and the deck's spacing rule, with the override named as the
+    escape hatch — instead of a generic crossing/spacing rejection on a
+    plane the caller never assigned anything to. Backbone-only conflicts
+    keep the generic (accurate) messages.
+  Request/response shape change is additive only (a new optional
+  `routing.*` request field; no response field changed).
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
