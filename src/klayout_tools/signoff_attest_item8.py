@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .signoff import SignoffError, _classify, _read_envelope
+from .signoff_drc_crosscheck import crosscheck_project
 
 
 def _recognised_kind(root: str, path: str) -> str | None:
@@ -32,6 +33,12 @@ def _recognised_kind(root: str, path: str) -> str | None:
         return None
     if not isinstance(envelope, Mapping):
         return None
+    # Issue #6809: project a cross-check envelope to its single-engine
+    # equivalent before classification, exactly as ``--manifest`` grading
+    # does (issue #5815), so the two surfaces agree on the verdict for a
+    # whole `--engine both` citation, not just the diagnosis. Anything the
+    # projector refuses stays as-is and fails recognition below.
+    envelope = crosscheck_project(envelope) or envelope
     try:
         return _classify(envelope, path)
     except SignoffError:
