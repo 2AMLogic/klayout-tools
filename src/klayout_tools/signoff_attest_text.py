@@ -51,11 +51,19 @@ def documented_suffix(check: Mapping[str, Any]) -> str:
     return f" (validates only; documented: {' '.join(argv)})"
 
 
+_SKEW_REMEDY = (
+    "version skew -- written by an older klt than this one recognises; "
+    "re-run the cited check under the current klt"
+)
+
+
 def _what_envelope(c: dict) -> str:
     what = f"{c['role']} {c['path']} envelope"
-    return (
-        f"{what} ({c['kind']})" if c["passed"] else f"{what}: not a recognised envelope"
-    )
+    if c["passed"]:
+        return f"{what} ({c['kind']})"
+    if c.get("reason") == "envelope_version_skew":  # issue #5986
+        return f"{what}: {_SKEW_REMEDY}"
+    return f"{what}: not a recognised envelope"
 
 
 def _what_command(c: dict) -> str:
