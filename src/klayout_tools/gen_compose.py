@@ -238,6 +238,7 @@ from .gen_compose_routing import (
     _polyline_midpoint_um,
     _port_own_layer,
     _resolve_cross_block_route_layer,
+    _resolve_intermediate_landing_pad_sizes,
     _resolve_label_layer,
     _resolve_landing_pad_sizes,
     _resolve_route_layer,
@@ -3247,6 +3248,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     cross_block_width_um: float | None = None
     # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
+    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
+    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
+    # sizes). The two fields select competing pad-sizing policies and are
+    # rejected together below.
+    minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
@@ -3297,9 +3304,35 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         landing_pad_override_um = _parse_landing_pad_override(
             routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
         )
+        raw_minimal_ladder = routing.get("minimal_ladder")
+        if raw_minimal_ladder is not None:
+            if not isinstance(raw_minimal_ladder, bool):
+                raise GenComposeError(
+                    "request.routing.minimal_ladder must be a boolean when given"
+                )
+            minimal_ladder = raw_minimal_ladder
+        if minimal_ladder and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
+            )
+        elif minimal_ladder:
+            side_for_pair = _make_landing_pad_side_um(
+                pdk_info["variant"], minimal_ladder=True
             )
 
         cross_layer_role = routing.get("cross_block_layer_role")
@@ -4397,6 +4430,20 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         via_drop_size_um,
         override_um=landing_pad_override_um,
     )
+    # routing.minimal_ladder (issue #6058): the intermediate hop pads of the
+    # drawn ladders, sized at their own per-pair enclosure/area floors
+    # without the contact-derived baseline -- the same per-pair distinction
+    # ``side_for_pair`` already applied to the collision-check footprints
+    # above, resolved once more here for drawing so the two cannot disagree
+    # (#1197). ``None`` with the mode off: drawing reads only
+    # ``landing_pad_size_um`` and is byte-for-byte the pre-#6058 output.
+    intermediate_landing_pad_size_um = (
+        _resolve_intermediate_landing_pad_sizes(
+            routed_geometry, pdk_info["variant"], via_drop_size_um
+        )
+        if minimal_ladder
+        else None
+    )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
         order,
@@ -4410,6 +4457,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
+        intermediate_landing_pad_size_um=intermediate_landing_pad_size_um,
         boundary_bbox_um=boundary_bbox_um,
     )
     warnings.extend(dbu_rescale_warnings)
@@ -4655,9 +4703,18 @@ def _draw_routed_entry(
     label_layer: tuple[int, int] | None = None,
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[Any, float] | None = None,
+    intermediate_landing_pad_size_um: dict[Any, float] | None = None,
 ) -> None:
     """Draw one ``routed_geometry`` entry into ``top`` (the per-route half of
-    :func:`_write_composed_gds`, shared with ``klt route``)."""
+    :func:`_write_composed_gds`, shared with ``klt route``).
+
+    ``intermediate_landing_pad_size_um`` (issue #6058) carries
+    ``routing.minimal_ladder``'s per-pair intermediate sides; a drop whose
+    own ``terminal_landing_layers`` marking classifies one of its
+    ``landing_layers`` as intermediate draws that pad at the intermediate
+    side. ``None``/unmarked (the default, ``klt route``, and every
+    pre-#6058 caller) keeps today's terminal sizing, unchanged.
+    """
     import klayout.db as kdb
 
     points = route["points_um"]
@@ -4736,10 +4793,31 @@ def _draw_routed_entry(
         # to enclose it.
         _insert_via_cuts(top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu)
         array_extra_um = _drop_array_extra_um(drop)
+        # Issue #6058: which of this hop's two landing layers are terminal
+        # planes for the endpoint this drop serves -- recorded by
+        # ``_resolve_via_drops`` when it still knew the endpoint's port
+        # layer and the leg's effective route layer. A layer outside that
+        # marking is an intermediate plane of the ladder and, in a
+        # ``routing.minimal_ladder`` request, draws at its own per-pair
+        # enclosure/area floor instead of the contact-derived baseline
+        # (falling back to the terminal side for any pair the intermediate
+        # dict does not carry -- the conservative, never-smaller answer).
+        terminal_layers = drop.get("terminal_landing_layers")
         for landing_pair in drop.get("landing_layers", ()):
-            landing_size_um = (landing_pad_size_um or {}).get(
-                (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-            ) + array_extra_um
+            if (
+                terminal_layers is not None
+                and landing_pair not in terminal_layers
+                and intermediate_landing_pad_size_um is not None
+                and (landing_pair, via_pair) in intermediate_landing_pad_size_um
+            ):
+                landing_size_um = intermediate_landing_pad_size_um[
+                    (landing_pair, via_pair)
+                ]
+            else:
+                landing_size_um = (landing_pad_size_um or {}).get(
+                    (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
+                )
+            landing_size_um += array_extra_um
             # Round minimum sizes outward, preserving the margin
             # against the *rounded* via too. The epsilon only removes
             # floating-point noise at an integer grid coordinate.
@@ -4797,6 +4875,7 @@ def _write_composed_gds(
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float]
     | None = None,
+    intermediate_landing_pad_size_um: dict[Any, float] | None = None,
     boundary_bbox_um: dict[str, float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
@@ -5051,6 +5130,7 @@ def _write_composed_gds(
                 label_layer,
                 via_drop_size_um,
                 landing_pad_size_um,
+                intermediate_landing_pad_size_um,
             )
 
     draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)

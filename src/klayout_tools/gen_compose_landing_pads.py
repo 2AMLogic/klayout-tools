@@ -9,22 +9,29 @@ those sizes feed on the *check* side of the router:
   request-level ``routing.landing_pad_size_um`` override is checked at the
   same size it is drawn at (the #1197 "check and drawn output cannot
   disagree" rule) while a request without one keeps today's fixed-baseline
-  footprints byte-for-byte;
+  footprints byte-for-byte; since #6058 the resolver also answers the
+  per-pair floor of a ``routing.minimal_ladder`` request's *intermediate*
+  landings, from the drop's own ``terminal_landing_layers`` marking;
 * ``_landing_and_widen_pad_boxes`` -- every pad box one leg draws (via-drop
   landing pads plus stub-widen boxes), extracted verbatim from
   ``compose()``'s ``_leg_conflict`` (#1520's own-block self-notch loop) so
   the pad-vs-pitch rejection can reuse the same boxes;
-* ``_landing_pad_conflict_reason`` -- the named pad-vs-pitch rejection
-  (issue #5803): a conflict whose geometry is a landing pad is reported as
-  the pad footprint vs terminal pitch conflict it is, with the deck's
-  spacing rule and the ``routing.landing_pad_size_um`` escape hatch, not
-  as a generic backbone crossing;
 * ``_drawn_leg_intermediate_pad_regions`` -- relocated verbatim from
   ``gen_compose_routing.py``, which sat exactly at its per-file size
   ratchet ceiling (the same move ``gen_compose_layer_rules.py`` made in
   #5426, and ``gen_compose_via_cuts.py`` before that). ``gen_compose_routing``
   re-imports the name at module scope, so every pre-existing import path
   keeps resolving unchanged.
+
+The *message* cluster that turned a pad conflict into the named
+pad-vs-pitch rejection (``_leg_conflict_message``,
+``_landing_pad_conflict_reason``, ``_terminal_pitch_um``,
+``_drawn_pad_side_um``, ``_pad_conflict_escape_note``,
+``_pad_is_intermediate``) moved to
+:mod:`.gen_compose_pad_conflicts` when #6058 grew it past this file's own
+size-ratchet ceiling; the names are re-imported at module scope below so
+every pre-existing ``gen_compose_landing_pads.<name>`` import path (the
+test suite's included) keeps resolving unchanged.
 
 Same conventions as the modules it was split from:
 ``gen_compose.py``/``gen_compose_routing.py`` names (``GenComposeError``,
@@ -36,6 +43,15 @@ dependency back on them.
 from __future__ import annotations
 
 from typing import Any
+
+from .gen_compose_pad_conflicts import (  # noqa: F401 -- re-export (see above)
+    _drawn_pad_side_um,
+    _landing_pad_conflict_reason,
+    _leg_conflict_message,
+    _pad_conflict_escape_note,
+    _pad_is_intermediate,
+    _terminal_pitch_um,
+)
 
 #: One pad box a leg draws: ``(pad_layer, block_id, (x0, y0, x1, y1)_um,
 #: drop)``. ``drop`` is the via_drops entry the pad came from (its
@@ -71,8 +87,12 @@ def _parse_landing_pad_override(raw: Any, where: str) -> float | None:
     return float(raw)
 
 
-def _make_landing_pad_side_um(variant: str, override_um: float | None = None) -> Any:
-    """Memoized ``((pad_layer, via_layer)) -> side_um`` resolver (issue #5803).
+def _make_landing_pad_side_um(
+    variant: str,
+    override_um: float | None = None,
+    minimal_ladder: bool = False,
+) -> Any:
+    """Memoized ``((pad_layer, via_layer[, drop])) -> side_um`` resolver.
 
     ``compose()`` builds one resolver per request and threads it into every
     collision-check footprint builder (``_drawn_leg_footprint_region``,
@@ -90,6 +110,16 @@ def _make_landing_pad_side_um(variant: str, override_um: float | None = None) ->
     so the grown value only ever reaches the checks for pairs whose floor
     is legal), keeping the two from disagreeing mid-flight.
 
+    ``minimal_ladder`` (issue #6058) adds the optional third argument,
+    ``drop``: a landing that drop's own ``terminal_landing_layers`` marking
+    (:func:`.gen_compose_routing._resolve_via_drops`) classifies as
+    *intermediate* answers that hop's per-pair enclosure/area floor
+    (:func:`.gen_compose_layer_rules._intermediate_landing_pad_floor_um`)
+    -- the drawn side without the contact-derived baseline -- instead of
+    the baseline. A two-argument call (every pre-#6058 caller, and any drop
+    without the marking) never sees the difference, so the mode-off
+    footprints are byte-for-byte unchanged.
+
     Via sides come from the same ``via_drop_cut_side_um`` deck lookup
     ``compose()`` resolves its ``via_drop_size_um`` dict from -- never a
     second, private threshold.
@@ -97,25 +127,44 @@ def _make_landing_pad_side_um(variant: str, override_um: float | None = None) ->
     from .gen_compose import _VIA_LANDING_SIZE_UM
     from .gen_compose_via_cuts import via_drop_cut_side_um
 
-    pair_cache: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
+    pair_cache: dict[tuple[tuple[int, int], tuple[int, int], bool], float] = {}
     via_cache: dict[tuple[int, int], float] = {}
 
-    def side_um(pad_layer: tuple[int, int], via_layer: tuple[int, int]) -> float:
-        pair = (pad_layer, via_layer)
-        if pair not in pair_cache:
-            if override_um is None:
-                pair_cache[pair] = _VIA_LANDING_SIZE_UM
+    def _via_side_um(via_layer: tuple[int, int]) -> float:
+        if via_layer not in via_cache:
+            via_cache[via_layer] = via_drop_cut_side_um(variant, via_layer)
+        return via_cache[via_layer]
+
+    def side_um(
+        pad_layer: tuple[int, int],
+        via_layer: tuple[int, int],
+        drop: dict[str, Any] | None = None,
+    ) -> float:
+        intermediate = minimal_ladder and _pad_is_intermediate(drop, pad_layer)
+        key = (pad_layer, via_layer, intermediate)
+        if key not in pair_cache:
+            if intermediate:
+                from .gen_compose_layer_rules import _intermediate_landing_pad_floor_um
+
+                floor_side, _floors = _intermediate_landing_pad_floor_um(
+                    variant, pad_layer, via_layer, _via_side_um(via_layer)
+                )
+                pair_cache[key] = floor_side
+            elif override_um is None:
+                pair_cache[key] = _VIA_LANDING_SIZE_UM
             else:
-                if via_layer not in via_cache:
-                    via_cache[via_layer] = via_drop_cut_side_um(variant, via_layer)
                 from .gen_compose_layer_rules import _landing_pad_floor_um
 
                 floor_side, _floors = _landing_pad_floor_um(
-                    variant, pad_layer, via_layer, via_cache[via_layer]
+                    variant, pad_layer, via_layer, _via_side_um(via_layer)
                 )
-                pair_cache[pair] = max(override_um, floor_side)
-        return pair_cache[pair]
+                pair_cache[key] = max(override_um, floor_side)
+        return pair_cache[key]
 
+    # Read by ``_landing_pad_conflict_reason`` (and anything else that must
+    # know whether the resolver's answers already exclude the fixed
+    # baseline) without threading a second callable everywhere.
+    side_um.minimal_ladder = minimal_ladder
     return side_um
 
 
@@ -161,7 +210,7 @@ def _landing_and_widen_pad_boxes(
         # hop happen to be identical.
         for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
             side_um = (
-                side_for_pair(pad_layer, via_layer)
+                side_for_pair(pad_layer, via_layer, drop)
                 if side_for_pair is not None
                 else _VIA_LANDING_SIZE_UM
             )
@@ -187,236 +236,6 @@ def _landing_and_widen_pad_boxes(
             box = (cx - half_um, cy - length_um, cx + half_um, cy)
         boxes.append((layer, block_id, box, None))
     return boxes
-
-
-def _leg_conflict_message(
-    variant: str,
-    via_drops: list[dict[str, Any]],
-    cand_layer: tuple[int, int] | None,
-    other_net: str,
-    cand_region: Any,
-    other_region: Any,
-    dbu: float,
-    side_for_pair: Any,
-    spacing_lookup: Any,
-    check_spacing: bool,
-) -> str | None:
-    """The overlap-or-spacing verdict for one (candidate, accepted) pair.
-
-    Relocated verbatim from ``compose()``'s ``_leg_conflict`` loop body
-    (issue #5803, beside the pad-vs-pitch rejection it now folds in): the
-    #1057 overlap test, the #1386 spacing-aware test on the primary entry
-    only (``check_spacing`` -- the #1913 intermediate/far pad entries are
-    compared overlap-only, #1680), each upgraded to consult
-    :func:`_landing_pad_conflict_reason` first so a conflict at a landing
-    pad names pad-vs-pitch instead of a generic backbone crossing. Returns
-    ``None`` when neither test fires -- the caller keeps looping.
-
-    Messages (and their thresholds) are byte-identical to the pre-#5803
-    wording; only the pad-involving conflicts can change what they say.
-    """
-    if not (cand_region & other_region).is_empty():
-        if not check_spacing:
-            reason = _landing_pad_conflict_reason(
-                variant,
-                via_drops,
-                cand_layer,
-                other_net,
-                other_region,
-                dbu,
-                side_for_pair,
-                spacing_lookup,
-            )
-            if reason is not None:
-                return reason
-        return f"crosses already-routed net '{other_net}'"
-    if not check_spacing:
-        return None
-    cand_spacing = spacing_lookup(cand_layer)
-    if cand_spacing is None:
-        return None
-    cand_spacing_um, cand_rule_id = cand_spacing
-    cand_spacing_dbu = int(round(cand_spacing_um / dbu))
-    if cand_spacing_dbu <= 0:
-        return None
-    if not (cand_region.sized(cand_spacing_dbu) & other_region).is_empty():
-        reason = _landing_pad_conflict_reason(
-            variant,
-            via_drops,
-            cand_layer,
-            other_net,
-            other_region,
-            dbu,
-            side_for_pair,
-            spacing_lookup,
-            spacing_um=cand_spacing_um,
-        )
-        if reason is not None:
-            return reason
-        return (
-            f"comes within {cand_spacing_um:.4g}um of "
-            f"already-routed net '{other_net}' -- closer "
-            "than the resolved deck's own "
-            f"'{cand_rule_id}' minimum same-layer spacing "
-            "rule (no literal overlap, but still a real "
-            "`klt drc` violation on the composed layout)"
-        )
-    return None
-
-
-def _landing_pad_conflict_reason(
-    variant: str,
-    via_drops: list[dict[str, Any]],
-    pad_layer: tuple[int, int] | None,
-    other_net: str,
-    other_region: Any,
-    dbu: float,
-    side_for_pair: Any,
-    spacing_lookup: Any,
-    spacing_um: float | None = None,
-) -> str | None:
-    """The named pad-vs-pitch rejection (issue #5803), or ``None``.
-
-    Called from ``compose()``'s ``_leg_conflict`` when a candidate leg's
-    conflict against an already-accepted net involves a landing pad this
-    leg draws on ``pad_layer`` -- either a literal overlap (the
-    intermediate/far pad entries #1913 compare overlap-only, on a plane
-    neither net's primary layer names) or a spacing-rule fire on the
-    primary entry whose region mixes the backbone with a route-layer pad.
-    Today both surface as a generic "crosses/comes within already-routed
-    net ..." message that reads as a *backbone* problem, sending the caller
-    to fix width/waypoints when the binding constraint is the pad
-    footprint vs the neighbouring terminal's pitch -- the compatibility
-    wall #5803 records.
-
-    ``spacing_um`` selects the mode: ``None`` (overlap) requires the pad
-    itself to literally intersect ``other_region``; a spacing threshold
-    requires the pad grown by that threshold to -- the same test the
-    caller just fired on its whole-footprint region, restricted to the
-    pad so a backbone-only conflict keeps the generic (accurate) message.
-
-    Returns ``None`` (caller falls back to the generic message unchanged)
-    when no via_drops entry contributes a pad on ``pad_layer``, or the
-    conflict does not involve one -- i.e. when it is genuinely
-    backbone-only.
-
-    The message names the three things the caller needs to reconcile the
-    conflict: the pad footprint (the effective drawn side for this
-    ``(landing, via)`` pair), the terminal pitch (centre-to-centre, see
-    :func:`_terminal_pitch_um`; 0 for an outright overlap), and the
-    resolved deck's own spacing rule when the layer carries one -- plus the
-    ``routing.landing_pad_size_um`` override as the escape hatch where the
-    deck's floors allow a smaller pad.
-    """
-    import klayout.db as kdb
-
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_layer_rules import _landing_pad_floor_um
-    from .gen_compose_routing import _drop_array_extra_um
-    from .gen_compose_via_cuts import via_drop_cut_side_um
-
-    if pad_layer is None:
-        return None  # unknown candidate layer -- no pair-keyed pad to name
-    pad_drops = [d for d in via_drops if pad_layer in (d.get("landing_layers") or ())]
-    if not pad_drops:
-        return None  # backbone-only conflict -- generic message is accurate
-
-    def drawn_side_um(drop: dict[str, Any]) -> float:
-        """The side drawing will actually insert for this drop's pair.
-
-        The collision *checks* keep the fixed-baseline footprint when the
-        request sets no ``routing.landing_pad_size_um`` (the #2072/#1501
-        scoping trade-off, deliberately unchanged here) -- but the message
-        must report the size the composed GDS will really carry, area and
-        enclosure floors included, or it understates the conflict it
-        names.
-        """
-        pair_side = side_for_pair(pad_layer, drop["via_layer"])
-        floor_side, _floors = _landing_pad_floor_um(
-            variant,
-            pad_layer,
-            drop["via_layer"],
-            via_drop_cut_side_um(variant, drop["via_layer"]),
-        )
-        return max(pair_side, _VIA_LANDING_SIZE_UM, floor_side) + _drop_array_extra_um(
-            drop
-        )
-
-    pad_region = kdb.Region()
-    for drop in pad_drops:
-        half_dbu = int(round(drawn_side_um(drop) / 2.0 / dbu))
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
-        pad_region.insert(
-            kdb.Box(cx - half_dbu, cy - half_dbu, cx + half_dbu, cy + half_dbu)
-        )
-    if spacing_um is None:
-        if (pad_region & other_region).is_empty():
-            return None  # the backbone conflicts, the pad does not
-    else:
-        spacing_dbu = int(round(spacing_um / dbu))
-        if (
-            spacing_dbu <= 0
-            or (pad_region.sized(spacing_dbu) & other_region).is_empty()
-        ):
-            return None  # the backbone is the near side, the pad is not
-    drop = pad_drops[0]
-    side_um = drawn_side_um(drop)
-    px, py = float(drop["x_um"]), float(drop["y_um"])
-    pitch_um = _terminal_pitch_um(pad_region, other_region, px, py, side_um, dbu)
-    spacing = spacing_lookup(pad_layer)
-    spacing_note = ""
-    if spacing is not None:
-        spacing_um_rule, rule_id = spacing
-        spacing_note = (
-            f"; '{rule_id}' additionally requires >= {spacing_um_rule:.4g}um "
-            "same-layer edge-to-edge clearance to a neighbouring shape"
-        )
-    need_um = side_um + (spacing[0] if spacing is not None else 0.0)
-    if pitch_um <= 1e-9:
-        conflict = (
-            f"overlaps already-routed net '{other_net}' on that plane -- "
-            "the two terminals' pads touch outright (pitch 0um)"
-        )
-    else:
-        conflict = (
-            f"sits {pitch_um:.4g}um (terminal pitch, centre-to-centre) "
-            f"from already-routed net '{other_net}' on that plane"
-        )
-    return (
-        f"via-drop landing pad ({side_um:.4g}um square at ({px:.4g}, {py:.4g}) "
-        f"on layer {pad_layer}) {conflict} -- a {side_um:.4g}um landing-pad "
-        f"footprint needs >= {need_um:.4g}um of terminal pitch to clear a "
-        f"neighbouring terminal{spacing_note} -- a generator whose terminal "
-        "pitch is below the landing-pad footprint cannot be landed on "
-        "independently: request routing.landing_pad_size_um (issue #5803) "
-        "where the deck's floors allow a smaller pad, or land one of the "
-        "two nets on another plane"
-    )
-
-
-def _terminal_pitch_um(
-    pad_region: Any, other_region: Any, px: float, py: float, side_um: float, dbu: float
-) -> float:
-    """Centre-to-centre terminal pitch of a pad vs ``other_region``, in um.
-
-    0 on an outright overlap; otherwise the pad centre's distance to the
-    nearest point of ``other_region`` plus half the pad side -- exact for a
-    like-sized square neighbour, and commensurable with the ``side +
-    spacing`` requirement. ``Edge.distance(point)`` is the *signed* distance
-    to the edge's infinite line, so some edge of any region the point sits
-    outside always scores <= 0 and a ``min`` over ``max(0, ...)`` would
-    report 0 here -- use the true point-to-segment distance instead.
-    """
-    import klayout.db as kdb
-
-    if not (pad_region & other_region).is_empty():
-        return 0.0
-    centre = kdb.Point(int(round(px / dbu)), int(round(py / dbu)))
-    nearest = min(
-        (edge.euclidian_distance(centre) for edge in other_region.edges()), default=0
-    )
-    return (int(nearest) + int(round(side_um / 2.0 / dbu))) * dbu
 
 
 def _drawn_leg_intermediate_pad_regions(
@@ -448,7 +267,11 @@ def _drawn_leg_intermediate_pad_regions(
     ``side_for_pair`` (issue #5803) sizes each pad for its own
     ``(landing, via)`` pair -- the drawn side -- instead of the fixed
     ``_VIA_LANDING_SIZE_UM`` baseline every pad assumed before #5803; the
-    default (``None``) keeps that baseline, unchanged.
+    default (``None``) keeps that baseline, unchanged. Since #6058 the
+    resolver accepts the drop itself as a third argument, so a
+    ``routing.minimal_ladder`` request's intermediate pads are measured at
+    their shrunk, per-pair floor side (checks match drawing); a two-
+    argument call or an unmarked drop keeps the pre-#6058 answer.
 
     Returns ``{}`` when ``route_layer`` is ``None`` -- a caller that
     genuinely does not know its own leg's layer already gets every via-drop
@@ -478,7 +301,7 @@ def _drawn_leg_intermediate_pad_regions(
             if pad_layer == route_layer:
                 continue  # already part of _drawn_leg_footprint_region
             if side_for_pair is not None:
-                side_um = side_for_pair(pad_layer, drop["via_layer"])
+                side_um = side_for_pair(pad_layer, drop["via_layer"], drop)
             else:
                 side_um = _VIA_LANDING_SIZE_UM
             landing_half_dbu = int(

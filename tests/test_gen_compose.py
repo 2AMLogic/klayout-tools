@@ -7669,6 +7669,10 @@ def test_route_two_pin_populates_via_drops_for_a_diffusion_role_port():
             "y_um": 0.0,
             "via_layer": deck.contact,
             "landing_layers": (deck.active, deck.metals[0]),
+            # #6058: the endpoint's own port layer and the effective route
+            # layer are the terminal landings; li1 (metals[0]) here is an
+            # intermediate plane of the two-hop ladder.
+            "terminal_landing_layers": (deck.active,),
             "block_id": "a",
         },
         {
@@ -7676,6 +7680,7 @@ def test_route_two_pin_populates_via_drops_for_a_diffusion_role_port():
             "y_um": 0.0,
             "via_layer": deck.vias[0],
             "landing_layers": (deck.metals[0], deck.metals[1]),
+            "terminal_landing_layers": (deck.metals[1],),
             "block_id": "a",
         },
     ]

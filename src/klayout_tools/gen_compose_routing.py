@@ -105,6 +105,9 @@ from .gen_compose_layer_rules import (
     _resolve_route_layer,
 )
 from .gen_compose_layer_rules import (
+    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
+)
+from .gen_compose_layer_rules import (
     _resolve_landing_pad_sizes as _resolve_landing_pad_sizes,
 )
 from .gen_compose_plane_change import (
@@ -1821,7 +1824,12 @@ def _drawn_leg_footprint_region(
 
     for drop in via_drops:
         if side_for_pair is not None and route_layer is not None:
-            side_um = side_for_pair(route_layer, drop["via_layer"])
+            # The drop itself rides along (issue #6058): a pad on this leg's
+            # own route_layer is always one of its drop's terminal planes,
+            # so this stays the terminal side -- but the resolver, not the
+            # caller, makes that call, keeping every footprint builder on
+            # the same classification.
+            side_um = side_for_pair(route_layer, drop["via_layer"], drop)
         else:
             side_um = _VIA_LANDING_SIZE_UM
         landing_half_dbu = int(
@@ -3208,6 +3216,20 @@ def _resolve_via_drops(
                     f"{effective_route_layer} cannot reach: {drop_error}"
                 )
             if ladder is not None:
+                # Issue #6058: the two planes this endpoint's own ladder
+                # terminates on -- its port's own layer and the leg's
+                # effective route layer -- are *terminal* landings; every
+                # other level the ladder passes through is *intermediate*.
+                # Recorded per hop (a ``landing_layers`` entry can be
+                # terminal at this endpoint and intermediate at another --
+                # a second net's ladder can pass through this net's own
+                # terminal plane) so pad sizing, the collision-check
+                # footprints and drawing all classify one landing the same
+                # way. ``routing.minimal_ladder`` is the only consumer that
+                # shrinks a pad below today's size, and it reads exactly
+                # this marking -- absent (a caller-built drop), the pad
+                # keeps today's terminal sizing, unchanged.
+                terminal_layers = frozenset((port_layer, effective_route_layer))
                 # One via_drops entry per hop (issue #1567): a single-hop
                 # ladder (the pre-#1567 case) produces exactly the one entry
                 # it always did; a multi-hop ladder produces one entry per
@@ -3224,6 +3246,11 @@ def _resolve_via_drops(
                             "y_um": pos[1],
                             "via_layer": via_layer,
                             "landing_layers": (metal_a, metal_b),
+                            "terminal_landing_layers": tuple(
+                                layer
+                                for layer in (metal_a, metal_b)
+                                if layer in terminal_layers
+                            ),
                             **({"array": drop_array} if drop_array else {}),
                             # block_id (#1520): which endpoint's own block
                             # this drop's landing pad lands on -- lets a
@@ -3721,9 +3748,11 @@ def route_two_pin(
     "channel_track": int, "reason": str | None}`` (a rejected leg omits
     ``width_um``/``channel_track``, nothing having been drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "landing_layers", "block_id"}`` entries (empty unless a drop was
-    resolved; one entry per via *hop* since #1567), consumed by
-    :func:`_write_composed_gds`. ``stub_widen`` (#496, see
+    "landing_layers", "terminal_landing_layers", "block_id"}`` entries
+    (empty unless a drop was resolved; one entry per via *hop* since
+    #1567; ``terminal_landing_layers`` since #6058 -- the subset of that
+    hop's ``landing_layers`` that are terminal planes for this endpoint),
+    consumed by :func:`_write_composed_gds`. ``stub_widen`` (#496, see
     :func:`_endpoint_stub_widen_um`) is a list of ``{"x_um", "y_um",
     "direction_deg", "length_um", "width_um"}`` entries -- one per endpoint
     whose own pad is wider than ``width_um`` and faces north/south.
