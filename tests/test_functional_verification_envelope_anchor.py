@@ -160,6 +160,53 @@ def test_base_dir_anchors_the_inline_request_form(tmp_path, monkeypatch):
     assert runs[2] == runs[0]
 
 
+def test_inline_request_without_base_dir_follows_the_cwd(tmp_path, monkeypatch):
+    """No ``--base-dir``: the stdin/inline form has no request file to anchor
+    to, so the envelopes follow the cwd (#6779) -- the same anchor every
+    relative path in the request already resolves against. The same inline
+    request run from two directories in two repos therefore legitimately
+    yields two *different* envelopes, and from a cwd outside every repo it
+    reports everything ``external``; a future change to that anchor is a
+    deliberate one, not a silent regression."""
+    flat = _checkout(tmp_path / "checkout-a")
+    _setup_inputs(flat)
+    nested = _checkout(tmp_path / "checkout-b") / "proj"
+    nested.mkdir()
+    _setup_inputs(nested)
+    inline = json.dumps(_base_request())
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    runs = {}
+    for label, cwd in {"flat checkout": flat, "nested checkout": nested}.items():
+        monkeypatch.chdir(cwd)
+        runs[label] = _envelopes(run_functional_verification(inline))
+
+    assert runs["flat checkout"]["sources"][0] == {
+        "path": "gcd.v",
+        "scope": "repo",
+        "sha256": runs["flat checkout"]["sources"][0]["sha256"],
+    }
+    assert runs["nested checkout"]["sources"][0]["path"] == "proj/gcd.v"
+    assert runs["nested checkout"]["sources"][0]["scope"] == "repo"
+    assert runs["flat checkout"]["results_xml"]["path"].startswith(
+        ".klt/functional-verification/"
+    )
+    assert runs["nested checkout"]["results_xml"]["path"].startswith(_OUT)
+    assert json.dumps(runs["flat checkout"], sort_keys=True) != json.dumps(
+        runs["nested checkout"], sort_keys=True
+    )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _setup_inputs(outside)
+    monkeypatch.chdir(outside)
+    got = _envelopes(run_functional_verification(inline))
+    assert got["sources"][0]["path"] is None
+    assert got["sources"][0]["scope"] == "external"
+    for key in _ARTIFACTS:
+        assert (got[key]["path"], got[key]["scope"]) == (None, "external"), key
+
+
 def test_mutation_log_paths_do_not_depend_on_the_invoking_directory(
     tmp_path, monkeypatch
 ):
