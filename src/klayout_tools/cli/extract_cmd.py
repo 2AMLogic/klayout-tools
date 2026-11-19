@@ -56,7 +56,7 @@ from ..extract import (
     rerun_extract_report,
     run_extract,
 )
-from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE
+from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE, parse_device_params
 from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
@@ -394,6 +394,7 @@ _REQUEST_FIELD_DESTS = {
             "deck_options",
             "label_layers",
             "device_models",
+            "device_params",
             "probes",
             "defer_resistor_fixed_offset",
             "omit_dead_metal",
@@ -553,6 +554,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
                 flag="--device-model",
                 error_cls=ExtractError,
             ),
+            "device_params": _str_list("device_params"),
             "probes": _request_probes(request),
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "omit_dead_metal": _bool("omit_dead_metal"),
@@ -812,12 +814,13 @@ def run(args: argparse.Namespace) -> int:
             # `--hierarchical-cells` (issue #2722): opt-in hierarchical
             # `.SUBCKT` emission. `()` when the flag was never given.
             hierarchical_cells=hierarchical_cells,
-            # `--engine`/`--deck-file`/`--deck-var`/`--runset-timeout` (issue
-            # #5481): the PDK-runset engine. Defaults leave every call that
-            # predates them running the curated deck exactly as before.
+            # `--engine`/`--deck-file`/`--deck-var`/`--device-param`/
+            # `--runset-timeout` (issues #5481, #5513): the PDK-runset engine.
+            # Defaults leave every call that predates them unchanged.
             engine=args.engine,
             deck_file=args.deck_file,
             deck_vars=deck_vars,
+            device_params=parse_device_params(args.device_params),
             runset_timeout=args.runset_timeout,
         )
     except ExtractError as exc:
@@ -876,10 +879,7 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
         if not args.deck:
             raise ExtractError("argument --deck is required")
         request = extract_batch.argv_request(
-            {
-                **vars(args),
-                "deck_options": _parse_deck_options(args.deck_options),
-            }
+            {**vars(args), "deck_options": _parse_deck_options(args.deck_options)}
         )
         base_dir, output = os.getcwd(), args.output
     # The request document was not read when `run()` checked the argv engine,

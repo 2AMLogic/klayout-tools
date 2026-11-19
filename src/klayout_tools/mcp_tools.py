@@ -36,10 +36,9 @@ from pathlib import Path
 from typing import Any
 
 from ._jsonnum import is_int
+from .mcp_doc_links import cli_docs_url
 
 TOOL_PREFIX = "klt_"
-
-DOCS_BASE_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
 
 #: Verbs that dispatch to a paid/remote fleet by design: not listed unless the
 #: operator opts in (``--enable-verb`` / ``--allow-fleet``).
@@ -216,8 +215,7 @@ def _describe(
 ) -> str:
     body = (parser.description or help_line or "").strip()
     body = re.sub(r"\s+", " ", body)
-    doc = f"{DOCS_BASE_URL}/{verb_path[0]}.md"
-    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {doc})"
+    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {cli_docs_url(verb_path[0])})"
 
 
 def _walk(

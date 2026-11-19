@@ -19,6 +19,7 @@ import pytest
 
 from golden_deck.generate_golden_deck import is_curated_topology_rule
 from helpers.gf180mcu_landings import landed
+from helpers.sky130_drc_landings import landed_cuts
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     get_deck,
@@ -3230,7 +3231,7 @@ def _sky130_diff_licon_stack(tmp_path, name, diff_boxes, licon_box):
     layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
     for box in diff_boxes:
         top.shapes(diff).insert(box)
-    top.shapes(licon1).insert(licon_box)
+    landed_cuts(layout, top, licon1, [licon_box])
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -3309,8 +3310,7 @@ def _sky130_tap_layout(tmp_path, name, tap_boxes, licon_boxes):
     layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
     for box in tap_boxes:
         top.shapes(tap).insert(box)
-    for box in licon_boxes:
-        top.shapes(licon1).insert(box)
+    landed_cuts(layout, top, licon1, licon_boxes)
     path = tmp_path / f"{name}.gds"
     layout.write(str(path))
     return path
@@ -3886,7 +3886,7 @@ def test_run_drc_sky130_via_width_violation(tmp_path):
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(kdb.Box(0, 0, 100, 100))  # 100 dbu < 150
+    landed_cuts(layout, top, via, [kdb.Box(0, 0, 100, 100)])  # 100 dbu < 150
     path = tmp_path / "via_width_violation.gds"
     layout.write(str(path))
 
@@ -3906,7 +3906,7 @@ def test_run_drc_sky130_via_width_clean(tmp_path):
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(kdb.Box(0, 0, 150, 150))  # 150 >= 150
+    landed_cuts(layout, top, via, [kdb.Box(0, 0, 150, 150)])  # 150 >= 150
     path = tmp_path / "via_width_clean.gds"
     layout.write(str(path))
 
@@ -4237,7 +4237,7 @@ def test_run_drc_two_shape_violation(
         other, kdb.LayerInfo(other_layer[0], other_layer[1], other_layer_name)
     )
     top.shapes(main).insert(kdb.Box(*box))
-    top.shapes(other).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, other, [kdb.Box(*other_box)])
     draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
@@ -4410,7 +4410,7 @@ def test_run_drc_two_shape_clean(
         other, kdb.LayerInfo(other_layer[0], other_layer[1], other_layer_name)
     )
     top.shapes(main).insert(kdb.Box(*box))
-    top.shapes(other).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, other, [kdb.Box(*other_box)])
     draw_cut_landings(layout, top, other_layer, layer, kdb.Box(*other_box))
     path = tmp_path / f"{rule.replace('.', '_')}_clean.gds"
     layout.write(str(path))
@@ -5233,7 +5233,7 @@ def test_run_drc_single_shape_violation(
     top = layout.create_cell("TOP")
     lay = layout.layer(*layer)
     layout.set_info(lay, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(lay).insert(kdb.Box(*box))
+    landed_cuts(layout, top, lay, [kdb.Box(*box)])
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -5468,8 +5468,7 @@ def test_run_drc_space_violation(
     top = layout.create_cell("TOP")
     lay = layout.layer(*layer)
     layout.set_info(lay, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(lay).insert(kdb.Box(*box))
-    top.shapes(lay).insert(kdb.Box(*other_box))
+    landed_cuts(layout, top, lay, [kdb.Box(*box), kdb.Box(*other_box)])
     path = tmp_path / f"{rule.replace('.', '_')}_violation.gds"
     layout.write(str(path))
 
@@ -6127,7 +6126,7 @@ def test_run_drc_sky130_upper_stack_layers_now_covered(tmp_path):
     # Upper-right quadrant: via2/via3 landing under a capm top plate, all
     # margins comfortably >= every applicable enclosure/separation
     # threshold (max 140 dbu).
-    top.shapes(via2).insert(kdb.Box(2700, 2700, 2900, 2900))
+    landed_cuts(layout, top, via2, [kdb.Box(2700, 2700, 2900, 2900)])
     top.shapes(via3).insert(kdb.Box(2700, 2700, 2900, 2900))
     top.shapes(capm).insert(kdb.Box(2300, 2300, 3800, 3800))
 
@@ -7972,7 +7971,7 @@ def test_run_drc_sky130_via_fixed_size_boundaries(
     top = layout.create_cell("TOP")
     via = layout.layer(68, 44)
     layout.set_info(via, kdb.LayerInfo(68, 44, "via.drawing"))
-    top.shapes(via).insert(cut_box)
+    landed_cuts(layout, top, via, [cut_box])
     path = tmp_path / f"via_fixed_{case_id}.gds"
     layout.write(str(path))
 
@@ -8022,7 +8021,7 @@ def test_run_drc_sky130_via2_to_via4_fixed_size_boundaries(
     top = layout.create_cell("TOP")
     cut = layout.layer(*layer)
     layout.set_info(cut, kdb.LayerInfo(layer[0], layer[1], layer_name))
-    top.shapes(cut).insert(cut_box)
+    landed_cuts(layout, top, cut, [cut_box])
     path = tmp_path / f"{rule_id}_{case_id}.gds"
     layout.write(str(path))
 
@@ -10229,8 +10228,7 @@ def test_waivers_move_matching_markers_to_waived(tmp_path):
 def test_waivers_do_not_apply_to_other_rule_or_cell(tmp_path):
     gds = _hier_gds(tmp_path)
     waivers = _waivers_file(
-        tmp_path,
-        [_waiver(rule="poly.space.1"), _waiver(cell="block_a")],
+        tmp_path, [_waiver(rule="poly.space.1"), _waiver(cell="block_a")]
     )
 
     report = run_drc(gds, "sky130", waivers_file=waivers)
@@ -10409,7 +10407,8 @@ def test_cli_waivers_rejected_with_klayout_engine(tmp_path, capsys):
         capsys,
         [gds, "--engine", "klayout", "--deck-file", waivers, "--waivers", waivers],
     )
-    assert "--waivers is not supported with --engine klayout" in message
+    assert "only the curated engine matches waivers" in message
+    assert "docs/cli/drc.md, 'Waivers'" in message
 
 
 def test_waived_report_check_and_rerun_replay_waivers(tmp_path):

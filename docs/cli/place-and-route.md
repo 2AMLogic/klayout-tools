@@ -2252,7 +2252,7 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library` (the `asap7sc7p5t` recipe also accepts `asap7sc7p5t_rvt`, issue #6029 — the open_pdks name of the same 7.5-track stack, and the one `post_route_spef`/`post_route_sdf` resolve their extract deck under, so the preset and the post-route pass compose). An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library` (the `asap7sc7p5t` recipe also accepts `asap7sc7p5t_rvt`, issue #6029 — the lambdapdk name of the same 7.5-track stack, and the one `post_route_spef`/`post_route_sdf` resolve their extract deck under, so the preset and the post-route pass compose). An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
@@ -3124,15 +3124,14 @@ tiny routed block, `output_dbu_um` 0.00025, M4/M5 track offsets 0.012 and
 M6/M7 0.016 per #4493): the ORFS-width `M5` strap lands a 24 nm `V4` cut in
 a 120 nm strap, so `V4.M5.AUX.2` fired 1,332 times, with `M4.AUX.1`/`M4.AUX.2`
 from the off-grid `M3`/`M4` stub and `M5.AUX.1`/`M6.AUX.1` from strap edges.
-The shipped recipe clears those families: `M5` is 0.216 um wide, the only
+The shipped recipe uses a 0.216 µm `M5` strap, the only
 width for which the tech LEF has a wide `V4` bar (`VIARULE
-M5_M4widePWR0p864`); `ongrid {M3 M4}` snaps the stub onto the tracks;
-`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits; widths plus
-spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
-edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
-`M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
-`V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
-(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+M5_M4widePWR0p864`). `ongrid {M3 M4}` snaps the stub onto the tracks and
+`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits. Both strap-edge
+checks were clean on the original seven-inverter block (24 µm core, reported
+origin 0.96 µm, PR #4499). The wide `V4` bar's zero `M4` enclosure left
+369 `V4.M4.EN.1` and 13 `V4.M5.EN.2` markers. The request exposes no control
+for that enclosure. That run also had two `M5.W.3` markers.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
 markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
 count that scales with block size, not a fixed number). They sit on
@@ -3145,9 +3144,34 @@ re-introduces the families above), `split_cuts` is measured DRC-dirty on
 gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
 This is an upstream
 OpenROAD `pdngen` limitation; the preset is unchanged here.
-`pdngen` offsets are core-origin relative: the edge-grid result was measured
-with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
-hits (adjust `power.straps` explicitly in that case).
+
+**Strap edges depend on the snapped core origin.** At `core_margin_um: 0.96`,
+the 97-inverter chain using the `place_and_route_drcfill` request (20% utilization)
+had zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`, `M4.W.3`, `M5.AUX.1` and
+`M6.AUX.1`. The first routed DEF `ROW` started at (972, 1080) nm. The
+following runs varied only the requested margin (2026-11-18, klayout-tools
+`94950eeee`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12, packaged
+`asap7.drc`, lambdapdk v0.2.17).
+
+| `core_margin_um` | First row x, y (nm) | `M5.AUX.1` | `M6.AUX.1` |
+| ---: | ---: | ---: | ---: |
+| 0.864 | 864, 1080 | 8 | 0 |
+| 0.918 | 918, 1080 | 8 | 0 |
+| 0.96 | 972, 1080 | 0 | 0 |
+| 1.0 | 1026, 1080 | 8 | 0 |
+| 1.188 | 1188, 1350 | 0 | 8 |
+
+Among these origins, M5 was clean at x = 972 and 1188 nm, both 12 nm modulo
+the deck's 24 nm grid. At x = 1026 nm the first strap's edges were at 1230
+and 1446 nm, both 6 nm off grid. M6 checks the horizontal edges against a
+32 nm grid. At the 1.0 µm margin, a 32-output fan-out also had eight
+`M5.AUX.1` markers at both 20% and 40% utilization. Rerun the same request
+with `power` omitted to isolate the PDN contribution. All three 1.0 µm runs
+then had zero `M5.AUX.1` markers. To confirm attribution, compare the marker
+coordinates with the strap edges in the routed DEF's `SPECIALNETS`. To move
+a strap, expand the preset into explicit `power.straps` and `power.connects`
+and adjust the affected layer's `power.straps[].offset_um` relative to the
+snapped origin.
 
 **`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a

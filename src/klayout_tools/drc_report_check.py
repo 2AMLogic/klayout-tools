@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._deck_hash import source_file_hash
 from ._provenance import content_hash
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -97,7 +98,9 @@ def _report_hash_checks(
     deck_check = hash_check(
         f"{prefix}provenance.deck.content_hash",
         get_path(committed, ("provenance", "deck", "content_hash")),
-        content_hash(resolved_deck),
+        content_hash(resolved_deck)
+        if committed.get("engine") == "klayout"
+        else source_file_hash(resolved_deck),
     )
     if deck_missing is not None:
         deck_check["deck_not_found"] = deck_missing

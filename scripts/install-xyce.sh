@@ -47,9 +47,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The pinned release. Bump the version, the URL, the checksum, and
-# CHANGELOG.md together in the same change. The checksum pins the *zip
-# wrapper* Sandia serves (the .pkg lives inside it); recompute with:
+# The pinned release. Bump the version, the URL, the checksum, and a
+# changelog fragment (`changelog.d/README.md`) together in the same change.
+# The checksum pins the *zip wrapper* Sandia serves (the .pkg lives
+# inside it); recompute with:
 #   curl -fsL -o /tmp/xyce.zip "$XYCE_MACOS_URL" && shasum -a 256 /tmp/xyce.zip
 XYCE_VERSION="7.10.0"
 XYCE_MACOS_URL="https://xyce.sandia.gov/download/1952/"
