@@ -1,8 +1,11 @@
-"""``klt gen diode`` (issue #4300): sky130 junction diode generator."""
+"""``klt gen diode`` (issue #4300): sky130 junction diode generator.
+
+gf180mcu lives in ``test_gen_diode_gf180mcu.py`` (issue #6614)."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -141,8 +144,115 @@ def test_diode_rejects_bad_params(tmp_path, pdk_root):
         _gen(tmp_path, pdk_root, width_um=0.1)
 
 
-def test_diode_rejects_non_sky130_family(tmp_path):
+def test_diode_rejects_unsupported_family(tmp_path):
+    # gf180mcu is covered by test_gen_diode_gf180mcu.py (issue #6614).
     root = tmp_path / "pdk_install"
-    (root / "gf180mcuD" / "libs.tech").mkdir(parents=True)
+    (root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     with pytest.raises(GenError, match="not yet supported"):
-        _gen(tmp_path, root, variant="gf180mcuD")
+        _gen(tmp_path, root, variant="ihp-sg13g2")
+
+
+_GOLDEN = json.loads(
+    (Path(__file__).parent / "fixtures" / "gen_diode_sky130_geometry.json").read_text()
+)
+
+
+def _layer_boxes(gds):
+    layout = kdb.Layout()
+    layout.read(gds)
+    boxes = {}
+    for idx in layout.layer_indexes():
+        info = layout.get_info(idx)
+        found = [
+            [b.left, b.bottom, b.right, b.top]
+            for cell in layout.each_cell()
+            for b in (s.bbox() for s in cell.shapes(idx).each())
+        ]
+        if found:
+            boxes[f"{info.layer}/{info.datatype}"] = sorted(found)
+    return dict(sorted(boxes.items()))
+
+
+@pytest.mark.parametrize("case", sorted(_GOLDEN))
+def test_sky130_geometry_unchanged_by_gf180mcu_support(tmp_path, pdk_root, case):
+    """The golden was captured from the generator *before* gf180mcu support
+    (issue #6614); sky130 output must not move when another family is added."""
+    kind, vclass, size = case.split("|")
+    width, length = (float(v) for v in size.split("x"))
+    _, gds = _gen(
+        tmp_path,
+        pdk_root,
+        kind=kind,
+        voltage_class=vclass,
+        width_um=width,
+        length_um=length,
+    )
+    assert _layer_boxes(gds) == _GOLDEN[case]
+
+
+def test_sky130_omitted_voltage_class_is_05v5(tmp_path, pdk_root):
+    """An omitted voltage_class keeps resolving to sky130's ``05v5``."""
+    _, omitted = _gen(tmp_path, pdk_root, kind="p_nwell")
+    layout_omitted = _layer_boxes(omitted)
+    _, explicit = _gen(tmp_path, pdk_root, kind="p_nwell", voltage_class="05v5")
+    assert layout_omitted == _layer_boxes(explicit)
+    assert "75/20" not in layout_omitted  # no hvi
+
+
+# --------------------------------------------------------------------------- #
+# Issue #6643: off-manufacturing-grid width_um/length_um warnings
+# --------------------------------------------------------------------------- #
+
+
+def _grid_warnings(report):
+    return [w for w in report["warnings"] if "manufacturing grid" in w]
+
+
+@pytest.mark.parametrize(
+    ("param", "other"), [("width_um", "length_um"), ("length_um", "width_um")]
+)
+def test_diode_off_grid_edge_warns_once(tmp_path, pdk_root, param, other):
+    """2.003um is on the 1nm dbu grid but off sky130's 5nm manufacturing grid:
+    exactly one warning for the off-grid edge, naming the grid and both
+    neighbours, while the dbu-based ``snapped_to_grid`` keeps its meaning."""
+    report, _ = _gen(tmp_path, pdk_root, **{param: 2.003, other: 2.0})
+    (warning,) = _grid_warnings(report)
+    assert f"generator 'diode': params.{param}=2.003um" in warning
+    assert "'sky130' manufacturing grid (0.005um)" in warning
+    assert "2um (below)" in warning
+    assert "2.005um (above)" in warning
+    assert f"params.{other}" not in warning
+    assert report["drc_hints"]["snapped_to_grid"] is False
+
+
+def test_diode_both_edges_off_grid_warn_separately(tmp_path, pdk_root):
+    report, _ = _gen(tmp_path, pdk_root, width_um=2.003, length_um=3.007)
+    width_warning, length_warning = _grid_warnings(report)
+    assert "params.width_um=2.003um" in width_warning
+    assert "2um (below)" in width_warning and "2.005um (above)" in width_warning
+    assert "params.length_um=3.007um" in length_warning
+    assert "3.005um (below)" in length_warning and "3.01um (above)" in length_warning
+
+
+@pytest.mark.parametrize(("kind", "vclass"), [("n_psub", "05v5"), ("p_nwell", "11v0")])
+def test_diode_off_grid_warning_covers_every_kind(tmp_path, pdk_root, kind, vclass):
+    report, _ = _gen(
+        tmp_path, pdk_root, kind=kind, voltage_class=vclass, width_um=2.003
+    )
+    assert len(_grid_warnings(report)) == 1
+
+
+@pytest.mark.parametrize(("width", "length"), [(2.0, 2.0), (0.4, 0.4), (10.0, 6.0)])
+def test_diode_on_grid_sizes_carry_no_warnings(tmp_path, pdk_root, width, length):
+    report, _ = _gen(tmp_path, pdk_root, width_um=width, length_um=length)
+    assert report["warnings"] == []
+
+
+def test_diode_off_grid_warning_matches_a_real_drc_finding(tmp_path, pdk_root):
+    """The warning is advisory (geometry is drawn as requested), so ``klt drc``
+    must still report the ``*.ongrid.*`` finding the warning predicts."""
+    report, gds = _gen(tmp_path, pdk_root, width_um=2.003)
+    assert len(_grid_warnings(report)) == 1
+    drc = run_drc(gds, "sky130")
+    assert drc["status"] == "violations"
+    assert any(".ongrid." in v["rule"] for v in drc["violations"])

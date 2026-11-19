@@ -111,6 +111,20 @@ def add_signoff_parser(
         ),
     )
     signoff_parser.add_argument(
+        "--artifact-manifest",
+        metavar="PATH",
+        action="append",
+        help=(
+            "an artifact-store manifest (`klt artifact`) to resolve "
+            "`artifact:<key>` citations against; repeatable. A cited "
+            "`artifact:` evidence path, or an envelope input path of that form, "
+            "is looked up by URI, fetched through the broker "
+            "($KLT_ARTIFACT_BROKER) and sha256-verified before it is read. "
+            "An unresolvable one grades `unmet`/`artifact_unavailable`. Only "
+            "meaningful with --manifest/--fleet. See docs/cli/signoff.md."
+        ),
+    )
+    signoff_parser.add_argument(
         "--allow-generator-exec",
         action="store_true",
         help=(

@@ -10,6 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -32,19 +37,42 @@ def test_deck_names_lists_the_built_in_decks():
 
 
 def test_deck_identity_rejects_a_non_deck_sibling_module():
-    """`deck_source_path` will happily import any sibling module of the deck
-    package, so an unvalidated name would hash `history.py` and report it as
-    a deck. The name must be checked against the registry first."""
+    """An importable sibling is a deck only if the registry declares it."""
     assert deck_source_path("history") is not None  # importable, but not a deck
     with pytest.raises(_provenance.UnknownProvenanceDeckError):
         _provenance.deck_identity("history")
 
 
-def test_deck_identity_matches_an_independent_hash_of_the_deck_module():
-    block = _provenance.deck_identity("sky130")
-    with open(deck_source_path("sky130"), "rb") as handle:
-        expected = hashlib.sha256(handle.read()).hexdigest()
-    assert block["content_hash"] == f"sha256:{expected}"
+@pytest.mark.parametrize(
+    ("name", "sources"),
+    [
+        ("gf180mcu", ("gf180mcu.py",)),
+        ("sky130", ("sky130.py", "sky130_offgrid.py", "sky130_unmodeled.py")),
+        (
+            "sg13g2",
+            (
+                "sg13g2.py",
+                "sg13g2_cont_grid.py",
+                "sg13g2_runset_notes.py",
+                "sg13g2_svaricap.py",
+            ),
+        ),
+    ],
+)
+def test_deck_identity_hashes_its_rule_sources(name, sources):
+    directory = Path(deck_source_path(name)).parent
+    records = [
+        (filename, hashlib.sha256((directory / filename).read_bytes()).digest())
+        for filename in sources
+    ]
+    digest = (
+        records[0][1]
+        if len(records) == 1
+        else hashlib.sha256(
+            b"".join(filename.encode() + b"\0" + raw for filename, raw in records)
+        ).digest()
+    )
+    assert _provenance.deck_identity(name)["content_hash"] == f"sha256:{digest.hex()}"
 
 
 # --------------------------------------------------------------------------- #
@@ -67,6 +95,67 @@ def test_deck_hash_matches_a_real_drc_runs_provenance(tmp_path, capsys):
     assert payload["content_hash"] == report["provenance"]["deck"]["content_hash"]
     assert payload["deck"] == report["provenance"]["deck"]["name"]
     assert payload["released"] == report["provenance"]["deck"]["released"]
+
+
+def test_saved_report_detects_a_sibling_edit_and_missing_source(tmp_path):
+    package = tmp_path / "klayout_tools"
+    shutil.copytree(
+        Path(_provenance.__file__).parent,
+        package,
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+
+    def klt(*args, expected_exit=0):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "klayout_tools.cli",
+                *args,
+                "--format",
+                "json",
+            ],
+            cwd=tmp_path,
+            env={**os.environ, "PYTHONPATH": str(tmp_path)},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == expected_exit, (result.stdout, result.stderr)
+        return json.loads(result.stderr if expected_exit == 1 else result.stdout)
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(8, 0)).insert(kdb.Box(0, 0, 5000, 5000))
+    stream = str(tmp_path / "top.gds")
+    layout.write(stream)
+    report = klt("drc", stream, "--deck", "sg13g2")
+    saved = tmp_path / "drc.json"
+    saved.write_text(json.dumps(report))
+    assert klt("drc", "--check", str(saved), stream)["status"] == "match"
+    rules = ("deck", "rules", "--deck", "sg13g2", "--rule", "cont.ongrid.1")
+    before = klt(*rules)
+    assert before["rules"][0]["limits"]["grid_um"] == 0.005
+    assert before["content_hash"] == report["provenance"]["deck"]["content_hash"]
+
+    hook = package / "decks/sg13g2_cont_grid.py"
+    hook.write_bytes(hook.read_bytes().replace(b"grid_um=0.005", b"grid_um=0.010"))
+    after = klt(*rules)
+    assert after["rules"][0]["limits"]["grid_um"] == 0.010
+    assert after["content_hash"] != before["content_hash"]
+    check = klt("drc", "--check", str(saved), stream, expected_exit=3)
+    deck_check = next(
+        c for c in check["checks"] if c["field"] == "provenance.deck.content_hash"
+    )
+    assert (check["status"], deck_check["actual"]) == ("drifted", after["content_hash"])
+
+    hook.unlink()
+    missing = klt("deck", "hash", "--deck", "sg13g2", expected_exit=1)
+    assert "no content hash" in missing["error"]["message"]
+    assert (
+        klt("deck", "hash", "--deck", "sky130")["content_hash"]
+        == _provenance.deck_identity("sky130")["content_hash"]
+    )
 
 
 # --------------------------------------------------------------------------- #
