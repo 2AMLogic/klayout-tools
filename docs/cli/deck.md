@@ -50,6 +50,11 @@ The value is computed by the same code path a real run records
 `klt drc --deck sky130 <layout>` would report in its
 `provenance.deck.content_hash`.
 
+The named pin covers the primary module and the sibling sources declared in
+its literal `DRC_RULE_SOURCES` tuple. Add a sibling there when moving curated
+rules out of the primary module. The contract describes the digest and the
+`sg13g2` and `sky130` pin migration. [Deck provenance](../json-contract.md)
+
 This excerpt from `klt deck hash --deck sky130 --format json` uses
 `sha256:...` for this build's deck hash.
 
@@ -304,7 +309,7 @@ The example uses a placeholder hash and shows selected device classes.
 ```
 
 - `deck` — the deck name.
-- `content_hash` — this install's own `sha256:`-prefixed deck module hash
+- `content_hash` — this install's own `sha256:`-prefixed deck source hash
   (the same computation and shape as `provenance.deck.content_hash`).
 - `device_classes` — the device-class roles this deck is *structurally
   capable* of recognising (`ExtractionDeck.device_classes`) — independent of
@@ -406,7 +411,7 @@ uses `sha256:...` for this build's deck hash.
 }
 ```
 
-- `content_hash` — this install's own deck module hash, the same value
+- `content_hash` — this install's own deck source hash, the same value
   `klt deck info`/`provenance.deck.content_hash` report. Cite it alongside a
   constant and the citation becomes re-checkable: the next PDK bump changes
   the hash, so a stale transcription is detectable instead of invisible.
@@ -568,7 +573,7 @@ field by field, which two separate passes on a real design had to do
 ```
 
 - `deck` / `content_hash` — the deck name as given, and this install's own
-  deck module hash (the same value `klt deck info`/`klt deck rules`/
+  deck source hash (the same value `klt deck info`/`klt deck rules`/
   `provenance.deck.content_hash` report). Cite it alongside a transcribed
   layer number and the citation stays re-checkable on the next PDK bump.
 - `name` — the `devices[].class` label this class extracts as (the same
@@ -663,9 +668,8 @@ class this deck does not declare":
 `(deck, release)` pair, covering every `v*` git tag — mapping
 `{deck, content_hash, git_tag, git_commit, package_version}`. It is
 **generated, never hand-maintained**: `scripts/generate_deck_history.py`
-walks this repo's own git tag history and rebuilds it from scratch, hashing
-each `decks/*.py` module exactly the way
-`klayout_tools._provenance.sha256_file` hashes it at runtime. Recording one
+walks this repo's git tags and hashes the sources declared at each tag.
+Releases through v0.9.2 used the primary module alone. Recording one
 entry per release (not only when a deck's hash changes) is what makes both
 query shapes exact:
 
