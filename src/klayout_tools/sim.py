@@ -161,7 +161,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
-from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
 from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
@@ -4430,6 +4430,13 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #5779): the device-multiplier lint's findings
+    # -- warning-only, never a failing exit.
+    environment.update(
+        sim_env_report.device_multiplier_environment(
+            netlist_path, request=request, repo_root=repo_root
+        )
+    )
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
@@ -7100,19 +7107,11 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
     Comments and ``+`` continuations go through the shared helpers, so a
     ``$`` glued to the next token (``.include $PDK_ROOT/...``) survives and
     an orphan ``+`` is dropped, as it always was here. Deliberately lexical,
-    not a complete SPICE parser: ``.include``/``.lib`` are not followed."""
-    logical: list[str] = []
-    for raw in netlist_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("*"):
-            continue
-        line = strip_spice_inline_comment(line)
-        if not line:
-            continue
-        logical.append(line)
-    return [
-        line for line in fold_spice_continuations(logical) if not line.startswith("+")
-    ]
+    not a complete SPICE parser: ``.include``/``.lib`` are not followed.
+    Shared implementation in :func:`_spice_text.logical_lines` (issue #5779
+    moved it out so this module keeps its size ratchet while the
+    device-multiplier lint reads cards the same way)."""
+    return _spice_text_logical_lines(netlist_text)
 
 
 _NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)

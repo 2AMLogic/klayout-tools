@@ -28,12 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from ._jsonnum import is_int
-from .mcp_doc_links import DOCS_BASE_URL, cli_docs_url
+from .mcp_doc_links import cli_docs_url, link_cli_docs
 
 TOOL_PREFIX = "klt_"
-_DOC_POINTER = re.compile(
-    r"(?<![\w./\\-])docs/cli/([A-Za-z0-9_-]+\.md)(?![\w/\\-]|\.\w)"
-)
 
 #: Verbs that dispatch to a paid/remote fleet by design: not listed unless the
 #: operator opts in (``--enable-verb`` / ``--allow-fleet``).
@@ -79,11 +76,6 @@ def _subparsers_action(
         if isinstance(action, argparse._SubParsersAction):
             return action
     return None
-
-
-def _link_cli_docs(text: str) -> str:
-    """Use URLs for bare CLI doc references so remote clients can follow them."""
-    return _DOC_POINTER.sub(rf"{DOCS_BASE_URL}/\1", text)
 
 
 def _help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
@@ -168,7 +160,7 @@ def _input_schema(
         schema = _action_schema(action)
         help_text = _help_text(parser, action)
         if help_text:
-            schema["description"] = _link_cli_docs(help_text)
+            schema["description"] = link_cli_docs(help_text)
         if (
             action.default is not None
             and action.default is not argparse.SUPPRESS
@@ -214,7 +206,7 @@ def _describe(
     verb_path: tuple[str, ...], parser: argparse.ArgumentParser, help_line: str
 ) -> str:
     body = (parser.description or help_line or "").strip()
-    body = _link_cli_docs(re.sub(r"\s+", " ", body))
+    body = link_cli_docs(re.sub(r"\s+", " ", body))
     return f"klt {' '.join(verb_path)}: {body} (CLI docs: {cli_docs_url(verb_path[0])})"
 
 
