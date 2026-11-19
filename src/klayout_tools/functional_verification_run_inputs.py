@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -41,6 +43,7 @@ from ._provenance import (
     sha256_file,
     sha256_file_required,
 )
+from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (
     resolve_sources_with_synthesize,
     with_from_synthesize,
@@ -56,6 +59,8 @@ class RunInputs(NamedTuple):
     #: Defines the ``pdk`` input derives (``FUNCTIONAL``, no SDF); the run
     #: merges them *under* the caller's own ``options.defines`` (issue #5782).
     pdk_defines: dict[str, str | None]
+    #: Original source paths for normalizing simulator failure messages.
+    source_paths: list[str]
     #: Captured before generated wrappers or SDF rewrites enter the build.
     provenance: dict[str, Any]
 
@@ -69,6 +74,41 @@ class RunInputs(NamedTuple):
                 raise FunctionalVerificationError(
                     f"Cannot hash original SDF {sdf['file']!r}: {exc}"
                 ) from exc
+
+    def normalize_failure_messages(
+        self, tests: list[dict[str, Any]], request_dir: str
+    ) -> None:
+        """Render known RTL filenames in parsed cocotb diagnostics for the report."""
+        failures = [test for test in tests if test.get("error_message")]
+        if not failures:
+            return
+        root = find_repo_root(request_dir) or request_dir
+        labels: dict[str, str] = {}
+        for i, source in enumerate(self.source_paths):
+            relative = repo_relative_path(source, repo_root=root)["path"]
+            label = relative or f"environment.sources[{i}]"
+            labels.setdefault(source, label)
+            labels.setdefault(os.path.realpath(source), label)
+
+        # Match complete filenames at diagnostic delimiters. A root scrubber
+        # would also match prefixes of other names such as "cells.v~". A
+        # parenthesized line number -- "gcd.v(17):" -- ends a filename, while
+        # a reference opening right after a quote is whole: it runs to the
+        # closing quote or a location suffix, so a space inside quotes is
+        # filename text ("gcd.v (copy).v"), not a delimiter.
+        paths = "|".join(re.escape(p) for p in sorted(labels, key=len, reverse=True))
+        location = re.compile(
+            r"""(?:(?<=["'`])"""
+            rf"(?:{paths})"
+            r"""(?=["'`]|$|:|\((?=\d))"""
+            r"""|(?<!["'`])(?<![^\s'"`(<\[{:;,=])"""
+            rf"(?:{paths})"
+            r"""(?=$|[\s'"`)>\]}:;,]|\.(?=\s|$)|\((?=\d)))"""
+        )
+        for test in failures:
+            test["error_message"] = location.sub(
+                lambda match: labels[match[0]], test["error_message"]
+            )
 
 
 def sources_echo(
@@ -128,7 +168,7 @@ def resolve_run_inputs(
         )
         provenance["input"] = {"role": INPUT_ROLE_SOURCE, "content_hash": digest}
     return sources, RunInputs(
-        synth_block, sources_echo(sources, envelope), defines, provenance
+        synth_block, sources_echo(sources, envelope), defines, list(sources), provenance
     )
 
 
