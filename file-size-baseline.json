@@ -477,7 +477,7 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2545
+      "lines": 2490
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
@@ -585,7 +585,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12339
+      "lines": 12295
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

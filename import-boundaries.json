@@ -591,6 +591,7 @@
         "klayout_tools.pdk_cell_models",
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_corner_skew",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
