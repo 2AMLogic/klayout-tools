@@ -3138,7 +3138,7 @@ def _run_yosys(
         raise SynthesizeError(
             f"yosys did not complete within {timeout_s}s (script "
             f"'{script_path}') -- process killed (raise --yosys-timeout-s, "
-            "$KLT_YOSYS_TIMEOUT_S or request.yosys_timeout_s for more time)"
+            "$KLT_YOSYS_TIMEOUT_S or request.yosys_timeout_s to allow more time)"
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
