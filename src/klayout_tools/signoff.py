@@ -90,9 +90,6 @@ from .signoff_artifact import (
 from .signoff_attest_binding import attestation_record
 from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
-# Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# that requires them machine-derived (issue #5462); out of this file for its
-# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
 from .signoff_coverage_disclosure import (
