@@ -223,8 +223,9 @@ def test_module_imports_stdlib_only():
                 assert alias.name.split(".")[0] in sys.stdlib_module_names
 
 
-def test_standalone_help_links_to_artifact_docs(capsys, monkeypatch):
-    monkeypatch.setenv("COLUMNS", "80")
+@pytest.mark.parametrize("columns", [70, 80, 90])
+def test_standalone_help_links_to_artifact_docs(capsys, monkeypatch, columns):
+    monkeypatch.setenv("COLUMNS", str(columns))
     with pytest.raises(SystemExit) as exited:
         artifact_verify.main(["--help"])
     assert exited.value.code == 0
