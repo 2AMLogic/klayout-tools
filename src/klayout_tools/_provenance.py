@@ -43,6 +43,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
+from types import EllipsisType
 from typing import Any
 
 from . import build_identity
@@ -700,6 +701,8 @@ def _deck_block(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     path_envelope: Mapping[str, Any] | None = None,
+    *,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash, released}``;
     ``None`` when no rule/model deck was involved (e.g. LVS against a
@@ -765,14 +768,12 @@ def _deck_block(
     identity. Omitted when ``None``, so every other verb's block is
     byte-identical.
 
-    All three keys are omitted entirely when there is nothing to record --
-    a deck that declares no selectable option and a caller that passed none
-    -- keeping the block byte-identical to before these parameters existed
-    for every call site that does not pass them.
+    A deck with no declared or supplied options omits the option keys.
     """
     if name is None:
         return None
-    deck_hash = content_hash(path)
+    digest = sha256_file(path) if deck_sha256 is ... else deck_sha256
+    deck_hash = f"sha256:{digest}" if digest is not None else None
     block: dict[str, Any] = {
         "name": name,
         "content_hash": deck_hash,
@@ -874,17 +875,15 @@ def build_provenance(
     klayout_version_override: str | None = None,
     klayout_version_override_active: bool = False,
     deck_path_envelope: Mapping[str, Any] | None = None,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
-    ``deck_name``/``deck_path`` identify the rule (or model) deck a run used
-    and the file whose content is hashed to pin it; pass both ``None`` when no
-    deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
-    dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``input_path`` is the single input artifact a verb ran
-    against; when given, its content hash is recorded as ``provenance.input``
-    (``{content_hash, role}``, mirroring ``deck``) so a stale committed
-    report is a one-line diff against a freshly computed hash. Pass ``None``
+    ``deck_name``/``deck_path`` identify the rule or model deck. Supplying
+    ``deck_sha256`` uses a previously captured digest (including a captured
+    ``None``). Omitting it hashes the file now. ``pdk`` is a ``find_pdk``
+    result or ``None``. ``input_path`` identifies the artifact hashed in
+    ``provenance.input`` alongside its role. Pass ``None``
     (the default) only when the verb genuinely has no single input stream to
     pin. A verb that pins its input under a *verb-specific* key of its own is
     **not** such a case: ``klt lvs`` carries
@@ -960,6 +959,7 @@ def build_provenance(
             deck_options,
             resolve_deck_options,
             deck_path_envelope,
+            deck_sha256=deck_sha256,
         ),
         "input": _input_block(input_path, input_role),
     }
