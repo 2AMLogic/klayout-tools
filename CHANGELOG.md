@@ -24,22 +24,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   family's flavour is a `GenError`. The declared `voltage_class` default stays
   `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
   one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
-- **`klt functional-verification`'s `{path, scope}` envelopes no longer vary
-  with the directory `klt` is invoked from** (#6762, 2026-11-19):
-  `environment.sources[]`, `environment.{results_xml,test_log,build_log}`, the
-  per-seed `environment.initial_state.runs[].results_xml` and mutation
-  `mutation_testing.results[].log_path` resolved their `scope` against the
-  repo containing the *process cwd*, so one request over the same inputs
-  produced a different committed blob per invoking directory (`{"path": null,
-  "scope": "external"}` instead of `{"path": "rtl/gcd.v", "scope": "repo"}`).
-  They now resolve against the repo containing the *request* — its own
-  directory, or `--base-dir` — the same anchor `docs/cli/functional-verification.md`
-  already documents for every relative path in the request. **Reports can
-  change** for a run whose cwd sat in a different repo than its request
-  (`external` ↔ `repo`); a request outside every repo reports `external`
-  throughout, as does a `-o/--outdir` outside the request's repo. `sha256`
-  values are unchanged. No field is added or removed and no `schema_version`
-  bumps. `klt em` and the OpenROAD engine logs keep their cwd anchor.
+
+- **`klt sim` complex-vector save-mode refusal names the waveform-limiting
+  remedy** (#6749, 2026-11-19): an AC request combining
+  `options.complex_vectors` with `options.save_mode: "netlist"` was refused
+  before launch, but the message only said to omit `options.save_mode`, so a
+  caller following it literally accepted a waveform of every node. The
+  refusal now also directs the caller to `options.save_vectors` with each
+  requested complex vector listed there, and spells out the corrected
+  options for the request (e.g. `{"complex_vectors": ["v(out)"],
+  "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
+  before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
+  AC vectors" section.
 - **`klt sim --resume` no longer refuses a sharded resume that has fewer
   outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
   reused finished shards, the replacement dispatch still asked for the

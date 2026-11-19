@@ -349,7 +349,9 @@ entry named after `verilog_top` (a failure carries
 `environment.results_xml` is the absent envelope (`{path: null, scope: "absent"}`); `environment.test_log`/`build_log`
 name the transcripts and `environment.sdf` is populated as on the cocotb path.
 `provenance.input.content_hash` covers the resolved `request.sources`,
-including the Verilog bench file listed there.
+including the Verilog bench file listed there — so a Verilog-top report cannot
+be bundled with a `source`-role synthesize/equiv citation in one `klt signoff`
+run; see [`signoff.md`](signoff.md) → Provenance consistency.
 `environment.parameters` is `{}` — the field is carried for shape parity with
 the cocotb path, but a non-empty `request.parameters` is a request error here.
 The SDF diagnostic gate is unchanged: a partial annotation is still exit 1.

@@ -157,6 +157,11 @@ from .extract import (
     spice_safe_net_name,
 )
 from .extract_progress import StageTimer, active_timer, stage
+from .lvs_body import (
+    _body_net_warnings,
+    _body_verification_report,
+    _body_verification_unchecked,
+)
 from .lvs_combine import (
     _combine_circuit_devices_safely,  # noqa: F401
     _combine_devices_safely,
@@ -205,7 +210,6 @@ from .lvs_known_limits import note_known_limit
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
-    _body_net_warnings,
     _build_mismatches,
     _build_net_correspondence,
     _collect_tolerance_snaps,
@@ -231,8 +235,6 @@ from .lvs_pin_anchors import (
     _TopLevelPinAnchor,
 )
 from .lvs_power import (
-    _body_verification_report,
-    _body_verification_unchecked,
     _power_connectivity_report,
     _power_connectivity_unchecked,
     _well_layer_lef_pins,
@@ -536,20 +538,18 @@ POWER_STATUS_UNCHECKED = "unchecked"
 #: Issue #1983: ``body_verification.status`` values -- the machine-checkable
 #: counterpart of the ``device.body_unverified`` ``mismatches[]`` warning
 #: (issue #281). Deliberately a *separate* verdict from the report's top-level
-#: ``status``, exactly as :data:`POWER_STATUS_MATCH` and friends are: a
-#: ``"unverified"`` body is a coverage statement about how the layout's MOS
-#: bodies were resolved, not a compare failure, so it never changes ``status``
-#: (that non-blocking behaviour is unchanged from before this block existed).
-#: See :func:`_body_verification_report`.
+#: ``status``: it is a coverage statement about the layout's MOS bodies, not a
+#: compare failure, so it never changes ``status`` (see
+#: :func:`_body_verification_report`).
 #:
-#: - ``"verified"``: inline extraction ran and every MOS body terminal in the
-#:   layout's top circuit resolved to a real, drawn/labelled net.
-#: - ``"unverified"``: at least one MOS body terminal was compared against a
-#:   deck-synthesized net instead (the ``device.body_unverified`` condition).
-#: - ``"unchecked"``: this run could not answer the question at all -- the
-#:   pre-extracted ``layout.netlist`` request form, which carries no deck and
-#:   therefore no way to tell a drawn tie from a synthesized one. Never means
-#:   "verified": the reason says which case it is.
+#: - ``"verified"``: every MOS body terminal the check inspected (issue
+#:   #5749's ``inspected_count``) resolved to a real, drawn/labelled net.
+#: - ``"unverified"``: at least one inspected body terminal was compared
+#:   against a deck-synthesized net (the ``device.body_unverified`` condition).
+#: - ``"unchecked"``: this run could not answer the question at all -- no
+#:   ``layout.deck`` was given (the pre-extracted ``layout.netlist`` form), or
+#:   no MOS device was eligible to inspect (``inspected_count`` 0, issue
+#:   #5749). Never means "verified": the reason says which case it is.
 BODY_STATUS_VERIFIED = "verified"
 BODY_STATUS_UNVERIFIED = "unverified"
 BODY_STATUS_UNCHECKED = "unchecked"
@@ -860,6 +860,12 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+#: Issue #5795: the caller-given relative ``--deck-file`` string, so the
+#: runset report echoes the caller's own form like ``layout``/``reference``
+#: already do; popped by ``run_lvs_klayout_runset`` before any echo.
+_DECK_FILE_GIVEN_KEY = "_deck_file_given"
+
+
 def _merge_deck_flags(
     request: dict[str, Any],
     engine: str,
@@ -889,6 +895,8 @@ def _merge_deck_flags(
                 "both (a flag never silently overrides the request document)"
             )
         request["deck_file"] = os.path.abspath(deck_file)
+        if not os.path.isabs(deck_file):
+            request[_DECK_FILE_GIVEN_KEY] = deck_file
     if deck_vars:
         if request.get("deck_vars") is not None:
             raise LvsError(
@@ -1487,8 +1495,14 @@ def run_lvs(
 
     if engine == RUNSET_ENGINE:
         # Issue #2849: the PDK's own runset does extraction and compare; the
-        # verdict is read back from its .lvsdb (see lvs_runset.py).
-        return _run_runset_response(request, request_dir, portable_paths)
+        # verdict is read back from its .lvsdb (see lvs_runset.py). Its
+        # report records klayout_binary as a basename in both modes (#5795,
+        # finishing what #3988 started for portable_paths).
+        return _finish_response(
+            run_lvs_klayout_runset(request, request_dir),
+            portable=portable_paths,
+            request_dir=request_dir,
+        )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
     # resolved `{key: value}` mapping, one layer down: this is a JSON object
@@ -2030,25 +2044,6 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
-
-
-def _run_runset_response(
-    request: dict[str, Any], request_dir: str, portable_paths: bool
-) -> dict[str, Any]:
-    """Run the ``klayout-runset`` engine and finish its response.
-
-    Issue #3988: under ``portable_paths`` the tool's identity (its basename)
-    is kept for ``environment.klayout_binary`` instead of the generic
-    external-path object; the version is recorded separately in
-    ``engine_version``."""
-    runset_report = run_lvs_klayout_runset(request, request_dir)
-    binary = runset_report.get("environment", {}).get("klayout_binary")
-    response = _finish_response(
-        runset_report, portable=portable_paths, request_dir=request_dir
-    )
-    if portable_paths and isinstance(binary, str):
-        response["environment"]["klayout_binary"] = os.path.basename(binary)
-    return response
 
 
 def _finish_response(
@@ -4791,7 +4786,7 @@ def _parse_anchor_top_level_pins(
     return value, value
 
 
-def _parse_strict_top_level_pin_count(options: Mapping[str, Any], engine: str) -> bool:
+def _parse_strict_top_level_pin_count(options: Mapping[str, Any]) -> bool:
     """Resolve ``options.strict_top_level_pin_count`` (issue #2845); default
     ``False``. A non-boolean is a clean request error. The check compares
     ``Circuit.pin_count()`` of the two selected circuits, which both engines
