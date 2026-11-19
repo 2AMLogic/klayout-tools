@@ -974,10 +974,17 @@ envelope's own verdict produces):
 | Key | Carried on | Value |
 | --- | ---------- | ----- |
 | `detail.nothing_checked_reasons` | `nothing_checked` only | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
-| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` and `runset_unrecognised_device` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` (its `insufficient_evidence` status route only) and `runset_unrecognised_device` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
 
 `cited_evidence` is present on **either** route into `nothing_checked` and on
 a failing or partial run, and neither key is consulted by any grading rule.
+`undersized_sample` is the one reason in that cell whose two routes disclose
+differently, so the qualifier matters: the envelope's own
+`status: "insufficient_evidence"` token (issue #2873) carries `cited_evidence`,
+while the campaign-discipline refusal — a *passing* report whose own
+`sample_size.verdict` says `insufficient` (issue #2467) — carries
+`detail.yield_campaign` instead, never both (see "Campaign discipline on
+item 6" below for that block's shape).
 On a `check_failed` item 7 it carries the `pex` envelope's `body_bias` block,
 so the claimant-enforced disclosure ("was this measured on a properly-biased
 netlist?") has an in-report source on a failing row too; an envelope
