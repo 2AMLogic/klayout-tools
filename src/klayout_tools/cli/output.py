@@ -33,11 +33,12 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import io
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
@@ -47,6 +48,29 @@ ERROR_EXIT_CODE = 1
 #: Pass it to :func:`emit_error` as ``exit_code`` when a command detects a
 #: usage error itself, inside ``run()``, after argparse has accepted the argv.
 EXIT_USAGE_ERROR = 2
+
+
+@contextlib.contextmanager
+def _printable_stdout() -> Iterator[None]:
+    """Let a text render survive characters stdout cannot encode (issue #5573).
+
+    A strict legacy stdout (``PYTHONIOENCODING=cp1252``, a Windows console)
+    raises ``UnicodeEncodeError`` on a claimant's free text such as the
+    ``--attest`` ``description`` -- after the envelope was written, turning a
+    passing result into a traceback and exit 1 with a partial report. For the
+    render, an unencodable character prints as a ``\\uXXXX`` escape instead
+    (the JSON, ASCII-escaped, keeps the original string). A handler the caller
+    or runtime already chose (``replace``, ``surrogateescape``) is left alone,
+    and the stream's own handler is restored afterwards."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None or getattr(sys.stdout, "errors", None) != "strict":
+        yield
+        return
+    reconfigure(errors="backslashreplace")
+    try:
+        yield
+    finally:
+        reconfigure(errors="strict")
 
 
 def emit_success(
@@ -59,13 +83,16 @@ def emit_success(
     ``format == "json"`` writes ``payload`` as indented JSON to stdout (plus a
     trailing newline). ``format == "text"`` delegates to ``text_renderer``,
     which is responsible for printing whatever human-readable rendering the
-    command defines; ``text_renderer`` is not part of the JSON contract.
+    command defines; ``text_renderer`` is not part of the JSON contract. A
+    character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
+    aborting the render (:func:`_printable_stdout`).
     """
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
     else:
-        text_renderer(payload)
+        with _printable_stdout():
+            text_renderer(payload)
 
 
 def write_json_file(payload: dict, path: str) -> None:
@@ -136,12 +163,14 @@ def _drift_check_label(entry: dict) -> str:
 
     ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
     that points at one ``attestation.checks[<i>]`` entry with an additive
-    ``check`` object holding that check's identity -- its ``role`` plus
-    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
     ``corner``/``metric`` the check kind carries (see
     ``signoff_attest_drift.check_identity``, which owns both the key set and
-    the order). Rendering it is a plain join of those values in that order, so
-    this module -- a leaf that every ``klt`` verb and two library modules
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
     import -- stays free of a dependency on the signoff stack, and the
     producer stays the single place that decides what identifies a check.
 

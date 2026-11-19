@@ -21,6 +21,7 @@ from .signoff import (
     _classify_failure_reason,
     _read_envelope,
 )
+from .signoff_drc_crosscheck import crosscheck_project
 
 
 def _recognition(root: str, path: str) -> tuple[str | None, str | None]:
@@ -40,7 +41,13 @@ def _recognition(root: str, path: str) -> tuple[str | None, str | None]:
     ``"envelope_version_skew"`` (a response from an older klt -- the remedy is
     to re-run the check, not to cite another file), via the same
     :func:`klayout_tools.signoff._classify_failure_reason`. It is ``None`` for
-    a recognised envelope and for an unreadable one, which stays reasonless."""
+    a recognised envelope and for an unreadable one, which stays reasonless.
+
+    Issue #6809: a cross-check envelope is projected to its single-engine
+    equivalent before classification, exactly as ``--manifest`` grading does
+    (issue #5815), so a whole ``--engine both`` citation is recognised ``drc``
+    here too. Anything the projector refuses stays as-is and fails
+    recognition below, still carrying the appropriate reason."""
     try:
         envelope = _read_envelope(os.path.join(root, path))
     except SignoffError:
@@ -48,6 +55,7 @@ def _recognition(root: str, path: str) -> tuple[str | None, str | None]:
     try:
         if not isinstance(envelope, Mapping):
             raise SignoffError(f"envelope '{path}' is not a JSON object")
+        envelope = crosscheck_project(envelope) or envelope
         return _classify(envelope, path), None
     except SignoffError as exc:
         return None, _classify_failure_reason(exc)

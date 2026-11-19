@@ -86,7 +86,7 @@ standard error envelope. [Geode meshing documentation](https://github.com/rjwalt
 | `terminals[]` | `name` (caller-facing) and the mesh dimension-2 physical group `surface` it binds to. `surface` values go into the geode spec in matrix row/column order; `name` never reaches the engine. |
 | `ground[]` | The 0 V reference conductor(s), same `{name, surface}` shape. At least one is required (geode schema v1 rejects a ground-less spec at load). A conductor is a terminal or ground, never both. |
 | `materials[]` | Optional dielectrics: `{physical_group, eps_r: [re, im]}`; `eps_r` defaults to vacuum `[1, 0]` — omitting `materials` leaves every unlisted region at vacuum. `im` must be 0 and `re` > 0: the electrostatic solve is real and lossless. |
-| `checks[]` | `name`, `output: "c"`, `terminal_pair` (`[a, a]` = self term), `unit` (`F`/`pF`/`fF`, default `fF`), `limits` (`min`/`max`, either optional; none = reported, never fails). |
+| `checks[]` | `name`, `output: "c"`, `terminal_pair` (`[a, a]` = self term), `unit` (`F`/`pF`/`fF`, default `fF`), `limits` (`min`/`max`, either optional; none = reported, never fails). Maxwell off-diagonals are `<= 0` (the mutual capacitance is `-c_farad[i][j]`), so a mutual-coupling check's `limits` must be negative, as in the `c_sig_gnd` example above. |
 | `options.geode_binary` | Binary name/path; see resolution below. |
 | `options.timeout_s` | Wall-clock budget shared by meshing and solving, in seconds (default 1800). |
 | `options.keep_artifacts` | Default `true`. Keep outputs under `output_dir` (default `.klt/em/<request-stem>/` beside the request). Layout runs use a fresh `run-*` directory. With `false`, temporary outputs are removed and a caller-supplied mesh still appears in `artifacts`. |

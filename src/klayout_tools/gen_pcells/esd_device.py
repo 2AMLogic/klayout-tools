@@ -59,6 +59,7 @@ def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) 
         "layer, sized to enclose the finger array (only used when "
         "voltage_flavor_mark_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_mark_present",
@@ -66,6 +67,7 @@ def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) 
         "Whether voltage_flavor_mark_layer is a real layer resolved "
         "for params.voltage_flavor on this PDK family",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_extra_mark_layer",
@@ -73,6 +75,7 @@ def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) 
         "Second voltage_flavor marker layer drawn over the same box "
         "(only used when voltage_flavor_extra_mark_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_extra_mark_present",
@@ -80,6 +83,7 @@ def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) 
         "Whether voltage_flavor_extra_mark_layer is a real layer "
         "resolved for params.voltage_flavor on this PDK family",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_mark_margin_um",
@@ -87,6 +91,7 @@ def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) 
         "Harness-resolved margin the voltage_flavor marker box grows "
         "beyond the finger array's active footprint",
         default=default_margin_um,
+        hidden=True,
     )
 
 
@@ -245,6 +250,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Tap ring drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "esd_mark_layer",
@@ -252,12 +258,14 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ESD device-class marker drawing layer (only used when "
                 "esd_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "esd_mark_present",
                 self.TypeBoolean,
                 "Whether esd_mark_layer is a real layer this PDK family cites",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "salicide_block_layer",
@@ -265,12 +273,14 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Salicide-block drawing layer (only used when "
                 "salicide_block_present and params.salicide_block)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "salicide_block_present",
                 self.TypeBoolean,
                 "Whether salicide_block_layer is a real layer this PDK family cites",
                 default=False,
+                hidden=True,
             )
             _declare_flavor_mark_params(self, kdb, WELL_ENCLOSURE_MARGIN_UM)
             self.param(
@@ -279,6 +289,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether sd_implant_layer is a real layer this PDK family "
                 "needs over the unit device's own active body",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "sd_implant_margin_um",
@@ -287,6 +298,7 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the unit device's own active box (only used when "
                 "sd_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             declare_ring_implant_params(self, kdb)
 

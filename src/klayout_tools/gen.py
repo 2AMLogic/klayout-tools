@@ -124,27 +124,18 @@ from .gen_layer_params import (
 # re-exports (mirrors `gen_compose.py`'s own `_MAX_SAME_BLOCK_CROSS_LAYER_LANES
 # as _MAX_SAME_BLOCK_CROSS_LAYER_LANES`-style re-exports from
 # `gen_compose_routing.py`, issue #1708).
+# The two `_MAX_*` names below are pure re-exports (see the block comment
+# above): `gen_pcells/res_array.py`/`cap_array.py` import them through
+# `klayout_tools.gen` for their generated `res_flavor_<i>_*`/
+# `cap_top_requires_<i>_*` slot loops.
 from .gen_layer_params import (
-    _MAX_CAP_TOP_PLATE_REQUIRES,
-    _MAX_RES_FLAVOR_LAYERS,
-    CAP_BOTTOM_PLATE_MARGIN_UM,
-    CAP_PARALLEL_VIA_EDGE_INSET_UM,
-    CAP_TOP_ESCAPE_CLEARANCE_UM,
-    GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
-    GUARD_RING_DEFAULT_PADDING_UM,
-    GUARD_RING_DEFAULT_WIDTH_UM,
-    SD_PAD_GATE_GAP_MIN_UM,
-    _bond_pad_layer_params,
-    _cap_array_layer_params,
-    _diff_pair_layer_params,
-    _diode_layer_params,
-    _esd_device_layer_params,
-    _mos_array_layer_params,
-    _resistor_layer_params,
-    _resistor_strip_layer_params,
+    _MAX_CAP_TOP_PLATE_REQUIRES as _MAX_CAP_TOP_PLATE_REQUIRES,
 )
 from .gen_layer_params import (
     _MAX_METAL_RES_LEVEL as _MAX_METAL_RES_LEVEL,
+)
+from .gen_layer_params import (
+    _MAX_RES_FLAVOR_LAYERS as _MAX_RES_FLAVOR_LAYERS,
 )
 from .gen_layer_params import (
     _METAL_RES_GEOMETRY_MIN_KEYS as _METAL_RES_GEOMETRY_MIN_KEYS,
@@ -202,6 +193,23 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM as _PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM,
+)
+from .gen_layer_params import (
+    CAP_BOTTOM_PLATE_MARGIN_UM,
+    CAP_PARALLEL_VIA_EDGE_INSET_UM,
+    CAP_TOP_ESCAPE_CLEARANCE_UM,
+    GUARD_RING_DEFAULT_CONTACTS_PER_SIDE,
+    GUARD_RING_DEFAULT_PADDING_UM,
+    GUARD_RING_DEFAULT_WIDTH_UM,
+    SD_PAD_GATE_GAP_MIN_UM,
+    _bond_pad_layer_params,
+    _cap_array_layer_params,
+    _diff_pair_layer_params,
+    _diode_layer_params,
+    _esd_device_layer_params,
+    _mos_array_layer_params,
+    _resistor_layer_params,
+    _resistor_strip_layer_params,
 )
 from .gen_layer_params import (
     CONTACT_GAP_SAFE_UM as CONTACT_GAP_SAFE_UM,
@@ -350,172 +358,6 @@ SCHEMA_VERSION = 1
 
 #: Reference PCell library name; registered lazily once (:func:`_pcell_library`).
 _PCELL_LIBRARY_NAME = "klt_gen_reference"
-
-#: PCell parameters are never sourced from the request -- they carry no
-#: caller-meaningful value (the drawing layer is a generator implementation
-#: detail, not something a request should have to know KLayout's
-#: ``LayerInfo`` shape to set). ``layer`` is ``resistor_strip``'s (phase 1)
-#: single drawing-layer param; the rest are the phase-2 generators' per-role
-#: layer params (see :func:`_device_layer_params` and friends) plus
-#: ``well_present``, the harness-computed flag that tells a generator
-#: whether its ``well_layer`` param is a real, DRC-checked layer for the
-#: resolved PDK family. ``res_array``'s own per-flavour ``res_flavor_<i>_*``
-#: mask slots are appended below :data:`_PDK_RES_FLAVOR_LAYERS`, since how
-#: many of them exist is derived from that table; ``cap_array``'s own
-#: ``cap_top_requires_<i>_*`` slots are appended the same way below
-#: :data:`_PDK_CAP_TOP_PLATE_REQUIRES` (issue #1555).
-_HIDDEN_PARAMS = {
-    "vpp_gds_path",
-    "layer",
-    "active_layer",
-    "poly_layer",
-    "contact_layer",
-    "metal_layer",
-    "tap_layer",
-    "well_layer",
-    "well_present",
-    "metal_label_layer",
-    "metal_label_present",
-    "well_tap_implant_layer",
-    "well_tap_implant_present",
-    "well_margin_resolved_um",
-    "gate_pad_clearance_um",
-    "ring_well_margin_um",
-    "gap_contact_enclosure_um",
-    # `mos_array`/`diff_pair`/`esd_device`'s issue #1577 harness-computed
-    # knobs -- resolved per PDK family exactly like `gate_pad_clearance_um`
-    # above, never part of the request schema.
-    "voltage_flavor_mark_margin_um",
-    "contact_gate_offset_um",
-    "bottom_endcap_um",
-    "top_endcap_um",
-    "sd_implant_layer",
-    "sd_implant_present",
-    "sd_implant_margin_um",
-    "mos_cap_mark_layer",
-    "sd_implant_min_space_um",
-    "npc_layer",
-    "npc_present",
-    "npc_margin_um",
-    "npc_min_space_um",
-    "bjt_mark_layer",
-    "bjt_mark_present",
-    "res_mark_layer",
-    "res_mark_present",
-    "dummy_layer",
-    "dummy_present",
-    "pad_layer",
-    "top_metal_layer",
-    "esd_mark_layer",
-    "esd_mark_present",
-    "salicide_block_layer",
-    "salicide_block_present",
-    "voltage_flavor_mark_layer",
-    "voltage_flavor_mark_present",
-    "voltage_flavor_extra_mark_layer",
-    "voltage_flavor_extra_mark_present",
-    "cap_top_plate_layer",
-    "cap_bottom_plate_layer",
-    "cap_top_via_layer",
-    "cap_top_via_present",
-    "cap_top_via_metal_layer",
-    "cap_top_via_metal_present",
-    # `cap_array`'s per-family geometry floors (see
-    # :data:`_PDK_CAP_GEOMETRY_MIN_UM`) -- harness-computed from the resolved
-    # PDK family exactly like `gate_pad_clearance_um`/
-    # `well_margin_resolved_um` above, never part of the request schema.
-    # `cap_top_via_metal_min_w_um` (issue #1455) was omitted from this set
-    # when it landed, so it leaked into `klt gen --list`'s `cap_array`
-    # params despite being absent from `docs/cli/gen.md`'s own param table;
-    # listing all four together here keeps the mechanism consistent (#1555).
-    "cap_bottom_plate_margin_min_um",
-    "cap_top_via_min_w_um",
-    "cap_top_via_metal_min_w_um",
-    "cap_min_spacing_um",
-    # `cap_array`'s second (capm2/met5) MiM level for `stack: 2` (issue
-    # #3332) -- harness-computed from the resolved PDK family, never part of
-    # the request schema.
-    "cap2_top_plate_layer",
-    "cap2_top_via_layer",
-    "cap2_top_via_metal_layer",
-    "cap2_present",
-    "cap2_via_side_um",
-    "cap2_metal_min_w_um",
-    "cap2_metal_via_enclosure_um",
-    # `guard_ring`/`mos_array`/`diff_pair`/`bjt_array`/`esd_device`'s own
-    # tap/collector-ring implant (issue #1580, follow-up to #1577's
-    # unit-device-only `sd_implant_*` fix) -- harness-computed exactly like
-    # `sd_implant_layer`/`sd_implant_present` above, never part of the
-    # request schema. See :func:`_ring_tap_implant_layer`.
-    "ring_implant_layer",
-    "ring_implant_present",
-    # How far that ring implant extends past the ring's own `Comp` band
-    # (issue #2369) -- the ring-shaped counterpart of `sd_implant_margin_um`
-    # above, harness-computed from the resolved PDK family the same way.
-    # Shared verbatim by `well_island`'s own `well_tap_implant_*` ring
-    # (issue #1421), which draws the same implant over the same `Comp` mask.
-    "ring_implant_margin_um",
-    # `bjt_array`'s per-unit emitter (Pplus) / base-tie (Nplus) implants
-    # (issue #3587) -- harness-computed like `sd_implant_*` above.
-    "unit_emitter_implant_layer",
-    "unit_base_implant_layer",
-    "unit_implant_margin_um",
-    # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
-    # harness-computed from the resolved PDK family/`params.metal_level`
-    # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
-    # :data:`_PDK_METAL_RES_LEVEL_MIN_UM`. `params.metal_level` itself is
-    # *not* hidden -- it is a real, request-facing param, exactly like
-    # `flavor`.
-    "metal_res_via_min_w_um",
-    "metal_res_via_enclosure_min_um",
-    "metal_res_via_space_min_um",
-    # Fixed drawn side of every cut on a fixed-size cut/via layer (issue
-    # #2585) -- harness-computed from the resolved PDK family and the
-    # resolved cut layer by :func:`_cut_fixed_size_um`, exactly like the
-    # per-family floors above, never part of the request schema. `0.0` (every
-    # layer with no upper size bound) leaves the drawn cut unchanged.
-    "contact_fixed_size_um",
-    "cap_top_via_fixed_size_um",
-    # Manufacturing grid (um) the contact layer's curated deck requires cut
-    # vertices on (issue #2648), resolved by `mfg_grid_um`; `0.0` = no snap.
-    "mfg_grid_um",
-    # sky130 precision-poly rectangular end contact (issue #2449), resolved
-    # per (family, flavor) by `_res_end_contact_um`; never request-facing.
-    "end_contact_w_um",
-    "end_contact_h_um",
-    # gf180mcu salicide-block clearance from the end contacts (issue #3000),
-    # resolved per family by `_res_sab_geometry_um`; never request-facing.
-    "res_contact_space_um",
-    # sg13g2 PDK-PCell poly-resistor convention (issue #2679): poly drawn as
-    # the two abutting heads only; resolved per family, never request-facing.
-    "res_poly_heads_only",
-    "nplus_layer",
-    "pplus_layer",
-    "hvi_layer",
-    "diode_mark_layer",
-}
-
-#: ``res_array``'s flavour mask slots are generated from
-#: :data:`_MAX_RES_FLAVOR_LAYERS` (which depends on
-#: :data:`klayout_tools.gen_layer_params._PDK_RES_FLAVOR_LAYERS`), so they
-#: join :data:`_HIDDEN_PARAMS` here rather than being listed literally at its
-#: own definition -- they are harness-computed layer params like every other
-#: name in that set, never part of the request schema.
-_HIDDEN_PARAMS |= {
-    f"res_flavor_{i}_{suffix}"
-    for i in range(_MAX_RES_FLAVOR_LAYERS)
-    for suffix in ("layer", "present", "head_enclosure_um", "side_extension_um")
-}
-
-#: ``cap_array``'s top-plate requires-mask slots are generated from
-#: :data:`_MAX_CAP_TOP_PLATE_REQUIRES` (see
-#: :data:`klayout_tools.gen_layer_params._PDK_CAP_TOP_PLATE_REQUIRES`), so --
-#: like ``res_flavor_<i>_*`` -- they join :data:`_HIDDEN_PARAMS` here.
-_HIDDEN_PARAMS |= {
-    f"cap_top_requires_{i}_{suffix}"
-    for i in range(_MAX_CAP_TOP_PLATE_REQUIRES)
-    for suffix in ("layer", "present")
-}
 
 #: PDK-generic contact/via cut **budget** (um) used by every phase-2
 #: generator: the side every contact region, landing pad, ring band and port
@@ -3558,8 +3400,9 @@ def list_generators() -> dict[str, Any]:
         }
 
     ``params`` documents every request-adjustable ``params`` field the
-    generator's PCell declares (hidden, implementation-only parameters such
-    as the drawing layer are omitted -- see ``_HIDDEN_PARAMS``).
+    generator's PCell declares -- declarations marked ``hidden=True``
+    (implementation-only plumbing such as the drawing layer, set by the
+    harness at variant time and never sourced from a request) are omitted.
     """
     pcell_classes = _build_pcell_classes()
 
@@ -3575,7 +3418,7 @@ def list_generators() -> dict[str, Any]:
                 "description": p.description,
             }
             for p in decl.get_parameters()
-            if p.name not in _HIDDEN_PARAMS
+            if not p.hidden
         ]
         generators.append(
             {"name": spec.name, "summary": spec.summary, "params": params}
@@ -3799,15 +3642,12 @@ def _resolve_params(
     """Merge and validate ``raw_params`` against the generator's PCell defaults.
 
     Every declared, non-hidden parameter ends up in the result: the request's
-    value when given (type-checked against the PCell's declared type), the
-    PCell's own default otherwise. Raises :class:`GenError` for an unknown
-    parameter name or a value that doesn't match the declared type.
+    type-checked value, or the PCell default otherwise; raises
+    :class:`GenError` for an unknown name or mismatched type.
     """
     pcell_classes = _build_pcell_classes()
     decl = pcell_classes[spec.name]()
-    declared = {
-        p.name: p for p in decl.get_parameters() if p.name not in _HIDDEN_PARAMS
-    }
+    declared = {p.name: p for p in decl.get_parameters() if not p.hidden}
 
     unknown = sorted(set(raw_params) - set(declared))
     if unknown:
@@ -3825,9 +3665,10 @@ def _resolve_params(
         _esd_device_resolve_total_width(raw_params, resolved)
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
-    spec.validate(resolved)
     if spec.name == "diode":
+        # Before spec.validate: report the family's flavours, not the union (#6630).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
+    spec.validate(resolved)
     return resolved
 
 

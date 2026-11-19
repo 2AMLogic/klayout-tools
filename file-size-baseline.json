@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1021
+      "lines": 1004
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1651
+      "lines": 1627
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9834
+      "lines": 9833
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -569,11 +569,11 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7234
+      "lines": 7136
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1141
+      "lines": 1137
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
