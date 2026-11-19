@@ -3825,9 +3825,13 @@ def _resolve_params(
         _esd_device_resolve_total_width(raw_params, resolved)
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
-    spec.validate(resolved)
     if spec.name == "diode":
+        # Before spec.validate so an unknown voltage_class is reported against
+        # the selected family's flavours, not the union of every family's
+        # (spec.validate's generic check stays as the backstop for families
+        # with no diode support).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
+    spec.validate(resolved)
     return resolved
 
 
