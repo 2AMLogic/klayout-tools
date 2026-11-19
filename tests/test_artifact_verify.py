@@ -37,7 +37,7 @@ import pytest
 from klayout_tools import artifact_objects as store
 from klayout_tools import artifact_verify
 from klayout_tools.cli import main
-from klayout_tools.mcp_tools import DOCS_BASE_URL
+from klayout_tools.mcp_doc_links import DOCS_BASE_URL
 
 REPO = "acme/widgets"
 SECRET = "X-Amz-Signature=fake0secret0signature0do0not0print"

@@ -848,6 +848,7 @@
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.asap7_bsimcmg",
+        "klayout_tools.device_multiplier_lint",
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",

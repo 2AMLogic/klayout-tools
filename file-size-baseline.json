@@ -440,10 +440,6 @@
       "lines": 667
     },
     {
-      "path": "src/klayout_tools/mcp_tools.py",
-      "lines": 504
-    },
-    {
       "path": "src/klayout_tools/metrics.py",
       "lines": 521
     },
@@ -585,7 +581,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12337
+      "lines": 12335
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
