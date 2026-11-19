@@ -345,8 +345,8 @@ pin authored under #4893 (the report's byte hash) therefore grades
 report's `provenance.input.content_hash`. In exchange, a pin now detects an
 RTL edit the moment the report is re-run, a command-backed pinned citation
 grades instead of rendering `unverifiable_provenance`, and the report joins
-the provenance-consistency cross-check against `synthesize`/`equiv` citations
-over the same sources.
+the provenance-consistency cross-check against `synthesize` citations over the
+same sources.
 
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
@@ -423,20 +423,41 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt synthesize`/`klt equiv` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 **Verilog-top functional-verification citations (issue #6488).** On the
 `testbench.verilog_top` path the Verilog bench is itself a `request.sources`
 entry, so the report's `input.content_hash` digests the bench together with
-the DUT sources — it can never agree with a `klt synthesize`/`klt equiv`
-citation over the DUT alone, and bundling both in one `klt signoff` run
-renders `provenance_consistency.ok: false` and `status: "refused"` for the
-whole run. That disagreement is structural, not a staleness signal: no re-run
-or re-pin makes the bundle grade. Cite the cocotb-path functional-verification
-report instead (its digest covers the DUT sources only), or keep the
-Verilog-top citation out of any bundle that also cites a `source`-role
-`synthesize`/`equiv` report.
+the DUT sources — it can never agree with a `klt synthesize` citation over the
+DUT alone, and bundling both in one `klt signoff` run renders
+`provenance_consistency.ok: false` and `status: "refused"` for the whole run.
+That disagreement is structural, not a staleness signal: no re-run or re-pin
+makes the bundle grade. Cite the cocotb-path functional-verification report
+instead (its digest covers the DUT sources only), or keep the Verilog-top
+citation out of any bundle that also cites a `source`-role `synthesize`
+report.
+
+**Layout-free `klt lef-abstract` citations (issue #6671).** With
+`--no-layout` there is no layout to pin, so the report's `input.content_hash`
+digests the socket descriptor under role `source` — the same comparison bucket
+as the RTL digest of a `klt synthesize` or provenance-bearing
+`klt functional-verification` report, but a different file. Even fresh reports
+for the same design therefore disagree, and bundling a layout-free
+`lef-abstract` report with either renders `provenance_consistency.ok: false`
+and `status: "refused"` for the whole run. As with the Verilog-top case that is
+structural, not a staleness signal: no re-run or re-pin makes the bundle grade.
+Cite the layout-free `lef-abstract` report and the RTL-digest reports in
+separate `klt signoff` bundles. A layout-bearing `lef-abstract` report pins its
+layout under role `layout` and is compared only against other `layout`-role
+checks.
+
+**`klt equiv` is not a signoff evidence kind.** It records the same
+role-`source` RTL digest as `klt synthesize`, but `klt signoff` has no `equiv`
+recognizer: an `equiv` report is rejected as an unrecognized envelope
+(envelope-aggregation mode exits `1`; `--manifest` grading renders the citing
+item `"unmet"` with `reason: "unrecognized_envelope"`) before any hash
+comparison, so it never joins this cross-check.
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
 envelope — which carries no `provenance` block at all as of its current
