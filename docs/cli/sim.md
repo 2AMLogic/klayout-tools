@@ -4645,8 +4645,11 @@ and for any value other than `"error"`/`"null"`. It is not applied to
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
-A `measurements[]` entry declares **exactly one** of two forms (plus the
-`crossings` and `noise` forms, documented in their own sections below):
+A `measurements[]` entry declares **exactly one** measurement form. `spice` and
+`expr` are described here; every other form is documented in its own section
+below; a section that says its form is refused beside every other measurement
+form means exactly that (the form registry is `sim_forms.FORMS`, the single
+source of the membership):
 
 | Form    | What it is                                                          | Where it lands in the deck                    |
 | ------- | ------------------------------------------------------------------- | --------------------------------------------- |
@@ -5720,8 +5723,9 @@ recovered from it. `transfer` grades one stability metric of the complex ratio
 }
 ```
 
-- `transfer` is a fifth measurement form, mutually exclusive with `spice`,
-  `expr`, `crossings` and `cycle_mean`. It has exactly `num`, `den`, `metric`.
+- `transfer` is a measurement form refused beside every other measurement form
+  (an entry declares exactly one form; see "Measurements that are not `.meas`
+  cards"). It has exactly `num`, `den`, `metric`.
 - `num` / `den` are single-ended `v(node)` selectors: one non-empty node token
   with no whitespace, control character, comma or parenthesis. Matching is
   case-insensitive. Arbitrary expressions and differential selectors are not
@@ -5848,8 +5852,7 @@ measurement, with no out-of-tool waveform post-processing:
 - **Form.** `snm` is an object `{x, y1, y2}` of single-ended `v(node)` selectors
   (one node token, no whitespace, comma or parenthesis; case-insensitive).
   Unknown keys and non-string selectors are refused up front (exit 1), as is
-  declaring `snm` beside any other value form (`spice`, `expr`, `crossings`,
-  `cycle_mean`, `energy`, `noise`, `transfer`, `tian`) on the same entry.
+  declaring `snm` beside any other measurement form on the same entry.
   Measurement names must be unique. `engine: "xyce"` is refused.
 - **Analysis.** Requires `analysis.kind: "dc"`; the sweep axis is `x`. Any other
   kind is refused up front.
@@ -6334,9 +6337,9 @@ request:
 }
 ```
 
-- `tian` is a further measurement form: an entry declares **exactly one** of
-  `spice`, `expr`, `crossings`, `cycle_mean`, `energy`, `noise`, `transfer` or
-  `tian`. It requires `analysis.passes`; `voltage_pass` / `current_pass` must
+- `tian` is a measurement form refused beside every other measurement form (an
+  entry declares **exactly one** form; see "Measurements that are not `.meas`
+  cards"). It requires `analysis.passes`; `voltage_pass` / `current_pass` must
   name entries of it (case-insensitive). Unknown keys, a malformed selector or
   an unknown `metric` are refused up front (exit 1). Measurement names must be
   unique. The pre-existing refusal of `measurements[]` beside `passes` still

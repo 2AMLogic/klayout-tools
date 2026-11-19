@@ -57,6 +57,7 @@ def _build_resistor_strip_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]
                 self.TypeLayer,
                 "Drawing layer for the unit resistors",
                 default=kdb.LayerInfo(67, 20),
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:

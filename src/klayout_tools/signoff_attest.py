@@ -84,7 +84,7 @@ from .signoff import (
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_glob import expand_entry
-from .signoff_attest_input import input_binding
+from .signoff_attest_input import attestation_block, input_binding
 from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
@@ -1031,14 +1031,13 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
             "klt_version": build_version(),
             "klayout_version": klayout_version(),

@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4530
+      "lines": 4403
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1021
+      "lines": 1004
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9834
+      "lines": 9833
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1141
+      "lines": 1137
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
