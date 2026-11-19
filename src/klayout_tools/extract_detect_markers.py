@@ -9,11 +9,12 @@ out-parameter; none changes a net, a device, a bound model or a rule
 threshold. They are the layout-geometry counterpart of
 `extract_detect_block.py`.
 
-``_bbox_um_rounded`` and ``_resolve_mos_capacitors`` still live in
-`extract.py` and are imported inside the function bodies that call them:
-`extract.py` imports this module at its top level, so a module-level
-``from .extract import ...`` would be a circular import (the idiom
-`extract_detect_block.py` documents).
+``_bbox_um_rounded`` still lives in `extract.py` and is imported inside the
+function bodies that call it: `extract.py` imports this module at its top
+level, so a module-level ``from .extract import ...`` would be a circular
+import (the idiom `extract_detect_block.py` documents).
+``_resolve_mos_capacitors`` lives in `extract_mos_capacitor.py` (issue #5893)
+and is a plain module-level import.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import region as _region
 from .decks import ExtractionDeck
 from .extract_flavour import _flavour_split_island
+from .extract_mos_capacitor import _resolve_mos_capacitors
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -269,17 +271,42 @@ def _flavour_recognised_islands(
         return recognised
     active = _region(layout, top_cell, deck.active)
     poly = _region(layout, top_cell, deck.poly)
-    nwell = _region(layout, top_cell, deck.nwell)
+    # Merged once and shared by every flavour (issue #5893): re-merging
+    # `active` per flavour was ~26 of 37 wall minutes on a 166 KB ttgf0p2
+    # block. `all_gates` is the gate area, built once: its merged components
+    # are per-island, so those interacting with an island are exactly that
+    # island's `island & poly`, without a whole-chip boolean per island.
+    nwell = _region(layout, top_cell, deck.nwell).merged()
+    merged_islands = active.merged()
+    all_gates = merged_islands & poly.merged()
     for flavour in flavours:
-        marker_region = _region(layout, top_cell, flavour.marker)
-        and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
-        not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
-        for component in active.merged().each():
+        # Merged once per flavour: every consumer below is coverage-based.
+        marker_region = _region(layout, top_cell, flavour.marker).merged()
+        # A flavour whose marker carries no shapes claims nothing (both claim
+        # tests need an interaction with `marker_region`): skip it outright.
+        if marker_region.is_empty():
+            continue
+        and_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.and_markers
+        ]
+        not_regions = [
+            _region(layout, top_cell, m).merged() for m in flavour.not_markers
+        ]
+        # A gate lies inside its island, so only islands interacting with
+        # `marker_region` can yield a claimed part; on a digital block the
+        # LDMOS/MVSD/MVPSD markers are near-empty and nearly all drop out.
+        for component in merged_islands.interacting(marker_region).each():
             island = kdb.Region(component)
-            if (island & poly).is_empty():
+            if all_gates.interacting(island).is_empty():
                 continue
             claimed_part, _ = _flavour_split_island(
-                island, poly, flavour, marker_region, and_regions, not_regions, nwell
+                island,
+                all_gates,
+                flavour,
+                marker_region,
+                and_regions,
+                not_regions,
+                nwell,
             )
             recognised += claimed_part
     return recognised
@@ -311,7 +338,7 @@ def _detect_unsupported_devices(
     """
     import klayout.db as kdb
 
-    from .extract import _bbox_um_rounded, _resolve_mos_capacitors
+    from .extract import _bbox_um_rounded
 
     warnings: list[str] = []
     entries: list[dict[str, Any]] = []

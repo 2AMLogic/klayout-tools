@@ -109,3 +109,19 @@ def test_parasitics_stages_recorded_when_no_geometry_is_ground_eligible(tmp_path
     path = _write_gds(layout, tmp_path / "empty.gds")
     timing = run_extract(path, "sky130", parasitics=True)["timing"]
     assert "parasitics_inject" in timing["stages"]
+
+
+def test_unsupported_and_unmodeled_diagnostics_have_their_own_stages(tmp_path):
+    # Issue #5893: both diagnostics re-read whole-chip marker layers and
+    # (for the unsupported-device one) re-run MOS-capacitor recognition, so
+    # an unstaged run attributed them to `unattributed_seconds` -- ~70% of
+    # wall time on a routed gf180mcu block. They must be attributed, the
+    # same contract #3408 set for the normalized hash.
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    result = run_extract(path, "sky130")
+    assert {
+        "unsupported_device_diagnostic",
+        "unmodeled_marker_diagnostic",
+    } <= set(result["timing"]["stages"])
+    assert result["timing"]["stages"]["unsupported_device_diagnostic"] >= 0
+    assert result["timing"]["stages"]["unmodeled_marker_diagnostic"] >= 0
