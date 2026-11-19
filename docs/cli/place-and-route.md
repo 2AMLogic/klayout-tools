@@ -714,16 +714,22 @@ the same two x positions on every instance of a column look more like geometry
 repeated per instance than independent per-route line-end choices. Neither
 explanation is traced.
 
-To attribute markers on your own block, re-run the same request with `power`
-omitted (no PDN is built) and compare: markers that persist sit on router
-metal, markers that vanish sit on `pdngen` geometry. If they persist, there is
-no in-request control that moves them (above); open an issue that references
-#6596 with the request and routed DEF so the source can be traced.
+To narrow the search, re-run the same request with `power` omitted. A marker
+that persists shows the violation can occur without the generated PDN. A marker
+can disappear because removing the PDN changes the routing obstructions and a
+signal wire takes a different path.
 
-These markers carry no `source_cell` / `source_path` (both `null`), so they
-cannot be traced to a net or router shape: they sit on top-level router
-geometry, which has no containing instance to attribute (`drc.md`). Rule
-definitions are in [`drc.md`](drc.md).
+To identify the source, overlay each marker on the M4 geometry in the **same
+failing run's routed DEF**. Check signal wires in `NETS` and PDN straps in
+`SPECIALNETS`, including the M4 shapes of vias in both sections. If the
+geometry at the marker leaves the source ambiguous, leave it unattributed.
+Include the request and that routed DEF in an issue referencing #6596.
+
+For these top-cell markers, `null` values for `source_cell` and `source_path`
+mean that no single placed instance fully contains the marker's bounding box.
+This can happen on top-level geometry or where the box crosses an instance
+boundary. Either signal or PDN geometry can yield those values. See the
+[DRC guide](drc.md) for rule definitions and instance attribution.
 
 ## PDK / LEF / liberty resolution
 
