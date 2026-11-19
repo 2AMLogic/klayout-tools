@@ -330,12 +330,18 @@ def device_multiplier_environment(
     lint's findings for this run's netlist -- warning-only, never a failing
     exit.
 
-    Instance cards of the netlist are checked against the device
-    subcircuit texts of the scanned ``.include`` closure (the same shared
-    ``sim_staging`` resolver every other disclosure here uses), so a net
-    carrying ``mult=6`` and no ``m=`` against a subcircuit that declares
-    ``mult`` but never forwards it is named instead of silently simulating
-    1x. Additive/optional: ``{}`` -- the key absent -- when there is
+    Instance cards are read from the netlist **and every file of the
+    scanned ``.include`` closure** (issue #6684), so a DUT split into an
+    included file is linted too; they are checked against the device
+    subcircuit texts of the same closure (the same shared ``sim_staging``
+    resolver every other disclosure here uses), so a net carrying
+    ``mult=6`` and no ``m=`` against a subcircuit that declares ``mult``
+    but never forwards it is named instead of silently simulating 1x. A
+    finding from a closure file carries that file's repo-relative label as
+    ``file``; a top-level finding keeps the pre-#6684 shape, and the
+    ``note``/``unevaluated`` disclosures cover the netlist's own cards
+    only (a PDK library's parametric internals must not add noise).
+    Additive/optional: ``{}`` -- the key absent -- when there is
     nothing to say (no checkable instance, or every checked pair agrees).
     A closure that cannot be resolved or read is disclosed through the
     lint's ``note`` (instances whose subcircuit text is missing) and
@@ -367,6 +373,12 @@ def device_multiplier_environment(
         closure_paths = []
         not_scanned = [{"target": "<include closure>", "reason": "unresolved"}]
     closure_texts: list[str] = [netlist_text]
+    # Instance-card sources: the netlist first (label None = top level),
+    # then each closure file that is not the netlist itself -- the staged
+    # closure always lists the netlist first, and an include can name a
+    # file already scanned, so each file feeds the card list once.
+    card_texts: list[tuple[str, str | None]] = [(netlist_text, None)]
+    scanned_sources = {os.path.realpath(netlist_path)}
     for path in closure_paths:
         # Labels follow the scanned-closure convention (issue #2928):
         # repo-relative, never an absolute external path.
@@ -376,10 +388,21 @@ def device_multiplier_environment(
         )
         try:
             with open(path, encoding="utf-8") as handle:
-                closure_texts.append(handle.read())
+                text = handle.read()
         except (OSError, UnicodeDecodeError):
             not_scanned.append({"target": label, "reason": "unreadable"})
-    cards = device_multiplier_lint.instance_cards(netlist_text)
+            continue
+        closure_texts.append(text)
+        real = os.path.realpath(path)
+        if real in scanned_sources:
+            continue
+        scanned_sources.add(real)
+        card_texts.append((text, label))
+    cards = [
+        (card, label)
+        for text, label in card_texts
+        for card in device_multiplier_lint.instance_cards(text)
+    ]
     subckts = device_multiplier_lint.collect_subckts(closure_texts)
     report = device_multiplier_lint.instance_report(cards, subckts)
     has_content = (

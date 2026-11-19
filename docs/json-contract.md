@@ -194,11 +194,19 @@ the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 #5779): the device-multiplier lint's findings for instances whose vendor
 `mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
 that declares `mult` but never forwards it to drive — a new finding class,
-warning-only. `findings` carry the instance, target subcircuit, both raw
-values and a note; a `note` (never an error) discloses instances whose
-subcircuit text is absent from the scanned include closure, `unevaluated`
-lists non-numeric `m=`/`mult=` values that cannot be compared, and
-`not_scanned` discloses closure parts that could not be read. The field is
+warning-only. Issue #6684 extends the scan from the netlist's own cards to
+every file of the scanned `.include` closure, so a DUT split into an
+included file is linted too; a finding for a closure-file card carries the
+additive `file` field (the repo-relative scanned-closure label), while a
+finding for the netlist's own card keeps the exact #5779 shape. `findings`
+carry the instance, target subcircuit, both raw
+values and a note; a `note` (never an error) discloses the netlist's own
+instances whose subcircuit text is absent from the scanned include
+closure, `unevaluated` lists the netlist's own non-numeric
+`m=`/`mult=` values that cannot be compared, and
+`not_scanned` discloses closure parts that could not be read — the
+`note`/`unevaluated` disclosures are scoped to the netlist's cards so an
+included library's parametric internals cannot add noise. The field is
 absent when there is nothing to disclose, the exit code and every existing
 field are unchanged, and the note recommends retaining both forms because
 some models use `mult` to scale Monte Carlo mismatch. No

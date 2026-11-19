@@ -9,8 +9,9 @@ The lint checks the pair on declaring, non-forwarding subcircuits and
 recommends keeping both forms equal.
 
 Pure text-in/findings-out: :func:`lint_instances` takes folded instance
-cards plus ``{name: subckt text}`` and returns findings; no I/O of its
-own (``sim_environment_report.device_multiplier_environment`` does the
+cards (bare, or tagged with their closure-file label -- issue #6684) plus
+``{name: subckt text}`` and returns findings; no I/O of its own
+(:func:`sim_environment_report.device_multiplier_environment` does the
 reading and reuses the shared ``sim_staging`` include-closure resolver).
 Detection is text-driven -- no hard-coded PDK subckt-name list.
 """
@@ -40,6 +41,17 @@ _MULT_REF_RE = re.compile(r"\bmult\b", re.IGNORECASE)
 #: Instances listed by name in the unverifiable note before it falls back
 #: to a count.
 _MAX_LISTED = 5
+
+#: An instance card optionally paired with the repo-relative label of the
+#: closure file it was read from (issue #6684): ``(card, label)``. A bare
+#: ``str`` card -- or a ``None`` label -- is a card of the top-level
+#: netlist, whose findings keep the pre-#6684 shape (no ``file`` key) and
+#: whose uncheckable pairs keep their ``note``/``unevaluated``
+#: disclosures; those disclosures are deliberately scoped to the netlist
+#: the caller wrote, so a library file's parametric internals (an
+#: ``X… mult={mult}`` wrapper inside a PDK ``.subckt`` body) cannot add
+#: noise to a run that merely includes it.
+SourcedCard = tuple[str, "str | None"]
 
 
 def instance_cards(text: str) -> list[str]:
@@ -81,22 +93,27 @@ def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
 
 
 def lint_instances(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
 ) -> list[dict[str, Any]]:
     """Findings for instance cards of subcircuits that declare ``mult``
     but never forward it to drive (the acceptance-criteria pure function:
-    cards in, findings out, no I/O)."""
+    cards in, findings out, no I/O). Cards may be bare strings (the
+    top-level netlist's) or ``(card, file_label)`` pairs from the scanned
+    include closure (issue #6684); a closure card's finding carries the
+    additive ``file`` field."""
     return _lint(instance_cards, subckts)[0]
 
 
 def instance_report(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
 ) -> dict[str, Any]:
     """:func:`lint_instances` findings plus the non-finding disclosures:
     a ``note`` when instances could not be checked (their subcircuit text
     is absent from the scanned closure) and ``unevaluated`` entries when a
-    ``m=``/``mult=`` value is not a plain number. ``findings`` is always
-    present."""
+    ``m=``/``mult=`` value is not a plain number. Both disclosures cover
+    the top-level netlist's own cards only (issue #6684): closure-file
+    cards yield findings, not library-internal chatter. ``findings`` is
+    always present."""
     findings, unverified, unevaluated = _lint(instance_cards, subckts)
     report: dict[str, Any] = {"findings": findings}
     if unverified:
@@ -115,19 +132,21 @@ def instance_report(
 
 
 def _lint(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
     """``(findings, unverified, unevaluated)`` behind both public entries."""
     findings: list[dict[str, Any]] = []
     unverified: list[dict[str, str]] = []
     unevaluated: list[dict[str, str]] = []
-    for card in instance_cards:
-        _lint_card(card, subckts, findings, unverified, unevaluated)
+    for entry in instance_cards:
+        card, source = entry if isinstance(entry, tuple) else (entry, None)
+        _lint_card(card, source, subckts, findings, unverified, unevaluated)
     return findings, unverified, unevaluated
 
 
 def _lint_card(
     card: str,
+    source: str | None,
     subckts: dict[str, str],
     findings: list[dict[str, Any]],
     unverified: list[dict[str, str]],
@@ -136,7 +155,10 @@ def _lint_card(
     """Fold one card's decision into the shared result lists: skip
     non-instance and parameterless cards, note a checkable instance whose
     subcircuit text is missing from the closure, else run the rule table
-    (only for a subcircuit that declares ``mult`` and never forwards it)."""
+    (only for a subcircuit that declares ``mult`` and never forwards it).
+    ``source`` is the card's closure-file label (``None`` for the
+    top-level netlist): it reaches the finding as ``file``, and only a
+    top-level card can land in ``unverified``."""
     tokens = split_spice_tokens(card)
     if not tokens or tokens[0][0].lower() != "x":
         return
@@ -145,13 +167,13 @@ def _lint_card(
         return
     subckt_text = subckts.get((target or "").lower())
     if subckt_text is None:
-        if _pair_could_yield_finding(params):
+        if source is None and _pair_could_yield_finding(params):
             unverified.append({"instance": tokens[0], "subckt": target or ""})
         return
     header, _, body = subckt_text.partition("\n")
     if not _header_declares_mult(header) or _body_forwards_mult(body):
         return
-    _compare_pair(tokens[0], target or "", params, findings, unevaluated)
+    _compare_pair(tokens[0], target or "", params, findings, unevaluated, source)
 
 
 def _pair_could_yield_finding(params: dict[str, str]) -> bool:
@@ -182,17 +204,21 @@ def _compare_pair(
     params: dict[str, str],
     findings: list[dict[str, Any]],
     unevaluated: list[dict[str, str]],
+    source: str | None = None,
 ) -> None:
     """The rule table for one instance of a subcircuit that declares
     ``mult`` but never forwards it to drive: disclose unevaluated values,
-    then flag a pair that disagrees."""
+    then flag a pair that disagrees. ``unevaluated`` is a top-level-only
+    disclosure (``source is None``); findings fire for closure cards too,
+    tagged with ``source`` as their ``file``."""
     m_raw = params.get("m")
     mult_raw = params.get("mult")
     m_value = _param_number(m_raw)
     mult_value = _param_number(mult_raw)
-    for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
-        if raw is not None and value is None:
-            unevaluated.append({"instance": instance, "param": name, "value": raw})
+    if source is None:
+        for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
+            if raw is not None and value is None:
+                unevaluated.append({"instance": instance, "param": name, "value": raw})
     comparable = (m_raw is None or m_value is not None) and (
         mult_raw is None or mult_value is not None
     )
@@ -209,6 +235,7 @@ def _compare_pair(
                     mult=mult_raw,
                     m_value=None,
                     mult_value=mult_value,
+                    file=source,
                 )
             )
         return
@@ -223,6 +250,7 @@ def _compare_pair(
                 mult=mult_raw,
                 m_value=m_value,
                 mult_value=effective,
+                file=source,
             )
         )
 
@@ -236,9 +264,13 @@ def _finding(
     mult: str | None,
     m_value: float | None,
     mult_value: float | None,
+    file: str | None = None,
 ) -> dict[str, Any]:
     """One finding: the instance echo plus note text that names both
-    forms' roles (never suggesting either is removable)."""
+    forms' roles (never suggesting either is removable). ``file`` -- the
+    scanned-closure label of the file the card came from -- is present
+    only on a closure-file finding (issue #6684); a top-level netlist
+    finding keeps the exact pre-#6684 shape."""
     m_text = _number_text(m, m_value)
     mult_text = _number_text(mult, mult_value)
     if kind == DRIVE_1X:
@@ -256,7 +288,7 @@ def _finding(
         f"{drive} Depending on the model, mult can also scale Monte Carlo mismatch. "
         "Keep m=N and mult=N for an N-times device."
     )
-    return {
+    finding: dict[str, Any] = {
         "instance": instance,
         "subckt": subckt,
         "kind": kind,
@@ -264,6 +296,9 @@ def _finding(
         "mult": mult,
         "note": note,
     }
+    if file is not None:
+        finding["file"] = file
+    return finding
 
 
 def _number_text(raw: str | None, value: float | None) -> str:
