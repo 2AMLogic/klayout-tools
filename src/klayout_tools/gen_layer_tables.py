@@ -534,11 +534,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # library uses for its ESD clamps". Reusing it here gives a
         # grounded-gate ESD MOSFET the same voltage-domain marking its
         # diode-clamp counterparts already carry, distinguishing it from an
-        # ordinary core `mos_array` unit -- no curated *DRC* rule currently
-        # checks `Dualgate` in this deck (`dualgate.drc` is cited but not
-        # transcribed, see the module docstring), so drawing it never affects
-        # `klt drc --deck gf180mcu` status.
+        # ordinary core `mos_array` unit. `diode` (issue #6614) draws it as the
+        # 6V flavour's required `Dualgate`; the deck checks only its width and
+        # spacing (`dualgate.width.1`/`dualgate.space.1`).
         "esd_mark": (55, 0),  # Dualgate
+        "diode_mark": (115, 5),  # diode_mk -- DiodeDevice.marker in decks/gf180mcu.py
         # Salicide-block role, shared with `_PDK_RES_FLAVOR_LAYERS`'s own
         # gf180mcu `"generic"` mask set -- the *same* SAB (49/0) layer, not a
         # second private one: SAB is documented above as a general
