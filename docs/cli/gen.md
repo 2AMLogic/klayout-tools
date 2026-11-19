@@ -702,7 +702,7 @@ reports `fingers` transistors between the same two S/D nets on one gate net,
 which `klt lvs`'s
 [`options.combine_devices`](lvs.md) folds into that single device). Every
 rail, stub, and clearance uses the same `0.42` µm width / `0.4` µm spacing
-budget the S/D pads use, so the strapping is DRC-clean on both curated decks;
+budget the S/D pads use, so the strapping is DRC-clean on all curated decks;
 the column pitch is unchanged and only the unit's height grows. The gate comb
 crosses *under* the drain rail on `poly` — no contact, so no connection —
 which is how a single-routing-metal generator gets both rails and a gate
@@ -2991,8 +2991,8 @@ $ klt gen resistor_strip --params '{"num": 3, "length_um": 1.5}' \
 $ klt gen mos_array --pdk sky130A -o output/mos_array.gds --format json
 $ klt drc output/mos_array.gds --deck sky130
 
-# The same defaults on gf180mcu -- every phase-2 generator's documented
-# defaults pass klt drc clean on both curated decks:
+# Generate the same MOS array with default parameters on gf180mcu and check
+# it with the gf180mcu deck:
 $ klt gen mos_array --pdk gf180mcuC -o output/mos_array_gf180.gds
 $ klt drc output/mos_array_gf180.gds --deck gf180mcu
 
