@@ -15,6 +15,7 @@ from typing import Any
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
 from .. import signoff_cmd
+from .._doc_paths import RawDescriptionDocHelpFormatter
 from ..color import add_color_args
 
 
@@ -29,7 +30,7 @@ def add_signoff_parser(
     """
     signoff_parser = subparsers.add_parser(
         "signoff",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=RawDescriptionDocHelpFormatter,
         epilog=(
             "Opt-in evidence kinds (non-native envelopes) and the T1 "
             "checklist items each may satisfy; any other item rejects them "
@@ -205,9 +206,9 @@ def add_signoff_parser(
         "--inventory",
         metavar="FILE",
         help=(
-            "with --attest: the versioned attestation inventory (kind "
-            "'t1-attestation-inventory') in a git repo; the envelope pins its "
-            "sha256. Optional for --attest 2: declared layout 'checks'."
+            "with --attest: the versioned attestation inventory (kind 't1-attestation-"
+            "inventory') in a git repo; the envelope pins its sha256. Item 9 may "
+            "declare 'depends_on' paths; --attest 2 may declare layout 'checks'."
         ),
     )
     add_skip_local_only_argument(signoff_parser)
