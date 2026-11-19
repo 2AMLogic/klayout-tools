@@ -784,6 +784,7 @@
         "klayout_tools.cli.signoff_repin_cmd",
         "klayout_tools.cli.signoff_tier_text",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_artifact",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
         "klayout_tools.signoff_attest_build",
@@ -1664,6 +1665,11 @@
       "consumer": "shared-core",
       "exporter": "sim",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "artifact",
+      "reason": "Signoff resolves manifest-backed citations using the artifact broker and its verified fetch API (issue #5882)."
     },
     {
       "consumer": "signoff",
