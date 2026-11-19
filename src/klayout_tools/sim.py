@@ -2976,7 +2976,6 @@ def _prepare_sim_request(
     max_units_per_job: int | None,
     max_concurrent_jobs: int | None,
     capacity_wait_s: float | None,
-    dry_run: bool,
     pdk_root: str | None = None,
     capacity_retries: int | None = None,
     timeout_s: float | None = None,
@@ -3687,7 +3686,6 @@ def _run_sim_corners(
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
         capacity_retries=capacity_retries,
-        dry_run=dry_run,
         pdk_root=pdk_root,
         timeout_s=timeout_s,
     )

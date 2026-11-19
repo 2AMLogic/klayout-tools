@@ -6566,7 +6566,6 @@ def _connect_mos_capacitors(
 def _mos_capacitor_entry_index(
     island: kdb.Region,
     deck: ExtractionDeck,
-    poly: kdb.Region,
     nwell: kdb.Region,
     region_of: Callable[[tuple[int, int]], kdb.Region],
 ) -> int | None:
@@ -6640,7 +6639,7 @@ def _resolve_mos_capacitors(
     for component in active.merged().each():
         island = kdb.Region(component)
         chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+            _mos_capacitor_entry_index(island, deck, nwell, region_of)
             if not (island & poly).is_empty()
             else None
         )
