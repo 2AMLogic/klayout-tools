@@ -297,7 +297,7 @@
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
-      "lines": 2134
+      "lines": 1957
     },
     {
       "path": "src/klayout_tools/extract_batch.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6360
+      "lines": 6257
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",

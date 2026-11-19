@@ -20,6 +20,7 @@ from .lvs_combine import (
     _unmatched_combine_devices_per_circuit_warnings,
 )
 from .lvs_finfet_flatten import flatten_layout_netlist
+from .lvs_layout_short_nets import apply_layout_short_nets
 from .lvs_mos_options import split_layout_mos_flavours
 from .lvs_supply import supply_fragmentation_findings
 
@@ -46,6 +47,7 @@ class _LayoutStage(NamedTuple):
     combine_per_circuit_warnings: list[dict[str, Any]]
     layout_circuit_names: set[str]
     finfet_bulk_records: Any
+    layout_short_nets_warnings: list[dict[str, Any]]
 
 
 def _resolve_layout_stage(
@@ -97,6 +99,19 @@ def _resolve_layout_stage(
     )
 
     split_layout_mos_flavours(layout_netlist, opts.compare_mos_flavour)
+
+    # Issue #5632: `hints.layout_short_nets` joins named layout nets on the
+    # selected top circuit before anything below can consume the joined
+    # result -- before the per-circuit and whole-netlist `combine_devices`
+    # steps, before `flatten_layout` (which merges sub-cell nets by
+    # connectivity, so a tie made here survives it -- the constraint
+    # `apply_finfet_bulk_hierarchy`'s docstring records for a layout-side
+    # `join_nets`), and before the gate-level power-only prune. A no-op
+    # (empty list) unless the request declares the hint.
+    layout_short_nets_warnings = apply_layout_short_nets(
+        opts.layout_short_nets,
+        _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+    )
 
     # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
     # `provenance.input.role`. `_resolve_layout` returns the original
@@ -219,4 +234,5 @@ def _resolve_layout_stage(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_short_nets_warnings,
     )
