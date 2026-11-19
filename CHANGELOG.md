@@ -14,6 +14,21 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen mos_array` rejects an sg13g2 ring opening that would draw a
+  sub-rule pSD notch** (#6790, additive — a new `GenError`, no
+  `schema_version` bump): the guard-ring opening was validated only against
+  the generic 0.4 µm same-layer floor, but the tap ring's pSD implant
+  extends 0.18 µm into the opening from each cut face, so on sg13g2 any
+  requested `ring_gap_um` in `[0.4, 0.67)` drew a DRC-dirty `psd.space.1`
+  (0.31 µm) notch. The drawn opening — snapped, offset-shifted, and
+  margin-inset exactly as the PCell draws it, checked against the curated
+  deck's own rule — is now validated before GDS is written; the error names
+  `ring_gap_um`, the rule, and the remedy. A boundary request such as
+  `ring_gap_um=0.665` (offset 0) that draws exactly 0.31 µm stays legal, and
+  closed-ring, ring-less, PFET, and standalone `guard_ring` requests are
+  unchanged. Other PDKs and `diff_pair` are deliberately untouched (out of
+  #6790's scope).
+
 - **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
   the `diode` generator now runs on gf180mcu. `voltage_class` accepts
   `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck

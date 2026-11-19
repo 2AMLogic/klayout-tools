@@ -79,6 +79,144 @@ def _validate_guard_ring_implant_gap(
         raise GenError(error)
 
 
+def _validate_mos_array_implant_gap(
+    params: dict[str, Any], pdk_info: dict[str, Any], default_dbu: float
+) -> None:
+    """Reject an ``mos_array`` ring opening whose *drawn* implant opening
+    would violate the curated deck's same-layer space rule, before any GDS
+    is written (#6790).
+
+    The tap ring's implant extends ``ring_implant_margin_um`` past every
+    edge of the ring's band, including the two cut faces of a requested
+    opening (:func:`klayout_tools.gen._implant_gap_box_um` insets the
+    opening by the margin at each end) -- so the implant's own opening is
+    the *snapped, offset-shifted* ring gap minus ``2 * margin``, while the
+    PDK-agnostic :func:`klayout_tools.gen_describe._validate_ring_gap` only
+    compares the *requested* gap against the generic
+    ``MIN_SAME_LAYER_SPACING_UM`` floor. On sg13g2 every request in
+    ``[0.4, 0.67)`` um therefore passed validation and drew a pSD notch that
+    ``psd.space.1`` (0.31 um) then flagged -- measured in #6790, where a
+    0.665 um gap passes or fails depending solely on where the shifted cut
+    faces snap on the manufacturing grid.
+
+    Only the drawn notch is checked here -- deliberately *not* the GF180
+    standalone validator's additional nominal ``spacing + 2 * margin``
+    pre-check (:func:`_validate_guard_ring_implant_gap`), which would reject
+    the clean 0.665 um case #6790 measured as exactly on the boundary.
+
+    sg13g2 only, deliberately (#6790's own scope): gf180mcu's ``mos_array``
+    ring (Pplus/Nplus, ``pplus.space.1`` 0.4 um) has the same arithmetic but
+    was not measured there, so its behaviour is left unchanged -- the
+    standalone ``guard_ring`` already has its own GF180-only validator, and
+    extending this check to further families/generators (``diff_pair``) is
+    #6790's explicit out-of-scope.
+    """
+    from .decks import get_deck, get_layer_names, get_nominal_dbu
+    from .gen import (
+        GenError,
+        _mos_array_layout,
+        _shift_box,
+        _snap_ring_box_um,
+    )
+    from .gen_layer_params import _mos_array_layer_params
+
+    family = _pdk_family(pdk_info["variant"])
+    if family != "sg13g2":
+        return
+    side = params["ring_gap_side"]
+    if not side or not params["add_guard_ring"]:
+        # No opening, or no ring for it to cut a notch into (#6790's
+        # ringless control case): nothing to validate here.
+        return
+    gap_um = params["ring_gap_um"]
+
+    # Resolve the ring's implant exactly as `_mos_array_layer_params` does
+    # for the PCell (`_produce` merges the same dict into the variant), so
+    # the layer, margin, grid and every family-resolved geometry knob below
+    # are the ones the drawn GDS will actually use.
+    layer = _mos_array_layer_params(pdk_info, params)
+    if not layer["ring_implant_present"]:
+        # e.g. an sg13g2 pfet ring resolves no pSD implant (#6790's PFET
+        # control case) -- no implant opening exists to violate a rule.
+        return
+    margin_um = layer["ring_implant_margin_um"]
+    implant = layer["ring_implant_layer"]
+    pair = (implant.layer, implant.datatype)
+    rules = [r for r in get_deck(family) if r.check == "space" and r.layer == pair]
+    if margin_um <= 0.0 or not rules:
+        return
+    rule = max(rules, key=lambda r: r.threshold_dbu)
+    required_um = rule.threshold_dbu * get_nominal_dbu(family)
+    implant_name = get_layer_names(family).get(pair, "implant").split(".")[0]
+
+    # Rebuild the ring's cut box on the same path the PCell draws it: the
+    # same layout call `_mos_array_validate` already makes (extended with
+    # the family-resolved knobs `_MosArrayPCell.produce_impl` threads from
+    # the same `layer` dict), then the same shift + grid snap +
+    # margin-inset arithmetic `_insert_implant_ring` applies.
+    draw_well_tap = (
+        params.get("flavor") == "pfet"
+        and layer["well_present"]
+        and layer["well_tap_implant_present"]
+    )
+    info = _mos_array_layout(
+        params["w_um"],
+        params["l_um"],
+        params["fingers"],
+        params["rows"],
+        params["cols"],
+        params["dummy"],
+        params["topology"],
+        params["gate_contact"],
+        params["finger_topology"],
+        layer["gate_pad_clearance_um"],
+        draw_well_tap,
+        True,
+        side,
+        gap_um,
+        params["ring_gap_offset_um"],
+        params["ring_padding_um"],
+        layer["contact_gate_offset_um"],
+        layer["bottom_endcap_um"],
+        layer["sd_implant_margin_um"] if layer["sd_implant_present"] else 0.0,
+        layer["voltage_flavor_mark_margin_um"],
+        params["interior_channel_um"],
+        bool(params["mos_cap"]),
+        params["pitch_x_um"],
+        params["pitch_y_um"],
+        top_endcap_um=layer["top_endcap_um"],
+        tap_reach_um=0.0,  # a ring is drawn, so no tap pads (#3648)
+        share_sd=params["share_sd"],
+        mirror=params["mirror"],
+        dogbone_terminals=params["dogbone_terminals"],
+    )
+    ring = info["ring"]
+    assert ring is not None and ring["gap"] is not None  # add_guard_ring=True
+    ox, oy = info["ring_offset_um"]
+    dbu = resolve_pdk_dbu(pdk_info) or default_dbu
+    snapped = _snap_ring_box_um(
+        _shift_box(ring["gap"]["box_um"], ox, oy), layer["mfg_grid_um"], dbu
+    )
+    axis = 0 if side in ("N", "S") else 1
+    gap_dbu = round(snapped[axis + 2] / dbu) - round(snapped[axis] / dbu)
+    opening_dbu = gap_dbu - 2 * round(margin_um / dbu)
+    if opening_dbu <= 0:
+        # The implant opening closes entirely (a tap-ring gap of
+        # 2 * margin_um or less): there is no notch, so the implant that
+        # runs across the opening is doping field oxide -- harmless.
+        return
+    if opening_dbu * dbu + 1e-9 >= required_um:
+        return
+    raise GenError(
+        f"generator 'mos_array': params.ring_gap_um={gap_um} on "
+        f"{family.upper()} draws a {opening_dbu * dbu:.3f} µm {implant_name} "
+        f"opening across ring_gap_side='{side}' -- below rule {rule.id} "
+        f"({rule.description}, {required_um:.2f} µm) once the ring implant "
+        f"extends {margin_um:.2f} µm into the opening from each cut face; "
+        "increase ring_gap_um or unset params.ring_gap_side to close the ring"
+    )
+
+
 def _ring_gap_layout(
     outer_w_um: float,
     outer_h_um: float,

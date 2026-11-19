@@ -343,6 +343,7 @@ from .gen_ring_layout import (
     _guard_ring_layer_params,
     _ring_layout,
     _validate_guard_ring_implant_gap,
+    _validate_mos_array_implant_gap,
 )
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
@@ -3667,6 +3668,11 @@ def _resolve_params(
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
     spec.validate(resolved)
+    if spec.name == "mos_array":
+        # PDK-aware refinement of `_mos_array_validate`'s generic ring-gap
+        # checks (#6790): after they pass, reject an opening whose *drawn*
+        # implant notch would still violate the deck's same-layer rule.
+        _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
     if spec.name == "diode":
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     return resolved
