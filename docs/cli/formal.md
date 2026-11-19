@@ -20,9 +20,9 @@ inline forms).
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `top` | string | required | Top module (a wrapper holding the properties, or the design itself). |
-| `sources` | string[] | — | HDL files (SystemVerilog accepted; `assert`/`assume`/`cover` live here). |
-| `netlist_path` | string | — | A synthesized netlist, e.g. a `klt synthesize` report's `netlist_path`. Read before `sources`. |
-| `liberty` | string | — | Liberty file giving the netlist's standard cells functional models. |
+| `sources` | string[] | — | HDL files (SystemVerilog accepted; `assert`/`assume`/`cover` live here), resolved relative to the request. `~` and `$VAR` are expanded. An unset `$VAR` is exit 1 naming the variable. |
+| `netlist_path` | string | — | A synthesized netlist, e.g. a `klt synthesize` report's `netlist_path`. Read before `sources`. `~` and `$VAR` are expanded. |
+| `liberty` | string | — | Liberty file giving the netlist's standard cells functional models. `~` and `$VAR` are expanded. |
 | `mode` | `bmc` \| `prove` \| `cover` | `bmc` | See "Modes". |
 | `depth` | int ≥ 1 | `20` | Steps to check (BMC / induction depth / cover search depth). |
 | `solver` | `bitwuzla` \| `z3` \| `yices` \| `boolector` | `bitwuzla` | `smtbmc` engine. `bitwuzla` is what `scripts/install-symbiyosys.sh` pins for CI. |

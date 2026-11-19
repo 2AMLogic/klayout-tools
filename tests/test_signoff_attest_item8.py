@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
+    _REQUIRED_METRICS,
     AttestationError,
     build_attestation,
     check_attestation,
@@ -194,6 +196,58 @@ def test_digital_non_numeric_metric_field_fails(tmp_path):
     envelope = _attest(repo, inventory)
 
     assert _failed(envelope) == [("metric", "power")]
+
+
+def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
+    repo = _repo(tmp_path)
+    payload = json.dumps(
+        {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+    )
+    for corner in ("tt", "ss"):
+        (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
+            gzip.compress(payload.encode())
+        )
+    inventory = _digital_inventory()
+    inventory["citations"] = {
+        "gain": ["evidence/sim_tt.json.gz"],
+        "bandwidth": ["evidence/sim_tt.json.gz", "evidence/sim_ss.json.gz"],
+    }
+    inventory["envelope_checks"] = {
+        "evidence/sim_tt.json.gz": _PASS,
+        "evidence/sim_ss.json.gz": _PASS,
+    }
+    inventory["metrics"] = {
+        corner: {
+            name: {
+                "envelope": f"evidence/sim_{corner}.json.gz",
+                "field": f"result.{name}",
+            }
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "1e999"])
+def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({"status": "pass", "result": {"fmax": 0}}).replace(
+            '"fmax": 0', f'"fmax": {literal}'
+        )
+    )
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "fail"
+    assert _failed(envelope) == [("metric", name) for name in _REQUIRED_METRICS]
 
 
 def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):

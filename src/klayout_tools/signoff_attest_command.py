@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import time
 from collections.abc import Mapping
 from typing import Any
 
 from .signoff import _COMMAND_EVIDENCE_TIMEOUT_S
+from .signoff_attest_env import command_env
 
 # Bounded tail of a failing command's captured output (issue #4698). Held out
 # of band (never in a check dict built by an attestation builder) because it
@@ -118,23 +118,6 @@ def attach_durations(envelope: Mapping[str, Any]) -> None:
                 check["duration_s"] = duration
 
 
-def _command_env() -> dict[str, str]:
-    """Environment for a declared command: the caller's, minus the tool
-    venv's ``bin`` directory on ``PATH`` when running inside a venv (as under
-    ``uvx``/pipx), so a bare ``python3`` resolves to the repo's interpreter
-    rather than the tool's. Outside a venv the environment is unchanged."""
-    env = dict(os.environ)
-    if sys.prefix == sys.base_prefix or "PATH" not in env:
-        return env
-    venv_bin = os.path.normcase(os.path.dirname(sys.executable))
-    env["PATH"] = os.pathsep.join(
-        entry
-        for entry in env["PATH"].split(os.pathsep)
-        if os.path.normcase(entry) != venv_bin
-    )
-    return env
-
-
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
     """Run one declared command; return ``(exit_status, error)``. ``error``
     is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
@@ -155,7 +138,7 @@ def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | 
             stderr=subprocess.STDOUT,
             timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
             check=False,
-            env=_command_env(),
+            env=command_env(),
         )
     except subprocess.TimeoutExpired:
         record_duration(key, started)

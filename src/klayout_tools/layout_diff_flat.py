@@ -132,7 +132,9 @@ def _label_entry(
     def items(keys: list[str]) -> list[dict[str, Any]]:
         out = []
         for k in keys[:limit]:
-            text, x, y = k.split("\t")
+            # Split from the right: only the two numeric fields are peeled off,
+            # so a tab inside the label string itself survives intact.
+            text, x, y = k.rsplit("\t", 2)
             out.append({"text": text, "x": int(x), "y": int(y)})
         return out
 

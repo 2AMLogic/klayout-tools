@@ -26,11 +26,21 @@ def generation_inputs(
 ) -> dict[str, str | None]:
     """The host-independent inputs that shape xschem's output: the xschem
     version, the xschemrc *basename* (its directory is checkout-specific) and
-    the PDK variant."""
+    the PDK variant.
+
+    The variant is recorded only when it was *established* -- selected via
+    ``--pdk``/``$PDK``, or the root's only variant (issue #5639). A
+    defaulted, ambiguous choice is ``null``: no fact beats a wrong fact.
+    Blocks predating ``variant_established`` count as established.
+    """
     return {
         "xschem_version": version,
         "rcfile": os.path.basename(rcfile) if rcfile else None,
-        "pdk_variant": pdk_block["variant"] if pdk_block is not None else None,
+        "pdk_variant": (
+            pdk_block["variant"]
+            if pdk_block is not None and pdk_block.get("variant_established", True)
+            else None
+        ),
     }
 
 
