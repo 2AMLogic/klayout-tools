@@ -1203,7 +1203,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest. For a built-in deck it covers the primary Python module and
   each deck-specific sibling that populates or modifies its curated DRC rules
-  (including exemptions, notes and provenance IDs). For multiple sources,
+  (including exemptions, notes and provenance IDs). Extraction-only siblings
+  such as `sky130_lvt.py` fall outside the DRC pin. The hash covers all of
+  `sky130_unmodeled.py` because it supplies rule provenance IDs, so edits to
+  its disclosure data also change the pin. For multiple sources,
   hash the concatenation of each UTF-8 basename, a NUL byte and its raw
   32-byte SHA-256 digest, sorted by basename. A single source or an external
   deck file uses the SHA-256 of its raw bytes. An unreadable required source
@@ -1751,7 +1754,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). Unlike the cwd-relative default above, every `functional-verification` envelope here (and `environment.sources[]`) is relative to the repo containing the **request** (its own directory, or `--base-dir`), so the same run yields the same report from any invoking directory; a request outside every repo reports `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:

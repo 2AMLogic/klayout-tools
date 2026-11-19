@@ -21,7 +21,7 @@ import pytest
 
 from klayout_tools import _provenance
 from klayout_tools.cli import main
-from klayout_tools.decks import deck_names, deck_source_path
+from klayout_tools.decks import deck_names, deck_source_path, drc_deck_names
 from klayout_tools.decks import history as deck_history
 from klayout_tools.drc import run_drc
 
@@ -43,24 +43,30 @@ def test_deck_identity_rejects_a_non_deck_sibling_module():
         _provenance.deck_identity("history")
 
 
-@pytest.mark.parametrize(
-    ("name", "sources"),
-    [
-        ("gf180mcu", ("gf180mcu.py",)),
-        ("sky130", ("sky130.py", "sky130_offgrid.py", "sky130_unmodeled.py")),
-        (
-            "sg13g2",
-            (
-                "sg13g2.py",
-                "sg13g2_cont_grid.py",
-                "sg13g2_runset_notes.py",
-                "sg13g2_svaricap.py",
-            ),
-        ),
-    ],
-)
-def test_deck_identity_hashes_its_rule_sources(name, sources):
+def _rule_sources(name, package):
+    probe = Path(__file__).parent / "helpers" / "deck_rule_sources.py"
+    result = subprocess.run(
+        [sys.executable, "-B", str(probe), name],
+        env={**os.environ, "PYTHONPATH": str(package.parent)},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("name", drc_deck_names())
+def test_deck_identity_hashes_its_rule_sources(name):
     directory = Path(deck_source_path(name)).parent
+    siblings = _rule_sources(name, directory.parent)
+    # Keep the original regression coverage for known contributors even if a
+    # future edit accidentally drops both a hook and its declaration.
+    required = {
+        "sky130": {"sky130_offgrid", "sky130_unmodeled"},
+        "sg13g2": {"sg13g2_cont_grid", "sg13g2_runset_notes", "sg13g2_svaricap"},
+    }
+    assert required.get(name, set()) <= set(siblings)
+    sources = sorted(f"{module}.py" for module in [name, *siblings])
     records = [
         (filename, hashlib.sha256((directory / filename).read_bytes()).digest())
         for filename in sources
@@ -97,15 +103,20 @@ def test_deck_hash_matches_a_real_drc_runs_provenance(tmp_path, capsys):
     assert payload["released"] == report["provenance"]["deck"]["released"]
 
 
-def test_saved_report_detects_a_sibling_edit_and_missing_source(tmp_path):
+@pytest.fixture
+def copied_package(tmp_path):
     package = tmp_path / "klayout_tools"
     shutil.copytree(
         Path(_provenance.__file__).parent,
         package,
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    return package
 
-    def klt(*args, expected_exit=0):
+
+@pytest.fixture
+def klt(copied_package):
+    def run(*args, expected_exit=0):
         result = subprocess.run(
             [
                 sys.executable,
@@ -116,14 +127,50 @@ def test_saved_report_detects_a_sibling_edit_and_missing_source(tmp_path):
                 "--format",
                 "json",
             ],
-            cwd=tmp_path,
-            env={**os.environ, "PYTHONPATH": str(tmp_path)},
+            cwd=copied_package.parent,
+            env={**os.environ, "PYTHONPATH": str(copied_package.parent)},
             capture_output=True,
             text=True,
         )
         assert result.returncode == expected_exit, (result.stdout, result.stderr)
         return json.loads(result.stderr if expected_exit == 1 else result.stdout)
 
+    return run
+
+
+@pytest.mark.parametrize("sibling", ["sky130_test_provenance", "sky130_lvt"])
+def test_sky130_must_declare_a_transitive_rule_field_source(
+    copied_package, klt, sibling
+):
+    decks = copied_package / "decks"
+    with (decks / f"{sibling}.py").open("a") as helper:
+        helper.write(
+            "\ndef native_output_id(stem, suffix, fallback):\n"
+            "    return 'test-' + fallback\n"
+        )
+    with (decks / "sky130_offgrid.py").open("a") as offgrid:
+        offgrid.write(f"\nfrom .{sibling} import native_output_id\n")
+    [row] = klt("deck", "rules", "--deck", "sky130", "--rule", "dnwell.ongrid.1")[
+        "rules"
+    ]
+    assert row["provenance"]["rule_id"] == "test-x.1b"
+    with pytest.raises(
+        AssertionError, match=f"sky130: DRC_RULE_SOURCES omits {sibling}"
+    ):
+        _rule_sources("sky130", copied_package)
+
+    primary = decks / "sky130.py"
+    primary.write_text(
+        primary.read_text().replace(
+            "DRC_RULE_SOURCES = (", f'DRC_RULE_SOURCES = ("{sibling}", '
+        )
+    )
+    assert sibling in _rule_sources("sky130", copied_package)
+
+
+def test_saved_report_detects_a_sibling_edit_and_missing_source(
+    tmp_path, copied_package, klt
+):
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     top.shapes(layout.layer(8, 0)).insert(kdb.Box(0, 0, 5000, 5000))
@@ -138,7 +185,7 @@ def test_saved_report_detects_a_sibling_edit_and_missing_source(tmp_path):
     assert before["rules"][0]["limits"]["grid_um"] == 0.005
     assert before["content_hash"] == report["provenance"]["deck"]["content_hash"]
 
-    hook = package / "decks/sg13g2_cont_grid.py"
+    hook = copied_package / "decks/sg13g2_cont_grid.py"
     hook.write_bytes(hook.read_bytes().replace(b"grid_um=0.005", b"grid_um=0.010"))
     after = klt(*rules)
     assert after["rules"][0]["limits"]["grid_um"] == 0.010
