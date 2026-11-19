@@ -147,7 +147,7 @@ dimension is now independently checkable — see the note itself.)
 | `esd_device` | yes | yes | no | no |
 | `bond_pad` | yes | yes | no | no |
 | `bjt_array` | yes | yes | yes (HBT, PDK cell) | no |
-| `diode` | yes | no | no | no |
+| `diode` | yes | yes | no | no |
 | `pdk_cell` | yes | yes | yes | yes (family-agnostic, reads `libs.ref`) |
 
 **gf180mcu — `mos_array`'s unit-device geometry was margined against the
@@ -702,7 +702,7 @@ reports `fingers` transistors between the same two S/D nets on one gate net,
 which `klt lvs`'s
 [`options.combine_devices`](lvs.md) folds into that single device). Every
 rail, stub, and clearance uses the same `0.42` µm width / `0.4` µm spacing
-budget the S/D pads use, so the strapping is DRC-clean on both curated decks;
+budget the S/D pads use, so the strapping is DRC-clean on all curated decks;
 the column pitch is unchanged and only the unit's height grows. The gate comb
 crosses *under* the drain rail on `poly` — no contact, so no connection —
 which is how a single-routing-metal generator gets both rails and a gate
@@ -2307,41 +2307,65 @@ block through [`klt gen-compose`](gen-compose.md) and promote `M1_D` with a
 `pins[]` entry (`{"net": "PAD", "block": "esd", "port": "M1_D"}`), which
 writes the net label on the composed cell.
 
-### `diode` (junction diode / pad ESD clamp primitive, issue #4300)
+### `diode` (junction diode / pad ESD clamp primitive, issues #4300, #6614)
 
-A single sky130 junction diode that extracts as the deck's own diode class.
-**sky130 only** — other families raise a clear `GenError` ("not yet supported
-by this generator"); gf180mcu and sg13g2 declare diode classes too and are a
-follow-up.
+A single junction diode that extracts as the deck's own diode class.
+**sky130 and gf180mcu** — other families (sg13g2, ...) raise a clear
+`GenError` ("not yet supported by this generator"). `voltage_class` names the
+PDK flavour, and each flavour belongs to one family, so it also selects the
+layer stack (see below).
 
-- `kind="n_psub"` — n+ diffusion (`nsdm`) in the p-substrate. The substrate
-  is the anode; `ANODE` is a contacted p+ substrate tap beside the diode and
-  `CATHODE` is the diffusion's local metal. Extracts as `diode_pw2nd_*`.
-- `kind="p_nwell"` — p+ diffusion (`psdm`) in an nwell. `ANODE` is the
-  diffusion's local metal; `CATHODE` is a contacted n+ well tap in the same
-  well. Extracts as `diode_pd2nw_*`.
-- `voltage_class="05v5"` (default) or `"11v0"`, which adds the `hvi`
-  implant (covering the whole nwell for `p_nwell`, per `nwell.9`) so the
-  device extracts as `*_11v0`.
+- `kind="n_psub"` — n+ diffusion in the p-substrate. The substrate is the
+  anode; `ANODE` is a contacted p+ substrate tap beside the diode and
+  `CATHODE` is the diffusion's local metal. Extracts as `diode_pw2nd_*`
+  (sky130) / `diode_nd2ps_06v0` (gf180mcu).
+- `kind="p_nwell"` — p+ diffusion in an nwell. `ANODE` is the diffusion's
+  local metal; `CATHODE` is a contacted n+ well tap in the same well.
+  Extracts as `diode_pd2nw_*` (sky130) / `diode_pd2nw_06v0` (gf180mcu).
+- `voltage_class` — **sky130:** `"05v5"` (default) or `"11v0"`, which adds
+  the `hvi` implant (covering the whole nwell for `p_nwell`, per `nwell.9`) so
+  the device extracts as `*_11v0`. **gf180mcu:** `"06v0"`, its only flavour
+  and the default there. An *omitted* `voltage_class` resolves to the PDK's
+  own flavour; naming another family's flavour (`"05v5"`/`"11v0"` on gf180mcu,
+  `"06v0"` on sky130) raises a `GenError` listing what that family accepts.
 
-Both draw the `areaid.diode` (81/23) recognition mark over the junction.
-**`areaid.ed` (81/19) is never drawn**: the extraction deck treats it as an
-exclusion, so an ESD-flagged diode would not extract as `diode_*`. Ports are
-`ANODE`/`CATHODE` on `li1`; `device_count` is `1` and
-`drc_hints.matched_group_id` is `null`. `lvt`/`nvt`/`hvt` flavours, guard
-rings, arrays and matching are not drawn.
+**sky130** draws the `areaid.diode` (81/23) recognition mark over the
+junction. **`areaid.ed` (81/19) is never drawn**: the extraction deck treats
+it as an exclusion, so an ESD-flagged diode would not extract as `diode_*`.
+Ports are `ANODE`/`CATHODE` on `li1`.
+
+**gf180mcu** draws the `diode_mk` (115/5) mark over the junction and one
+`Dualgate` (55/0) box over the whole cell. The deck recognises only the two
+6V (`Dualgate`) flavours, so *without `Dualgate` the diode extracts as no
+device at all*; the 3.3V and deep-nwell (`_dn`) flavours are not drawn.
+`Nwell` is drawn for `p_nwell` only, and never `DNWELL`, `Poly2`, `RES_MK` or
+`DRC_BJT` (the deck's exclusions). Ports are `ANODE`/`CATHODE` on `Metal1`.
+`Dualgate` and `Nwell` margins beyond the diffusion (0.4 µm and 0.6 µm) are
+conservative choices, **not deck-verified**: for these layers the curated deck
+transcribes only `dualgate.width.1`/`dualgate.space.1` and the Nwell tap rule
+`nwell.enclosing.comp.1`, and lists the 5V/6V `_MV` rules as unmodeled, so a `clean`
+`klt drc --deck gf180mcu` verdict is not full 5V/6V coverage. The generator
+adds a single tap beside the diffusion and does not cap the diffusion width;
+the curated deck did not flag a 20 µm-wide diode, but the PDK's own 15 µm
+5V/6V tap-distance rules are not verified against this geometry.
+
+For both families `device_count` is `1` and `drc_hints.matched_group_id` is
+`null`. `lvt`/`nvt`/`hvt` flavours, guard rings, arrays and matching are not
+drawn.
 
 | `params` field  | Type   | Default    | Description |
 | --------------- | ------ | ---------- | ----------- |
 | `kind`          | string | `"n_psub"` | `"n_psub"` or `"p_nwell"`. |
-| `voltage_class` | string | `"05v5"`   | `"05v5"` or `"11v0"`. |
+| `voltage_class` | string | PDK-native | sky130: `"05v5"` (default) or `"11v0"`. gf180mcu: `"06v0"` (default). |
 | `width_um`      | double | `2.0`      | Junction diffusion width (µm). Must be `>= 0.4`. |
 | `length_um`     | double | `2.0`      | Junction diffusion length (µm). Must be `>= 0.4`. |
 
 The contact count is derived from the diffusion area. To verify against a
-schematic, label the two ports' `li1` (positions are in `ports[]`), run
-`klt extract`, and compare with a `D` element of the matching class under
-`klt lvs`.
+schematic, label the two ports' metal (`li1` on sky130, the `Metal1` pin
+layer 34/10 on gf180mcu; positions are in `ports[]`), run `klt extract`, and
+compare with a `D` element of the matching class under `klt lvs`. On
+gf180mcu, `klt lvs` matched a reference with `ANODE`/`CATHODE` swapped, so that
+comparison checks the device class and connectivity, not polarity.
 
 ### `asap7_finfet` (ASAP7 FinFET nFET/pFET, issue #2762)
 
@@ -2967,8 +2991,8 @@ $ klt gen resistor_strip --params '{"num": 3, "length_um": 1.5}' \
 $ klt gen mos_array --pdk sky130A -o output/mos_array.gds --format json
 $ klt drc output/mos_array.gds --deck sky130
 
-# The same defaults on gf180mcu -- every phase-2 generator's documented
-# defaults pass klt drc clean on both curated decks:
+# Generate the same MOS array with default parameters on gf180mcu and check
+# it with the gf180mcu deck:
 $ klt gen mos_array --pdk gf180mcuC -o output/mos_array_gf180.gds
 $ klt drc output/mos_array_gf180.gds --deck gf180mcu
 
