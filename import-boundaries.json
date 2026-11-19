@@ -325,6 +325,7 @@
         "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_pdk",
         "klayout_tools.functional_verification_run_inputs",
+        "klayout_tools.functional_verification_run_results",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
         "klayout_tools.functional_verification_sdf_instance",
@@ -390,6 +391,7 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_boundary",
+        "klayout_tools.gen_compose_derived_frame",
         "klayout_tools.gen_compose_landing_pads",
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_plane_change",
@@ -814,6 +816,7 @@
         "klayout_tools.signoff_attest_presence",
         "klayout_tools.signoff_attest_stream",
         "klayout_tools.signoff_attest_text",
+        "klayout_tools.signoff_characterization",
         "klayout_tools.signoff_coverage_disclosure",
         "klayout_tools.signoff_derived_rows",
         "klayout_tools.signoff_details",
@@ -846,6 +849,7 @@
       "description": "`klt sim` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.asap7_bsimcmg",
+        "klayout_tools.device_multiplier_lint",
         "klayout_tools.cli.parser_sim",
         "klayout_tools.cli.sim_check_cmd",
         "klayout_tools.cli.sim_cmd",
@@ -1630,6 +1634,11 @@
       "consumer": "report",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "report",
+      "exporter": "signoff",
+      "reason": "Issue #6125: klt report renders a `klt drc --engine both` envelope by reusing signoff_drc_crosscheck.crosscheck_project (#5815/#6097) so the two verbs read the cross-check shape identically instead of keeping a second projection."
     },
     {
       "consumer": "report",

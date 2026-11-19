@@ -85,7 +85,7 @@ from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
 from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import attestation_block, input_binding
-from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
+from .signoff_attest_pins import item9_pin_checks, json_node
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
 
@@ -945,10 +945,9 @@ def _run_checks(
     normalized: Mapping[str, Any],
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every check for ``item``, in a deterministic order: file-presence
-    checks sorted by path (independent of inventory listing order), then
-    the item's command and pin checks. With ``committed_checks`` (the
-    ``--check`` path) every ``local_only`` command is skipped, not run."""
+    """Run the item's artifact and command checks in deterministic order.
+    Item 9's pin checks follow once the envelope's build version is known.
+    With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
@@ -969,10 +968,6 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command, root, _file_check))
-        resolved_pins, pin_sources = resolve_pin_refs(
-            normalized["pins"], root, _normalize_repo_path
-        )
-        checks.extend(with_resolved_from(item9.pin_checks(resolved_pins), pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1018,9 +1013,13 @@ def build_attestation(
     normalized = _validated_inventory(inventory, item, root, inventory_path)
     with klt_shim_scope():
         checks = _run_checks(item, root, normalized, committed_checks)
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    klt_version = build_version()
+    if item == 9:
+        pins = normalized["pins"]
+        checks.extend(item9_pin_checks(pins, root, _normalize_repo_path, klt_version))
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
-    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1039,7 +1038,7 @@ def build_attestation(
             inventory=inventory,
         ),
         "provenance": {
-            "klt_version": build_version(),
+            "klt_version": klt_version,
             "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,

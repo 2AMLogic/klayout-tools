@@ -3643,9 +3643,8 @@ def _resolve_params(
     """Merge and validate ``raw_params`` against the generator's PCell defaults.
 
     Every declared, non-hidden parameter ends up in the result: the request's
-    value when given (type-checked against the PCell's declared type), the
-    PCell's own default otherwise. Raises :class:`GenError` for an unknown
-    parameter name or a value that doesn't match the declared type.
+    type-checked value, or the PCell default otherwise; raises
+    :class:`GenError` for an unknown name or mismatched type.
     """
     pcell_classes = _build_pcell_classes()
     decl = pcell_classes[spec.name]()
@@ -3667,14 +3666,15 @@ def _resolve_params(
         _esd_device_resolve_total_width(raw_params, resolved)
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
+    if spec.name == "diode":
+        # Before spec.validate: report the family's flavours, not the union (#6630).
+        resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     spec.validate(resolved)
     if spec.name == "mos_array":
         # PDK-aware refinement of `_mos_array_validate`'s generic ring-gap
         # checks (#6790): after they pass, reject an opening whose *drawn*
         # implant notch would still violate the deck's same-layer rule.
         _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
-    if spec.name == "diode":
-        resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     return resolved
 
 

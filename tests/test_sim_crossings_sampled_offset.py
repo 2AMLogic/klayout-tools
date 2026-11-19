@@ -61,6 +61,22 @@ def test_malformed_sampled_offset_is_refused(level):
         )
 
 
+@pytest.mark.parametrize(
+    "level",
+    [
+        {"sample_at": 2.0, "offset": -0.9},
+        {"sample_at": 2.0, "fraction": 0.5},
+    ],
+)
+def test_sampled_level_is_not_checked_as_supply_relative(level):
+    """Without the ``is_sampled_offset`` guard in
+    ``validate_supply_relative_levels`` every dict-shaped sampled level was
+    sent to the ``{frac_of, fraction}`` validator and refused before any run
+    with ``unknown key(s)`` (issue #6538, fix landed with PR #5922)."""
+    spec = [{"name": "t", "crossings": {"signal": "v(a)", "level": level}}]
+    sim_crossings.validate_supply_relative_levels(spec, [{"vdd": 1.8}])
+
+
 def test_null_sample_at_is_refused_before_a_run_not_crashed_at_extraction():
     """An explicit ``{"sample_at": null}`` used to pass shape validation (only
     a missing key was thought impossible) and then crash the extraction with a

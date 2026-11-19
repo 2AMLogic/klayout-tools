@@ -190,6 +190,21 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim` also gains an additive `environment.device_multiplier` (issue
+#5779): the device-multiplier lint's findings for instances whose vendor
+`mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
+that declares `mult` but never forwards it to drive — a new finding class,
+warning-only. `findings` carry the instance, target subcircuit, both raw
+values and a note; a `note` (never an error) discloses instances whose
+subcircuit text is absent from the scanned include closure, `unevaluated`
+lists non-numeric `m=`/`mult=` values that cannot be compared, and
+`not_scanned` discloses closure parts that could not be read. The field is
+absent when there is nothing to disclose, the exit code and every existing
+field are unchanged, and the note recommends retaining both forms because
+some models use `mult` to scale Monte Carlo mismatch. No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Device
+multiplier warnings".
+
 `klt sim --job-status` (issue #4291) passes an optional `progress` object
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
@@ -897,12 +912,17 @@ the artifact was regenerated".
 
 Issue #5460 adds an optional `check` object to a `drift[]` entry of the
 `klt signoff --attest --check` response, naming the `attestation.checks[]`
-entry the entry is about: its `role`, plus whichever identity keys that check
-kind carries — `path` (a `present` file check), `target` / `name` /
-`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
-check), `corner` + `metric` (an item-8 metric check, one per corner ×
-metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
-pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+entry the entry is about: its `role`, then the check's own kind (its `check`
+value — `present`, `command`, `stream_readable`, …) when it carries one,
+then whichever identity keys that check kind carries — `path` (a `present`
+file check), `target` / `name` / `testbench` (a `command` or `recorded_hash`
+check), `row` (an item-8 citation check), `corner` + `metric` (an item-8
+metric check, one per corner × metric). The kind comes first so checks of
+one role that carry no other identity key stay pairwise distinct — the three
+`layout` stream checks of item 2, for example, are named by their kind alone.
+A check with no identity key beyond its kind — item 9's `pdk` / `tools` pins
+(`{"role": …, "check": "pin"}`), a top-level `cold_start`
+(`{"role": "cold_start", "check": "command"}`) — stops there. **Additive; no
 `schema_version` bump**: `field` stays the dotted positional pointer
 (`attestation.checks.17.content_hash`) it has always been, and `committed` /
 `fresh` are untouched, so a consumer that never reads `check` sees the bytes
@@ -912,7 +932,8 @@ when both lists have the same length, so an inventory that *gained or lost* a
 file still yields one whole-list entry), a `status` entry, anything outside
 `attestation.checks`, and every `drift[]` entry the other `--check` verbs
 produce. `--format text` renders it as a bracketed label after the pointer
-(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+(`attestation.checks.17.content_hash  [testbench present
+sim/bin/sim_common.py]:`) so
 a CI log names the file that moved without a second lookup — the index alone
 is not even stable, since file-presence checks are sorted by path. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
@@ -1203,7 +1224,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest. For a built-in deck it covers the primary Python module and
   each deck-specific sibling that populates or modifies its curated DRC rules
-  (including exemptions, notes and provenance IDs). For multiple sources,
+  (including exemptions, notes and provenance IDs). Extraction-only siblings
+  such as `sky130_lvt.py` fall outside the DRC pin. The hash covers all of
+  `sky130_unmodeled.py` because it supplies rule provenance IDs, so edits to
+  its disclosure data also change the pin. For multiple sources,
   hash the concatenation of each UTF-8 basename, a NUL byte and its raw
   32-byte SHA-256 digest, sorted by basename. A single source or an external
   deck file uses the SHA-256 of its raw bytes. An unreadable required source
@@ -1751,7 +1775,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -2232,6 +2256,18 @@ A satisfied assertion of either kind marks the declared categories checked
 and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
+
+**Deck stdout as additive evidence** (issue #6613): every `--engine
+klayout` DRC report carries a top-level `deck_output` object —
+`{"stdout": <str>, "truncated": <bool>, "line_count": <int>}` — holding
+the deck's own captured stdout (tail-capped at 500 lines, temp work-dir
+paths scrubbed to a placeholder; `line_count` counts the whole stdout).
+Like `coverage_assertion` it is additive and optional from a consumer's
+perspective, but unlike it the field is always present on a klayout-engine
+report that produced a verdict. It is execution evidence to cite, never a
+status upgrade: a zero-finding, zero-category run stays `coverage_unknown`
+(exit 4), `--expect-rule-categories 0` remains rejected, and klt parses
+nothing from the log. `--rerun` excludes it from the drift diff.
 
 `nothing_checked` and `nothing_checked_reasons` remain available. In a v1
 coverage block, zero means **known** zero actual checked work. It is not a

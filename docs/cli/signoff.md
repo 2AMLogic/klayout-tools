@@ -966,18 +966,28 @@ unchanged by it: a `critical_metric_blockers` entry still renders
 thin report of an artifact this item does not accept.
 
 **An unmet item names what was read.** `citation` is present only on a
-`"met"` item — that contract is unchanged — so a `nothing_checked` item
-carries the same information additively under `detail` instead (issue #5479):
+`"met"` item — that contract is unchanged — so a single-citation unmet item
+carries the same information additively under `detail` instead (issue #5479
+for `nothing_checked`, extended by issue #5692 to every other reason the
+envelope's own verdict produces):
 
-| Key | Value |
-| --- | ----- |
-| `detail.nothing_checked_reasons` | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
-| `detail.cited_evidence` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
+| Key | Carried on | Value |
+| --- | ---------- | ----- |
+| `detail.nothing_checked_reasons` | `nothing_checked` only | The envelope's own stable reason codes, e.g. `["no_delta_rows"]` — the same list the `checks[]` path reports, through the same accessor, so an unrecognised code from a newer producer survives here too |
+| `detail.cited_evidence` | `nothing_checked`, **`check_failed`**, `partial_coverage`, `undersized_sample` and `runset_unrecognised_device` | The block a `"met"` citation would have carried: `file`/`command`, `kind`, `check_status` (the envelope's own token), `content_hash`, `input_verified`, `exit_status`, plus the same per-kind passthroughs — a `drc` report's `coverage`, a `pex` report's `body_bias` (issue #1983) |
 
-Both keys are present on **either** route into the reason, and neither is
-consulted by any grading rule. Without `cited_evidence` the committed record
-showed a verdict with no artifact behind it: a reader could not tell *which*
-extraction was cited, or that one had been read at all.
+`cited_evidence` is present on **either** route into `nothing_checked` and on
+a failing or partial run, and neither key is consulted by any grading rule.
+On a `check_failed` item 7 it carries the `pex` envelope's `body_bias` block,
+so the claimant-enforced disclosure ("was this measured on a properly-biased
+netlist?") has an in-report source on a failing row too; an envelope
+committed before `body_bias` existed simply omits the key. It also lets a
+reader tell a failing extraction from a misfiled artifact — both read
+`check_failed`, but `cited_evidence.kind` names which was cited. Without
+`cited_evidence` the committed record showed a verdict with no artifact behind
+it: a reader could not tell *which* run was cited, or that one had been read
+at all. The multi-citation route's `detail.failed_citations` (bare file
+names) is unchanged.
 
 ### A sim envelope that applied no bound (`no_limits_checked`)
 
@@ -2496,7 +2506,7 @@ Every inventory is a JSON object with these common fields:
 | `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
-| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description`. Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
+| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description` (item 8, which has no `artifact_binding`: `citation.attestation.description`). Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
 
 Plus the item's own fields. Unknown top-level fields are refused (exit `1`),
 because a typo such as `testbench` for `testbenches` would otherwise attest
@@ -2509,7 +2519,7 @@ an inventory the author did not write.
 | **2** Layout (optional inventory, with `--input`) | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | `checks` and/or `inputs` — at least one | each exits `0` (`command`, role `audit`); `name` must be unique |
 | | `inputs`: list of paths (first ships in the first release after `v0.9.2`) | `checks` and/or `inputs` — at least one | each file exists and is hash-pinned (`present`, role `input`), and joins the role-tagged `provenance.input.paths` set digest; see "Pinning the generator's inputs" |
 | **8** Characterization report | `report`: path | yes | the report file exists (`present`, role `report`) |
-| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688) |
+| | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
 | | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
@@ -2518,7 +2528,7 @@ an inventory the author did not write.
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
 | **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
@@ -2626,7 +2636,15 @@ generic envelope still grades `met` (compatibility). A met item-8 generic
 citation therefore always carries `citation.attestation`, so a reader can tell
 the two apart: `{"tool_produced": true, "producer": "klt signoff --attest",
 "check_count": N, "passed_count": N}` for an envelope this producer made, and
-`{"tool_produced": false}` for any other. Disclosure only; it never changes
+`{"tool_produced": false}` for any other. When a tool-produced envelope
+carries a non-empty `attestation.description` (the inventory's scope
+disclosure, issue #5573), the block also carries it verbatim as
+`citation.attestation.description` (issue #6111) — item 8 has no
+`artifact_binding`, so this block is where its disclosure reaches the tier
+record. The key is omitted when the description is absent, empty,
+whitespace-only or not a string, and a `{"tool_produced": false}` block never
+carries one. Additive: the block's four existing keys are unchanged and no
+`schema_version` bumps. Disclosure only; it never changes
 the verdict. The envelope pins the inventory (as for the other items); the
 report and cited envelopes are recorded by hash in their `present` checks, and
 `--check` reports drift in any of them, in the row map, or in a recorded
@@ -2641,8 +2659,9 @@ sorted by path (regardless of inventory order; item 9's `present` checks run
 `testbench` first, then `testbench_dependency` bench by sorted bench, then
 `source` sorted by path), then the item's
 command checks (item 1's `freshness` checks sorted by target), then item 9's
-disclosure rows (`unbenched_row`, `dependency_binding`), then item 9's two
-`pin` checks. Two runs over the same bytes with the same outcomes produce
+disclosure rows (`unbenched_row`, `dependency_binding`), then item 9's
+`pdk` and `tools` pin checks and, when declared, its `klt` version check.
+Two runs over the same bytes with the same build and outcomes produce
 byte-identical output.
 
 ```json
@@ -2651,25 +2670,28 @@ byte-identical output.
   "kind": "generic",
   "status": "pass",
   "t1_item": 9,
-  "summary": "T1 item 9 (Testbenches shipped): 5/5 attestation checks passed (klt signoff --attest)",
+  "summary": "T1 item 9 (Testbenches shipped): 8/8 attestation checks passed (klt signoff --attest)",
   "source": "attest/item9.json",
   "attestation": {
     "producer": "klt signoff --attest",
     "inventory_schema_version": 1,
     "hash_algorithm": "sha256-raw-bytes",
-    "check_count": 5,
-    "passed_count": 5,
+    "check_count": 8,
+    "passed_count": 8,
     "checks": [
       {"check": "present", "role": "testbench", "path": "tb/ota_ac.spice", "passed": true, "content_hash": "sha256:9a1e..."},
       {"check": "present", "role": "testbench", "path": "tb/ota_tran.spice", "passed": true, "content_hash": "sha256:4c07..."},
       {"check": "command", "role": "cold_start", "argv": ["make", "sim"], "cwd": ".", "exit_status": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_ac.spice", "declared": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_tran.spice", "declared": 0, "passed": true},
       {"check": "pin", "role": "pdk", "passed": true, "value": {"name": "sky130A", "revision": "0fe599b2"}},
-      {"check": "pin", "role": "tools", "passed": true, "value": {"klt": "0.7.0", "ngspice": "42"}}
+      {"check": "pin", "role": "tools", "passed": true, "value": {"klt": "0.9.3", "ngspice": "42"}},
+      {"check": "pin", "role": "tool_version", "tool": "klt", "passed": true, "value": "0.9.3"}
     ],
     "description": "testbenches cover tt only; no corner matrix"
   },
   "provenance": {
-    "klt_version": "0.7.0",
+    "klt_version": "0.9.3",
     "klayout_version": null,
     "pdk": null,
     "deck": null,
@@ -2770,7 +2792,7 @@ Item 9: testbenches, a cold-start invocation and reproducibility pins
   "cold_start": {"argv": ["klt", "sim", "sim/request.json", "--format", "json"]},
   "pins": {
     "pdk": {"name": "sky130A", "revision": "0fe599b2afb6708d281543108caf8310912f54af"},
-    "tools": {"klt": "0.7.0", "ngspice": "42"}
+    "tools": {"klt": "0.9.3", "ngspice": "42"}
   }
 }
 ```
@@ -2786,11 +2808,19 @@ form instead of a placeholder name:
 }
 ```
 
-A **literal** pin is checked for shape only: klt verifies `pdk.name` and
-`pdk.revision` are non-empty and each `tools.<tool>` version is a non-empty
-string, but never compares the literal with the artifact it names -- a literal
-that has drifted from the repo's own pin of record passes silently, which is
-why the reference form below exists.
+Set `pins.tools.klt` to the exact build version you intend to run (the example
+uses `0.9.3`). Both `--attest 9` and `--check` compare the literal or resolved
+version string with the full `provenance.klt_version`, including any development
+suffix. On a mismatch the `tool_version` check records `"passed": false` and
+the running version in `running`. Attestation exits 3 and leaves the
+output file untouched. If the running version contains `+unknown`, the check
+passes with `"unverifiable": true`. A pinned value containing `+unknown` is
+compared literally when the running build is known.
+
+When upgrading an inventory that already pins klt, update the pin to the
+build you will use and regenerate its committed envelope to include the new
+check. The other tool versions and the PDK name and revision are checked for
+non-empty strings.
 
 **A pin declared by the file that owns it (issue #5563).** Instead of
 hand-copying a value the repo already tracks (a tool commit, a PDK revision),
@@ -2811,11 +2841,10 @@ reference object that klt resolves from a JSON file in the repo at attest and
 `from` is a repo-relative path (absolute paths, `..` escapes and symlinks are
 refused, exactly like every other inventory path); `key` is a dotted path into
 that file's JSON (digit segments index lists, as for item-8 metric bindings).
-The check's `value` carries the **resolved** string, and a check that used at
-least one reference records where each value came from as `resolved_from`
-(a literal-only inventory emits the check it always did -- no
-`resolved_from` key). A reference whose file is missing, is not readable JSON,
-lacks the key, or resolves to anything but a non-empty string grades the pin
+The `pdk` or `tools` check's `value` carries the **resolved** strings. When
+that section uses a reference, `resolved_from` records its file and key.
+A reference whose file is missing, is not readable JSON, lacks the key, or
+resolves to anything but a non-empty string grades the pin
 `passed: false` -- a failed check, not a malformed inventory. Because `--check`
 re-resolves from the owning file, a pin bump drifts the committed envelope the
 same way a source edit does: no re-attest can re-legitimize a stale copy.
@@ -3029,20 +3058,25 @@ additive `check` object identifying it:
   "field": "attestation.checks.17.content_hash",
   "committed": "sha256:3bca9b8e95ec…",
   "fresh": "sha256:aaa8abc15692…",
-  "check": {"role": "testbench", "path": "sim/bin/sim_common.py"}
+  "check": {"role": "testbench", "check": "present", "path": "sim/bin/sim_common.py"}
 }
 ```
 
-`check` is the check's `role` plus whichever identity keys its kind carries —
-`path` for a file-presence check, `target` / `name` / `testbench` for a
-command or `recorded_hash` check, `row` for a citation check, `corner` +
-`metric` for an item-8 metric check. A check with no identity beyond its role
-(the `pdk` / `tools` pins, a top-level `cold_start`) gets `{"role": …}`.
-`--format text` prints it as a bracketed label after the pointer:
+`check` is the check's `role`, then the check's own kind (its `check` value
+— `present`, `command`, `stream_readable`, …) when it carries one, then
+whichever identity keys its kind carries — `path` for a file-presence check,
+`target` / `name` / `testbench` for a command or `recorded_hash` check,
+`row` for a citation check, `corner` + `metric` for an item-8 metric check.
+The kind comes before those keys so checks of one role with no other
+identity key stay pairwise distinct (the three `layout` stream checks of
+item 2). A check with no identity key beyond its kind (the `pdk` / `tools`
+pins, a top-level `cold_start`) stops there — `{"role": …, "check": "pin"}`,
+`{"role": "cold_start", "check": "command"}`. `--format text` prints it as a
+bracketed label after the pointer:
 
 ```
 drift:
-  attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:
+  attestation.checks.17.content_hash  [testbench present sim/bin/sim_common.py]:
       committed: 'sha256:3bca9b8e95ec…'
       fresh:     'sha256:aaa8abc15692…'
 ```
@@ -5591,7 +5625,7 @@ actually ran and failed):
 | `"command_timeout"`       | yes | **(issue #5763)** A command-backed entry's subprocess ran but was killed by the fixed evidence-timeout cap (`_COMMAND_EVIDENCE_TIMEOUT_S`, 1800 s) — the bound, not the check, produced the `unmet` grade, so a hung gate is distinguishable in the record from a failing one. |
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, or exited nonzero — a timeout is `"command_timeout"` above. Distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
-| `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
+| `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). A single citation carries `detail.cited_evidence` naming the artifact read, including a `pex` report's `body_bias` (issue #5692); `citation` itself stays `null`. For item 11's compound citation this covers a failing `lvs` part beside an ERC half that proves nothing about power delivery either; a failing `lvs` part beside a *complete, continuous* supply spec renders `"lvs_did_not_pass"` below instead (issue #2495). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. **Item 11 only** (issue #2496): also rendered when the cited `erc` part's own **spec** document — read separately, since the envelope echoes the spec's path but not its declarations — no longer matches that run's own `provenance.spec.content_hash` (issue #2049): the spec was edited after `klt erc` ran, so the declarations item 11 is grading are not the ones the cited run actually checked. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the pin matches the envelope but the audited artifact itself no longer re-hashes to that value (`input_verified: false`), meaning the artifact was edited after it was attested. |
 | `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a command-backed `functional-verification` citation of a **legacy** report (from a `klt` predating the `provenance` block, issue #5550) or an `options.from_synthesize` one (`provenance.input` is `null` by design), where a command's stdout is not a stable file to re-hash (a *file-backed* one of either is re-hashed by the grader, issue #4893), or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. The item carries `detail.content_hash_pin: "unverifiable"` and a `detail.content_hash_pin_note` naming the envelope kind (issue #3747). **Item 11 only** (issue #2496): also rendered when the cited `erc` part's spec document could not be verified at all — the envelope carries no `provenance.spec.content_hash` (it predates issue #2049), or the document could no longer be hashed on this second read. **Items 1, 2, 9 and 10, artifact-anchored `generic` citations** (issue #2718): also rendered when the artifact `provenance.input.path` names cannot be found or read from the grading context (`input_verified: null`), so the binding is only the envelope's own claim. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), items 3-7 and 11 reject a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above; items 1, 2, 9 and 10 refuse a bare one as `"unanchored_evidence"` instead), every item other than item 11 rejects an `"erc"`, `"place-and-route"`, `"socket-check"` or `"lef-abstract"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. (A cited item-11 *set* that is merely missing the `erc` or `lvs` part renders `"power_delivery_parts_missing"` instead, issue #4193.) The cited check did not fail on its own terms; it simply does not prove what this item requires. |
