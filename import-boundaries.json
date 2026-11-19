@@ -324,6 +324,7 @@
         "klayout_tools.functional_verification_mutation_proposals",
         "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_pdk",
+        "klayout_tools.functional_verification_results",
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
