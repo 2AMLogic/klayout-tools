@@ -2976,7 +2976,6 @@ def _prepare_sim_request(
     max_units_per_job: int | None,
     max_concurrent_jobs: int | None,
     capacity_wait_s: float | None,
-    dry_run: bool,
     pdk_root: str | None = None,
     capacity_retries: int | None = None,
     timeout_s: float | None = None,
@@ -3687,7 +3686,6 @@ def _run_sim_corners(
         max_concurrent_jobs=max_concurrent_jobs,
         capacity_wait_s=capacity_wait_s,
         capacity_retries=capacity_retries,
-        dry_run=dry_run,
         pdk_root=pdk_root,
         timeout_s=timeout_s,
     )
@@ -4142,7 +4140,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
             request=request,
-            hosts=hosts,
+            hosts=sim_batch_resume.resume_hosts(hosts, corner_points, dispatch_points),
             measurements_spec=measurements_spec,
             request_dir=request_dir,
             **shard_kwargs,
@@ -8486,7 +8484,7 @@ def _run_corner(
     # directory now, before it is cleaned up below -- so the reduced array is
     # what leaves the corner, on every backend, whatever `keep_artifacts` is.
     crossings = sim_crossings.extract_corner_crossings(
-        measurements_spec, corner_dir, point.supply_v
+        measurements_spec, corner_dir, point.supply_v, analysis.get("kind")
     )
     # Issue #3033: same for the energy reduction.
     energy = sim_energy.extract_corner_energy(measurements_spec, corner_dir)
@@ -8977,9 +8975,9 @@ def _crossings_measurement_result(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """One ``crossings`` measurement's response entry (issue #2868).
 
-    ``value`` is the number of crossings found inside the window -- a plain
-    number, graded through :func:`_grade_measurement_value` exactly like any
-    scalar -- and the series itself rides the additive ``crossings`` sibling.
+    ``value`` is the number of window crossings (on ``dc``, the first
+    crossing's sweep abscissa), graded through :func:`_grade_measurement_value`
+    like any scalar -- and the series itself rides the additive ``crossings`` sibling.
     No series (signal did not resolve, rawfile unreadable) is an ordinary
     ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
     no ``crossings`` member, like any other measurement with no value."""
@@ -9004,11 +9002,11 @@ def _crossings_measurement_result(
             {"severity": "error", "code": "measurement", "message": message}
         ]
     m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.total
+        spec, outcome.graded_value()
     )
     result = {
         "name": name,
-        "value": outcome.total,
+        "value": outcome.graded_value(),
         "unit": unit,
         "status": m_status,
         "margin": margin,
@@ -10078,12 +10076,12 @@ def _engine_build_with_comparison(
 
 
 def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """``environment.engine_build`` (issue #3095): the local ngspice build
-    identity -- ``--version`` banner plus binary sha256 -- probed once per
-    sweep. ``engine_version`` is the major version only and two builds of one
-    major can differ in options (FFTW vs. padded FFT). ``None`` for engines
-    without a probe (xyce). A failed probe never fails the run: the banner is
-    ``None`` and ``probe`` / ``reason`` say why."""
+    """The local ngspice build identity (issue #3095) -- ``--version`` banner plus
+    binary sha256 -- probed once per sweep into ``environment.engine_build`` on
+    ``local`` reports, ``client_engine_build`` off-host (#5566 rewrites ``engine_build``
+    to the worker's). ``engine_version`` is the major version only and two builds of one
+    major can differ in options (FFTW vs. padded FFT). ``None`` for engines without a
+    probe (xyce). A failed probe never fails the run; ``probe`` / ``reason`` say why."""
     if ngspice_binary is None:
         return None
     build: dict[str, Any] = {
