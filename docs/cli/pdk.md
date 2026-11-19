@@ -1118,9 +1118,10 @@ library's) to extract from the way `klt pdk cells` extracts from
 ## `klt pdk decks`
 
 Lists the KLayout DRC deck files a variant ships under
-`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`), and the LVS
+runsets under `libs.tech/klayout/lvs/` (or `tech/lvs/`), with the `-rd`
 globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
-exactly one of them (`is_default`); the siblings (for sky130A,
+exactly one DRC deck (`is_default`); the siblings (for sky130A,
 `sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
 sibling passed via `--deck-file` without the globals it gates on silently
 runs zero rules (`coverage_unknown`, issue #1302).
@@ -1157,21 +1158,35 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 }
 ```
 
-- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), `helper` (`*.rb.drc`,
   Ruby helper scripts that merely carry the `.drc` extension; listed but not
-  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
-  are not listed.
+  scanned, `globals: []`), or `lvs` (`*.lvs`, the directly-runnable LVS
+  runset). Other files in the directories (Python drivers, `*.lylvs`
+  wrappers, `rule_decks/` fragments) are not listed.
+- **LVS entries.** `decks[]` lists the DRC entries first, then one `kind:
+  "lvs"` entry per runset; `is_default` on an LVS entry marks the runset
+  `klt lvs --engine klayout-runset --pdk <variant>` runs, and is independent of
+  the DRC `is_default` (a variant can have an LVS default and no DRC one). A
+  caller that only wants DRC decks must filter on `kind`. `schema_version`
+  stays `1`: no existing field changed, and `kind` gained one member. LVS
+  globals are verdict-affecting (an unset `simplify`/`combine`/
+  `implicit_connect` yields a well-formed but wrong `mismatch`), so read the
+  defaults. The variables `klt lvs --engine klayout-runset` sets itself
+  (`input`, `schematic`, `report`, `top`, `topcell`) are not listed.
 - `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
   `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
   globals. A global assigned under `if not defined? $x`, `... unless defined?
-  $x` or `||=` is `required_by_caller: false` with its literal `default`;
-  any other `$name` mentioned outside a comment is `required_by_caller: true`.
+  $x` or `||=`, read through a `<helper>?($x)` /
+  `<helper>?($x, default: V)` call (default `false` / `V`), or read as
+  `CONST = $x || '<literal>'` is `required_by_caller: false` with its
+  literal `default`; any other `$name` mentioned outside a comment is `required_by_caller: true`.
   Literal `require`/`load` includes are followed.
 - **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
   proof a deck ignores a variable, and a defaulted global (e.g. `feol`
   defaulting to `"false"`) can still silently disable whole rule groups —
   read the defaults, not just the `required_by_caller` flag.
-- A variant with no `drc/` directory is a successful empty `decks` list.
+- A variant with neither a `drc/` nor an `lvs/` directory is a successful empty
+  `decks` list.
   Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`
