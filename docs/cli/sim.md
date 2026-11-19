@@ -3879,18 +3879,15 @@ the netlist body; see "Measurements that are not `.meas` cards" below.
 
 ## Device multiplier warnings (`environment.device_multiplier`, [#5779](https://github.com/2AMLogic/klayout-tools/issues/5779))
 
-sky130's device subcircuits **declare** a vendor `mult` parameter and never
-forward it to the inner primitive as a device multiplier (verified 2026-11-15
-against volare `c6d73a35f524070e85faff4a6a9eef49553ebc2b`: 0 of 22 FET
-subckts declaring `mult=1` in `models_fet.spice` contain `m = {mult}`;
-`models_resistors.spice` is the same shape). The drive multiplier comes only
-from SPICE's own `m=` on the instance, while `mult` de-rates mismatch: it
-appears in the subckt's mismatch sigma denominator
-(`AGAUSS(0,1.0,1)/sqrt(l*w*mult)`), inert in a nominal run and live in a
-mismatch Monte Carlo run. A netlist carrying `mult=6` and no `m=` therefore
-simulates a **1x** device — and no step of the flow said anything. The two
-forms are a non-redundant pair: `m=` supplies drive, `mult` supplies the
-mismatch de-rating of an N-times-larger device, and **neither is removable**.
+Some device subcircuits declare a vendor `mult` parameter without forwarding
+it to the inner primitive. For example, none of the 22 FET subcircuits
+declaring `mult=1` in sky130's `models_fet.spice` forward it to drive (volare
+`c6d73a35f524070e85faff4a6a9eef49553ebc2b`). On these devices, an instance
+with `mult=6` and no SPICE `m=` simulates **1x drive**. The effect on Monte
+Carlo mismatch depends on the model. The sky130 `nfet_01v8` uses
+`sqrt(l*w*mult)` in the mismatch sigma denominator, while the
+`res_generic_nd` subcircuit only declares `mult`. Keep `m=N` and `mult=N`
+for an N-times device.
 
 After the corners run, `klt sim` lints the netlist's instance cards against
 the device subcircuit texts of the scanned `.include` closure (the same
@@ -3904,14 +3901,13 @@ declaring-not-forwarding subcircuit:
 | Instance parameters | Verdict |
 | --- | --- |
 | `mult=N` (N>1), no `m=` | finding `drive_1x` — the device simulates 1x drive |
-| `m=M`, `mult` absent or `mult=N≠M` | finding `drive_mismatch_disagreement` — drive and mismatch de-rating disagree |
+| `m=M`, `mult` absent (M≠1) or `mult=N≠M` | finding `drive_mismatch_disagreement` — the drive and vendor multiplier settings differ |
 | `mult=N m=N` (equal) | clean |
-| `mult=1` with no `m=`, or explicit `m=1` | clean |
+| Only `mult=1` or only `m=1` | clean |
 
 A finding carries the instance name, the target subcircuit, both raw
-parameter values and a note naming both forms' roles — the wording never
-suggests dropping either form (in a Monte Carlo run that would overstate
-mismatch by `sqrt(N)` per device). Findings are **warning-only**: they are
+parameter values and a note recommending that both forms be set to the
+intended multiplier. Findings are **warning-only**: they are
 reported to stderr and in `environment.device_multiplier.findings`, and
 neither the exit code nor any existing field changes. An instance whose
 `m=`/`mult=` value is not a plain number (an `{expression}` or parameter
@@ -3933,7 +3929,7 @@ no checkable instance, or every checked pair agreeing — keeps
       "kind": "drive_1x",
       "m": null,
       "mult": "6",
-      "note": "the vendor mult=6 passed to 'sky130_fd_pr__nfet_01v8' multiplies nothing on this instance's drive: the subcircuit declares mult but never forwards it to the device, and the instance carries no m=, so the device simulates 1x. mult still de-rates mismatch in a Monte Carlo run (the subcircuit's mismatch expressions read it), so carry the drive on m= and keep the pair equal (m=N with mult=N for an N-times device)."
+      "note": "'sky130_fd_pr__nfet_01v8' declares mult but does not forward mult=6 to device drive. With no m= on this instance, the device simulates 1x. Depending on the model, mult can also scale Monte Carlo mismatch. Keep m=N and mult=N for an N-times device."
     }
   ]
 }

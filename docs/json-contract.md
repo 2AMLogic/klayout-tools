@@ -200,8 +200,8 @@ subcircuit text is absent from the scanned include closure, `unevaluated`
 lists non-numeric `m=`/`mult=` values that cannot be compared, and
 `not_scanned` discloses closure parts that could not be read. The field is
 absent when there is nothing to disclose, the exit code and every existing
-field are unchanged, and the note wording never suggests dropping either
-multiplier form (`mult` is live in mismatch Monte Carlo runs). No
+field are unchanged, and the note recommends retaining both forms because
+some models use `mult` to scale Monte Carlo mismatch. No
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Device
 multiplier warnings".
 

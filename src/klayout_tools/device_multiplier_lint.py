@@ -1,20 +1,12 @@
 """Device-multiplier lint (issue #5779): does a device instance's vendor
 ``mult`` parameter agree with the SPICE ``m=`` drive multiplier?
 
-sky130's device subcircuits **declare** a vendor ``mult`` parameter and
-never forward it to the inner primitive as a device multiplier, so the
-drive multiplier comes only from SPICE's own ``m=`` on the instance. The
-two forms are a non-redundant pair: ``m=`` supplies drive, ``mult``
-de-rates mismatch (it appears in the subckt's mismatch sigma denominator,
-e.g. ``AGAUSS(0,1.0,1)/sqrt(l*w*mult)``), so an instance carrying
-``mult=6`` and no ``m=`` simulates a **1x** device, and ``m=N`` with
-``mult`` absent or unequal means drive and mismatch de-rating disagree.
-
-The lint checks that the **pair agrees** on instances of subcircuits that
-declare ``mult`` in their ``.subckt`` header but never forward it to drive
-(no ``m=`` card in the body referencing ``mult``). It never suggests
-dropping either form: ``mult`` is live in a mismatch Monte Carlo run even
-though it is inert nominally.
+Some subcircuits declare ``mult`` without forwarding it to the primitive's
+``m=``. On these instances SPICE's ``m=`` supplies drive. What ``mult``
+does in a Monte Carlo run depends on the model. For example, sky130's
+``nfet_01v8`` uses it in the mismatch sigma denominator ``sqrt(l*w*mult)``.
+The lint checks the pair on declaring, non-forwarding subcircuits and
+recommends keeping both forms equal.
 
 Pure text-in/findings-out: :func:`lint_instances` takes folded instance
 cards plus ``{name: subckt text}`` and returns findings; no I/O of its
@@ -30,16 +22,15 @@ from collections.abc import Iterable
 from typing import Any
 
 from ._spice_number import parse as parse_spice_number
-from ._spice_text import logical_lines
-from ._spice_tokens import split_spice_tokens
+from ._spice_text import circuit_lines, logical_lines
+from ._spice_tokens import split_card_assignments, split_spice_tokens
 
 #: Finding ``kind``: ``mult=N`` (N>1) with no ``m=`` -- the device
 #: simulates 1x drive.
 DRIVE_1X = "drive_1x"
 
 #: Finding ``kind``: ``m=`` present but unequal to ``mult`` (or ``mult``
-#: absent) on a declaring-not-forwarding subcircuit -- drive and mismatch
-#: de-rating disagree.
+#: absent) on a declaring-not-forwarding subcircuit.
 DRIVE_MISMATCH_DISAGREEMENT = "drive_mismatch_disagreement"
 
 #: A value referencing ``mult`` inside a body card's ``m=`` parameter --
@@ -54,8 +45,10 @@ _MAX_LISTED = 5
 def instance_cards(text: str) -> list[str]:
     """Subcircuit-instance cards of one netlist text: logical cards
     (comments stripped, ``+`` continuations folded) whose first token
-    starts with ``X``."""
-    return [line for line in logical_lines(text) if line[0].lower() == "x"]
+    starts with ``X``, outside control blocks."""
+    return [
+        line for line in circuit_lines(logical_lines(text)) if line[0].lower() == "x"
+    ]
 
 
 def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
@@ -70,7 +63,7 @@ def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
     collected: dict[str, str] = {}
     for text in texts:
         stack: list[tuple[str, str, list[str]]] = []
-        for line in logical_lines(text):
+        for line in circuit_lines(logical_lines(text)):
             word = line.split(None, 1)[0].lower()
             if word == ".subckt":
                 tokens = line.split()
@@ -147,10 +140,9 @@ def _lint_card(
     tokens = split_spice_tokens(card)
     if not tokens or tokens[0][0].lower() != "x":
         return
-    params = _card_params(tokens)
+    params, target = _card_params(tokens)
     if "m" not in params and "mult" not in params:
         return
-    target = _target_subckt(tokens)
     subckt_text = subckts.get((target or "").lower())
     if subckt_text is None:
         if _pair_could_yield_finding(params):
@@ -250,30 +242,20 @@ def _finding(
     m_text = _number_text(m, m_value)
     mult_text = _number_text(mult, mult_value)
     if kind == DRIVE_1X:
-        note = (
-            f"the vendor mult={mult_text} passed to '{subckt}' multiplies "
-            "nothing on this instance's drive: the subcircuit declares mult "
-            "but never forwards it to the device, and the instance carries "
-            "no m=, so the device simulates 1x. mult still de-rates mismatch "
-            "in a Monte Carlo run (the subcircuit's mismatch expressions "
-            "read it), so carry the drive on m= and keep the pair equal "
-            "(m=N with mult=N for an N-times device)."
+        drive = (
+            f"'{subckt}' declares mult but does not forward mult={mult_text} "
+            "to device drive. With no m= on this instance, the device simulates 1x."
         )
     else:
-        if mult is None:
-            pair = (
-                "vendor mult absent (the subcircuit's mismatch expressions "
-                "default it to 1)"
-            )
-        else:
-            pair = f"vendor mult={mult_text}"
-        note = (
-            f"drive m={m_text} and {pair} disagree on '{subckt}': the "
-            "subcircuit de-rates mismatch by mult (it is never forwarded to "
-            f"drive), so this instance simulates {m_text}x drive with a "
-            f"{mult_text}x device's mismatch de-rating. Keep the pair equal "
-            "(m=N with mult=N for an N-times device)."
+        pair = "mult absent" if mult is None else f"mult={mult_text}"
+        drive = (
+            f"The multiplier settings on '{subckt}' disagree (m={m_text}, {pair}). "
+            f"The instance simulates {m_text}x drive."
         )
+    note = (
+        f"{drive} Depending on the model, mult can also scale Monte Carlo mismatch. "
+        "Keep m=N and mult=N for an N-times device."
+    )
     return {
         "instance": instance,
         "subckt": subckt,
@@ -292,44 +274,12 @@ def _number_text(raw: str | None, value: float | None) -> str:
     return raw or ""
 
 
-def _card_params(tokens: list[str]) -> dict[str, str]:
-    """``{lower-cased name: raw value}`` of a card's ``name=value``
-    tokens. One token may be a brace-wrapped pair list (``{w=1 mult=6}``);
-    values keep their own braces (``m={mult * 2}`` stays whole)."""
-    params: dict[str, str] = {}
-    for token in tokens[1:]:
-        _absorb_param(token, params)
-    return params
-
-
-def _absorb_param(token: str, params: dict[str, str]) -> None:
-    body = token
-    while len(body) >= 2 and body[0] == "{" and body[-1] == "}":
-        body = body[1:-1].strip()
-        if " " in body and "=" in body:
-            for part in body.split():
-                _absorb_param(part, params)
-            return
-    if "=" not in body:
-        return
-    name, _, value = body.partition("=")
-    name = name.strip().lower()
-    if name:
-        params.setdefault(name, value.strip())
-
-
-def _target_subckt(tokens: list[str]) -> str | None:
-    """The subcircuit an X-card instantiates: its last positional token
-    (every ``name=value`` token is a parameter)."""
-    positional = [token for token in tokens[1:] if "=" not in token]
-    return positional[-1] if positional else None
-
-
 def _header_declares_mult(header: str) -> bool:
     """Does the ``.subckt`` header declare a ``mult`` parameter? Uses the
     shared tokenizer (not a bare ``split()``) so the spaced ``mult = 1``
     spelling reads the same as ``mult=1``."""
-    return "mult" in _card_params(split_spice_tokens(header))
+    params, _ = _card_params(split_spice_tokens(header))
+    return "mult" in params
 
 
 def _body_forwards_mult(body: str) -> bool:
@@ -340,10 +290,16 @@ def _body_forwards_mult(body: str) -> bool:
         first = line.split(None, 1)[0]
         if first.startswith("."):
             continue
-        for name, value in _card_params(split_spice_tokens(line)).items():
-            if name == "m" and _MULT_REF_RE.search(value):
-                return True
+        params, _ = _card_params(split_spice_tokens(line))
+        if _MULT_REF_RE.search(params.get("m", "")):
+            return True
     return False
+
+
+def _card_params(tokens: list[str]) -> tuple[dict[str, str], str | None]:
+    """Case-insensitive SPICE parameters and the preceding model name."""
+    assignments, model = split_card_assignments(tokens[1:])
+    return {name.lower(): value for name, value in assignments}, model
 
 
 def _param_number(raw: str | None) -> float | None:

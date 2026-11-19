@@ -25,6 +25,7 @@ real reasons, recorded in :func:`fold_spice_continuations`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
 
 #: The package's shared inline-comment rule, as one pattern for every
 #: netlist reader (issue #5417). Two markers:
@@ -152,3 +153,19 @@ def logical_lines(text: str) -> list[str]:
         if line:
             kept.append(line)
     return [line for line in fold_spice_continuations(kept) if not line.startswith("+")]
+
+
+def circuit_lines(lines: Iterable[str]) -> Iterator[str]:
+    """Yield nonblank, stripped cards outside ngspice control blocks."""
+    in_control = False
+    for line in lines:
+        card = line.strip()
+        if not card:
+            continue
+        keyword = card.split(None, 1)[0].lower()
+        if keyword == ".control":
+            in_control = True
+        elif keyword == ".endc":
+            in_control = False
+        elif not in_control:
+            yield card

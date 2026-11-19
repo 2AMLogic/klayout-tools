@@ -174,6 +174,32 @@ def test_continuation_cards_fold_before_matching():
     assert [f["kind"] for f in findings] == [lint.DRIVE_1X]
 
 
+@pytest.mark.parametrize(
+    ("params", "kind", "m", "mult"),
+    [
+        ("PARAMS: mult=6", lint.DRIVE_1X, None, "6"),
+        ("mult=1\n+ MULT = 6", lint.DRIVE_1X, None, "6"),
+        ("m=1 M=2 m=6", lint.DRIVE_MISMATCH_DISAGREEMENT, "6", None),
+        ("{w=1 mult=6}", lint.DRIVE_1X, None, "6"),
+    ],
+)
+def test_instance_assignments_on_a_resistor_subcircuit(params, kind, m, mult):
+    model = ".subckt dev a b mult=1\nR1 a b 1k\n.ends"
+    report = _report(f"X1 in 0 dev {params}", model)
+    (finding,) = report["findings"]
+    assert (finding["subckt"], finding["kind"]) == ("dev", kind)
+    assert (finding["m"], finding["mult"]) == (m, mult)
+    assert "depending on the model" in finding["note"].lower()
+    assert "m=N" in finding["note"] and "mult=N" in finding["note"]
+
+
+def test_control_command_is_skipped_and_circuit_cards_resume_after_endc():
+    model = ".subckt dev a b mult=1\nR1 a b 1k\n.ends"
+    deck = ".CONTROL\nalias xreport echo\nxreport dev mult=6\n.ENDC\nX1 in 0 dev mult=6"
+    (finding,) = _findings(deck, model)
+    assert (finding["instance"], finding["kind"]) == ("X1", lint.DRIVE_1X)
+
+
 def test_param_names_match_case_insensitively():
     findings = _findings(
         "XU1 d g s b sky130_fd_pr__nfet_01v8 MULT = 6\n", DECLARING_NOT_FORWARDING
@@ -310,6 +336,10 @@ def test_run_sim_reports_finding_and_keeps_exit_status(tmp_path, monkeypatch, ca
     _stub_subprocess_run(monkeypatch)
     control_status = sim.run_sim(control)["status"]
     assert "device-multiplier" not in capsys.readouterr().err
+    control_exit = main(["sim", control, "--format", "json"])
+    control_output = capsys.readouterr()
+    assert "device-multiplier" not in control_output.err
+    assert "device_multiplier" not in json.loads(control_output.out)["environment"]
 
     request = _write_fixtures(
         tmp_path,
@@ -326,10 +356,10 @@ def test_run_sim_reports_finding_and_keeps_exit_status(tmp_path, monkeypatch, ca
     assert "not_scanned" not in entry
     assert report["status"] == control_status
     assert "device-multiplier finding(s)" in capsys.readouterr().err
-    assert main(["sim", request, "--format", "json"]) == main(
-        ["sim", control, "--format", "json"]
-    )
-    assert "device-multiplier finding(s)" in capsys.readouterr().err
+    assert main(["sim", request, "--format", "json"]) == control_exit
+    warning_output = capsys.readouterr()
+    assert "device-multiplier finding(s)" in warning_output.err
+    assert json.loads(warning_output.out)["environment"]["device_multiplier"] == entry
 
 
 def test_run_sim_clean_netlist_keeps_environment_unchanged(tmp_path, monkeypatch):
