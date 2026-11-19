@@ -156,6 +156,30 @@ def _drift_check_label(entry: dict) -> str:
     return "  [" + " ".join(str(value) for value in check.values()) + "]"
 
 
+def _print_shape_mismatch(mismatch: dict | None) -> None:
+    """Print the ``shape_mismatch`` line of a ``--rerun`` drift report when
+    the envelope carries one (issue #5829), nothing otherwise.
+
+    A committed envelope that binds ``provenance.input`` with different keys
+    than the fresh one is a cross-release envelope-shape change, not content
+    drift; the line names both key sets and the regeneration remediation.
+    Takes the ``shape_mismatch`` value itself and returns early when absent,
+    the same print-when-present helper shape as main's
+    :func:`_print_build_skew`, so the shared ``render_rerun_drift`` renderer
+    does not accrue a branch per additive field (the C901 ratchet).
+    """
+    if not isinstance(mismatch, dict):
+        return
+    committed_keys = ", ".join(mismatch.get("keys_committed") or [])
+    fresh_keys = ", ".join(mismatch.get("keys_fresh") or [])
+    print(
+        f"shape_mismatch: {mismatch.get('field', 'provenance.input')} binds "
+        f"{committed_keys} committed vs {fresh_keys} fresh -- a cross-release "
+        "envelope shape change, not content drift; Regenerate the envelope "
+        "and re-commit it"
+    )
+
+
 def render_rerun_drift(result: dict) -> None:
     """Print the ``--format text`` rendering of a ``--rerun`` drift report.
 
@@ -184,6 +208,13 @@ def render_rerun_drift(result: dict) -> None:
     lookup -- the same "print it only when present" pattern as ``doc_drift``
     above. See :func:`_drift_check_label`.
 
+    It also carries ``shape_mismatch`` (issue #5829): one line when a
+    committed envelope binds ``provenance.input`` with different keys than
+    the fresh one -- a cross-release envelope-shape change, not content
+    drift -- naming both key sets and the regeneration remediation. See
+    :func:`_print_shape_mismatch`; ``build_skew`` renders through its own
+    :func:`_print_build_skew` helper for the same reason.
+
     Every verb's payload may additionally carry a ``not_compared`` list
     (issue #5866): provenance fields present in the committed report and
     absent from the fresh one -- not comparable, so excluded from the
@@ -196,6 +227,7 @@ def render_rerun_drift(result: dict) -> None:
     print(f"status: {result['status']}")
     if "doc_drift" in result:
         print(f"doc_drift: {str(result['doc_drift']).lower()}")
+    _print_shape_mismatch(result.get("shape_mismatch"))
     drift = result["drift"]
     if drift:
         print()
