@@ -14,6 +14,7 @@ under ``fixtures/em/`` (see
 
 import json
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
@@ -102,12 +103,16 @@ def test_fixture_is_valid_against_geode_report_schema():
     """Issue #6514: the engine-side fixture is pinned to geode's published
     report schema (vendored verbatim from geode-fem ``GEODE_REPORT_SCHEMA_COMMIT``),
     so the suite asserts the envelope ``geode`` emits, not the adapter's
-    guess at it. ``backend``'s documented value set is asserted separately
-    because the schema types it as a bare string."""
+    guess at it. ``backend``'s documented value set and ``mesh.sha256``'s
+    documented shape (hex SHA-256 of the mesh bytes) are asserted separately
+    because the schema types both as bare strings. ``git_sha: "fixture"`` is
+    deliberately *not* a documented value (``<sha>[-dirty]`` / ``unknown``):
+    it is the one marker that this report is hand-authored, not a real run."""
     schema = json.loads(GEODE_REPORT_SCHEMA.read_text(encoding="utf-8"))
     report = json.loads(FIXTURE.read_text(encoding="utf-8"))
     jsonschema.validate(report, schema)
     assert report["backend"] in ("ndarray", "wgpu", "cuda", "metal")
+    assert re.fullmatch(r"[0-9a-f]{64}", report["mesh"]["sha256"])
     # Negative control: the validation bites on this fixture, so a future
     # edit that drops a required field fails here rather than silently
     # re-diverging from the engine's contract.

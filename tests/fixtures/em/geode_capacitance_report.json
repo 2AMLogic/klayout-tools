@@ -9,7 +9,7 @@
   "status": "ok",
   "mesh": {
     "path": "m.msh",
-    "sha256": "5f2a0d8c1e7b4396a0c3f8d2e1b54790ac6d3e8f1b2c4d5e6f7a8b9c0d1e2f3a4",
+    "sha256": "5f2a0d8c1e7b4396a0c3f8d2e1b54790ac6d3e8f1b2c4d5e6f7a8b9c0d1e2f3a",
     "length_unit_m": 1e-6,
     "n_nodes": 271,
     "n_tets": 894,
