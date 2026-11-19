@@ -16010,7 +16010,7 @@ def _inventory(item: int, **overrides) -> dict:
                 "name": "sky130A",
                 "revision": "0fe599b2afb6708d281543108caf8310912f54af",
             },
-            "tools": {"ngspice": "42", "klt": "0.7.0"},
+            "tools": {"ngspice": "42"},
         }
     else:
         base["hygiene"] = ["README.md", "LICENSE", ".github/workflows/ci.yml"]
