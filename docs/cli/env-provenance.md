@@ -162,7 +162,7 @@ $ klt env-provenance lint-envelope build/gcd.pnr.json
 build/gcd.pnr.json: def_path: /Users/someone/work/.klt/place-and-route/gcd.def
 build/gcd.pnr.json: gds_path: /Users/someone/work/.klt/place-and-route/gcd.gds
 violations: 2 absolute path(s) in 1 file(s)
-replace each absolute host path with a repo-relative reference (…) or with a content hash (…)
+for a klt-produced envelope, re-run with request.portable_paths: true (…); otherwise replace each absolute host path with a repo-relative reference (…)
 ```
 
 ```json
@@ -170,7 +170,7 @@ replace each absolute host path with a repo-relative reference (…) or with a c
   "schema_version": 1,
   "status": "violations",
   "finding_count": 2,
-  "recommendation": "replace each absolute host path with a repo-relative reference …",
+  "recommendation": "for a klt-produced envelope, re-run with request.portable_paths: true …",
   "files": [
     {
       "file": "build/gcd.pnr.json",
@@ -281,6 +281,16 @@ one-document-per-line requirement).
   machine, which is exactly what a reproducibility lint cannot do. Prefixes
   match on a path-component boundary, so `/opt/pdk` admits `/opt/pdk/sky130A/…`
   but not `/opt/pdk-scratch/…`.
+- **For a `klt`-produced envelope, the first-choice remedy is
+  `request.portable_paths: true`** (issue #5795). `klt lvs` and
+  `klt place-and-route` accept it (issues #3798/#3820): the *writer* rewrites
+  every absolute host path in the returned report to a committable form
+  (repo-relative `{path, scope}`, `$PDK_ROOT/…`, or a basename), so the record
+  lints clean with no declarations and the lint stays decoupled from every
+  verb's schema. For `klt lvs`'s runset engine, repo-relative inputs — including
+  a relative `--deck-file` — now keep even the default-mode report clean
+  (#5795). `--allow-prefix` remains the fallback for a genuinely machine-wide
+  install root a committer cannot rewrite.
 
 Exit codes: `0` clean, `3` findings, `1` a file could not be read or is not
 valid JSON (never a silent "clean"), `2` argparse usage error.
@@ -382,6 +392,13 @@ assert not find_absolute_path_fields(clean)  # same check as `lint-envelope`
   (`/home`, `/Users`, `C:\Users`) by design, so a clean `scan` says nothing
   about non-home roots.
 
+A tool-binary field is the everyday case: `klt drc --engine klayout` records
+the resolved binary in `environment.klayout_binary` on every run
+([`drc.md`](drc.md) → "Pinning the KLayout application"), and
+`scrub_payload(resp, [("/usr/bin", "<KLAYOUT_BIN_DIR>")])` rewrites
+`/usr/bin/klayout` to `<KLAYOUT_BIN_DIR>/klayout` — clean under an empty
+allow-list.
+
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
 `find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,
 `lint_envelope_files()`, and `render_path_field()` (the same
@@ -407,6 +424,7 @@ that formats its own records can use just the pieces it needs.
   it into a repo's CI" above. That is a decision this repo made for its own
   tree, not a default the verb imposes on a consumer.)
 - **`lint-envelope` does not rewrite anything.** It reports the field; the fix
-  (retype to `{path, scope}`, or drop the path for a content hash) is a
+  (re-run the `klt` verb with `portable_paths: true`, retype to
+  `{path, scope}`, or drop the path for a content hash) is a
   per-field contract decision — see
   [`../json-contract.md`](../json-contract.md) → "Path fields: envelope vs. plain string".

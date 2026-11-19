@@ -242,7 +242,6 @@ from ._provenance import (
     build_provenance,
     content_hash,
     sha256_file,
-    wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
     build_check_result,
@@ -259,6 +258,7 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
+from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
 from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
@@ -3164,70 +3164,6 @@ def _write_yosys_log(
         os.path.splitext(script_path)[0] + ".log",
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
-
-
-_SV_SOURCE_ERROR_RE = re.compile(r"(?:^|[\s/\\])\S*\.svh?:\d+:\s*ERROR:")
-
-
-def _sv_frontend_hint_if_applicable(error_line: str) -> str:
-    """Hint appended when Yosys's native ``-sv`` front end rejects a
-    SystemVerilog construct (issue #4181).
-
-    Yosys prefixes a parse error with ``<file>:<line>:``, so the source
-    extension is read straight off the error line -- a ``.v`` source with
-    the same syntax error gets no hint. Conservative table: only the
-    unpacked-array-port class (``syntax error, unexpected '['`` while a
-    port list is expected) is recognised; anything else returns ``""``.
-    """
-    if not _SV_SOURCE_ERROR_RE.search(error_line):
-        return ""
-    if "syntax error, unexpected '['" not in error_line:
-        return ""
-    return (
-        " -- hint: this looks like an unpacked-array port (e.g. "
-        "`input logic [31:0] a_i[2]`), a SystemVerilog construct Yosys's "
-        "native `read_verilog -sv` front end does not support; rewrite it "
-        "as a packed/flattened port or pre-convert the source"
-    )
-
-
-def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
-    """Build an actionable error message from a failed ``yosys -s`` run.
-
-    Prefers the last ``ERROR:`` line Yosys itself printed (its own error
-    lines go to stderr -- verified live, Yosys survey worked example), on
-    either stream; falls back to a generic exit-code message with a short
-    tail of captured output when no ``ERROR:`` line is found.
-
-    When the error line is the ``Can't open script file `<path>' for
-    reading: No such file or directory`` shape *and* ``<path>`` verifiably
-    exists on the host filesystem, appends a hint that the ``yosys`` on
-    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368; for a path under
-    the host temp dir the hint instead names the sandbox's private ``/tmp``
-    mount and leads with relocating the request (issue #2453). A script path
-    that genuinely does not exist is a different failure and is left
-    unchanged.
-    """
-    for stream in (completed.stderr or "", completed.stdout or ""):
-        error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
-        if error_lines:
-            message = f"yosys synthesis failed: {error_lines[-1]}"
-            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
-            # Issue #2635: `Module `\<cell>' ... is not part of the design`
-            # is what a hard macro with no `request.macros` entry looks
-            # like, and the raw line says nothing about which request field
-            # fixes it. Appended as a further `--` clause, the same
-            # recognized-hint structure the WASI hint above already uses.
-            macro_hint = macro_spec.undeclared_module_hint(error_lines[-1])
-            if macro_hint is not None:
-                message = f"{message} -- {macro_hint}"
-            message += _sv_frontend_hint_if_applicable(error_lines[-1])
-            return message
-
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {completed.returncode}: {snippet}"
 
 
 def _submodule_key(
