@@ -471,7 +471,7 @@ def _parse_escaped_connection_expr(expr: str) -> str:
     )
 
 
-def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
+def _parse_connection_expr(expr: str) -> str:
     """Resolve one single-net expression to a net name, or raise
     :class:`VerilogNetlistError` for anything this narrow grammar does not
     model (a range slice, concatenation, a non-constant expression).
