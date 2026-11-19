@@ -465,6 +465,30 @@ inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
 callers gating on `status` should expect that (see `docs/cli/lvs.md`,
 "`reference.unresolved_subckt_call`").
 
+`klt lvs`'s `body_verification` block gains an `inspected_count` integer
+(issue #5749): how many MOS devices the body check actually examined, across
+every eligible class (generic and `compare_mos_flavour`-flavoured), present
+in every branch (`0` for `"unchecked"`) so a `"verified"` states its own
+coverage instead of being inferred from the absence of findings. The same
+issue also stops the block from rendering the *vacuous* `"verified"`: a run
+that reached the check (a `layout.deck` was given) but found zero eligible
+MOS devices — a passives-only layout — now reads `"unchecked"` with a
+`reason`, and the check now sees flavoured classes, so a flavoured-only
+layout is inspected (and honestly `"unverified"` when a body tie is missing)
+rather than silently skipped. Both halves are additive-plus-honesty: no
+field is removed or retyped, no `status` value is added or removed, and
+`status`/`error_count`/`category_error_counts` are untouched (the block
+does not feed grading) — but the previously-skipped flavoured warning now
+fires, so on a `compare_mos_flavour: true` run over a layout with untied
+flavoured bodies `mismatch_count` increases by one per newly-seen class
+and `category_counts` gains a `device.body_unverified` key. A consumer
+that read `body_verification.status: "verified"` as "this run inspected
+bodies" must now also read `inspected_count`, because a pre-#5749
+`"verified"` may have inspected nothing. No `schema_version` bump;
+`docs/schemas/lvs-response.schema.json`'s `body_verification` definition
+describes the new field. See `docs/cli/lvs.md`'s `body_verification` field
+table.
+
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
 `environment.sdf.dropped` is documented as an open map keyed by class name,
@@ -1205,6 +1229,19 @@ stability statement, concrete precedents, and drift-detection guidance, and
     The `asap7`, `gf180mcu`, `sg13cmos5l` and external-file pins retain their
     values for identical source bytes. Historical release pins still resolve
     against the release that emitted them with `klt deck resolve`.
+  - **Coverage disclosures are not guaranteed to be hashed (#6775).**
+    `content_hash` identifies the rule set a run was checked against: the
+    primary module plus the siblings its `DRC_RULE_SOURCES` names. The
+    disclosure lists that ride in the same envelope —
+    `coverage.unmodeled_rules` and `coverage.unchecked_rules` (`klt drc`), and
+    `unmodeled_rules` on `klt deck info` / `klt deck rules` — record what the
+    deck does *not* check, and are covered only to the extent their source
+    text lives in a hashed file.
+    Where a deck assembles one from a sibling module `DRC_RULE_SOURCES` does
+    not name (e.g. `gf180mcu`, which declares none), adding or removing an
+    entry can leave `content_hash` unchanged, so citing the hash next to such
+    a list does not make that list drift-detectable. Compare the emitted list
+    itself when its exact contents matter.
   - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
     (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
     only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
