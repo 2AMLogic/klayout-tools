@@ -184,11 +184,22 @@ impl Parser {
     }
 
     /// Parse one top-level group (liberty files are a single top-level
-    /// `library (...) { ... }` group).
-    fn parse_group(&mut self) -> Option<Group> {
-        let name = match self.next()? {
-            Token::Ident(s) => s,
-            other => panic!("expected group/attr name, got {:?}", other),
+    /// `library (...) { ... }` group). `Ok(None)` means end-of-input
+    /// *before* any group started -- distinct from `Err`, which covers
+    /// end-of-input inside an open group and every other syntax break
+    /// (issue #5629: this is the hand-port of techmap's fallible grammar;
+    /// a malformed `.lib` must reach callers as `LibertyError`, never as
+    /// a panic).
+    fn parse_group(&mut self) -> Result<Option<Group>, LibertyError> {
+        let name = match self.next() {
+            None => return Ok(None),
+            Some(Token::Ident(s)) => s,
+            Some(other) => {
+                return Err(LibertyError(format!(
+                    "expected group/attr name, got {:?}",
+                    other
+                )))
+            }
         };
         // Args in parens (may be empty).
         let mut args = Vec::new();
@@ -211,7 +222,12 @@ impl Parser {
                         };
                         args.push(v);
                     }
-                    other => panic!("unexpected token in arg list: {:?}", other),
+                    other => {
+                        return Err(LibertyError(format!(
+                            "unexpected token in arg list: {:?}",
+                            other
+                        )))
+                    }
                 }
             }
         }
@@ -231,50 +247,68 @@ impl Parser {
                             self.next();
                         }
                         Some(Token::Ident(_)) => {
-                            members.push(self.parse_member());
+                            members.push(self.parse_member()?);
                         }
-                        other => panic!("unexpected token in group body: {:?}", other),
+                        other => {
+                            return Err(LibertyError(format!(
+                                "unexpected token in group body: {:?}",
+                                other
+                            )))
+                        }
                     }
                 }
-                Some(Group {
+                Ok(Some(Group {
                     name,
                     args,
                     members,
-                })
+                }))
             }
             Some(Token::Semi) => {
                 self.next();
                 // A complex attribute at top level -- shouldn't normally
                 // happen for the outermost call, but handle gracefully by
                 // wrapping it as a group with no members.
-                Some(Group {
+                Ok(Some(Group {
                     name,
                     args,
                     members: Vec::new(),
-                })
+                }))
             }
-            other => panic!("expected '{{' or ';' after group header, got {:?}", other),
+            other => Err(LibertyError(format!(
+                "expected '{{' or ';' after group header, got {:?}",
+                other
+            ))),
         }
     }
 
-    fn parse_member(&mut self) -> Member {
-        let name = match self.next().unwrap() {
-            Token::Ident(s) => s,
-            other => panic!("expected member name, got {:?}", other),
+    fn parse_member(&mut self) -> Result<Member, LibertyError> {
+        let name = match self.next() {
+            Some(Token::Ident(s)) => s,
+            other => {
+                return Err(LibertyError(format!(
+                    "expected member name, got {:?}",
+                    other
+                )))
+            }
         };
         match self.peek() {
             Some(Token::Colon) => {
                 self.next();
-                let v = match self.next().unwrap() {
-                    Token::Ident(s) => Value::Ident(s),
-                    Token::Str(s) => Value::Str(s),
-                    other => panic!("expected value after ':', got {:?}", other),
+                let v = match self.next() {
+                    Some(Token::Ident(s)) => Value::Ident(s),
+                    Some(Token::Str(s)) => Value::Str(s),
+                    other => {
+                        return Err(LibertyError(format!(
+                            "expected value after ':', got {:?}",
+                            other
+                        )))
+                    }
                 };
                 // consume trailing ';'
                 if self.peek() == Some(&Token::Semi) {
                     self.next();
                 }
-                Member::SimpleAttr(name, v)
+                Ok(Member::SimpleAttr(name, v))
             }
             Some(Token::LParen) => {
                 self.next();
@@ -296,7 +330,12 @@ impl Parser {
                             };
                             args.push(v);
                         }
-                        other => panic!("unexpected token in complex-attr args: {:?}", other),
+                        other => {
+                            return Err(LibertyError(format!(
+                                "unexpected token in complex-attr args: {:?}",
+                                other
+                            )))
+                        }
                     }
                 }
                 match self.peek() {
@@ -314,38 +353,45 @@ impl Parser {
                                     self.next();
                                 }
                                 Some(Token::Ident(_)) => {
-                                    members.push(self.parse_member());
+                                    members.push(self.parse_member()?);
                                 }
                                 other => {
-                                    panic!("unexpected token in group body: {:?}", other)
+                                    return Err(LibertyError(format!(
+                                        "unexpected token in group body: {:?}",
+                                        other
+                                    )))
                                 }
                             }
                         }
-                        Member::Group(Group {
+                        Ok(Member::Group(Group {
                             name,
                             args,
                             members,
-                        })
+                        }))
                     }
                     Some(Token::Semi) => {
                         self.next();
-                        Member::ComplexAttr(name, args)
+                        Ok(Member::ComplexAttr(name, args))
                     }
-                    other => panic!("expected '{{' or ';' after complex attr, got {:?}", other),
+                    other => Err(LibertyError(format!(
+                        "expected '{{' or ';' after complex attr, got {:?}",
+                        other
+                    ))),
                 }
             }
-            other => panic!(
+            other => Err(LibertyError(format!(
                 "expected ':' or '(' after member name '{}', got {:?}",
                 name, other
-            ),
+            ))),
         }
     }
 }
 
-fn parse_top(src: &str) -> Group {
+fn parse_top(src: &str) -> Result<Group, LibertyError> {
     let tokens = tokenize(src);
     let mut p = Parser { tokens, pos: 0 };
-    p.parse_group().expect("empty liberty file")
+    p.parse_group()?
+        .ok_or_else(|| LibertyError("empty liberty file".to_string()))
 }
 
 // ---------------------------------------------------------------------
@@ -635,7 +681,7 @@ fn parse_cell(group: &Group) -> Cell {
 /// netlist references) -- selective parsing is a valid future optimisation
 /// but this spike measures the full, general parse path.
 pub fn parse(src: &str) -> Result<Library, LibertyError> {
-    let top = parse_top(src);
+    let top = parse_top(src)?;
     if top.name != "library" {
         return Err(LibertyError(format!(
             "expected top-level 'library' group, got '{}'",
@@ -821,5 +867,43 @@ library ("test_lib") {
             .unwrap();
         assert_eq!(table.values.len(), 2);
         assert_eq!(table.values[1], vec![0.30, 0.40]);
+    }
+
+    #[test]
+    fn truncated_group_returns_err_not_panic() {
+        // Issue #5629: the file ends right after the opening brace -- EOF
+        // inside an open group body must surface as a group-body
+        // diagnostic through the `Result<_, LibertyError>` the public
+        // signature already promises, never as a panic (a panic crossing
+        // the pyo3 boundary surfaces as PanicException, which sta.py's
+        // `except ValueError` does not catch).
+        let err = parse("library (demo) {").unwrap_err();
+        assert!(
+            err.0.contains("unexpected token in group body"),
+            "unexpected diagnostic: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_err_not_panic() {
+        // Initial EOF is distinct from EOF inside an open group: the whole
+        // file is empty, reported as such rather than as a group-body
+        // diagnostic.
+        let err = parse("").unwrap_err();
+        assert_eq!(err.0, "empty liberty file");
+    }
+
+    #[test]
+    fn malformed_nested_member_returns_err_not_panic() {
+        // `area` with neither ':' nor '(' after it -- reached through the
+        // nested-group recursion, same error path as the truncation above.
+        let err = parse(r#"library (demo) { cell (A) { area } }"#).unwrap_err();
+        assert!(
+            err.0
+                .contains("expected ':' or '(' after member name 'area'"),
+            "unexpected diagnostic: {}",
+            err.0
+        );
     }
 }
