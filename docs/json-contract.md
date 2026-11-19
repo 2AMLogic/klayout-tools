@@ -1435,9 +1435,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
 
     | `role` | Meaning | Verbs |
     |---|---|---|
-    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
-    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039) |
-    | `"source"` | HDL source | `synthesize`, `equiv` |
+    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `power`, `lef-abstract` (layout-bearing mode only; layout-free `--no-layout` hashes a `source` instead — see [`cli/signoff.md`](cli/signoff.md#provenance-consistency)), `lvs` (`layout.file` shape), `sta` (`def` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039), `characterize` |
+    | `"source"` | HDL source, or the socket descriptor hashed by layout-free `lef-abstract` | `synthesize`, `equiv` (both its `yosys` and `yosys-sequential` engines), `formal`, `functional-verification`, `lef-abstract` (`--no-layout` only) |
 
     The field exists because the hash alone is kind-blind, and one verb can
     pin either kind: `klt lvs`'s `layout.file` shape hashes the original
