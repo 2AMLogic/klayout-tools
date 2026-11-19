@@ -185,9 +185,21 @@ Once a caller has `klt version --format json`'s `klayout_version_expected`
 override, not a new `klt`-specific flag (option (b) above):
 
 ```bash
+# released install:
+uv tool install "klayout-tools==<klt version>" \
+  --with klayout==<klayout_version_expected>
+
+# dev/git checkout:
 uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>" \
   --with klayout==<klayout_version_expected>
 ```
+
+Since issue #5601, the mismatch warning itself prints whichever of the two
+forms matches the running build, derived from `reinstall_spec()` — the
+version-pin form on a released install, a real git-commit form on a clean
+dev checkout, and no fabricated command when the build is not reinstallable
+(dirty tree / no recorded commit). Options (a) and (b) above stand
+unchanged.
 
 See `docs/json-contract.md`'s "Shared `provenance` block" section for the
 field reference and this same recipe alongside the existing
@@ -242,7 +254,8 @@ written by the 0.28.x serializer, issue
   `src/klayout_tools/extract_parasitics.py:622,624,991,993,1603,2058`;
   `src/klayout_tools/power.py:1287,1327,2138`;
   `src/klayout_tools/tap_distance.py:266` — re-derive with
-  `git grep -n 'polygons_of_net(net,' -- src`.
+  `git grep -nE 'polygons_of_net\([a-z_]+,' -- src`, dropping the two
+  docstring/comment mentions it also matches.
 
   Installing an older engine anyway means bypassing the floor
   (`pip install --no-deps klayout-tools==<ver>` next to the older

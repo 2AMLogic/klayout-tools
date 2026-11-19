@@ -7216,58 +7216,39 @@ def test_live_engine_spef_map_distinguishes_interconnect_corners(tmp_path):
     assert report["provenance"]["input"]["content_hash"] is not None
 
 
-def _write_placed_buffered_def(tmp_path) -> str:
-    """The captured buffered DEF with every component and pin given a
-    location, so OpenROAD's `estimate_parasitics -placement` has geometry to
-    extract (the captured DEF is deliberately unplaced)."""
-    import re
+def _openroad_write_spef(tmp_path: Path) -> tuple[str, str]:
+    """Return a routed DEF and its name-mapped SPEF from OpenROAD.
 
-    text = _CLOCK_CAPTURES["defs"]["buffered"]
-    counter = iter(range(1, 1000))
-
-    def place_component(match):
-        x = 10_000 * next(counter)
-        return f"{match.group(1)} + PLACED ( {x} 20000 ) N ;"
-
-    text = re.sub(
-        r"^(    - \S+ sky130_fd_sc_hd__\S+) ;$", place_component, text, flags=re.M
-    )
-
-    def place_pin(match):
-        x = 5_000 * next(counter)
-        return (
-            f"{match.group(1)} + LAYER met2 ( -70 0 ) ( 70 140 ) + PLACED ( {x} 0 ) N ;"
-        )
-
-    text = re.sub(
-        r"^(    - \S+ \+ NET .* \+ USE SIGNAL) ;$", place_pin, text, flags=re.M
-    )
-    text = text.replace(
-        "COMPONENTS 6 ;", "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\nCOMPONENTS 6 ;"
-    )
-    return _write(tmp_path / "placed.def", text)
-
-
-def _openroad_write_spef(tmp_path, def_path: str) -> str:
-    """Have OpenROAD itself estimate placement parasitics on `def_path` and
-    `write_spef` them -- the real writer's `*NAME_MAP` form, which the
-    hand-written unit fixture only imitates."""
+    OpenRCX's `write_spef` needs extracted routing. The separate placement
+    estimator's SPEF writer omits `*NAME_MAP`.
+    """
     liberty_path, _corner, pdk_info = post_route_sta._resolve_liberty(
         "sky130_fd_sc_hd", "tt_025C_1v80", variant="sky130A"
     )
     tech_lef, cell_lef = post_route_sta._resolve_lef("sky130_fd_sc_hd", pdk_info)
+    def_path = _write(tmp_path / "buffered.def", _CLOCK_CAPTURES["defs"]["buffered"])
+    routed_def = tmp_path / "routed.def"
     spef_path = tmp_path / "openroad.spef"
     script = _write(
         tmp_path / "write_spef.tcl",
         "\n".join(
             [
+                "set_thread_count 1",
+                f"read_liberty {liberty_path}",
                 f"read_lef {tech_lef}",
                 f"read_lef {cell_lef}",
                 f"read_def {def_path}",
-                f"read_liberty {liberty_path}",
-                "create_clock -name clk -period 2.0 [get_ports clk]",
-                "set_wire_rc -layer met2",
-                "estimate_parasitics -placement",
+                "initialize_floorplan -die_area {0 0 100 100} "
+                "-core_area {5 5 95 95} -site unithd",
+                "make_tracks",
+                "place_pins -hor_layers met3 -ver_layers met2",
+                "global_placement -density 0.3",
+                "detailed_placement",
+                "set_routing_layers -signal met1-met5",
+                "global_route",
+                "detailed_route",
+                f"write_def {routed_def}",
+                "extract_parasitics -version 2.0 -lef_rc",
                 f"write_spef {spef_path}",
             ]
         )
@@ -7277,8 +7258,9 @@ def _openroad_write_spef(tmp_path, def_path: str) -> str:
         script, str(tmp_path / "write_spef.json"), error_cls=PostRouteStaError
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert routed_def.is_file(), completed.stdout + completed.stderr
     assert spef_path.is_file(), completed.stdout + completed.stderr
-    return str(spef_path)
+    return str(routed_def), str(spef_path)
 
 
 def test_electrical_check_tcl_ends_redirect_on_error_path():
@@ -7308,8 +7290,7 @@ def test_live_engine_spef_name_map_annotation(tmp_path):
     #3755): a SPEF written by OpenROAD's own `write_spef` (so with its real
     `*NAME_MAP`) must annotate every net of the design it was extracted
     from."""
-    def_path = _write_placed_buffered_def(tmp_path)
-    spef_path = _openroad_write_spef(tmp_path, def_path)
+    def_path, spef_path = _openroad_write_spef(tmp_path)
     assert "*NAME_MAP" in Path(spef_path).read_text(encoding="utf-8")
 
     report = run_sta(

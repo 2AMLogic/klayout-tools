@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from ._provenance import sha256_file
+from ._tcl import tcl_literal as _tcl_literal
 from .env_provenance import find_repo_root, repo_relative_path
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
@@ -805,9 +806,8 @@ def write_sdf_line(sdf_path: str) -> str:
     feed the same consumer (``klt functional-verification``'s
     ``options.sdf``). The rationale for each of the two flags is documented on
     ``place_and_route_sta._spef_sta_script_lines``.
-    Must be emitted after ``read_spef`` so the delays it writes are the
-    real routed-parasitic ones."""
-    return f"write_sdf -divider . -include_typ {sdf_path}"
+    Emit after ``read_spef`` for real routed-parasitic delays."""
+    return f"write_sdf -divider . -include_typ {_tcl_literal(sdf_path)}"
 
 
 def _timing_violation_report_lines(

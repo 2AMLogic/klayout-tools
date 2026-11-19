@@ -711,6 +711,36 @@ IR-drop solve already produced are checked against those limits, per net.
   own `current_limit_a`; `margin_a = current_limit_a - abs(current_a)` is
   reported signed so a caller can see *how much* headroom (positive) or
   overage (negative) an edge has, not just pass/fail.
+- **A split arm is judged on its cross-section, not row by row** (issue
+  #6449). Where two arms of one merged polygon join, the vertex grid (see
+  "Non-rectangular segments") can cut a wider arm lengthwise into parallel
+  mesh rows. The metal is continuous across those cuts, but a pad or load
+  snaps to a single node, so one row can carry the whole port current while
+  its sibling carries ~0 A — against a *row-width* limit that is up to half
+  what the drawn arm tolerates. So for a cut perpendicular to the flow
+  (strictly inside the cells' half-spans), the signed sum of every branch
+  crossing it is compared against `current_limit_a_per_um *` the contiguous
+  conducting width at that cut (the summed `current_limit_a` of those
+  rows). A section is only formed when it is unambiguous: the crossing
+  branches must tile each contiguous metal interval exactly once and be
+  *all* the metal the polygon has at that cut (a cell the mesh models as
+  flowing the other way leaves metal unmapped, so that cut is skipped);
+  every member needs a solved current and a declared limit; and members
+  must share one layer and one merged polygon, so width is never lent
+  across a gap, a layer or a polygon. A true neck (one narrow interval at
+  the cut) is judged at its own width. Endpoint order and the flow axis do
+  not change the result. Each edge is attributed to the worst eligible
+  section it crosses, and such an entry in `em_verdict` carries three extra
+  fields — `basis: "cross_section"`, `width_um` (the conducting width) and
+  `section_edge_ids` — with `current_a`/`current_limit_a` the section's
+  current and limit. Every other edge (vias, rectangular rails, edges on no
+  eligible cut, a section with a member of unknown current or limit) keeps
+  the per-edge comparison above, byte-identical to before and with none of
+  those fields. A section can only relax a per-row finding (the summed
+  limit is never below the sum of the members' currents when each passes),
+  never tighten one. `checked_edge_count`/`unchecked_edge_count` and the
+  `coverage` block are unchanged: an edge is checked exactly when it has a
+  limit and a solved current, as before.
 - **An edge with no declared limit, or no solved current, is `unchecked`,
   never guessed at.** The same discipline `_solve_ir_drop` already applies
   to droop: a `stackup`/`vias` role that declared no
@@ -1055,7 +1085,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `nets[].status`      | string             | This net's own `"pass"`/`"fail"`/`"not_checked"`.                                                  |
 | `nets[].checked_edge_count`/`unchecked_edge_count`/`fail_count` | integer | This net's own totals.                                                        |
 | `nets[].worst_case`  | object \| null     | This net's own worst-margin checked edge (same shape as below), `null` if none was checked.        |
-| `nets[].failing_edges[]` | array\<object\> | Every edge on this net that failed: `{"net", "island_id", "edge_id", "kind", "layer", "current_a", "current_limit_a", "current_limit_source", "margin_a", "status"}` — `current_a`/`current_limit_a` are magnitudes; `margin_a = current_limit_a - current_a` (negative for a failing edge); `current_limit_source` is the spec's citation, `null` if none was given; `status` is always `"fail"` in this array (present for symmetry with `worst_case`, which can be `"pass"`). |
+| `nets[].failing_edges[]` | array\<object\> | Every edge on this net that failed: `{"net", "island_id", "edge_id", "kind", "layer", "current_a", "current_limit_a", "current_limit_source", "margin_a", "status"}` — `current_a`/`current_limit_a` are magnitudes; `margin_a = current_limit_a - current_a` (negative for a failing edge); `current_limit_source` is the spec's citation, `null` if none was given; `status` is always `"fail"` in this array (present for symmetry with `worst_case`, which can be `"pass"`). An entry judged on a **cross-section** (issue #6449) additionally carries `"basis": "cross_section"`, `"width_um"` (the contiguous conducting width, number) and `"section_edge_ids"` (the branch edges pooled into that section, array\<string\>), and its `current_a`/`current_limit_a` are the section's; an entry on the per-edge basis has none of these three keys. |
 
 ## Worked example: real `klt place-and-route` output (the `gcd` corpus fixture)
 

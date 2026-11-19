@@ -46,7 +46,7 @@ import pytest
 
 from helpers.artifact_envelope import env as _envelope
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _stub_verilator_coverage
 from klayout_tools import functional_verification as fv
 from klayout_tools.cli import main
 from klayout_tools.functional_verification import (
@@ -1267,12 +1267,13 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "test_log": _envelope(None, "external"),
         "build_log": _envelope(None, "external"),
         # `_RESULTS_XML_WITH_FAILURE` carries the exact `random_seed` value
-        # the spike captured live (section 4) -- this is the authoritative
-        # echo, read back from `results.xml` itself.
+        # captured live (section 4) -- the authoritative `results.xml` echo.
         "random_seed": 1785780800,
         # Additive (issue #3290): `{}` without `options.source_defines`.
         "source_defines": {},
         "env": {},
+        # Additive (issue #5697): `{}` without `request.parameters`.
+        "parameters": {},
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,
@@ -1781,28 +1782,6 @@ def test_stubbed_missing_simulator_binary(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Coverage post-processing (Verilator only)
 # --------------------------------------------------------------------------- #
-
-_COVERAGE_SUMMARY = """\
-Coverage Summary:
-  line      : 100.0% (  6/  6)
-  toggle    : 60.0% (102/170)
-  branch    : 100.0% (  4/  4)
-  expr      : 100.0% (  5/  5)
-  fsm_state : 0.0% (  0/  0)
-  fsm_arc   : 0.0% (  0/  0)
-"""
-
-
-def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
-    def fake_run(cmd, **kwargs):
-        assert cmd[0] == "verilator_coverage"
-        if cmd[1] == "--write-info":
-            with open(cmd[2], "w", encoding="utf-8") as handle:
-                handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")
-            return fake_completed(returncode=returncode)
-        return fake_completed(returncode=returncode, stdout=summary)
-
-    monkeypatch.setattr(fv.subprocess, "run", fake_run)
 
 
 def test_stubbed_coverage_run_populates_the_coverage_block(tmp_path, monkeypatch):
@@ -4501,15 +4480,18 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # not find intermodpath!` -- enough to fail the diagnostic gate outright on
 # any real post-route SDF with router-inserted diodes.
 #
-# Reproduced live against Icarus 13.0 through this module (not just read off
-# the issue), which pinned down one thing the issue's own write-up does not
-# say: the failure needs the port bit's net to carry **more than one** entry.
-# A bus-port net whose single entry is the diode's own annotates cleanly even
-# before this fix -- #1619's deferral is enough for it -- but the moment that
-# same net carries a second entry, one of them fails, exactly as #1619 shape
-# (a) describes. That is why this fixture hangs *two* diodes off `ui_in[0]`
-# (a real router inserts one diode per violating pin, so a multi-load input
-# bit collects several) and why the pinned no-fix case
+# Reproduced live against Icarus 13.0 through this module (not just read
+# off the issue). The deciding variable is the port bit's net's *physical
+# fanout*, per issue #5705's one-variable controls on raw `iverilog`/`vvp`
+# 13.0: `$sdf_annotate` creates at most one interconnect modpath per
+# bit-selected top-level port net -- the **last-declared instance's**
+# destination -- and rejects every other load's entry. A bus-port net
+# whose only load is the diode annotates cleanly (fanout 1), but this
+# fixture hangs *two* diodes off `ui_in[0]` (one per violating pin, as a
+# real router inserts), and on that fanout-2 net the first-declared
+# diode's entry is rejected regardless of entry count -- a lone
+# non-last-declared entry fails too; the old "more than one entry"
+# reading is superseded. That is also why the pinned no-fix case
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
 # unresolvable`, where the second load is a `specify`-bearing cell) keeps
 # failing: dropping the diode entry there leaves the ordinary shape (b) entry
@@ -4517,8 +4499,9 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 #
 # What makes this subset droppable where the *general* shape (b) case is not
 # is the destination: `klt_diode`'s model has no `specify` block and no
-# output pin at all, so no modpath the entry could annotate exists and no
-# logic observes the pin. `_drop_sdf_zero_delay_physical_only_interconnects`
+# output pin at all, no logic observes the pin, the entry can still be
+# the cap's survivor -- the drop rests on timing emptiness, not "no
+# modpath exists". `_drop_sdf_zero_delay_physical_only_interconnects`
 # removes exactly those entries and reports the count as its own
 # `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
 # identical pin, and *any* entry onto a `specify`-bearing destination, are
@@ -5299,28 +5282,15 @@ async def test_output_settles_within_two_ns(dut):
 )
 def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tmp_path):
     """Issue #1619 shape (b), root-caused rather than fixed -- see the
-    module-level comment above :func:`_split_sdf_bus_port_interconnects` for
-    the full writeup.
-
-    Live testing found this shape's failure mode is a *different* Icarus
-    behaviour than shape (a)'s, and not one `_split_sdf_bus_port_
-    interconnects`'s deferral strategy can work around: with a **no-op**
-    cocotb testbench (a test coroutine that returns immediately, never
-    `await`s a trigger), the exact same split fixture used here resolves
-    every entry cleanly -- but with *any* testbench that actually drives the
-    DUT and awaits a `Timer` (the realistic case, and every other test in
-    this file), the run deterministically raises with the deferred entry
-    unresolved, reproduced identically across a clean `.klt/` build
-    directory, a fresh Python interpreter, and a fresh `klt` CLI subprocess
-    invocation. The no-op-vs-driven-testbench split points at a genuine race
-    between Icarus's own `$sdf_annotate` intermodpath insertion and VPI
-    callback scheduling once the simulator actually advances past time 0 --
-    not something this module's own generated wrapper/shim/SDF-splitting
-    code can control from the outside. This test pins the *realistic*
-    (driven-testbench) outcome down: it must keep raising, not silently
-    start passing (which would mean either Icarus's own behaviour changed,
-    or a future change here papered over the failure without actually
-    resolving it)."""
+    module-level comment above :func:`_split_sdf_bus_port_interconnects`
+    and #5705's measured mechanism: Icarus's one-modpath-per-bit-selected-
+    port-net cap annotates only the last-declared instance's destination,
+    so the `a[0] u1.in` entry is rejected deterministically, in either
+    SDF entry order (the survivor is fixed by netlist declaration order,
+    which the split never touches). This test pins that the run keeps
+    raising rather than silently passing, and (issue #5769) that the
+    refusal names the rejected arc `a[0] → u1.in` plus the buffer
+    workaround while never naming the surviving `u_d.in` arc."""
     tmp_path.joinpath("bus_fanout_in.v").write_text(
         _BUS_PORT_FANOUT_INPUT_DUT_V, encoding="utf-8"
     )
@@ -5335,8 +5305,14 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
     }
     annotated = _write_request(tmp_path / "request-sdf.json", request)
 
-    with pytest.raises(fv.FunctionalVerificationError, match="did not fully apply"):
+    with pytest.raises(
+        fv.FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
         run_functional_verification(annotated)
+    message = str(excinfo.value)
+    assert "a[0] → u1.in" in message
+    assert "u_d.in" not in message
+    assert "insert a buffer" in message
 
 
 def _bus_port_source_sdf_text(

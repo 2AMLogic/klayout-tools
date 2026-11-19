@@ -21,6 +21,9 @@ generated files -- so it names the caller's own inputs, not tool scratch. When
 Lives apart from ``functional_verification.py`` (size-ratchet baseline): both
 report builders (cocotb and Verilog-top) take the echo through the one
 :func:`with_run_inputs` post-step.
+
+Both builders also attach the shared ``provenance`` block through this
+post-step (issue #5550).
 """
 
 from __future__ import annotations
@@ -28,11 +31,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
-from ._provenance import sha256_file
+from ._provenance import (
+    INPUT_ROLE_SOURCE,
+    _combined_content_hash,
+    build_provenance,
+    sha256_file,
+)
 from .functional_verification_from_synthesize import (
     resolve_sources_with_synthesize,
     with_from_synthesize,
 )
+from .functional_verification_pdk import derive_pdk_defines, merge_pdk_input
 
 
 class RunInputs(NamedTuple):
@@ -40,6 +49,14 @@ class RunInputs(NamedTuple):
 
     from_synthesize: dict[str, Any] | None
     sources: list[dict[str, Any]]
+    #: Defines the ``pdk`` input derives (``FUNCTIONAL``, no SDF); the run
+    #: merges them *under* the caller's own ``options.defines`` (issue #5782).
+    pdk_defines: dict[str, str | None]
+    #: The request's own RTL as resolved (issue #5550) -- a snapshot taken
+    #: *before* the SDF/initial-state shims, escaped-divider renames, and
+    #: scoped-define wrappers substitute generated files from the output
+    #: directory into the caller's ``sources`` list.
+    source_paths: list[str]
 
 
 def sources_echo(
@@ -58,16 +75,63 @@ def resolve_run_inputs(
     request_dir: str,
     hdl_toplevel: str,
     envelope: Callable[[str | None], dict[str, Any]],
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
 ) -> tuple[list[str], RunInputs]:
-    """:func:`resolve_sources_with_synthesize` plus the ``sources`` echo."""
+    """:func:`resolve_sources_with_synthesize` plus the ``sources`` echo.
+
+    ``pdk_variant``/``pdk_root`` (the CLI's ``--pdk``/``--pdk-root``, issue
+    #5782) merge over the request's ``pdk`` block here; with no pdk input at
+    all the result is byte-identical to before the issue."""
+    pdk_input = merge_pdk_input(request_doc, request_dir, pdk_variant, pdk_root)
     sources, synth_block = resolve_sources_with_synthesize(
-        request_doc, request_dir, hdl_toplevel, envelope
+        request_doc, request_dir, hdl_toplevel, envelope, pdk_input=pdk_input
     )
-    return sources, RunInputs(synth_block, sources_echo(sources, envelope))
+    defines = derive_pdk_defines(pdk_input, request_doc.get("options"))
+    return sources, RunInputs(
+        synth_block, sources_echo(sources, envelope), defines, list(sources)
+    )
+
+
+def input_provenance(
+    resolved_sources: list[str], synth_block: dict[str, Any] | None
+) -> dict[str, Any]:
+    """The shared ``provenance`` block for a functional-verification response
+    (issue #5550): ``input.content_hash`` digests the RTL ``request.sources``
+    as resolved *before* the SDF/initial-state shims, escaped-divider renames,
+    and scoped-define wrappers are substituted, under the same ``source``
+    role and the same
+    ``_combined_content_hash`` scheme ``klt synthesize``/``klt equiv`` use --
+    so a committed report is hash-pinnable in a signoff manifest, and a
+    ``klt signoff`` bundle can bind an FV citation to the very sources a
+    cited synthesis/equivalence run checked (``_provenance_consistency``'s
+    per-role comparison).
+
+    ``options.from_synthesize`` runs record ``input: null`` instead: their
+    design input is the synthesized netlist, already pinned by the additive
+    ``from_synthesize.netlist_sha256`` block -- a ``source``-role digest here
+    could only ever disagree with the synthesize report's own RTL digest (the
+    netlist is that run's *output*) and refuse a coherent bundle, the exact
+    #2027 false-alarm mode the per-role comparison exists to avoid.
+    """
+    if synth_block is not None:
+        return build_provenance()
+    if len(resolved_sources) == 1:
+        return build_provenance(
+            input_path=resolved_sources[0], input_role=INPUT_ROLE_SOURCE
+        )
+    provenance = build_provenance()
+    provenance["input"] = {
+        "content_hash": _combined_content_hash(resolved_sources),
+        "role": INPUT_ROLE_SOURCE,
+    }
+    return provenance
 
 
 def with_run_inputs(report: dict[str, Any], inputs: RunInputs) -> dict[str, Any]:
-    """Attach ``from_synthesize`` and ``environment.sources`` (in place)."""
+    """Attach the resolved inputs and their provenance to the report in place."""
     with_from_synthesize(report, inputs.from_synthesize)
     report["environment"]["sources"] = inputs.sources
+    report["provenance"] = input_provenance(inputs.source_paths, inputs.from_synthesize)
     return report
