@@ -28,6 +28,21 @@ from ._jsonnum import is_finite_number
 #: invocation, so under ``arithmetic: auto`` it multiplies across trials.
 YOSYS_TIMEOUT_MAX_S = 3600.0
 
+#: Default per-invocation wall-clock timeout for one ``yosys -s <script>`` run
+#: (``synthesize._run_yosys``) when no source sets a budget. Generous on
+#: purpose: a full ``synth``/``abc`` pass does more work than ``equiv``'s SAT
+#: proof, and ``arithmetic: auto`` pays this budget ~10+ times per request.
+DEFAULT_YOSYS_TIMEOUT_S = 300.0
+
+#: Report keys ``synthesize.RERUN_BOOKKEEPING_KEYS`` drops from a ``--rerun``
+#: diff (issue #5773). The budget is host-level bookkeeping, not a verdict
+#: field: the point of the flag / env overrides is that an operator on a
+#: loaded box can raise the watchdog on a rerun without touching the committed
+#: report or the request, so a different budget on the fresh side is not
+#: drift. The synthesis *result* a rerun verifies is budget-independent; a
+#: consumer wanting the fresh budget reads the embedded ``fresh`` report.
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"yosys_timeout_s"})
+
 #: Host-level budget override (``--yosys-timeout-s`` and
 #: ``request.yosys_timeout_s`` are the other two sources; see
 #: :func:`bind_yosys_timeout` for the precedence). A property of the *host*,
@@ -103,7 +118,7 @@ def bind_yosys_timeout(
 
     Precedence: ``--yosys-timeout-s`` (``flag_value``) >
     ``$KLT_YOSYS_TIMEOUT_S`` > ``request["yosys_timeout_s"]`` > the 300 s
-    :data:`klayout_tools.synthesize.DEFAULT_YOSYS_TIMEOUT_S` default (a
+    :data:`DEFAULT_YOSYS_TIMEOUT_S` default (a
     ``None`` return means no override anywhere, so the default applies).
     Env beats the request field because the variable is a property of the
     *host*, not of the design -- an operator on a loaded box with a

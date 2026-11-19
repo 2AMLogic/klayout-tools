@@ -2197,21 +2197,6 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     synthesize_parser.add_argument(
-        "--yosys-timeout-s",
-        dest="yosys_timeout_s",
-        type=float,
-        default=None,
-        help=(
-            "per-invocation Yosys wall-clock budget in seconds for this run "
-            "(default: 300; cap 3600) -- overrides the request document's "
-            "`yosys_timeout_s` field. The KLT_YOSYS_TIMEOUT_S environment "
-            "variable also overrides the request field; the flag wins over "
-            "the env var. Must be re-passed with `--check --rerun`, like "
-            "`--equiv-timeout-s`. See docs/cli/synthesize.md's 'Yosys "
-            "budget overrides' section."
-        ),
-    )
-    synthesize_parser.add_argument(
         "--restructure-timing",
         dest="restructure_timing",
         action="store_true",
@@ -2272,7 +2257,7 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    synthesize_cmd.configure(synthesize_parser)  # --yosys-timeout-s + func=run
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
