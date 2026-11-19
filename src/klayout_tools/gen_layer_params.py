@@ -2844,30 +2844,26 @@ def _esd_device_layer_params(
 def _diode_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
-    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
-    the other curated decks' diode recognition has not been exercised against
-    this geometry."""
+    """Hidden layer params for ``diode`` (issues #4300, #6614): sky130 and
+    gf180mcu. A role the family has no layer for (sky130's Dualgate, gf180mcu's
+    ``hvi``) gets a placeholder that ``_diode_layout`` never draws; the other
+    curated decks' diode recognition has not been exercised against this
+    geometry."""
+    import klayout.db as kdb
+
     from .gen import GenError
+    from .gen_diode import DIODE_FAMILY_VOLTAGE_CLASSES
+    from .gen_pcells.diode import DIODE_LAYER_ROLES
 
     family = _pdk_family(pdk_info["variant"])
-    if family != "sky130":
+    if family not in DIODE_FAMILY_VOLTAGE_CLASSES:
         raise GenError(
             f"generator 'diode': PDK family '{family}' is not yet supported "
             "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
             "section"
         )
+    infos = {role: _role_layer_info(family, role) for role in DIODE_LAYER_ROLES}
     return {
-        f"{role}_layer": _role_layer_info(family, role)
-        for role in (
-            "active",
-            "tap",
-            "nplus",
-            "pplus",
-            "well",
-            "hvi",
-            "diode_mark",
-            "contact",
-            "metal",
-        )
+        f"{role}_layer": info if info is not None else kdb.LayerInfo(0, 0)
+        for role, info in infos.items()
     }

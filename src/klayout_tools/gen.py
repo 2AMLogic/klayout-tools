@@ -91,6 +91,7 @@ from .gen_describe import (
     _well_island_layer_params,
     _well_island_validate,
 )
+from .gen_diode import resolve_diode_voltage_class
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -3666,6 +3667,8 @@ def _resolve_params(
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
     spec.validate(resolved)
+    if spec.name == "diode":
+        resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     return resolved
 
 
@@ -4010,11 +4013,8 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
     "diode": _GeneratorSpec(
         name="diode",
         summary=(
-            "Junction diode (pad ESD clamp primitive): n+ diffusion in the "
-            "p-substrate or p+ diffusion in an nwell, with a contacted "
-            "substrate/well tap for the other terminal and the "
-            "areaid.diode recognition mark, so it extracts as sky130's "
-            "diode_pw2nd_*/diode_pd2nw_* -- sky130 only (issue #4300)."
+            "Junction diode (pad ESD clamp primitive): n+ in the p-substrate or p+ in "
+            "an nwell, with a tap and diode mark -- sky130, gf180mcu (#4300, #6614)."
         ),
         dbu=0.001,
         validate=_diode_validate,

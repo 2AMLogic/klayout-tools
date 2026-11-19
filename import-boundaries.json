@@ -114,6 +114,8 @@
       "description": "`klt deck` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.deck_cmd",
+        "klayout_tools.cli.parsers.deck",
+        "klayout_tools.deck_diff",
         "klayout_tools.decks.history"
       ]
     },
@@ -188,6 +190,8 @@
       "modules": [
         "klayout_tools.cli.em_cmd",
         "klayout_tools.cli.parsers.em",
+        "klayout_tools._em_geometry",
+        "klayout_tools._em_layout",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
@@ -482,6 +486,7 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
@@ -724,6 +729,7 @@
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
+        "klayout_tools._deck_hash",
         "klayout_tools._devices",
         "klayout_tools._digest",
         "klayout_tools._engine_proc",
@@ -783,6 +789,7 @@
         "klayout_tools.cli.signoff_repin_cmd",
         "klayout_tools.cli.signoff_tier_text",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_artifact",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
         "klayout_tools.signoff_attest_build",
@@ -885,6 +892,7 @@
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_crossings_dc",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
@@ -1663,6 +1671,11 @@
       "consumer": "shared-core",
       "exporter": "sim",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "signoff",
+      "exporter": "artifact",
+      "reason": "Signoff resolves manifest-backed citations using the artifact broker and its verified fetch API (issue #5882)."
     },
     {
       "consumer": "signoff",
