@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -409,6 +410,27 @@ def maybe_harvest_resume_shards(
     ):
         return None, None
     return harvest_resume_shard_map(checkpoint=checkpoint, **harvest_kwargs)
+
+
+def resume_hosts(
+    hosts: int, corner_points: Sequence[Any], dispatch_points: Sequence[Any]
+) -> int:
+    """The fleet size a resumed dispatch may ask for (issue #6685).
+
+    ``--resume`` reuses finished units, so ``dispatch_points`` (what is still
+    outstanding) can be shorter than ``corner_points`` (the whole request) and
+    fall below the requested ``hosts``. The "hosts exceeds the units to
+    dispatch" refusal guards a user asking for more hosts than units; on a
+    resume the user asked for nothing new, so refusing would strand a
+    half-finished sweep. Cap ``hosts`` at the outstanding unit count -- but
+    only when the resume actually reused something: a request whose own
+    ``hosts`` exceeds its own units is still refused, resume or not. Nothing
+    outstanding (everything reused) dispatches nothing, so there is nothing to
+    cap.
+    """
+    if 0 < len(dispatch_points) < len(corner_points):
+        return min(hosts, len(dispatch_points))
+    return hosts
 
 
 def merge_resume_environment(
