@@ -233,20 +233,20 @@ class _MacroNets:
         self.layout = src_layout
         self.cell = src_cell
         self.dbu = src_layout.dbu
-        self.l2n = kdb.LayoutToNetlist(
-            kdb.RecursiveShapeIterator(src_layout, src_cell, [])
-        )
+        # Flat extraction: a hierarchical one reports a child-only net's shapes
+        # in that child's frame (#6788), not the macro's like `flat`/the labels.
+        self.l2n = kdb.LayoutToNetlist(src_cell.name, self.dbu)
         self.l2n_layers: dict[_LayerPair, Any] = {}
         self.flat: dict[_LayerPair, Any] = {}
-        stack = list(self.deck.metals) + list(self.deck.vias)
-        for pair in stack:
+        for pair in list(self.deck.metals) + list(self.deck.vias):
             index = src_layout.find_layer(pair[0], pair[1])
             if index is None:
                 continue
-            self.l2n_layers[pair] = self.l2n.make_layer(index, f"L{pair[0]}_{pair[1]}")
             flat = kdb.Region(src_cell.begin_shapes_rec(index))
             flat.merge()
             self.flat[pair] = flat
+            self.l2n_layers[pair] = flat.dup()
+            self.l2n.register(self.l2n_layers[pair], f"L{pair[0]}_{pair[1]}")
         for region in self.l2n_layers.values():
             self.l2n.connect(region)
         metals, vias = self.deck.metals, self.deck.vias
