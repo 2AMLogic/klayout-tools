@@ -2951,15 +2951,14 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
         help="report the installed build's own deck content hash, device "
         "coverage, and release status",
         description=(
-            "Report this klt install's own deck content hash, structural "
-            "device-class coverage (ExtractionDeck.device_classes -- e.g. "
-            "whether diode recognition is wired up at all), and release "
-            "status -- with no input layout needed. Complements `klt deck "
-            "resolve`: `resolve` turns a hash you already have into a "
-            "release; `info` tells you your own currently-running hash and "
-            "coverage without first running an extraction (issue #1209 -- "
-            "two installs can report the identical `klt --version` string "
-            "while shipping different deck content)."
+            "Report this klt install's own deck content hash, device-class "
+            "coverage, and release status -- no input layout needed (issue "
+            "#1209; complements `klt deck resolve`, hash -> release). For a "
+            "curated_drc deck the module *is* its DRC rule table: "
+            "`content_hash` equals the `klt deck hash` / `deck rules` "
+            "value, `enforced_rule_count` counts its rules (`null` without "
+            "a curated table), and `deck info` alone suffices for a "
+            "provenance citation (issue #5843) -- see docs/cli/deck.md."
         ),
     )
     info_parser.add_argument(
