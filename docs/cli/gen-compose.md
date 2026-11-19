@@ -126,10 +126,14 @@ cleanly.
     and threshold — never a silently grown-back pad), honoured exactly where
     the floors allow, and measured by the route-vs-route collision checks at
     the same size drawing inserts. Omitting it keeps the default pads
-    byte-for-byte unchanged. A pad-vs-pitch conflict routing still hits is
-    rejected naming the pad footprint, the terminal pitch, and the deck's
-    spacing rule — not a generic crossing — with this field named as the
-    escape hatch.
+    byte-for-byte unchanged. If a pad overlaps another net on an intermediate
+    or far layer of a via stack, the rejection names the pad footprint,
+    terminal pitch, this override, and the deck's spacing rule when available.
+    A pad that violates spacing on the route layer without overlapping gets
+    the same diagnostic. A literal overlap on the route layer reports
+    `crosses already-routed net` even when it involves a pad. For example,
+    a pad can cross the other net's wire while the terminal pads are clear
+    of each other.
 - **Declare-only connectivity (no `routing`, #1188)** — `routing` is
   optional: omitting it (or passing `{}`) with a non-empty `connectivity[]`
   still validates every net's `{block, port}` pins against the referenced
