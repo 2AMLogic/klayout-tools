@@ -2680,6 +2680,16 @@ changing or removing it flips no item's `met`/`status` and no `tier`. For
 item 2 a disclosure requires `--inventory` (the plain `--attest 2 --input`
 envelope carries none).
 
+The text rendering is a courtesy, so a character the terminal's encoding
+cannot represent (a free-text disclosure in Japanese on a Windows-1252
+stdout, say) prints as a `\uXXXX` escape — in the `description:` line and in
+a drifted `attestation.description` under `--check` — instead of aborting the
+report after the envelope was written. The exit status is the verdict's, never
+a traceback's; the envelope and `--format json` keep the original string. A
+stdout error handler you chose yourself (`PYTHONIOENCODING=cp1252:replace`)
+is honoured as set. This applies to every verb's `--format text`
+(`cli/output.py`'s `emit_success`).
+
 #### Examples
 
 Item 1: sources plus a netlist whose freshness `klt netlist --check`

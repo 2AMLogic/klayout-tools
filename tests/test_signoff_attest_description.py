@@ -4,6 +4,8 @@ carried into the ``klt signoff --attest`` envelope (issue #5573)."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -338,3 +340,85 @@ def test_failing_item2_inventory_still_carries_the_description(tmp_path):
 
     assert envelope["status"] == "fail"
     assert envelope["attestation"]["description"] == _DISCLOSURE
+
+
+#: A valid disclosure no Windows-1252 stdout can encode, and how a text
+#: render must show it there (issue #5573 review: the passing attestation
+#: used to die with UnicodeEncodeError *after* writing the envelope).
+_JA = "レビュー待ち"
+_JA_ESCAPED = "\\u30ec\\u30d3\\u30e5\\u30fc\\u5f85\\u3061"
+
+
+def _klt(repo: Path, *args: str, encoding: str) -> subprocess.CompletedProcess:
+    """``klt signoff ARGS`` run from ``repo`` under a stdout of ``encoding``."""
+    return subprocess.run(
+        [sys.executable, "-m", "klayout_tools.cli", "signoff", *args],
+        cwd=repo,
+        env={**os.environ, "PYTHONIOENCODING": encoding},
+        capture_output=True,
+        encoding=encoding,
+        check=False,
+    )
+
+
+def _escaped(text: str) -> str:
+    """``text`` as a Windows-1252 stdout shows it: unencodable -> ``\\uXXXX``."""
+    return text.encode("cp1252", "backslashreplace").decode("cp1252")
+
+
+def _attest_argv(repo: Path, item: int, description: str) -> list[str]:
+    """``--attest`` argv for the inventory producer (10) or the stream one (2),
+    writing the inventory (at a fixed path, so a rewrite is a drift) first."""
+    if item == 10:
+        inventory = repo / "attest" / "item10.json"
+        inventory.write_text(json.dumps(_inventory(10, description)))
+        return ["--attest", "10", "--inventory", str(inventory)]
+    inventory_path = _stream_inventory(repo, description)
+    return ["--attest", "2", "--input", _stream(repo), "--inventory", inventory_path]
+
+
+@pytest.mark.parametrize("item", [10, 2])
+def test_text_output_is_printable_on_a_legacy_stdout(tmp_path, item):
+    """A passing attestation exits 0 with the *complete* text report under a
+    Windows-1252 stdout: the disclosure prints as ``\\uXXXX`` escapes (never a
+    UnicodeEncodeError mid-report), and the written envelope keeps the
+    original string. Both producers (inventory item 10, stream item 2)."""
+    repo = _repo(tmp_path)
+    argv = [*_attest_argv(repo, item, _JA), "-o", "attest/env.json"]
+    reference = _klt(repo, *argv, encoding="utf-8")
+    assert reference.returncode == 0, reference.stderr
+    assert f"description: {_JA}\n" in reference.stdout
+    (repo / "attest" / "env.json").unlink()  # the legacy run must write its own
+
+    legacy = _klt(repo, *argv, encoding="cp1252")
+
+    assert legacy.returncode == 0, legacy.stderr
+    assert "Traceback" not in legacy.stderr
+    assert f"description: {_JA_ESCAPED}\n" in legacy.stdout
+    # Complete: every line the UTF-8 run prints, in order, only escaped.
+    assert legacy.stdout == _escaped(reference.stdout)
+    envelope = json.loads((repo / "attest" / "env.json").read_text(encoding="utf-8"))
+    assert envelope["status"] == "pass"
+    assert envelope["attestation"]["description"] == _JA
+
+
+def test_check_drift_text_is_printable_on_a_legacy_stdout(tmp_path):
+    """The ``--check`` drift report prints the old and new ``description``
+    (``{value!r}``, which keeps non-ASCII): a description-only drift must not
+    crash under Windows-1252 either, and keeps its drifted exit status."""
+    repo = _repo(tmp_path)
+    committed = repo / "attest" / "env.json"
+    argv = _attest_argv(repo, 10, "planning-level only")
+    assert _klt(repo, *argv, "-o", str(committed), encoding="utf-8").returncode == 0
+    argv = _attest_argv(repo, 10, _JA)  # same inventory path, new disclosure
+    check = [*argv, "--check", str(committed)]
+    reference = _klt(repo, *check, encoding="utf-8")
+    assert f"fresh:     {_JA!r}" in reference.stdout
+
+    legacy = _klt(repo, *check, encoding="cp1252")
+
+    assert "Traceback" not in legacy.stderr
+    assert legacy.returncode == reference.returncode != 1
+    assert f"fresh:     '{_JA_ESCAPED}'" in legacy.stdout
+    assert "attestation.description" in legacy.stdout
+    assert legacy.stdout == _escaped(reference.stdout)
