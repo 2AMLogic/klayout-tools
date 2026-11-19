@@ -3799,9 +3799,8 @@ def _resolve_params(
     """Merge and validate ``raw_params`` against the generator's PCell defaults.
 
     Every declared, non-hidden parameter ends up in the result: the request's
-    value when given (type-checked against the PCell's declared type), the
-    PCell's own default otherwise. Raises :class:`GenError` for an unknown
-    parameter name or a value that doesn't match the declared type.
+    type-checked value, or the PCell default otherwise; raises
+    :class:`GenError` for an unknown name or mismatched type.
     """
     pcell_classes = _build_pcell_classes()
     decl = pcell_classes[spec.name]()
@@ -3826,10 +3825,7 @@ def _resolve_params(
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
     if spec.name == "diode":
-        # Before spec.validate so an unknown voltage_class is reported against
-        # the selected family's flavours, not the union of every family's
-        # (spec.validate's generic check stays as the backstop for families
-        # with no diode support).
+        # Before spec.validate: report the family's flavours, not the union (#6630).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     spec.validate(resolved)
     return resolved
