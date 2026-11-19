@@ -55,6 +55,11 @@ its literal `DRC_RULE_SOURCES` tuple. Add a sibling there when moving curated
 rules out of the primary module. The contract describes the digest and the
 `sg13g2` and `sky130` pin migration. [Deck provenance](../json-contract.md)
 
+The pin identifies the *checked* rule set. An `unmodeled_rules` or
+`unchecked_rules` disclosure list that a deck sources from a sibling not named
+in `DRC_RULE_SOURCES` is not guaranteed to be covered, so it can change while
+`content_hash` stays the same (the contract's "Coverage disclosures" note).
+
 This excerpt from `klt deck hash --deck sky130 --format json` uses
 `sha256:...` for this build's deck hash.
 
@@ -502,7 +507,9 @@ sections does this deck claim" question.
 `klt deck rules` also carries a top-level `unmodeled_rules` array (issue #3796):
 the official foundry rule ids the deck does not enforce, kept apart from the
 enforced `rules` list and not narrowed by `--rule`. Text output ends with a
-`NOT ENFORCED by this deck` line when it is non-empty.
+`NOT ENFORCED by this deck` line when it is non-empty. The list is a
+disclosure, not a checked rule: `provenance.deck.content_hash` is not
+guaranteed to change when it does (see the note under `klt deck hash`).
 
 ## `klt deck devices`
 
