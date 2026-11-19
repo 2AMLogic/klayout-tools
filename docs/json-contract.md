@@ -2627,7 +2627,11 @@ violation (issue #2029).
 ## `--format text` vs `--format json`
 
 - `text` (default) — a human-readable rendering. Its exact layout is **not**
-  part of the contract and may change between releases without notice.
+  part of the contract and may change between releases without notice. A
+  character the stdout encoding cannot represent prints as a `\uXXXX` escape
+  rather than aborting the render with a traceback (a stdout error handler the
+  caller chose, e.g. `PYTHONIOENCODING=cp1252:replace`, is honoured); the JSON
+  keeps the original string.
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
 
