@@ -17,13 +17,17 @@ from typing import Any
 def attestation_record(attestation: Mapping[str, Any]) -> dict[str, Any]:
     """The ``binding["attestation"]`` block: which producer attested, which
     inventory schema version it declared, and how many checks backed the
-    status."""
-    return {
+    status. A claimant's scope disclosure is copied verbatim when present."""
+    record = {
         "producer": attestation["producer"],
         "inventory_schema_version": inventory_schema_version(attestation),
         "check_count": attestation.get("check_count"),
         "passed_count": attestation.get("passed_count"),
     }
+    description = attestation.get("description")
+    if isinstance(description, str) and description.strip():
+        record["description"] = description
+    return record
 
 
 def inventory_schema_version(attestation: Mapping[str, Any]) -> Any:
