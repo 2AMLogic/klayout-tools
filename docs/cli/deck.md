@@ -704,7 +704,7 @@ change, and a textual `diff` of two reports is order-sensitive noise.
 
 | Category | Meaning |
 |----------|---------|
-| `added` | rule ids present on exactly one side (of either side's `rules` or `unmodeled_rules`) |
+| `added` | rule ids present only on the `--to` side, in either `rules` or `unmodeled_rules` |
 | `removed` | ids present only on the `--from` side |
 | `changed` | ids enforced on both sides; per id, **only the fields that actually moved**, each with its `from`/`to` value. Every per-rule field `deck rules` emits is compared: `description`, `check`, `layers`, `layer_refs`, `scope`, `value_um`, `value_dbu`, `limits`, `provenance` |
 | `enforcement_changed` | ids that moved between `rules` and `unmodeled_rules` in either direction (`from`/`to`: `enforced`/`unmodeled`). This is its own category deliberately: a rule the deck *stopped* enforcing must not read as `removed` — that would be indistinguishable from a deletion — and a rule it *started* enforcing must not read as `added`. It is the coverage-change signal: "the deck changed its mind" vs "was never checked" |

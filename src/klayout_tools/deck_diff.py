@@ -65,34 +65,6 @@ from typing import Any
 #: report's ``schema_version``).
 SCHEMA_VERSION = 1
 
-#: Every per-rule field compared, in report order -- the full set
-#: :func:`klayout_tools.decks.history.deck_rules` projects per rule. A field
-#: present on only one side lands in ``not_comparable`` instead of being read
-#: as a change.
-RULE_FIELDS = (
-    "description",
-    "check",
-    "layers",
-    "layer_refs",
-    "scope",
-    "value_um",
-    "value_dbu",
-    "limits",
-    "provenance",
-)
-
-#: The envelope-level fields compared under ``deck_level_changed`` (the
-#: ``deck rules`` fields that are not the rule table itself). ``deck``,
-#: ``content_hash`` and ``schema_version`` are identity, reported under
-#: ``identity``; ``rules``/``unmodeled_rules`` are the rule table.
-DECK_FIELDS = (
-    "nominal_dbu_um",
-    "marker_blind_layers",
-    "layer_table",
-    "ambiguous_names",
-    "unresolved",
-)
-
 #: The literal that names this build's own rule table as one side, resolved
 #: by the CLI layer via :func:`~klayout_tools.decks.history.deck_rules`.
 INSTALLED = "installed"
