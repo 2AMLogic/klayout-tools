@@ -59,3 +59,50 @@ def mode_flag_problem(
             "aggregation re-hashes no input artifacts)"
         )
     return repo_root_problem(repo_root)
+
+
+def describe_grader_problem(
+    args: argparse.Namespace, manifest_source: str | None, fleet_source: str | None
+) -> str | None:
+    """Reject inputs that would be ignored when describing this build's rules."""
+    if args.files or manifest_source or fleet_source:
+        return (
+            "--describe-grader cannot be combined with <file> arguments, "
+            "--manifest, or --fleet"
+        )
+    if getattr(args, "tiers_doc", None):
+        return (
+            "--tiers-doc is not meaningful with --describe-grader -- it "
+            "always reports this build's own shipped grading rules, never "
+            "an overridden doc's item list"
+        )
+    if getattr(args, "check", None):
+        return (
+            "--check is not meaningful with --describe-grader -- it verifies "
+            "a committed tier/fleet report, and this mode renders none"
+        )
+    if getattr(args, "repo_root", None) is not None:
+        return (
+            "--repo-root is not meaningful with --describe-grader -- it "
+            "grades no evidence, so there are no repo-scoped inputs to resolve"
+        )
+    return None
+
+
+def artifact_manifest_problem(
+    args: argparse.Namespace, manifest_source: str | None, fleet_source: str | None
+) -> str | None:
+    if not getattr(args, "artifact_manifest", None):
+        return None
+    if (
+        getattr(args, "repin", False)
+        or getattr(args, "attest", None) is not None
+        or getattr(args, "describe_grader", False)
+    ):
+        return "--artifact-manifest requires --manifest/--fleet report grading"
+    if not (manifest_source or fleet_source):
+        return (
+            "--artifact-manifest only applies to --manifest/--fleet (envelope "
+            "aggregation resolves no citations)"
+        )
+    return None
