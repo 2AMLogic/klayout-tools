@@ -62,6 +62,12 @@ def validate_blackbox_entry(
                 f"with only a cell name is an untimed black box; supply the "
                 "macro's lef as well to use a liberty, gds or blackbox view"
             )
+    if re.search(r"\s", cell):
+        raise error_cls(
+            f"{label}.cell must not contain whitespace: the name is written "
+            "verbatim into the generated stub LEF, where a space, tab or "
+            "newline breaks the MACRO statement (issue #6792)"
+        )
     return {
         "cell": cell,
         "lef": None,
