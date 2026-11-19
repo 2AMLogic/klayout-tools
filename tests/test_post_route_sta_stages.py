@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import post_route_sta
 from klayout_tools.post_route_sta import run_sta
 from klayout_tools.post_route_sta_stages import (
@@ -152,7 +152,7 @@ def _stub_openroad_stage_stdout(monkeypatch, stdout: str) -> None:
             json.dump(metrics, handle)
         return fake_completed(returncode=0, stdout=stdout)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _ok_record(side: str, **overrides) -> dict:

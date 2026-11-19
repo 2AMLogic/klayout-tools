@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import post_route_sta
 from klayout_tools.cli import sta_cmd
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
@@ -50,7 +50,7 @@ def _append_instance_block(monkeypatch, block: str) -> None:
             completed.stdout += block
         return completed
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", run)
+    patch_openroad_run(monkeypatch, run)
 
 
 # -- response assembly ------------------------------------------------------- #
@@ -190,7 +190,7 @@ def test_run_sta_report_instances_rejected_by_engine_check(tmp_path, monkeypatch
             return fake_completed(stdout="unknown \n")
         return fake_completed(returncode=3, stdout=block)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
