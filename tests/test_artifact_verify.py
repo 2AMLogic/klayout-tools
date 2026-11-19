@@ -22,6 +22,7 @@ import ast
 import hashlib
 import json
 import logging
+import re
 import socket
 import subprocess
 import sys
@@ -36,6 +37,7 @@ import pytest
 from klayout_tools import artifact_objects as store
 from klayout_tools import artifact_verify
 from klayout_tools.cli import main
+from klayout_tools.mcp_tools import DOCS_BASE_URL
 
 REPO = "acme/widgets"
 SECRET = "X-Amz-Signature=fake0secret0signature0do0not0print"
@@ -219,6 +221,16 @@ def test_module_imports_stdlib_only():
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 assert alias.name.split(".")[0] in sys.stdlib_module_names
+
+
+@pytest.mark.parametrize("columns", [70, 80, 90])
+def test_standalone_help_links_to_artifact_docs(capsys, monkeypatch, columns):
+    monkeypatch.setenv("COLUMNS", str(columns))
+    with pytest.raises(SystemExit) as exited:
+        artifact_verify.main(["--help"])
+    assert exited.value.code == 0
+    urls = re.findall(r"https://[^\s)]+", capsys.readouterr().out)
+    assert f"{DOCS_BASE_URL}/artifact.md" in urls
 
 
 def test_klt_verify_and_the_module_are_one_implementation():

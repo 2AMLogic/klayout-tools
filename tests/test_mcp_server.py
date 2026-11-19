@@ -11,14 +11,18 @@ so neither exceeds the 500-line per-file ratchet ceiling.
 
 from __future__ import annotations
 
+import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from klayout_tools.cli._doc_paths import _DOC_POINTER
 from klayout_tools.mcp_tools import (
+    DOCS_BASE_URL,
     HIDDEN_BY_DEFAULT,
     BridgePolicy,
     build_argv,
@@ -67,8 +71,78 @@ def test_every_registered_verb_yields_a_valid_tool(tools):
         json.dumps(schema)
 
 
+def test_tool_and_argument_descriptions_link_to_cli_docs(tools):
+    for tool in tools:
+        descriptions = [tool.description]
+        descriptions.extend(
+            prop.get("description", "")
+            for prop in tool.input_schema["properties"].values()
+        )
+        for text in descriptions:
+            assert _DOC_POINTER.search(text) is None, (tool.name, text)
+
+
+def test_doc_links_preserve_existing_urls_and_punctuation(monkeypatch):
+    root = argparse.ArgumentParser()
+    url = f"{DOCS_BASE_URL}/layers.md"
+    text = f"See (docs/cli/layers.md), {url}, or docs/cli/layers.md."
+    verb = root.add_subparsers().add_parser("layers", description=text)
+    verb.add_argument("--example", help=text)
+    monkeypatch.setattr("klayout_tools.cli.parser.create_parser", lambda: root)
+
+    (tool,) = derive_tools()
+    expected = f"See ({url}), {url}, or {url}."
+    assert tool.description == f"klt layers: {expected} (CLI docs: {url})"
+    assert tool.input_schema["properties"]["example"]["description"] == expected
+
+
 def test_bridge_does_not_expose_itself(tools):
     assert not any(t.top_verb == "mcp" for t in tools)
+
+
+DOCS_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/"
+
+
+def _cli_docs_url(tool):
+    match = re.search(r"\(CLI docs: (\S+)\)$", tool.description)
+    assert match, f"{tool.name}: description carries no trailing CLI docs URL"
+    return match.group(1)
+
+
+def _heading_slugs(page: Path) -> set[str]:
+    """GitHub's anchor for each ATX heading: rendered text, lowercased, with
+    punctuation dropped and spaces turned into hyphens."""
+    slugs = set()
+    for line in page.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"#{1,6}\s+(.*)", line)
+        if heading:
+            text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.group(1))
+            text = re.sub(r"[^\w\s-]", "", text.replace("`", "").lower())
+            slugs.add(re.sub(r"\s", "-", text.strip()))
+    return slugs
+
+
+def test_sim_merge_and_plan_link_to_their_manual_sections(tools):
+    # Neither verb has its own page: both are sections of docs/cli/sim.md. Exact
+    # fragments, because a swapped pair would still reach the same file.
+    merge = "sim.md#merging-per-request-reports-klt-sim-merge-3045"
+    plan = "sim.md#planning-shards-klt-sim-plan-3423"
+    assert _cli_docs_url(_tool(tools, "klt_sim_merge")) == DOCS_URL + merge
+    assert _cli_docs_url(_tool(tools, "klt_sim_plan")) == DOCS_URL + plan
+    # The verbs that do own a page, and `klt sim` itself, stay unanchored.
+    assert _cli_docs_url(_tool(tools, "klt_sim")) == DOCS_URL + "sim.md"
+    assert _cli_docs_url(_tool(tools, "klt_layers")) == DOCS_URL + "layers.md"
+
+
+def test_every_catalog_cli_docs_link_resolves_in_the_checkout(tools):
+    for tool in tools:
+        url = _cli_docs_url(tool)
+        assert url.startswith(DOCS_URL), tool.name
+        page, _, fragment = url[len(DOCS_URL) :].partition("#")
+        path = REPO / "docs" / "cli" / page
+        assert path.is_file(), f"{tool.name}: {url} has no page in the checkout"
+        if fragment:
+            assert fragment in _heading_slugs(path), f"{tool.name}: no #{fragment}"
 
 
 def test_fleet_verbs_hidden_unless_opted_in(tools, policy):
