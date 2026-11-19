@@ -4,7 +4,10 @@ Unit tests run with no ``geode`` binary: a stub script replays a report
 fixture whose engine-side keys (``kind``, ``status``, ``terminals``,
 ``c_farad``, ...) are the keys of geode-fem's released ``CapacitanceReport``
 (``crates/geode-cli/src/report.rs``, read over ``gh api``). The fixture is
-hand-written but not invented: only its *numbers* are synthetic. Only
+hand-written but not invented: only its *numbers* are synthetic, and its
+shape is pinned to geode's published report schema, vendored verbatim
+under ``fixtures/em/`` (see
+:func:`test_fixture_is_valid_against_geode_report_schema`). Only
 :func:`test_live_geode` exercises the real binary, and it is *skipped*
 (never passed) when ``geode`` is absent.
 """
@@ -15,12 +18,20 @@ import shutil
 import stat
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from klayout_tools.cli.parser import create_parser
 from klayout_tools.em import EmError, parse_capacitance_report, run_em
 
 FIXTURE = Path(__file__).parent / "fixtures" / "em" / "geode_capacitance_report.json"
+GEODE_REPORT_SCHEMA = (
+    Path(__file__).parent / "fixtures" / "em" / "geode_report.schema.json"
+)
+#: geode-fem commit the vendored report schema was copied verbatim from
+#: (``crates/geode-cli/schemas/report.schema.json``). Do not read the
+#: geode-fem checkout at test time: the path is not portable to CI.
+GEODE_REPORT_SCHEMA_COMMIT = "592e8898"
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +96,24 @@ def _request(tmp_path: Path, stub: Path | None, **extra) -> Path:
 def _main(*argv: str):
     args = create_parser().parse_args(argv)
     return args.func(args)
+
+
+def test_fixture_is_valid_against_geode_report_schema():
+    """Issue #6514: the engine-side fixture is pinned to geode's published
+    report schema (vendored verbatim from geode-fem ``GEODE_REPORT_SCHEMA_COMMIT``),
+    so the suite asserts the envelope ``geode`` emits, not the adapter's
+    guess at it. ``backend``'s documented value set is asserted separately
+    because the schema types it as a bare string."""
+    schema = json.loads(GEODE_REPORT_SCHEMA.read_text(encoding="utf-8"))
+    report = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    jsonschema.validate(report, schema)
+    assert report["backend"] in ("ndarray", "wgpu", "cuda", "metal")
+    # Negative control: the validation bites on this fixture, so a future
+    # edit that drops a required field fails here rather than silently
+    # re-diverging from the engine's contract.
+    report.pop("c_flux_diag_farad")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(report, schema)
 
 
 def test_success_payload(tmp_path):

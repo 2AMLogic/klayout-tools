@@ -130,9 +130,9 @@ def _resistor_strip_describe(
     )
 
     # Layer name is not resolved against a PDK layer map at phase 1 -- the
-    # drawing layer is a generator implementation detail (see the module
-    # docstring's `_HIDDEN_PARAMS` note); a real per-PDK layer name lookup is
-    # phase 2 scope, alongside the primitive families that actually need one.
+    # drawing layer is a generator implementation detail (hidden, per the
+    # module docstring); a real per-PDK layer name lookup is phase 2 scope,
+    # alongside the primitive families that actually need one.
     layer = {"layer": 67, "datatype": 20, "name": None}
 
     ports = [
@@ -3077,30 +3077,16 @@ def _diode_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
-    from .gen_diode import _diode_layout, diode_notes
+    from .gen_diode import _diode_layout, diode_notes, diode_ports
 
+    family = _pdk_family(pdk_info["variant"])
     info = _diode_layout(
         params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
     )
-    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     assert metal_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    ports = []
-    for name, box, direction in (
-        ("ANODE", info["anode_li"], 90),
-        ("CATHODE", info["cathode_li"], 90),
-    ):
-        ports.append(
-            {
-                "name": name,
-                "net": None,
-                "layer": metal_layer,
-                "x_um": (box[0] + box[2]) / 2,
-                "y_um": (box[1] + box[3]) / 2,
-                "width_um": box[2] - box[0],
-                "direction_deg": direction,
-            }
-        )
+    ports = diode_ports(info, metal_layer)
     snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
     return {
         "device_count": 1,
@@ -3115,5 +3101,12 @@ def _diode_describe(
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + _mfg_grid_warnings(
+            "diode",
+            family,
+            params,
+            # Both edges are diffusion extents.
+            checks=(("width_um", "active"), ("length_um", "active")),
         ),
     }

@@ -1214,6 +1214,19 @@ stability statement, concrete precedents, and drift-detection guidance, and
     The `asap7`, `gf180mcu`, `sg13cmos5l` and external-file pins retain their
     values for identical source bytes. Historical release pins still resolve
     against the release that emitted them with `klt deck resolve`.
+  - **Coverage disclosures are not guaranteed to be hashed (#6775).**
+    `content_hash` identifies the rule set a run was checked against: the
+    primary module plus the siblings its `DRC_RULE_SOURCES` names. The
+    disclosure lists that ride in the same envelope —
+    `coverage.unmodeled_rules` and `coverage.unchecked_rules` (`klt drc`), and
+    `unmodeled_rules` on `klt deck info` / `klt deck rules` — record what the
+    deck does *not* check, and are covered only to the extent their source
+    text lives in a hashed file.
+    Where a deck assembles one from a sibling module `DRC_RULE_SOURCES` does
+    not name (e.g. `gf180mcu`, which declares none), adding or removing an
+    entry can leave `content_hash` unchanged, so citing the hash next to such
+    a list does not make that list drift-detectable. Compare the emitted list
+    itself when its exact contents matter.
   - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
     (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
     only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
@@ -2601,7 +2614,11 @@ violation (issue #2029).
 ## `--format text` vs `--format json`
 
 - `text` (default) — a human-readable rendering. Its exact layout is **not**
-  part of the contract and may change between releases without notice.
+  part of the contract and may change between releases without notice. A
+  character the stdout encoding cannot represent prints as a `\uXXXX` escape
+  rather than aborting the render with a traceback (a stdout error handler the
+  caller chose, e.g. `PYTHONIOENCODING=cp1252:replace`, is honoured); the JSON
+  keeps the original string.
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
 
