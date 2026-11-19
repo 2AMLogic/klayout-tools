@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 from klayout_tools.cli._doc_paths import _DOC_POINTER
+from klayout_tools.mcp_doc_links import DOCS_BASE_URL
 from klayout_tools.mcp_tools import (
-    DOCS_BASE_URL,
     HIDDEN_BY_DEFAULT,
     BridgePolicy,
     build_argv,
