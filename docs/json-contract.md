@@ -1201,9 +1201,19 @@ stability statement, concrete precedents, and drift-detection guidance, and
     drift comparison. Additive; no `schema_version` bump.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
-  hex digest of the deck file actually used, so "clean against *this exact*
-  rule set" is a checkable claim. The whole block is `null` when no deck was
-  involved (e.g. `lvs` against a pre-extracted netlist).
+  hex digest. For a built-in deck it covers the primary Python module and
+  each deck-specific sibling that populates or modifies its curated DRC rules
+  (including exemptions, notes and provenance IDs). For multiple sources,
+  hash the concatenation of each UTF-8 basename, a NUL byte and its raw
+  32-byte SHA-256 digest, sorted by basename. A single source or an external
+  deck file uses the SHA-256 of its raw bytes. An unreadable required source
+  yields `content_hash: null`. The whole block is `null` when no deck was
+  involved (e.g. LVS against a pre-extracted netlist).
+  - **Pin migration (#6741).** Re-run reports that pin the named `sg13g2` or
+    `sky130` deck and update expected pins when adopting the new identity.
+    The `asap7`, `gf180mcu`, `sg13cmos5l` and external-file pins retain their
+    values for identical source bytes. Historical release pins still resolve
+    against the release that emitted them with `klt deck resolve`.
   - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
     (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
     only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
