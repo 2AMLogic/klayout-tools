@@ -1363,6 +1363,24 @@ jobs:
         # the cache step above keeps a warm-cache rebuild fast.
         run: cargo build --manifest-path native/techmap/Cargo.toml
 
+      - name: Cache native/wave cargo build (debug)
+        # tests/test_wave.py::test_build_then_query_modexp_canary_counts_done_handshakes
+        # builds `native/wave` from inside pytest (`build_cargo_binary`), which
+        # on a cold cargo registry does a crates.io fetch of `fst-reader` et
+        # al. in every matrix leg; one stalled fetch reds an unrelated PR
+        # (issue #6635, PR #6304's `Tests (Python 3.12)`). Mirrors the
+        # `native/techmap` step above. No separate build step: pytest builds
+        # the crate, and this step's post-job save captures the fetched
+        # registry.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/wave/target
+          key: cargo-wave-debug-${{ runner.os }}-${{ hashFiles('native/wave/Cargo.lock') }}
+          restore-keys: cargo-wave-debug-${{ runner.os }}-
+
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
         # integration tests (issue #62's public-repo gate + full canary
