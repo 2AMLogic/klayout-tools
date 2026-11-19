@@ -222,7 +222,6 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -234,7 +233,7 @@ from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._engine_proc import run_in_group
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -265,6 +264,7 @@ from ._verilog_params import (
 from .equiv import EquivError, run_equiv
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
+from .request_paths import RequestPaths
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -303,7 +303,7 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_x_scan import netlist_x_constant_warning
+from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -788,6 +788,9 @@ class SynthesizeError(Exception):
     with ``structural.has_critical: true`` and exit code ``3`` -- never this
     exception. See ``docs/cli/synthesize.md``'s "Exit codes" section.
     """
+
+
+_rpath = RequestPaths(SynthesizeError)
 
 
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
@@ -1452,7 +1455,7 @@ def run_synthesize(
                 constr_inputs=_ABC_CONSTR_INPUTS,
             ),
             **_missing_timing_warning(abc_log_path, timing),
-            **netlist_x_constant_warning(
+            **netlist_warnings(
                 _read_produced_netlist(netlist_path),
                 cell_library=cell_library,
                 has_tie_cells=cell_library in _TIE_CELLS,
@@ -2057,7 +2060,7 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.sources entry")
         if not os.path.isfile(path):
             raise SynthesizeError(f"RTL source not found: {entry}")
         try:
@@ -2462,12 +2465,7 @@ def _resolve_abc_constr_request(
     if not isinstance(driving_cell, str) or not driving_cell:
         raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
     load_ff = raw["load_ff"]
-    if (
-        isinstance(load_ff, bool)
-        or not isinstance(load_ff, (int, float))
-        or not math.isfinite(load_ff)
-        or load_ff <= 0
-    ):
+    if not is_finite_number(load_ff) or load_ff <= 0:
         raise SynthesizeError(
             f"{where}.load_ff must be a finite number greater than zero "
             f"(femtofarads), got {load_ff!r}"
@@ -3109,32 +3107,31 @@ def _run_yosys(
     """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
     on any failure to run: missing binary, non-zero exit, or exceeding
     ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
+    Never raises on a *successful* (exit 0) run; the caller validates that the
+    declared output files appeared. Returns the captured ``stdout`` log text --
+    Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
+    matches :func:`_synthesis_error_message`'s stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
+    (issue #1588) can parse it without a second Yosys invocation.
 
-    Never raises on a *successful* (exit 0) run; the caller validates that
-    the declared output files appeared. Returns the captured ``stdout`` log
-    text -- Yosys's own ``Warning: `` lines land on stdout, never stderr
-    (verified live; matches :func:`_synthesis_error_message`'s
-    stream-preference note for ``ERROR:`` lines) -- so
-    :func:`_compute_structural`/:func:`_summarize_warnings` (issue #1588)
-    can parse it without a second Yosys invocation.
+    A timed-out run raises :class:`SynthesizeError` exactly like any other Yosys
+    failure (never a bare ``subprocess.TimeoutExpired``) -- this is what lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
+    architecture trial synthesis without killing the rest of the ``"auto"``
+    sweep. The kill takes the child's whole process group (issue #5798), so a
+    ``yosys-abc`` grandchild cannot outlive the watchdog that ended its parent.
 
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this lets
-    :func:`_measure_candidate` (issue #1775) disqualify one hung trial
-    synthesis without killing the rest of the ``"auto"`` sweep.
-
-    ``cwd`` (issue #1844) is passed straight through to ``subprocess.run``;
-    ``script_path`` is always absolute, so ``cwd`` only matters for a
-    script :func:`_write_script` wrote with a relative-form embedded path
-    (``repo_root`` given), which must be run with ``cwd=<that same
-    repo_root>``. The default ``None`` reproduces the pre-#1844 behaviour
-    (subprocess's own default), correct for scripts embedding only
-    absolute paths.
-
-    The child env is a copy of ``os.environ`` with ``COLUMNS`` pinned to
-    4096, applied unconditionally (an inherited ``COLUMNS=80`` is exactly
-    the failing case), so the readline-wrapped ``source`` echo can never
-    wedge the abc handshake (issue #5780; see ``docs/cli/synthesize.md``).
+    ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
+    ``script_path`` is always given as an absolute path, so ``cwd`` only matters
+    for a script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must run with ``cwd=<that same repo_root>`` to
+    resolve correctly. The default ``None`` reproduces the pre-#1844 behaviour
+    exactly (subprocess's own default: the invoking process's cwd), correct for
+    every script that embeds only absolute paths. The child env is a copy of
+    ``os.environ`` with ``COLUMNS`` pinned to 4096, applied unconditionally (an
+    inherited ``COLUMNS=80`` is exactly the failing case), so the readline-wrapped
+    ``source`` echo can never wedge the abc handshake (issue #5780; see
+    ``docs/cli/synthesize.md``).
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
@@ -4284,19 +4281,12 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
-        )
+        resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
-        )
+        assert netlist_path is not None
+        resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )

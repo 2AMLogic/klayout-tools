@@ -17,12 +17,11 @@ from __future__ import annotations
 
 import contextvars
 import functools
-import math
 import os
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 
 #: Upper bound for the request's ``yosys_timeout_s`` (30 min needed by a
 #: large generic-``abc`` run, with 2x headroom). The budget is paid per Yosys
@@ -65,13 +64,7 @@ def _validate_yosys_timeout(
     override is a structured error naming where it came from and the single
     :data:`YOSYS_TIMEOUT_MAX_S` cap -- never a silently-ignored value.
     """
-    if (
-        isinstance(value, bool)
-        or not is_number(value)
-        or not math.isfinite(value)
-        or value <= 0
-        or value > YOSYS_TIMEOUT_MAX_S
-    ):
+    if not is_finite_number(value) or value <= 0 or value > YOSYS_TIMEOUT_MAX_S:
         raise error_cls(
             f"{source_label} must be a finite number > 0 and <= "
             f"{YOSYS_TIMEOUT_MAX_S:g} (seconds); got {value!r}"

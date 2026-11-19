@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .decks import ExtractionDeck
 
 
@@ -40,11 +40,14 @@ def _pin_position_um(
     """A pin's port position in the *composed* frame, or ``None``.
 
     ``None`` when the block reported no ``ports[]`` entry for it, or the entry
-    carries no usable ``x_um``/``y_um`` -- exactly the case
-    :func:`route_two_pin` already reports as "one or both ports report no
-    position (empty ports[])". Used only to *order* candidate legs by
-    Manhattan distance (:func:`route_bundle`); the routability verdict itself
-    always comes from :func:`route_two_pin`.
+    carries no usable ``x_um``/``y_um`` -- absent, a ``bool``, NaN/+-infinity,
+    or an integer too large for a float (a 400-digit literal passes
+    ``is_number`` and then overflows ``float()``, issue #6565) -- exactly the
+    case :func:`route_two_pin` reports as "one or both ports report no
+    position (empty ports[])". :func:`route_two_pin` resolves its endpoints
+    through this same function, so the two cannot disagree. Also used to
+    *order* candidate legs by Manhattan distance (:func:`route_bundle`); the
+    routability verdict itself always comes from :func:`route_two_pin`.
     """
     block = blocks.get(pin["block"])
     if block is None:
@@ -53,7 +56,7 @@ def _pin_position_um(
     if not isinstance(port, dict):
         return None
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if not is_number(x_um) or not is_number(y_um):
+    if not is_finite_number(x_um) or not is_finite_number(y_um):
         return None
     offset = offsets_um[pin["block"]]
     return (float(x_um) + offset["x"], float(y_um) + offset["y"])
