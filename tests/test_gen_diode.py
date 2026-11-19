@@ -1,8 +1,11 @@
-"""``klt gen diode`` (issue #4300): sky130 junction diode generator."""
+"""``klt gen diode`` (issue #4300): sky130 junction diode generator.
+
+gf180mcu lives in ``test_gen_diode_gf180mcu.py`` (issue #6614)."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -141,8 +144,56 @@ def test_diode_rejects_bad_params(tmp_path, pdk_root):
         _gen(tmp_path, pdk_root, width_um=0.1)
 
 
-def test_diode_rejects_non_sky130_family(tmp_path):
+def test_diode_rejects_unsupported_family(tmp_path):
+    # gf180mcu is covered by test_gen_diode_gf180mcu.py (issue #6614).
     root = tmp_path / "pdk_install"
-    (root / "gf180mcuD" / "libs.tech").mkdir(parents=True)
+    (root / "ihp-sg13g2" / "libs.tech").mkdir(parents=True)
     with pytest.raises(GenError, match="not yet supported"):
-        _gen(tmp_path, root, variant="gf180mcuD")
+        _gen(tmp_path, root, variant="ihp-sg13g2")
+
+
+_GOLDEN = json.loads(
+    (Path(__file__).parent / "fixtures" / "gen_diode_sky130_geometry.json").read_text()
+)
+
+
+def _layer_boxes(gds):
+    layout = kdb.Layout()
+    layout.read(gds)
+    boxes = {}
+    for idx in layout.layer_indexes():
+        info = layout.get_info(idx)
+        found = [
+            [b.left, b.bottom, b.right, b.top]
+            for cell in layout.each_cell()
+            for b in (s.bbox() for s in cell.shapes(idx).each())
+        ]
+        if found:
+            boxes[f"{info.layer}/{info.datatype}"] = sorted(found)
+    return dict(sorted(boxes.items()))
+
+
+@pytest.mark.parametrize("case", sorted(_GOLDEN))
+def test_sky130_geometry_unchanged_by_gf180mcu_support(tmp_path, pdk_root, case):
+    """The golden was captured from the generator *before* gf180mcu support
+    (issue #6614); sky130 output must not move when another family is added."""
+    kind, vclass, size = case.split("|")
+    width, length = (float(v) for v in size.split("x"))
+    _, gds = _gen(
+        tmp_path,
+        pdk_root,
+        kind=kind,
+        voltage_class=vclass,
+        width_um=width,
+        length_um=length,
+    )
+    assert _layer_boxes(gds) == _GOLDEN[case]
+
+
+def test_sky130_omitted_voltage_class_is_05v5(tmp_path, pdk_root):
+    """An omitted voltage_class keeps resolving to sky130's ``05v5``."""
+    _, omitted = _gen(tmp_path, pdk_root, kind="p_nwell")
+    layout_omitted = _layer_boxes(omitted)
+    _, explicit = _gen(tmp_path, pdk_root, kind="p_nwell", voltage_class="05v5")
+    assert layout_omitted == _layer_boxes(explicit)
+    assert "75/20" not in layout_omitted  # no hvi

@@ -74,6 +74,15 @@ from .design_evidence_tiers import (
 )
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
+from .signoff_artifact import _INPUT_ARTIFACT_FIELDS as _INPUT_ARTIFACT_FIELDS
+from .signoff_artifact import artifact_resolution as artifact_resolution
+from .signoff_artifact import (
+    citation_uri,
+    input_artifact_value,
+    materialize_citation,
+    report_artifact_unavailable,
+    unavailable_is_unresolved,
+)
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
 # that requires them machine-derived (issue #5462); out of this file for its
@@ -4378,7 +4387,7 @@ def build_tier_report(
         manifest,
         read_spec_rows=_read_spec_rows,
         parse_members=_parse_multi_members,
-        resolve_evidence=_resolve_evidence,
+        resolve_evidence=unavailable_is_unresolved(_resolve_evidence),
         lookup_evidence=_lookup_evidence,
         repo_root=repo_root,
     )
@@ -4957,63 +4966,6 @@ def _yield_samples_content_hash(
     return None, {"samples": samples, "searched": candidates}, None
 
 
-#: Per kind, the top-level envelope field(s) naming the **input artifact**
-#: whose bytes ``provenance.input.content_hash`` covers -- the file
-#: :func:`_verify_input_artifact` re-hashes to check that self-reported hash
-#: against the artifact itself (issue #2196).
-#:
-#: Each entry is the producing verb's own ``input_path=`` argument to
-#: :func:`klayout_tools._provenance.build_provenance`, named by the field
-#: that run echoes it back under -- so this table cannot claim to verify a
-#: hash of something the envelope does not actually point at:
-#:
-#: - ``drc``/``extract``/``erc`` -- ``file``, the layout stream each ran on.
-#: - ``lvs`` -- ``layout``: the *layout side* is what `klt lvs` hashes into
-#:   ``provenance.input`` (issue #1969), either the GDS/OASIS stream of the
-#:   ``layout.file`` request shape or the SPICE file of the pre-extracted
-#:   ``layout.netlist`` one. ``reference`` is deliberately **absent**: the
-#:   reference netlist is pinned under ``environment.reference_sha256``, a
-#:   different digest, so re-hashing it here would compare two unrelated
-#:   values and report a mismatch that is not one.
-#: - ``sim`` -- ``netlist``, the SPICE deck it simulated.
-#: - ``pex`` -- ``layout``: `klt pex` republishes its own `klt extract`
-#:   run's ``provenance`` block verbatim (``pex.py``), and that run's input
-#:   is this layout stream.
-#: - ``sta`` -- ``def_path`` when the run was given a DEF, else
-#:   ``verilog_path``, mirroring `klt sta`'s own
-#:   ``input_path = def_path if has_def else verilog_path`` branch. Ordered,
-#:   and only the first *present* field is consulted, so the two can never
-#:   be crossed.
-#:
-#: A kind absent here is never re-hashed and reports ``input_verified:
-#: null``: ``yield`` re-hashes its samples document already
-#: (:func:`_yield_samples_content_hash` -- that path reports ``True`` on its
-#: own); ``functional-verification``/``power``/``place-and-route``
-#: populate no ``provenance.input`` at all today, or echo no path for
-#: the artifact they hashed (`klt place-and-route` pins the gate-level
-#: netlist it placed but echoes only its *outputs*); ``error`` envelopes
-#: carry no verdict to anchor.
-#:
-#: ``generic`` is deliberately absent from this table -- a generic
-#: envelope's author chooses their own field names, so this module must
-#: never guess which one is the artifact. It is handled by a separate,
-#: **opt-in** branch in :func:`_input_artifact_candidates` instead (issue
-#: #2403): an envelope that sets ``provenance.input.path`` is asking to be
-#: verified against it; one that does not keeps ``input_verified: null``,
-#: unchanged from before this field existed.
-_INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
-    "drc": ("file",),
-    "extract": ("file",),
-    "erc": ("file",),
-    "lvs": ("layout",),
-    "sim": ("netlist",),
-    "pex": ("layout",),
-    "sta": ("def_path", "verilog_path"),
-    "lef-abstract": ("file",),
-    "seam-check": ("file",),
-}
-
-
 def _resolve_input_artifact_value(
     value: Any,
     spec: Mapping[str, Any],
@@ -5072,6 +5024,9 @@ def _resolve_input_artifact_value(
     holds the contract and the fallbacks.
     """
     candidates: list[str] = []
+    local = materialize_citation(value)
+    if local is not None:
+        return [local]
     if isinstance(value, str) and value:
         candidates.append(_resolve_relative_to_spec(value, spec))
         if evidence_dir is not None and not os.path.isabs(value):
@@ -5100,36 +5055,8 @@ def _input_artifact_candidates(
     evidence_dir = (
         os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
     )
-    for field in _INPUT_ARTIFACT_FIELDS.get(kind, ()):
-        value = envelope.get(field)
-        if value is None:
-            # Not "unresolvable" -- this field simply was not the one the run
-            # hashed (`klt sta`'s DEF/Verilog branch); try the next.
-            continue
-        # The first *present* field decides: it is the one the producing run
-        # hashed, so falling through to another on a failed resolution would
-        # verify the wrong artifact.
-        return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
-    if kind in ("generic", "model-run"):
-        # Issue #2403 (and #4859 for `model-run`, whose model record is
-        # likewise author-named): a `generic` envelope names its own fields by
-        # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
-        # so the only field this module ever reads for it is this one
-        # explicit, opt-in name -- never `source` (documented as purely
-        # informational, `docs/cli/signoff.md`) and never a guess at some
-        # other author-chosen key. An envelope that omits
-        # `provenance.input.path` is unaffected: `[]` here means
-        # `_verify_input_artifact` reports `input_verified: null`, exactly
-        # as it did before this field existed.
-        provenance = envelope.get("provenance")
-        input_block = (
-            provenance.get("input") if isinstance(provenance, Mapping) else None
-        )
-        if isinstance(input_block, Mapping) and "path" in input_block:
-            return _resolve_input_artifact_value(
-                input_block.get("path"), spec, evidence_dir, repo_root
-            )
-    return []
+    value = input_artifact_value(kind, envelope)
+    return _resolve_input_artifact_value(value, spec, evidence_dir, repo_root)
 
 
 def _verify_input_artifact(
@@ -5160,6 +5087,8 @@ def _verify_input_artifact(
     evidence.
     """
     if not isinstance(recorded_hash, str) or not recorded_hash:
+        # Even an unpinned citation must obtain the bytes it explicitly names.
+        materialize_citation(input_artifact_value(kind, envelope))
         return None
     read_any = False
     for candidate in _input_artifact_candidates(
@@ -5255,10 +5184,13 @@ def _unresolved_evidence_detail(
     resolve: an unreadable evidence file names both the resolved path and the
     process cwd it resolved against (evidence paths are cwd-relative)."""
     if reason == _REASON_UNREADABLE_EVIDENCE and spec.get("file") is not None:
+        if (uri := citation_uri(spec["file"])) is not None:
+            return {"artifact": uri}
         return {"path": os.path.abspath(spec["file"]), "cwd": os.getcwd()}
     return {}
 
 
+@report_artifact_unavailable
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -6238,7 +6170,8 @@ def _resolve_evidence(
     """Resolve one normalized evidence ``spec`` to the envelope it names,
     without grading it -- returns ``(resolution, None)`` on success, or
     ``(None, <_REASON_* constant>)`` when the evidence could not be resolved
-    to a recognised ``klt`` envelope at all.
+    to a recognised ``klt`` envelope at all. An unavailable artifact URI
+    raises ArtifactUnavailable so the grader can include its URI and cause.
 
     Split out of :func:`_grade_evidence` (issue #2025) so the compound
     item-11 path (:func:`_grade_power_delivery`) resolves its several cited
@@ -6316,11 +6249,13 @@ def _resolve_evidence(
             return None, _REASON_COMMAND_FAILED
 
         file_label: str | None = None
+        local_file: str | None = None
         source_label = command_label
     else:
         file = spec["file"]
+        local_file = materialize_citation(file) or file
         try:
-            envelope = _read_envelope(file)
+            envelope = _read_envelope(local_file)
         except SignoffError:
             return None, _REASON_UNREADABLE_EVIDENCE
 
@@ -6375,15 +6310,15 @@ def _resolve_evidence(
         # against the artifact the envelope names. Disclosure only -- see
         # this module's "Input-artifact verification" docstring section.
         input_verified = _verify_input_artifact(
-            check_kind, envelope, spec, actual_hash, file_label, repo_root
+            check_kind, envelope, spec, actual_hash, local_file, repo_root
         )
 
     actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
-        check_kind, spec, file_label, actual_hash, input_verified, provenance
+        check_kind, spec, local_file, actual_hash, input_verified, provenance
     )
 
     pex_inputs, input_members, input_verified = _fold_kind_inputs(
-        check_kind, envelope, spec, file_label, actual_hash, input_verified, repo_root
+        check_kind, envelope, spec, local_file, actual_hash, input_verified, repo_root
     )
 
     return (
