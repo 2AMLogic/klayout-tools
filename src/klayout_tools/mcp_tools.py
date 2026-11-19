@@ -31,7 +31,6 @@ from ._jsonnum import is_int
 from .mcp_doc_links import DOCS_BASE_URL, cli_docs_url
 
 TOOL_PREFIX = "klt_"
-
 _DOC_POINTER = re.compile(
     r"(?<![\w./\\-])docs/cli/([A-Za-z0-9_-]+\.md)(?![\w/\\-]|\.\w)"
 )
