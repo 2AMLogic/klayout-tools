@@ -269,3 +269,22 @@ def test_resolve_via_drops_marks_terminal_and_intermediate_landings():
             "block_id": "a",
         },
     ]
+
+
+def test_shrunk_footprints_include_the_cut_array_extent(pdk_root):
+    """An ``access.via_array`` drop's pads grow by the array extent on both
+    the terminal and the minimal-ladder intermediate side (#6058 keeps the
+    #2927 growth, whichever branch sizes the pad)."""
+    dbu = 0.001
+    drop = _marked_drop(_MET1, _VIA1, _MET2, (_MET2,))
+    drop["array"] = {"rows": 1, "cols": 3, "pitch_um": 0.3}
+    extra = (max(1, 3) - 1) * 0.3
+    minimal = pads._make_landing_pad_side_um("sky130A", minimal_ladder=True)
+    regions = pads._drawn_leg_intermediate_pad_regions([drop], dbu, _MET2, minimal)
+    box = regions[_MET1].bbox()
+    assert (box.right - box.left) * dbu == pytest.approx(0.32 + extra)
+    boxes = pads._landing_and_widen_pad_boxes([drop], [], _MET2, minimal)
+    terminal = next(b for b in boxes if b[0] == _MET2)
+    assert (terminal[2][2] - terminal[2][0]) == pytest.approx(
+        _VIA_LANDING_SIZE_UM + extra
+    )
