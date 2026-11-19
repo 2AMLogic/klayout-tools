@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import pdk as pdk_module
 from klayout_tools import post_route_sta
 from klayout_tools._openroad_engine import container_runtime_hint
@@ -1473,7 +1473,7 @@ def _stub_openroad_success(
             returncode=0, stdout="\n".join(stdout_lines), stderr=spef_stderr
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_run_sta_response_envelope(tmp_path, monkeypatch):
@@ -1616,7 +1616,7 @@ def _stub_openroad_multi_corner(
                 handle.write("# mutated mid-run\n")
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
@@ -1974,7 +1974,7 @@ def _stub_openroad_check_family_engine(
             )
         return fake_completed(returncode=0, stdout=stdout)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -2320,7 +2320,7 @@ def test_run_sta_missing_evidence_blocks_degrade_to_null_not_false(
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     annotation = run_sta(request_path)["spef_annotation"]
 
@@ -2598,7 +2598,7 @@ def test_run_sta_engine_failure_raises(tmp_path, monkeypatch):
             stderr="[ERROR STA-1234] something went wrong",
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError, match=r"\[ERROR STA-1234\]"):
         run_sta(request_path)
@@ -2610,7 +2610,7 @@ def test_run_sta_missing_openroad_binary_raises(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise OSError("no such file or directory: 'openroad'")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError, match="could not launch openroad"):
         run_sta(request_path)
@@ -2799,7 +2799,7 @@ def test_run_sta_unreachable_container_runtime_surfaces_hint(tmp_path, monkeypat
             return fake_completed(stdout="26Q3-771-gdeadbeef\n")
         return fake_completed(returncode=1, stderr=_DOCKER_29_UNREACHABLE)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -3252,7 +3252,7 @@ def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -3327,7 +3327,7 @@ def _stub_openroad_capture(monkeypatch, scenario_by_corner: dict) -> list[str]:
             return fake_completed(returncode=0, stdout=captured["stdout"])
         return fake_completed(returncode=3, stdout=captured["stdout"])
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -4341,7 +4341,7 @@ def _stub_openroad_clock_capture(
             json.dump(captured["metrics"], handle)
         return fake_completed(returncode=0, stdout=captured["stdout"])
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -4980,7 +4980,7 @@ def test_run_sta_report_ports_validation_runs_before_engine(tmp_path, monkeypatc
     def fail_run(*args, **kwargs):
         raise AssertionError("engine must not run for an invalid request")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    patch_openroad_run(monkeypatch, fail_run)
     with pytest.raises(PostRouteStaError, match="must not repeat a port"):
         run_sta(request_path)
 
@@ -5169,7 +5169,7 @@ def _append_port_block(monkeypatch, block: str) -> None:
             completed.stdout += block
         return completed
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", run)
+    patch_openroad_run(monkeypatch, run)
 
 
 def test_run_sta_report_ports_single_corner(tmp_path, monkeypatch):
@@ -5252,7 +5252,7 @@ def test_run_sta_report_ports_rejected_by_engine_check(tmp_path, monkeypatch):
             return fake_completed(stdout="unknown \n")
         return fake_completed(returncode=3, stdout=block)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -5375,7 +5375,7 @@ def test_run_sta_false_path_from_validation_runs_before_engine(tmp_path, monkeyp
     def fail_run(*args, **kwargs):
         raise AssertionError("engine must not run for an invalid request")
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fail_run)
+    patch_openroad_run(monkeypatch, fail_run)
     with pytest.raises(PostRouteStaError, match="must not repeat a port"):
         run_sta(request_path)
 
@@ -5493,7 +5493,7 @@ def test_run_sta_false_path_from_rejected_by_engine_check(tmp_path, monkeypatch)
             return fake_completed(stdout="unknown \n")
         return fake_completed(returncode=3, stdout=block)
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -5791,7 +5791,7 @@ def _stub_openroad_completeness_capture(
             json.dump(captured["metrics"], handle)
         return fake_completed(returncode=0, stdout=captured["stdout"])
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -6401,7 +6401,7 @@ def test_engine_error_message_drops_checkout_prefix(tmp_path, monkeypatch):
             stderr=f"[ERROR ODB-0125] DEF parser error in {def_abs} line 7",
         )
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PostRouteStaError) as excinfo:
         run_sta(request_path)
@@ -6580,7 +6580,7 @@ def _wrap_openroad_with_sdf_writer(monkeypatch, *, write: bool = True) -> list[s
                 )
         return result
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -7015,7 +7015,7 @@ def _stub_openroad_matrix(
         ]
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+    patch_openroad_run(monkeypatch, fake_run)
     return scripts
 
 
@@ -7148,7 +7148,7 @@ def test_run_sta_spef_map_detects_concurrent_def_mutation(tmp_path, monkeypatch)
                 handle.write("# mutated mid-run\n")
         return result
 
-    monkeypatch.setattr(post_route_sta.subprocess, "run", mutating_run)
+    patch_openroad_run(monkeypatch, mutating_run)
 
     with pytest.raises(PostRouteStaError, match="geometry backing this multi-corner"):
         run_sta(request_path)

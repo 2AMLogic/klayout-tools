@@ -24,7 +24,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from klayout_tools import sim, synthesize
+from klayout_tools import _openroad_engine, sim, synthesize
 
 
 def fake_completed(
@@ -36,6 +36,40 @@ def fake_completed(
     return subprocess.CompletedProcess(
         args=[], returncode=returncode, stdout=stdout, stderr=stderr
     )
+
+
+class FakePopen:
+    """Completed OpenROAD invocation with the engine's Popen interface."""
+
+    pid = (1 << 31) - 1  # representable as pid_t, above the kernel PID limit
+
+    def __init__(self, completed: subprocess.CompletedProcess) -> None:
+        self._completed = completed
+        self.returncode = None
+
+    def poll(self):
+        # Report the process as already exited: the engine's launch-time
+        # container-id poll gives up immediately rather than waiting out
+        # its full bound in every stubbed test (a real child would be
+        # running here and report None).
+        return self._completed.returncode
+
+    def communicate(self, timeout=None):
+        self.returncode = self._completed.returncode
+        return self._completed.stdout, self._completed.stderr
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def patch_openroad_run(monkeypatch, fake_run: Callable) -> None:
+    """Share one stub between blocking probes and the isolated OpenROAD launch."""
+
+    def popen(argv, **kwargs):
+        return FakePopen(fake_run(argv, **kwargs))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_openroad_engine, "Popen", popen)
 
 
 _STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"

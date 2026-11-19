@@ -1953,7 +1953,8 @@ add `corners[].engine_log` for each actual session.
 
 The entry has the same [fields and retention semantics as P&R](place-and-route.md#retained-openroad-logs):
 invocation ID, script filename/hash, normalized script/metrics/log paths,
-process outcome/return code, and `retention_errors`. New paths use
+process outcome/return code, the wrapper's `container_id` (`null` if no ID
+was recorded), and `retention_errors`. New paths use
 `{path, scope}` envelopes (as, since schema 2 / issue #2879, are
 `def_path`, `verilog_path`, and `spef_path`). Log `repo` paths resolve from
 the invoking repository root; the input-path fields resolve from the root of
