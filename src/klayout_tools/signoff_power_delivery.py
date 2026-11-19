@@ -36,6 +36,7 @@ from typing import Any, cast
 
 from ._jsonnum import is_int, is_number
 from ._provenance import content_hash
+from .signoff_artifact import report_artifact_unavailable
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,
@@ -1653,6 +1654,7 @@ def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
     return {"tapless": True} if tapless else {}
 
 
+@report_artifact_unavailable
 def _grade_power_delivery(
     specs: list[dict[str, Any]],
     *,
@@ -1784,9 +1786,7 @@ def _grade_power_delivery(
     ``parts`` (and nothing more -- ``power_delivery`` states facts about a
     proven grid, and an unmet group has none), so a grouped report accounts
     for every cited envelope even when a group's own rules failed. The
-    default keeps today's shape exactly: a failing single-group citation
-    renders ``citation: null``, as it always has.
-    """
+    default keeps a failing single-group citation at ``citation: null``."""
     from .signoff import _citation
     from .signoff_grouped_citations import (
         missing_parts_verdict as _missing_parts_verdict,
