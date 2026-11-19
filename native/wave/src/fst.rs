@@ -53,32 +53,23 @@ use fst_reader::{
 
 use crate::cache::{CachedSignal, ClockEntry, ColumnCache};
 use crate::format::format_value;
+use crate::fst_convert::RealFrameFill;
 
-/// f64 read from an FST frame slot that was never written: fst-writer fills
-/// frames with ASCII 'x' bytes, so a real signal with no change before the
-/// first time step reads back as this exact bit pattern. We drop it.
-const REAL_FRAME_GARBAGE_BITS: u64 = u64::from_le_bytes([b'x'; 8]);
-
-/// Read-side backing for one open FST file: the reader itself plus decode
-/// memoization for the handful of signals the loader probes at load time
-/// (clock/reset candidates) and for windowed multi-signal prefetches.
+/// Read-side backing for one open FST file: the reader plus decode memoization for the
+/// loader's probe signals (clock/reset candidates) and windowed multi-signal prefetches.
 #[allow(clippy::type_complexity)]
 pub struct FstBacking {
     reader: Mutex<FstReader<BufReader<File>>>,
     /// Per signal index (parallel to `ColumnCache::signals`).
     handles: Vec<usize>, // FstSignalHandle indices (handle is not Clone)
-    is_real: Vec<bool>,
-    /// Real-ness indexed by FST handle (hot-path lookup for bulk decodes).
-    is_real_by_handle: Vec<bool>,
-    /// Decoded full streams for the handful of signals the loader probed
-    /// (clock/reset candidates), keyed by FST handle index so aliases share
-    /// one entry. Deliberately NOT a general cache: memoizing every stream a
-    /// query touches would hold multi-GB of decoded strings on
-    /// high-activity traces.
+    real_frame_fill: RealFrameFill,
+    /// Decoded full streams for the handful of signals the loader probed (clock/reset
+    /// candidates), keyed by FST handle index so aliases share one entry. Deliberately
+    /// NOT a general cache: memoizing every stream a query touches would hold
+    /// multi-GB of decoded strings on high-activity traces.
     memo: Mutex<HashMap<usize, std::sync::Arc<Vec<(u64, String)>>>>,
-    /// Prefix streams (all changes in `[0, max_tick]`) bulk-decoded by
-    /// `prefetch_to`; serves every windowed read with `tick_max <= max_tick`
-    /// without another file pass.
+    /// Prefix streams (all changes in `[0, max_tick]`) bulk-decoded by `prefetch_to`; serves every
+    /// windowed read with `tick_max <= max_tick` without another file pass.
     prefix: Mutex<Option<PrefixMemo>>,
 }
 
@@ -88,20 +79,10 @@ struct PrefixMemo {
 }
 
 impl FstBacking {
-    #[inline]
-    fn handle_is_real(&self, handle_idx: usize) -> bool {
-        self.is_real_by_handle
-            .get(handle_idx)
-            .copied()
-            .unwrap_or(false)
-    }
-
-    /// Bulk-decode the `[0, max_tick]` prefix of many signals in ONE file
-    /// pass (each fst-reader pass re-decodes the time table and block
-    /// metadata, so per-signal passes dominate point-query latency). Called
-    /// by windowed query entry points (`sample`/`wave`/`diff`) with their
-    /// matched signal set; the pass early-terminates past `max_tick`, so
-    /// memory is bounded by the window, not the trace.
+    /// Bulk-decode the `[0, max_tick]` prefix of many signals in ONE file pass (each fst-reader
+    /// pass re-decodes the time table and block metadata, so per-signal passes dominate point-query
+    /// latency). Called by windowed query entry points (`sample`/`wave`/`diff`) with their matched
+    /// signal set; the pass early-terminates past `max_tick`, so memory is bounded by the window.
     pub(crate) fn prefetch_to(&self, sig_indices: &[usize], max_tick: u64) {
         if sig_indices.len() <= 1 {
             return; // a single signal costs the same either way
@@ -133,16 +114,13 @@ impl FstBacking {
                 |time, h, value| -> Result<(), ()> {
                     if time <= max_tick {
                         let hi = h.get_index();
-                        if let Some(v) = canon_value(&value, self.handle_is_real(hi)) {
+                        if let Some(v) = canon_value(&value, time, &self.real_frame_fill) {
                             by_handle.entry(hi).or_default().push((time, v));
                         }
                     }
                     Ok(())
                 },
             );
-        }
-        for (&h, list) in by_handle.iter_mut() {
-            strip_real_frame_garbage(list, self.handle_is_real(h));
         }
         // signals with no changes in the window still need an entry so the
         // hit-check above and read_range know they were covered
@@ -163,21 +141,19 @@ impl FstBacking {
         if let Some(hit) = self.memo.lock().unwrap().get(&h) {
             return hit.as_ref().clone();
         }
-        let is_real = self.is_real[sig_idx];
         let mut out: Vec<(u64, String)> = Vec::new();
         {
             let mut reader = self.reader.lock().unwrap();
             let _ = reader.read_signals(
                 &FstFilter::filter_signals(vec![FstSignalHandle::from_index(h)]),
                 |time, _h, value| -> Result<(), ()> {
-                    if let Some(v) = canon_value(&value, is_real) {
+                    if let Some(v) = canon_value(&value, time, &self.real_frame_fill) {
                         out.push((time, v));
                     }
                     Ok(())
                 },
             );
         }
-        strip_real_frame_garbage(&mut out, is_real);
         out
     }
 
@@ -206,7 +182,6 @@ impl FstBacking {
         if let Some(hit) = self.memo.lock().unwrap().get(&h) {
             return split_window(hit, tick_min, tick_max);
         }
-        let is_real = self.is_real[sig_idx];
         let mut all: Vec<(u64, String)> = Vec::new();
         {
             let mut reader = self.reader.lock().unwrap();
@@ -214,7 +189,7 @@ impl FstBacking {
                 &FstFilter::new(0, tick_max, vec![FstSignalHandle::from_index(h)]),
                 |time, _h, value| -> Result<(), ()> {
                     if time <= tick_max {
-                        if let Some(v) = canon_value(&value, is_real) {
+                        if let Some(v) = canon_value(&value, time, &self.real_frame_fill) {
                             all.push((time, v));
                         }
                     }
@@ -222,7 +197,6 @@ impl FstBacking {
                 },
             );
         }
-        strip_real_frame_garbage(&mut all, is_real);
         split_window(&all, tick_min, tick_max)
     }
 
@@ -231,6 +205,7 @@ impl FstBacking {
     fn read_many(
         reader: &mut FstReader<BufReader<File>>,
         handle_indices: &[usize],
+        real_frame_fill: &RealFrameFill,
     ) -> HashMap<usize, Vec<(u64, String)>> {
         let mut by_handle: HashMap<usize, Vec<(u64, String)>> = HashMap::new();
         if handle_indices.is_empty() {
@@ -243,7 +218,7 @@ impl FstBacking {
         let _ = reader.read_signals(
             &FstFilter::filter_signals(handles),
             |time, h, value| -> Result<(), ()> {
-                if let Some(v) = canon_value(&value, false) {
+                if let Some(v) = canon_value(&value, time, real_frame_fill) {
                     by_handle.entry(h.get_index()).or_default().push((time, v));
                 }
                 Ok(())
@@ -256,33 +231,27 @@ impl FstBacking {
 /// Convert an FST value to the canonical stored-string form: 1-char values
 /// as-is, multi-bit with x/z kept as bit text, pure-binary converted to
 /// leading-zero-stripped uppercase hex.
-fn canon_value(value: &FstSignalValue, is_real: bool) -> Option<String> {
+fn canon_value(
+    value: &FstSignalValue,
+    tick: u64,
+    real_frame_fill: &RealFrameFill,
+) -> Option<String> {
     match value {
         FstSignalValue::String(bytes) => {
-            // FST stores bit strings at full declared width; the minimal
-            // form strips implied left-extension padding so query output is
-            // independent of dump dialect.
+            // FST stores bit strings at full declared width; the minimal form strips implied
+            // left-extension padding so query output is independent of dump dialect.
             let s = std::str::from_utf8(bytes).ok()?;
             Some(crate::cache::minimal_xz(format_value(s)))
         }
         FstSignalValue::Real(r) => {
-            if is_real && r.to_bits() == REAL_FRAME_GARBAGE_BITS {
-                // frame slot for a never-initialized real -- no genuine value
-                return Some(String::new()); // marker, stripped below
+            if real_frame_fill.matches(tick, *r) {
+                return None;
             }
-            // Debug formatting keeps a decimal point ("100.0", not "100"),
-            // matching the raw VCD real tokens this format stores. Never
-            // run reals through format_value -- a value like 100 would be
-            // mistaken for binary and hexified.
+            // Debug formatting keeps a decimal point ("100.0", not "100"), matching the raw VCD
+            // real tokens this format stores. Never run reals through format_value -- a value
+            // like 100 would be mistaken for binary and hexified.
             Some(format!("{r:?}"))
         }
-    }
-}
-
-/// Remove the frame-garbage marker produced by `canon_value` for reals.
-fn strip_real_frame_garbage(list: &mut Vec<(u64, String)>, is_real: bool) {
-    if is_real {
-        list.retain(|(_, v)| !v.is_empty());
     }
 }
 
@@ -502,7 +471,8 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
     }
     probe_handles.sort_unstable();
     probe_handles.dedup();
-    let probe_data = FstBacking::read_many(&mut reader, &probe_handles);
+    let real_frame_fill = RealFrameFill::from_header(&header);
+    let probe_data = FstBacking::read_many(&mut reader, &probe_handles, &real_frame_fill);
     let empty: Vec<(u64, String)> = Vec::new();
     let trans_of = |var_idx: usize| -> &Vec<(u64, String)> {
         probe_data.get(&vars[var_idx].handle_idx).unwrap_or(&empty)
@@ -643,13 +613,6 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
     let ticks_to_ns = 10f64.powi(header.timescale_exponent as i32 + 9);
     let timescale_str = timescale_str_from_exponent(header.timescale_exponent);
 
-    let mut is_real_by_handle =
-        vec![false; vars.iter().map(|v| v.handle_idx + 1).max().unwrap_or(0)];
-    for v in &vars {
-        if v.is_real {
-            is_real_by_handle[v.handle_idx] = true;
-        }
-    }
     // Seed the decode memo with the clock/reset probe results -- sync-mode
     // queries re-read those signals immediately (reset rebasing) and must
     // not pay a second file pass for them.
@@ -660,8 +623,7 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
     let backing = FstBacking {
         reader: Mutex::new(reader),
         handles: vars.iter().map(|v| v.handle_idx).collect(),
-        is_real: vars.iter().map(|v| v.is_real).collect(),
-        is_real_by_handle,
+        real_frame_fill,
         memo: Mutex::new(memo),
         prefix: Mutex::new(None),
     };
@@ -681,3 +643,7 @@ pub fn load_fst(path: &Path) -> Option<ColumnCache> {
         backing,
     ))
 }
+
+#[cfg(test)]
+#[path = "fst_tests.rs"]
+mod tests;
