@@ -1362,9 +1362,14 @@ terminal (or `batch.poll_timeout_s` elapses), and collects and grades it
 exactly as the original invocation would have. Pass the **same request** the
 job was submitted from — the request supplies the unit list and the
 measurement limits; it is not re-uploaded. A job id with no `job.json` in the
-bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
-applies to a single-job `batch` run only: it is refused for other backends,
-for sharded (`hosts > 1`) runs, and with `--batch-set` or `--submit-only`.
+bucket fails with exit `1` and `error.code: "batch_unknown_job"`. That code is
+reserved for a plain "not found" answer: a lookup that fails any other way
+(expired or missing credentials, `AccessDenied`, S3 throttling, a timeout) is
+reported as a `batch backend failed: …` error carrying the AWS CLI's message,
+never as `batch_unknown_job`, so it is not mistaken for a job that was never
+submitted. `--attach` applies to a single-job `batch` run only: it is refused
+for other backends, for sharded (`hosts > 1`) runs, and with `--batch-set` or
+`--submit-only`.
 For a deck-list request, `--attach` returns the same deck report a blocking
 run would (unit trees installed under the outdir, `environment.remote` filled
 in); the request must declare the same decks the job ran, or it fails with
