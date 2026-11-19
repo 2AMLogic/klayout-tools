@@ -1214,7 +1214,7 @@ def run_synthesize(
         library_defaults, dont_use_requested, dont_use_mode
     )
     abc_constr_request = _resolve_abc_constr_request(
-        constraints, liberty_path, resolved_globs
+        constraints, liberty_path, resolved_globs=resolved_globs
     )
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
@@ -2434,7 +2434,8 @@ def _describe_clock_targets(
 def _resolve_abc_constr_request(
     constraints: dict[str, Any] | None,
     liberty_path: str,
-    resolved_globs: tuple[str, ...] = (),
+    *,
+    resolved_globs: tuple[str, ...],
 ) -> tuple[str, float] | None:
     """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
     or ``None`` when the request does not supply one (issue #4662).
@@ -2448,8 +2449,7 @@ def _resolve_abc_constr_request(
     """
     if not constraints or constraints.get("abc_constr") is None:
         return None
-    raw = constraints["abc_constr"]
-    where = "request.constraints.abc_constr"
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
     if not isinstance(raw, dict):
         raise SynthesizeError(f"{where} must be a JSON object")
     unknown = sorted(set(raw) - {"driving_cell", "load_ff"})

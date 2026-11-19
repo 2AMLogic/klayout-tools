@@ -2085,10 +2085,9 @@ def check_lvs_report(
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
-    Since #2659 / #4984 ``layout`` and ``reference`` are ``{path, scope}``
-    objects resolved against the report's own repo root (cwd-independent);
-    only a pre-#4984 or ``klayout-runset`` report's bare ``reference``
-    string stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
+    Repo-scoped layout and reference paths resolve against the report's repo root
+    (#2659, #4984). Bare reference strings in legacy or ``klayout-runset`` reports
+    resolve against the working directory (#2595).
     ``--layout`` (#2699) and ``--reference`` (#5845) override their recorded
     paths through :func:`~klayout_tools._report_verify.resolve_committed_path`.
 
@@ -2118,6 +2117,7 @@ def check_lvs_report(
             committed.get("reference"),
             report_path,
             override=reference_path,
+            override_hint="--reference/an absolute path",
             include_repo_root=True,
         ),
     ]

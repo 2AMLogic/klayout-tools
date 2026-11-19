@@ -194,16 +194,17 @@ def report_checks(
     return checks
 
 
-#: ``klt drc --check --rerun`` exclusions (issue #5660): the volatile
-#: provenance fields plus the two surfaces an ``--engine klayout`` run now
-#: always populates. The same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` -- "a
-#: field a report never carried cannot itself have drifted".
+#: DRC reruns exclude volatile provenance and native-deck execution details.
+#: Same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` (issue #5660) -- "a field a
+#: report never carried cannot itself have drifted".
 #:
 #: * ``environment.klayout_binary`` -- a host-local path (#2849 precedent): the
 #:   same KLayout installed under another prefix is not a change in evidence.
 #: * ``provenance.klayout_module_version`` -- the pip-wheel axis, volatile like
 #:   its sibling ``provenance.klayout_version``.
+#: * ``deck_output`` -- the deck log can include per-run paths and timings.
 DRC_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("deck_output",),
     ("environment", "klayout_binary"),
     ("provenance", "klayout_module_version"),
 }

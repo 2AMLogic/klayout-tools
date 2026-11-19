@@ -138,7 +138,11 @@ def test_diode_lvs_round_trip(tmp_path, pdk_root, kind, device, card):
 def test_diode_rejects_bad_params(tmp_path, pdk_root):
     with pytest.raises(GenError, match="kind"):
         _gen(tmp_path, pdk_root, kind="bogus")
-    with pytest.raises(GenError, match="voltage_class"):
+    with pytest.raises(
+        GenError,
+        match=r"voltage_class '3v3' is not a sky130 flavour "
+        r"-- must be one of \['05v5', '11v0'\]",
+    ):
         _gen(tmp_path, pdk_root, voltage_class="3v3")
     with pytest.raises(GenError, match="width_um"):
         _gen(tmp_path, pdk_root, width_um=0.1)

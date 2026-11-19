@@ -196,6 +196,7 @@ support, the marker is gone, and CI now covers 3.10 through 3.14.)
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
 import json  # noqa: F401 -- tests reach it as fv.json
 import os
@@ -206,6 +207,7 @@ import sys
 import xml.etree.ElementTree as ElementTree
 from typing import Any
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
@@ -1001,9 +1003,13 @@ class _Report(dict):
     local_paths: dict[str, str | None]
 
 
-def _path_envelope(path: str | None) -> dict[str, Any]:
-    """``path`` as the committable ``{path, scope}`` shape (never absolute)."""
-    root = find_repo_root()
+def _path_envelope(
+    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
+) -> dict[str, Any]:
+    """``path`` as the committable ``{path, scope}`` shape (never absolute),
+    relative to ``repo_root`` (default: the cwd's repo -- a run passes the
+    request's, so its report does not vary with the invoking directory)."""
+    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
     if path is not None and root is None:
         return {"path": None, "scope": "external"}
     return repo_relative_path(path, repo_root=root)
@@ -1084,33 +1090,6 @@ def _run_spec_test(engine_runner, spec: dict[str, Any], **kwargs: Any) -> None:
         plusargs=spec["plusargs"],
         **kwargs,
     )
-
-
-def _collect_run_results(
-    run_specs: list[dict[str, Any]], *, engine: str, module: str, build_log: str
-) -> tuple[list[dict[str, Any]], tuple[int, int, int], list[dict[str, Any]]]:
-    """Parse every run's results: ``(tests, (passed, failed, skipped),
-    per-seed run reports)``. A seeded run's tests carry ``initial_state_seed``
-    (issue #2998)."""
-    tests: list[dict[str, Any]] = []
-    totals = [0, 0, 0]
-    run_reports: list[dict[str, Any]] = []
-    for spec in run_specs:
-        spec_tests = _parse_run_results(spec, engine=engine, build_log=build_log)
-        counts = _executed_result_counts(spec_tests, module)
-        totals = [total + count for total, count in zip(totals, counts, strict=True)]
-        if spec["seed"] is not None:
-            for test in spec_tests:
-                test["initial_state_seed"] = spec["seed"]
-            run_reports.append(
-                {
-                    "seed": spec["seed"],
-                    "status": "fail" if counts[1] else "pass",
-                    "results_xml": _hashed_path_envelope(spec["results_xml"]),
-                }
-            )
-        tests.extend(spec_tests)
-    return tests, (totals[0], totals[1], totals[2]), run_reports
 
 
 def _initial_state_echo(
@@ -1624,11 +1603,9 @@ class _MissingToolError(FunctionalVerificationError):
 def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     """Parse a cocotb ``results.xml`` into the contract's ``tests[]`` list.
 
-    Structure (spike section 4, captured live): a ``<testcase>`` with no
-    child element is a pass, a ``<failure>`` child is a failure, a
-    ``<skipped>`` child is a skip. ``error_type``/``error_message`` are taken
-    verbatim from the ``<failure>`` element's own attributes and are present
-    only on failing entries.
+    A testcase passes unless it contains a failure or skip. Only failures
+    carry an error type and message. The parser reads the raw diagnostic
+    from the failure attributes or element text.
 
     Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
     *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``
@@ -2512,6 +2489,9 @@ def run_functional_verification(
     """
     request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
     output_dir = _resolve_output_dir(request_dir, output_dir)
+    # Issue #6762: every `{path, scope}` envelope in the report is relative to
+    # the *request's* repo, never the cwd's, so one run yields one report.
+    repo_root = find_repo_root(request_dir)
 
     engine = _resolve_engine(request_doc)
 
@@ -2526,7 +2506,7 @@ def run_functional_verification(
         request_doc,
         request_dir,
         hdl_toplevel,
-        _path_envelope,
+        functools.partial(_path_envelope, repo_root=repo_root),
         pdk_variant=pdk_variant,
         pdk_root=pdk_root,
     )
@@ -2887,6 +2867,7 @@ def run_functional_verification(
                 sdf_renamed=sdf_renamed,
                 source_defines=source_defines,
                 tools=tools,
+                repo_root=repo_root,
             ),
             run_inputs,
         )
@@ -2959,9 +2940,14 @@ def run_functional_verification(
 
     tests, (passed_count, failed_count, skipped_count), run_reports = (
         _collect_run_results(
-            run_specs, engine=engine, module=module, build_log=build_log
+            run_specs,
+            engine=engine,
+            module=module,
+            build_log=build_log,
+            repo_root=repo_root,
         )
     )
+    run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
     if coverage_requested:
@@ -3002,11 +2988,11 @@ def run_functional_verification(
                 "engine_version": _engine_version(engine),
                 "tools": tools,
                 "cocotb_version": _cocotb_version(),
-                "results_xml": _hashed_path_envelope(results_xml),
+                "results_xml": _hashed_path_envelope(results_xml, repo_root=repo_root),
                 # Additive (issue #3013): the simulator/cocotb console and build
                 # transcripts, named by path (never inlined) like `results_xml`.
-                "test_log": _hashed_path_envelope(test_log),
-                "build_log": _hashed_path_envelope(build_log),
+                "test_log": _hashed_path_envelope(test_log, repo_root=repo_root),
+                "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Additive (issue #3290): `options.source_defines` keyed by the
                 # request.sources entry as resolved; `{}` when absent.
@@ -3092,6 +3078,9 @@ from .functional_verification_mutation_proposals import (  # noqa: E402, F401
 from .functional_verification_mutation_variant import (  # noqa: E402, F401
     _build_and_test_variant,
     _run_isolated_variant,
+)
+from .functional_verification_run_results import (  # noqa: E402
+    _collect_run_results,
 )
 from .functional_verification_verilog_top import (  # noqa: E402, F401
     _check_verilog_top_sdf,

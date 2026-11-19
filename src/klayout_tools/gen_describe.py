@@ -130,9 +130,9 @@ def _resistor_strip_describe(
     )
 
     # Layer name is not resolved against a PDK layer map at phase 1 -- the
-    # drawing layer is a generator implementation detail (see the module
-    # docstring's `_HIDDEN_PARAMS` note); a real per-PDK layer name lookup is
-    # phase 2 scope, alongside the primitive families that actually need one.
+    # drawing layer is a generator implementation detail (hidden, per the
+    # module docstring); a real per-PDK layer name lookup is phase 2 scope,
+    # alongside the primitive families that actually need one.
     layer = {"layer": 67, "datatype": 20, "name": None}
 
     ports = [
