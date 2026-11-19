@@ -173,7 +173,7 @@
     },
     {
       "path": "src/klayout_tools/characterize.py",
-      "lines": 2243
+      "lines": 2238
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4758
+      "lines": 4530
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
-      "lines": 3062
+      "lines": 2860
     },
     {
       "path": "src/klayout_tools/digital_fleet.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1131
+      "lines": 1103
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9835
+      "lines": 9834
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5075
+      "lines": 5059
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -361,7 +361,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4936
+      "lines": 4882
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6360
+      "lines": 6355
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -421,7 +421,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2419
+      "lines": 2207
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -429,7 +429,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
-      "lines": 823
+      "lines": 734
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
@@ -465,11 +465,11 @@
     },
     {
       "path": "src/klayout_tools/netlist_normalize.py",
-      "lines": 2245
+      "lines": 2240
     },
     {
       "path": "src/klayout_tools/op_sanity.py",
-      "lines": 1836
+      "lines": 1833
     },
     {
       "path": "src/klayout_tools/parasitic_integrity.py",
@@ -557,7 +557,7 @@
     },
     {
       "path": "src/klayout_tools/remote_transport.py",
-      "lines": 622
+      "lines": 614
     },
     {
       "path": "src/klayout_tools/reset_coverage.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7238
+      "lines": 7234
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -585,15 +585,15 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12339
+      "lines": 12337
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4333
+      "lines": 4318
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 915
+      "lines": 912
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
@@ -613,7 +613,7 @@
     },
     {
       "path": "src/klayout_tools/sim_steps.py",
-      "lines": 1313
+      "lines": 1302
     },
     {
       "path": "src/klayout_tools/sim_tian.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4647
+      "lines": 4577
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -741,7 +741,7 @@
     },
     {
       "path": "tests/test_characterize.py",
-      "lines": 2274
+      "lines": 2270
     },
     {
       "path": "tests/test_characterize_vendor_comparison.py",
@@ -861,7 +861,7 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12375
+      "lines": 12372
     },
     {
       "path": "tests/test_gen_compose.py",
@@ -909,7 +909,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26197
+      "lines": 26071
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
@@ -1049,11 +1049,11 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15833
+      "lines": 15832
     },
     {
       "path": "tests/test_sim_batch.py",
-      "lines": 8236
+      "lines": 8196
     },
     {
       "path": "tests/test_sim_batch_async.py",

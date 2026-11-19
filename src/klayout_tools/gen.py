@@ -91,6 +91,7 @@ from .gen_describe import (
     _well_island_layer_params,
     _well_island_validate,
 )
+from .gen_diode import resolve_diode_voltage_class
 
 # Issue #2347 moved every family's `validate`/`describe` pair (plus the
 # helpers used only by them, and `_well_island_layer_params`, which #1875 had
@@ -573,11 +574,11 @@ ENCLOSURE_MARGIN_UM = 0.1
 #: stripe (issue #4851); clears sg13g2's 0.07um GatPoly-to-Activ spacing.
 DOGBONE_GATE_GAP_UM = 0.1
 
-#: Minimum spacing (um) kept between same-layer shapes belonging to
-#: different unit instances (adjacent array cells, ring segments) --
-#: exceeds every curated same-layer spacing rule on both decks (sky130
-#: ``li1.space.1``: 0.17um; gf180mcu ``comp.space.1``/``poly2.space.1``/
-#: ``metal1.space.1``: 0.28um/0.24um/0.23um).
+#: Generic minimum spacing (um) between same-layer shapes of different unit
+#: instances (array cells, ring segments). Clears the rules on the body layers
+#: (poly/diffusion/contact/li1/lower metals), but NOT every curated rule, e.g.
+#: nwell 0.6-1.27; sky130 met5 1.6, capm 0.84; sg13g2 TopMetal1/2 1.64/2.0,
+#: TopVia1/2 0.42/1.06 (sg13cmos5l: level 1 only). Use the deck rule instead.
 MIN_SAME_LAYER_SPACING_UM = 0.4
 
 #: Margin (um) a well ring/tie keeps around the tap/comp region it encloses
@@ -1201,7 +1202,7 @@ def _mos_unit_strapped_layout(
     :data:`MIN_SAME_LAYER_SPACING_UM` clear of the drain rail's metal.
 
     Every clearance is :data:`MIN_SAME_LAYER_SPACING_UM`, which already
-    exceeds both curated decks' same-layer spacing rules, and every rail and
+    exceeds the same-layer rules on the layers drawn here, and every rail and
     stub is :data:`CONTACT_SIZE_UM` + 2 * :data:`ENCLOSURE_MARGIN_UM` wide
     -- the same width budget the S/D pads use -- so no minimum-width rule
     binds either. ``total_len_um`` is identical to the series shape's, so
@@ -3825,6 +3826,8 @@ def _resolve_params(
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
     spec.validate(resolved)
+    if spec.name == "diode":
+        resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     return resolved
 
 
@@ -4169,11 +4172,8 @@ _GENERATOR_SPECS: dict[str, _GeneratorSpec] = {
     "diode": _GeneratorSpec(
         name="diode",
         summary=(
-            "Junction diode (pad ESD clamp primitive): n+ diffusion in the "
-            "p-substrate or p+ diffusion in an nwell, with a contacted "
-            "substrate/well tap for the other terminal and the "
-            "areaid.diode recognition mark, so it extracts as sky130's "
-            "diode_pw2nd_*/diode_pd2nw_* -- sky130 only (issue #4300)."
+            "Junction diode (pad ESD clamp primitive): n+ in the p-substrate or p+ in "
+            "an nwell, with a tap and diode mark -- sky130, gf180mcu (#4300, #6614)."
         ),
         dbu=0.001,
         validate=_diode_validate,
