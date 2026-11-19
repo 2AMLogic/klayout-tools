@@ -423,8 +423,20 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt synthesize`/`klt equiv` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
+
+**Verilog-top functional-verification citations (issue #6488).** On the
+`testbench.verilog_top` path the Verilog bench is itself a `request.sources`
+entry, so the report's `input.content_hash` digests the bench together with
+the DUT sources — it can never agree with a `klt synthesize`/`klt equiv`
+citation over the DUT alone, and bundling both in one `klt signoff` run
+renders `provenance_consistency.ok: false` and `status: "refused"` for the
+whole run. That disagreement is structural, not a staleness signal: no re-run
+or re-pin makes the bundle grade. Cite the cocotb-path functional-verification
+report instead (its digest covers the DUT sources only), or keep the
+Verilog-top citation out of any bundle that also cites a `source`-role
+`synthesize`/`equiv` report.
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
 envelope — which carries no `provenance` block at all as of its current
@@ -1433,10 +1445,18 @@ DRC evidence the tool can produce, and `klt signoff` reads it directly:
   fields the single-engine `citation.coverage` quotes, per engine). The
   ordinary `citation.coverage` quotes the curated side's, as before.
   Disclosure only, never graded on.
+- **Envelope aggregation discloses the same block** (issue #6123): a
+  cross-check envelope read through `checks[]` carries the identical
+  `drc_crosscheck` object on `checks[].detail`, so a failing check whose
+  violations came from the native side no longer reads as
+  `violation_count: 0` with nothing naming the engine. `violation_count`
+  itself stays the curated side's — the two sides' `violations[]` are
+  deliberately not unioned (the `agree_violations` groups describe the same
+  geometry from both decks). Absent from a single-engine check's `detail`.
 - **A native side that is absent** (`reports.native: null` — the engine was
   unavailable or failed) grades `unmet` on the envelope's own
-  `status: "not_checked"` and discloses `engines.native: null`, so the
-  citation never implies a two-engine claim.
+  `status: "not_checked"` and discloses `engines.native: null`, so neither
+  the citation nor the aggregation-mode `detail` implies a two-engine claim.
 - **`pointer` still selects one side.** `{"file": …, "pointer":
   "/reports/curated"}` grades the curated side as a standalone `drc`
   envelope — the long-standing pointer contract — with `citation.pointer`
@@ -3186,6 +3206,35 @@ A relative `--repo-root` resolves against this process's working directory,
 like any other path argument. Evidence files need not live under the root —
 only the `scope: "repo"` echoes are joined against it — but naming the tree
 the evidence was actually produced from is the intended use.
+
+### Citing stored evidence: `--artifact-manifest`
+
+A manifest-forward repo keeps only artifact-store manifests (`klt artifact`,
+[`artifact.md`](artifact.md)) in git; the evidence bytes live in the store.
+`--artifact-manifest PATH` (repeatable; issue #5882; only with
+`--manifest`/`--fleet`) lets two citation shapes name such bytes by their
+`artifact:<key>` URI:
+
+- a file-backed evidence entry, `{"file": "artifact:<key>", "content_hash": ...}`
+  or the bare string form;
+- a cited envelope's own input path, e.g. a `generic` envelope's
+  `provenance.input.path` of `{"path": "artifact:<key>", "scope": "repo"}`.
+
+The URI is looked up by key in the given manifest(s), fetched through the
+broker (`$KLT_ARTIFACT_BROKER`) into a temporary file that is deleted when
+the run ends, and read exactly like a file on disk — so
+`citation.input_verified` keeps its meaning (`true` means the fetched bytes
+were really re-hashed). The fetch verifies sha256, key and size against the
+manifest entry before anything is written; gzip bytes are read directly.
+The citation's `file` stays the URI.
+
+Anything that stops the bytes being obtained — no `--artifact-manifest`, no
+entry for the key, no broker configured or reachable, a hash/size mismatch —
+grades `unmet` with reason `artifact_unavailable` and
+`detail: {"artifact": "<uri>", "problem": "<code>: <message>"}`; it never
+falls back to a literal path and is never `met`. There is no broker-free
+mode: a manifest's pinned hash is not the bytes. Without the flag, and with no
+`artifact:` path cited, behaviour is unchanged.
 
 ### An overridden doc can outrun the build: `graded_by_build`
 
@@ -5475,6 +5524,7 @@ actually ran and failed):
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
+| `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
@@ -5854,17 +5904,15 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"generic"`, or `"error"` — see "What it does" above. A `socket-check` check passes on `status: "pass"`; a `lef-abstract` check (which has no top-level `status`) on `self_check.status: "pass"` (issue #2839). |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Values are quoted verbatim from the cited envelope, so a field's shape follows that envelope's own `schema_version` (e.g. `file`/`layout` are `{path, scope}` objects once the source envelope carries them that way); retyping a source field therefore does not by itself bump `klt signoff`'s `schema_version`. Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Values are quoted verbatim from the cited envelope, so a field's shape follows that envelope's own `schema_version` (e.g. `file`/`layout` are `{path, scope}` objects once the source envelope carries them that way); retyping a source field therefore does not by itself bump `klt signoff`'s `schema_version`. Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. A `drc`-kind check whose source is a cross-check (`--engine both`) envelope also gains a `drc_crosscheck` key (issue #6123) — the same `{"mode", "engines", "comparison_state"}` block `citation.drc_crosscheck` carries (issue #5815): each engine's own `status` and coverage fields, naming which engine found what beside a `violation_count` that stays the curated side's. Absent for every single-engine check; disclosure only (`passed` is untouched) — see "Citing a `--engine both` (cross-check) DRC report" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. Any kind's detail also gains a `coverage_qualification` key (issue #2109) when the source envelope's versioned `coverage` block classifies as `partial`, naming the requested work it skipped — see "Partial coverage is qualified, not inferred" above — and a `coverage_state` key naming the rollup row for any envelope carrying versioned coverage at all. A `yield`-kind check's detail gains a `yield_campaign` key (issue #2467, absent when the report carries no measurements) rolling up its per-measurement `sample_size.verdict` and `negative_control` state — reported here, never graded on (`passed` is untouched); the grading gate built on the same statement belongs to `--manifest` item 6, see "Campaign discipline on item 6" below. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Regenerating signoff evidence in a consumer repo
 
-A consumer repo that commits its signoff evidence needs a small script to
-re-run the graders. This is the canonical shape (issue #2874). Two properties
-matter: the grader is **always the pinned registry wheel** (`klayout-tools==$KLT_VERSION`),
-never whatever `klt` happens to be on `PATH`; and a host that can run neither
-`uv` nor `python3 -m venv` fails loudly instead of silently grading with
-something else.
+A consumer repo that commits signoff evidence should regenerate it with the
+same producer its CI uses. Choose the recipe that matches the pin in CI.
+
+### Registry release pin
 
 Order of preference: `uvx` (needs no `python3-venv`/`ensurepip`), then a
 throwaway `python3 -m venv` + `pip`, then a clear stderr message and a
@@ -5907,6 +5955,56 @@ Notes:
   not fall back to a different `klt`.
 - Verify the committed record with `--check` (see
   [Verifying a committed report](#verifying-a-committed-report---check-issue-2249)).
+
+### Git commit pin without `uvx`
+
+If CI uses `uvx --from "git+…@<sha>"` and that environment hangs, install
+the commit in a throwaway venv with pip. Copy the full commit SHA from CI.
+You can also read `git_commit` and `reinstall_spec` from the producing
+environment's `klt version --format json`, or `provenance.klt_reinstall_spec`
+from a report that records it. For an annotated tag, use the
+[peeled commit](version.md#pinning-a-release-tag-use-the-peeled-commit).
+
+Run this script from the consumer repo with `KLT_COMMIT` set. It requires
+Git, Python with venv and pip support, and GNU `timeout`. On macOS with GNU
+coreutils, set `TIMEOUT_CMD=gtimeout`. Provisioning needs access to the Git
+repository and package dependencies.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! ${KLT_COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Set KLT_COMMIT to the full commit SHA pinned in CI." >&2
+  exit 2
+fi
+deadline=${TIMEOUT_CMD:-timeout}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+venv="$work/venv"
+
+"$deadline" -k 5s 60s python3 -m venv "$venv"
+"$deadline" -k 5s 5m "$venv/bin/python" -m pip install \
+  "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_COMMIT}"
+"$deadline" -k 5s 30s "$venv/bin/klt" --version
+"$venv/bin/klt" signoff --attest 10 --inventory attest/item10.json -o evidence/item10.json
+```
+
+Exit 124 means provisioning or startup timed out (137 if `timeout` had to
+kill it after the five-second grace period). Treat the environment as unusable
+and stop. The absolute path keeps the host's `klt` out of the run. If CI also
+pins the KLayout engine, add its `klayout==<version>` requirement to the same
+pip install.
+
+The producer writes `provenance.klt_version` and `provenance.klayout_version`
+from the running build. A newer host build would record its own provenance and
+may generate different checks or envelope fields.
+[See `signoff_attest.py`.](https://github.com/2AMLogic/klayout-tools/blob/94950eeee19e4219d938b81cf742065bd333d750/src/klayout_tools/signoff_attest.py#L1042-L1045)
+
+Tag visibility in the installer's cache can also affect the version string
+for the same commit. Verify the evidence with CI's pinned producer using
+`klt signoff --attest 10 --inventory attest/item10.json --check evidence/item10.json`.
+The drift check ignores the version strings.
 
 ## Exit codes and errors
 

@@ -2994,6 +2994,54 @@ The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
 `backend: "batch"` — the live-run report slot is deliberately empty until
 those 2am prerequisites are done.
 
+### Transient convergence differs between local and batch
+
+([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)) A transient
+grid can return every unit `status: "error"` with `singular_matrix` /
+`nonconvergence` diagnostics on `--backend batch` while the same deck, models
+and corner converge under `--backend local`. That symptom does not establish
+the cause (worker solver build, init file, thread settings, model closure, or
+the deck itself); the batch report already carries the worker-side evidence
+that separates them. When **every** unit (at least two) of a `batch` run fails
+this way, the report's top-level `diagnostics[]` carries one
+`batch_convergence_all_failed` warning that quotes the current values of the
+fields below and points here. It is absent when any unit is ok, on any other
+backend, and for other error codes.
+
+Read these, all existing fields of the batch report (with `hosts > 1` they
+repeat per `environment.remote.fleet[]` entry, and the warning's `workers[]`
+lists each shard):
+
+| Field | What it tells you |
+| --- | --- |
+| `environment.remote.worker_environment.engine_build_comparison.status` | `match`, `mismatch` or `not_comparable`: the worker's `ngspice --version` banner against the client's (`environment.client_engine_build`). `mismatch` means the solver build can differ; `match` proves only the same banner, not identical build options. |
+| `environment.remote.worker_environment.ngspice_init.source` and `.sha256` | Which init file the worker's ngspice read (`request`, `thread_pin`, `home` or `none`) and its digest. The digest is comparable to `environment.ngspice_init.sha256` of a `--backend local` run: a different digest means different init content. For `request`/`thread_pin` the entry's `lines` show the file (a `thread_pin` digest also covers the `set num_threads=N` line, so compare `lines` before reading a mismatch as a settings difference); for `home` only the digest is kept ([#6045](https://github.com/2AMLogic/klayout-tools/issues/6045)). |
+| `environment.remote.worker_environment.omp_num_threads` | The worker's effective `OMP_NUM_THREADS`; `null` when unset. |
+| `environment.ngspice_options` | The `options.ngspice_options` the run declared. The runner echoes them back and klt fails the run when the echo differs, so this is the set the worker applied. Absent when none was declared. |
+
+For a model-closure difference rather than a solver one, read
+`pdk_stamp_comparison` and `models_lib_comparison` as in steps 0 and 3 of the
+gf180 checklist above.
+
+**One-corner canary.** To test the worker on a single corner before
+committing a full grid, submit a one-corner copy of the request with batch
+chosen **explicitly** (`"backend": "batch"` in the request, or
+`--backend batch`), `options.keep_artifacts: true` and `--outdir DIR`, then
+read that corner's `artifacts.log` (and `artifacts.deck`) under `DIR` as in
+"Getting the per-corner deck and ngspice log through klt" and diff it against
+the same corner's log from a `--backend local` run. Pass
+`--wait-for-capacity SECONDS` if the fleet may be at capacity. A host-default
+`KLT_SIM_BACKEND=batch` alone is not enough: a single unit under a host-default
+backend runs locally, whereas an explicit choice is submitted as a one-job
+batch.
+
+`--dry-run` cannot serve as the canary: by contract it returns before any
+backend, so it never contacts the worker (it checks the request, not the
+worker's solver).
+
+A difference in these fields is a lead, not a proof; only a reproducible
+difference justifies a simulator, model or runner-image change.
+
 ## Pre-composed decks (`decks` requests)
 
 `klt sim`'s off-host backends are the sanctioned route to off-host
@@ -5425,13 +5473,39 @@ that does not understand it, so on such a runner give `level` as a literal
 number per corner. (This is the supply-relative path;
 see the `.meas` note under *`WHEN` thresholds must be literal numbers*.)
 
-`crossings` is a measurement form refused beside every other measurement form
-(an entry declares **exactly one** form; see "Measurements that are not `.meas`
-cards"). It requires `analysis.kind: "tran"`; an unknown key, a missing
-`signal`/`level`, an unknown `edge`, a malformed window or `max` are all
-refused up front (`SimError`, exit 1) with a corrective message. Optional
-`unit`, `limits`, `plausible_range` and `k_sigma` apply to the entry's `value`
-(the count).
+**`crossings` on a `dc` sweep (issue #5703).** With `analysis.kind: "dc"` the
+series axis is the **swept source's value**, so `from`/`to`/`level.sample_at`
+are in the sweep's own unit (volts/amps; a number or SPICE literal such as
+`"1m"`), and the graded `value` is the **first crossing abscissa** (linearly
+interpolated), not the count. The dc-only multiplicative level
+`{"sample_at": 1.0, "fraction": 0.99}` is `0.99 × signal(sample_at)`, resolved
+per corner, so "the input where `v(out)` has dropped to 99 % of this corner's
+own value at `Vin = 1 V`" carries `limits`, gets a per-corner `status`, counts
+in `coverage.measurements_with_limits`, and is graded by `klt signoff`.
+`{"sample_at", "offset"}` works on the sweep axis too.
+
+```json
+{"name": "vin_drop_1pct", "unit": "V", "limits": {"min": 1.2},
+ "crossings": {"signal": "v(out)", "edge": "fall",
+               "level": {"sample_at": 1.0, "fraction": 0.99}}}
+```
+
+The corner's `crossings` member is `{"abscissae": [...], "edges": [...],
+"count": N, "truncated": bool, "level": <resolved threshold>}` (`abscissae`
+replaces `times`; `tran` reports are unchanged, `value` = count). A signal that
+never crosses the level inside the sweep/window is `status: "error"` with a
+`measurement` diagnostic -- never a `0` that passes a `limits.min`. Refused
+before any run: `crossings.reduce` on `dc`, a literal `sample_at` outside a
+literal sweep range, and `{"sample_at", "fraction"}` on `tran`. One sweep only
+(no nested/2-D dc), ngspice rawfile path only.
+
+Each measurement entry declares **exactly one** form (see "Measurements that
+are not `.meas` cards"). For `crossings`, set `analysis.kind` to `"tran"` or
+`"dc"`. An unknown key, a missing `signal` or `level`, an unknown `edge`, or a
+malformed window or `max` raises `SimError` before the run (exit 1).
+Optional `unit`, `limits`, `plausible_range` and `k_sigma` apply to the
+entry's `value`. On a transient analysis this is the crossing count, as in
+the response below. On a DC sweep it is the first crossing abscissa.
 
 ### Response
 
@@ -9096,6 +9170,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
+| `batch_convergence_all_failed` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#6720](https://github.com/2AMLogic/klayout-tools/issues/6720)): every unit (at least two) of a `batch` run errored with `singular_matrix` or `nonconvergence`. The message quotes the worker-reported fields to compare against a `--backend local` run and names the one-corner canary; additive `unit_count` and `workers[]` (one per job or `fleet[]` shard: `fleet_index`, `capture`, `engine_build_comparison`, `ngspice_init` as `{source, sha256}`, `omp_num_threads`) carry the same values as the worker reported them, `null` where the report has no worker capture, never the client's values. Absent when any unit is ok, on any other backend and for other codes. A valid `options.fail_on_diagnostic` code, but a no-op (it never sits on a corner, so it matches none), like its report-level siblings. See "Transient convergence differs between local and batch". |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal, or the job never published a `status.json` within 1800s (the message says it never started). The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `batch_job_interrupted` | The corner's result was never observed: the job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than `batch.interrupted_grace_s`, so polling stopped before `poll_timeout_s`. Distinct from `batch_poll_timeout`; the job may still be recoverable on the fleet and the client does not re-launch it. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |

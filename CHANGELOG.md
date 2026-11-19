@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
+  the `diode` generator now runs on gf180mcu. `voltage_class` accepts
+  `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck
+  recognises); `kind="n_psub"` extracts as `diode_nd2ps_06v0` and
+  `"p_nwell"` as `diode_pd2nw_06v0`, both DRC-clean and LVS-matching. An
+  *omitted* `voltage_class` now resolves to the PDK's own flavour (still
+  `"05v5"` on sky130, so sky130 output is unchanged); naming the other
+  family's flavour is a `GenError`. The declared `voltage_class` default stays
+  `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
+  one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
+
+- **`klt sim` complex-vector save-mode refusal names the waveform-limiting
+  remedy** (#6749, 2026-11-19): an AC request combining
+  `options.complex_vectors` with `options.save_mode: "netlist"` was refused
+  before launch, but the message only said to omit `options.save_mode`, so a
+  caller following it literally accepted a waveform of every node. The
+  refusal now also directs the caller to `options.save_vectors` with each
+  requested complex vector listed there, and spells out the corrected
+  options for the request (e.g. `{"complex_vectors": ["v(out)"],
+  "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
+  before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
+  AC vectors" section.
 - **`klt sim --resume` no longer refuses a sharded resume that has fewer
   outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
   reused finished shards, the replacement dispatch still asked for the
@@ -41,6 +63,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   the case (raw `sha256` match + identity mismatch) as
   `normalization_changed`. The stamp format and JSON fields do not change.
   Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+- **`klt sim --backend batch`: a grid where every unit fails to converge now
+  says where to look** (#6720, 2026-11-18). When every unit (at least two) of a
+  `batch` run errors with `singular_matrix` or `nonconvergence`, the report's
+  top-level `diagnostics[]` gains one `batch_convergence_all_failed` warning
+  that quotes the worker-reported fields to compare with a `--backend local`
+  run (`engine_build_comparison.status`, `ngspice_init.source`/`.sha256`,
+  `omp_num_threads`, and `environment.ngspice_options`) and names a one-corner
+  canary. Additive only: no existing field changes, nothing is emitted when any
+  unit is ok, on another backend or for other codes, and no new flag or
+  worker-side `--dry-run` is added (`--dry-run` still never contacts the
+  worker). The code is report-level and registered in `DIAGNOSTIC_CODES`, so
+  `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
+  Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
+  batch".
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
