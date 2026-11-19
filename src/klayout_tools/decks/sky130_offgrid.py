@@ -5,9 +5,10 @@ keep that module under its file-size ceiling. ``sky130`` re-exports the public
 names and calls :func:`offgrid_rules` with its own provenance factory (passed
 in, so this module never imports :mod:`.sky130` back).
 
-Not a pure move for provenance, though: ``provenance.deck.content_hash`` hashes
-only ``decks/sky130.py``, so the 75 rules built here are no longer covered by
-it (see the "PROVENANCE CAVEAT" below; tracked in #6741).
+Provenance: this module is listed in ``sky130.DRC_RULE_SOURCES``, so
+``provenance.deck.content_hash`` covers it together with ``decks/sky130.py``
+and the 75 rules built here stay inside the deck identity (see "PROVENANCE"
+below; #6741).
 """
 
 from __future__ import annotations
@@ -52,16 +53,15 @@ from .sky130_unmodeled import native_output_id
 # ordinary `DrcRule` entries that `sky130` appends to its `DECK`
 # (`DECK += offgrid_rules(...)`).
 #
-# PROVENANCE CAVEAT -- these rules are **outside** `provenance.deck.content_hash`.
-# The table lives in this sibling module only to keep `sky130.py` under its
-# file-size ceiling (issue #5737). `decks.deck_source_path("sky130")` returns
-# just `decks.sky130`'s own file, and that file's source is what the hash
-# covers, so all 75 rules built here (38 `grid_um` + 37 angle, of the deck's
-# 153) are invisible to it: editing this file -- `OFFGRID_GRID_UM`, a row, an
-# angle limit -- leaves the deck's identity hash byte-identical. The
-# pre-move layout had this table inside the hashed file, so this exposure is
-# new with the move; the same single-module gap already exists for the one-rule
-# `sg13g2_cont_grid` precedent (#5231). Tracked in #6741.
+# PROVENANCE -- these rules are **inside** `provenance.deck.content_hash`, but
+# only because `sky130.py` names this module in its literal `DRC_RULE_SOURCES`
+# tuple (#6741; see `docs/cli/deck.md`). The table lives in this sibling module
+# only to keep `sky130.py` under its file-size ceiling (issue #5737), and the
+# hash covers `decks/sky130.py` plus the siblings that tuple lists: dropping
+# `"sky130_offgrid"` from it would make all 75 rules built here (38 `grid_um` +
+# 37 angle, of the deck's 153) invisible to the deck identity, so editing this
+# file -- `OFFGRID_GRID_UM`, a row, an angle limit -- would leave the hash
+# byte-identical. `tests/test_deck_hash.py` pins the listing.
 #
 # Grid: **0.005um for every checked layer**, verbatim -- the source block
 # passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer

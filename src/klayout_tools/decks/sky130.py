@@ -386,6 +386,8 @@ from .sky130_offgrid import (  # noqa: F401
 )
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
+DRC_RULE_SOURCES = ("sky130_offgrid", "sky130_unmodeled")
+
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
 # rules only -- see the module docstring's own citation of this repo/commit
