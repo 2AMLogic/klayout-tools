@@ -62,6 +62,28 @@ def test_input_not_found_repo_scoped_echo_names_the_repo_root(tmp_path):
     assert external["resolved_repo_root"] is None
 
 
+def test_input_not_found_repo_scoped_echo_under_override_names_no_repo_root(
+    tmp_path,
+):
+    """Issue #6461: the override gate is the function's own, not a
+    caller-side substitution -- an override supplied the reported ``path``
+    (anchored on the cwd), so a repo-scoped echo's root must not be named
+    as an anchor the path never used."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = repo / "pair" / "report.json"
+    override = str(tmp_path / "override.spice")
+
+    entry = input_not_found_entry(
+        override,
+        str(report),
+        None,
+        echoed={"path": "ref.spice", "scope": "repo"},
+        override=override,
+    )
+    assert entry["resolved_repo_root"] is None
+
+
 def test_stale_pin_names_the_failed_comparison():
     detail = stale_pin(
         {"content_hash": "sha256:stale-revision"}, {"content_hash": "sha256:layoutA"}

@@ -29,6 +29,7 @@ def input_not_found_entry(
     *,
     override_hint: str = _LVS_OVERRIDE_HINT,
     echoed: Any = None,
+    override: str | None = None,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -39,9 +40,10 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
-    - ``resolved_repo_root`` -- when LVS supplies the effective input echo
-      (issue #5845), the repo root used for a repo-scoped path. A bare path
-      or explicit override has no repo anchor and reports ``None``.
+    - ``resolved_repo_root`` -- the repo root a repo-scoped ``{path,
+      scope}`` echo (issue #5845) was anchored on; ``None`` for every
+      other echo shape and whenever ``override`` supplied the reported
+      ``path`` (issue #6461: anchored on the cwd, not a repo root).
     - ``hint`` -- when the input sits next to the report, how to reach it;
       ``None`` otherwise.
     """
@@ -60,9 +62,14 @@ def input_not_found_entry(
         "hint": hint,
     }
     if echoed is not None:
+        # Issue #6461: gate on the override *here* -- an override supplied
+        # the reported `path` (anchored on the cwd), so the echo's repo
+        # root must never name an anchor the path did not use.
         entry["resolved_repo_root"] = (
             env_provenance.find_repo_root(report_dir)
-            if isinstance(echoed, Mapping) and echoed.get("scope") == "repo"
+            if not override
+            and isinstance(echoed, Mapping)
+            and echoed.get("scope") == "repo"
             else None
         )
     return entry
@@ -142,7 +149,8 @@ def input_hash_check(
         report_path,
         found_relative_to_report,
         override_hint=override_hint,
-        echoed=(override or echoed) if include_repo_root else None,
+        echoed=echoed if include_repo_root else None,
+        override=override,
     )
     return check
 
