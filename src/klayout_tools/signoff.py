@@ -117,7 +117,7 @@ from .signoff_derived_rows import (
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
-from .signoff_details import _DETAIL_BUILDERS
+from .signoff_details import _DETAIL_BUILDERS, _drc_rule_selection_detail
 
 # The `drc --engine both` (cross-check) envelope projection (issue #5815):
 # rewriting the cross-check shape into the single-engine `drc` envelope the
@@ -2782,14 +2782,6 @@ def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
     return bool(omitted) or selection.get("subset") is not False
 
 
-def _drc_rule_selection_detail(envelope: Mapping[str, Any]) -> dict[str, Any]:
-    """``{"rule_selection": <block>}`` quoted verbatim off a `klt drc --rules`
-    envelope (issue #2768), or ``{}`` when it carries none."""
-    if "rule_selection" not in envelope:
-        return {}
-    return {"rule_selection": envelope.get("rule_selection")}
-
-
 #: The kinds whose verdict is exactly one passing ``status`` token, read by
 #: :func:`_check_passed` through one table rather than one branch each
 #: (issue #2839 added ``socket-check`` here without growing that function).
@@ -3348,6 +3340,10 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         # Issue #2768: a `--rules` subset says so in the check itself, quoted
         # verbatim; absent for a full-deck run, so old detail is unchanged.
         detail.update(_drc_rule_selection_detail(envelope))
+        # Issue #6123: a projected `--engine both` envelope names which engine
+        # found what, as the `--manifest` citation does (#5815), beside a
+        # `violation_count` that stays the curated side's; no-op otherwise.
+        detail.update(crosscheck_disclosure(envelope) or {})
     elif kind == "lvs":
         detail = {
             "layout": envelope.get("layout"),
