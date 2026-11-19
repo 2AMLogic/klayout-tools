@@ -18,6 +18,7 @@ from ._common_params import (
     declare_metal_label_present,
     declare_mos_array_extra_params,
     declare_mos_stack_params,
+    declare_mos_well_tie_params,
     declare_ring_implant_params,
     declare_ring_well_margin,
     declare_voltage_flavor_mark_params,
@@ -188,6 +189,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,  # type: ignore[attr-defined]
                 "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "gate_contact",
@@ -216,6 +218,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Well drawing layer (only used when flavor is 'pfet' and well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_well_present(self)
             self.param(
@@ -224,31 +227,10 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "PDK dummy-device marker drawing layer, covering each dummy "
                 "unit device's gate footprint (only used when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_dummy_marker_params(self)
-            self.param(
-                "well_tap_implant_layer",
-                self.TypeLayer,
-                "Well-tie implant layer drawn over the well-tap pad (only "
-                "used when flavor is 'pfet', well_present, and "
-                "well_tap_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_tap_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "a tap pad on the shared active role as a well tie",
-                default=False,
-            )
-            self.param(
-                "metal_label_layer",
-                self.TypeLayer,
-                "Label layer the well-tap pad's fixed net-name text is drawn "
-                "on (only used when well_tap_implant_present and "
-                "metal_label_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_well_tie_params(self, kdb)
             declare_metal_label_present(self)
             self.param(
                 "voltage_flavor_mark_layer",
@@ -257,6 +239,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer, sized to enclose every unit device (only used when "
                 "voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_voltage_flavor_mark_params(self, kdb)
             self.param(
@@ -266,6 +249,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the array's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
             declare_mos_array_extra_params(self, kdb)
@@ -310,6 +294,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Guard ring tap drawing layer (only used when add_guard_ring is set)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_ring_implant_params(self, kdb)
             self.param(

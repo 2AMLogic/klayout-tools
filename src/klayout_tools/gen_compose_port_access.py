@@ -233,20 +233,20 @@ class _MacroNets:
         self.layout = src_layout
         self.cell = src_cell
         self.dbu = src_layout.dbu
-        self.l2n = kdb.LayoutToNetlist(
-            kdb.RecursiveShapeIterator(src_layout, src_cell, [])
-        )
+        # Flat extraction: a hierarchical one reports a child-only net's shapes
+        # in that child's frame (#6788), not the macro's like `flat`/the labels.
+        self.l2n = kdb.LayoutToNetlist(src_cell.name, self.dbu)
         self.l2n_layers: dict[_LayerPair, Any] = {}
         self.flat: dict[_LayerPair, Any] = {}
-        stack = list(self.deck.metals) + list(self.deck.vias)
-        for pair in stack:
+        for pair in list(self.deck.metals) + list(self.deck.vias):
             index = src_layout.find_layer(pair[0], pair[1])
             if index is None:
                 continue
-            self.l2n_layers[pair] = self.l2n.make_layer(index, f"L{pair[0]}_{pair[1]}")
             flat = kdb.Region(src_cell.begin_shapes_rec(index))
             flat.merge()
             self.flat[pair] = flat
+            self.l2n_layers[pair] = flat.dup()
+            self.l2n.register(self.l2n_layers[pair], f"L{pair[0]}_{pair[1]}")
         for region in self.l2n_layers.values():
             self.l2n.connect(region)
         metals, vias = self.deck.metals, self.deck.vias
@@ -547,9 +547,10 @@ def _search_landing(
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pad_extra_um: dict[_LayerPair, float] = {}
+    cut_half: dict[_LayerPair, int] = {}  # Round outward with a DBU tolerance.
     for via, lower, upper in ladder:
         extra = _array_extra_um(array, pitches_um[via]) if pitches_um else 0.0
-        cuts_um[via] += extra
+        cut_half[via] = max(1, math.ceil((cuts_um[via] + extra) / (2 * dbu) - 1e-9))
         for metal in (lower, upper):
             pad_extra_um[metal] = max(pad_extra_um.get(metal, 0.0), extra)
     for metal, extra in pad_extra_um.items():
@@ -558,7 +559,6 @@ def _search_landing(
         pads_um = {net_layer: 0.0}
     to_half = lambda um: max(1, int(math.ceil(um / dbu / 2.0)))  # noqa: E731
     pad_half = {pair: to_half(side) for pair, side in pads_um.items() if side > 0}
-    cut_half = {pair: to_half(side) for pair, side in cuts_um.items()}
     space_dbu = {
         pair: int(round(_min_spacing_um(variant, pair) / dbu))
         for pair in {**pad_half, **cut_half}

@@ -63,6 +63,7 @@
         "klayout_tools.cli",
         "klayout_tools.cli.__main__",
         "klayout_tools.cli._argv_flags",
+        "klayout_tools.cli._doc_paths",
         "klayout_tools.cli._parsing",
         "klayout_tools.cli._request_document",
         "klayout_tools.cli._request_file",
@@ -113,6 +114,8 @@
       "description": "`klt deck` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.deck_cmd",
+        "klayout_tools.cli.parsers.deck",
+        "klayout_tools.deck_diff",
         "klayout_tools.decks.history"
       ]
     },
@@ -179,6 +182,18 @@
         "klayout_tools.economy_leaves",
         "klayout_tools.economy_pnr",
         "klayout_tools.economy_whatif"
+      ]
+    },
+    "em": {
+      "kind": "verb",
+      "description": "`klt em` implementation: core modules plus CLI adapter.",
+      "modules": [
+        "klayout_tools.cli.em_cmd",
+        "klayout_tools.cli.parsers.em",
+        "klayout_tools._em_geometry",
+        "klayout_tools._em_layout",
+        "klayout_tools._geode",
+        "klayout_tools.em"
       ]
     },
     "env_provenance": {
@@ -375,6 +390,7 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_boundary",
+        "klayout_tools.gen_compose_landing_pads",
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_plane_change",
         "klayout_tools.gen_compose_port_access",
@@ -469,8 +485,10 @@
       "kind": "verb",
       "description": "`klt lvs` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli._lvs_parser_args",
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
@@ -509,6 +527,7 @@
       "description": "`klt mcp` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.mcp_cmd",
+        "klayout_tools.mcp_doc_links",
         "klayout_tools.mcp_resources",
         "klayout_tools.mcp_server",
         "klayout_tools.mcp_tools"
@@ -572,6 +591,7 @@
         "klayout_tools.decks.sg13g2_unmodeled",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
+        "klayout_tools.decks.sky130_offgrid",
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
@@ -713,6 +733,7 @@
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
+        "klayout_tools._deck_hash",
         "klayout_tools._devices",
         "klayout_tools._digest",
         "klayout_tools._engine_proc",
@@ -721,6 +742,7 @@
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
+        "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
         "klayout_tools._paths",
@@ -742,6 +764,7 @@
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
         "klayout_tools._verilog_top",
+        "klayout_tools._yosys_error_messages",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.coverage_work",
@@ -772,6 +795,7 @@
         "klayout_tools.cli.signoff_repin_cmd",
         "klayout_tools.cli.signoff_tier_text",
         "klayout_tools.signoff",
+        "klayout_tools.signoff_artifact",
         "klayout_tools.signoff_attest",
         "klayout_tools.signoff_attest_binding",
         "klayout_tools.signoff_attest_build",
@@ -782,6 +806,7 @@
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
+        "klayout_tools.signoff_attest_item8",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_item9_depends_on",
         "klayout_tools.signoff_attest_live",
@@ -810,6 +835,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_repin",
         "klayout_tools.signoff_runset",
+        "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
         "klayout_tools.signoff_unmet_reasons",
         "klayout_tools.signoff_yield_disclosure"
@@ -831,6 +857,7 @@
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
+        "klayout_tools._meas_lint_wrapper",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -873,6 +900,7 @@
         "klayout_tools.sim_corner_variants",
         "klayout_tools.sim_corners",
         "klayout_tools.sim_crossings",
+        "klayout_tools.sim_crossings_dc",
         "klayout_tools.sim_crossings_reduce",
         "klayout_tools.sim_cycle_mean",
         "klayout_tools.sim_deck_expand",
@@ -1018,6 +1046,7 @@
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_driving_cell",
         "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
@@ -1045,6 +1074,7 @@
       "kind": "verb",
       "description": "`klt version` implementation: core modules plus CLI adapter.",
       "modules": [
+        "klayout_tools.cli.parsers.version",
         "klayout_tools.cli.version_cmd"
       ]
     },
@@ -1653,6 +1683,11 @@
     },
     {
       "consumer": "signoff",
+      "exporter": "artifact",
+      "reason": "Signoff resolves manifest-backed citations using the artifact broker and its verified fetch API (issue #5882)."
+    },
+    {
+      "consumer": "signoff",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -1875,9 +1910,31 @@
       "consumer": "route",
       "exporter": "gen_compose",
       "reason": "`klt route` deliberately reuses gen_compose's router, landing-pad sizing and label-port derivation so labelled-pin routing in a placed layout matches klt gen-compose output (issue #5205); promote the private helpers to a shared module when either is next reworked."
+    },
+    {
+      "consumer": "em",
+      "exporter": "cli-infra",
+      "reason": "`klt em` adapter uses the shared CLI output envelope helpers (emit_success/emit_error), like every verb adapter."
+    },
+    {
+      "consumer": "em",
+      "exporter": "functional_verification",
+      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_yosys_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); equiv.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_synthesis_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); synthesize.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
     {
       "consumer": "klayout_tools.cli.pex_text",
       "exporter": "klayout_tools.cli.extract_text",
@@ -1931,6 +1988,12 @@
       "exporter": "klayout_tools.netlist_normalize",
       "symbol": "_tokenize",
       "reason": "Issue #5402: passthrough-call protection must parse X cards exactly as the netlist conversion does; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.lvs_reference_stage",
+      "exporter": "klayout_tools.netlist_normalize",
+      "symbol": "_sim_model_classes",
+      "reason": "Issue #5676: the plain-element sim-model guard must read the exact curated MOS model table the netlist conversion pairs against so the guard and the conversion cannot drift; netlist_normalize is at its file-size ceiling, so promote to public when it is next split."
     },
     {
       "consumer": "klayout_tools.sim_osdi_pin",
@@ -2483,6 +2546,12 @@
       "exporter": "klayout_tools.build_identity",
       "symbol": "_recorded_klayout_version_expected",
       "reason": "Issue #5660: the binary-worded --engine klayout mismatch warning must quote the exact build-time expected KLayout version that _provenance (same shared-core group) used to compute klayout_version_mismatch, so the warning cannot name an expected version the envelope did not; both call sites read it via the build_identity attribute, exactly as _provenance does."
+    },
+    {
+      "consumer": "klayout_tools.em",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_load_request_json",
+      "reason": "Issue #5616: loads the em request with the same error handling as sim/corner_matrix; promote to a public name when _paths is next reworked."
     }
   ],
   "legacy_exceptions": {
