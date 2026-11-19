@@ -5204,7 +5204,9 @@ input resolved, its bytes moved):
   "input_not_found": {
     "path": "design.gds",
     "resolved": "/work/design.gds",
-    "found_relative_to_report": "/work/pair/design.gds"
+    "found_relative_to_report": "/work/pair/design.gds",
+    "resolved_against": "/work",
+    "hint": "run --check from the report's directory, or pass --layout/an absolute path; request-file-relative paths resolve against /work/pair"
   }
 }
 ```
@@ -5218,6 +5220,12 @@ input resolved, its bytes moved):
   report-relative candidate to try). A non-`null` value is the tell for the
   directory-portability trap above: the committed request/report pair is
   intact, `--check` was just invoked from somewhere else.
+- `resolved_against` — the directory a relative `path` was anchored to (the
+  current working directory); `null` for an echoed absolute path, which has no
+  anchor.
+- `hint` — when the input sits next to the report (`found_relative_to_report`
+  is non-`null`), how to reach it: run `--check` from the report's directory,
+  or pass `--layout`/an absolute path; `null` otherwise.
 
 Text output (`--format text`, the default) renders the same information in
 place of the bare `actual: None`:
@@ -5231,8 +5239,8 @@ place of the bare `actual: None`:
                 against the current working directory -- re-run from there
 ```
 
-`klt drc --check` does not (yet) carry this block — its `provenance.input`
-path resolution is unchanged by this issue.
+`klt drc --check` attaches the same five-key block on its
+`provenance.input.content_hash` line (issue #6466); see [`drc.md`](drc.md).
 
 ### Full mode (`--rerun`)
 
