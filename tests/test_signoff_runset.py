@@ -1,13 +1,13 @@
 """``klt signoff`` grading of a PDK-runset LVS report (issue #2870).
 
-The pin allowlist ships empty, so each test installs the fixture runset's hash
-the way a reviewed commit to ``signoff_runset.PINNED_RUNSETS`` would.
+The runset fixture installs its hash in the signoff-side pin allowlist.
 """
 
 from __future__ import annotations
 
 import copy
 import hashlib
+from unittest.mock import Mock
 
 import pytest
 
@@ -70,20 +70,91 @@ def test_pinned_runset_report_is_met_and_names_its_engine(tmp_path, runset):
     assert item["citation"]["pdk_pin"]["pdk"] == "ihp-sg13g2"
 
 
-def test_curated_report_citation_is_unchanged(tmp_path):
-    item = _item_4(tmp_path, LVS_MATCH_ENVELOPE)
+def _lvs_items(tmp_path, envelope) -> tuple[dict, dict]:
+    parts = _power_delivery_evidence(tmp_path, lvs_envelope=envelope)
+    result = build_tier_report(_manifest(evidence={"4": parts[1], "11": parts}))
+    return next(item for item in result["items"] if item["id"] == 4), _item_11(result)
 
-    assert item["status"] == "met"
-    assert "engine" not in item["citation"]
+
+def _lvs_citations(items: tuple[dict, dict]) -> tuple[dict, dict]:
+    item_4, item_11 = items
+    assert item_4["status"] == "met", item_4
+    assert item_11["status"] == "met", item_11
+    compound = item_11["citation"]
+    assert "runset_rehash_status" not in compound
+    assert "runset_rehash_status" not in compound["parts"][0]
+    lvs_part = next(part for part in compound["parts"] if part["kind"] == "lvs")
+    return item_4["citation"], lvs_part
+
+
+def test_relative_runset_is_rehashed_from_signoff_cwd(tmp_path, runset, monkeypatch):
+    envelope = _runset_envelope(
+        LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset, deck_file=runset.name
+    )
+    monkeypatch.chdir(runset.parent)
+    matching = _lvs_citations(_lvs_items(tmp_path, envelope))
+    assert all("runset_rehash_status" not in citation for citation in matching)
+
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    monkeypatch.chdir(other_dir)
+    unavailable = _lvs_citations(_lvs_items(tmp_path, envelope))
+    assert unavailable == tuple(
+        {**citation, "runset_rehash_status": "unverifiable"} for citation in matching
+    )
+
+    (other_dir / runset.name).write_text("# unrelated runset\n")
+    for item in _lvs_items(tmp_path, envelope):
+        assert item["status"] == "unmet", item
+        assert item["reason"] == "runset_hash_mismatch"
+        assert item["citation"] is None
+
+
+@pytest.mark.parametrize("path_case", ["missing-absolute", "absent", "non-string"])
+def test_unavailable_runset_path_is_disclosed(tmp_path, runset, path_case):
+    envelope = _runset_envelope(LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset)
+    if path_case == "missing-absolute":
+        envelope["deck_file"] = str(tmp_path / "missing.lvs")
+    elif path_case == "absent":
+        del envelope["deck_file"]
+    else:
+        envelope["deck_file"] = 42
+
+    for citation in _lvs_citations(_lvs_items(tmp_path, envelope)):
+        assert citation["runset_rehash_status"] == "unverifiable"
+
+
+def test_runset_read_error_is_disclosed_from_one_attempt_per_item(
+    tmp_path, runset, monkeypatch
+):
+    envelope = _runset_envelope(LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset)
+    digest = Mock(side_effect=OSError("cannot read runset"))
+    monkeypatch.setattr(signoff_runset, "sha256_file", digest)
+
+    for citation in _lvs_citations(_lvs_items(tmp_path, envelope)):
+        assert citation["runset_rehash_status"] == "unverifiable"
+    assert digest.call_count == 2
+
+
+def test_curated_report_citation_is_unchanged(tmp_path):
+    for citation in _lvs_citations(
+        _lvs_items(tmp_path, LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE)
+    ):
+        assert "engine" not in citation
+        assert "runset_rehash_status" not in citation
 
 
 def test_unpinned_runset_is_refused(tmp_path, runset, monkeypatch):
     monkeypatch.setattr(signoff_runset, "PINNED_RUNSETS", {})
+    digest = Mock(side_effect=AssertionError("an unpinned deck must not be read"))
+    monkeypatch.setattr(signoff_runset, "sha256_file", digest)
 
-    item = _item_4(tmp_path, _runset_envelope(LVS_MATCH_ENVELOPE, runset))
-
-    assert item["status"] == "unmet"
-    assert item["reason"] == "runset_not_pinned"
+    envelope = _runset_envelope(LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset)
+    for item in _lvs_items(tmp_path, envelope):
+        assert item["status"] == "unmet", item
+        assert item["reason"] == "runset_not_pinned"
+        assert item["citation"] is None
+    digest.assert_not_called()
 
 
 def test_runset_file_drift_with_pinned_recorded_hash_is_a_mismatch(tmp_path, runset):
@@ -103,6 +174,7 @@ def test_one_unrecognised_device_class_fails(tmp_path, runset):
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
         runset,
+        deck_file=str(tmp_path / "missing.lvs"),
         coverage={"declared_not_recognized": ["RES"]},
     )
 
@@ -144,30 +216,14 @@ def test_item_11_accepts_runset_report_with_populated_net_correspondence(
     assert item["status"] == "met", item
 
 
-def test_item_11_refuses_unpinned_runset_report(tmp_path, runset, monkeypatch):
-    envelope = _runset_envelope(LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset)
-    monkeypatch.setattr(signoff_runset, "PINNED_RUNSETS", {})
-    result = build_tier_report(
-        _manifest(
-            kind="analog",
-            evidence={
-                "11": _power_delivery_evidence(
-                    tmp_path, kind="analog", lvs_envelope=envelope
-                )
-            },
-        )
-    )
-
-    item = _item_11(result)
-    assert item["status"] == "unmet"
-    assert item["reason"] == "runset_not_pinned"
-
-
 def test_item_11_runset_report_with_empty_net_correspondence_is_unproven(
     tmp_path, runset
 ):
     envelope = _runset_envelope(
-        LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset, net_correspondence=[]
+        LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+        runset,
+        deck_file=str(tmp_path / "missing.lvs"),
+        net_correspondence=[],
     )
     result = build_tier_report(
         _manifest(
