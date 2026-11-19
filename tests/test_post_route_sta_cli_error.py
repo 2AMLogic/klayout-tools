@@ -14,6 +14,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import post_route_sta
+from klayout_tools._tcl import tcl_literal
 from klayout_tools.cli import main
 from test_post_route_sta import (
     _base_request,
@@ -46,6 +47,10 @@ def test_cli_error_openroad_rejects_truncated_liberty(tmp_path, monkeypatch, cap
     )
     truncated_lib.write_text("library (demo) {\n", encoding="utf-8")
     monkeypatch.setenv("PDK_ROOT", str(install_root))
+    # The complete command the generated session must issue for the
+    # truncated fixture: the Tcl-quoted *full* path, not just its filename,
+    # so a same-named valid lib in another directory cannot satisfy it.
+    expected_read_liberty = f"read_liberty {tcl_literal(str(truncated_lib))}"
     _write(tmp_path / "top.def", "# fake routed def\n")
     request_path = _write_request(tmp_path / "request.json", _base_request())
 
@@ -59,9 +64,9 @@ def test_cli_error_openroad_rejects_truncated_liberty(tmp_path, monkeypatch, cap
         read_liberty_lines = [
             line for line in script.splitlines() if line.startswith("read_liberty")
         ]
-        # The generated session selects exactly the truncated corner lib...
-        assert len(read_liberty_lines) == 1
-        assert truncated_lib.name in read_liberty_lines[0]
+        # The generated session reads exactly the truncated corner lib (full
+        # path, compared whole)...
+        assert read_liberty_lines == [expected_read_liberty]
         # ...and a real OpenROAD refuses to parse it: simulate that failure.
         return fake_completed(
             returncode=1,

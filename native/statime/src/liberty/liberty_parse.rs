@@ -10,8 +10,9 @@
 //!
 //! The grammar is fallible (issue #5629, the hand-port of techmap's own
 //! grammar): a truncated or malformed `.lib` surfaces as
-//! `Err(LibertyError)` rather than a panic, so a panic never crosses the
-//! pyo3 boundary.
+//! `Err(LibertyError)` rather than a panic, so every direct caller of
+//! `parse` (the standalone `klt-statime` CLI and `lib.rs`'s
+//! `run_critical_path`) receives a diagnostic instead of an unwind.
 
 use std::fmt;
 

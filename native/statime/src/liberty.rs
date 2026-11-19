@@ -501,9 +501,12 @@ library ("test_lib") {
         // Issue #5629: the file ends right after the opening brace -- EOF
         // inside an open group body must surface as a group-body
         // diagnostic through the `Result<_, LibertyError>` the public
-        // signature already promises, never as a panic (a panic crossing
-        // the pyo3 boundary surfaces as PanicException, which sta.py's
-        // `except ValueError` does not catch).
+        // signature already promises, never as a panic. This pins the
+        // direct Rust caller of `parse` (the standalone `klt-statime` CLI,
+        // `lib.rs`'s `run_critical_path`); the pyo3 entry point
+        // `critical_path_json` already wraps its call in `catch_unwind`
+        // and re-raises a panic as `ValueError`, so the Python boundary
+        // was never the failure site.
         let err = parse("library (demo) {").unwrap_err();
         assert!(
             err.0.contains("unexpected token in group body"),
