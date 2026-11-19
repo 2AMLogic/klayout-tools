@@ -62,9 +62,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   canary. Additive only: no existing field changes, nothing is emitted when any
   unit is ok, on another backend or for other codes, and no new flag or
   worker-side `--dry-run` is added (`--dry-run` still never contacts the
-  worker). The code is report-level, so it is not accepted by
-  `options.fail_on_diagnostic`. Docs: `docs/cli/sim.md`'s "Transient
-  convergence differs between local and batch".
+  worker). The code is report-level and registered in `DIAGNOSTIC_CODES`, so
+  `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
+  Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
+  batch".
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
