@@ -159,6 +159,7 @@ from ._paths import (
     _validate_via_entries,
 )
 from ._power_em_sections import em_edge_verdicts
+from ._power_mesh import _cell_sides
 from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
@@ -219,11 +220,13 @@ _STACKUP_KEYS = (
     "layer",
     "label_layer",
     "sheet_resistance_ohm_per_sq",
+    "sheet_resistance_source",
     "current_limit_a_per_um",
     "current_limit_source",
 )
 _VIA_EXTRA_KEYS = (
     "resistance_ohm",
+    "resistance_ohm_source",
     "current_limit_a",
     "current_limit_source",
     "cut_size_um",
@@ -390,12 +393,18 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        # Issue #5791: the `sheet_resistance_ohm_per_sq` citation.
+        sheet_resistance_source = _read_source_citation(
+            entry, "sheet_resistance_source"
+        )
+
         entries.append(
             {
                 "name": name,
                 "layer": layer,
                 "label_layer": label_layer,
                 "sheet_resistance_ohm_per_sq": sheet_r,
+                "sheet_resistance_source": sheet_resistance_source,
                 "current_limit_a_per_um": current_limit_a_per_um,
                 "current_limit_source": current_limit_source,
             }
@@ -437,6 +446,41 @@ def _validate_via_cut_geometry(
             )
         cut_geometry[key] = value
     return cut_geometry
+
+
+def _read_source_citation(entry: dict[str, Any], key: str) -> str | None:
+    """An optional provenance-citation spec field (issue #5791),
+    ``str()``-coerced exactly like ``current_limit_source``: free text, in
+    any JSON type, never type-checked."""
+    value = entry.get(key)
+    return None if value is None else str(value)
+
+
+def _via_resistance_citation(
+    entry: dict[str, Any],
+    spec_path: str,
+    index: int,
+    resistance_ohm: float | None,
+) -> str | None:
+    """The via's optional ``resistance_ohm_source`` citation (issue #5791),
+    refused without an explicit ``resistance_ohm``: under ``--deck`` an
+    omitted number is filled from the deck
+    (:func:`_apply_deck_via_resistance`) and the report's own
+    ``vias[].resistance_source`` would then say ``deck:<name>:<corner>``, so
+    echoing a spec citation on top would assert false provenance in a report
+    ``klt signoff`` can cite. An explicit ``resistance_ohm`` always wins
+    over the deck, so every accepted citation is truthful."""
+    source = _read_source_citation(entry, "resistance_ohm_source")
+    if source is not None and resistance_ohm is None:
+        raise PowerError(
+            f"spec '{spec_path}': vias[{index}] gives "
+            "'resistance_ohm_source' without 'resistance_ohm' -- "
+            "with --deck the number would come from the deck and "
+            "the citation would claim spec provenance it does not "
+            "have; set 'resistance_ohm' explicitly or drop the "
+            "citation"
+        )
+    return source
 
 
 def _validate_vias(
@@ -504,6 +548,11 @@ def _validate_vias(
         if current_limit_source is not None:
             current_limit_source = str(current_limit_source)
 
+        # Issue #5791; deck guard in `_via_resistance_citation`.
+        resistance_ohm_source = _via_resistance_citation(
+            entry, spec_path, i, resistance_ohm
+        )
+
         cut_geometry = _validate_via_cut_geometry(entry, spec_path, i)
 
         entries.append(
@@ -513,6 +562,7 @@ def _validate_vias(
                 "between": between,
                 "resistance_ohm": resistance_ohm,
                 "resistance_source": "spec",
+                "resistance_ohm_source": resistance_ohm_source,
                 "current_limit_a": current_limit_a,
                 "current_limit_source": current_limit_source,
                 **cut_geometry,
@@ -980,68 +1030,6 @@ def _warn_if_network_fragmented(
     )
 
 
-def _cell_sides(
-    column: int,
-    row: int,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-    horizontal_major: bool,
-) -> tuple[
-    tuple[tuple[int, int], tuple[str, int, int], float, float, float, float, bool], ...
-]:
-    """The four sides of one mesh cell as ``(neighbour_key, port_key, port_x,
-    port_y, half_length_um, cross_um, is_major_axis_end)`` tuples.
-
-    ``port_key`` is deliberately shared by the two cells on either side of a
-    boundary, so they meet at **one** node; ``half_length_um`` is the
-    centre-to-side travel along the flow direction and ``cross_um`` the
-    conducting width across it.
-    """
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    half_w, half_h = (x1 - x0) / 2, (y1 - y0) / 2
-    width_um, height_um = x1 - x0, y1 - y0
-    return (
-        (
-            (column - 1, row),
-            ("v", column, row),
-            x0,
-            cy,
-            half_w,
-            height_um,
-            horizontal_major,
-        ),
-        (
-            (column + 1, row),
-            ("v", column + 1, row),
-            x1,
-            cy,
-            half_w,
-            height_um,
-            horizontal_major,
-        ),
-        (
-            (column, row - 1),
-            ("h", column, row),
-            cx,
-            y0,
-            half_h,
-            width_um,
-            not horizontal_major,
-        ),
-        (
-            (column, row + 1),
-            ("h", column, row + 1),
-            cx,
-            y1,
-            half_h,
-            width_um,
-            not horizontal_major,
-        ),
-    )
-
-
 def _model_box_polygon(
     box: kdb.Box,
     entry: dict[str, Any],
@@ -1087,6 +1075,7 @@ def _model_box_polygon(
         entry["current_limit_source"],
         length_um=length_um,
         cross_um=cross_um,
+        resistance_ohm_source=entry["sheet_resistance_source"],
     )
     return [(n_a, a_x, a_y), (n_b, b_x, b_y)]
 
@@ -1179,6 +1168,7 @@ def _model_mesh_polygon(
                 entry["current_limit_source"],
                 length_um=half_um,
                 cross_um=cross_um,
+                resistance_ohm_source=entry["sheet_resistance_source"],
             )
     return endpoints
 
@@ -1240,6 +1230,7 @@ def _build_island_network(
         area_um2: float | None = None,
         n_cuts: int | None = None,
         n_cuts_source: str | None = None,
+        resistance_ohm_source: str | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -1274,6 +1265,12 @@ def _build_island_network(
                     round(current_limit_a, 12) if current_limit_a is not None else None
                 ),
                 "current_limit_source": current_limit_source,
+                # Issue #5791: where this edge's `resistance_ohm` came
+                # from -- the contributing role's spec citation
+                # (`stackup[].sheet_resistance_source` on a metal edge,
+                # `vias[].resistance_ohm_source` on a via edge), `null`
+                # when that role declared none.
+                "resistance_ohm_source": resistance_ohm_source,
                 # Issue #3401: cuts this via edge's `resistance_ohm` was
                 # divided across (`null` on a metal edge); `n_cuts_source`
                 # is "spec" when `cut_size_um`/`cut_space_um` derived it,
@@ -1367,6 +1364,7 @@ def _build_island_network(
                 area_um2=polygon.area() * dbu * dbu,
                 n_cuts=n_cuts,
                 n_cuts_source=n_cuts_source,
+                resistance_ohm_source=via["resistance_ohm_source"],
             )
 
     # The connectivity model already declared these nodes one island, so the
