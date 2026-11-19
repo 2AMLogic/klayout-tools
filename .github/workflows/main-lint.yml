@@ -1,0 +1,59 @@
+name: Main Lint
+
+# A per-commit lint verdict for every push to main (issue #6387).
+#
+# Why this exists: ci.yml's main group is shared on `github.ref` with the
+# default single pending slot, so when merges land minutes apart a waiting run
+# is superseded by the next one and concludes `cancelled` with NO jobs -- no
+# verdict for that commit (.loom/docs/ci-principles.md rule 2, #9608). That is
+# deliberate and this workflow does not change it. It closes the gap for the
+# cheap deterministic gates only: a cross-PR lint conflict (two PRs each green
+# alone, red together) on a superseded main commit would otherwise be invisible
+# until a PR author tripped over it. Measured 2026-11-17: 22 of the last 30
+# main commits had a cancelled `CI` run, and only 8 had any `Lint (ruff)`
+# check-run.
+#
+# Why a separate workflow: a pending run replaced by the `CI` group has no
+# jobs, so a job-level concurrency group inside ci.yml cannot help.
+#
+# Concurrency: one group per commit SHA, never cancelling. Distinct commits
+# never share a group, so nothing supersedes anything; the group name keeps the
+# workflow-name prefix the merge_group_ci::main_cancel lint relies on, and
+# `cancel-in-progress` is the literal `false`.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-lint-${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    name: Main Lint (ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # Restore only: ci.yml's lint job is the one cache writer on main.
+          save-cache: false
+
+      - name: Install dependencies
+        # --locked fails the job if uv.lock is stale relative to pyproject.toml.
+        run: uv sync --locked --extra dev
+
+      # Both steps GATE; do not add continue-on-error (see ci.yml's lint job).
+      - name: ruff format --check
+        run: uv run --frozen --extra dev ruff format --check .
+
+      - name: ruff check
+        run: uv run --frozen --extra dev ruff check .

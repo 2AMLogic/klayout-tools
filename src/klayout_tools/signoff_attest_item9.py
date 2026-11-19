@@ -11,9 +11,15 @@ top-level ``cold_start``:
 
 Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
 item's reproducibility-pin checks, which live here for the same reason. Plus
-(issue #5701) a bench entry's ``sources`` -- the implementation modules the
-bench is spread across -- hashed as ``role: "source"`` ``present`` checks
-attributed to the bench(es) that declared them.
+(issue #5641) a ``cold_start`` accepting a list: several named cold starts
+over one inventoried file, so a shared implementation module can carry every
+graded cold start without minting hollow wrapper files. Plus (issue #5701) a
+bench entry's ``sources`` -- the implementation modules the bench is spread
+across -- hashed as ``role: "source"`` ``present`` checks attributed to the
+bench(es) that declared them.
+
+Plus (issue #5850) a bench entry's ``depends_on`` declarations, which live in
+:mod:`klayout_tools.signoff_attest_item9_depends_on` for the same reason.
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
@@ -27,6 +33,12 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from ._jsonnum import is_int
+from .signoff_attest_item9_depends_on import (
+    bench_depends_on_map,
+    dependency_binding_checks,
+    dependency_present_checks,
+    validated_depends_on,
+)
 
 
 def _error(message: str) -> Exception:
@@ -136,6 +148,53 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
     ]
 
 
+def _cold_start_specs(
+    raw: Any,
+    field: str,
+    root: str,
+    command_spec: Callable[..., dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One entry's ``cold_start`` as a list of specs.
+
+    Either today's single command object -- one unnamed spec, so the emitted
+    envelope is unchanged -- or (issue #5641) a non-empty list of named
+    command objects: each ``{name, argv, ...}`` with a non-empty ``name``
+    unique within its entry, one graded cold start per member over the same
+    file. ``name`` is validated and stripped here because ``command_spec``
+    silently ignores unknown keys."""
+    if not isinstance(raw, list):
+        return [command_spec(raw, field, root, documented_argv=True)]
+    if not raw:
+        raise _error(
+            f"'{field}' is an empty list -- declare at least one named cold "
+            "start (a list of {name, argv, ...} objects)"
+        )
+    specs: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for index, member in enumerate(raw):
+        member_field = f"{field}[{index}]"
+        if not isinstance(member, Mapping):
+            raise _error(
+                f"'{member_field}' must be an object with a 'name' and an 'argv' list"
+            )
+        name = member.get("name")
+        if not isinstance(name, str) or not name:
+            raise _error(f"'{member_field}.name' must be a non-empty string")
+        if name in names:
+            raise _error(
+                f"cold start name '{name}' is declared more than once in '{field}'"
+            )
+        names.add(name)
+        spec = command_spec(
+            {key: value for key, value in member.items() if key != "name"},
+            member_field,
+            root,
+            documented_argv=True,
+        )
+        specs.append({"name": name, **spec})
+    return specs
+
+
 def _validated_sources(
     sources: Any,
     field: str,
@@ -160,49 +219,77 @@ def _validated_sources(
     return normalized
 
 
+def _bench_record(
+    entry: Mapping[str, Any],
+    field: str,
+    root: str,
+    normalize_path: Callable[[Any, str, str], str],
+    command_spec: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    """One bench entry's validated ``cold_start``/``depends_on``/``sources``."""
+    record: dict[str, Any] = {}
+    if "cold_start" in entry:
+        record["cold_start"] = _cold_start_specs(
+            entry["cold_start"], f"{field}.cold_start", root, command_spec
+        )
+    if "depends_on" in entry:
+        record["depends_on"] = validated_depends_on(
+            entry["depends_on"], field, root, normalize_path
+        )
+    if "sources" in entry:
+        record["sources"] = _validated_sources(
+            entry["sources"], field, normalize_path, root
+        )
+    return record
+
+
 def split_testbenches(
     inventory: Mapping[str, Any],
     root: str,
     normalize_path: Callable[[Any, str, str], str],
     command_spec: Callable[..., dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Reduce object-form ``testbenches`` entries to plain paths.
 
     Returns ``(inventory_with_plain_paths, {normalized_path: bench_record})``,
-    where a bench record carries the entry's ``cold_start`` spec and its
-    normalized ``sources`` paths (issue #5701). String entries pass through
-    untouched, so an old-form inventory is returned as an equal mapping and
-    validates exactly as before. A malformed container is left for the
-    generic path-list validator to refuse."""
+    where a bench record carries the entry's ``cold_start`` specs, its
+    normalized ``depends_on`` paths (issue #5850) and its normalized
+    ``sources`` paths (issue #5701). String entries pass through untouched,
+    so an old-form inventory is returned as an equal mapping and validates
+    exactly as before. A malformed container is left for the generic
+    path-list validator to refuse. An entry may declare its ``cold_start``
+    as a list (issue #5641): N named commands over one shared file, each
+    graded independently -- the file is still inventoried exactly once."""
     entries = inventory.get("testbenches")
     if not isinstance(entries, list):
         return dict(inventory), {}
     paths: list[Any] = []
     records: dict[str, dict[str, Any]] = {}
+    bench_paths: set[str] = set()
     for index, entry in enumerate(entries):
         if not isinstance(entry, Mapping):
             paths.append(entry)
             continue
         field = f"testbenches[{index}]"
-        unknown = sorted(set(entry) - {"path", "cold_start", "sources"})
+        unknown = sorted(set(entry) - {"path", "cold_start", "depends_on", "sources"})
         if unknown:
             raise _error(
                 f"'{field}' has unknown field(s): {', '.join(unknown)} "
-                "(accepted: cold_start, path, sources)"
+                "(accepted: cold_start, depends_on, path, sources)"
             )
         if "path" not in entry:
             raise _error(f"'{field}' must declare 'path'")
         path = normalize_path(entry["path"], "testbenches", root)
+        if path in bench_paths:
+            raise _error(
+                f"path '{path}' is listed more than once in 'testbenches' -- "
+                "each inventoried file must appear exactly once; to run several "
+                "cold starts over one file, declare them as a list of named "
+                f"commands on that entry's 'cold_start' (see '{field}.cold_start')"
+            )
+        bench_paths.add(path)
         paths.append(entry["path"])
-        record: dict[str, Any] = {}
-        if "cold_start" in entry:
-            record["cold_start"] = command_spec(
-                entry["cold_start"], f"{field}.cold_start", root, documented_argv=True
-            )
-        if "sources" in entry:
-            record["sources"] = _validated_sources(
-                entry["sources"], field, normalize_path, root
-            )
+        record = _bench_record(entry, field, root, normalize_path, command_spec)
         if record:
             # A duplicate path is refused by the generic list validator.
             records.setdefault(path, record)
@@ -241,9 +328,10 @@ def validate_into(
 ) -> None:
     """Item 9's normalised non-path fields. Every bench needs a cold start:
     its own, or the top-level one. A bench's ``sources`` are collected into
-    ``source_benches`` (issue #5701); ``bench_cold_starts`` keeps its
-    ``{path: spec}`` shape, records without a ``cold_start`` contributing
-    none."""
+    ``source_benches`` (issue #5701) and its ``depends_on`` edges into
+    ``bench_depends_on`` (issue #5850); ``bench_cold_starts`` maps each path
+    to its entry's list of cold start specs (issue #5641), records without a
+    ``cold_start`` contributing none."""
     benches = normalized["testbenches"]
     normalized["bench_cold_starts"] = {
         path: record["cold_start"]
@@ -251,6 +339,7 @@ def validate_into(
         if "cold_start" in record
     }
     normalized["source_benches"] = _source_benches(bench_records, benches)
+    normalized["bench_depends_on"] = bench_depends_on_map(bench_records, benches)
     normalized["unbenched_rows"] = validated_unbenched_rows(inventory)
     normalized["pins"] = inventory.get("pins")
     if "cold_start" in inventory:
@@ -335,30 +424,53 @@ def with_progress(
     return wrapped
 
 
+def _progress_label(role: str, identity: Mapping[str, Any]) -> str:
+    """The stderr progress label for one command run: the role, then whatever
+    identity the check carries (``name`` for one of a bench's several cold
+    starts, ``testbench`` for a per-bench one)."""
+    return " ".join(
+        part
+        for part in (
+            role,
+            identity.get("name", ""),
+            identity.get("testbench", ""),
+        )
+        if part
+    )
+
+
 def item9_checks(
     normalized: Mapping[str, Any],
     command: Callable[..., dict[str, Any]],
     root: str,
     file_check: Callable[..., dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Item 9's command, unbenched-row and (via the caller) pin checks, in a
-    deterministic order: source ``present`` checks sorted by path (issue
-    #5701; the caller has already emitted the bench ``present`` checks, also
-    sorted), then the top-level cold start, per-bench cold starts sorted by
-    path, then unbenched rows sorted by row id. Each source check carries
-    ``testbenches``, the sorted benches that declared it."""
-    run = with_progress(
-        command, lambda role, ident: f"{role} {ident.get('testbench', '')}".strip()
-    )
-    checks = [
+    """Item 9's dependency, source, command and unbenched-row checks (the
+    caller adds the pin checks), in a deterministic order: declared-dependency
+    ``present`` checks bench by sorted bench (issue #5850), then source
+    ``present`` checks sorted by path (issue #5701; the caller has already
+    emitted the bench ``present`` checks, also sorted), then the top-level
+    cold start, per-bench cold starts sorted by path -- a bench declaring
+    several, in ``name`` order (issue #5641) -- then unbenched rows sorted by
+    row id, then ``dependency_binding`` rows sorted by path. Each source
+    check carries ``testbenches``, the sorted benches that declared it."""
+    run = with_progress(command, _progress_label)
+    checks = dependency_present_checks(root, normalized, file_check) + [
         {**file_check(root, path, "source"), "testbenches": benches}
         for path, benches in sorted(normalized["source_benches"].items())
     ]
     if "cold_start" in normalized:
         checks.append(run(normalized["cold_start"], "cold_start"))
-    for path, spec in sorted(normalized["bench_cold_starts"].items()):
-        checks.append(run(spec, "cold_start", testbench=path))
-    return checks + unbenched_row_checks(normalized["unbenched_rows"])
+    for path, specs in sorted(normalized["bench_cold_starts"].items()):
+        for spec in sorted(specs, key=lambda s: s.get("name", "")):
+            if "name" in spec:
+                checks.append(
+                    run(spec, "cold_start", testbench=path, name=spec["name"])
+                )
+            else:
+                checks.append(run(spec, "cold_start", testbench=path))
+    checks += unbenched_row_checks(normalized["unbenched_rows"])
+    return checks + dependency_binding_checks(normalized)
 
 
 def pdk_pin(pdk: Any) -> dict[str, Any] | None:
