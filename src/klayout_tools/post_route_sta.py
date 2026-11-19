@@ -300,6 +300,7 @@ from ._sta_request_diag import (
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
+from ._sta_request_diag import extract_block as _extract_block
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from ._tcl import tcl_literal as _tcl_literal
@@ -4070,18 +4071,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
             f"sta metrics '{metrics_path}' must contain a JSON object"
         )
     return data
-
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when
-    either marker is absent (an OpenROAD build that never reached that part
-    of the script, or a caller parsing a stream the markers aren't in)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
 
 
 def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:
