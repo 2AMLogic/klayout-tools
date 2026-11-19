@@ -33,7 +33,10 @@ The trade-off accepted: the check now depends on the Actions API being
 reachable. That is why **this script never fails**. Any error -- missing `gh`,
 a 403, a rate limit, a timeout -- produces a valid, empty history payload and
 exit 0, and the check then falls back to the committed ceilings, which is the
-pre-#2615 behaviour rather than a broken build.
+pre-#2615 behaviour rather than a broken build. Transient failures -- an HTTP
+5xx, a timeout, a dropped connection -- are retried a bounded number of times
+first (#6214, in `ci_wall_clock_gh`); only a failure that survives its
+retries falls back.
 
 Output payload (`schema_version` 1):
 
@@ -103,7 +106,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -112,6 +114,7 @@ from urllib.parse import quote
 # The step-measurement conventions (#2617 cache miss, #5964 checkout) have
 # exactly one definition: ci_wall_clock_steps's, which both importers share.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ci_wall_clock_gh import FetchError, GhClient
 from ci_wall_clock_steps import measure_cache_miss, measure_checkout
 
 HISTORY_SCHEMA_VERSION = 1
@@ -140,47 +143,8 @@ DEFAULTS = {
 }
 
 
-class FetchError(Exception):
-    """Any reason the history could not be collected (never fatal)."""
-
-
 def _parse_iso(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-
-
-class GhClient:
-    """A counted, timeout-bounded `gh api` caller."""
-
-    def __init__(self, gh: str, timeout: int, max_calls: int) -> None:
-        self.gh = gh
-        self.timeout = timeout
-        self.max_calls = max_calls
-        self.calls = 0
-
-    def get(self, path: str) -> object:
-        if self.calls >= self.max_calls:
-            raise FetchError(f"API call budget of {self.max_calls} exhausted")
-        self.calls += 1
-        try:
-            proc = subprocess.run(
-                [self.gh, "api", "-H", "Accept: application/vnd.github+json", path],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise FetchError(f"`{self.gh} api {path}` failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise FetchError(
-                f"`{self.gh} api {path}` exited {proc.returncode}: "
-                f"{proc.stderr.strip()[:200]}"
-            )
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise FetchError(
-                f"`{self.gh} api {path}` returned non-JSON: {exc}"
-            ) from exc
 
 
 def job_durations(
@@ -541,6 +505,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gh", default="gh", help="the gh executable to call")
     parser.add_argument("--timeout", type=int, default=30, help="seconds per API call")
     parser.add_argument("--max-api-calls", type=int, default=40)
+    parser.add_argument(
+        "--retry-sleep",
+        type=float,
+        default=2.0,
+        help="seconds before the first transient-failure retry, growing "
+        "geometrically (2 s then 5 s by default; 0 waits no time between "
+        "retries but still makes them)",
+    )
     args = parser.parse_args(argv)
 
     opts = budget_options(args.budget)
@@ -556,7 +528,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.history_not_before is not None:
         opts["history_not_before"] = args.history_not_before
 
-    client = GhClient(args.gh, args.timeout, args.max_api_calls)
+    client = GhClient(
+        args.gh, args.timeout, args.max_api_calls, retry_sleep=args.retry_sleep
+    )
     try:
         payload = collect(client, args.repo, args.run_id, opts)
     except FetchError as exc:
