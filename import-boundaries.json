@@ -525,6 +525,7 @@
       "description": "`klt mcp` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.mcp_cmd",
+        "klayout_tools.mcp_doc_links",
         "klayout_tools.mcp_resources",
         "klayout_tools.mcp_server",
         "klayout_tools.mcp_tools"
@@ -588,6 +589,7 @@
         "klayout_tools.decks.sg13g2_unmodeled",
         "klayout_tools.decks.sky130",
         "klayout_tools.decks.sky130_lvt",
+        "klayout_tools.decks.sky130_offgrid",
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
@@ -738,6 +740,7 @@
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
+        "klayout_tools._macros_blackbox",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
         "klayout_tools._paths",
@@ -759,6 +762,7 @@
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
         "klayout_tools._verilog_top",
+        "klayout_tools._yosys_error_messages",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.coverage_work",
@@ -800,6 +804,7 @@
         "klayout_tools.signoff_attest_glob",
         "klayout_tools.signoff_attest_input",
         "klayout_tools.signoff_attest_item2_inputs",
+        "klayout_tools.signoff_attest_item8",
         "klayout_tools.signoff_attest_item9",
         "klayout_tools.signoff_attest_item9_depends_on",
         "klayout_tools.signoff_attest_live",
@@ -850,6 +855,7 @@
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
+        "klayout_tools._meas_lint_wrapper",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -1914,6 +1920,18 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_yosys_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); equiv.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_synthesis_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); synthesize.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
     {
       "consumer": "klayout_tools.cli.pex_text",
       "exporter": "klayout_tools.cli.extract_text",

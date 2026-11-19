@@ -20,6 +20,7 @@ from klayout_tools.signoff_attest import (
 )
 
 _PASS = {"argv": [sys.executable, "-c", "pass"]}
+_ENV = {"schema_version": 1, "kind": "generic"}
 _FAIL = {"argv": [sys.executable, "-c", "raise SystemExit(1)"]}
 
 
@@ -31,7 +32,11 @@ def _repo(tmp_path) -> Path:
     for name in ("sim_tt", "sim_ss"):
         (repo / "evidence" / f"{name}.json").write_text(
             json.dumps(
-                {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+                {
+                    **_ENV,
+                    "status": "pass",
+                    "result": {"fmax": 100, "area": 5, "power": 2},
+                }
             )
         )
     return repo
@@ -201,7 +206,7 @@ def test_digital_non_numeric_metric_field_fails(tmp_path):
 def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
     repo = _repo(tmp_path)
     payload = json.dumps(
-        {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+        {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
     )
     for corner in ("tt", "ss"):
         (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
@@ -239,7 +244,7 @@ def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
 def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
     repo = _repo(tmp_path)
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 0}}).replace(
+        json.dumps({**_ENV, "status": "pass", "result": {"fmax": 0}}).replace(
             '"fmax": 0', f'"fmax": {literal}'
         )
     )
@@ -247,7 +252,15 @@ def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
     envelope = _attest(repo, _digital_inventory())
 
     assert envelope["status"] == "fail"
-    assert _failed(envelope) == [("metric", name) for name in _REQUIRED_METRICS]
+    # The shared reader refuses the nonfinite literal, so the recogniser
+    # (#5688) rejects the cited file, both spec rows citing it, and each
+    # metric bound to it.
+    assert _failed(envelope) == [
+        ("envelope", "evidence"),
+        ("citation", "bandwidth"),
+        ("citation", "gain"),
+        *[("metric", name) for name in _REQUIRED_METRICS],
+    ]
 
 
 def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
@@ -259,7 +272,9 @@ def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
 
     assert envelope["status"] == "pass"
     cited_once = [
-        c for c in envelope["attestation"]["checks"] if c["role"] == "evidence"
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["role"] == "evidence" and c["check"] == "present"
     ]
     assert len(cited_once) == 2
 
@@ -298,12 +313,16 @@ def test_check_reports_drift_on_cited_envelope_and_row_map(tmp_path):
     assert clean["status"] == "match"
     assert clean["fresh_status"] == "pass"
 
-    (repo / "evidence" / "sim_tt.json").write_text(json.dumps({"status": "pass"}))
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass"})
+    )
     drifted = check_attestation(8, inv_path, str(committed))
     assert drifted["status"] != "match"
 
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+        )
     )
     inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
     (repo / "inventory.json").write_text(json.dumps(inventory))
@@ -437,7 +456,9 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
     inventory = _digital_inventory()
     committed = _committed_item8(repo, inventory)
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}}
+        )
     )
 
     result = check_attestation(8, str(repo / "inventory.json"), committed)

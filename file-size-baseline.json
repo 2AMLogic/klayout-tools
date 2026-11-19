@@ -241,7 +241,7 @@
     },
     {
       "path": "src/klayout_tools/decks/sky130.py",
-      "lines": 3062
+      "lines": 2860
     },
     {
       "path": "src/klayout_tools/digital_fleet.py",
@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1131
+      "lines": 1103
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6360
+      "lines": 6355
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7238
+      "lines": 7234
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4647
+      "lines": 4577
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -861,7 +861,7 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12375
+      "lines": 12372
     },
     {
       "path": "tests/test_gen_compose.py",
