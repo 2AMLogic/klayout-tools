@@ -147,7 +147,7 @@ from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
 )
 from .extract import (
@@ -2086,7 +2086,7 @@ def check_lvs_report(
     compares each against ``environment.layout_sha256``/
     ``environment.reference_sha256``; when the committed report used an
     extraction deck (``provenance.deck`` is non-``null``), also re-hashes
-    that deck's source (:func:`~klayout_tools.decks.deck_source_path`) and
+    that deck's identity (:func:`~klayout_tools.decks.deck_content_hash`) and
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
@@ -2138,7 +2138,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
-                content_hash(deck_source_path(deck["name"])),
+                deck_content_hash(deck["name"]),
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))

@@ -3077,7 +3077,7 @@ def _diode_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
-    from .gen_diode import _diode_layout, diode_ports
+    from .gen_diode import _diode_layout, diode_notes, diode_ports
 
     family = _pdk_family(pdk_info["variant"])
     info = _diode_layout(
@@ -3088,15 +3088,6 @@ def _diode_describe(
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     ports = diode_ports(info, metal_layer)
     snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
-    notes = [
-        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
-        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
-    ]
-    if params["kind"] == "n_psub":
-        notes.append(
-            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
-            "terminal in the extracted netlist"
-        )
     return {
         "device_count": 1,
         "ports": ports,
@@ -3104,7 +3095,7 @@ def _diode_describe(
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
             "matched_group_id": None,
             "snapped_to_grid": snapped,
-            "notes": notes,
+            "notes": diode_notes(params["kind"], params["voltage_class"]),
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
