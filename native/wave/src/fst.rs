@@ -54,10 +54,9 @@ use fst_reader::{
 use crate::cache::{CachedSignal, ClockEntry, ColumnCache};
 use crate::format::format_value;
 
-/// f64 bit patterns of an unwritten FST frame slot (real signal, first change after the frame
-/// tick): the ASCII 'x' fill (fst-writer <= 0.3.1) or `f64::NAN` (0.3.2, ekiwi/fst-writer#12) --
-/// dropped so either writer's stores decode identically; a genuine match is suppressed too.
-const REAL_FRAME_GARBAGE_BITS: [u64; 2] = [u64::from_le_bytes([b'x'; 8]), f64::NAN.to_bits()];
+/// f64 bits of fst-writer <= 0.3.1's ASCII-'x' fill for an unwritten real frame slot; never a
+/// genuine value, so dropped everywhere (0.3.2's `f64::NAN` fill: `strip_real_frame_garbage`).
+const REAL_FRAME_GARBAGE_BITS: u64 = u64::from_le_bytes([b'x'; 8]);
 
 /// Read-side backing for one open FST file: the reader plus decode memoization for the
 /// loader's probe signals (clock/reset candidates) and windowed multi-signal prefetches.
@@ -74,9 +73,8 @@ pub struct FstBacking {
     /// NOT a general cache: memoizing every stream a query touches would hold
     /// multi-GB of decoded strings on high-activity traces.
     memo: Mutex<HashMap<usize, std::sync::Arc<Vec<(u64, String)>>>>,
-    /// Prefix streams (all changes in `[0, max_tick]`) bulk-decoded by
-    /// `prefetch_to`; serves every windowed read with `tick_max <= max_tick`
-    /// without another file pass.
+    /// Prefix streams (all changes in `[0, max_tick]`) bulk-decoded by `prefetch_to`; serves every
+    /// windowed read with `tick_max <= max_tick` without another file pass.
     prefix: Mutex<Option<PrefixMemo>>,
 }
 
@@ -94,12 +92,10 @@ impl FstBacking {
             .unwrap_or(false)
     }
 
-    /// Bulk-decode the `[0, max_tick]` prefix of many signals in ONE file
-    /// pass (each fst-reader pass re-decodes the time table and block
-    /// metadata, so per-signal passes dominate point-query latency). Called
-    /// by windowed query entry points (`sample`/`wave`/`diff`) with their
-    /// matched signal set; the pass early-terminates past `max_tick`, so
-    /// memory is bounded by the window, not the trace.
+    /// Bulk-decode the `[0, max_tick]` prefix of many signals in ONE file pass (each fst-reader
+    /// pass re-decodes the time table and block metadata, so per-signal passes dominate point-query
+    /// latency). Called by windowed query entry points (`sample`/`wave`/`diff`) with their matched
+    /// signal set; the pass early-terminates past `max_tick`, so memory is bounded by the window.
     pub(crate) fn prefetch_to(&self, sig_indices: &[usize], max_tick: u64) {
         if sig_indices.len() <= 1 {
             return; // a single signal costs the same either way
@@ -257,15 +253,14 @@ impl FstBacking {
 fn canon_value(value: &FstSignalValue, is_real: bool) -> Option<String> {
     match value {
         FstSignalValue::String(bytes) => {
-            // FST stores bit strings at full declared width; the minimal
-            // form strips implied left-extension padding so query output is
-            // independent of dump dialect.
+            // FST stores bit strings at full declared width; the minimal form strips implied
+            // left-extension padding so query output is independent of dump dialect.
             let s = std::str::from_utf8(bytes).ok()?;
             Some(crate::cache::minimal_xz(format_value(s)))
         }
         FstSignalValue::Real(r) => {
-            if is_real && REAL_FRAME_GARBAGE_BITS.contains(&r.to_bits()) {
-                return Some(String::new()); // never-initialized real: marker, stripped below
+            if is_real && r.to_bits() == REAL_FRAME_GARBAGE_BITS {
+                return Some(String::new()); // 0.3.1 'x' fill: marker, stripped below
             }
             // Debug formatting keeps a decimal point ("100.0", not "100"), matching the raw VCD
             // real tokens this format stores. Never run reals through format_value -- a value
@@ -275,10 +270,15 @@ fn canon_value(value: &FstSignalValue, is_real: bool) -> Option<String> {
     }
 }
 
-/// Remove the frame-garbage marker produced by `canon_value` for reals.
+/// Strip frame garbage from a real signal's ordered stream: the 'x'-fill marker anywhere, and the
+/// leading run of `NaN` (fst-writer 0.3.2 fill, ekiwi/fst-writer#12). A NaN after any non-NaN
+/// sample is a genuine change (unparseable token, `$dumpoff`) and stays; a leading one is
+/// indistinguishable from fill.
 fn strip_real_frame_garbage(list: &mut Vec<(u64, String)>, is_real: bool) {
     if is_real {
         list.retain(|(_, v)| !v.is_empty());
+        let lead = list.iter().take_while(|(_, v)| v == "NaN").count();
+        list.drain(..lead);
     }
 }
 
