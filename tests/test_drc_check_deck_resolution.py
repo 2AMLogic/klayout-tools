@@ -13,7 +13,7 @@ import klayout_tools.drc_report_check as rc
 from klayout_tools._provenance import content_hash
 from klayout_tools.cli import main
 from klayout_tools.cli.output import render_check_text
-from klayout_tools.decks import asap7_rules, deck_source_path
+from klayout_tools.decks import asap7_rules, deck_content_hash
 from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report
 
 DECK = str(asap7_rules.DECK_PATH)
@@ -146,14 +146,13 @@ def _curated_report(tmp_path: Path) -> str:
     curated side carries."""
     layout = tmp_path / "top.gds"
     layout.write_bytes(b"gds-bytes")
-    deck_path = deck_source_path("sky130")
     doc = {
         "engine": "curated",
         "file": str(layout),
         "deck": "sky130",
         "provenance": {
             "input": {"content_hash": content_hash(str(layout))},
-            "deck": {"content_hash": content_hash(deck_path)},
+            "deck": {"content_hash": deck_content_hash("sky130")},
         },
     }
     path = tmp_path / "curated.json"
@@ -190,10 +189,11 @@ def test_crosscheck_override_applies_to_native_side_only(tmp_path):
     assert "deck_not_found" not in native_check
 
 
-def test_override_ignored_for_curated_report(tmp_path):
-    assert (
-        check_drc_report(_curated_report(tmp_path), deck_path=DECK)["status"] == "match"
-    )
+def test_override_rejected_for_curated_report(tmp_path):
+    # Issue #6070: --check agrees with --rerun -- a curated single report has
+    # no deck override, so the flag is an error, never a silent no-op.
+    with pytest.raises(DrcError, match="--deck-file"):
+        check_drc_report(_curated_report(tmp_path), deck_path=DECK)
 
 
 def test_nonexistent_override_is_a_failed_check_with_diagnostic(tmp_path):

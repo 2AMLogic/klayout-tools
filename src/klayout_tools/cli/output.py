@@ -172,12 +172,12 @@ def render_rerun_drift(result: dict) -> None:
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
     still told the checklist's wording moved. It also carries ``build_skew``
-    (issue #5868): one line when the excluded ``build`` block
-    differs. Rendered only when present, so
-    every other verb's output is byte-identical to what it was, and rendered
-    as field *names* only: the values are whole paragraphs of checklist
-    prose, which is precisely what a consumer asked not to have dumped into
-    its gate output.
+    (issues #5868, #5852): one line when the excluded ``build`` block
+    differs -- or when its identity cannot be verified at all -- rendered
+    only when present, so every other verb's output is byte-identical to
+    what it was, and rendered as field *names* only: the values are whole
+    paragraphs of checklist prose, which is precisely what a consumer asked
+    not to have dumped into its gate output.
 
     ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
     entry that points at one ``attestation.checks[<i>]`` entry with an
@@ -185,6 +185,14 @@ def render_rerun_drift(result: dict) -> None:
     label after the pointer so the drifted file is named without a second
     lookup -- the same "print it only when present" pattern as ``doc_drift``
     above. See :func:`_drift_check_label`.
+
+    Every verb's payload may additionally carry a ``not_compared`` list
+    (issue #5866): provenance fields present in the committed report and
+    absent from the fresh one -- not comparable, so excluded from the
+    verdict. Rendered as field *names* only (the committed value is
+    provenance chatter a gate does not need), so a non-zero exit always
+    means "something that could be compared did not match". Absent key ->
+    byte-identical output, as with ``doc_drift``.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
@@ -198,20 +206,42 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
-    skew = result.get("build_skew")
-    if isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset"):
-        names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
-        if skew["state"] == "ruleset":
-            what = "graded under a different ruleset (build.grading_ruleset_id moved)"
-        else:
-            what = "rendered by a different klt build (grading ruleset unchanged)"
-        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    not_compared = result.get("not_compared") or []
+    if not_compared:
+        print()
+        print("not compared (provenance fields absent from the fresh report):")
+        for entry in not_compared:
+            print(f"  {entry['field']}")
+    _print_build_skew(result.get("build_skew"))
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
         print("doc drift (checklist wording -- excluded from the verdict):")
         for entry in doc_drift_fields:
             print(f"  {entry['field']}")
+
+
+def _print_build_skew(skew: dict | None) -> None:
+    """The one ``build_skew:`` line of a signoff ``--check`` text render
+    (issues #5868, #5852), only when the excluded ``build`` block actually
+    differs -- or its identity cannot be verified at all."""
+    if not isinstance(skew, dict) or skew.get("state") not in (
+        "build_only",
+        "ruleset",
+        "unverifiable",
+    ):
+        return
+    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+    if skew["state"] == "ruleset":
+        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+    elif skew["state"] == "build_only":
+        what = "rendered by a different klt build (grading ruleset unchanged)"
+    else:
+        what = "build identity unverifiable (a +unknown install records no git facts)"
+    if names:
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    else:
+        print(f"build_skew: {what} -- excluded from the verdict")
 
 
 def render_check_text(result: dict) -> None:

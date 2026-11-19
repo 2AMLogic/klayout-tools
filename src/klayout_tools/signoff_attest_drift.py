@@ -130,6 +130,48 @@ def annotate_check_drift(
             entry["check"] = check_identity(checks[index])
 
 
+def yaml_notes(
+    committed: Mapping[str, Any], fresh: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """The informational notes for ``attest: "yaml"`` checks whose raw bytes
+    drifted while the canonical hash held (issue #5862): one
+    ``{check, path, note}`` per such check. ``raw_content_hash`` rides in
+    the envelope *only* so this comparison is possible -- the drift diff
+    excludes it (:func:`drift_result`), so the note is the one place the
+    difference surfaces. Live-result only: never written into an envelope,
+    which is why a note never keeps a byte-differing ``--check`` green on
+    its own (``content_hash`` participates in the diff like any field)."""
+    checks = (committed.get("attestation") or {}).get("checks")
+    fresh_checks = (fresh.get("attestation") or {}).get("checks")
+    if (
+        not isinstance(checks, list)
+        or not isinstance(fresh_checks, list)
+        or len(checks) != len(fresh_checks)
+    ):
+        return []
+    notes: list[dict[str, Any]] = []
+    for committed_check, check in zip(checks, fresh_checks, strict=True):
+        if not isinstance(committed_check, Mapping):
+            continue
+        if (
+            check.get("attest") == "yaml"
+            and check.get("content_hash") is not None
+            and check.get("content_hash") == committed_check.get("content_hash")
+            and check.get("raw_content_hash") != committed_check.get("raw_content_hash")
+        ):
+            notes.append(
+                {
+                    "check": check_identity(check),
+                    "path": check["path"],
+                    "note": (
+                        "raw bytes differ; canonical yaml hash unchanged "
+                        '(attest: "yaml")'
+                    ),
+                }
+            )
+    return notes
+
+
 def drift_result(
     committed_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
@@ -146,14 +188,26 @@ def drift_result(
             skipped.append(
                 {key: check[key] for key in SKIPPED_CHECK_KEYS if key in check}
             )
+    # A yaml check's raw_content_hash is deliberately unbound (informational
+    # only), so it is excluded here per call -- VOLATILE_ATTESTATION_PATHS is
+    # positional and cannot express "this key under any check" -- and any
+    # committed-vs-fresh difference is reported as a live note instead.
+    checks = fresh["attestation"]["checks"]
+    exclude = VOLATILE_ATTESTATION_PATHS | {
+        ("attestation", "checks", str(index), "raw_content_hash")
+        for index in range(len(checks))
+    }
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,
         fresh=fresh,
-        exclude=VOLATILE_ATTESTATION_PATHS,
+        exclude=exclude,
         mode="check",
     )
-    annotate_check_drift(result["drift"], fresh["attestation"]["checks"])
+    annotate_check_drift(result["drift"], checks)
+    notes = yaml_notes(committed, fresh)
+    if notes:
+        result["notes"] = notes
     fresh_payload = result.pop("fresh")
     result["fresh_status"] = fresh_payload["status"]
     result["skipped_checks"] = skipped
