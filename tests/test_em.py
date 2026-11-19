@@ -12,6 +12,7 @@ under ``fixtures/em/`` (see
 (never passed) when ``geode`` is absent.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -33,6 +34,11 @@ GEODE_REPORT_SCHEMA = (
 #: (``crates/geode-cli/schemas/report.schema.json``). Do not read the
 #: geode-fem checkout at test time: the path is not portable to CI.
 GEODE_REPORT_SCHEMA_COMMIT = "592e8898"
+#: sha256 of the vendored schema's raw bytes (issue #6667): the
+#: load-bearing pin that keeps the copy upstream's verbatim bytes.
+GEODE_REPORT_SCHEMA_SHA256 = (
+    "d18a8aa542dc7c66a521a4c550e05d05edf9fc250259b9d75de9cc99b6ff06a1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -119,6 +125,21 @@ def test_fixture_is_valid_against_geode_report_schema():
     report.pop("c_flux_diag_farad")
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(report, schema)
+
+
+def test_vendored_geode_report_schema_is_upstream_bytes():
+    """Issue #6667: the vendored schema is an independent oracle only while
+    it is upstream's bytes; ``GEODE_REPORT_SCHEMA_COMMIT`` alone documents
+    the pin without checking it. Raw bytes, not text, so a line-ending
+    normalizing checkout cannot change the digest."""
+    digest = hashlib.sha256(GEODE_REPORT_SCHEMA.read_bytes()).hexdigest()
+    assert digest == GEODE_REPORT_SCHEMA_SHA256, (
+        "tests/fixtures/em/geode_report.schema.json no longer matches the "
+        "pinned geode-fem bytes. To refresh it, copy "
+        "crates/geode-cli/schemas/report.schema.json from the new geode-fem "
+        "commit and update GEODE_REPORT_SCHEMA_COMMIT and "
+        "GEODE_REPORT_SCHEMA_SHA256 together."
+    )
 
 
 def test_success_payload(tmp_path):
