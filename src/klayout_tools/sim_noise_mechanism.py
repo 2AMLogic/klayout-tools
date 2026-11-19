@@ -66,6 +66,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import sim_noise_contributors, sim_noise_leaves
+from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: The ``noise.mechanism`` values.
 NOISE_MECHANISMS = sim_noise_leaves.NOISE_MECHANISMS
@@ -272,8 +274,6 @@ def extract_corner(
 
 def _read_plot(raw_path: str) -> tuple[dict[str, Any] | None, tuple[str, str] | None]:
     """``(waveform, None)`` or ``(None, (code, message))``."""
-    from .sim import SimError, parse_ascii_rawfile
-
     if not os.path.isfile(raw_path):
         return None, (
             "noise_mechanism_rawfile_missing",
