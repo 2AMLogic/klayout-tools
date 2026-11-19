@@ -70,7 +70,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed, fake_popen
+from helpers.subprocess_fakes import fake_completed, patch_openroad_run
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
@@ -2073,8 +2073,7 @@ def test_run_rejects_power_straps_too_wide_for_explicit_floorplan_core(
     def fail_if_called(cmd, **kwargs):
         raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fail_if_called))
+    patch_openroad_run(monkeypatch, fail_if_called)
 
     request_path = _setup_success_env(
         tmp_path,
@@ -2325,8 +2324,7 @@ def test_full_route_rejects_wired_port_less_macro_pin_before_openroad(
     def fail_if_called(cmd, **kwargs):
         raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fail_if_called))
+    patch_openroad_run(monkeypatch, fail_if_called)
 
     request_path = _setup_success_env(
         tmp_path,
@@ -2731,8 +2729,7 @@ def _stub_openroad_success(
 
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
@@ -3738,8 +3735,7 @@ def _stub_openroad_success_with_post_route_spef(
         stdout_lines.append(place_and_route._HOLD_VIOLATIONS_END)
         return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_post_route_spef_omitted_defaults_false_and_leaves_spef_sta_null(
@@ -3888,8 +3884,7 @@ def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: s
             stderr=completed.stderr,
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_pnr_violation_count_lines_request_every_check_family():
@@ -4073,8 +4068,7 @@ def _overlay_real_def_pins(monkeypatch, *, def_pins_text: str) -> None:
                     Path(def_path).write_text(def_pins_text)
         return result
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
 
 def test_post_route_spef_declares_pins_from_def_pins_section(tmp_path, monkeypatch):
@@ -4325,10 +4319,7 @@ def test_post_route_spef_unsupported_cell_library_fails_before_engine(
     def engine_must_not_run(*args, **kwargs):
         raise AssertionError("engine invoked before request validation finished")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", engine_must_not_run)
-    monkeypatch.setattr(
-        place_and_route.subprocess, "Popen", fake_popen(engine_must_not_run)
-    )
+    patch_openroad_run(monkeypatch, engine_must_not_run)
 
     with pytest.raises(
         PlaceAndRouteError, match="post_route_spef requires a known klt extract deck"
@@ -4800,8 +4791,7 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
             returncode=1, stderr="[ERROR PPL-0001] no valid pin placement found\n"
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(
         PlaceAndRouteError, match=r"openroad 'place' stage failed:.*PPL-0001"
@@ -6624,8 +6614,7 @@ def test_stubbed_floorplan_stage_unreadable_liberty_surfaces_mount_hint(
             ),
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError) as exc_info:
         run_place_and_route(request_path)
@@ -6658,8 +6647,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
             json.dump(_STAGE_METRICS[stage], handle)
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match=r"DRT-0305.*zero_"):
         run_place_and_route(request_path)
@@ -6678,8 +6666,7 @@ def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
         Path(checkpoint_out).write_text("fake odb\n")
         return fake_completed(returncode=0)  # no metrics file written
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match="did not produce the expected"):
         run_place_and_route(request_path)
@@ -6693,8 +6680,7 @@ def test_stubbed_missing_openroad_binary(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("no such file: openroad")
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError, match="could not launch openroad"):
         run_place_and_route(request_path)
@@ -6715,8 +6701,7 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
             json.dump(_STAGE_METRICS["floorplan"], handle)
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     report = run_place_and_route(request_path)
     assert report["engine_version"] is None
@@ -11079,15 +11064,8 @@ def test_check_place_and_route_report_clean_pass(tmp_path, monkeypatch):
     invocation at all."""
     request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
 
-    monkeypatch.setattr(
-        place_and_route.subprocess,
-        "run",
-        lambda *a, **k: pytest.fail("--check must not invoke OpenROAD"),
-    )
-    monkeypatch.setattr(
-        place_and_route.subprocess,
-        "Popen",
-        fake_popen(lambda *a, **k: pytest.fail("--check must not invoke OpenROAD")),
+    patch_openroad_run(
+        monkeypatch, lambda *a, **k: pytest.fail("--check must not invoke OpenROAD")
     )
     result = place_and_route.check_place_and_route_report(report_path, request_path)
 
@@ -12084,8 +12062,7 @@ def test_ord_2013_failure_names_request_macros(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", fake_run)
-    monkeypatch.setattr(place_and_route.subprocess, "Popen", fake_popen(fake_run))
+    patch_openroad_run(monkeypatch, fake_run)
 
     with pytest.raises(PlaceAndRouteError) as excinfo:
         run_place_and_route(request_path)

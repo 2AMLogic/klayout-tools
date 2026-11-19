@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_popen
+from helpers.subprocess_fakes import patch_openroad_run
 from klayout_tools import place_and_route, place_and_route_reports
 from test_place_and_route import (
     _script_lines,
@@ -135,10 +135,7 @@ def test_final_route_artifacts_and_metrics_are_authoritative(
             )
         return completed
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", append_style_run)
-    monkeypatch.setattr(
-        place_and_route.subprocess, "Popen", fake_popen(append_style_run)
-    )
+    patch_openroad_run(monkeypatch, append_style_run)
     result = place_and_route.run_place_and_route(request)
     assert result["route_drc_violation_count"] == final_count
     assert result["stages"][-1]["route_drc_violation_count"] == final_count
@@ -195,10 +192,7 @@ def test_missing_final_report_does_not_fall_back_to_engine_or_earlier_pass(
             Path(calls[-1][2]).unlink()
         return completed
 
-    monkeypatch.setattr(place_and_route.subprocess, "run", missing_report_run)
-    monkeypatch.setattr(
-        place_and_route.subprocess, "Popen", fake_popen(missing_report_run)
-    )
+    patch_openroad_run(monkeypatch, missing_report_run)
     result = place_and_route.run_place_and_route(request)
     assert result["route_drc_violation_count"] is None
     metrics_path = Path(_stage_script(request, "route")).with_name(

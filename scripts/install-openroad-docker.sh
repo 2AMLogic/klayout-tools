@@ -286,11 +286,12 @@ done < <(compgen -e OPENROAD_ || true)
 CID_FILE="\$(mktemp "\${TMPDIR:-/tmp}/klt-openroad-cid.XXXXXX")"
 rm -f "\$CID_FILE"
 CLIENT_PID=
+FINISHED=0
 MARKER_PID=
 cleanup() {
     # Only kill on an unfinished run: after \`wait\` reaped the client the
     # container is already gone (--rm); the cid file is all that is left.
-    if [[ -n "\$CLIENT_PID" ]] && kill -0 "\$CLIENT_PID" 2>/dev/null; then
+    if [[ "\$FINISHED" == 0 ]]; then
         CID="\$(cat "\$CID_FILE" 2>/dev/null || true)"
         if [[ -n "\$CID" ]]; then
             # Async on purpose: the runtime daemon performs the kill, and a
@@ -298,7 +299,9 @@ cleanup() {
             # shell is inside its EXIT trap here.
             docker kill "\$CID" >/dev/null 2>&1 &
         fi
-        kill "\$CLIENT_PID" >/dev/null 2>&1 || true
+        if [[ -n "\$CLIENT_PID" ]]; then
+            kill "\$CLIENT_PID" >/dev/null 2>&1 || true
+        fi
     fi
     if [[ -n "\$MARKER_PID" ]]; then
         kill "\$MARKER_PID" >/dev/null 2>&1 || true
@@ -336,6 +339,7 @@ CLIENT_PID=\$!
 MARKER_PID=\$!
 STATUS=0
 wait "\$CLIENT_PID" || STATUS=\$?
+FINISHED=1
 exit "\$STATUS"
 WRAPPER_EOF
 chmod +x "$WRAPPER"

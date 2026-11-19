@@ -734,6 +734,8 @@
         "klayout_tools._layout",
         "klayout_tools._native",
         "klayout_tools._openroad_engine",
+        "klayout_tools._openroad_logs",
+        "klayout_tools._openroad_process",
         "klayout_tools._paths",
         "klayout_tools._power_activity",
         "klayout_tools._request_fields",

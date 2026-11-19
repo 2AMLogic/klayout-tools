@@ -24,12 +24,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from klayout_tools import sim, synthesize
-
-#: The real ``subprocess.Popen``, captured at import time: the fakes patch
-#: the shared stdlib module object's ``Popen`` attribute, so a passthrough
-#: that spelled ``subprocess.Popen`` would recurse into itself.
-_REAL_POPEN = subprocess.Popen
+from klayout_tools import _openroad_engine, sim, synthesize
 
 
 def fake_completed(
@@ -44,24 +39,9 @@ def fake_completed(
 
 
 class FakePopen:
-    """Popen-shaped adapter around a legacy `fake_run`-style result.
+    """Completed OpenROAD invocation with the engine's Popen interface."""
 
-    `_openroad_engine._run_openroad` launches the engine through
-    `subprocess.Popen` (issue #5726: the launch needs its own process group
-    and a launch-time `invocation.json` write while the stage runs, which
-    the blocking `subprocess.run` cannot provide). Engine stubs that used to
-    intercept the shared global `subprocess.run` attribute therefore need
-    the same fake reachable through `subprocess.Popen`;
-    :func:`fake_popen` wraps an existing `fake_run(argv, **kwargs)` for
-    that. Exceptions the fake raises (launch failures, injected timeouts or
-    interrupts) propagate unchanged, preserving the old call semantics.
-    """
-
-    #: A pgid no real process group can have (pid_max tops out far below
-    #: this), so the engine's process-group kill in a stubbed test
-    #: deterministically raises `ProcessLookupError` instead of signaling
-    #: an unrelated process group on the host.
-    pid = 1 << 62
+    pid = (1 << 31) - 1  # representable as pid_t, above the kernel PID limit
 
     def __init__(self, completed: subprocess.CompletedProcess) -> None:
         self._completed = completed
@@ -82,27 +62,14 @@ class FakePopen:
         return self.returncode
 
 
-def fake_popen(fake_run: Callable) -> Callable:
-    """Turn a legacy `fake_run(argv, **kwargs) -> CompletedProcess` into a
-    `subprocess.Popen`-shaped factory for :class:`FakePopen`.
+def patch_openroad_run(monkeypatch, fake_run: Callable) -> None:
+    """Share one stub between blocking probes and the isolated OpenROAD launch."""
 
-    Only engine-shaped argv (`openroad ...`) reaches `fake_run`; every other
-    argv is launched by the *real* `subprocess.Popen`. The fakes patch the
-    shared stdlib module object (tests patch `place_and_route.subprocess.Popen`),
-    so a module-global `Popen` patch is visible to real `subprocess.run`
-    internals too -- including the git probe `conftest.real_build_identity_git`
-    deliberately keeps real by handing `build_identity` the unpatched `run`
-    (issue #5726 added the first module-global `Popen` patch). Real `run`
-    resolves `Popen` through those same globals, so a fake that asserted on
-    non-engine argv broke the probe; passing non-engine argv through keeps
-    that protection working for the new launch path as well."""
+    def popen(argv, **kwargs):
+        return FakePopen(fake_run(argv, **kwargs))
 
-    def factory(argv, **kwargs):
-        if argv[:1] == ["openroad"]:
-            return FakePopen(fake_run(argv, **kwargs))
-        return _REAL_POPEN(argv, **kwargs)
-
-    return factory
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(_openroad_engine, "Popen", popen)
 
 
 _STUB_VERSION_BANNER = "ngspice-99 : stub banner\n"
