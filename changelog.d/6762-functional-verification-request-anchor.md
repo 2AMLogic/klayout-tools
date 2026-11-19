@@ -1,16 +1,15 @@
-- **`klt functional-verification`'s `{path, scope}` envelopes no longer vary
-  with the directory `klt` is invoked from** (#6762, 2026-11-19):
-  `environment.sources[]`, `environment.{results_xml,test_log,build_log}`, the
+- **`klt functional-verification` uses the request's base directory to select the
+  repo for its `{path, scope}` envelopes** (#6762, 2026-11-19).
+  `environment.sources[]`, `environment.{results_xml,test_log,build_log}`,
   per-seed `environment.initial_state.runs[].results_xml` and mutation
-  `mutation_testing.results[].log_path` resolved their `scope` against the
-  repo containing the *process cwd*, so one request over the same inputs
-  produced a different committed blob per invoking directory (`{"path": null,
-  "scope": "external"}` instead of `{"path": "rtl/gcd.v", "scope": "repo"}`).
-  They now resolve against the repo containing the *request* — its own
-  directory, or `--base-dir` — the same anchor `docs/cli/functional-verification.md`
-  already documents for every relative path in the request. **Reports can
-  change** for a run whose cwd sat in a different repo than its request
-  (`external` ↔ `repo`); a request outside every repo reports `external`
-  throughout, as does a `-o/--outdir` outside the request's repo. `sha256`
-  values are unchanged. No field is added or removed and no `schema_version`
-  bumps. `klt em` and the OpenROAD engine logs keep their cwd anchor.
+  `mutation_testing.results[].log_path` previously used the repo containing
+  the invoking directory. They now use the repo containing the request file's
+  directory by default. For stdin and inline JSON without `--base-dir`, the
+  invoking directory is the base for relative request paths, so envelopes can
+  differ between working directories. A fixed absolute `--base-dir` pins the
+  classification repo for every request form. A relative `-o/--outdir` still
+  follows the invoking directory, so output paths and scopes can change even
+  with a fixed base. Present paths outside the selected repo have scope
+  `external`, as do all present paths if the base lies outside every repo.
+  The schema version, fields and digest calculation are unchanged.
+  `klt em` and the OpenROAD engine logs keep their cwd anchor.
