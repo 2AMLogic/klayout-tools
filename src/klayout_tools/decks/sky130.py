@@ -380,6 +380,8 @@ from . import (
 from .sky130_lvt import lvt_mos_flavour
 from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
 
+DRC_RULE_SOURCES = ("sky130_unmodeled",)
+
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
 # rules only -- see the module docstring's own citation of this repo/commit
@@ -1791,10 +1793,7 @@ DECK: list[DrcRule] = [
 # `DrcRule(...)` literals: a row-per-source-line table can be diffed directly
 # against that contiguous section of the upstream file, which is the property
 # that makes a transcription of this size reviewable. The rules it builds are
-# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below), and
-# they live in *this* module on purpose -- `decks.deck_source_path()` hashes
-# this file as the deck's identity for `provenance.deck.content_hash`, so a
-# rule table moved to a sibling module would be invisible to that hash.
+# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below).
 #
 # Grid: **0.005um for every checked layer**, verbatim -- the source block
 # passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer
