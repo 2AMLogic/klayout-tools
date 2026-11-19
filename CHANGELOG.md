@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
+  the `diode` generator now runs on gf180mcu. `voltage_class` accepts
+  `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck
+  recognises); `kind="n_psub"` extracts as `diode_nd2ps_06v0` and
+  `"p_nwell"` as `diode_pd2nw_06v0`, both DRC-clean and LVS-matching. An
+  *omitted* `voltage_class` now resolves to the PDK's own flavour (still
+  `"05v5"` on sky130, so sky130 output is unchanged); naming the other
+  family's flavour is a `GenError`. The declared `voltage_class` default stays
+  `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
+  one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
+
+- **`klt sim --resume` no longer refuses a sharded resume that has fewer
+  outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
+  reused finished shards, the replacement dispatch still asked for the
+  originally requested fleet size and tripped the `remote.hosts (N) exceeds
+  the number of units to dispatch (M) -- an idle fleet member would still be
+  billed` refusal, stranding a half-finished sweep (e.g. `--hosts 2` with one
+  shard collected and one lost). A resume that reused units now caps the fleet
+  at the units still outstanding; a fresh run (or a resume that reused nothing)
+  with `hosts` above its unit count is refused exactly as before. No JSON field
+  changes.
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
   sim`'s netlist identity cut every line at the first whitespace-preceded `$`

@@ -83,7 +83,10 @@ this document (and the code) win.
   `--resume` first harvests the retained shard map: shards whose remote jobs
   are already terminal (`done`) are collected and their units reused, and
   only the unlaunched/unfinished/failed ones are submitted again (see
-  "Lost and interrupted shards are resumable too" below). See "Wall-clock
+  "Lost and interrupted shards are resumable too" below). On a resume the
+  fleet size is capped at the number of outstanding units, so reusing units
+  never trips the "hosts exceeds the number of units" refusal (a fresh run
+  with `--hosts` above its unit count is still refused). See "Wall-clock
   budget, orphan safety, and resume" below.
 - `--attach JOB_ID` — re-attach to an already-submitted `batch` job (the id
   `klt sim` prints on stderr at launch) instead of submitting a new one.
