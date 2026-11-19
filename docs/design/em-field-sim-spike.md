@@ -163,9 +163,13 @@ Documented in the same field-table style as `klt sim`
 versioned per command, not the string-typed `"schema"` field the SPICE
 spike originally proposed before that convention existed — `klt sim` itself
 notes this deviation, and this spike adopts the settled convention directly
-rather than repeating the now-corrected mistake). **This is a proposed
-shape for review, not a shipped contract**, and no `klt` verb, dependency,
-or line of solver-invoking code exists yet.
+rather than repeating the now-corrected mistake). **Shipped for one slice (#5616):** `engine: "geode_fem"`, `solve_mode:
+"quasi_static"`, `outputs: ["c"]` on a caller-supplied mesh is implemented
+as `klt em` — see [docs/cli/em.md](../cli/em.md) for the shipped request,
+response and exit codes (which differ in detail from the examples below).
+Everything else in this section (driven/eigenmode modes, `layout`/`region`/
+`stackup`/`ports`/`frequency`, the other outputs) **remains a proposed shape
+for review, not a shipped contract**.
 
 ### Request
 

@@ -66,7 +66,6 @@ from . import (
     tap_distance_cmd,
     techmap_cmd,
     trajectory_cmd,
-    version_cmd,
     wave_cmd,
     yield_campaign_cmd,
     yield_cmd,
@@ -78,6 +77,7 @@ from . import (
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
@@ -88,8 +88,10 @@ from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
 from .parsers.components import add_components_parser
+from .parsers.em import add_em_parser
 from .parsers.extract import add_extract_parser
 from .parsers.signoff import add_signoff_parser
+from .parsers.version import add_version_parser
 
 
 def _add_format_arg(
@@ -210,7 +212,7 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = DocArgumentParser(
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
@@ -226,7 +228,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
-
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
@@ -267,7 +268,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_env_provenance_parser(subparsers)
     _add_evidence_parser(subparsers)
     add_artifact_parser(subparsers, _no_subcommand_handler, _add_format_arg)
-    _add_version_parser(subparsers)
+    add_version_parser(subparsers, _add_format_arg)
 
     add_extract_parser(
         subparsers,
@@ -337,6 +338,8 @@ def create_parser() -> argparse.ArgumentParser:
     _add_kb_parser(subparsers)
 
     _add_mom_parser(subparsers)
+
+    add_em_parser(subparsers, _add_format_arg)
 
     _add_power_parser(subparsers)
 
@@ -3290,33 +3293,6 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(lint_parser)
     lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
-
-
-def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``version`` verb (issue #1202).
-
-    A verb rather than only a flag, because the ``--version`` flag has no
-    ``--format`` of its own: a machine consumer gating on "is this build a
-    release?" needs the structured payload, not a string to re-parse.
-    """
-    version_parser = subparsers.add_parser(
-        "version",
-        help="report the running build's identity (release vs post-tag build)",
-        description=(
-            "Report which klayout-tools build is running: its version, the "
-            "git commit it was built from, and whether that commit is this "
-            "version's release tag. Only a clean build made exactly at the "
-            "release tag carries the bare `X.Y.Z`; any other build's "
-            "distribution version is a distinct PEP 440 dev version "
-            "(`X.Y.(Z+1).devN+g<sha>`, plus `.dirty` for uncommitted "
-            "changes), so it can never satisfy a `klayout-tools==X.Y.Z` "
-            "pin. Identifying the build never fails: an unrecoverable "
-            "identity is reported as `X.Y.Z.dev0+unknown` with "
-            "`is_release: null`, not as an error."
-        ),
-    )
-    _add_format_arg(version_parser)
-    version_parser.set_defaults(func=version_cmd.run)
 
 
 def _add_kb_parser(subparsers: argparse._SubParsersAction) -> None:
