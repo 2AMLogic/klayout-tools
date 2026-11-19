@@ -3604,11 +3604,13 @@ created before `openroad` launches and the engine streams into them, so
 `tail -f .klt/place-and-route/openroad-logs/<invocation_id>/stdout.log` shows
 progress during a long stage, and an interrupted run keeps whatever OpenROAD
 had flushed. OpenROAD may block-buffer stdout when it is not on a TTY, so
-lines can lag the engine; this has not been measured. `invocation.json` is
-written when the process ends. As a single anecdotal sizing hint (not a
-model): a ~44k-instance IHP SG13G2 design took roughly 2 h+ in the `route`
-stage versus about 3 min for the other stages combined (klt 0.8.1.dev442,
-OpenROAD 26Q3-1510).
+lines can lag the engine; this has not been measured. At launch, `klt` writes
+`invocation.json` with `"outcome": "running"`. When the invocation finishes,
+`klt` atomically replaces that snapshot with the final record.
+
+As a single anecdotal sizing hint (not a model): a ~44k-instance IHP SG13G2
+design took roughly 2 h+ in the `route` stage versus about 3 min for the
+other stages combined (klt 0.8.1.dev442, OpenROAD 26Q3-1510).
 
 Successful JSON responses add `engine_logs`, an array in invocation order.
 Each entry contains:
@@ -3620,6 +3622,7 @@ Each entry contains:
 | `script_path`, `metrics_path` | Normalized locations of the invoked script and requested metrics output; these files can be replaced by a later run. |
 | `directory`, `stdout_path`, `stderr_path`, `metadata_path` | Normalized retained-log locations. |
 | `outcome`, `returncode` | `exited` with the actual process code, or `launch_failed`, `timed_out`, or `interrupted` with a null code. |
+| `container_id` | The 64-digit hexadecimal container ID from the generated Docker wrapper's `klt-openroad-cid <id>` stderr line, or `null` if no ID was recorded (for example, with native OpenROAD or an older wrapper). |
 | `retention_errors` | Secondary write failures, each with `artifact` and `error`; empty when all logs were written. |
 
 New path fields use the shared `{path, scope}` convention: `repo` paths are
