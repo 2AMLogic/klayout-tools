@@ -440,10 +440,6 @@
       "lines": 667
     },
     {
-      "path": "src/klayout_tools/mcp_tools.py",
-      "lines": 504
-    },
-    {
       "path": "src/klayout_tools/metrics.py",
       "lines": 521
     },
