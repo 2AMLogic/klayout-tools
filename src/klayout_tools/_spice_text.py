@@ -25,6 +25,7 @@ real reasons, recorded in :func:`fold_spice_continuations`.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Iterator
 
 #: The package's shared inline-comment rule, as one pattern for every
 #: netlist reader (issue #5417). Two markers:
@@ -125,3 +126,46 @@ def fold_spice_continuations(lines: list[str]) -> list[str]:
         else:
             folded.append(line)
     return folded
+
+
+def logical_lines(text: str) -> list[str]:
+    """Netlist lines with ``+`` continuations joined and comments removed.
+
+    The whole pre-pass in one call (issue #5779), for the readers -- ``sim``'s
+    ``_logical_netlist_lines`` and the device-multiplier lint -- that want
+    cards and nothing else: each line is stripped, a blank or full-line ``*``
+    comment is dropped, :func:`strip_spice_inline_comment` removes an inline
+    comment, and :func:`fold_spice_continuations` joins the ``+`` lines. An
+    orphan ``+`` continuation (nothing above it to fold onto) is dropped, as
+    ``sim.py`` has always done -- see :func:`fold_spice_continuations` for why
+    that choice stays per-caller.
+
+    Deliberately lexical, not a complete SPICE parser: ``.include``/``.lib``
+    are not followed, and a ``$`` glued to the next token
+    (``.include $PDK_ROOT/...``) survives, per the shared inline-comment rule.
+    """
+    kept: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("*"):
+            continue
+        line = strip_spice_inline_comment(line)
+        if line:
+            kept.append(line)
+    return [line for line in fold_spice_continuations(kept) if not line.startswith("+")]
+
+
+def circuit_lines(lines: Iterable[str]) -> Iterator[str]:
+    """Yield nonblank, stripped cards outside ngspice control blocks."""
+    in_control = False
+    for line in lines:
+        card = line.strip()
+        if not card:
+            continue
+        keyword = card.split(None, 1)[0].lower()
+        if keyword == ".control":
+            in_control = True
+        elif keyword == ".endc":
+            in_control = False
+        elif not in_control:
+            yield card
