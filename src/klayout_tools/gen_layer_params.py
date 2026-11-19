@@ -530,8 +530,8 @@ _MAX_CAP_TOP_PLATE_REQUIRES = max(
 )
 
 #: ``cap_array``'s top-plate requires-mask slots (``cap_top_requires_<i>_*``)
-#: are generated from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: are generated from this value, declared with ``hidden=True`` (issue #6757)
+#: in :mod:`klayout_tools.gen_pcells.cap_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 
@@ -796,8 +796,8 @@ _MAX_RES_FLAVOR_LAYERS = max(
 )
 
 #: ``res_array``'s flavour mask slots (``res_flavor_<i>_*``) are generated
-#: from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: from this value, declared with ``hidden=True`` (issue #6757) in
+#: :mod:`klayout_tools.gen_pcells.res_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 #: The default ``res_array`` flavour: the first flavour listed for each family
@@ -2372,7 +2372,7 @@ def _cap_array_layer_params(
     ``top_plate_via_metal`` being optional fields.
 
     Also resolves, all of them harness-computed from the resolved family and
-    never request-facing (see :data:`_HIDDEN_PARAMS`):
+    never request-facing (each declared ``hidden=True``, issue #6757):
 
     - the :data:`_CAP_GEOMETRY_MIN_KEYS` geometry floors (issues #1455/#1555,
       see :func:`_cap_geometry_min_um`) -- ``0.0`` each for a family that

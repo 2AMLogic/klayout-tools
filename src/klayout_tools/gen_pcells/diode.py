@@ -76,6 +76,7 @@ def _build_diode_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     self.TypeLayer,  # type: ignore[attr-defined]
                     f"{role} drawing layer",
                     default=kdb.LayerInfo(0, 0),
+                    hidden=True,
                 )
 
         def display_text_impl(self) -> str:
