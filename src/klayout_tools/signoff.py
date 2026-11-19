@@ -5430,11 +5430,11 @@ def _grade_check_outcome(
             "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
         }
     reason = _non_passing_reason(kind, envelope, allowed_kinds=allowed_kinds)
-    if reason == _REASON_NOTHING_CHECKED:
-        failure_detail = {
-            **failure_detail,
-            **vacuous.nothing_checked_item_detail(envelope, _citation(resolution)),
-        }
+    failure_detail.update(  # Issue #5692: name what was read (reverses #5479)
+        vacuous.nothing_checked_item_detail(envelope, _citation(resolution))
+        if reason == _REASON_NOTHING_CHECKED
+        else {"cited_evidence": _citation(resolution)}
+    )
     pin = pin_disclosure(spec, resolution, check_kind=kind)
     if pin.get("content_hash_pin") == PIN_STALE:
         # Name the failed comparison, exactly as the staleness verdict does.
