@@ -3629,11 +3629,8 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# PCell harness -- adapts a request's `params` to a PCellDeclarationHelper
-# subclass's declared parameter schema + produce_impl(), per spike section 1's
-# "KLayout PCells (native)" entry. Generic across every registered generator;
-# generator-specific knowledge (validation, port/bbox reporting) lives in each
-# _GeneratorSpec, not here.
+# PCell harness for request parameters and produce_impl(). Each _GeneratorSpec
+# supplies generator-specific validation and reporting.
 # --------------------------------------------------------------------------- #
 
 
@@ -3671,9 +3668,6 @@ def _resolve_params(
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     spec.validate(resolved)
     if spec.name == "mos_array":
-        # PDK-aware refinement of `_mos_array_validate`'s generic ring-gap
-        # checks (#6790): after they pass, reject an opening whose *drawn*
-        # implant notch would still violate the deck's same-layer rule.
         _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
     return resolved
 

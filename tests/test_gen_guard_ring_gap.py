@@ -319,8 +319,7 @@ def test_sg13g2_standalone_guard_ring_gap_still_accepted(tmp_path, sg13g2_pdk_ro
 
 
 def test_gf180mcu_mos_array_ring_gap_not_newly_rejected(tmp_path, both_pdk_root):
-    """gf180mcu is out of #6790's scope: a request this issue's rule would
-    reject on sg13g2 must keep its pre-issue behaviour there (accepted)."""
+    """GF180 still accepts this gap. Issue #6827 tracks its pplus.space.1 violation."""
     output = tmp_path / "gf180_mos.gds"
     generate(
         {
