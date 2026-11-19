@@ -668,7 +668,7 @@ the deck's track-alignment rules. The request has no control for it, and
 also no router option for a request field to drive: the flow runs
 `detailed_route -output_drc ... -output_maze ... -or_seed ...`, and OpenROAD
 `26Q3-1510-g6cb3f2b704`'s `help detailed_route` (read 2026-11-18) lists no
-option that places or snaps line ends. Its options are report paths, the
+option that places or snaps line ends. Its options include report paths, the
 routing-layer window, via and pin access (`-via_access_layer`,
 `-min_access_points`, `-no_pin_access`), the seed, distribution, and
 `-clean_patches` / `-repair_pdn_vias`.
