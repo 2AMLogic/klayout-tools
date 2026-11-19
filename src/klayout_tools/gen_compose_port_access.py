@@ -549,6 +549,7 @@ def _search_landing(
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pads_um: dict[_LayerPair, float] = {}
     pad_half: dict[_LayerPair, int] = {}
+    cut_half: dict[_LayerPair, int] = {}  # Round outward with a DBU tolerance.
     for via, lower, upper in ladder:
         extra = _array_extra_um(array, pitches_um[via]) if pitches_um else 0.0
         for metal in (lower, upper):
@@ -556,9 +557,7 @@ def _search_landing(
             pads_um[metal] = max(pads_um.get(metal, 0.0), side)
             half = landing_pad_half_dbu(side, cuts_um[via], dbu)
             pad_half[metal] = max(pad_half.get(metal, 0), half)
-        cuts_um[via] += extra
-    to_half = lambda um: max(1, int(math.ceil(um / dbu / 2.0)))  # noqa: E731
-    cut_half = {pair: to_half(side) for pair, side in cuts_um.items()}
+        cut_half[via] = max(1, math.ceil((cuts_um[via] + extra) / (2 * dbu) - 1e-9))
     space_dbu = {
         pair: int(round(_min_spacing_um(variant, pair) / dbu))
         for pair in {**pad_half, **cut_half}

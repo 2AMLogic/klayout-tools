@@ -12,6 +12,7 @@ so neither exceeds the 500-line per-file ratchet ceiling.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -69,6 +70,51 @@ def test_every_registered_verb_yields_a_valid_tool(tools):
 
 def test_bridge_does_not_expose_itself(tools):
     assert not any(t.top_verb == "mcp" for t in tools)
+
+
+DOCS_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/"
+
+
+def _cli_docs_url(tool):
+    match = re.search(r"\(CLI docs: (\S+)\)$", tool.description)
+    assert match, f"{tool.name}: description carries no trailing CLI docs URL"
+    return match.group(1)
+
+
+def _heading_slugs(page: Path) -> set[str]:
+    """GitHub's anchor for each ATX heading: rendered text, lowercased, with
+    punctuation dropped and spaces turned into hyphens."""
+    slugs = set()
+    for line in page.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"#{1,6}\s+(.*)", line)
+        if heading:
+            text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.group(1))
+            text = re.sub(r"[^\w\s-]", "", text.replace("`", "").lower())
+            slugs.add(re.sub(r"\s", "-", text.strip()))
+    return slugs
+
+
+def test_sim_merge_and_plan_link_to_their_manual_sections(tools):
+    # Neither verb has its own page: both are sections of docs/cli/sim.md. Exact
+    # fragments, because a swapped pair would still reach the same file.
+    merge = "sim.md#merging-per-request-reports-klt-sim-merge-3045"
+    plan = "sim.md#planning-shards-klt-sim-plan-3423"
+    assert _cli_docs_url(_tool(tools, "klt_sim_merge")) == DOCS_URL + merge
+    assert _cli_docs_url(_tool(tools, "klt_sim_plan")) == DOCS_URL + plan
+    # The verbs that do own a page, and `klt sim` itself, stay unanchored.
+    assert _cli_docs_url(_tool(tools, "klt_sim")) == DOCS_URL + "sim.md"
+    assert _cli_docs_url(_tool(tools, "klt_layers")) == DOCS_URL + "layers.md"
+
+
+def test_every_catalog_cli_docs_link_resolves_in_the_checkout(tools):
+    for tool in tools:
+        url = _cli_docs_url(tool)
+        assert url.startswith(DOCS_URL), tool.name
+        page, _, fragment = url[len(DOCS_URL) :].partition("#")
+        path = REPO / "docs" / "cli" / page
+        assert path.is_file(), f"{tool.name}: {url} has no page in the checkout"
+        if fragment:
+            assert fragment in _heading_slugs(path), f"{tool.name}: no #{fragment}"
 
 
 def test_fleet_verbs_hidden_unless_opted_in(tools, policy):
