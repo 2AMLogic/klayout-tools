@@ -25,12 +25,9 @@ installed, no deck involved) are ``null`` -- never fabricated.
 
 This module also owns the single ``sha256_file`` implementation the verbs
 share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
-plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
-and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
-#1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
-WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
-leaving ``equiv.py``'s independent error-formatting function without it;
-issue #2453 narrowed it for scripts under the host temp dir).
+plus ``_yosys_version``/``_combined_content_hash`` (issue #1112) and
+``wasi_sandbox_hint_if_applicable`` (issues #1755/#1368; #2453 narrowed
+it to scripts under the host temp dir).
 
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
@@ -44,7 +41,6 @@ import hashlib
 import os
 import re
 import subprocess
-import sys
 import tempfile
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -65,6 +61,7 @@ from ._digest import (
 from ._digest import (
     sha256_file_required as sha256_file_required,
 )
+from ._engine_remedy import _warn_klayout_version_mismatch
 from ._report_verify import get_path
 from .decks.history import is_deck_hash_released
 
@@ -514,25 +511,6 @@ def _klayout_version_mismatch(actual: str | None, expected: str | None) -> bool:
     return actual != expected
 
 
-def _warn_klayout_version_mismatch(actual: str | None, expected: str | None) -> None:
-    """The stderr warning printed once per report when
-    :func:`_klayout_version_mismatch` is ``True`` (issue #1490) -- a caller
-    piping ``--format json`` to a file still sees this on the terminal,
-    since JSON output goes to stdout only (``docs/json-contract.md``)."""
-    message = (
-        f"klt: warning: resolved klayout engine version {actual!r} differs "
-        f"from klayout=={expected}, the version this klayout-tools build/"
-        "commit was tested against -- DRC/LVS report counts (deck content "
-        "hash, rules_skipped, category_counts, ...) may differ from a "
-        f"report generated with klayout=={expected}, even though the "
-        "verdict itself is unaffected. To reproduce the exact engine: "
-        f'`uv tool install "klayout-tools @ git+...@<sha>" '
-        f"--with klayout=={expected}` -- see docs/json-contract.md's "
-        '"Shared `provenance` block".'
-    )
-    print(message, file=sys.stderr)
-
-
 def _pdk_block(
     pdk: dict[str, Any] | None, deck_path: str | None = None
 ) -> dict[str, Any] | None:
@@ -794,7 +772,11 @@ def _deck_block(
     """
     if name is None:
         return None
-    deck_hash = content_hash(path)
+    from ._deck_hash import source_file_hash
+    from .decks import deck_source_path
+
+    builtin = path and os.path.abspath(path) == deck_source_path(name)
+    deck_hash = source_file_hash(path) if builtin else content_hash(path)
     block: dict[str, Any] = {
         "name": name,
         "content_hash": deck_hash,
@@ -862,13 +844,9 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report would carry for ``name``, computed the only way that can
-    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
-    drift from what a real run records.
+    block a report carries for ``name``, computed by :func:`_deck_block`.
 
-    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
-    without which :func:`~klayout_tools.decks.deck_source_path` would happily
-    import and hash any sibling module of the deck package.
+    Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
     from .decks import deck_names, deck_source_path
 
@@ -893,6 +871,8 @@ def build_provenance(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
+    klayout_version_override: str | None = None,
+    klayout_version_override_active: bool = False,
     deck_path_envelope: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
@@ -953,6 +933,9 @@ def build_provenance(
     not every ``build_provenance`` caller. A ``True`` result also prints a
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
+    ``klayout_version_override`` (+ ``..._active``, issue #5660) repopulates
+    ``klayout_version`` from the binary that ran the deck (``--engine klayout``
+    sites); the wheel's version moves to ``klayout_module_version``.
     """
     if input_role not in INPUT_ROLES:
         raise ValueError(
@@ -960,6 +943,8 @@ def build_provenance(
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
     actual_klayout_version = _klayout_version()
+    if klayout_version_override_active:
+        actual_klayout_version = klayout_version_override
     git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
@@ -979,27 +964,28 @@ def build_provenance(
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
-        # Build-time-recorded only -- deliberately *not*
-        # `build_identity.klayout_version_expected()`'s live-checkout
-        # fallback, which shells out to `git` (issue #1490). That fallback is
-        # fine as a one-shot cost for `klt version --format json`; calling it
-        # from every `klt drc`/`klt lvs` run would add a subprocess call to
-        # every single report on a dev/editable install, and no
-        # `uv tool install ... @<sha>` install (the reproducibility scenario
-        # this field exists for) is ever editable -- `hatch_build.py` always
-        # records `KLAYOUT_VERSION_EXPECTED` for that install path, so the
-        # live probe would only ever fire for a case this field need not
-        # cover. An editable/dev checkout with no build-time record simply
-        # reports `klayout_version_mismatch: False` ("no confirmed
-        # mismatch"), matching `_klayout_version_mismatch`'s documented
-        # "unresolvable renders as False" rule.
+        # Build-time-recorded only -- deliberately *not* the live-checkout
+        # `git` fallback of `build_identity.klayout_version_expected()`
+        # (issue #1490): it is fine as a one-shot cost for `klt version`,
+        # but every `klt drc`/`klt lvs` report would gain a subprocess call
+        # on a dev/editable install -- and no `uv tool install ... @<sha>`
+        # install (the case this field exists for) is ever editable. With
+        # no build-time record the field reports `False`, matching
+        # `_klayout_version_mismatch`'s "unresolvable renders as False" rule.
         expected_klayout_version = build_identity._recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version
         )
         block["klayout_version_mismatch"] = mismatch
-        if mismatch:
+        if mismatch and not klayout_version_override_active:
             _warn_klayout_version_mismatch(
-                actual_klayout_version, expected_klayout_version
+                actual_klayout_version,
+                expected_klayout_version,
+                # Already computed above for `klt_reinstall_spec` -- the
+                # warning reuses it instead of re-deriving, so the hot path
+                # gains no probe (issue #5601).
+                reinstall_spec,
             )
+    if klayout_version_override_active:
+        block["klayout_module_version"] = _klayout_version()
     return block

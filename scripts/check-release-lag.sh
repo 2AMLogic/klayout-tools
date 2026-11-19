@@ -161,7 +161,7 @@ fi
 # Same ordering RELEASING.md documents: newest tag by creation date.
 LATEST_TAG="$(git -C "$REPO" tag --sort=-creatordate | head -1)"
 
-CHANGELOG_HINT="CHANGELOG.md's \"## Unreleased\" section lists what has landed on main but is not yet in a tagged release."
+CHANGELOG_HINT="See changelog.d/ and CHANGELOG.md's \"## Unreleased\" section for changes pending release."
 
 if [ -z "$LATEST_TAG" ]; then
     STATUS="no_tags"

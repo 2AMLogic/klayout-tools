@@ -23,13 +23,9 @@ stays in ``lvs.py``.
 Dependency surface mirrors ``lvs_mismatch.py``'s discipline: this module
 calls out to ``lvs.py``'s ``LvsError`` and ``CATEGORY_*`` constants, imported
 *inside* the handful of functions that use them (never at module scope), so
-this module never has a load-time dependency back on ``lvs.py`` -- only
-``lvs.py`` depends on this module at import time. ``lvs.py`` in turn imports
-this module's entry points (:func:`_resolve_netgen_setup`,
-:func:`_resolve_netgen_binary`, :func:`_run_netgen_lvs`, plus
-:data:`_NETGEN_DEFAULT_TIMEOUT_S`) back at
-module scope, preserving ``klayout_tools.lvs.<name>`` as a working import
-path for every name the test suite/callers used before this split.
+this module has no load-time dependency back on ``lvs.py``.
+The engine branch in ``lvs_netgen_branch.py`` imports the Netgen helpers
+and the default timeout directly from this module.
 :func:`_mismatch` is imported from ``lvs_mismatch.py`` at module scope
 instead, since that module carries no load-time dependency on either this
 module or ``lvs.py``.
