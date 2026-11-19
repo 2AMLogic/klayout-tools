@@ -5,6 +5,13 @@ A request can supply a tagged mesh or ask `klt em` to mesh a labelled GDS
 region using its PDK stackup. Both paths use `engine: "geode_fem"`,
 `solve_mode: "quasi_static"` and `outputs: ["c"]`.
 
+How close those numbers are to the true answer is answered by
+[`docs/design/em-validation.md`](../design/em-validation.md)
+([#5618](https://github.com/2AMLogic/klayout-tools/issues/5618)): the
+closed-form parallel-plate bar through this repo's own GDS + stackup path,
+the convergence-order gate on the exact coax oracle, and the independent
+`klt mom` cross-check with its committed evidence.
+
 ```
 klt em request.json --format json
 ```

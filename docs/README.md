@@ -103,6 +103,7 @@ docs/
     digital-fleet-unit-abstraction-decision.md
     em-field-sim-spike.md
     em-site-export-format.md
+    em-validation.md
     extract-fidelity-roadmap.md
     fastcap-oracle.md
     flute-congestion-precheck-results.md
