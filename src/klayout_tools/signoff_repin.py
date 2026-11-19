@@ -44,6 +44,7 @@ from .signoff import (
     _normalize_evidence_entry,
     _resolve_evidence,
 )
+from .signoff_artifact import ArtifactUnavailable
 from .signoff_evidence_pin import PIN_STALE, PIN_VERIFIED, content_hash_pin_state
 
 #: ``schema_version`` of the ``--repin`` payload.
@@ -121,7 +122,10 @@ def _classify_entry(
     if spec is None:
         return None, SKIP_INVALID_EVIDENCE, None
 
-    resolution, _reason = _resolve_evidence(spec, repo_root)
+    try:
+        resolution, _reason = _resolve_evidence(spec, repo_root)
+    except ArtifactUnavailable:
+        return None, SKIP_UNRESOLVED_EVIDENCE, spec.get("file")
     if resolution is None:
         return None, SKIP_UNRESOLVED_EVIDENCE, spec.get("file")
 

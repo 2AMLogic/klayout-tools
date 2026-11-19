@@ -231,10 +231,47 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     return max(_VIA_LANDING_SIZE_UM, needed_side_um)
 
 
+def _landing_pad_floor_um(
+    variant: str,
+    pad_layer: tuple[int, int],
+    via_layer: tuple[int, int],
+    via_side_um: float,
+) -> tuple[float, list[tuple[str, float]]]:
+    """The deck floor one ``(landing, via)`` landing-pad pair must clear.
+
+    Returns ``(floor_side_um, floors)``: ``floor_side_um`` is the smallest
+    pad side the resolved deck's own rules permit on this pair -- the larger
+    of the pad layer's minimum-area side (issue #2072) and via side plus
+    twice the pair's minimum enclosing-margin (issue #2074) -- and ``floors``
+    is one ``(rule_id, required_side_um)`` entry per rule that shapes it, so
+    a rejection can name the binding rule rather than a bare threshold.
+    Both are empty when the layer carries no such rule (or the family/deck
+    cannot be resolved): anything the caller asks for is then legal.
+
+    Issue #5803: this is the floor ``routing.landing_pad_size_um``'s
+    override is validated against -- a pad the deck forbids is an
+    application error naming the rule, not a silently grown one.
+    """
+    floor_side = 0.0
+    floors: list[tuple[str, float]] = []
+    area_floor = _min_area_um2_for_layer(variant, pad_layer)
+    if area_floor is not None:
+        needed = math.sqrt(area_floor[0])
+        floors.append((area_floor[1], needed))
+        floor_side = max(floor_side, needed)
+    enclosure = _min_enclosing_margin_um_for_layer(variant, pad_layer, via_layer)
+    if enclosure is not None:
+        needed = via_side_um + 2 * enclosure[0]
+        floors.append((enclosure[1], needed))
+        floor_side = max(floor_side, needed)
+    return floor_side, floors
+
+
 def _resolve_landing_pad_sizes(
     routed_geometry: list[dict[str, Any]],
     variant: str,
     via_drop_size_um: dict[tuple[int, int], float],
+    override_um: float | None = None,
 ) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
     """Landing-pad sides keyed by ``(landing_layer, via_layer)`` (#2074).
 
@@ -244,11 +281,20 @@ def _resolve_landing_pad_sizes(
     can enclose different cuts with different margins on adjacent hops.
     Missing enclosure rules leave the baseline/area floor unchanged.
 
+    ``override_um`` (issue #5803) is ``routing.landing_pad_size_um``: a
+    caller-set pad side replacing the fixed baseline. A pair whose deck
+    floor exceeds it is an application error naming the binding rule --
+    silently growing the pad back would defeat the override's whole purpose
+    (reconciling a generator's terminal pitch with the pad footprint),
+    exactly the #1548 silently-dropped-intent failure mode. A pair with no
+    shaping rule draws at exactly the override; the default (``None``) is
+    byte-for-byte the pre-#5803 resolution.
+
     Resolve once per distinct pair and pass the result into drawing; the
     router's existing spacing pre-checks keep their baseline footprint,
     as with the area and via-width floors described above.
     """
-    from .gen_compose import _VIA_DROP_SIZE_UM
+    from .gen_compose import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
 
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
@@ -256,15 +302,31 @@ def _resolve_landing_pad_sizes(
             via_layer = drop["via_layer"]
             for pad_layer in drop.get("landing_layers", ()):
                 pair = (pad_layer, via_layer)
-                if pair not in landing_pad_size_um:
-                    side = _landing_pad_side_um_for_layer(variant, pad_layer)
-                    enclosure = _min_enclosing_margin_um_for_layer(
-                        variant, pad_layer, via_layer
-                    )
-                    if enclosure is not None:
-                        via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
-                        side = max(side, via_side + 2 * enclosure[0])
-                    landing_pad_size_um[pair] = side
+                if pair in landing_pad_size_um:
+                    continue
+                via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
+                floor_side, floors = _landing_pad_floor_um(
+                    variant, pad_layer, via_layer, via_side
+                )
+                if override_um is not None:
+                    if override_um < floor_side - 1e-9:
+                        rule_id, needed = max(floors, key=lambda f: f[1])
+                        raise GenComposeError(
+                            f"request.routing.landing_pad_size_um "
+                            f"({override_um:.4g}um) is below the resolved PDK "
+                            f"deck's own floor for a landing pad on layer "
+                            f"{pad_layer} over via layer {via_layer} -- "
+                            f"'{rule_id}' requires >= {needed:.4g}um. A "
+                            "smaller pad would draw a guaranteed `klt drc` "
+                            "violation; request at least "
+                            f"{floor_side:.4g}um for this deck, or omit "
+                            "routing.landing_pad_size_um to keep the default "
+                            "pads"
+                        )
+                    landing_pad_size_um[pair] = override_um
+                    continue
+                side = max(_VIA_LANDING_SIZE_UM, floor_side)
+                landing_pad_size_um[pair] = side
     return landing_pad_size_um
 
 

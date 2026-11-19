@@ -1076,7 +1076,13 @@ two things let a caller tell a slow run from a hang and budget the step:
   `unattributed_seconds` (the remainder no stage covers, so
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
   **exclusive**: a stage opened inside another is credited to the inner stage
-  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  only, so the parent's value excludes it (issue #5716). The `--progress`
+  `finished in Ns` line is **not** this quantity: it is wall time *inside* the
+  stage, inclusive of any stage nested in it, so for a parent stage it exceeds
+  that stage's `timing.stages` value by its children's time (e.g.
+  `device_extraction` with `--parasitics`, whose `parasitics_compute` runs
+  inside it). Use the stderr line to see how long a stage has been open, and
+  `timing.stages` to see where the time went. Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
   and passive-region work; **excludes** the `--parasitics` compute),
   `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,

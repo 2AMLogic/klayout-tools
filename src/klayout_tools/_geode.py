@@ -1,6 +1,4 @@
-"""The geode adapter for ``klt em`` (issue #5616): the only geode-specific
-code, isolated here so a change in the engine's CLI touches this module
-only.
+"""Geode CLI adapter for meshing and capacitance extraction.
 
 The engine interface is the released geode-fem CLI as read from its
 public source (``rjwalters/geode-fem``, ``crates/geode-cli``): a problem
@@ -18,10 +16,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 from typing import Any
 
+from ._engine_proc import run_in_group
 from ._paths import resolve_tool_binary
 
 #: The problem-spec schema version geode understands
@@ -177,3 +177,103 @@ def _reorder_matrix(
         )
     idx = {name: i for i, name in enumerate(engine_names)}
     return [[matrix[idx[a]][idx[b]] for b in surfaces] for a in surfaces]
+
+
+def _mesh_stats(path: str) -> dict[str, int]:
+    try:
+        summary = json.loads(_read_file(path))["mesh"]
+        counts = {key: summary["n_" + key] for key in ("nodes", "tets", "triangles")}
+    except (ValueError, KeyError, TypeError) as exc:
+        raise EmError("geode mesh report is missing mesh statistics") from exc
+    if any(type(value) is not int or value <= 0 for value in counts.values()):
+        raise EmError("geode mesh report has invalid mesh statistics")
+    return counts
+
+
+def _run_engine(
+    cmd: list[str], report_path: str, log_path: str, timeout: float, keep: bool
+) -> None:
+    where = f" (log: {log_path})" if keep else ""
+    try:
+        proc = run_in_group(
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired as exc:
+        _write_log(log_path, exc.stdout, exc.stderr)
+        raise EmError(f"geode {cmd[1]} timed out after {timeout:g}s{where}") from exc
+    except OSError as exc:
+        raise EmError(f"could not run geode at '{cmd[0]}': {exc}") from exc
+
+    # Failure evidence is retained and referenced, not discarded. A
+    # failed run still writes its ``kind: "error"`` report to the
+    # output path; its message beats a bare exit code.
+    _write_log(log_path, proc.stdout, proc.stderr)
+    if proc.returncode != 0:
+        detail = (
+            _engine_error_message(_read_file(report_path))
+            or (proc.stderr or "").strip()[-500:]
+            or "engine wrote no diagnostics"
+        )
+        raise EmError(f"geode {cmd[1]} exited {proc.returncode}: {detail}{where}")
+
+
+def write_geode_json(path: str, doc: dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(doc, handle, indent=2)
+        handle.write("\n")
+
+
+def _read_file(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _write_log(path: str, out: Any, err: Any) -> None:
+    def text(v: Any) -> str:
+        return v.decode("utf-8", "replace") if isinstance(v, bytes) else (v or "")
+
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(f"--- stdout ---\n{text(out)}\n--- stderr ---\n{text(err)}\n")
+
+
+def generate_mesh(
+    binary: str, layout: dict[str, Any], outdir: str, timeout: int, keep: bool
+) -> tuple[str, dict[str, int]]:
+    """Produce the tagged mesh and its matching capacitance spec together."""
+    mesh = os.path.join(outdir, "layout.msh")
+    layout_path = os.path.join(outdir, "layout.json")
+    write_geode_json(layout_path, layout)
+    spec = os.path.join(outdir, "spec.json")
+    report = os.path.join(outdir, "mesh-report.json")
+    cmd = [
+        binary,
+        "mesh",
+        layout_path,
+        "--analysis",
+        "capacitance",
+        "--mesh-out",
+        mesh,
+        "--spec-out",
+        spec,
+        "--output",
+        report,
+        "--gmsh-timeout",
+        str(timeout),
+    ]
+    _run_engine(cmd, report, os.path.join(outdir, "mesh.log"), timeout, keep)
+    if not os.path.isfile(mesh) or not os.path.isfile(spec):
+        raise EmError("geode mesh did not produce the mesh and capacitance spec")
+    return mesh, _mesh_stats(report)
+
+
+def solve_mesh(
+    binary: str, outdir: str, timeout: float, keep: bool
+) -> tuple[list[str], list[list[float]]]:
+    spec = os.path.join(outdir, "spec.json")
+    report = os.path.join(outdir, "report.json")
+    cmd = build_geode_command(binary, spec, report)
+    _run_engine(cmd, report, os.path.join(outdir, "solve.log"), timeout, keep)
+    return parse_capacitance_report(_read_file(report))

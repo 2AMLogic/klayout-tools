@@ -64,7 +64,6 @@ from ._provenance import (
     _yosys_version,
     build_provenance,
     content_hash,
-    wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
@@ -81,6 +80,7 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
+from ._yosys_error_messages import _yosys_error_message
 from .equiv_errors import EquivError
 from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public here
     CANONICAL_SIM_BACKEND,
@@ -753,34 +753,6 @@ def _sequential_error_message(stdout: str, stderr: str) -> str | None:
         "designs need a future phase (temporal induction / BMC via "
         "SymbiYosys)."
     )
-
-
-def _yosys_error_message(stdout: str, stderr: str, returncode: int | None) -> str:
-    """Build an actionable error message from a failed ``yosys -s`` run --
-    mirrors ``synthesize.py``'s ``_synthesis_error_message``: prefers the
-    last ``ERROR:`` line Yosys itself printed, falling back to a short tail
-    of captured output.
-
-    When the error line is the ``Can't open script file `<path>' for
-    reading: No such file or directory`` shape *and* ``<path>`` verifiably
-    exists on the host filesystem, appends a hint that the ``yosys`` on
-    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368/#1755; for a path under
-    the host temp dir the hint instead names the sandbox's private ``/tmp``
-    mount and leads with relocating the request (issue #2453). A script
-    path that genuinely does not exist is a different failure and is left
-    unchanged.
-    """
-    for stream in (stderr, stdout):
-        error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
-        if error_lines:
-            message = f"yosys equivalence check failed: {error_lines[-1]}"
-            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
-            return message
-
-    tail_source = (stderr or stdout).strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {returncode}: {snippet}"
 
 
 def _classify_sat_result(stdout: str) -> tuple[str, list[dict[str, str]]]:
