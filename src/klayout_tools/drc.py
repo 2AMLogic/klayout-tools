@@ -2627,11 +2627,11 @@ def rerun_drc_report(
     others. Use ``--check`` (cheap mode) to avoid this if that matters.
 
     Diffs the fresh report against the committed one via
-    :func:`klayout_tools.drc_report_check.drc_rerun_result`, excluding its
-    ``DRC_RERUN_EXCLUDE_PATHS``: the volatile ``provenance`` version strings
-    plus (issue #5660) the host-local ``environment.klayout_binary`` and the
-    wheel-axis ``provenance.klayout_module_version`` -- fields that
-    legitimately vary between runs of identical inputs.
+    :func:`klayout_tools.drc_report_check.drc_rerun_result`. Its
+    ``DRC_RERUN_EXCLUDE_PATHS`` covers volatile provenance versions, including
+    ``provenance.klayout_module_version``, and the host-local
+    ``environment.klayout_binary``. It also excludes ``deck_output`` because
+    a native deck may print per-run timings and paths.
     ``status: "drifted"`` names every other field that changed, including a
     changed ``violation_count``/``violations`` (the DRC-outcome-changed
     case) as well as a changed ``provenance.input.content_hash`` (the

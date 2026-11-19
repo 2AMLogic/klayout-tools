@@ -201,3 +201,62 @@ def test_sky130_omitted_voltage_class_is_05v5(tmp_path, pdk_root):
     _, explicit = _gen(tmp_path, pdk_root, kind="p_nwell", voltage_class="05v5")
     assert layout_omitted == _layer_boxes(explicit)
     assert "75/20" not in layout_omitted  # no hvi
+
+
+# --------------------------------------------------------------------------- #
+# Issue #6643: off-manufacturing-grid width_um/length_um warnings
+# --------------------------------------------------------------------------- #
+
+
+def _grid_warnings(report):
+    return [w for w in report["warnings"] if "manufacturing grid" in w]
+
+
+@pytest.mark.parametrize(
+    ("param", "other"), [("width_um", "length_um"), ("length_um", "width_um")]
+)
+def test_diode_off_grid_edge_warns_once(tmp_path, pdk_root, param, other):
+    """2.003um is on the 1nm dbu grid but off sky130's 5nm manufacturing grid:
+    exactly one warning for the off-grid edge, naming the grid and both
+    neighbours, while the dbu-based ``snapped_to_grid`` keeps its meaning."""
+    report, _ = _gen(tmp_path, pdk_root, **{param: 2.003, other: 2.0})
+    (warning,) = _grid_warnings(report)
+    assert f"generator 'diode': params.{param}=2.003um" in warning
+    assert "'sky130' manufacturing grid (0.005um)" in warning
+    assert "2um (below)" in warning
+    assert "2.005um (above)" in warning
+    assert f"params.{other}" not in warning
+    assert report["drc_hints"]["snapped_to_grid"] is False
+
+
+def test_diode_both_edges_off_grid_warn_separately(tmp_path, pdk_root):
+    report, _ = _gen(tmp_path, pdk_root, width_um=2.003, length_um=3.007)
+    width_warning, length_warning = _grid_warnings(report)
+    assert "params.width_um=2.003um" in width_warning
+    assert "2um (below)" in width_warning and "2.005um (above)" in width_warning
+    assert "params.length_um=3.007um" in length_warning
+    assert "3.005um (below)" in length_warning and "3.01um (above)" in length_warning
+
+
+@pytest.mark.parametrize(("kind", "vclass"), [("n_psub", "05v5"), ("p_nwell", "11v0")])
+def test_diode_off_grid_warning_covers_every_kind(tmp_path, pdk_root, kind, vclass):
+    report, _ = _gen(
+        tmp_path, pdk_root, kind=kind, voltage_class=vclass, width_um=2.003
+    )
+    assert len(_grid_warnings(report)) == 1
+
+
+@pytest.mark.parametrize(("width", "length"), [(2.0, 2.0), (0.4, 0.4), (10.0, 6.0)])
+def test_diode_on_grid_sizes_carry_no_warnings(tmp_path, pdk_root, width, length):
+    report, _ = _gen(tmp_path, pdk_root, width_um=width, length_um=length)
+    assert report["warnings"] == []
+
+
+def test_diode_off_grid_warning_matches_a_real_drc_finding(tmp_path, pdk_root):
+    """The warning is advisory (geometry is drawn as requested), so ``klt drc``
+    must still report the ``*.ongrid.*`` finding the warning predicts."""
+    report, gds = _gen(tmp_path, pdk_root, width_um=2.003)
+    assert len(_grid_warnings(report)) == 1
+    drc = run_drc(gds, "sky130")
+    assert drc["status"] == "violations"
+    assert any(".ongrid." in v["rule"] for v in drc["violations"])

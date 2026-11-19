@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4530
+      "lines": 4403
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -193,7 +193,7 @@
     },
     {
       "path": "src/klayout_tools/cli/signoff_cmd.py",
-      "lines": 1021
+      "lines": 1004
     },
     {
       "path": "src/klayout_tools/cli/sim_cmd.py",
@@ -257,7 +257,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1651
+      "lines": 1627
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9834
+      "lines": 9833
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -353,7 +353,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 5075
+      "lines": 5059
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -361,7 +361,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4936
+      "lines": 4882
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -573,7 +573,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1141
+      "lines": 1137
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
