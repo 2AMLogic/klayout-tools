@@ -77,12 +77,19 @@ class RunInputs(NamedTuple):
             labels.setdefault(os.path.realpath(source), label)
 
         # Match complete filenames at diagnostic delimiters. A root scrubber
-        # would also match prefixes of other names such as "cells.v~".
+        # would also match prefixes of other names such as "cells.v~". A
+        # parenthesized line number -- "gcd.v(17):" -- ends a filename, while
+        # a reference opening right after a quote is whole: it runs to the
+        # closing quote or a location suffix, so a space inside quotes is
+        # filename text ("gcd.v (copy).v"), not a delimiter.
         paths = "|".join(re.escape(p) for p in sorted(labels, key=len, reverse=True))
         location = re.compile(
-            r"""(?<![^\s'"`(<\[{:;,=])"""
+            r"""(?:(?<=["'`])"""
             rf"(?:{paths})"
-            r"""(?=$|[\s'"`)>\]}:;,]|\.(?=\s|$))"""
+            r"""(?=["'`]|$|:|\((?=\d))"""
+            r"""|(?<!["'`])(?<![^\s'"`(<\[{:;,=])"""
+            rf"(?:{paths})"
+            r"""(?=$|[\s'"`)>\]}:;,]|\.(?=\s|$)|\((?=\d)))"""
         )
         for test in failures:
             test["error_message"] = location.sub(

@@ -106,6 +106,37 @@ def test_only_known_source_references_change(tmp_path, monkeypatch):
     ) == (1, 3, 1)
 
 
+def test_parenthesized_line_number_rewrites_source(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    source = tmp_path / "gcd.v"
+    xml = f"""<testsuite><testcase name="located">
+      <failure message="{source}(17): dut.gcd.result mismatch"/>
+    </testcase></testsuite>"""
+    _stub_runner(monkeypatch, _FakeRunner(xml))
+    request = _write_request(tmp_path / "request.json", _base_request())
+
+    report = run_functional_verification(request)
+
+    (test,) = report["tests"]
+    assert test["error_message"] == "gcd.v(17): dut.gcd.result mismatch"
+
+
+def test_quoted_reference_beyond_known_source_is_preserved(tmp_path, monkeypatch):
+    _setup_inputs(tmp_path)
+    source = tmp_path / "gcd.v"
+    (tmp_path / "gcd.v (copy).v").write_text("module gcd_copy; endmodule\n")
+    xml = f"""<testsuite><testcase name="copy">
+      <failure message='unexpected reference to "{source} (copy).v"'/>
+    </testcase></testsuite>"""
+    _stub_runner(monkeypatch, _FakeRunner(xml))
+    request = _write_request(tmp_path / "request.json", _base_request())
+
+    report = run_functional_verification(request)
+
+    (test,) = report["tests"]
+    assert test["error_message"] == f'unexpected reference to "{source} (copy).v"'
+
+
 def test_each_initial_state_seed_reports_portable_failures(tmp_path, monkeypatch):
     _stage(tmp_path)
     xml = f"""<testsuite><testcase name="test_top">
