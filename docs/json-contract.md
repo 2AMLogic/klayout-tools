@@ -1203,7 +1203,10 @@ stability statement, concrete precedents, and drift-detection guidance, and
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest. For a built-in deck it covers the primary Python module and
   each deck-specific sibling that populates or modifies its curated DRC rules
-  (including exemptions, notes and provenance IDs). For multiple sources,
+  (including exemptions, notes and provenance IDs). Extraction-only siblings
+  such as `sky130_lvt.py` fall outside the DRC pin. The hash covers all of
+  `sky130_unmodeled.py` because it supplies rule provenance IDs, so edits to
+  its disclosure data also change the pin. For multiple sources,
   hash the concatenation of each UTF-8 basename, a NUL byte and its raw
   32-byte SHA-256 digest, sorted by basename. A single source or an external
   deck file uses the SHA-256 of its raw bytes. An unreadable required source
