@@ -2242,6 +2242,18 @@ and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
 
+**Deck stdout as additive evidence** (issue #6613): every `--engine
+klayout` DRC report carries a top-level `deck_output` object —
+`{"stdout": <str>, "truncated": <bool>, "line_count": <int>}` — holding
+the deck's own captured stdout (tail-capped at 500 lines, temp work-dir
+paths scrubbed to a placeholder; `line_count` counts the whole stdout).
+Like `coverage_assertion` it is additive and optional from a consumer's
+perspective, but unlike it the field is always present on a klayout-engine
+report that produced a verdict. It is execution evidence to cite, never a
+status upgrade: a zero-finding, zero-category run stays `coverage_unknown`
+(exit 4), `--expect-rule-categories 0` remains rejected, and klt parses
+nothing from the log. `--rerun` excludes it from the drift diff.
+
 `nothing_checked` and `nothing_checked_reasons` remain available. In a v1
 coverage block, zero means **known** zero actual checked work. It is not a
 synonym for partial, unknown, attempted, or inapplicable work. Real errored
