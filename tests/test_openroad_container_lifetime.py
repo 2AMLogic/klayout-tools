@@ -278,6 +278,38 @@ def test_interrupt_kill_hits_group_and_recorded_container(tmp_path, monkeypatch)
     assert record["invocation_id"] in str(exc.value)
 
 
+def test_termination_unwind_kills_and_retains_but_propagates_unchanged(
+    tmp_path, monkeypatch
+):
+    """SIGTERM/SIGHUP unwind the stage as ``SystemExit`` (issue #5726): it is
+    killed and retained as ``interrupted`` like a Ctrl-C, but only a
+    ``KeyboardInterrupt`` gets the log pointer appended -- the termination
+    exit status must reach the caller unchanged."""
+    script = tmp_path / "run.tcl"
+    script.write_text("# invoked script\n", encoding="utf-8")
+    unwind = SystemExit(128 + signal.SIGTERM)
+    monkeypatch.setattr(engine, "Popen", _marked_popen_factory(tmp_path, unwind))
+    killpg_calls, docker_kills = _record_kill_paths(
+        monkeypatch, recorded_container=True
+    )
+    with pytest.raises(SystemExit) as exc:
+        engine._run_openroad(
+            str(script),
+            str(tmp_path / "metrics.json"),
+            error_cls=RuntimeError,
+            container_id_wait_s=0.0,
+        )
+    assert exc.value is unwind
+    assert exc.value.args == (128 + signal.SIGTERM,)
+    assert killpg_calls == [(424242, signal.SIGTERM)]
+    assert docker_kills == [["docker", "kill", STUB_CID]]
+    record = json.loads(
+        next(tmp_path.glob("openroad-logs/*/invocation.json")).read_text()
+    )
+    assert record["outcome"] == "interrupted"
+    assert record["container_id"] == STUB_CID
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="os.getsid process groups")
 def test_engine_run_is_isolated_in_its_own_session(tmp_path, monkeypatch):
     """The engine child runs in its own session (start_new_session), so a
