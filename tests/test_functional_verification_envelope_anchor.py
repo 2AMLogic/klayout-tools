@@ -1,11 +1,8 @@
-"""``{path, scope}`` envelopes are anchored on the request, not the cwd (#6762).
+"""Functional-verification path envelopes use the request base (#6762, #6779).
 
-``klt functional-verification`` used to resolve the ``"repo"`` scope of
-``environment.sources``, ``environment.{results_xml,test_log,build_log}``,
-per-seed ``results_xml`` and mutation ``log_path`` from the *process cwd*, so
-one committed report differed by the directory ``klt`` was invoked from. Every
-test here runs the same request from several working directories and demands a
-byte-identical result.
+A request file uses its parent directory by default. Stdin and inline JSON
+default to the invoking directory. A fixed absolute ``--base-dir`` pins the
+base for any request form.
 
 Split out of ``tests/test_functional_verification.py`` for the per-file size
 ratchet (that module is baselined far over the hard limit); shared fixtures
@@ -161,13 +158,8 @@ def test_base_dir_anchors_the_inline_request_form(tmp_path, monkeypatch):
 
 
 def test_inline_request_without_base_dir_follows_the_cwd(tmp_path, monkeypatch):
-    """No ``--base-dir``: the stdin/inline form has no request file to anchor
-    to, so the envelopes follow the cwd (#6779) -- the same anchor every
-    relative path in the request already resolves against. The same inline
-    request run from two directories in two repos therefore legitimately
-    yields two *different* envelopes, and from a cwd outside every repo it
-    reports everything ``external``; a future change to that anchor is a
-    deliberate one, not a silent regression."""
+    """The two layouts give the same inline source different repo-relative
+    paths. Outside a checkout, the same source is external (#6779)."""
     flat = _checkout(tmp_path / "checkout-a")
     _setup_inputs(flat)
     nested = _checkout(tmp_path / "checkout-b") / "proj"
