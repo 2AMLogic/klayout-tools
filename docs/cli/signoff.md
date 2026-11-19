@@ -4216,7 +4216,15 @@ new. Outcomes:
 
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
-  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
+  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
+  **passing** measurements grade (issue #6027): those rows leave
+  `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
+  bench with one known-failing row can claim the rows its envelope genuinely
+  carries. A row whose tagged measurement fails — or that the failing
+  envelope does not tag — stays in `failed_rows`, and a failing envelope of a
+  kind that carries no `spec_row` tags (or one refused on a stale pin,
+  binding or provenance) credits nothing;
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
@@ -4313,7 +4321,11 @@ declares `limits`; a named row with no such measurement is uncovered
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
 `row_coverage.row_sources` maps each covered row to `"derived"` (checked
-against the envelope) or `"asserted"` (the manifest's word only). The change is
+against the envelope) or `"asserted"` (the manifest's word only). The same
+derivation credits a row from a *failing* `klt sim` citation when the envelope
+tags a passing, limited measurement with it (issue #6027) — visible in
+`detail.row_sources`, since `row_coverage` itself is only emitted on `met`.
+The change is
 additive: `schema_version` is not bumped.
 
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by

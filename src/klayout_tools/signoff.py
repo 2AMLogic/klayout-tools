@@ -76,8 +76,7 @@ from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# that requires them machine-derived (issue #5462); out of this file for its
-# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+# requiring them machine-derived (#5462); out of file for its size ceiling.
 from .signoff_attest_binding import attestation_record
 from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
@@ -95,6 +94,9 @@ from .signoff_coverage_disclosure import (
 )
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
+    _maybe_record_failed_sim,
+    _record_envelope,
+    _remember_envelope,
     asserted_rows,
     credited_rows,
     multi_row_info,
@@ -5395,6 +5397,9 @@ def _grade_evidence(
         allowed_kinds=allowed_kinds,
     )
     if unmet is not None:
+        _maybe_record_failed_sim(
+            envelope_sink, unmet, check_kind, envelope, spec, resolution, allowed_kinds
+        )
         return unmet
 
     sta_refusal = sta_annotation_refusal(
@@ -6651,8 +6656,8 @@ def _build_tier_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     not_applicable: dict[str, Any] | None = None
-    # Issue #3778: the envelope of every ``met`` citation graded below, keyed
-    # by the spec's identity, for `_grade_multi_citation`'s `spec_row` check.
+    # Issue #3778: the envelope of every ``met`` citation graded below -- and
+    # every ``check_failed`` ``sim`` one (#6027) -- for the row credit.
     met_envelopes: dict[int, dict[str, Any]] = {}
 
     def grade_spec(
@@ -6668,7 +6673,6 @@ def _build_tier_item(
             generator_exec=generator_exec,
             envelope_sink=sink,
         )
-        _remember_envelope(met_envelopes, spec, sink)
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
             if spec_status == "met"
@@ -6682,6 +6686,7 @@ def _build_tier_item(
             and spec_citation["kind"] not in allowed_kinds
         ):
             return "unmet", _REASON_WRONG_KIND, None, spec_detail
+        _remember_envelope(met_envelopes, spec, sink)  # not for wrong_kind (#6027)
         # Issue #5789: refuse an item 3 whose declared coverage disagrees.
         return _item3_coverage_verdict(
             item_id,
@@ -6894,6 +6899,12 @@ def _grade_multi_citation(
     ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``;
     so is ``require_coverage_invalid`` (issue #5789, via
     :func:`_checked_multi_members`).
+
+    Issue #6027: a ``check_failed`` ``sim`` member's envelope is captured too,
+    so its tagged, limited, passing rows join ``covered``/``row_sources`` as
+    ``derived`` and leave ``failed_rows``; the citation still grades
+    ``unmet`` with its own reason, and a named row whose tagged measurement
+    fails stays in ``failed_rows``.
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -7209,24 +7220,6 @@ def _parse_multi_members(
                 return None, f"{where} 'rows' is not a non-empty list of strings"
         members.append((spec, rows))
     return members, None
-
-
-def _record_envelope(
-    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
-) -> None:
-    """Append ``envelope`` to ``sink`` when one was given (issue #3778)."""
-    if sink is not None:
-        sink.append(envelope)
-
-
-def _remember_envelope(
-    met_envelopes: dict[int, dict[str, Any]],
-    spec: dict[str, Any],
-    sink: list[dict[str, Any]],
-) -> None:
-    """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
-    if sink:
-        met_envelopes[id(spec)] = sink[0]
 
 
 # --------------------------------------------------------------------------- #

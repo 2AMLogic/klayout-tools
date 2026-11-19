@@ -22,11 +22,32 @@ its size ratchet:
     counting as coverage, and the item grades ``unmet`` /
     ``partial_coverage`` with the rows listed under ``detail.asserted_rows``.
     Off by default, so existing manifests grade unchanged.
+
+Row-scoped credit from a failing envelope (issue #6027)
+    A ``check_failed`` ``sim`` citation grades ``unmet`` as a unit, but its
+    envelope's per-row truth survives the failure: rows its tagged,
+    ``limits``-bearing, passing measurements grade now count as ``derived``
+    coverage (and leave ``failed_rows``) instead of being mis-reported as
+    failed. Only derived rows are credited -- a failed citation never covers
+    a row on the manifest's word alone, and an envelope that a stale-pin,
+    binding, kind or provenance refusal would reject is not captured at all
+    (:func:`_maybe_record_failed_sim` decides).
+
+The envelope-capture plumbing (:func:`_record_envelope` /
+:func:`_remember_envelope`) lives here too, moved out of :mod:`.signoff` for
+the same ceiling: it exists to feed the derived-row check.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from .coverage import coverage_refusal_reason
+from .signoff_evidence_pin import (
+    PIN_STALE,
+    PIN_UNVERIFIABLE,
+    content_hash_pin_state,
+)
 
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
@@ -79,15 +100,99 @@ def envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
 def credited_rows(
     rows: list[str] | None, envelope: dict[str, Any] | None
 ) -> tuple[list[str] | None, bool]:
-    """The rows a ``met`` member is credited with and whether they were
-    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
-    (or unavailable) envelopes keep the manifest-asserted ``rows``."""
+    """The rows a member is credited with and whether they were ``derived``
+    from its envelope's ``spec_row`` tags (issue #3778). Untagged (or
+    unavailable) envelopes keep the manifest-asserted ``rows``. Since issue
+    #6027 the envelope may also come from a ``check_failed`` ``sim`` grading;
+    :func:`multi_row_info` credits the result only when it is derived.
+    """
     if not rows or envelope is None:
         return rows, False
     has_tags, covering = envelope_tagged_rows(envelope)
     if not has_tags:
         return rows, False
     return [r for r in rows if r in covering], True
+
+
+def _record_envelope(
+    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
+) -> None:
+    """Append ``envelope`` to ``sink`` when one was given (issue #3778).
+
+    Called on the ``met`` return and -- issue #6027 -- through
+    :func:`_maybe_record_failed_sim` on a ``check_failed`` ``sim`` grading
+    that survived every trust gate, the only non-passing verdict whose
+    envelope still carries trustworthy per-row truth. The stale-pin,
+    binding, kind and provenance refusals record nothing: those envelopes
+    are not evidence for any row.
+    """
+    if sink is not None:
+        sink.append(envelope)
+
+
+#: Mirrors ``signoff._REASON_CHECK_FAILED`` -- not importable from here,
+#: because :mod:`.signoff` imports this module.
+_CHECK_FAILED = "check_failed"
+
+
+def _maybe_record_failed_sim(
+    sink: list[dict[str, Any]] | None,
+    unmet: tuple[str, str, Any, Any] | None,
+    check_kind: str,
+    envelope: dict[str, Any],
+    spec: dict[str, Any],
+    resolution: dict[str, Any],
+    allowed_kinds: set[str] | None,
+) -> None:
+    """Capture a failing ``sim`` envelope for the derived-row credit
+    (issue #6027) -- but only when its per-row truth is trustworthy
+    evidence. A no-op for every other verdict and kind.
+
+    The verdict itself is never touched: the trust gates are ordered
+    *after* the pass/fail check on purpose, so a run that failed is
+    reported as the failure it is, with a stale pin or a vacuous verdict
+    disclosed beside it (:func:`signoff._grade_check_outcome`). The
+    *capture* however waits on those gates: a refused envelope is not
+    evidence for any row, and records nothing.
+
+    Only the gates that can fire for ``sim`` are consulted. The ``sta``
+    annotation/constraint refusals self-gate on ``sta``, the generic
+    binding check on ``generic``, the post-layout requirement is item 7's
+    and item 7 accepts no ``sim`` citation, and the runset/yield gates are
+    kind-matched -- leaving the kind acceptance (a citation the item
+    rejects as ``wrong_kind`` must not credit rows), the vacuous-verdict
+    gate -- :func:`~.coverage.coverage_refusal_reason`, exactly what
+    ``sim`` sees of ``signoff._coverage_refusal`` -- and the
+    ``content_hash`` pin state: the same trio the ``met`` path applies to
+    a ``sim`` envelope.
+    """
+    if unmet is None or unmet[1] != _CHECK_FAILED or check_kind != "sim":
+        return
+    if allowed_kinds is not None and check_kind not in allowed_kinds:
+        return
+    if coverage_refusal_reason(envelope) is not None:
+        return
+    pin = content_hash_pin_state(spec.get("content_hash"), resolution["content_hash"])
+    if pin in (PIN_UNVERIFIABLE, PIN_STALE):
+        return
+    _record_envelope(sink, envelope)
+
+
+def _remember_envelope(
+    met_envelopes: dict[int, dict[str, Any]],
+    spec: dict[str, Any],
+    sink: list[dict[str, Any]],
+) -> None:
+    """Key the envelope a grading captured -- ``met``, or a ``check_failed``
+    ``sim`` one (issue #6027) -- by ``spec``'s identity, for the
+    derived-row credit :func:`multi_row_info` computes.
+
+    The caller must invoke this only *after* the member's own
+    ``wrong_kind`` downgrades: a citation the item rejects as the wrong
+    kind is not evidence for any row, and :func:`multi_row_info` credits
+    derived rows from every non-``met`` member that has an entry here."""
+    if sink:
+        met_envelopes[id(spec)] = sink[0]
 
 
 def multi_row_info(
@@ -100,6 +205,12 @@ def multi_row_info(
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
     declared). ``unratified_rows`` lists every non-gap row declared
     ``ratified: false``, covered or not.
+
+    A member grades ``met`` or -- issue #6027 -- ``check_failed`` with a
+    captured, tagged ``sim`` envelope: its derived rows join ``covered`` and
+    ``row_sources``. A failed member never contributes asserted rows, and a
+    derived-only credit from it never masks the citation's own failure (the
+    item still grades ``unmet`` on the failed member).
 
     Issue #5599: a row whose ``gap`` is the justified object form
     (``justified_gap`` set) is listed under ``justified_gaps`` --
@@ -116,9 +227,12 @@ def multi_row_info(
     covered: set[str] = set()
     row_sources: dict[str, str] = {}
     for spec, rows, g in graded:
-        if g[0] != "met":
-            continue
         member_rows, derived = credited.get(id(spec), (rows, False))
+        # Issue #6027: a failed citation credits only derived rows -- those
+        # its tagged, limited, passing measurements grade; never asserted
+        # ones, and never from a refused (uncaptured) envelope.
+        if g[0] != "met" and not derived:
+            continue
         for r in member_rows or []:
             covered.add(r)
             # A row covered by any derived citation is machine-checked.
