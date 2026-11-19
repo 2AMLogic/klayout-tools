@@ -122,7 +122,6 @@ def test_a_request_without_the_5645_fields_declares_no_features(tmp_path):
         str(_write_body(tmp_path)),
         corner_count=1,
         timeout_s=30.0,
-        keep_artifacts=False,
         client_version="0.9.2.dev1+gabc1234",
     ).cmd
     assert "mmiss" not in command

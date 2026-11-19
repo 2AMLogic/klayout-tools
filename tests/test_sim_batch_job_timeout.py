@@ -469,7 +469,6 @@ def test_fractional_stated_bound_is_ceiled_into_job_json(tmp_path):
         corner_count=UNITS,
         timeout_s=PER_UNIT_TIMEOUT_S,
         job_timeout_s=3399.5,
-        keep_artifacts=False,
     )
     assert spec.to_job_json()["timeout_seconds"] == math.ceil(3399.5) == 3400
 

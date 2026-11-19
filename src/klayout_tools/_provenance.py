@@ -772,7 +772,11 @@ def _deck_block(
     """
     if name is None:
         return None
-    deck_hash = content_hash(path)
+    from ._deck_hash import source_file_hash
+    from .decks import deck_source_path
+
+    builtin = path and os.path.abspath(path) == deck_source_path(name)
+    deck_hash = source_file_hash(path) if builtin else content_hash(path)
     block: dict[str, Any] = {
         "name": name,
         "content_hash": deck_hash,
@@ -840,13 +844,9 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report would carry for ``name``, computed the only way that can
-    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
-    drift from what a real run records.
+    block a report carries for ``name``, computed by :func:`_deck_block`.
 
-    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
-    without which :func:`~klayout_tools.decks.deck_source_path` would happily
-    import and hash any sibling module of the deck package.
+    Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
     from .decks import deck_names, deck_source_path
 
