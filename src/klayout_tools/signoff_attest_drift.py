@@ -197,6 +197,13 @@ def drift_result(
         ("attestation", "checks", str(index), "raw_content_hash")
         for index in range(len(checks))
     }
+    # An unknown running build can only disclose that it could not verify the
+    # klt pin. Keep comparing the pin and verdict across builds.
+    exclude |= {
+        ("attestation", "checks", str(index), "unverifiable")
+        for index, check in enumerate(checks)
+        if check["check"] == "pin" and check["role"] == "tool_version"
+    }
     result = build_rerun_result(
         report_path=committed_path,
         committed=committed,
