@@ -146,7 +146,7 @@ from ._report_verify_hints import input_hash_check
 from .decks import (
     InvalidDeckOptionError,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
 )
 from .evidence_canonicalize import rerun_result_for
@@ -157,6 +157,11 @@ from .extract import (
     spice_safe_net_name,
 )
 from .extract_progress import StageTimer, active_timer, stage
+from .lvs_body import (
+    _body_net_warnings,
+    _body_verification_report,
+    _body_verification_unchecked,
+)
 from .lvs_combine import (
     _combine_circuit_devices_safely,  # noqa: F401
     _combine_devices_safely,
@@ -205,7 +210,6 @@ from .lvs_known_limits import note_known_limit
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
-    _body_net_warnings,
     _build_mismatches,
     _build_net_correspondence,
     _collect_tolerance_snaps,
@@ -231,8 +235,6 @@ from .lvs_pin_anchors import (
     _TopLevelPinAnchor,
 )
 from .lvs_power import (
-    _body_verification_report,
-    _body_verification_unchecked,
     _power_connectivity_report,
     _power_connectivity_unchecked,
     _well_layer_lef_pins,
@@ -536,20 +538,18 @@ POWER_STATUS_UNCHECKED = "unchecked"
 #: Issue #1983: ``body_verification.status`` values -- the machine-checkable
 #: counterpart of the ``device.body_unverified`` ``mismatches[]`` warning
 #: (issue #281). Deliberately a *separate* verdict from the report's top-level
-#: ``status``, exactly as :data:`POWER_STATUS_MATCH` and friends are: a
-#: ``"unverified"`` body is a coverage statement about how the layout's MOS
-#: bodies were resolved, not a compare failure, so it never changes ``status``
-#: (that non-blocking behaviour is unchanged from before this block existed).
-#: See :func:`_body_verification_report`.
+#: ``status``: it is a coverage statement about the layout's MOS bodies, not a
+#: compare failure, so it never changes ``status`` (see
+#: :func:`_body_verification_report`).
 #:
-#: - ``"verified"``: inline extraction ran and every MOS body terminal in the
-#:   layout's top circuit resolved to a real, drawn/labelled net.
-#: - ``"unverified"``: at least one MOS body terminal was compared against a
-#:   deck-synthesized net instead (the ``device.body_unverified`` condition).
-#: - ``"unchecked"``: this run could not answer the question at all -- the
-#:   pre-extracted ``layout.netlist`` request form, which carries no deck and
-#:   therefore no way to tell a drawn tie from a synthesized one. Never means
-#:   "verified": the reason says which case it is.
+#: - ``"verified"``: every MOS body terminal the check inspected (issue
+#:   #5749's ``inspected_count``) resolved to a real, drawn/labelled net.
+#: - ``"unverified"``: at least one inspected body terminal was compared
+#:   against a deck-synthesized net (the ``device.body_unverified`` condition).
+#: - ``"unchecked"``: this run could not answer the question at all -- no
+#:   ``layout.deck`` was given (the pre-extracted ``layout.netlist`` form), or
+#:   no MOS device was eligible to inspect (``inspected_count`` 0, issue
+#:   #5749). Never means "verified": the reason says which case it is.
 BODY_STATUS_VERIFIED = "verified"
 BODY_STATUS_UNVERIFIED = "unverified"
 BODY_STATUS_UNCHECKED = "unchecked"
@@ -2086,7 +2086,7 @@ def check_lvs_report(
     compares each against ``environment.layout_sha256``/
     ``environment.reference_sha256``; when the committed report used an
     extraction deck (``provenance.deck`` is non-``null``), also re-hashes
-    that deck's source (:func:`~klayout_tools.decks.deck_source_path`) and
+    that deck's identity (:func:`~klayout_tools.decks.deck_content_hash`) and
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
@@ -2138,7 +2138,7 @@ def check_lvs_report(
             hash_check(
                 "provenance.deck.content_hash",
                 deck.get("content_hash"),
-                content_hash(deck_source_path(deck["name"])),
+                deck_content_hash(deck["name"]),
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
@@ -4791,7 +4791,7 @@ def _parse_anchor_top_level_pins(
     return value, value
 
 
-def _parse_strict_top_level_pin_count(options: Mapping[str, Any], engine: str) -> bool:
+def _parse_strict_top_level_pin_count(options: Mapping[str, Any]) -> bool:
     """Resolve ``options.strict_top_level_pin_count`` (issue #2845); default
     ``False``. A non-boolean is a clean request error. The check compares
     ``Circuit.pin_count()`` of the two selected circuits, which both engines

@@ -179,7 +179,7 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
     get_parasitics_deck,
 )
@@ -3690,13 +3690,12 @@ def check_extract_report(
     ``klt extract`` up to the same shared ``_report_verify.py`` machinery
     issue #1106 built for those two verbs: re-hashes the input layout stream
     (``committed["file"]``) and the deck
-    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    (:func:`~klayout_tools.decks.deck_content_hash`, resolved from
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance.content_hash`) -- reusing
-    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
-    hashing. Returns the shared ``--check`` payload built by
+    using the same hash functions as the original report. Returns the
+    shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
     "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
     otherwise.
@@ -3716,7 +3715,7 @@ def check_extract_report(
     extract --deck`` is required for every run, so ``provenance.deck`` is
     always populated for a genuine committed report; an unresolvable deck
     name (e.g. the deck module was since renamed/removed) hashes to ``None``
-    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    via :func:`~klayout_tools.decks.deck_content_hash`, which likewise never
     counts as a match.
 
     Under ``--engine klayout-runset`` the deck entry is replaced by a runset
@@ -3749,7 +3748,7 @@ def check_extract_report(
             ),
         ),
         extract_runset.provenance_hash_check(
-            committed, deck_source_path=deck_source_path
+            committed, deck_content_hash=deck_content_hash
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -6561,7 +6560,6 @@ def _connect_mos_capacitors(
 def _mos_capacitor_entry_index(
     island: kdb.Region,
     deck: ExtractionDeck,
-    poly: kdb.Region,
     nwell: kdb.Region,
     region_of: Callable[[tuple[int, int]], kdb.Region],
 ) -> int | None:
@@ -6635,7 +6633,7 @@ def _resolve_mos_capacitors(
     for component in active.merged().each():
         island = kdb.Region(component)
         chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+            _mos_capacitor_entry_index(island, deck, nwell, region_of)
             if not (island & poly).is_empty()
             else None
         )

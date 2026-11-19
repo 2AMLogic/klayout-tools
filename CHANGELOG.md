@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
+  the `diode` generator now runs on gf180mcu. `voltage_class` accepts
+  `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck
+  recognises); `kind="n_psub"` extracts as `diode_nd2ps_06v0` and
+  `"p_nwell"` as `diode_pd2nw_06v0`, both DRC-clean and LVS-matching. An
+  *omitted* `voltage_class` now resolves to the PDK's own flavour (still
+  `"05v5"` on sky130, so sky130 output is unchanged); naming the other
+  family's flavour is a `GenError`. The declared `voltage_class` default stays
+  `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
+  one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
+
+- **`klt sim` complex-vector save-mode refusal names the waveform-limiting
+  remedy** (#6749, 2026-11-19): an AC request combining
+  `options.complex_vectors` with `options.save_mode: "netlist"` was refused
+  before launch, but the message only said to omit `options.save_mode`, so a
+  caller following it literally accepted a waveform of every node. The
+  refusal now also directs the caller to `options.save_vectors` with each
+  requested complex vector listed there, and spells out the corrected
+  options for the request (e.g. `{"complex_vectors": ["v(out)"],
+  "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
+  before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
+  AC vectors" section.
 - **`klt sim --resume` no longer refuses a sharded resume that has fewer
   outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
   reused finished shards, the replacement dispatch still asked for the
