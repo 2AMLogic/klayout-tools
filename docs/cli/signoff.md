@@ -2506,7 +2506,7 @@ Every inventory is a JSON object with these common fields:
 | `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
-| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description`. Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
+| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description` (item 8, which has no `artifact_binding`: `citation.attestation.description`). Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
 
 Plus the item's own fields. Unknown top-level fields are refused (exit `1`),
 because a typo such as `testbench` for `testbenches` would otherwise attest
@@ -2636,7 +2636,15 @@ generic envelope still grades `met` (compatibility). A met item-8 generic
 citation therefore always carries `citation.attestation`, so a reader can tell
 the two apart: `{"tool_produced": true, "producer": "klt signoff --attest",
 "check_count": N, "passed_count": N}` for an envelope this producer made, and
-`{"tool_produced": false}` for any other. Disclosure only; it never changes
+`{"tool_produced": false}` for any other. When a tool-produced envelope
+carries a non-empty `attestation.description` (the inventory's scope
+disclosure, issue #5573), the block also carries it verbatim as
+`citation.attestation.description` (issue #6111) — item 8 has no
+`artifact_binding`, so this block is where its disclosure reaches the tier
+record. The key is omitted when the description is absent, empty,
+whitespace-only or not a string, and a `{"tool_produced": false}` block never
+carries one. Additive: the block's four existing keys are unchanged and no
+`schema_version` bumps. Disclosure only; it never changes
 the verdict. The envelope pins the inventory (as for the other items); the
 report and cited envelopes are recorded by hash in their `present` checks, and
 `--check` reports drift in any of them, in the row map, or in a recorded
@@ -3039,20 +3047,25 @@ additive `check` object identifying it:
   "field": "attestation.checks.17.content_hash",
   "committed": "sha256:3bca9b8e95ec…",
   "fresh": "sha256:aaa8abc15692…",
-  "check": {"role": "testbench", "path": "sim/bin/sim_common.py"}
+  "check": {"role": "testbench", "check": "present", "path": "sim/bin/sim_common.py"}
 }
 ```
 
-`check` is the check's `role` plus whichever identity keys its kind carries —
-`path` for a file-presence check, `target` / `name` / `testbench` for a
-command or `recorded_hash` check, `row` for a citation check, `corner` +
-`metric` for an item-8 metric check. A check with no identity beyond its role
-(the `pdk` / `tools` pins, a top-level `cold_start`) gets `{"role": …}`.
-`--format text` prints it as a bracketed label after the pointer:
+`check` is the check's `role`, then the check's own kind (its `check` value
+— `present`, `command`, `stream_readable`, …) when it carries one, then
+whichever identity keys its kind carries — `path` for a file-presence check,
+`target` / `name` / `testbench` for a command or `recorded_hash` check,
+`row` for a citation check, `corner` + `metric` for an item-8 metric check.
+The kind comes before those keys so checks of one role with no other
+identity key stay pairwise distinct (the three `layout` stream checks of
+item 2). A check with no identity key beyond its kind (the `pdk` / `tools`
+pins, a top-level `cold_start`) stops there — `{"role": …, "check": "pin"}`,
+`{"role": "cold_start", "check": "command"}`. `--format text` prints it as a
+bracketed label after the pointer:
 
 ```
 drift:
-  attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:
+  attestation.checks.17.content_hash  [testbench present sim/bin/sim_common.py]:
       committed: 'sha256:3bca9b8e95ec…'
       fresh:     'sha256:aaa8abc15692…'
 ```
