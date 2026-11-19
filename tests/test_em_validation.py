@@ -43,51 +43,39 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 from pathlib import Path
 
-import klayout.db as kdb
 import pytest
 
+from helpers.em_validation_oracles import (
+    COAX_A_M,
+    COAX_B_M,
+    COAX_LENGTH_M,
+    EPS0_F_PER_M,
+    build_coax_mesh,
+    geode_or_skip,
+    gmsh_or_skip,
+    layer_pair_geometry,
+    mutual_ff,
+    parallel_plate_ff,
+    plate_pair_gds,
+    run_layout_request,
+)
 from klayout_tools import pdk_stackup
 from klayout_tools._em_layout import prepare_layout
 from klayout_tools._geode import generate_mesh
 from klayout_tools.em import run_em
 
-#: Vacuum permittivity, F/m (CODATA 2018) -- the same value
-#: ``native/mom/src/solver.rs`` uses, so an oracle mismatch here can only come
-#: from the solve, never from a constant disagreeing across the codebase.
-EPS0_F_PER_M = 8.854_187_812_8e-12
-
 EVIDENCE = Path(__file__).parent / "fixtures" / "em" / "cross_validation_evidence.json"
+EVIDENCE_DOC = json.loads(EVIDENCE.read_text())
 
-# ---------------------------------------------------------------------------
-# Environment: which live engines are present?
-# ---------------------------------------------------------------------------
-
-
-def _geode_or_skip() -> str:
-    """Resolve the geode binary exactly as ``run_em`` does (options -> env ->
-    PATH), or skip the test: a live validation must never pass silently by
-    accident of an absent engine."""
-    env = os.environ.get("KLT_GEODE_BINARY")
-    if env:
-        if shutil.which(env) or (os.path.isfile(env) and os.access(env, os.X_OK)):
-            return env
-        pytest.skip(f"$KLT_GEODE_BINARY={env!r} does not name a runnable binary")
-    found = shutil.which("geode")
-    if found:
-        return found
-    pytest.skip(
-        "geode binary not found: set KLT_GEODE_BINARY or put geode on PATH "
-        "(docs/cli/em.md 'Resolving geode')"
-    )
-
-
-def _gmsh_or_skip() -> None:
-    """``geode mesh`` shells out to Gmsh (``$GEODE_GMSH`` or ``PATH``)."""
-    if shutil.which(os.environ.get("GEODE_GMSH", "gmsh")) is None:
-        pytest.skip("gmsh binary not found (geode mesh shells out to it)")
+#: The tolerance bands the live gates enforce are *read from* the committed
+#: evidence, never restated here: ``tolerance_band.max`` bounds the em-vs-mom
+#: disagreement, ``each_solver_bound.max`` is mom-validation.md section 1's
+#: ceiling on any one solve over the closed form. Relaxing a band therefore
+#: means editing the evidence, which the audit test below re-checks.
+CROSS_MAX_REL_DIFFERENCE = EVIDENCE_DOC["tolerance_band"]["max"]
+EACH_SOLVER_MAX = EVIDENCE_DOC["each_solver_bound"]["max"]
 
 
 @pytest.fixture(autouse=True)
@@ -99,90 +87,6 @@ def _hermetic_pdk(tmp_path, monkeypatch):
     (install / "libs.tech").mkdir(parents=True)
     (install / "libs.ref").mkdir()
     monkeypatch.setenv("PDK_ROOT", str(install.parent))
-
-
-# ---------------------------------------------------------------------------
-# Fixture geometry and oracles
-# ---------------------------------------------------------------------------
-
-
-def _plate_pair_gds(path: Path, side_um: float, lower: str, upper: str) -> None:
-    """Two coincident square plates on a sky130 layer pair: the section-1
-    parallel-plate fixture of ``docs/design/mom-validation.md``, realized as
-    a GDS on PDK conductors (zero-thickness plates become the stackup's own
-    metal z-extents; the gap and eps_r come from the stackup)."""
-    layers = {
-        "li1": (67, 20),
-        "met1": (68, 20),
-        "met2": (69, 20),
-    }
-    layout = kdb.Layout()
-    layout.dbu = 0.001
-    top = layout.create_cell("TOP")
-    half = int(side_um * 500)
-    box = kdb.Box(0, 0, int(side_um * 1000), int(side_um * 1000))
-    for name in (lower, upper):
-        layer, datatype = layers[name]
-        top.shapes(layout.layer(layer, 20)).insert(box)
-        top.shapes(layout.layer(layer, 5)).insert(
-            kdb.Text("TOPP" if name == upper else "BOT", half, half)
-        )
-    layout.write(str(path))
-
-
-def _layer_pair_geometry(stack: dict, lower: str, upper: str) -> dict:
-    """The facing gap, the uniform eps between the plates and the plates'
-    z-extents, all derived from the curated stackup (never a duplicated
-    table -- issue #5617's discipline). Raises if the inter-plate dielectric
-    is not uniform: the parallel-plate oracle needs one eps_r."""
-    conductors = {c["name"]: c for c in stack["conductors"]}
-    lo, hi = conductors[lower], conductors[upper]
-    lo_top = lo["z0_um"] + lo["thickness_um"]
-    hi_bottom = hi["z0_um"]
-    gap = hi_bottom - lo_top
-    eps = {
-        d["permittivity"]
-        for d in stack["dielectrics"]
-        if d["z0_um"] < hi_bottom
-        and d["z0_um"] + d["thickness_um"] > lo_top
-        and d["permittivity"] is not None
-    }
-    assert gap > 0, (lower, upper, gap)
-    assert len(eps) == 1, f"non-uniform dielectric between {lower} and {upper}: {eps}"
-    return {
-        "gap_um": gap,
-        "eps_r": next(iter(eps)),
-        "lower": {"name": lower, **lo},
-        "upper": {"name": upper, **hi},
-    }
-
-
-def _parallel_plate_ff(area_um2: float, gap_um: float, eps_r: float) -> float:
-    """Oracle: the ideal parallel-plate capacitance ``eps_r eps_0 A / d`` in
-    femtofarads. For finite plates a strict lower bound on any solve."""
-    # um^2 -> m^2 is 1e-12, um -> m is 1e-6, F -> fF is 1e15.
-    return eps_r * EPS0_F_PER_M * (area_um2 / gap_um) * 1e9
-
-
-def _mutual_ff(response: dict) -> float:
-    """``-C_01`` of the two-terminal Maxwell matrix, the pair capacitance in
-    the usual (positive) SPICE sense."""
-    return -response["results"]["c"]["matrix"][0][1] * 1e15
-
-
-def _run_layout_request(tmp_path: Path, name: str, gds: Path) -> dict:
-    request = tmp_path / f"{name}.json"
-    request.write_text(
-        json.dumps(
-            {
-                "layout": os.path.relpath(gds, tmp_path),
-                "region": {"cell": "TOP"},
-                "stackup": "sky130A",
-                "options": {"keep_artifacts": False},
-            }
-        )
-    )
-    return run_em(str(request))
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +104,9 @@ FIVE_PERCENT_MAX = 1.05
 
 #: Measured excess over the oracle at default mesh settings, met1/met2 pair
 #: (docs/design/em-validation.md section 1): +12.5 % / +6.1 % / +3.1 % at
-#: 10 / 20 / 40 um. The ceiling 1.25 is section 1's own band at L/d ~ 20-40.
+#: 10 / 20 / 40 um. The ceiling (``EACH_SOLVER_MAX``, 1.25 in the committed
+#: evidence) is section 1's own band at L/d ~ 20-40.
 EXCESS_TREND_SIDES_UM = (10.0, 20.0, 40.0)
-EXCESS_SANITY_MAX = 1.25
 
 
 def test_parallel_plate_meets_five_percent_bar(tmp_path):
@@ -210,16 +114,16 @@ def test_parallel_plate_meets_five_percent_bar(tmp_path):
     pair, 40x40 um plates through ``klt em``'s layout path at its default
     mesh settings -- the 5 % bar of docs/design/em-field-sim-spike.md
     section 5, on geometry produced by this repo's own pipeline."""
-    _gmsh_or_skip()
-    _geode_or_skip()
+    gmsh_or_skip()
+    geode_or_skip()
     stack = pdk_stackup.stackup("sky130A")
-    geom = _layer_pair_geometry(stack, "met1", "met2")
+    geom = layer_pair_geometry(stack, "met1", "met2")
     gds = tmp_path / "plates-40.gds"
-    _plate_pair_gds(gds, FIVE_PERCENT_SIDE_UM, "met1", "met2")
+    plate_pair_gds(gds, FIVE_PERCENT_SIDE_UM, "met1", "met2")
 
-    response = _run_layout_request(tmp_path, "req-40", gds)
-    measured = _mutual_ff(response)
-    ideal = _parallel_plate_ff(FIVE_PERCENT_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
+    response = run_layout_request(tmp_path, "req-40", gds)
+    measured = mutual_ff(response)
+    ideal = parallel_plate_ff(FIVE_PERCENT_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
 
     print(
         f"\nparallel plate L={FIVE_PERCENT_SIDE_UM} d={geom['gap_um']:.4f} "
@@ -246,18 +150,18 @@ def test_parallel_plate_excess_shrinks_with_aspect_ratio(tmp_path):
     (mom-validation.md section 1 asserts the same physics for ``klt mom``).
     This is the GDS-path proof that the boxed solve converges to the
     parallel-plate regime, not merely to any number."""
-    _gmsh_or_skip()
-    _geode_or_skip()
+    gmsh_or_skip()
+    geode_or_skip()
     stack = pdk_stackup.stackup("sky130A")
-    geom = _layer_pair_geometry(stack, "met1", "met2")
+    geom = layer_pair_geometry(stack, "met1", "met2")
 
     excesses = []
     for side in EXCESS_TREND_SIDES_UM:
         gds = tmp_path / f"plates-{side:.0f}.gds"
-        _plate_pair_gds(gds, side, "met1", "met2")
-        response = _run_layout_request(tmp_path, f"req-{side:.0f}", gds)
-        measured = _mutual_ff(response)
-        ideal = _parallel_plate_ff(side**2, geom["gap_um"], geom["eps_r"])
+        plate_pair_gds(gds, side, "met1", "met2")
+        response = run_layout_request(tmp_path, f"req-{side:.0f}", gds)
+        measured = mutual_ff(response)
+        ideal = parallel_plate_ff(side**2, geom["gap_um"], geom["eps_r"])
         excesses.append(measured / ideal - 1.0)
         print(
             f"    L={side:4.0f} um (L/d={side / geom['gap_um']:5.0f})  "
@@ -270,20 +174,13 @@ def test_parallel_plate_excess_shrinks_with_aspect_ratio(tmp_path):
     assert all(
         later < earlier for earlier, later in zip(excesses, excesses[1:], strict=False)
     ), f"excess over the closed form does not shrink as d/L -> 0: {excesses}"
-    assert 1.0 < 1.0 + excesses[0] < EXCESS_SANITY_MAX, excesses[0]
+    assert 1.0 < 1.0 + excesses[0] < EACH_SOLVER_MAX, excesses[0]
 
 
 # ---------------------------------------------------------------------------
 # Oracle 2: convergence order under mesh refinement (coax, exact closed form)
 # ---------------------------------------------------------------------------
 
-#: Coax geometry: upstream geode-fem's own oracle-1 dimensions
-#: (benchmarks/electrostatic/results.toml; a = 1, b = 2.5, L = 1, SI metres,
-#: end faces left untagged so they carry the natural symmetry condition --
-#: the continuum field is exactly the 2-D radial one).
-COAX_A_M = 1.0
-COAX_B_M = 2.5
-COAX_LENGTH_M = 1.0
 #: Characteristic length halved per level. 0.4 is left out of the gate: at
 #: ~4 elements across the annulus the pair (0.4 -> 0.2) is still
 #: pre-asymptotic (observed order 1.1); the gated levels measure
@@ -299,66 +196,19 @@ COAX_THEORETICAL_ORDER = 2.0
 COAX_FINEST_MAX_REL_ERROR = 1e-3
 
 
-def _build_coax_mesh(path: Path, h: float) -> None:
-    """A tagged coax-annulus tetrahedral mesh from the gmsh Python API
-    (OpenCASCADE): volume ``diel``, terminal surface ``S_in`` (inner
-    cylinder), ground surface ``S_out`` (outer cylinder). The end annuli are
-    left untagged so they carry the natural (zero normal displacement)
-    condition -- for the radial field they are exact symmetry planes."""
-    gmsh = pytest.importorskip(
-        "gmsh", reason="gmsh Python module needed to build meshes"
-    )
-    gmsh.initialize()
-    try:
-        gmsh.option.setNumber("General.Terminal", 0)
-        gmsh.model.add("coax")
-        outer = gmsh.model.occ.add_cylinder(
-            0, 0, -COAX_LENGTH_M / 2, 0, 0, COAX_LENGTH_M, COAX_B_M
-        )
-        inner = gmsh.model.occ.add_cylinder(
-            0, 0, -COAX_LENGTH_M / 2, 0, 0, COAX_LENGTH_M, COAX_A_M
-        )
-        out, _removed = gmsh.model.occ.cut([(3, outer)], [(3, inner)])
-        assert len(out) == 1, out
-        vol_dim, vol_tag = out[0]
-        gmsh.model.occ.synchronize()
-        surfaces = gmsh.model.get_boundary([(3, vol_tag)], oriented=False)
-        inner_faces, outer_faces = [], []
-        for _dim, tag in surfaces:
-            xmin, ymin, zmin, xmax, ymax, zmax = gmsh.model.get_bounding_box(2, tag)
-            if abs(zmax - zmin) < 1e-6:
-                continue  # end annulus: symmetry plane, deliberately untagged
-            radius = max(abs(xmin), xmax, abs(ymin), ymax)
-            if abs(radius - COAX_A_M) < 1e-6:
-                inner_faces.append(tag)
-            elif abs(radius - COAX_B_M) < 1e-6:
-                outer_faces.append(tag)
-        assert len(inner_faces) == 1 and len(outer_faces) == 1
-        gmsh.model.add_physical_group(3, [vol_tag], name="diel")
-        gmsh.model.add_physical_group(2, inner_faces, name="S_in")
-        gmsh.model.add_physical_group(2, outer_faces, name="S_out")
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h)
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h)
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-        gmsh.model.mesh.generate(3)
-        gmsh.write(str(path))
-    finally:
-        gmsh.finalize()
-
-
 def test_coax_refinement_converges_at_the_element_order(tmp_path):
     """Oracle: ``C = 2 pi eps_0 L / ln(b/a)`` (exact coax closed form), on
     gmsh meshes fed through ``klt em``'s supplied-mesh request. The observed
     convergence order of the refinement study must be consistent with the
     element's theoretical order (P1 tets, electrostatic energy: ``O(h^2)``)
     or the test fails."""
-    geode = _geode_or_skip()
+    geode = geode_or_skip()
     exact = 2.0 * math.pi * EPS0_F_PER_M * COAX_LENGTH_M / math.log(COAX_B_M / COAX_A_M)
 
     values, errors = [], []
     for h in COAX_LEVELS_H_M:
         mesh = tmp_path / f"coax-{h}.msh"
-        _build_coax_mesh(mesh, h)
+        build_coax_mesh(mesh, h)
         request = tmp_path / f"coax-req-{h}.json"
         request.write_text(
             json.dumps(
@@ -429,14 +279,14 @@ def test_layout_refinement_converges_from_above(tmp_path):
     layout path). The refinement runs entirely through klt's own geometry
     path: the layout document is ``prepare_layout``'s output and only its
     mesh-size fields are scaled."""
-    _gmsh_or_skip()
-    geode = _geode_or_skip()
+    gmsh_or_skip()
+    geode = geode_or_skip()
     stack = pdk_stackup.stackup("sky130A")
-    geom = _layer_pair_geometry(stack, "met1", "met2")
-    ideal = _parallel_plate_ff(LAYOUT_REFINE_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
+    geom = layer_pair_geometry(stack, "met1", "met2")
+    ideal = parallel_plate_ff(LAYOUT_REFINE_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
 
     gds = tmp_path / "plates-refine.gds"
-    _plate_pair_gds(gds, LAYOUT_REFINE_SIDE_UM, "met1", "met2")
+    plate_pair_gds(gds, LAYOUT_REFINE_SIDE_UM, "met1", "met2")
     geometry = prepare_layout(
         {
             "layout": gds.name,
@@ -474,7 +324,7 @@ def test_layout_refinement_converges_from_above(tmp_path):
             )
         )
         response = run_em(str(request))
-        values.append(_mutual_ff(response))
+        values.append(mutual_ff(response))
         print(
             f"    refinement x{refine}: |C01|={values[-1]:.4f} fF "
             f"({values[-1] / ideal:.4f} x oracle, nodes={stats['nodes']})"
@@ -484,7 +334,7 @@ def test_layout_refinement_converges_from_above(tmp_path):
     assert values[1] < values[0], (
         f"layout-path refinement is not converging from above: {values}"
     )
-    assert values[0] <= ideal * EXCESS_SANITY_MAX, values[0] / ideal
+    assert values[0] <= ideal * EACH_SOLVER_MAX, values[0] / ideal
 
 
 # ---------------------------------------------------------------------------
@@ -498,11 +348,10 @@ def test_layout_refinement_converges_from_above(tmp_path):
 CROSS_SIDE_UM = 10.0
 CROSS_LOWER, CROSS_UPPER = "li1", "met1"
 CROSS_PANEL_UM = 0.29
-#: Measured |em - mom| / mom = 0.0216; the band and its rationale are the
-#: committed evidence's own (tests/fixtures/em/cross_validation_evidence.json
-#: -> tolerance_band), ~2.3x headroom over the measurement.
-CROSS_MAX_REL_DIFFERENCE = 0.05
-CROSS_SANITY_MAX = 1.25
+# Measured |em - mom| / mom = 0.0216; the band (CROSS_MAX_REL_DIFFERENCE) and
+# its rationale are the committed evidence's own, read at the top of this
+# module (tests/fixtures/em/cross_validation_evidence.json -> tolerance_band),
+# ~2.3x headroom over the measurement.
 
 
 def test_em_and_mom_agree_on_the_shared_gds(tmp_path):
@@ -516,17 +365,17 @@ def test_em_and_mom_agree_on_the_shared_gds(tmp_path):
             "native/mom/ (see docs/cli/mom.md#building-the-native-extension)"
         ),
     )
-    _gmsh_or_skip()
-    _geode_or_skip()
+    gmsh_or_skip()
+    geode_or_skip()
     from klayout_tools.mom import run_mom
 
     stack = pdk_stackup.stackup("sky130A")
-    geom = _layer_pair_geometry(stack, CROSS_LOWER, CROSS_UPPER)
+    geom = layer_pair_geometry(stack, CROSS_LOWER, CROSS_UPPER)
     gds = tmp_path / "cross-plates.gds"
-    _plate_pair_gds(gds, CROSS_SIDE_UM, CROSS_LOWER, CROSS_UPPER)
+    plate_pair_gds(gds, CROSS_SIDE_UM, CROSS_LOWER, CROSS_UPPER)
 
-    em_response = _run_layout_request(tmp_path, "cross-em", gds)
-    em = _mutual_ff(em_response)
+    em_response = run_layout_request(tmp_path, "cross-em", gds)
+    em = mutual_ff(em_response)
 
     spec = tmp_path / "cross-mom.json"
     spec.write_text(
@@ -555,7 +404,7 @@ def test_em_and_mom_agree_on_the_shared_gds(tmp_path):
     assert mom_report["warnings"] == [], mom_report["warnings"]
     mom = -mom_report["capacitance_matrix_ff"][0][1]
 
-    ideal = _parallel_plate_ff(CROSS_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
+    ideal = parallel_plate_ff(CROSS_SIDE_UM**2, geom["gap_um"], geom["eps_r"])
     print(
         f"\ncross-check li1/met1 {CROSS_SIDE_UM}x{CROSS_SIDE_UM} um "
         f"(d={geom['gap_um']:.4f}, eps_r={geom['eps_r']}):\n"
@@ -568,8 +417,8 @@ def test_em_and_mom_agree_on_the_shared_gds(tmp_path):
 
     # Both solves sit above the closed-form lower bound, inside section 1's
     # own band for this aspect ratio ...
-    assert ideal <= em <= ideal * CROSS_SANITY_MAX, em / ideal
-    assert ideal <= mom <= ideal * CROSS_SANITY_MAX, mom / ideal
+    assert ideal <= em <= ideal * EACH_SOLVER_MAX, em / ideal
+    assert ideal <= mom <= ideal * EACH_SOLVER_MAX, mom / ideal
     # ... and the two independent methods agree within the committed band.
     assert abs(em - mom) / mom <= CROSS_MAX_REL_DIFFERENCE, (
         f"klt em ({em:.4f} fF) and klt mom ({mom:.4f} fF) disagree by more "
@@ -589,13 +438,13 @@ def test_cross_validation_evidence_is_self_consistent():
     values, the band must contain the measurement, and the fixture's own
     gap/eps must still agree with the curated sky130A stackup -- if the
     stackup table moves, this fails and the evidence must be re-measured."""
-    evidence = json.loads(EVIDENCE.read_text())
+    evidence = EVIDENCE_DOC
     fixture, oracle = evidence["fixture"], evidence["oracle"]
 
     # The oracle names itself (closed form) and recomputes exactly.
     assert oracle["kind"] == "closed_form_parallel_plate"
     assert oracle["formula"] == "C = eps_r * eps_0 * A / d"
-    ideal = _parallel_plate_ff(
+    ideal = parallel_plate_ff(
         fixture["plate_side_um"] ** 2, fixture["gap_um"], fixture["eps_r"]
     )
     assert oracle["value_ff"] == pytest.approx(ideal, rel=1e-4)
@@ -605,7 +454,7 @@ def test_cross_validation_evidence_is_self_consistent():
 
     # The stackup has not drifted out from under the measurement.
     stack = pdk_stackup.stackup("sky130A")
-    geom = _layer_pair_geometry(stack, CROSS_LOWER, CROSS_UPPER)
+    geom = layer_pair_geometry(stack, CROSS_LOWER, CROSS_UPPER)
     assert fixture["gap_um"] == pytest.approx(geom["gap_um"], abs=1e-9)
     assert fixture["eps_r"] == pytest.approx(geom["eps_r"], abs=1e-9)
     for role in ("lower", "upper"):
