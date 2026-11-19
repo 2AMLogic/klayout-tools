@@ -507,9 +507,9 @@ sections does this deck claim" question.
 `klt deck rules` also carries a top-level `unmodeled_rules` array (issue #3796):
 the official foundry rule ids the deck does not enforce, kept apart from the
 enforced `rules` list and not narrowed by `--rule`. Text output ends with a
-`NOT ENFORCED by this deck` line when it is non-empty. The list is a
-disclosure, not a checked rule: `provenance.deck.content_hash` is not
-guaranteed to change when it does (see the note under `klt deck hash`).
+`NOT ENFORCED by this deck` line when it is non-empty. This disclosure list
+can change while the report's top-level `content_hash` stays the same (see
+the note under `klt deck hash`).
 
 ## `klt deck devices`
 
