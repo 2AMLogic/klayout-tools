@@ -190,6 +190,8 @@
       "modules": [
         "klayout_tools.cli.em_cmd",
         "klayout_tools.cli.parsers.em",
+        "klayout_tools._em_geometry",
+        "klayout_tools._em_layout",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
