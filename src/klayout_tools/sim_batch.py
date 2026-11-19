@@ -2083,9 +2083,9 @@ def attach_staged_model_comparison(
 def _compare_engine_builds(
     worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """Compare the worker's ``--version`` banner with the client's local
-    ``environment.engine_build`` banner (issue #3095). ``not_comparable``
-    unless both sides captured one -- never a proven mismatch. Whitespace is
+    """Compare the worker's ``--version`` banner with the client's
+    ``environment.client_engine_build`` banner (#3095; the off-host probe key, #5566).
+    ``not_comparable`` unless both sides have one; never a proven mismatch. Whitespace
     normalised; a match proves the same banner, not the same build options."""
     worker = (worker_simulator or {}).get("version_banner")
     client = (client_build or {}).get("version_banner")
