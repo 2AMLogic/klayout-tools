@@ -220,6 +220,11 @@ def _compare_pair(
     if mult_raw is None:
         declared = _param_number(header_mult)
         effective = 1.0 if declared is None else declared
+    elif mult_value is None:
+        # Unreachable today: ``comparable`` above already returned the
+        # nonnumeric-mult case. Restated so the checker sees the
+        # invariant (a present ``mult=`` implies a numeric value).
+        return
     else:
         effective = mult_value
     if m_value != effective:
