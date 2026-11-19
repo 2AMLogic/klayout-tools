@@ -240,13 +240,13 @@ def refuse_unsupported(given: Mapping[str, Any]) -> None:
 
 def provenance_hash_check(
     committed: Mapping[str, Any],
-    deck_source_path: Callable[[str], str | None],
+    deck_content_hash: Callable[[str], str | None],
 ) -> dict[str, Any]:
     """The engine-aware provenance entry ``check_extract_report`` appends
     for a committed report.
 
-    The curated engine hashes its deck module through
-    ``deck_source_path(provenance.deck.name)``. A runset-engine report names
+    The curated engine hashes its named rule sources through
+    ``deck_content_hash(provenance.deck.name)``. A runset-engine report names
     no curated deck -- its ``provenance.deck.name`` is the runset's own
     filename, which no curated deck module resolves, so hashing it would
     grade every pristine runset report ``"drifted"``. It hashes the runset
@@ -254,7 +254,7 @@ def provenance_hash_check(
     ``check_lvs_report`` has carried since issue #2849: a changed runset
     changes the extraction exactly as a changed deck does.
 
-    ``deck_source_path`` is injected so this module, whose engine never
+    ``deck_content_hash`` is injected so this module, whose engine never
     resolves a curated deck, stays free of the ``decks`` import."""
     if committed.get("engine") == RUNSET_ENGINE:
         return hash_check(
@@ -266,7 +266,7 @@ def provenance_hash_check(
     return hash_check(
         "provenance.deck.content_hash",
         get_path(committed, ("provenance", "deck", "content_hash")),
-        content_hash(deck_source_path(deck_name) if deck_name else None),
+        deck_content_hash(deck_name) if deck_name else None,
     )
 
 
