@@ -183,3 +183,15 @@ def test_doc_location_prefers_bundled_copy(tmp_path, monkeypatch):
     bundled.write_text("x", encoding="utf-8")
     monkeypatch.setattr(mod, "__file__", str(pkg / "mod.py"))
     assert mod.functional_verification_doc_location() == str(bundled.resolve())
+
+    # Every pointer the verb's --help prints resolves to that same bundled
+    # file (#6418). Check the subparser *description* itself: a match
+    # anywhere in --help already passes via the epilog and `--mutations`.
+    from klayout_tools.cli.parser import create_parser
+
+    sub = next(
+        a for a in create_parser()._actions if hasattr(a, "choices") and a.choices
+    ).choices["functional-verification"]
+    assert str(bundled.resolve()) in " ".join(sub.description.split())
+    assert "docs/cli/functional-verification.md" not in sub.description
+    assert "cocotb-verification-spike" not in sub.description
