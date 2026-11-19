@@ -5909,12 +5909,10 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 
 ## Regenerating signoff evidence in a consumer repo
 
-A consumer repo that commits its signoff evidence needs a small script to
-re-run the graders. This is the canonical shape (issue #2874). Two properties
-matter: the grader is **always the pinned registry wheel** (`klayout-tools==$KLT_VERSION`),
-never whatever `klt` happens to be on `PATH`; and a host that can run neither
-`uv` nor `python3 -m venv` fails loudly instead of silently grading with
-something else.
+A consumer repo that commits signoff evidence should regenerate it with the
+same producer its CI uses. Choose the recipe that matches the pin in CI.
+
+### Registry release pin
 
 Order of preference: `uvx` (needs no `python3-venv`/`ensurepip`), then a
 throwaway `python3 -m venv` + `pip`, then a clear stderr message and a
@@ -5957,6 +5955,56 @@ Notes:
   not fall back to a different `klt`.
 - Verify the committed record with `--check` (see
   [Verifying a committed report](#verifying-a-committed-report---check-issue-2249)).
+
+### Git commit pin without `uvx`
+
+If CI uses `uvx --from "git+…@<sha>"` and that environment hangs, install
+the commit in a throwaway venv with pip. Copy the full commit SHA from CI.
+You can also read `git_commit` and `reinstall_spec` from the producing
+environment's `klt version --format json`, or `provenance.klt_reinstall_spec`
+from a report that records it. For an annotated tag, use the
+[peeled commit](version.md#pinning-a-release-tag-use-the-peeled-commit).
+
+Run this script from the consumer repo with `KLT_COMMIT` set. It requires
+Git, Python with venv and pip support, and GNU `timeout`. On macOS with GNU
+coreutils, set `TIMEOUT_CMD=gtimeout`. Provisioning needs access to the Git
+repository and package dependencies.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ ! ${KLT_COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Set KLT_COMMIT to the full commit SHA pinned in CI." >&2
+  exit 2
+fi
+deadline=${TIMEOUT_CMD:-timeout}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+venv="$work/venv"
+
+"$deadline" -k 5s 60s python3 -m venv "$venv"
+"$deadline" -k 5s 5m "$venv/bin/python" -m pip install \
+  "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_COMMIT}"
+"$deadline" -k 5s 30s "$venv/bin/klt" --version
+"$venv/bin/klt" signoff --attest 10 --inventory attest/item10.json -o evidence/item10.json
+```
+
+Exit 124 means provisioning or startup timed out (137 if `timeout` had to
+kill it after the five-second grace period). Treat the environment as unusable
+and stop. The absolute path keeps the host's `klt` out of the run. If CI also
+pins the KLayout engine, add its `klayout==<version>` requirement to the same
+pip install.
+
+The producer writes `provenance.klt_version` and `provenance.klayout_version`
+from the running build. A newer host build would record its own provenance and
+may generate different checks or envelope fields.
+[See `signoff_attest.py`.](https://github.com/2AMLogic/klayout-tools/blob/94950eeee19e4219d938b81cf742065bd333d750/src/klayout_tools/signoff_attest.py#L1042-L1045)
+
+Tag visibility in the installer's cache can also affect the version string
+for the same commit. Verify the evidence with CI's pinned producer using
+`klt signoff --attest 10 --inventory attest/item10.json --check evidence/item10.json`.
+The drift check ignores the version strings.
 
 ## Exit codes and errors
 
