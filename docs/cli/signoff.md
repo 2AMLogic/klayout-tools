@@ -2496,7 +2496,7 @@ Every inventory is a JSON object with these common fields:
 | `schema_version` | yes | Integer. This build reads `1` and `2` (version 2 adds the `{"glob": ...}` path-list members described below); any other value is refused (exit `1`). |
 | `kind` | yes | The literal `"t1-attestation-inventory"`. |
 | `t1_item` | yes | Integer; must equal the `--attest` value. One inventory attests one item. |
-| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description`. Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
+| `description` | no | Free text, never graded. When non-empty (after trimming) it is carried into the envelope as `attestation.description` — the claimant's scope disclosure, e.g. "planning-level geometry; not DRC-clean" — and echoed into a met citation's `artifact_binding.attestation.description` (item 8, which has no `artifact_binding`: `citation.attestation.description`). Absent from the envelope when omitted, empty or whitespace-only. For item 2 this requires `--inventory` (see "Item 2 declared checks"). |
 
 Plus the item's own fields. Unknown top-level fields are refused (exit `1`),
 because a typo such as `testbench` for `testbenches` would otherwise attest
@@ -2626,7 +2626,15 @@ generic envelope still grades `met` (compatibility). A met item-8 generic
 citation therefore always carries `citation.attestation`, so a reader can tell
 the two apart: `{"tool_produced": true, "producer": "klt signoff --attest",
 "check_count": N, "passed_count": N}` for an envelope this producer made, and
-`{"tool_produced": false}` for any other. Disclosure only; it never changes
+`{"tool_produced": false}` for any other. When a tool-produced envelope
+carries a non-empty `attestation.description` (the inventory's scope
+disclosure, issue #5573), the block also carries it verbatim as
+`citation.attestation.description` (issue #6111) — item 8 has no
+`artifact_binding`, so this block is where its disclosure reaches the tier
+record. The key is omitted when the description is absent, empty,
+whitespace-only or not a string, and a `{"tool_produced": false}` block never
+carries one. Additive: the block's four existing keys are unchanged and no
+`schema_version` bumps. Disclosure only; it never changes
 the verdict. The envelope pins the inventory (as for the other items); the
 report and cited envelopes are recorded by hash in their `present` checks, and
 `--check` reports drift in any of them, in the row map, or in a recorded

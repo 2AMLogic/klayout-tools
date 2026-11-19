@@ -90,6 +90,12 @@ from .signoff_artifact import (
 from .signoff_attest_binding import attestation_record
 from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
+# Item 8's `citation.attestation` disclosure block, split out for the
+# size-ratchet ceiling like `signoff_attest_binding` above.
+from .signoff_characterization import (
+    attach_characterization_attestation as _attach_characterization_attestation,
+)
+
 # Item 3's DRC coverage disclosure and its #5789 ratchet, split out for
 # the size-ratchet ceiling like `signoff_derived_rows` below.
 from .signoff_coverage_disclosure import (
@@ -6022,45 +6028,6 @@ def _binding_check(
     anchored = item_id in _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE
     present = _generic_binding_present(envelope)
     return generic_binding_check(item_id, envelope, spec, anchored, present)
-
-
-#: T1 item 8 (Characterization report): the one item that accepts a bare
-#: generic envelope, so a met citation always discloses whether
-#: ``klt signoff --attest 8`` produced it (issue #4311).
-_CHARACTERIZATION_ITEM = 8
-
-
-def _attach_characterization_attestation(
-    check_kind: str,
-    item_id: int | None,
-    envelope: Mapping[str, Any],
-    citation: dict[str, Any],
-) -> None:
-    """Add ``citation["attestation"]`` for a met item-8 generic citation; a
-    no-op for every other kind/item."""
-    if check_kind == "generic" and item_id == _CHARACTERIZATION_ITEM:
-        citation["attestation"] = _characterization_attestation_disclosure(envelope)
-
-
-def _characterization_attestation_disclosure(
-    envelope: Mapping[str, Any],
-) -> dict[str, Any]:
-    """The ``citation.attestation`` block for a met item-8 generic citation:
-    ``tool_produced`` is ``True`` (with the producer and check counts) only
-    when the envelope carries a ``klt signoff --attest`` attestation block;
-    ``False`` for a hand-written one, so the absence is visible, not implied.
-    Disclosure only -- never graded."""
-    attestation = envelope.get("attestation")
-    if isinstance(attestation, Mapping) and isinstance(
-        attestation.get("producer"), str
-    ):
-        return {
-            "tool_produced": True,
-            "producer": attestation["producer"],
-            "check_count": attestation.get("check_count"),
-            "passed_count": attestation.get("passed_count"),
-        }
-    return {"tool_produced": False}
 
 
 def _generic_artifact_binding(

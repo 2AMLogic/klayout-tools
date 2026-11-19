@@ -24,10 +24,20 @@ def attestation_record(attestation: Mapping[str, Any]) -> dict[str, Any]:
         "check_count": attestation.get("check_count"),
         "passed_count": attestation.get("passed_count"),
     }
-    description = attestation.get("description")
-    if isinstance(description, str) and description.strip():
+    description = scope_description(attestation)
+    if description is not None:
         record["description"] = description
     return record
+
+
+def scope_description(attestation: Mapping[str, Any]) -> str | None:
+    """The claimant's ``attestation.description`` when it is a non-empty
+    (after trimming) string, else ``None``. The one rule every echo site
+    (the artifact-binding record and item 8's disclosure block) applies."""
+    description = attestation.get("description")
+    if isinstance(description, str) and description.strip():
+        return description
+    return None
 
 
 def inventory_schema_version(attestation: Mapping[str, Any]) -> Any:
