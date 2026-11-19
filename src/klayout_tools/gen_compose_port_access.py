@@ -356,7 +356,9 @@ def _stack_sizes(
     variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
 ) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
     """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
-    as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
+    as ``compose()`` sizes the drawn via-drop ladder
+    (#1501/#2072/#2074/#2585/#6612 -- including the variant-keyed native
+    top-metal width floor both paths compose via the same lookup)."""
     from .gen_compose import _VIA_DROP_SIZE_UM, _fixed_cut_side_um, _via_fixed_size_um
 
     cuts: dict[_LayerPair, float] = {}
