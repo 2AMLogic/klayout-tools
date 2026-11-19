@@ -739,9 +739,11 @@ that is not runnable is an error naming the flag or variable; it never falls
 back to `PATH`. Every `--engine klayout` report records
 `environment.klayout_binary` naming the binary that ran (issues #4950/#5844):
 the resolved override path when one was in force, else the PATH-resolved
-absolute path of the `klayout` that ran — so a committed envelope can always
-answer *which* `klayout` produced it. `klt` does not fetch KLayout — supply
-any build you trust. In a pinned throwaway environment:
+absolute path of the `klayout` that ran — the bare name `klayout` only when
+nothing on `PATH` resolves — so a committed envelope can always answer
+*which* `klayout` produced it. A `--list-rule-categories` listing records
+the same field. `klt` does not fetch KLayout — supply any build you trust.
+In a pinned throwaway environment:
 
 ```
 KLT_KLAYOUT_BINARY=/opt/klayout-0.30.12/klayout \
@@ -756,6 +758,21 @@ deck revision.
 Note what this does *not* fix: the rule tables a PDK ships are the portable
 part, and there is still no way to run them **without** the vendor's driver.
 Composing a deck from a PDK's rule tables directly is tracked separately.
+
+Recording the binary has a consequence for a **committed** envelope: an
+absolute tool path is exactly what `klt env-provenance lint-envelope` flags,
+so an envelope or listing carrying a PATH-resolved `environment.klayout_binary`
+reports one finding under an empty allow-list, and `klt env-provenance scan`
+classes the same value as a `home-path` disclosure when the KLayout install
+lives under `$HOME`. The remedy is to scrub before committing — rewrite the
+field with `scrub_payload` per [`env-provenance.md`](env-provenance.md) →
+"Redacting a foreign payload: `scrub_payload`" — not to reach for
+`lint-envelope --allow-prefix`: this repo's own CI lint keeps an empty
+allow-list on purpose ("the tree passes today with an EMPTY allow-list, and
+that is the property worth keeping", `.github/workflows/ci.yml`), and
+`--allow-prefix` suits only a consumer whose CI does not defend that
+property. The bare-name recording (`klayout`, nothing on `PATH` resolved)
+is not a finding.
 
 **`--deck-var NAME=VALUE` (issue #1302, repeatable).** Passes an additional
 `-rd NAME=VALUE` script global to the `klayout` subprocess, beyond the
