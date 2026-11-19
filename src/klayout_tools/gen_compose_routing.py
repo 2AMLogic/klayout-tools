@@ -88,6 +88,9 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 from .gen_compose_landing_pads import (
     _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
 )
+from .gen_compose_landing_pads import (
+    _marked_via_drop_entry as _marked_via_drop_entry,
+)
 from .gen_compose_layer_rules import (
     _landing_pad_side_um_for_layer as _landing_pad_side_um_for_layer,
 )
@@ -103,9 +106,6 @@ from .gen_compose_layer_rules import (
 from .gen_compose_layer_rules import (
     _port_own_layer,
     _resolve_route_layer,
-)
-from .gen_compose_layer_rules import (
-    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
 )
 from .gen_compose_layer_rules import (
     _resolve_landing_pad_sizes as _resolve_landing_pad_sizes,
@@ -321,7 +321,7 @@ def _resolve_via_drop_layer(
                     "land a contact on"
                 )
             contact_hop: _ViaDropHop = (deck.contact, port_layer, deck.metals[0])
-            ladder = [contact_hop]
+            contact_ladder = [contact_hop]
             for via_index in range(0, route_idx):
                 if via_index >= len(deck.vias):
                     return None, (
@@ -332,14 +332,14 @@ def _resolve_via_drop_layer(
                         f"metals[{route_idx}]) and this pin's own diffusion "
                         "layer (reached via deck.contact)"
                     )
-                ladder.append(
+                contact_ladder.append(
                     (
                         deck.vias[via_index],
                         deck.metals[via_index],
                         deck.metals[via_index + 1],
                     )
                 )
-            return tuple(ladder), None
+            return tuple(contact_ladder), None
         # Any other non-metals-stack, non-diffusion-class role (no current
         # `klt gen` generator reports a port this way, but a deck may model
         # such a layer) keeps the pre-#454 behavior: drawn directly on
@@ -1824,11 +1824,8 @@ def _drawn_leg_footprint_region(
 
     for drop in via_drops:
         if side_for_pair is not None and route_layer is not None:
-            # The drop itself rides along (issue #6058): a pad on this leg's
-            # own route_layer is always one of its drop's terminal planes,
-            # so this stays the terminal side -- but the resolver, not the
-            # caller, makes that call, keeping every footprint builder on
-            # the same classification.
+            # The drop rides along (#6058): the resolver, not the caller,
+            # classifies this landing from the drop's own marking.
             side_um = side_for_pair(route_layer, drop["via_layer"], drop)
         else:
             side_um = _VIA_LANDING_SIZE_UM
@@ -3216,20 +3213,6 @@ def _resolve_via_drops(
                     f"{effective_route_layer} cannot reach: {drop_error}"
                 )
             if ladder is not None:
-                # Issue #6058: the two planes this endpoint's own ladder
-                # terminates on -- its port's own layer and the leg's
-                # effective route layer -- are *terminal* landings; every
-                # other level the ladder passes through is *intermediate*.
-                # Recorded per hop (a ``landing_layers`` entry can be
-                # terminal at this endpoint and intermediate at another --
-                # a second net's ladder can pass through this net's own
-                # terminal plane) so pad sizing, the collision-check
-                # footprints and drawing all classify one landing the same
-                # way. ``routing.minimal_ladder`` is the only consumer that
-                # shrinks a pad below today's size, and it reads exactly
-                # this marking -- absent (a caller-built drop), the pad
-                # keeps today's terminal sizing, unchanged.
-                terminal_layers = frozenset((port_layer, effective_route_layer))
                 # One via_drops entry per hop (issue #1567): a single-hop
                 # ladder (the pre-#1567 case) produces exactly the one entry
                 # it always did; a multi-hop ladder produces one entry per
@@ -3237,29 +3220,17 @@ def _resolve_via_drops(
                 # (``landing_layers``) -- :func:`_write_composed_gds` draws a
                 # via square plus a landing pad on each of those two layers
                 # per entry, so a multi-level drop is just N single-level
-                # drops stacked at the identical (x, y).
-                for via_layer, metal_a, metal_b in ladder:
-                    drop_array = _drop_array(port, via_layer)
+                # drops stacked at the identical (x, y). Since #6058 each
+                # entry also records its terminal landings.
+                for hop in ladder:
                     via_drops.append(
-                        {
-                            "x_um": pos[0],
-                            "y_um": pos[1],
-                            "via_layer": via_layer,
-                            "landing_layers": (metal_a, metal_b),
-                            "terminal_landing_layers": tuple(
-                                layer
-                                for layer in (metal_a, metal_b)
-                                if layer in terminal_layers
-                            ),
-                            **({"array": drop_array} if drop_array else {}),
-                            # block_id (#1520): which endpoint's own block
-                            # this drop's landing pad lands on -- lets a
-                            # caller-side conflict check (compose()'s own
-                            # _leg_conflict) test the pad against *that*
-                            # block's own drawn geometry, not just against
-                            # other already-accepted nets.
-                            "block_id": pin["block"],
-                        }
+                        _marked_via_drop_entry(
+                            pos,
+                            (port_layer, effective_route_layer),
+                            hop,
+                            _drop_array(port, hop[0]),
+                            pin["block"],
+                        )
                     )
     return via_drops, None
 

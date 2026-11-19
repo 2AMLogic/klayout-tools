@@ -87,14 +87,11 @@ def _parse_landing_pad_override(raw: Any, where: str) -> float | None:
     return float(raw)
 
 
-def _make_landing_pad_side_um(
-    variant: str,
-    override_um: float | None = None,
-    minimal_ladder: bool = False,
-) -> Any:
-    """Memoized ``((pad_layer, via_layer[, drop])) -> side_um`` resolver.
+class _LandingPadSideResolver:
+    """Memoized ``((pad_layer, via_layer[, drop])) -> side_um`` resolver --
+    what :func:`_make_landing_pad_side_um` returns.
 
-    ``compose()`` builds one resolver per request and threads it into every
+    ``compose()`` builds one per request and threads it into every
     collision-check footprint builder (``_drawn_leg_footprint_region``,
     :func:`_drawn_leg_intermediate_pad_regions`, ``_leg_conflict``'s #1520
     pad-box loop and its own-block escape checks), so the checked footprint
@@ -110,7 +107,7 @@ def _make_landing_pad_side_um(
     so the grown value only ever reaches the checks for pairs whose floor
     is legal), keeping the two from disagreeing mid-flight.
 
-    ``minimal_ladder`` (issue #6058) adds the optional third argument,
+    ``minimal_ladder`` (issue #6058) adds the optional third call argument,
     ``drop``: a landing that drop's own ``terminal_landing_layers`` marking
     (:func:`.gen_compose_routing._resolve_via_drops`) classifies as
     *intermediate* answers that hop's per-pair enclosure/area floor
@@ -118,54 +115,122 @@ def _make_landing_pad_side_um(
     -- the drawn side without the contact-derived baseline -- instead of
     the baseline. A two-argument call (every pre-#6058 caller, and any drop
     without the marking) never sees the difference, so the mode-off
-    footprints are byte-for-byte unchanged.
+    footprints are byte-for-byte unchanged. The mode itself rides along as
+    the ``minimal_ladder`` attribute so message paths can name the escape
+    hatch that matches the pad's own policy.
 
     Via sides come from the same ``via_drop_cut_side_um`` deck lookup
     ``compose()`` resolves its ``via_drop_size_um`` dict from -- never a
     second, private threshold.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_via_cuts import via_drop_cut_side_um
 
-    pair_cache: dict[tuple[tuple[int, int], tuple[int, int], bool], float] = {}
-    via_cache: dict[tuple[int, int], float] = {}
+    def __init__(
+        self,
+        variant: str,
+        override_um: float | None = None,
+        minimal_ladder: bool = False,
+    ) -> None:
+        from .gen_compose_via_cuts import via_drop_cut_side_um
 
-    def _via_side_um(via_layer: tuple[int, int]) -> float:
-        if via_layer not in via_cache:
-            via_cache[via_layer] = via_drop_cut_side_um(variant, via_layer)
-        return via_cache[via_layer]
+        self.minimal_ladder = minimal_ladder
+        self._variant = variant
+        self._override_um = override_um
+        self._pair_cache: dict[
+            tuple[tuple[int, int], tuple[int, int], bool], float
+        ] = {}
+        self._via_cache: dict[tuple[int, int], float] = {}
+        self._via_side_lookup = via_drop_cut_side_um
 
-    def side_um(
+    def _via_side_um(self, via_layer: tuple[int, int]) -> float:
+        if via_layer not in self._via_cache:
+            self._via_cache[via_layer] = self._via_side_lookup(self._variant, via_layer)
+        return self._via_cache[via_layer]
+
+    def __call__(
+        self,
         pad_layer: tuple[int, int],
         via_layer: tuple[int, int],
         drop: dict[str, Any] | None = None,
     ) -> float:
-        intermediate = minimal_ladder and _pad_is_intermediate(drop, pad_layer)
+        from .gen_compose import _VIA_LANDING_SIZE_UM
+
+        intermediate = self.minimal_ladder and _pad_is_intermediate(drop, pad_layer)
         key = (pad_layer, via_layer, intermediate)
-        if key not in pair_cache:
+        if key not in self._pair_cache:
             if intermediate:
                 from .gen_compose_layer_rules import _intermediate_landing_pad_floor_um
 
                 floor_side, _floors = _intermediate_landing_pad_floor_um(
-                    variant, pad_layer, via_layer, _via_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
                 )
-                pair_cache[key] = floor_side
-            elif override_um is None:
-                pair_cache[key] = _VIA_LANDING_SIZE_UM
+                self._pair_cache[key] = floor_side
+            elif self._override_um is None:
+                self._pair_cache[key] = _VIA_LANDING_SIZE_UM
             else:
                 from .gen_compose_layer_rules import _landing_pad_floor_um
 
                 floor_side, _floors = _landing_pad_floor_um(
-                    variant, pad_layer, via_layer, _via_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
                 )
-                pair_cache[key] = max(override_um, floor_side)
-        return pair_cache[key]
+                self._pair_cache[key] = max(self._override_um, floor_side)
+        return self._pair_cache[key]
 
-    # Read by ``_landing_pad_conflict_reason`` (and anything else that must
-    # know whether the resolver's answers already exclude the fixed
-    # baseline) without threading a second callable everywhere.
-    side_um.minimal_ladder = minimal_ladder
-    return side_um
+
+def _make_landing_pad_side_um(
+    variant: str,
+    override_um: float | None = None,
+    minimal_ladder: bool = False,
+) -> _LandingPadSideResolver:
+    """Build the per-request landing-pad side resolver (issues #5803/#6058).
+
+    See :class:`_LandingPadSideResolver` for the resolution contract; the
+    factory keeps the pre-#6058 call shape (and every
+    ``side_for_pair(pad, via)`` call site) unchanged.
+    """
+    return _LandingPadSideResolver(variant, override_um, minimal_ladder)
+
+
+def _marked_via_drop_entry(
+    pos: tuple[float, float],
+    terminal_layers: tuple[tuple[int, int], tuple[int, int]],
+    hop: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
+    drop_array: dict[str, Any] | None,
+    block_id: str,
+) -> dict[str, Any]:
+    """One hop's via_drops entry (``hop`` is :data:`._ViaDropHop`), with the
+    #6058 terminal-landing marking.
+
+    The two planes an endpoint's own ladder terminates on -- its port's own
+    layer and the leg's effective route layer, passed as
+    ``terminal_layers`` -- are *terminal* landings; every other level the
+    ladder passes through is *intermediate*. Recorded per hop in
+    ``terminal_landing_layers`` (a ``landing_layers`` entry can be terminal
+    at this endpoint and intermediate at another -- a second net's ladder
+    can pass through this net's own terminal plane) so pad sizing, the
+    collision-check footprints and drawing all classify one landing the
+    same way. ``routing.minimal_ladder`` is the only consumer that
+    shrinks a pad below today's size, and it reads exactly this marking --
+    absent (a caller-built drop), the pad keeps today's terminal sizing,
+    unchanged. Everything else is the pre-#6058 entry
+    (:func:`.gen_compose_routing._resolve_via_drops`) verbatim, including
+    the #1520 ``block_id``: which endpoint's own block this drop's landing
+    pad lands on -- lets a caller-side conflict check (compose()'s own
+    ``_leg_conflict``) test the pad against *that* block's own drawn
+    geometry, not just against other already-accepted nets.
+    """
+    via_layer, metal_a, metal_b = hop
+    terminal = frozenset(terminal_layers)
+    return {
+        "x_um": pos[0],
+        "y_um": pos[1],
+        "via_layer": via_layer,
+        "landing_layers": (metal_a, metal_b),
+        "terminal_landing_layers": tuple(
+            layer for layer in (metal_a, metal_b) if layer in terminal
+        ),
+        **({"array": drop_array} if drop_array else {}),
+        "block_id": block_id,
+    }
 
 
 def _landing_and_widen_pad_boxes(
