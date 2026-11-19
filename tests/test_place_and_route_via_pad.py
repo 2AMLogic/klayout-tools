@@ -279,11 +279,17 @@ def test_routed_def_scan_attributes_a_patch_tip_hit():
     entry = next(e for e in tip_check["rules"] if e["rule"] == "M3.S.5")
     assert entry["violations"] == 1
     assert entry["router_fill"] == 1 and entry["via_pads"] == 0
+    assert tip_check["router_fill_scan"] == {
+        "status": "scanned",
+        "reason": None,
+        "unresolved": 0,
+    }
 
 
 def test_without_a_def_path_the_same_hit_is_unattributed():
     """No DEF handed in means no patch region and no guesswork: the same
-    violation counts in the total but in neither attribution subset."""
+    violation counts in the total but in neither attribution subset, and
+    ``router_fill_scan`` is ``None`` -- no scan was attempted (issue #6100)."""
     layout, top = _wire_facing_the_real_patch()
     report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS)
     tip_check = report["tip_check"]
@@ -291,3 +297,94 @@ def test_without_a_def_path_the_same_hit_is_unattributed():
     assert entry["violations"] == 1
     assert entry["router_fill"] == 0 and entry["via_pads"] == 0
     assert tip_check["router_fill_violations"] == 0
+    assert tip_check["router_fill_scan"] is None
+
+
+def test_non_asap7_leaves_router_fill_scan_null():
+    """A non-ASAP7 family never attempts the scan (the pass itself is a
+    documented no-op there), so ``router_fill_scan`` is ``None`` and the
+    skipped state is ``tip_check``'s own ``status``/``reason`` to state."""
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(
+        layout,
+        top,
+        variant="sky130A",
+        lef_to_gds=FULL_LEF_TO_GDS,
+        def_path=str(_ROUTED_DEF),
+    )
+    tip_check = report["tip_check"]
+    assert tip_check["status"] == "skipped"
+    assert "not ASAP7" in tip_check["reason"]
+    assert tip_check["router_fill_scan"] is None
+
+
+# --------------------------------------------------------------------------
+# router_fill_scan: the scan's own self-report beside the zero (issue #6100)
+# --------------------------------------------------------------------------
+
+
+def test_drcfill_free_def_scans_clean_and_says_so(tmp_path):
+    """A scanned DEF whose router wrote no DRCFILL must read as *measured,
+    zero patches* -- ``router_fill_scan`` carries ``"scanned"`` with
+    ``unresolved`` 0 -- not share a bare ``router_fill`` 0 with the
+    never-measured case."""
+    text = "\n".join(
+        line
+        for line in _ROUTED_DEF.read_text(encoding="utf-8").splitlines()
+        if "+ SHAPE DRCFILL" not in line
+    )
+    stripped = tmp_path / "stripped.def"
+    stripped.write_text(text, encoding="utf-8")
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS, def_path=str(stripped))
+    tip_check = report["tip_check"]
+    assert tip_check["status"] == "violations"  # the wire's own tip hit
+    assert tip_check["router_fill_violations"] == 0
+    assert tip_check["router_fill_scan"] == {
+        "status": "scanned",
+        "reason": None,
+        "unresolved": 0,
+    }
+
+
+def test_skipped_scan_reports_its_reason_not_a_bare_zero(tmp_path):
+    """A DEF without a ``UNITS DISTANCE MICRONS`` statement: the scan skips
+    with its own reason, so ``router_fill`` 0 is readable as *never
+    measured* instead of indistinguishable from a clean scan."""
+    path = tmp_path / "nounits.def"
+    path.write_text("VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n", encoding="utf-8")
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS, def_path=str(path))
+    scan = report["tip_check"]["router_fill_scan"]
+    assert scan["status"] == "skipped"
+    assert "UNITS DISTANCE MICRONS" in scan["reason"]
+    assert scan["unresolved"] == 0
+    assert report["tip_check"]["router_fill_violations"] == 0
+
+
+def test_unresolved_items_surface_beside_the_zero(tmp_path):
+    """A width-less ``NETS``-section DRCFILL item (this pass never supplies
+    ``lef_layer_widths_dbu``): the scan runs but cannot reconstruct the
+    item, so ``router_fill`` 0 now carries ``unresolved`` 1 with it instead
+    of silently reading as a clean scan."""
+    path = tmp_path / "nets.def"
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        "DESIGN top ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "NETS 1 ;\n"
+        "  - n1 ( inst1 A )\n"
+        "    NEW M3 ( 0 -200 ) ( 0 0 ) + SHAPE DRCFILL ;\n"
+        "END NETS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+    layout, top = _wire_facing_the_real_patch()
+    report = _run(layout, top, lef_to_gds=FULL_LEF_TO_GDS, def_path=str(path))
+    tip_check = report["tip_check"]
+    assert tip_check["router_fill_violations"] == 0
+    assert tip_check["router_fill_scan"] == {
+        "status": "scanned",
+        "reason": None,
+        "unresolved": 1,
+    }
