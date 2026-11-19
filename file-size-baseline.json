@@ -269,7 +269,7 @@
     },
     {
       "path": "src/klayout_tools/equiv.py",
-      "lines": 1131
+      "lines": 1103
     },
     {
       "path": "src/klayout_tools/equiv_replay.py",
@@ -405,7 +405,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6360
+      "lines": 6355
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -421,7 +421,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2419
+      "lines": 2207
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
@@ -429,7 +429,7 @@
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
-      "lines": 823
+      "lines": 734
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7173
+      "lines": 7234
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -653,7 +653,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4647
+      "lines": 4577
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -909,7 +909,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26197
+      "lines": 26071
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

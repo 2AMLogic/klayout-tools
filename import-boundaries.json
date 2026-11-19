@@ -190,6 +190,8 @@
       "modules": [
         "klayout_tools.cli.em_cmd",
         "klayout_tools.cli.parsers.em",
+        "klayout_tools._em_geometry",
+        "klayout_tools._em_layout",
         "klayout_tools._geode",
         "klayout_tools.em"
       ]
@@ -484,6 +486,7 @@
       "modules": [
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
         "klayout_tools.lvs_finfet",
@@ -756,6 +759,7 @@
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
         "klayout_tools._verilog_top",
+        "klayout_tools._yosys_error_messages",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
         "klayout_tools.coverage_work",
@@ -847,6 +851,7 @@
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
+        "klayout_tools._meas_lint_wrapper",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
         "klayout_tools.remote_launcher",
@@ -1911,6 +1916,18 @@
     }
   ],
   "shared_private_permissions": [
+    {
+      "consumer": "klayout_tools.equiv",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_yosys_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); equiv.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
+    {
+      "consumer": "klayout_tools.synthesize",
+      "exporter": "klayout_tools._yosys_error_messages",
+      "symbol": "_synthesis_error_message",
+      "reason": "Issue #6090: the yosys error-message formatter (with the WASI-sandbox and wasm-trap hints) moved to _yosys_error_messages so the hint detection cannot diverge between the equiv and synthesize verbs (#1755); synthesize.py is at its file-size ratchet ceiling, so promote to public when it is next split."
+    },
     {
       "consumer": "klayout_tools.cli.pex_text",
       "exporter": "klayout_tools.cli.extract_text",
