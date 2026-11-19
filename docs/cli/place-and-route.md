@@ -3132,7 +3132,10 @@ spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
 edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
 `M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
 `V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
-(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+(~13) remain, plus a route-dependent 1-2 `M5.W.3` (a floor for that route,
+not a constant of the recipe, and router metal rather than `pdngen`
+geometry; see the `M5.W.3` paragraph below); no existing request field
+changes that.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
 markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
 count that scales with block size, not a fixed number). They sit on
@@ -3148,6 +3151,29 @@ OpenROAD `pdngen` limitation; the preset is unchanged here.
 `pdngen` offsets are core-origin relative: the edge-grid result was measured
 with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
 hits (adjust `power.straps` explicitly in that case).
+
+**The residual `M5.W.3` is router metal and route-dependent (issue #6453).**
+Do not read the 1-2 `M5.W.3` above as a PDN-geometry constant. Reported
+2026-11-17 (issue #6453), measured with the setup above (packaged `asap7.drc`,
+`klt drc --engine klayout`, `output_dbu_um` 0.00025, the shipped
+`asap7sc7p5t` recipe given as explicit `power.straps`, one routed slice
+block): the routed `M5` shapes that
+exceed the width buckets `M5.W.3` enumerates are TritonRoute landing patches
+around the PDN blockages, not `pdngen` metal. Their across-track extents are
+336 / 384 / 432 nm (even multiples of the 24 nm `M5` edge grid), none sits at
+a strap edge, and all sit inside strap columns.
+The count therefore moves with the route, and the one field that positions
+the straps trades it against a second family. Re-routing the same netlist
+with the `M5` strap `offset_um` moved one 6 nm step (the core-origin-relative
+vs deck-absolute case in the caveat above) gave zero `M5.W.3` but introduced
+32 `M5.AUX.1` markers, every one at an `M5` strap edge 6 nm off the 24 nm
+grid; neither offset setting cleared both. Power delivery (`stripe_segments`
+and `vias` per net) was identical under both offsets, so only the route's
+landing patches moved. No request field addresses router landing-patch
+widths, and the preset is unchanged: keep the shipped offset and treat the
+`M5.W.3` residue as a route-dependent floor. These figures come from one
+block; whether TritonRoute/OpenROAD exposes a landing-patch knob has not been
+traced.
 
 **`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a
