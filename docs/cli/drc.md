@@ -1162,8 +1162,15 @@ has no compound-layer expression for "one of": `poly2.enclosing.contact.1` /
 `comp.enclosing.contact.1` (a contact lands on poly2 *or* comp), and
 `metal4.enclosing.via4.1` / `mim.enclosing.via4.1` (a MiM via4 lands on the
 `mim` plate rather than on Metal4). A fully orphan cut is therefore still not
-reported by those four rules. sky130 has its own opt-in issue (#5737) and
-keeps the legacy behaviour until it lands.
+reported by those four rules. sky130 is opted in (#5737) on eight single-population sides
+(`li1.enclosing.licon1.1`, `met1.enclosing.mcon.1`,
+`met1.`/`met2.enclosing.via.1`, `met2.`/`met3.enclosing.via2.1`,
+`met4.enclosing.via3.1`, `met5.enclosing.via4.1`). Seven sky130 cut sides stay
+on the legacy behaviour because each is one of several disjoint populations:
+`diff.`/`tap.`/`poly.enclosing.licon.1` (a diffusion licon never touches
+poly), `met3.enclosing.via3.1` and `capm.enclosing.via3.1` (a capm via3 lands
+on capm, not met3), `met4.enclosing.via4.1` and `capm2.enclosing.via4.1`
+(likewise for capm2).
 
 asap7 has **no** cut-containment gap, and `require_containment` does not apply
 to it: it is a native KLayout DRC-DSL deck (`decks/asap7.drc`), not a curated
