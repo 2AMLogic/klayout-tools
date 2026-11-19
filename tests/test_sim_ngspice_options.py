@@ -254,7 +254,9 @@ def test_batch_job_with_stale_runner_echo_fails_loudly(tmp_path, monkeypatch):
 
     with pytest.raises(sim.SimError, match="options.ngspice_options.gminsteps"):
         sim_batch._run_batch_job(
-            config=types.SimpleNamespace(runner_version_check="off"),
+            config=types.SimpleNamespace(
+                runner_version_check="off", job_timeout_s=None
+            ),
             job_id="job-1",
             corner_points=[sim.CornerPoint(None, {}, 27)],
             netlist_path=str(tmp_path / "body.spice"),

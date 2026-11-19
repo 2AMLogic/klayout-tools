@@ -1,0 +1,1 @@
+- **`klt functional-verification` labels combined request and proposal errors as `--mutations input`** (#6577, 2026-11-18).

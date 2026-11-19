@@ -389,6 +389,20 @@ def test_check_hashes_runset(tmp_path, fake_klayout):
     assert check_lvs_report(str(path))["status"] != "match"
 
 
+def test_check_names_missing_runset_deck(tmp_path, fake_klayout):
+    """Issue #6223: a moved runset deck gets the `input_not_found` block."""
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(run_lvs(_request(tmp_path, 1))))
+    by_field = {c["field"]: c for c in check_lvs_report(str(path))["checks"]}
+    ok = by_field["provenance.runset.content_hash"]
+    assert ok["match"] and ok["actual"].startswith("sha256:")
+    assert "input_not_found" not in ok
+    (tmp_path / "pdk.lvs").rename(tmp_path / "moved.lvs")
+    gone = {c["field"]: c for c in check_lvs_report(str(path))["checks"]}[ok["field"]]
+    assert gone["actual"] is None and not gone["match"]
+    assert gone["input_not_found"]["path"] == str(tmp_path / "pdk.lvs")
+
+
 @pytest.mark.skipif(shutil.which("klayout") is None, reason="klayout binary absent")
 def test_real_binary_version_probe():
     assert lvs_runset._application_version(shutil.which("klayout")) is not None

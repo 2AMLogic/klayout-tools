@@ -9,7 +9,7 @@ name: Live klt sta engine checks (SPEF *NAME_MAP, driving cell / load, instance 
 # `tests/test_post_route_sta_instance_paths_run.py`) has the same requirement, and
 # no other lane runs that file. This manually-triggered job provisions both,
 # exactly as `equiv-canary.yml` does (minus Yosys, which these tests do not
-# use), and fails if any test is skipped. Trigger from the Actions tab, or
+# use), and fails if any test fails or is skipped. Trigger from the Actions tab, or
 # `gh workflow run post-route-sta-live.yml`, when `post_route_sta.py`'s Tcl
 # or SPEF handling changes. See `equiv-canary.yml` for the provisioning
 # rationale.
@@ -79,6 +79,7 @@ jobs:
           PDK: sky130A
           PDK_ROOT: /home/runner/.ciel
         run: |
+          set -o pipefail
           uv run --frozen --extra dev pytest tests/test_post_route_sta.py \
             tests/test_post_route_sta_instance_paths_run.py \
             -k "test_live_engine_spef_name_map_annotation or test_live_engine_driving_cell_and_output_load or test_live_engine_report_instances" \

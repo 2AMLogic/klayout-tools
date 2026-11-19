@@ -16261,7 +16261,7 @@ def test_attest_commands_run_in_the_declared_repo_relative_cwd(tmp_path):
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
-        ({"schema_version": 2}, "schema_version 2"),
+        ({"schema_version": 3}, "schema_version 3"),
         ({"schema_version": _DROP}, "schema_version"),
         ({"schema_version": True}, "schema_version"),
         ({"kind": "manifest"}, "t1-attestation-inventory"),

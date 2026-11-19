@@ -62,7 +62,7 @@ import functools
 import math
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
@@ -157,7 +157,7 @@ def _endpoint_stub_widen_um(
     if route_layer is None or _port_own_layer(port) != route_layer:
         return None
     pad_width_um = port.get("width_um")
-    if not isinstance(pad_width_um, (int, float)) or isinstance(pad_width_um, bool):
+    if not is_finite_number(pad_width_um):
         return None
     pad_width_um = float(pad_width_um)
     if pad_width_um <= width_um:
@@ -1094,7 +1094,7 @@ def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
         values: list[float] = []
         for key in ("x_um", "y_um", "width_um"):
             value = port.get(key)
-            if not is_number(value):
+            if not is_finite_number(value):
                 break
             values.append(float(value))
         if len(values) != 3 or values[2] <= 0.0:
@@ -1120,7 +1120,7 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
         if side is None or not isinstance(port, dict):
             continue
         value = port.get("x_um" if side in ("E", "W") else "y_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         lines[side] = float(value)
     return lines
@@ -1185,7 +1185,7 @@ def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
         if _ring_port_side(name) is None:
             continue
         value = port.get("width_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         if value > 0.0:
             widths.append(float(value))
@@ -2321,11 +2321,7 @@ def _same_layer_short_reason(
                     )
 
             pad_w = other_port.get("width_um")
-            if (
-                not isinstance(pad_w, (int, float))
-                or isinstance(pad_w, bool)
-                or (pad_w <= 0)
-            ):
+            if not is_finite_number(pad_w) or pad_w <= 0:
                 # no reported pad size -- fall back to trace width
                 pad_w = effective_width_um
             half = float(pad_w) / 2.0 + route_half_um
@@ -3802,21 +3798,15 @@ def route_two_pin(
     port_a = block_a["ports"].get(pin_a["port"])
     port_b = block_b["ports"].get(pin_b["port"])
 
-    # A block with no reported ports[] (a hand-crafted generator_report) can't
-    # supply a routable position -- treat as unroutable rather than crashing.
-    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
+    # A block with no reported ports[] (a hand-crafted generator_report), or a
+    # port whose x_um/y_um is not a finite number (a 400-digit int overflows
+    # float(), #6565), can't supply a routable position -- treat as
+    # unroutable rather than crashing. Same resolver route_bundle orders by.
+    a = _pin_position_um(pin_a, blocks, offsets_um)
+    b = _pin_position_um(pin_b, blocks, offsets_um)
+    if a is None or b is None:
         return _unroutable("one or both ports report no position (empty ports[])")
 
-    off_a = offsets_um[pin_a["block"]]
-    off_b = offsets_um[pin_b["block"]]
-    a = (
-        float(port_a["x_um"]) + off_a["x"],
-        float(port_a["y_um"]) + off_a["y"],
-    )
-    b = (
-        float(port_b["x_um"]) + off_b["x"],
-        float(port_b["y_um"]) + off_b["y"],
-    )
     dir_a = int(port_a.get("direction_deg", 0)) % 360
     dir_b = int(port_b.get("direction_deg", 0)) % 360
     if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:
