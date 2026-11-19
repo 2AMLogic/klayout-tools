@@ -11,8 +11,9 @@ asserted the opposite ("GitHub Actions' default bash shell runs with
 `grep -q pipefail` audit file the workflow as already defended.
 
 So these tests deliberately do NOT ask "does the word `pipefail` appear in
-the file". They slice out *this step's* `run:` block as text (the dev extra
-has no YAML library -- same approach as `test_ci_pdk_provisioning.py`),
+the file". They slice out *this step's* `run:` block as text (a YAML parser is
+available -- `pyyaml` is a runtime dependency -- but the text slice is
+all the assertions need, and it mirrors `test_ci_pdk_provisioning.py`),
 execute it under the shell GitHub Actions would actually pick for it, with a
 stub `uv` that emits a JSON report and exits 3, and assert on **exit
 status**: is `pipefail` in effect for this block, observably.
