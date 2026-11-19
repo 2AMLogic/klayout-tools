@@ -28,10 +28,10 @@ from pathlib import Path
 from typing import Any
 
 from ._jsonnum import is_int
+from .mcp_doc_links import DOCS_BASE_URL, cli_docs_url
 
 TOOL_PREFIX = "klt_"
 
-DOCS_BASE_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli"
 _DOC_POINTER = re.compile(
     r"(?<![\w./\\-])docs/cli/([A-Za-z0-9_-]+\.md)(?![\w/\\-]|\.\w)"
 )
@@ -216,8 +216,7 @@ def _describe(
 ) -> str:
     body = (parser.description or help_line or "").strip()
     body = _link_cli_docs(re.sub(r"\s+", " ", body))
-    doc = f"{DOCS_BASE_URL}/{verb_path[0]}.md"
-    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {doc})"
+    return f"klt {' '.join(verb_path)}: {body} (CLI docs: {cli_docs_url(verb_path[0])})"
 
 
 def _walk(

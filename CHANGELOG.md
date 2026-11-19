@@ -25,6 +25,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
   one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
 
+- **`klt sim` complex-vector save-mode refusal names the waveform-limiting
+  remedy** (#6749, 2026-11-19): an AC request combining
+  `options.complex_vectors` with `options.save_mode: "netlist"` was refused
+  before launch, but the message only said to omit `options.save_mode`, so a
+  caller following it literally accepted a waveform of every node. The
+  refusal now also directs the caller to `options.save_vectors` with each
+  requested complex vector listed there, and spells out the corrected
+  options for the request (e.g. `{"complex_vectors": ["v(out)"],
+  "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
+  before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
+  AC vectors" section.
+- **`klt mcp serve` tool descriptions for `klt_sim_merge` and `klt_sim_plan`
+  link to their manual sections** (#6793, 2026-11-19): both descriptions ended
+  in `(CLI docs: …/docs/cli/sim-merge.md)` / `…/sim-plan.md`, pages that do not
+  exist. They now point at the "Merging per-request reports" and "Planning
+  shards" sections of `docs/cli/sim.md`; every other tool's link, including
+  `klt_sim`'s plain `sim.md`, is unchanged. Description text only: no tool name,
+  input schema or JSON field moves. A test now checks every catalog docs link
+  against the checkout, fragment included.
 - **`klt sim --resume` no longer refuses a sharded resume that has fewer
   outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
   reused finished shards, the replacement dispatch still asked for the
@@ -52,6 +71,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   the case (raw `sha256` match + identity mismatch) as
   `normalization_changed`. The stamp format and JSON fields do not change.
   Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+- **`klt sim --backend batch`: a grid where every unit fails to converge now
+  says where to look** (#6720, 2026-11-18). When every unit (at least two) of a
+  `batch` run errors with `singular_matrix` or `nonconvergence`, the report's
+  top-level `diagnostics[]` gains one `batch_convergence_all_failed` warning
+  that quotes the worker-reported fields to compare with a `--backend local`
+  run (`engine_build_comparison.status`, `ngspice_init.source`/`.sha256`,
+  `omp_num_threads`, and `environment.ngspice_options`) and names a one-corner
+  canary. Additive only: no existing field changes, nothing is emitted when any
+  unit is ok, on another backend or for other codes, and no new flag or
+  worker-side `--dry-run` is added (`--dry-run` still never contacts the
+  worker). The code is report-level and registered in `DIAGNOSTIC_CODES`, so
+  `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
+  Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
+  batch".
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
@@ -463,6 +496,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
   field or `schema_version` changes; the deck's `provenance.deck` hash
   changes.
+- **`klt gen-compose` gains `routing.landing_pad_size_um` — a request-level
+  landing-pad size override — and names pad-vs-pitch conflicts as such**
+  (#5803, 2026-11-17): every via-drop's landing pad was a fixed 0.42 µm
+  square (contact-enclosure convention, grown per `(landing, via)` pair by
+  the #2072/#2074 area/enclosure floors), independent of the route's own
+  width — so a generator family whose terminals are pitched *finer* than
+  that footprint (e.g. `mos_array`'s 0.335 µm terminal columns) deposited
+  overlapping pads on every plane the ladders share, with no parameter on
+  either side to reconcile them, and the resulting rejections surfaced as
+  generic "crosses already-routed net" / "comes within N um" messages that
+  read as backbone problems:
+  - **`routing.landing_pad_size_um`** sets the pad side from the caller's
+    side. Validated against each drawn `(landing, via)` pair's own deck
+    floor — an override below the floor is an application error (exit 1)
+    naming the binding rule id and threshold (a smaller pad would be a
+    guaranteed `klt drc` violation, so it is never silently grown back);
+    where the floors allow it, pads draw at exactly the override, and the
+    route-vs-route collision checks measure the same footprint. Omitted ⇒
+    default pads, byte-for-byte unchanged.
+  - **Pad-vs-pitch conflicts are named.** A route-vs-route conflict whose
+    geometry is a landing pad now reports the pad footprint, the terminal
+    pitch, and the deck's spacing rule, with the override named as the
+    escape hatch — instead of a generic crossing/spacing rejection on a
+    plane the caller never assigned anything to. Backbone-only conflicts
+    keep the generic (accurate) messages.
+  Request/response shape change is additive only (a new optional
+  `routing.*` request field; no response field changed).
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
