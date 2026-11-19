@@ -7,14 +7,10 @@ block and records a ``constraints.report_ports`` request emits (issue
 
 Split out of :mod:`klayout_tools.post_route_sta` to keep that module under its
 file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`
-was (issues #3005, #5241). ``post_route_sta`` re-imports every name here, so
-existing ``post_route_sta._parse_worst_path_rows`` etc. references keep
-working.
-
-The Tcl that produces these blocks (``_worst_path_lines`` and
-``_port_path_lines``) stays in ``post_route_sta`` with the rest of the
-generated script; only the markers they print and the parsers that read them
-live here.
+was (issues #3005, #5241). The Tcl producers are
+:func:`~klayout_tools.post_route_sta_stages._worst_path_lines` and
+:func:`~klayout_tools.post_route_sta._port_path_lines`. This module defines
+the markers they emit and parses the rows between them.
 """
 
 from __future__ import annotations

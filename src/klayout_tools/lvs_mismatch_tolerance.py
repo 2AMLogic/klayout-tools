@@ -1,10 +1,8 @@
 """``options.parameter_tolerance`` snap-and-recompare helpers for ``klt lvs``.
 
 Split out of ``lvs_mismatch.py`` (issue #4746) to keep that module under its
-per-file size ceiling. Pure move: the names are re-exported from
-``lvs_mismatch`` (and so from ``lvs``) unchanged. This module never imports
-``lvs_mismatch`` or ``lvs`` at module scope (deferred imports inside the
-functions that need them), so the import graph stays acyclic.
+per-file size ceiling. Functions that need ``lvs_mismatch`` or ``lvs`` import
+them locally to keep the import graph acyclic.
 """
 
 from __future__ import annotations
