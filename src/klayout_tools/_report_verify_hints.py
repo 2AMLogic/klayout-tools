@@ -28,6 +28,7 @@ def input_not_found_entry(
     found_relative_to_report: str | None,
     *,
     override_hint: str = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
     echoed: Any = None,
     override: str | None = None,
 ) -> dict[str, Any]:
@@ -40,10 +41,13 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
-    - ``resolved_repo_root`` -- the repo root a repo-scoped ``{path,
-      scope}`` echo (issue #5845) was anchored on; ``None`` for every
-      other echo shape and whenever ``override`` supplied the reported
-      ``path`` (issue #6461: anchored on the cwd, not a repo root).
+    - ``resolved_repo_root`` -- emitted exactly when the caller opts in
+      with ``include_repo_root``, whatever ``echoed`` is (an absent echo
+      under an override still reports the key, as ``None``). The value is
+      the repo root a repo-scoped ``{path, scope}`` echo (issue #5845) was
+      anchored on; ``None`` for every other echo shape and whenever
+      ``override`` supplied the reported ``path`` (issue #6461: anchored on
+      the cwd, not a repo root).
     - ``hint`` -- when the input sits next to the report, how to reach it;
       ``None`` otherwise.
     """
@@ -61,10 +65,12 @@ def input_not_found_entry(
         "resolved_against": None if os.path.isabs(path) else os.getcwd(),
         "hint": hint,
     }
-    if echoed is not None:
-        # Issue #6461: gate on the override *here* -- an override supplied
-        # the reported `path` (anchored on the cwd), so the echo's repo
-        # root must never name an anchor the path did not use.
+    if include_repo_root:
+        # Key presence is the caller's opt-in, never inferred from `echoed`
+        # (a report with no echo + an override still emits it, as `None`).
+        # Issue #6461: the value gates on the override *here* -- an override
+        # supplied the reported `path` (anchored on the cwd), so the echo's
+        # repo root must never name an anchor the path did not use.
         entry["resolved_repo_root"] = (
             env_provenance.find_repo_root(report_dir)
             if not override
@@ -149,7 +155,8 @@ def input_hash_check(
         report_path,
         found_relative_to_report,
         override_hint=override_hint,
-        echoed=echoed if include_repo_root else None,
+        include_repo_root=include_repo_root,
+        echoed=echoed,
         override=override,
     )
     return check
