@@ -533,6 +533,23 @@ so no `schema_version` bump. It varies run to run by nature, so `--check
 --rerun` excludes it (`VOLATILE_PROVENANCE_PATHS`). Progress lines for the same
 run go to stderr only; stdout stays the envelope.
 
+**`klt pex --engine klayout-runset` adds fields, never changes one** (issue
+#6559). The `extraction` block gains `engine`, `parasitics_carried`,
+`params_not_carried`, `device_counts` and `extra_circuits` — present **only**
+under that engine, so a default-engine envelope is byte-identical to before —
+and
+`body_bias.status` gains the value `"not_assessed"` (only ever emitted by that
+engine). `klt extract --engine klayout-runset` reports gain a top-level
+`params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
+`instantiated_device_counts` (`{class: count}` across the instantiated
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
+instantiated hierarchy, which for a flat runset is the selected circuit's own
+count.
+Consumers that switch on `body_bias.status` already must tolerate an unknown
+value per the rule above. No `schema_version` bump on either verb. See
+[`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
+
 ## Requested-but-unperformed analysis
 
 When a request asks for an analysis or capability, its response must make
@@ -977,6 +994,32 @@ the right member even when two members under one path declare identical
 `argv`. Members are emitted in `name` order after benches sorted by path, so
 check order does not depend on inventory listing order. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
+
+Issue #5963 adds two additive, optional keys to a **file-backed**
+`evidence[]` entry of the `klt signoff --manifest` request (no
+`schema_version` bump; absent they change nothing): `artifact_manifest`
+(repo-relative path to a committed artifact-store `*.manifest.json`) and
+`artifact_member` (the manifest entry's `name`). For a `yield` entry whose
+samples document is not on disk, the grader takes the recorded `sha256` of
+the named member — `artifact_member`, else the entry whose `name` matches
+the report's own `samples` reference (exact, then a single basename match)
+— as the live hash the `content_hash` pin compares, reading only the
+committed manifest: no broker, no network, no subprocess, so the grade
+stays a pure function of the git tree. The citation discloses the basis
+(`content_hash_basis: "artifact_manifest"`, additive like issue #4893's
+`"evidence_file"`) and reports `input_verified: null` — the bytes were not
+re-hashed. A store-resolved hash never supplies a verdict (operator ruling
+2026-11-17, option `a`): the envelope itself stays committed and
+file-backed. An unreadable/invalid manifest, a missing, duplicate-named or
+basename-ambiguous member leaves the hash unresolved with a named reason in
+`content_hash_unresolved` (`manifest_unreadable`, `manifest_invalid`,
+`member_missing`, `duplicate_member`, or `ambiguous_member`). For any of
+these failures, a pinned unmet item carries the same object in
+`detail.content_hash_unresolved`. A non-string store-pin value or either
+store-pin key on a command-backed entry yields `invalid_evidence` for that
+item. A samples file present on disk always wins; entries that name no `artifact_manifest` are byte-identical to
+before. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Citing an object in
+the artifact store".
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,

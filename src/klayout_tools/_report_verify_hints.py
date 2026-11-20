@@ -208,6 +208,48 @@ def deck_not_found_entry(
     }
 
 
+def _stale_pin_target(
+    resolution: Mapping[str, Any],
+) -> tuple[str, str | list[str] | None, str]:
+    """Return the compared field, its source when known, and the hash to pin."""
+    samples = resolution.get("yield_samples_source")
+    if isinstance(samples, str):
+        if resolution.get("content_hash_basis") == "artifact_manifest":
+            return (
+                "artifact_manifest.entries[].sha256",
+                samples,
+                f"the recorded sha256 for {samples}, prefixed with 'sha256:'",
+            )
+        return (
+            _YIELD_HASH_FIELD,
+            samples,
+            f"the sha256 of the samples document {samples} (samples document)",
+        )
+
+    field = "provenance.input.content_hash"
+    envelope = resolution.get("envelope")
+    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
+    block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    block = block if isinstance(block, Mapping) else {}
+    members = block.get("paths")
+    if isinstance(members, list) and members:
+        names = []
+        for member in members:
+            path = member.get("path") if isinstance(member, Mapping) else None
+            path = path.get("path") if isinstance(path, Mapping) else path
+            if isinstance(path, str):
+                names.append(path)
+        return (
+            field,
+            names,
+            f"the input-set digest over the files in compared_against ({field})",
+        )
+    if isinstance(block.get("path"), str):
+        path = block["path"]
+        return field, path, f"the sha256 of the input artifact {path} ({field})"
+    return field, None, f"the envelope's {field} (the recorded input hash)"
+
+
 def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[str, Any]:
     """``detail`` for a ``stale_evidence`` verdict: names the failed
     comparison (field / expected / actual, the entry shape ``--check`` emits)
@@ -225,56 +267,14 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     still flags a pin of the evidence file's own sha256.
     """
     expected = spec.get("content_hash")
-    samples_path = resolution.get("yield_samples_path")
+    field, source, what = _stale_pin_target(resolution)
     detail: dict[str, Any] = {
         "content_hash_pin": "stale",
-        "hash_check": hash_check(
-            _YIELD_HASH_FIELD
-            if samples_path is not None
-            else "provenance.input.content_hash",
-            expected,
-            resolution["content_hash"],
-        ),
+        "hash_check": hash_check(field, expected, resolution["content_hash"]),
     }
-    envelope = resolution.get("envelope")
-    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
-    block = provenance.get("input") if isinstance(provenance, Mapping) else None
-    block = block if isinstance(block, Mapping) else {}
-    members = block.get("paths")
-    what = None
-    if isinstance(members, list) and members:
-        names = []
-        for member in members:
-            path = member.get("path") if isinstance(member, Mapping) else None
-            path = path.get("path") if isinstance(path, Mapping) else path
-            if isinstance(path, str):
-                names.append(path)
-        detail["compared_against"] = names
-        what = "the input-set digest over the files in compared_against"
-    elif isinstance(block.get("path"), str):
-        detail["compared_against"] = block["path"]
-        what = f"the sha256 of the input artifact {block['path']}"
-    elif isinstance(samples_path, str):
-        # Issue #5392: a yield report has no provenance.input; the hash is
-        # over the samples document the report names.
-        detail["compared_against"] = samples_path
-        what = f"the sha256 of the samples document {samples_path}"
-    if what is None:
-        # Issue #5837: no path to name in compared_against -- either
-        # provenance.input carries only content_hash/role (the
-        # `build_provenance` shape) or there is no input block at all. The
-        # hint and the own-hash check below still apply.
-        hint = (
-            "content_hash must be the envelope's provenance.input.content_hash "
-            "(the recorded input hash), not the hash of the evidence envelope "
-            "file"
-        )
-    else:
-        field = "samples document" if samples_path else "provenance.input.content_hash"
-        hint = (
-            f"content_hash must be {what} ({field}), "
-            "not the hash of the evidence envelope file"
-        )
+    if source is not None:
+        detail["compared_against"] = source
+    hint = f"content_hash must be {what}, not the hash of the evidence envelope file"
     evidence_file = resolution.get("file")
     own = sha256_file(evidence_file) if isinstance(evidence_file, str) else None
     if own is not None and expected == f"sha256:{own}":
