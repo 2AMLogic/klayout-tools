@@ -217,7 +217,8 @@
         "klayout_tools.equiv_errors",
         "klayout_tools.equiv_replay",
         "klayout_tools.equiv_sequential",
-        "klayout_tools.equiv_stage"
+        "klayout_tools.equiv_stage",
+        "klayout_tools.equiv_verdict"
       ]
     },
     "erc": {
