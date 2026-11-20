@@ -6,7 +6,10 @@ in ``tests/test_macros.py``. The tests import the shared request/stub
 helpers from ``tests.test_post_route_sta`` unchanged, and live in their
 own module so neither source test file grows past its per-file size
 ceiling (the ratchet gating every PR). Validation-side unit tests for the
-shared macros surface stay in ``tests/test_macros.py``.
+shared macros surface stay in ``tests/test_macros.py``; the black-box
+validator's own unit tests (issue #6792) live here, because
+``_macros_blackbox.py``'s surface is this module's and ``tests/test_macros.py``
+is size-baselined.
 """
 
 from __future__ import annotations
@@ -125,6 +128,51 @@ def test_macro_without_lef_or_cell_rejected_in_verilog_mode(tmp_path, monkeypatc
     request_path = _setup_verilog_success_env(tmp_path, monkeypatch, macros=[{}])
     with pytest.raises(PostRouteStaError, match=r"macros\[0\]\.lef is required"):
         run_sta(request_path)
+
+
+class _Err(Exception):
+    """Stands in for each verb's own `*Error` class -- the validator is
+    deliberately error-class-agnostic (issue #6792's whitespace check rides
+    the same `validate_blackbox_entry` path the verb errors ride)."""
+
+
+@pytest.mark.parametrize(
+    "cell",
+    ["my cell", "my\tcell", "mystery\n", "x\nMACRO evil\nEND evil", "   "],
+)
+def test_lefless_cell_with_whitespace_is_rejected(tmp_path, cell):
+    """A LEF-less `cell` is written verbatim into the generated stub LEF
+    (issue #6792): any whitespace character would break the `MACRO`
+    statement, so the request is rejected at validation time with the
+    indexed field named, not later as an OpenROAD parse error about a LEF
+    `klt` itself generated."""
+    with pytest.raises(_Err, match=r"request\.macros\[1\]\.cell"):
+        macro_spec.validate_macros(
+            [{"cell": "mystery"}, {"cell": cell}],
+            str(tmp_path),
+            error_cls=_Err,
+            allow_blackbox=True,
+        )
+
+
+@pytest.mark.parametrize("cell", ["_ram$2", "a.b"])
+def test_lefless_cell_non_simple_identifier_survives_verbatim(tmp_path, cell):
+    """Only whitespace is rejected (issue #6792): `_ram$2` is a legitimate
+    macro name, and `a.b` -- not a simple Verilog identifier -- still reads
+    back from the stub LEF as a cell of that name and resolves through
+    Verilog's escaped form (`test_escaped_identifier_blackbox_module_is_matched`)."""
+    macros = macro_spec.validate_macros(
+        [{"cell": cell}], str(tmp_path), error_cls=_Err, allow_blackbox=True
+    )
+    assert macros[0]["cell"] == cell
+
+
+@pytest.mark.parametrize("entry", [{}, {"cell": ""}, {"cell": 7}])
+def test_lefless_cell_missing_empty_or_non_string_keeps_lef_diagnostic(tmp_path, entry):
+    with pytest.raises(_Err, match=r"request\.macros\[0\]\.lef is required"):
+        macro_spec.validate_macros(
+            [entry], str(tmp_path), error_cls=_Err, allow_blackbox=True
+        )
 
 
 def test_blackboxed_cells_hoisted_on_multi_corner_response(tmp_path, monkeypatch):

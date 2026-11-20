@@ -664,20 +664,72 @@ aligns the router's *track* positions, not its *wire ends*. The detailed router
 chooses where a short M4 stub ends (e.g. a stub running from a via landing to a
 coordinate 61 nm from the via centre), and that choice is not checked against
 the deck's track-alignment rules. The request has no control for it, and
-`klt place-and-route` does not snap routed geometry after the fact.
+`klt place-and-route` does not snap routed geometry after the fact. There is
+also no router option for a request field to drive: the flow runs
+`detailed_route -output_drc ... -output_maze ... -or_seed ...`, and OpenROAD
+`26Q3-1510-g6cb3f2b704`'s `help detailed_route` (read 2026-11-18) lists no
+option that places or snaps line ends. Its options include report paths, the
+routing-layer window, via and pin access (`-via_access_layer`,
+`-min_access_points`, `-no_pin_access`), the seed, distribution, and
+`-clean_patches` / `-repair_pdn_vias`.
 
-Expect a small residual of `M4.AUX.2` (minimum-width M4 off a routing track) and
+A residual of `M4.AUX.1` / `M4.AUX.2` (M4 off the deck's across-track grid) and
 `M4.W.3` (vertical M4 width an even multiple of 24 nm) point markers from
-`klt drc` on the merged GDS. As observed by the issue author on the 2026-10
-ASAP7 reproducer, with the `floorplan.tracks` offsets above and the PDN straps
-disabled (#4494), this was about 7 markers per block (4 `M4.AUX.2`, 3
-`M4.W.3`) against several thousand router shapes. This is a dated observation,
-not a guarantee or a pass/fail threshold.
+`klt drc` on the merged GDS has been **reported, not established**. Two dated
+reports exist, and this repo has reproduced neither (see below):
 
-These markers carry no `source_cell` / `source_path` (both `null`), so they
-cannot be traced to a net or router shape: they sit on top-level router
-geometry, which has no containing instance to attribute (`drc.md`). Rule
-definitions are in [`drc.md`](drc.md).
+- 2026-10, issue #4501's author, ASAP7 reproducer, `floorplan.tracks` offsets
+  above, PDN straps disabled (#4494): about 7 markers per block (4
+  `M4.AUX.2`, 3 `M4.W.3`) against several thousand router shapes.
+- 2026-11-18, issue #6596's reporter, klayout-tools 0.9.2, packaged deck,
+  KLayout 0.30.12: `M4.AUX.1` and `M4.AUX.2`, 4 + 4 markers per routed slice
+  and 64 + 64 on a 16-instance column of the same stream, all at two x
+  positions off the 48 nm grid. The count scales with instance count, so it is
+  not a fixed per-block number, and it is route-dependent: a re-route that
+  changed only the cell mapping brought the family back.
+
+Neither report is a guarantee or a pass/fail threshold.
+
+**Not reproduced on a fresh run (2026-11-18).** With klayout-tools
+0.9.3.dev1789+g94950eeee19e, the OpenROAD build above, the packaged
+`asap7.drc`, `output_dbu_um` 0.00025 and the `floorplan.tracks` offsets above,
+six runs of `klt place-and-route` then `klt drc --engine klayout` on the merged
+GDS gave **zero** `M4.AUX.1`, `M4.AUX.2` and `M4.W.3` markers: a 97-inverter
+chain at 20 % utilization (4-5 routed M4 segments in the DEF `NETS` section)
+and a 32-output fan-out block (one `BUFx4` driving 32 three-inverter chains;
+74-89 routed M4 segments) at 20 % and 40 % utilization, each with the
+`asap7sc7p5t` power preset and with `power` omitted. The only M4-related
+markers were `V4.M4.EN.1` (12-17), present only with the power preset and
+documented under the preset below. This does not show the report is wrong: the
+reporter's cell mapping, floorplan and routed stream are not available here. It
+does mean this section cannot attribute the family to router metal, and **does
+not support recording it as recipe-inherent**.
+
+One reading of the report does not fit the packaged deck. M4 is a
+horizontally routed layer there, `M4.AUX.1` checks only the across-track (y)
+coordinate of M4 vertices against the 24 nm grid, and `M4.AUX.2` the y position
+of rectangles exactly 24 nm high against the 48 nm track grid. A router *line
+end* is an x position, which neither rule examines, and markers repeating at
+the same two x positions on every instance of a column look more like geometry
+repeated per instance than independent per-route line-end choices. Neither
+explanation is traced.
+
+To narrow the search, re-run the same request with `power` omitted. A marker
+that persists shows the violation can occur without the generated PDN. A marker
+can disappear because removing the PDN changes the routing obstructions and a
+signal wire takes a different path.
+
+To identify the source, overlay each marker on the M4 geometry in the **same
+failing run's routed DEF**. Check signal wires in `NETS` and PDN straps in
+`SPECIALNETS`, including the M4 shapes of vias in both sections. If the
+geometry at the marker leaves the source ambiguous, leave it unattributed.
+Include the request and that routed DEF in an issue referencing #6596.
+
+For these top-cell markers, `null` values for `source_cell` and `source_path`
+mean that no single placed instance fully contains the marker's bounding box.
+This can happen on top-level geometry or where the box crosses an instance
+boundary. Either signal or PDN geometry can yield those values. See the
+[DRC guide](drc.md) for rule definitions and instance attribution.
 
 ## PDK / LEF / liberty resolution
 

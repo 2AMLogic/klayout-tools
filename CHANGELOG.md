@@ -1117,6 +1117,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   in `unrouted_reasons[]` — an honest report of a tie that was previously
   missing. A group enclosed by its own ring typically needs
   `routing.cross_block_layer_role` for the tie to route out.
+- **`klt evidence canonicalize`: ask for the view `--rerun` diffs, instead of
+  copying the exclusion list** (#5541, 2026-11-13): `klt evidence canonicalize
+  REPORT --kind {drc,lvs,erc,extract,synthesize,place-and-route,equiv}` emits a
+  report reduced to exactly the fields that verb's `--check <report> --rerun`
+  compares — the kind's by-path exclusion set *and* its bookkeeping
+  canonicalizer (`run_id`, `script_path`, `blackbox_path`, `engine_logs`,
+  `elapsed_s`, `extract`'s `net_id`/anonymous-`$N` normalization), with
+  verdict-bearing fields untouched and keys sorted at every depth so the bytes
+  are a function of content alone. A repo that commits a report as regenerable
+  evidence can now commit *that* and diff the whole file, instead of
+  hand-maintaining a copy of an exclusion list that grows per release and whose
+  newer entries are nested rather than top-level — the failure that makes a
+  staleness guard report a difference on every run, including two back-to-back
+  runs of a byte-identical request. `provenance.pdk.ambiguous_sources` (#2564),
+  present only on a machine carrying more than one PDK store for the variant,
+  is removed for every kind. Equal canonical views of one kind mean that
+  kind's `--rerun` reports no drift; the converse does not hold — `--rerun`'s
+  comparison is directional and pair-dependent (committed-only `provenance`
+  leaves surface as `not_compared` per #5866, `drc` drops the redefined
+  `klayout_version_mismatch` flag across the #5660 boundary, and `klt lvs`'s
+  pair-dependent tolerance #1952/#2692), so a whole-file diff of canonical
+  views is the stricter check; the caveats are documented in
+  [`docs/cli/evidence.md`](docs/cli/evidence.md). The pairing of a kind with
+  its exclusion set and canonicalizer now lives in exactly one place
+  (`src/klayout_tools/evidence_canonicalize.py`) which every verb's own
+  `--rerun` reads, so the two cannot diverge. `--format` defaults to `json`
+  for this sub-verb (the payload *is* the document); `--rerun` behavior and
+  every report's own fields are unchanged, and no `schema_version` moves.
 
 ## 0.9.2 (2026-11-14)
 

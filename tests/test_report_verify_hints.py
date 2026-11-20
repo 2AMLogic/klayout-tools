@@ -145,6 +145,56 @@ def test_input_hash_check_repo_root_key_presence_follows_the_opt_in(
     assert "resolved_repo_root" not in block(False)
 
 
+def test_input_not_found_without_override_hint_names_no_flag(tmp_path):
+    """Issue #6840: ``override_hint=None`` means no flag can fix this input
+    (the runset deck on ``klt lvs --check``), so the remedy names no flag."""
+    entry = input_not_found_entry(
+        "pdk.lvs",
+        str(tmp_path / "report.json"),
+        str(tmp_path / "pdk.lvs"),
+        override_hint=None,
+    )
+    assert entry["hint"] == (
+        "run --check from the report's directory; "
+        f"request-file-relative paths resolve against {tmp_path}"
+    )
+
+
+def test_input_not_found_default_hint_pins_the_layout_wording(tmp_path):
+    """Issue #6840's second observation: since #6802/#6830 retargeted
+    ``tests/test_lvs.py``'s assertion, nothing pins the default remedy --
+    the one ``klt lvs --check``'s layout entry emits. Pin it byte-for-byte."""
+    entry = input_not_found_entry(
+        "l.gds", str(tmp_path / "report.json"), str(tmp_path / "l.gds")
+    )
+    assert entry["hint"] == (
+        "run --check from the report's directory, or pass --layout/an absolute path; "
+        f"request-file-relative paths resolve against {tmp_path}"
+    )
+
+
+def test_input_hash_check_null_hint_when_not_beside_the_report(tmp_path):
+    """The flag-less remedy still appears only when the input sits beside
+    the report: missing everywhere, or recorded absolute, the hint stays
+    ``null`` (issue #6840 edge cases; the absolute shape is #6223's)."""
+    absent = input_hash_check(
+        "provenance.runset.content_hash",
+        None,
+        "gone.lvs",
+        str(tmp_path / "report.json"),
+        override_hint=None,
+    )
+    assert absent["input_not_found"]["hint"] is None
+    absolute = input_hash_check(
+        "provenance.runset.content_hash",
+        None,
+        str(tmp_path / "elsewhere" / "pdk.lvs"),
+        str(tmp_path / "report.json"),
+        override_hint=None,
+    )
+    assert absolute["input_not_found"]["hint"] is None
+
+
 def test_stale_pin_names_the_failed_comparison():
     detail = stale_pin(
         {"content_hash": "sha256:stale-revision"}, {"content_hash": "sha256:layoutA"}

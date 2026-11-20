@@ -1710,10 +1710,26 @@ opening through the ring's band so a route can pass through it instead:
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
-  violation in `klt drc` after the fact. The window's extent across the
-  side is the ring band's full thickness (a strap crossing the ring is
-  constrained only along it, so its footprint extends past the window
-  across the side by construction). The field is `null` when the
+  violation in `klt drc` after the fact. That makes the window the
+  DRC-clean envelope for a **hand-drawn** strap only, and deliberately
+  wider than the clearance [`klt gen-compose`](gen-compose.md) requires
+  of a *routed* crossing through the same opening: a `connectivity[]`
+  route is held to the stricter per-cut-end clearance
+  `width_um / 2 + drc_hints.min_spacing_um`, where `width_um` is the
+  route's width. The ring's `drc_hints.min_spacing_um` comes from the
+  generator's PDK-independent 0.4 µm spacing floor. For `guard_ring`,
+  the strap window's inset at each cut end is 0.17 µm on sky130 `li1`,
+  0.23 µm on gf180mcu `metal1`, and 0.18 µm on sg13g2 `metal1`. These
+  smaller insets allow a hand-drawn strap to fit where a route of the
+  same width would fail the crossing clearance.
+  A crossing can use a different supported routing layer, whose own
+  spacing rule may exceed the ring's fixed margin. For example, on
+  sky130 the `top_metal` role selects `met5`, where `met5.space.1`
+  requires 1.60 µm between shapes on that layer.
+  The window's extent across the side is the ring band's full thickness
+  (a strap crossing the ring is constrained only along it, so its
+  footprint extends past the window across the side by construction).
+  The field is `null` when the
   along-side extent is narrower than the layer's minimum width (or ≤ 0
   after the spacing inset) — no same-layer-legal strap fits, because a
   strap filling the window is only as wide as the window's along-side
