@@ -25,6 +25,7 @@ from ._common_params import (
     declare_well_present,
     union_box,
 )
+from ._mos_array_ring_mv import declare_ring_mv_params, mv_cover_box, ring_well_box_um
 from ._mos_array_shapes import (
     _insert_mos_cap_mark,
     _insert_unit_shapes,
@@ -62,7 +63,6 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _insert_boxes,
         _mos_array_layout,
         _pcell_tap_reach_um,
-        _shift_box,
     )
     from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
@@ -251,6 +251,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
+            declare_ring_mv_params(self)
             declare_mos_array_extra_params(self, kdb)
             self.param(
                 "add_guard_ring",
@@ -506,15 +507,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # in a well the way #421's diff_pair regression test guards
                 # against.
                 if self.well_present and self.flavor == "pfet":
-                    margin = self.ring_well_margin_um
-                    ring_well_mark_box = _shift_box(
-                        (
-                            -margin,
-                            -margin,
-                            info["ring"]["outer_w_um"] + margin,
-                            info["ring"]["outer_h_um"] + margin,
-                        ),
-                        *info["ring_offset_um"],
+                    ox, oy = info["ring_offset_um"]
+                    ring_well_mark_box = ring_well_box_um(
+                        self, info["ring"], ox, oy, dbu
                     )
                     _insert_boxes(
                         self.cell,
@@ -541,11 +536,15 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # `flavor`; its box is not the well's (#1577: gf180mcu needs a
             # wider margin). Issue #6025: also grown over the guard ring's
             # own well tie when one is drawn, so an HV-nwell enclosure rule
-            # (sky130 nwell.9) holds.
+            # (sky130 nwell.9) holds. Issue #6503: and past the guard ring's
+            # final Comp edge by the family's DV.6 margin (gf180mcu only).
             _draw_voltage_flavor_marks(
                 self,
                 dbu,
-                union_box(info["voltage_flavor_mark_box_um"], ring_well_mark_box),
+                union_box(
+                    union_box(info["voltage_flavor_mark_box_um"], ring_well_mark_box),
+                    mv_cover_box(self, info, dbu),
+                ),
             )
 
             _insert_mos_cap_mark(self, info, dbu)

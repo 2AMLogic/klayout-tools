@@ -36,6 +36,7 @@ def pdk_root(tmp_path):
         ("res_array", "res_flavor_0_layer"),
         # A shared plumbing declaration from ``gen_pcells/_common_params.py``.
         ("res_array", "contact_layer"),
+        ("mos_array", "voltage_flavor_ring_margin_um"),
         # The per-family geometry floor that leaked into ``--list`` via #1455.
         ("cap_array", "cap_top_via_metal_min_w_um"),
     ],

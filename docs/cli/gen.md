@@ -895,6 +895,21 @@ draws a ring well: gf180mcu `medium_voltage` and sg13g2 `hv` PMOS ring variants
 stay clean on the curated decks (their real signoff Dualgate/ThickGateOx rules
 are not transcribed here and were *not* verified).
 
+**Marker and well past the ring's final Comp edge (issue #6503).** gf180mcu
+additionally resolves `voltage_flavor_ring_margin_um` (0.24 µm, the native
+runset's `DV.6`): the marker grows past the guard ring's *final*
+grid-snapped tap edge by that margin, and the ring's own
+well is grown off that same snapped edge by an MV-gated 0.16 µm
+(`DF.4d_MV`; a 3.3 V-only ring keeps the 0.15 µm default), so the native
+`gf180mcu.drc` runset's `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` and
+`nwell_OFFGRID` hold at every `ring_padding_um` — including the
+1.05–1.28 µm rule-swapping window a core-anchored marker used to produce.
+The same 0.16 µm well margin applies to ringless pfet tap pads: their
+NCOMP also lies under `Dualgate` and is subject to `DF.4d_MV`. Their well
+grows 0.01 µm per side; the core-anchored marker and the pads are unchanged.
+An nfet MV ring also gets the marker enclosure, but still draws no Nwell.
+Other families and requests without `voltage_flavor` are unchanged.
+
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
 `add_guard_ring` composes `guard_ring`'s ring-drawing (`ring_gap_side`/
