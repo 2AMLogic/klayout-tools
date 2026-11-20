@@ -14,11 +14,11 @@ The test times the two recognition paths directly -- in-process, over the
 synthetic flat array below at two sizes -- because an end-to-end wall-time
 ratio also sees KLayout's own C++ net clustering (superlinear at high
 device counts in every version, v0.5.0 included) and shared-CI contention.
-On the pre-fix tree the 800/200 ratio of this block measured ~16x
-(quadratic); the bulk-island-set rewrite holds it near 1. The bound 6
-leaves jitter headroom while still tripping any return to per-island,
-per-layer full-layout scans. Full-run wall times per size are recorded in
-the PR, not asserted here.
+Before the fix, recognition took 15.9x as long at 1600 cells as at 400
+cells (quadratic growth). Linear growth predicts 4x. After the bulk-island-set
+rewrite, six runs measured 3.1x to 5.1x. The 9x bound allows for timing
+jitter and still catches the original per-island, per-layer scans. Full-run
+wall times per size are recorded in PR #6072.
 
 The second test (issue #6527) pins result identity, not timing: with the
 gf180mcu MOS-cap marker drawn, the resolver's per-layer ``touching()``
@@ -133,11 +133,7 @@ def _recognition_seconds(n_cells: int) -> float:
 def test_device_recognition_scales_linearly_on_flat_arrays():
     quarter = _recognition_seconds(400)
     full = _recognition_seconds(1600)
-    # 4x the layout must not cost ~16x the recognition block: linear growth
-    # is 4x and the per-island loops this guards against were quadratic
-    # (~16x here, measured) before issue #5807's bulk-island-set rewrite --
-    # bound 6 sits between the two with jitter headroom on both sides.
-    assert full / quarter <= 6.0, (
+    assert full / quarter <= 9.0, (
         f"device recognition grew {full / quarter:.2f}x for a 4x-larger "
         "flat array (near-linear expected; per-island, per-layer "
         "full-layout scans regressed superlinearly before issue #5807)"

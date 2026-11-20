@@ -1105,6 +1105,8 @@ two things let a caller tell a slow run from a hang and budget the step:
   `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
   run while the `LayoutToNetlist` is still live; issue #5716; present only with
   `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
+  `unsupported_devices` (the #2919 diagnostic re-runs the recogniser walks
+  to find device markers the deck could not classify),
   `parasitics_inject` (building the parasitics report and injecting the R/C
   elements into the netlist, issue #5716; present only with `--parasitics`),
   `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
@@ -1139,20 +1141,22 @@ agreed within ~10 % on `device_extraction`).
 | 2× `gcd` | 9,714 | 4,107 | 3.96 s | 0.14 s | 20.4 s | 24.9 s |
 | 4× `gcd` | 19,428 | 8,213 | 10.4 s | 0.26 s | 79.7 s | 90.9 s |
 
-**Scaling.** `device_extraction` is mildly super-linear (≈0.36 → 0.41 → 0.54
-ms/device across 4.9k → 9.7k → 19.4k devices, roughly n^1.2) but is not the
-problem. `netlist_normalized_hash` is: it grows ~4× per doubling (quadratic) and
-is 70–88 % of the whole run once a netlist is written, which is the default.
+**Scaling.** On these sky130 routed digital blocks, `device_extraction` is
+mildly super-linear (≈0.36 → 0.41 → 0.54 ms/device across 4.9k → 9.7k → 19.4k
+devices, roughly n^1.2). The dominant stage is `netlist_normalized_hash`,
+which grows ~4× per doubling (quadratic) and accounts for 70–88 % of the
+whole run once a netlist is written, which is the default.
 A ~8.5k-instance block (≈9–10k devices, the 2× row) spends ~20 s of a ~25 s run
 there. Before issue #3408 that time was reported as `unattributed_seconds`
 (5.1 s of 7.0 s on `gcd`), so the `timing` object understated the cost; it now
 has its own stage. Passing `--no-netlist` skips it (the `mult8` row and the
 earlier `device_extraction`-dominated numbers).
 
-`device_extraction` was not split further: it is under 50 % of a default run
-and its growth is close to linear, so the data does not warrant it. Making the
-normalized hash itself sub-quadratic is a separate change and is out of scope
-here; this section only records and attributes the cost.
+On this sky130 corpus, `device_extraction` took under 50 % of a default run
+and grew close to linearly, so those measurements did not warrant splitting
+the stage further. On a 1,600-cell gf180mcu flat array, the unsupported-device
+diagnostic alone accounted for 123 s of `unattributed_seconds` before #5807
+rewrote the recogniser walks and timed the diagnostic as `unsupported_devices`.
 
 ### Reserved annotation layer
 
