@@ -139,3 +139,48 @@ def test_run_sim_definitions_only_closure_file_stays_quiet(tmp_path, monkeypatch
     report = sim.run_sim(request)
 
     assert "device_multiplier" not in report["environment"]
+
+
+def test_vendored_model_internals_are_quiet_but_dut_cards_are_checked(
+    tmp_path, monkeypatch, capsys
+):
+    # A reduced sky130 combined/continuous deck. The FET library instantiates
+    # parasitic devices declared by the diode library. Both are ordinary
+    # relative includes outside PDK_ROOT, as they would be in a vendored copy.
+    monkeypatch.setenv("PDK_ROOT", str(tmp_path / "installed-pdks"))
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "models_fet.spice").write_text(
+        ".subckt fet d g s b mult=1\n"
+        "Xdrain b d diode m = 0.5\n"
+        "Xsrc b s diode mult=6\n"
+        "M1 d g s b nch\n"
+        ".MODEL nch NMOS\n"
+        ".ends\n"
+    )
+    (models / "models_diodes.spice").write_text(
+        ".subckt diode a b mult=1\nD1 a b junction\n.model junction D\n.ends\n"
+    )
+    includes = (
+        '.include "models/models_fet.spice"\n.include "models/models_diodes.spice"\n'
+    )
+    _stub_subprocess_run(monkeypatch)
+    request = _write_fixtures(tmp_path, body=includes + "X1 d g 0 0 fet\n", models=None)
+    assert "device_multiplier" not in sim.run_sim(request)["environment"]
+    assert "device-multiplier finding(s)" not in capsys.readouterr().err
+
+    (tmp_path / "dut.spice").write_text(
+        "* .model in a comment\n.control\n.model ctrl D\n.endc\n"
+        ".subckt dut d g\nXD d g 0 0 fet mult=6\n.ends\n"
+    )
+    request = _write_fixtures(
+        tmp_path,
+        body=includes + '.include "dut.spice"\n.model local D\n'
+        "Xtop d g 0 0 fet m=2\nXuut d g dut\n",
+        models=None,
+    )
+    findings = sim.run_sim(request)["environment"]["device_multiplier"]["findings"]
+    assert [(f["instance"], f["kind"], f.get("file")) for f in findings] == [
+        ("Xtop", lint.DRIVE_MISMATCH_DISAGREEMENT, None),
+        ("XD", lint.DRIVE_1X, "<external>/dut.spice"),
+    ]

@@ -330,11 +330,10 @@ def device_multiplier_environment(
     lint's findings for this run's netlist -- warning-only, never a failing
     exit.
 
-    Instance cards are read from the netlist **and every file of the
-    scanned ``.include`` closure** (issue #6684), so a DUT split into an
-    included file is linted too; they are checked against the device
-    subcircuit texts of the same closure (the same shared ``sim_staging``
-    resolver every other disclosure here uses), so a net carrying
+    Instance cards are read from the netlist and included DUT files (issue
+    #6684). Includes containing a ``.model`` directive supply subcircuit
+    definitions only. The shared ``sim_staging`` resolver supplies the
+    full closure for checking each card, so a net carrying
     ``mult=6`` and no ``m=`` against a subcircuit that declares ``mult``
     but never forwards it is named instead of silently simulating 1x. A
     finding from a closure file carries that file's repo-relative label as
@@ -401,7 +400,9 @@ def device_multiplier_environment(
     cards = [
         (card, label)
         for text, label in card_texts
-        for card in device_multiplier_lint.instance_cards(text)
+        for card in device_multiplier_lint.instance_cards(
+            text, skip_model_file=label is not None
+        )
     ]
     subckts = device_multiplier_lint.collect_subckts(closure_texts)
     report = device_multiplier_lint.instance_report(cards, subckts)

@@ -3937,10 +3937,12 @@ Carlo mismatch depends on the model. The sky130 `nfet_01v8` uses
 `res_generic_nd` subcircuit only declares `mult`. Keep `m=N` and `mult=N`
 for an N-times device.
 
-After the corners run, `klt sim` lints the instance cards of the netlist
-**and every file of its scanned `.include` closure** (issue #6684 — a DUT
-split into an included file is linted too; the same shared resolver every
-`environment` closure disclosure uses). Detection is text-driven — a
+After the corners run, `klt sim` checks instance cards in the netlist and
+its scanned includes (#6684). An included file containing a SPICE
+`.model` directive outside a control block supplies subcircuit definitions
+only. This keeps a vendored device library’s internal parasitic instances
+out of the report. The top-level netlist is always checked, including when
+it declares local models. Detection is text-driven — a
 subcircuit "declares `mult`" when its `.subckt` header has the parameter,
 and "forwards it" only when a body card's `m=` references `mult` (a
 mismatch expression such as `sqrt(l*w*mult)` is not forwarding) — so no

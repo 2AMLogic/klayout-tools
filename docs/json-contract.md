@@ -195,8 +195,9 @@ the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 `mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
 that declares `mult` but never forwards it to drive — a new finding class,
 warning-only. Issue #6684 extends the scan from the netlist's own cards to
-every file of the scanned `.include` closure, so a DUT split into an
-included file is linted too; a finding for a closure-file card carries the
+DUT cards in the scanned `.include` closure. Includes containing a `.model`
+directive outside a control block contribute subcircuit definitions only.
+A finding for a closure-file card carries the
 additive `file` field (the repo-relative scanned-closure label), while a
 finding for the netlist's own card keeps the exact #5779 shape. `findings`
 carry the instance, target subcircuit, both raw

@@ -54,13 +54,19 @@ _MAX_LISTED = 5
 SourcedCard = tuple[str, "str | None"]
 
 
-def instance_cards(text: str) -> list[str]:
-    """Subcircuit-instance cards of one netlist text: logical cards
-    (comments stripped, ``+`` continuations folded) whose first token
-    starts with ``X``, outside control blocks."""
-    return [
-        line for line in circuit_lines(logical_lines(text)) if line[0].lower() == "x"
-    ]
+def instance_cards(text: str, *, skip_model_file: bool = False) -> list[str]:
+    """Fold X cards outside control blocks. When scanning includes, a
+    circuit-level ``.model`` directive identifies a model file whose
+    internal instances should be omitted. Callers still use its subckts
+    to check instances elsewhere in the deck.
+    """
+    cards = []
+    for line in circuit_lines(logical_lines(text)):
+        if line[0].lower() == "x":
+            cards.append(line)
+        elif skip_model_file and line.split(None, 1)[0].lower() == ".model":
+            return []
+    return cards
 
 
 def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
