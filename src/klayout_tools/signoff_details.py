@@ -3,10 +3,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from .signoff_power_delivery import _strap_layers
+
+
+def _drc_rule_selection_detail(envelope: Mapping[str, Any]) -> dict[str, Any]:
+    """``{"rule_selection": <block>}`` quoted verbatim off a `klt drc --rules`
+    envelope (issue #2768), or ``{}`` when it carries none. Moved here
+    unchanged from :mod:`.signoff` (issue #6123) for its size ceiling."""
+    if "rule_selection" not in envelope:
+        return {}
+    return {"rule_selection": envelope.get("rule_selection")}
 
 
 def _erc_detail(envelope: dict[str, Any]) -> dict[str, Any]:

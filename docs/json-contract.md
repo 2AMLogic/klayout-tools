@@ -190,6 +190,21 @@ refused before simulating (exit 1, usual error envelope) with both stamps in
 the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 "`environment.netlist_identity`".
 
+`klt sim` also gains an additive `environment.device_multiplier` (issue
+#5779): the device-multiplier lint's findings for instances whose vendor
+`mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
+that declares `mult` but never forwards it to drive — a new finding class,
+warning-only. `findings` carry the instance, target subcircuit, both raw
+values and a note; a `note` (never an error) discloses instances whose
+subcircuit text is absent from the scanned include closure, `unevaluated`
+lists non-numeric `m=`/`mult=` values that cannot be compared, and
+`not_scanned` discloses closure parts that could not be read. The field is
+absent when there is nothing to disclose, the exit code and every existing
+field are unchanged, and the note recommends retaining both forms because
+some models use `mult` to scale Monte Carlo mismatch. No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Device
+multiplier warnings".
+
 `klt sim --job-status` (issue #4291) passes an optional `progress` object
 (e.g. `sim_time_s`, `stop_time_s`) through from the fleet's `status.json` when
 the runner publishes one. Additive and absent otherwise; the existing fields
@@ -449,6 +464,30 @@ likewise additive (no `schema_version` bump), but unlike the diagnostic-only
 inputs are unchanged can flip from `"match"` to `"mismatch"` on upgrade —
 callers gating on `status` should expect that (see `docs/cli/lvs.md`,
 "`reference.unresolved_subckt_call`").
+
+`klt lvs`'s `body_verification` block gains an `inspected_count` integer
+(issue #5749): how many MOS devices the body check actually examined, across
+every eligible class (generic and `compare_mos_flavour`-flavoured), present
+in every branch (`0` for `"unchecked"`) so a `"verified"` states its own
+coverage instead of being inferred from the absence of findings. The same
+issue also stops the block from rendering the *vacuous* `"verified"`: a run
+that reached the check (a `layout.deck` was given) but found zero eligible
+MOS devices — a passives-only layout — now reads `"unchecked"` with a
+`reason`, and the check now sees flavoured classes, so a flavoured-only
+layout is inspected (and honestly `"unverified"` when a body tie is missing)
+rather than silently skipped. Both halves are additive-plus-honesty: no
+field is removed or retyped, no `status` value is added or removed, and
+`status`/`error_count`/`category_error_counts` are untouched (the block
+does not feed grading) — but the previously-skipped flavoured warning now
+fires, so on a `compare_mos_flavour: true` run over a layout with untied
+flavoured bodies `mismatch_count` increases by one per newly-seen class
+and `category_counts` gains a `device.body_unverified` key. A consumer
+that read `body_verification.status: "verified"` as "this run inspected
+bodies" must now also read `inspected_count`, because a pre-#5749
+`"verified"` may have inspected nothing. No `schema_version` bump;
+`docs/schemas/lvs-response.schema.json`'s `body_verification` definition
+describes the new field. See `docs/cli/lvs.md`'s `body_verification` field
+table.
 
 **A new key in a documented open map, and a new member on one class of that
 map's entries, are additive.** `klt functional-verification`'s
@@ -890,12 +929,17 @@ the artifact was regenerated".
 
 Issue #5460 adds an optional `check` object to a `drift[]` entry of the
 `klt signoff --attest --check` response, naming the `attestation.checks[]`
-entry the entry is about: its `role`, plus whichever identity keys that check
-kind carries — `path` (a `present` file check), `target` / `name` /
-`testbench` (a `command` or `recorded_hash` check), `row` (an item-8 citation
-check), `corner` + `metric` (an item-8 metric check, one per corner ×
-metric). A check with no identity beyond its role — item 9's `pdk` / `tools`
-pins, a top-level `cold_start` — gets `{"role": …}`. **Additive; no
+entry the entry is about: its `role`, then the check's own kind (its `check`
+value — `present`, `command`, `stream_readable`, …) when it carries one,
+then whichever identity keys that check kind carries — `path` (a `present`
+file check), `target` / `name` / `testbench` (a `command` or `recorded_hash`
+check), `row` (an item-8 citation check), `corner` + `metric` (an item-8
+metric check, one per corner × metric). The kind comes first so checks of
+one role that carry no other identity key stay pairwise distinct — the three
+`layout` stream checks of item 2, for example, are named by their kind alone.
+A check with no identity key beyond its kind — item 9's `pdk` / `tools` pins
+(`{"role": …, "check": "pin"}`), a top-level `cold_start`
+(`{"role": "cold_start", "check": "command"}`) — stops there. **Additive; no
 `schema_version` bump**: `field` stays the dotted positional pointer
 (`attestation.checks.17.content_hash`) it has always been, and `committed` /
 `fresh` are untouched, so a consumer that never reads `check` sees the bytes
@@ -905,7 +949,8 @@ when both lists have the same length, so an inventory that *gained or lost* a
 file still yields one whole-list entry), a `status` entry, anything outside
 `attestation.checks`, and every `drift[]` entry the other `--check` verbs
 produce. `--format text` renders it as a bracketed label after the pointer
-(`attestation.checks.17.content_hash  [testbench sim/bin/sim_common.py]:`) so
+(`attestation.checks.17.content_hash  [testbench present
+sim/bin/sim_common.py]:`) so
 a CI log names the file that moved without a second lookup — the index alone
 is not even stable, since file-presence checks are sorted by path. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "CI usage: `--check`".
@@ -1194,9 +1239,35 @@ stability statement, concrete precedents, and drift-detection guidance, and
     drift comparison. Additive; no `schema_version` bump.
 - `deck` — the rule (or model) deck the run used, as
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
-  hex digest of the deck file actually used, so "clean against *this exact*
-  rule set" is a checkable claim. The whole block is `null` when no deck was
-  involved (e.g. `lvs` against a pre-extracted netlist).
+  hex digest. For a built-in deck it covers the primary Python module and
+  each deck-specific sibling that populates or modifies its curated DRC rules
+  (including exemptions, notes and provenance IDs). Extraction-only siblings
+  such as `sky130_lvt.py` fall outside the DRC pin. The hash covers all of
+  `sky130_unmodeled.py` because it supplies rule provenance IDs, so edits to
+  its disclosure data also change the pin. For multiple sources,
+  hash the concatenation of each UTF-8 basename, a NUL byte and its raw
+  32-byte SHA-256 digest, sorted by basename. A single source or an external
+  deck file uses the SHA-256 of its raw bytes. An unreadable required source
+  yields `content_hash: null`. The whole block is `null` when no deck was
+  involved (e.g. LVS against a pre-extracted netlist).
+  - **Pin migration (#6741).** Re-run reports that pin the named `sg13g2` or
+    `sky130` deck and update expected pins when adopting the new identity.
+    The `asap7`, `gf180mcu`, `sg13cmos5l` and external-file pins retain their
+    values for identical source bytes. Historical release pins still resolve
+    against the release that emitted them with `klt deck resolve`.
+  - **Coverage disclosures are not guaranteed to be hashed (#6775).**
+    `content_hash` identifies the rule set a run was checked against: the
+    primary module plus the siblings its `DRC_RULE_SOURCES` names. The
+    disclosure lists that ride in the same envelope —
+    `coverage.unmodeled_rules` and `coverage.unchecked_rules` (`klt drc`), and
+    `unmodeled_rules` on `klt deck info` / `klt deck rules` — record what the
+    deck does *not* check, and are covered only to the extent their source
+    text lives in a hashed file.
+    Where a deck assembles one from a sibling module `DRC_RULE_SOURCES` does
+    not name (e.g. `gf180mcu`, which declares none), adding or removing an
+    entry can leave `content_hash` unchanged, so citing the hash next to such
+    a list does not make that list drift-detectable. Compare the emitted list
+    itself when its exact contents matter.
   - `path` (issue #3785, optional, additive) — the `{path, scope}` envelope
     (`env_provenance.repo_relative_path`) of the resolved deck file, emitted
     only by `klt sta` and `klt place-and-route` (whose Liberty is a resolved
@@ -1381,9 +1452,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
 
     | `role` | Meaning | Verbs |
     |---|---|---|
-    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
-    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039) |
-    | `"source"` | HDL source | `synthesize`, `equiv` |
+    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `power`, `array-check`, `ring-check`, `lef-abstract` (layout-bearing mode only; layout-free `--no-layout` hashes a `source` instead — see [`cli/signoff.md`](cli/signoff.md#provenance-consistency)), `lvs` (`layout.file` shape), `sta` (`def` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039), `characterize` |
+    | `"source"` | HDL source, or the socket descriptor hashed by layout-free `lef-abstract` | `synthesize`, `equiv` (both its `yosys` and `yosys-sequential` engines), `formal`, `functional-verification`, `lef-abstract` (`--no-layout` only) |
 
     The field exists because the hash alone is kind-blind, and one verb can
     pin either kind: `klt lvs`'s `layout.file` shape hashes the original
@@ -1721,7 +1792,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1888,6 +1959,15 @@ No field is added or removed by this list; `schema_version` is unchanged.
 Verb-specific extras (e.g. `engine_version` for the flow verbs) are
 documented with their verb.
 
+**Do not copy this table into a consumer.** `klt evidence canonicalize
+--kind <verb> REPORT` emits the report with these paths (and the verb's own
+extras and bookkeeping keys) already removed — the *static* view `--rerun`
+diffs, as a document to commit and diff whole. `--rerun` additionally
+tolerates directional, pair-dependent differences a single report cannot
+express — see the caveats in
+[`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize) (issue
+#5541).
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Eight verbs let a consumer verify that a previously committed `--format json`
@@ -1922,6 +2002,17 @@ All eight share one contract:
   and compares them. No engine runs.
 - **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
   verdict-bearing fields against the committed report.
+- **The view full mode diffs is available on its own** (issue #5541): `klt
+  evidence canonicalize --kind <verb> REPORT` emits a report reduced to the
+  static fields full mode compares, so a consumer that commits a report and
+  guards it with its own regenerate-and-diff check does not re-implement
+  the exclusion list. The same definition feeds both, so they cannot
+  diverge. Equal canonical views imply no drift; the converse does not
+  hold, because full mode's comparison is directional and pair-dependent
+  (committed-only `provenance` leaves are `not_compared`, issue #5866;
+  `drc` across the #5660 version boundary; the `lvs` pair tolerance) —
+  documented with the sub-verb in
+  [`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize).
 - **`klt signoff` has one mode, not two** (issue #2249): re-grading the
   manifest *is* the whole verification — there is no engine run to hold back
   — so `--check` alone produces the full-mode `{status, drift, fresh}` shape
@@ -1957,33 +2048,53 @@ All eight share one contract:
   the recorded `content_hash`/`layout_sha256`, so a file that disagrees
   reports `drifted`. With no explicit input the behaviour is unchanged
   (additive; no `schema_version` bump, no new response field).
-- **An unresolvable input path is named, not silently `null` (issue #2595
-  for `lvs`, issue #6466 for `drc`; `erc` carries its own copy).** A
+- **An unresolvable input path is named, not silently `null` (issues #2595
+  for `lvs`, #6466 for `drc`, #6655 for `erc`).** A
   committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
   shared convention, not an oversight, and unchanged here. Since #2659 above
-  this covers only `lvs`'s `reference` (and any pre-#2659 report's
-  bare-string field). But a path that resolves to no existing file
+  this covers only the echoes that are still a bare string: `erc`'s `spec`,
+  the `reference` and `deck_file` of a runset-engine `lvs` report, and any
+  pre-normalisation report's bare-string field. A non-runset `lvs` report
+  echoes its `reference` as the `{path, scope}` object, like its `layout`,
+  and `erc`'s `file` is that object too (#2703), so those re-anchor to the
+  repo root like `drc`'s `file`. But a
+  path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
-  lvs --check` (its layout, reference and runset-deck lines) and `klt drc
+  lvs --check` (its layout, reference and runset-deck lines), `klt drc
   --check` (its `provenance.input.content_hash` line, on a top-level report
   and on each `reports.curated.`/`reports.native.` side of an `--engine both`
-  envelope) therefore attach an **additive, optional** `input_not_found`
-  block (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
-  `hint`) to such a `checks[]` entry; `expected`/`actual`/`match`/`status` are
+  envelope) and `klt erc --check` (its `provenance.input.content_hash` and
+  `provenance.spec.content_hash` lines) therefore attach an
+  **additive, optional** `input_not_found`
+  block to such a `checks[]` entry. The block has five keys on `drc` and
+  `erc` (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
+  `hint`); each of `lvs`'s three entries (layout, reference, runset deck)
+  adds a sixth, `resolved_repo_root` (#5845): the repo root a repo-scoped
+  echo resolved against, `null` for a bare-string echo or an explicit
+  override. `expected`/`actual`/`match`/`status` are
   unchanged, and the key is absent on a genuine content mismatch, on an
   echo that names no path (`scope: "external"`/`"absent"`, or no field) and
   on a path that resolves to an existing file. An explicit input override
-  (`klt drc <file> --check`, `klt lvs --layout`) still wins and is the path
-  diagnosed when *it* is missing. `klt drc --check`'s other echoed-path line,
-  `provenance.waivers.content_hash`, carries no such block (it is not routed
-  through the same resolution); its deck line has its own `deck_not_found`
-  block. Additive by the envelope
+  (`klt drc <file> --check`, `klt lvs --layout`/`--reference`) still wins and
+  is the path diagnosed when *it* is missing. `hint` is `null` unless the
+  input sits beside the report. When set, it always names the report's
+  directory to run `--check` from, and adds an "or pass …" clause only
+  where the verb has an override: `lvs`'s layout and reference and `drc`'s
+  input. `lvs`'s runset-deck line (`--deck-file` is refused with `--check`)
+  and both `erc --check` lines (`--check` is mutually exclusive with ERC's
+  positional inputs) have none, so their hints name only the report's
+  directory. `klt drc --check`'s other echoed-path line,
+  `provenance.waivers.content_hash`, and `klt erc --check`'s deck line carry
+  no such block (they are not routed through the same resolution; the deck
+  line resolves packaged decks by name, and DRC's deck line has its own
+  `deck_not_found` block). Additive by the envelope
   rules above — no `schema_version` bump, and a consumer that never reads the
   key sees the bytes it saw before. See
-  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`" and
-  [`cli/drc.md`](cli/drc.md).
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`",
+  [`cli/drc.md`](cli/drc.md) and
+  [`cli/erc.md`](cli/erc.md).
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
@@ -2202,6 +2313,18 @@ A satisfied assertion of either kind marks the declared categories checked
 and clears the `unmeasured_rule_execution` sentinel; it is caller-supplied
 evidence, not proof of execution (see `docs/cli/drc.md`, "Engine" →
 `"klayout"`).
+
+**Deck stdout as additive evidence** (issue #6613): every `--engine
+klayout` DRC report carries a top-level `deck_output` object —
+`{"stdout": <str>, "truncated": <bool>, "line_count": <int>}` — holding
+the deck's own captured stdout (tail-capped at 500 lines, temp work-dir
+paths scrubbed to a placeholder; `line_count` counts the whole stdout).
+Like `coverage_assertion` it is additive and optional from a consumer's
+perspective, but unlike it the field is always present on a klayout-engine
+report that produced a verdict. It is execution evidence to cite, never a
+status upgrade: a zero-finding, zero-category run stays `coverage_unknown`
+(exit 4), `--expect-rule-categories 0` remains rejected, and klt parses
+nothing from the log. `--rerun` excludes it from the drift diff.
 
 `nothing_checked` and `nothing_checked_reasons` remain available. In a v1
 coverage block, zero means **known** zero actual checked work. It is not a
@@ -2584,7 +2707,11 @@ violation (issue #2029).
 ## `--format text` vs `--format json`
 
 - `text` (default) — a human-readable rendering. Its exact layout is **not**
-  part of the contract and may change between releases without notice.
+  part of the contract and may change between releases without notice. A
+  character the stdout encoding cannot represent prints as a `\uXXXX` escape
+  rather than aborting the render with a traceback (a stdout error handler the
+  caller chose, e.g. `PYTHONIOENCODING=cp1252:replace`, is honoured); the JSON
+  keeps the original string.
 - `json` — the stable API. Breaking a JSON field (renaming, removing, or
   retyping it) is a breaking change per CLAUDE.md; adding a field is not.
 

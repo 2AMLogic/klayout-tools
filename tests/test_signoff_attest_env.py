@@ -62,7 +62,7 @@ def _fake_venv_bin(tmp_path, with_klt=True) -> Path:
 
 
 def _capture_attest_env(monkeypatch):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -70,8 +70,8 @@ def _capture_attest_env(monkeypatch):
         seen["env"] = kwargs["env"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", {"argv": ["python3"], "cwd": "."})
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", {"argv": ["python3"], "cwd": "."})
     return seen["env"]
 
 
@@ -204,7 +204,7 @@ def _inventory_10(repo: Path, checks: list) -> str:
 def test_attest_run_shares_one_shim_across_commands_and_removes_it(
     monkeypatch, tmp_path, _fresh_klt_shim
 ):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     venv_bin = _fake_venv_bin(tmp_path)
     repo = _repo(tmp_path)
@@ -227,7 +227,7 @@ def test_attest_run_shares_one_shim_across_commands_and_removes_it(
     monkeypatch.setattr(sys, "prefix", "/venv")
     monkeypatch.setattr(sys, "base_prefix", "/base")
     monkeypatch.setenv("PATH", os.pathsep.join([str(venv_bin), "/usr/bin"]))
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
     build_attestation(10, inventory)
     # One shim directory, the same path handed to all three commands.
     assert len(envs) == 3

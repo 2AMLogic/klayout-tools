@@ -270,11 +270,13 @@ def _flavour_recognised_islands(
     active = _region(layout, top_cell, deck.active)
     poly = _region(layout, top_cell, deck.poly)
     nwell = _region(layout, top_cell, deck.nwell)
+    islands = active.merged()
     for flavour in flavours:
         marker_region = _region(layout, top_cell, flavour.marker)
         and_regions = [_region(layout, top_cell, m) for m in flavour.and_markers]
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
-        for component in active.merged().each():
+        # Only marker-touching islands can claim (#5807); empty when no marker drawn.
+        for component in islands.interacting(marker_region).each():
             island = kdb.Region(component)
             if (island & poly).is_empty():
                 continue

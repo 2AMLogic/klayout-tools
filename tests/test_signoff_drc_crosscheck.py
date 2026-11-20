@@ -341,6 +341,74 @@ def test_aggregation_mode_classifies_crosscheck_as_drc(tmp_path):
     assert check["detail"]["violation_count"] == 0
 
 
+def test_aggregation_detail_names_which_engine_found_violations(tmp_path):
+    """The filed gap (#6123): in aggregation mode a cross-check envelope
+    whose violations came from the native side shows `status: "violations"`
+    beside `violation_count: 0` (the curated side's count, which #5815
+    deliberately does not union) -- the detail now carries the same
+    `drc_crosscheck` block the `--manifest` citation does, so the JSON
+    itself names which engine found them."""
+    path = _write(tmp_path, "cross-native-dirty.json", _native_dirty())
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["status"] == "violations"
+    assert check["passed"] is False
+    assert check["detail"]["violation_count"] == 0
+    disclosure = check["detail"]["drc_crosscheck"]
+    assert disclosure["engines"]["curated"]["status"] == "clean"
+    assert disclosure["engines"]["native"]["status"] == "violations"
+    assert disclosure["comparison_state"] == "agree_violations"
+
+
+def test_aggregation_detail_disclosure_equals_the_manifest_citation(tmp_path):
+    """The two entry points disclose identically off the same envelope:
+    `checks[].detail.drc_crosscheck` in aggregation mode is the same block
+    `--manifest` puts in `citation.drc_crosscheck`."""
+    path = _write(tmp_path, "crosscheck.json", _both_clean())
+
+    detail = build_signoff([path])["checks"][0]["detail"]
+    citation = _item3(build_tier_report(_manifest(evidence={"3": path})))["citation"]
+
+    assert citation["drc_crosscheck"]["engines"]["native"]["status"] == "clean"
+    assert detail["drc_crosscheck"] == citation["drc_crosscheck"]
+
+
+def test_single_engine_detail_is_untouched(tmp_path):
+    """A single-engine `drc` check's detail is byte-for-byte unchanged: no
+    `drc_crosscheck` key, exactly the keys #2002/#2768 left behind."""
+    path = _write(tmp_path, "single.json", _report("curated"))
+
+    detail = build_signoff([path])["checks"][0]["detail"]
+
+    assert detail == {
+        "file": "x.gds",
+        "deck": "sky130",
+        "violation_count": 0,
+        "coverage": _coverage(),
+    }
+
+
+def test_aggregation_native_absent_detail_discloses_absence(tmp_path):
+    """A native-side-absent envelope discloses `engines.native: null` in the
+    aggregation detail too -- absent, never implied to have run."""
+    envelope = _envelope(
+        _report("curated"),
+        None,
+        status="not_checked",
+        comparison_state="native_unavailable",
+        identity=False,
+    )
+    path = _write(tmp_path, "cross-native-absent.json", envelope)
+
+    check = build_signoff([path])["checks"][0]
+
+    assert check["detail"]["drc_crosscheck"]["engines"] == {
+        "curated": {"status": "clean", "coverage": _coverage()},
+        "native": None,
+    }
+
+
 def test_malformed_curated_side_is_still_refused(tmp_path):
     """`project()` must not launder a broken artifact past
     `_validate_envelope`: a cross-check whose `reports.curated` is missing

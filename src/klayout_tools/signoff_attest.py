@@ -59,10 +59,10 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
@@ -70,7 +70,6 @@ from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
 from .env_provenance import find_repo_root
 from .signoff import (
-    _COMMAND_EVIDENCE_TIMEOUT_S,
     _ITEMS_REQUIRING_ANCHORED_GENERIC_EVIDENCE,
     _ITEMS_REQUIRING_ATTESTED_EVIDENCE,
     SCHEMA_VERSION,
@@ -80,11 +79,12 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
+from .signoff_attest_command import _run_command, reset_durations
 from .signoff_attest_drift import drift_result
-from .signoff_attest_env import command_env, klt_shim_scope
+from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_glob import expand_entry
-from .signoff_attest_input import input_binding
-from .signoff_attest_pins import json_node, resolve_pin_refs, with_resolved_from
+from .signoff_attest_input import attestation_block, input_binding
+from .signoff_attest_pins import item9_pin_checks, json_node
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
 
@@ -725,75 +725,6 @@ def _recorded_hash_check(root: str, entry: Mapping[str, Any]) -> dict[str, Any]:
     return check
 
 
-# Bounded tail of a failing command's captured output (issue #4698). Held out
-# of band (never in a check dict built here) because it is host-specific and
-# the envelope -- and its content hash -- must stay reproducible. The CLI adds
-# it to the live ``--format json`` result via :func:`attach_output_tails`,
-# after any ``--output`` write and ``--check`` diff.
-_OUTPUT_TAIL_MAX_LINES = 20
-_OUTPUT_TAIL_MAX_BYTES = 2048
-_failed_output: dict[tuple[tuple[str, ...], str], str] = {}
-
-
-def _bounded_tail(text: str) -> str:
-    lines = text.rstrip().splitlines()[-_OUTPUT_TAIL_MAX_LINES:]
-    tail = "\n".join(lines)
-    encoded = tail.encode("utf-8")
-    if len(encoded) > _OUTPUT_TAIL_MAX_BYTES:
-        tail = encoded[-_OUTPUT_TAIL_MAX_BYTES:].decode("utf-8", errors="replace")
-    return tail
-
-
-def failed_output_tail(check: Mapping[str, Any]) -> str:
-    """Bounded tail of the captured stdout+stderr of the failing command
-    ``check`` in the most recent attestation run, or ``""`` (a passing,
-    skipped or unlaunchable check has none)."""
-    return _failed_output.get(
-        (tuple(check.get("argv") or ()), check.get("cwd", "")), ""
-    )
-
-
-def attach_output_tails(envelope: Mapping[str, Any]) -> None:
-    """Add the additive ``output_tail`` string to each failing command check of
-    ``envelope`` (in place). Live-result only: call after the envelope has
-    been written or diffed, never before."""
-    for check in (envelope.get("attestation") or {}).get("checks") or []:
-        if check.get("check") == "command" and not check.get("passed"):
-            tail = failed_output_tail(check)
-            if tail:
-                check["output_tail"] = tail
-
-
-def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:
-    """Run one declared command; return ``(exit_status, error)``. ``error``
-    is ``"launch_failed"``/``"timeout"`` (stable tokens, not host-specific
-    messages, so the envelope stays reproducible) or ``None``. A failing
-    command's output tail is kept for :func:`failed_output_tail`."""
-    cwd = os.path.join(root, spec["cwd"]) if spec["cwd"] != "." else root
-    key = (tuple(spec["argv"]), spec["cwd"])
-    _failed_output.pop(key, None)
-    try:
-        completed = subprocess.run(
-            spec["argv"],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=spec.get("timeout_s", _COMMAND_EVIDENCE_TIMEOUT_S),
-            check=False,
-            env=command_env(),
-        )
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    except OSError:
-        return None, "launch_failed"
-    if completed.returncode != 0:
-        tail = _bounded_tail(completed.stdout.decode("utf-8", errors="replace"))
-        if tail:
-            _failed_output[key] = tail
-    return completed.returncode, None
-
-
 def _command_check(
     root: str, spec: Mapping[str, Any], role: str, **identity: Any
 ) -> dict[str, Any]:
@@ -860,22 +791,21 @@ def _metric_value(root: str, path: str, field: str) -> float | int | None:
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
-    """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
-    command, then (digital) one metric check per corner x required metric."""
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation per spec row, each freshness command, then (digital) metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
-    cited = sorted({p for paths in normalized["citations"].values() for p in paths})
-    present = {path: _file_check(root, path, "evidence") for path in cited}
-    checks.extend(present.values())
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(root, cites, _file_check)
+    checks.extend((*present.values(), *envelopes.values()))
     for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
+        paths = cites[row]
         checks.append(
             {
                 "check": "citation",
                 "role": "spec_row",
                 "row": row,
                 "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
+                "passed": bool(paths) and all(envelopes[p]["passed"] for p in paths),
             }
         )
     for path in cited:
@@ -945,10 +875,10 @@ def _run_checks(
     normalized: Mapping[str, Any],
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every check for ``item``, in a deterministic order: file-presence
-    checks sorted by path (independent of inventory listing order), then
-    the item's command and pin checks. With ``committed_checks`` (the
-    ``--check`` path) every ``local_only`` command is skipped, not run."""
+    """Run the item's artifact and command checks in deterministic order.
+    Item 9's pin checks follow once the envelope's build version is known.
+    With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
+    reset_durations()
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
@@ -969,10 +899,6 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command, root, _file_check))
-        resolved_pins, pin_sources = resolve_pin_refs(
-            normalized["pins"], root, _normalize_repo_path
-        )
-        checks.extend(with_resolved_from(item9.pin_checks(resolved_pins), pin_sources))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1018,9 +944,13 @@ def build_attestation(
     normalized = _validated_inventory(inventory, item, root, inventory_path)
     with klt_shim_scope():
         checks = _run_checks(item, root, normalized, committed_checks)
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    klt_version = build_version()
+    if item == 9:
+        pins = normalized["pins"]
+        checks.extend(item9_pin_checks(pins, root, _normalize_repo_path, klt_version))
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
-    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1031,16 +961,15 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
-            "klt_version": build_version(),
+            "klt_version": klt_version,
             "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,

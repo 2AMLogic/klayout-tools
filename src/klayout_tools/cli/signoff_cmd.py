@@ -128,6 +128,7 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
+from ..signoff_artifact import artifact_resolution
 from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
 from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
@@ -152,7 +153,11 @@ from ..signoff_output import non_attest_problem, write_output_or_message
 from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
-from .signoff_flags import mode_flag_problem
+from .signoff_flags import (
+    artifact_manifest_problem,
+    describe_grader_problem,
+    mode_flag_problem,
+)
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
     _justified_gap_suffix,
@@ -179,6 +184,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    problem = artifact_manifest_problem(args, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
     if getattr(args, "repin", False):
         # Checked before every other mode so `--repin --attest 9` refuses the
         # combination rather than quietly running the attestation (issue
@@ -193,10 +201,11 @@ def run(args: argparse.Namespace) -> int:
     if problem is not None:
         return emit_error("signoff", problem, args.format)
     repo_root = getattr(args, "repo_root", None)
-    if fleet_source:
-        return _run_fleet_report(args, fleet_source, repo_root=repo_root)
-    if manifest_source:
-        return _run_tier_report(args, manifest_source, repo_root=repo_root)
+    with artifact_resolution(getattr(args, "artifact_manifest", None)):
+        if fleet_source:
+            return _run_fleet_report(args, fleet_source, repo_root=repo_root)
+        if manifest_source:
+            return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
 
 
@@ -225,35 +234,9 @@ def _run_describe_grader(
     manifest_source: str | None,
     fleet_source: str | None,
 ) -> int:
-    if args.files or manifest_source or fleet_source:
-        return emit_error(
-            "signoff",
-            "--describe-grader cannot be combined with <file> arguments, "
-            "--manifest, or --fleet",
-            args.format,
-        )
-    if getattr(args, "tiers_doc", None):
-        return emit_error(
-            "signoff",
-            "--tiers-doc is not meaningful with --describe-grader -- it "
-            "always reports this build's own shipped grading rules, never "
-            "an overridden doc's item list",
-            args.format,
-        )
-    if getattr(args, "check", None):
-        return emit_error(
-            "signoff",
-            "--check is not meaningful with --describe-grader -- it verifies "
-            "a committed tier/fleet report, and this mode renders none",
-            args.format,
-        )
-    if getattr(args, "repo_root", None) is not None:
-        return emit_error(
-            "signoff",
-            "--repo-root is not meaningful with --describe-grader -- it "
-            "grades no evidence, so there are no repo-scoped inputs to resolve",
-            args.format,
-        )
+    problem = describe_grader_problem(args, manifest_source, fleet_source)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
