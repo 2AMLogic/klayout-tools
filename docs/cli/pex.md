@@ -1074,35 +1074,61 @@ klt pex pnpMPA.gds --engine klayout-runset --deck-file sg13cmos5l.lvs \
     --top pnpMPA_lvs --extract-only --format json
 ```
 
-**This is a device-level extraction with no parasitics — and a report from this
-route therefore does not, by itself, satisfy T1 item 7's intent.**
+**Without `--deck`, this is a device-level extraction with no parasitics —
+and a report from that route does not satisfy T1 item 7: `klt signoff`
+refuses it (`unmet`, reason `no_parasitics`).**
 [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 is parasitic
-verification; a runset leg has no R/C cards, so its `delta[]` is a
-device-representation delta. The route makes that gap *visible in the
-envelope* instead of unreachable. Joining the runset's devices with the curated
-deck's parasitics needs a net correspondence between two independently-numbered
-extractions, which nothing in this repo provides yet — that is
-[#6606](https://github.com/2AMLogic/klayout-tools/issues/6606), and it is what
-closes the gap. Until then `klt signoff` reports the disclosure below on the
-item-7 citation and does not grade on it.
+verification; a parasitic-free runset leg has no R/C cards, so its `delta[]`
+is a device-representation delta. **`--deck <curated>` (issue #6606) is the
+route that closes the gap**: it additionally runs that curated deck with
+parasitics and joins the two extractions by a measured geometric net
+correspondence
+([`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)
+records the decision and the refuted alternatives), attaching the curated
+parasitic network to the runset devices:
+
+```
+klt pex pnpMPA.gds --engine klayout-runset --deck-file sg13cmos5l.lvs \
+    --deck sg13cmos5l --top pnpMPA_lvs --extract-only --format json
+```
+
+A net the correspondence cannot match 1:1 is **listed, never silently
+dropped or silently merged** (`extraction.net_correspondence`:
+`matched` / `unmatched_runset_nets` / `unmatched_curated_nets` /
+`disagreements` — a net split or merged *between the two engines* is
+detected and reported, not compared), and such a leg's `delta[]` is a real
+parasitic delta over the nets that did match. `parasitics_carried` is
+`true` exactly when at least one parasitic card attached — on a layout the
+curated deck cannot read (labels off its `.pin` layers, PCell vias the pip
+`klayout.db` engine cannot resolve — IHP's own `pnpMPA` testcase is the
+measured example) the merged run honestly degenerates to the device-only
+leg and item 7 still refuses it.
 
 **Flags.** `--deck-file <runset.lvs>` is required under the engine and a usage
 error (exit 2) under any other; `--deck-var`, `--device-param` and
 `--runset-timeout` are runset-only and likewise usage errors otherwise (the
 spelling, validation and error text are `klt extract`'s own).
-`--device-model` is honoured. `--deck` is not a runset flag and is refused by
-name, as on `klt extract`. `--device-param` matters: without it every `X` card
-is parameter-free and the devices simulate at the PDK subcircuit's own
-defaults, so a delta over them is not a delta over the drawn sizes — it is the
-only way measured parameters reach the cards (issue #5513).
+`--device-model` is honoured. `--deck` under this engine is the merged
+route above (it selects the curated *parasitic* deck and is never forwarded
+to the runset extraction itself); without the engine it is the curated-deck
+selector as always. `--label-layer` is honoured by the merged route's
+curated leg (it is how a layout labelled off the deck's own `.pin` layers
+still names its nets); without `--deck` it stays refused. `--device-param`
+matters: without it every `X` card is parameter-free and the devices
+simulate at the PDK subcircuit's own defaults, so a delta over them is not
+a delta over the drawn sizes — it is the only way measured parameters reach
+the cards (issue #5513).
 
 **Refused by name, never silently ignored.** Every option that only makes sense
-with parasitics or the curated deck is refused with the flag spelled out
+with a richer curated parasitic model is refused with the flag spelled out
 (`engine 'klayout-runset' cannot honour --critical-net, --distributed-rc …`),
-exit 1: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
+exit 1 — under the merged route too, which serves the curated deck's default
+lumped model only: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
 `--mom-rlc-*`, `--parasitic-variant`, `--substrate-tie-ohms`, `--deck-option`,
-`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--label-layer`,
-`--pdk`, `--pdk-root` (the same table `klt extract` refuses them from), plus
+`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--pdk`,
+`--pdk-root` (the same table `klt extract` refuses them from), plus
+`--label-layer` *without* `--deck` (with `--deck` it routes to the curated
+leg, above),
 `--device-only-leg` (the runset leg *is* already the parasitic-free one) and
 `--tie-net` (it ties nets the curated deck reports as unbiased PMOS bodies,
 which this engine never computes). `--dry-run` is refused too: its preflight
@@ -1110,7 +1136,8 @@ models the curated deck and parasitics; use `--extract-only` to exercise the
 extraction without a measurement leg. `--backend batch` is **not** refused:
 `klt extract` refuses it because that verb would ship the extraction off-host,
 where the standalone `klayout` binary is not, but `klt pex --backend` only
-reaches the `klt sim` legs — the extraction always runs here.
+reaches the `klt sim` legs — the extraction always runs here (both legs of
+the merged route included).
 
 **What the envelope says.** Additive `extraction` fields, present **only** under
 this engine (a default-engine envelope is byte-identical to one produced before
@@ -1119,15 +1146,24 @@ the route existed; `schema_version` stays `2`):
 | Field | Meaning |
 |---|---|
 | `extraction.engine` | `"klayout-runset"`. |
-| `extraction.parasitics_carried` | Always `false`: the extracted leg has no R/C cards. Reported, never graded on. |
+| `extraction.parasitics_carried` | `false` for a plain runset leg (no R/C cards). For a merged leg (`--deck`, issue #6606): `true` exactly when the net correspondence attached at least one parasitic card; `klt signoff` refuses a `false` for item 7 (`no_parasitics`). |
+| `extraction.net_correspondence` | Present only on a merged leg (issue #6606): `matched` (`[{runset, curated}]`), `unmatched_runset_nets`, `unmatched_curated_nets`, `disagreements` (`{kind: split\|merge, …}` — a connectivity disagreement between the two engines, reported never guessed), `probe_count`, `deck`, `attached_card_count`. A net that cannot be matched is listed, never silently dropped or silently merged. |
 | `extraction.params_not_carried` | `{class: [PARAM, …]}` — the measured parameters the `X` cards do **not** carry, per device class, copied from `klt extract`'s own `params_not_carried`. `{}` once every parameter is declared with `--device-param`. |
 | `extraction.device_counts` | `{class: count}` — what the runset recognised, so a reader sees a family is present (or absent) without the extract JSON. Counted over the **instantiated hierarchy**, not the selected circuit alone: a hierarchical runset's top often holds no device itself (its devices sit in called cells), and the selected circuit's own count would read `{}` for a design full of them. Equal to `klt extract`'s `device_counts` for a flat runset, and to its `instantiated_device_counts` always. |
 | `extraction.device_count` | The total of `extraction.device_counts` — under this engine it replaces the echo of `klt extract`'s selected-circuit `device_count`, so the two never disagree. |
 | `extraction.extra_circuits` | `[circuit, …]` — the circuits the runset wrote besides the selected one; `[]` for a flat runset. A non-empty list is how a reader knows the extraction is hierarchical and that `extraction.net_count` still describes the selected circuit alone (nets inside a called cell are not summed: a net is not a per-instance quantity). |
 
-`extraction.deck` is `null` (no curated deck ran), `extraction.model` is
-`null` (no parasitic model), and `provenance.runset` carries the runset's
-`deck_file`, `content_hash` and `klayout_application_version`.
+`extraction.deck` is `null` and `extraction.model` is `null` on a plain
+runset leg (no curated deck ran); on a merged leg `extraction.deck` is the
+curated deck's name, `extraction.model`/`parasitic_integrity` describe the
+curated parasitics actually attached, and `provenance.runset` carries the
+runset's `deck_file`, `content_hash` and `klayout_application_version`
+either way. The merged leg's own netlist header names the deck and the
+match counts, and its written cards are the curated lumped model (one
+series `R` per matched net, a ground `C`, matched coupling, the substrate
+DC tie) — see
+[`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)
+for why it is coarser than the curated engine's own star.
 `body_bias.status` is **`"not_assessed"`** (with `null` counts): the runset
 engine never runs the curated deck's floating-PMOS-body check, so `"biased"`
 would state a clean result nothing measured.

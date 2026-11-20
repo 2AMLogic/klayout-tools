@@ -181,10 +181,13 @@ def test_cli_default_engine_still_requires_a_deck(tmp_path, fake_klayout, capsys
     assert "--deck" in err["error"]["message"]
 
 
-def test_cli_curated_deck_is_refused_by_name_under_the_runset_engine(
+def test_cli_curated_deck_under_the_runset_engine_runs_the_merged_route(
     tmp_path, fake_klayout, capsys
 ):
-    code, _out, err = _cli(
+    """Issue #6606: `--deck` under the runset engine selects the merged
+    route instead of exiting 1 -- the CLI envelope carries the
+    correspondence even when (as on this fixture) nothing matches."""
+    code, out, _err = _cli(
         tmp_path,
         "--engine",
         "klayout-runset",
@@ -196,8 +199,10 @@ def test_cli_curated_deck_is_refused_by_name_under_the_runset_engine(
         capsys=capsys,
     )
 
-    assert code == 1
-    assert "cannot honour --deck" in err["error"]["message"]
+    assert code == 4  # extract-only's own `not_checked`, not a refusal
+    extraction = json.loads(out)["extraction"]
+    assert extraction["deck"] == "sky130"
+    assert extraction["net_correspondence"]["deck"] == "sky130"
 
 
 def test_cli_parasitic_only_flag_is_refused_by_name_under_the_runset_engine(

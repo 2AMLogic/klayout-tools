@@ -94,8 +94,10 @@ def _pex_engine_disclosure(
     every curated-deck run, and every record committed before the route
     existed, which therefore renders exactly as it did before.
 
-    Grading policy for a parasitic-free leg is deliberately not decided here
-    (issue #6606): this is disclosure only.
+    Grading policy for a parasitic-free leg is **refused** (issue #6606
+    AC 4): :func:`parasitic_free_refusal` is the gate ``klt signoff``
+    consults, rendering item 7 ``"unmet"``/``no_parasitics`` -- this
+    function stays the disclosure half, quoted beside the verdict.
     """
     if kind != "pex":
         return None
@@ -112,3 +114,26 @@ def _pex_engine_disclosure(
             ),
         }
     }
+
+
+def parasitic_free_refusal(envelope: Mapping[str, Any]) -> str | None:
+    """The item-7 refusal reason for a pex envelope whose own extraction
+    disclosure says the extracted leg carried no parasitics (issue #6606
+    AC 4) -- ``"no_parasitics"``, or ``None`` when the leg carries them (or
+    makes no engine statement, which every curated-deck run does not).
+
+    Purely a read of the envelope's own ``extraction`` block, quoted from
+    the ``klt pex`` run that wrote it, never re-derived: a plain
+    ``--engine klayout-runset`` leg discloses ``parasitics_carried: false``
+    (its ``delta[]`` rows are device-representation deltas), while a merged
+    leg (``--deck <curated>``) flips the field to ``true`` exactly when the
+    net correspondence attached at least one parasitic card. An envelope
+    with no ``extraction.engine`` (every curated-deck run, and every record
+    predating the route) carries parasitics by construction and is never
+    refused here."""
+    extraction = envelope.get("extraction")
+    if not isinstance(extraction, dict) or not extraction.get("engine"):
+        return None
+    if extraction.get("parasitics_carried") is False:
+        return "no_parasitics"
+    return None

@@ -4041,6 +4041,26 @@ extraction-only report can never render item 7 `"met"`; see "A check that
 checked nothing is refused, not reported" above for the shared rule and both
 routes into it.
 
+**`no_parasitics` vs. all of them** (issue #6606, AC 4). A fourth thing can
+be wrong with an item-7 citation: the cited `klt pex` report's own
+extraction disclosure states the extracted leg carried **no parasitics**
+(`extraction.parasitics_carried: false` — a plain
+`--engine klayout-runset` leg, issue #6559). Item 7 is parasitic
+verification, and such a leg's `delta[]` rows are device-representation
+deltas, so the verdict does not establish the item no matter that every row
+met tolerance: it renders `"unmet"` with `reason: "no_parasitics"`, whose
+remedy is "re-run *this* artifact with parasitics attached"
+(`klt pex --engine klayout-runset --deck <curated>`, which joins the curated
+deck's parasitics onto the runset devices by geometric net correspondence —
+[`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)).
+A merged leg that attached cards discloses
+`extraction.parasitics_carried: true` and grades exactly as a curated one;
+an envelope with no engine statement (every curated-deck run, and every
+record predating the route) carries parasitics by construction and is never
+refused here. Before issue #6606 this disclosure was reported-only; the
+check's own `passed` status and the aggregation-mode `pex_extraction`
+disclosure are unchanged — the gate is item 7's alone.
+
 Only the literal JSON boolean `true` in `environment.sdf.annotated` grants
 annotation credit. False, null, missing fields, strings (including `"true"`
 and `"false"`), numbers, arrays, and objects do not qualify. Malformed optional

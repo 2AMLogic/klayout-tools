@@ -2852,47 +2852,36 @@ def run_pex(
     )
 
     try:
-        extract_report = run_extract(
+        # Issue #6559/#6606: the engine dispatch (curated / runset / the
+        # `--deck`-under-runset merged route) and the option mapping live in
+        # `pex_runset.run_extract_leg` -- the module that owns them.
+        extract_report = pex_runset.run_extract_leg(
             layout_path,
             deck_name,
+            runset=runset,
             output=output,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
-            # Issue #6559: the runset engine has no parasitics; every other
-            # option passes through and is refused by name by `run_extract`.
-            parasitics=runset is None,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            # Issue #2854: `--rename-declared-pins` passthrough. `False`
-            # whenever the flag was never given, which is the exact
-            # `run_extract` call this module made before it existed.
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            # Issue #2686: `--label-layer` passthrough. `None` when the flag
-            # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
             device_models=device_models,
+            deck_options=deck_options,
+            declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             critical_nets=critical_nets,
             critical_net_patterns=critical_net_patterns,
             critical_net_all=critical_net_all,
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
-            # Issue #4037: `False`/`None` whenever the flags were never given,
-            # which is the exact `run_extract` call made before they existed.
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            emit_selected_resistance=resistance_graph,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=mom_rlc_inductance_nh,
-            **pex_runset.extract_options(runset),
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc

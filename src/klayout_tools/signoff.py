@@ -230,10 +230,10 @@ from .signoff_na import (
     _na_statistical_detail,
 )
 
-# The cited `klt pex` envelope's extraction disclosures (issues #1983, #6559),
-# split out of this file for its size-ratchet ceiling and re-imported by name so
-# `signoff.<name>` keeps resolving.
+# The cited `klt pex` envelope's extraction disclosures (issues #1983/#6559)
+# and its item-7 parasitics gate (#6606), split out for the size-ratchet ceiling.
 from .signoff_pex_disclosure import _pex_body_bias_disclosure, _pex_engine_disclosure
+from .signoff_pex_disclosure import parasitic_free_refusal as _parasitic_free
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
@@ -3234,13 +3234,13 @@ def _kind_gated_check(
       estimate is not sized, or its own declared negative control did not
       detect the seeded degradation. See :func:`_yield_campaign_refusal`.
 
-    :func:`_check_passed` runs before these checks. Within this gate,
-    ``nothing_checked`` comes first and the yield campaign check comes last.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None, False
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
+        return refusal, False
+    if check_kind == "pex" and (refusal := _parasitic_free(envelope)):
         return refusal, False
     rehash_unverifiable = False
     if check_kind == "lvs":

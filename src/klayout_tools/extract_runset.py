@@ -286,6 +286,7 @@ def run_extract_klayout_runset(
     runset_timeout_s: float | None = None,
     klayout_binary: str | None = None,
     request_dir: str | None = None,
+    lvsdb_out: str | None = None,
 ) -> dict[str, Any]:
     """Extract ``path`` by running the PDK runset ``deck_file`` and return the
     ``klt extract`` report. See this module's docstring for the mechanism and
@@ -295,6 +296,11 @@ def run_extract_klayout_runset(
     binary, a runset that wrote no database, a timeout, an unreadable
     database -- reusing ``klt lvs``'s own message text wherever the shared
     launcher produces it.
+
+    ``lvsdb_out`` (issue #6606, internal -- no CLI flag) copies the runset's
+    ``.lvsdb`` to that path before the scratch work directory is removed, so
+    a caller (:mod:`klayout_tools.pex_net_correspondence`) can read the
+    database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
     from .extract import _build_metrics, _normalized_netlist_sha256, _staged
@@ -333,6 +339,8 @@ def run_extract_klayout_runset(
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
+        if lvsdb_out is not None:
+            shutil.copy2(lvsdb_path, lvsdb_out)
 
         with stage("lvsdb_read"):
             # `lvsdb` is the owner of `netlist`; it must stay referenced for

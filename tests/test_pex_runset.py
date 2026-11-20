@@ -207,11 +207,30 @@ def test_parasitic_only_option_is_refused_by_name(tmp_path, fake_klayout, kwargs
     assert "cmd" not in fake_klayout
 
 
-def test_curated_deck_name_is_refused_by_name_under_the_runset_engine(
+def test_curated_deck_under_the_runset_engine_is_the_merged_route(
     tmp_path, fake_klayout
 ):
-    with pytest.raises(PexError, match=r"cannot honour --deck\b"):
-        _extract_only(tmp_path, deck="sky130")
+    """Issue #6606: `--deck` under the runset engine is no longer refused --
+    it runs the curated leg and reports the correspondence. On this sky130-
+    invisible fixture (arbitrary layer numbers, no labels) nothing can
+    match, which the envelope states rather than guessing: no cards, so the
+    leg still carries no parasitics, and every runset net is listed
+    unmatched -- never silently dropped."""
+    report = _extract_only(tmp_path, deck="sky130")
+
+    extraction = report["extraction"]
+    assert extraction["deck"] == "sky130"
+    assert extraction["parasitics_carried"] is False
+    correspondence = extraction["net_correspondence"]
+    assert correspondence["deck"] == "sky130"
+    assert correspondence["attached_card_count"] == 0
+    assert correspondence["matched"] == []
+    assert correspondence["unmatched_runset_nets"]  # the fixture's \$N nets
+    assert correspondence["disagreements"] == []
+    # A leg nothing attached keeps its own honest header line.
+    text = open(str(tmp_path / "out.spice")).read()
+    assert "no parasitics: this engine extracts devices and connectivity" in text
+    assert "parasitics attached" not in text
 
 
 def test_every_refusal_is_named_at_once(tmp_path, fake_klayout):
