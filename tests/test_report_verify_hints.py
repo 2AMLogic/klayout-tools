@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 
+import pytest
+
 from klayout_tools._report_verify_hints import (
     input_hash_check,
     input_not_found_entry,
@@ -52,20 +54,97 @@ def test_input_not_found_repo_scoped_echo_names_the_repo_root(tmp_path):
         str(repo / "ref.spice"),
         str(report),
         None,
+        include_repo_root=True,
         echoed={"path": "ref.spice", "scope": "repo"},
     )
     assert entry["resolved_repo_root"] == str(repo)
 
-    bare = input_not_found_entry("ref.spice", str(report), None, echoed="ref.spice")
+    bare = input_not_found_entry(
+        "ref.spice", str(report), None, include_repo_root=True, echoed="ref.spice"
+    )
     assert bare["resolved_repo_root"] is None
 
     external = input_not_found_entry(
         str(repo / "ref.spice"),
         str(report),
         None,
+        include_repo_root=True,
         echoed={"path": None, "scope": "external"},
     )
     assert external["resolved_repo_root"] is None
+
+
+def test_input_not_found_repo_scoped_echo_under_override_names_no_repo_root(
+    tmp_path,
+):
+    """Issue #6461: the override gate is the function's own, not a
+    caller-side substitution -- an override supplied the reported ``path``
+    (anchored on the cwd), so a repo-scoped echo's root must not be named
+    as an anchor the path never used."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = repo / "pair" / "report.json"
+    override = str(tmp_path / "override.spice")
+
+    entry = input_not_found_entry(
+        override,
+        str(report),
+        None,
+        include_repo_root=True,
+        echoed={"path": "ref.spice", "scope": "repo"},
+        override=override,
+    )
+    assert entry["resolved_repo_root"] is None
+
+
+_REPO_ECHO = {"path": "ref.spice", "scope": "repo"}
+_EXTERNAL_ECHO = {"path": None, "scope": "external"}
+
+
+@pytest.mark.parametrize(
+    ("echoed", "override", "anchored_on_repo"),
+    [
+        pytest.param(None, "override.spice", False, id="absent-echo+override"),
+        pytest.param("ref.spice", None, False, id="bare-string"),
+        pytest.param("ref.spice", "override.spice", False, id="bare-string+override"),
+        pytest.param(_REPO_ECHO, None, True, id="repo-scoped"),
+        pytest.param(_REPO_ECHO, "override.spice", False, id="repo-scoped+override"),
+        pytest.param(
+            _EXTERNAL_ECHO, "override.spice", False, id="external-echo+override"
+        ),
+    ],
+)
+def test_input_hash_check_repo_root_key_presence_follows_the_opt_in(
+    tmp_path, echoed, override, anchored_on_repo
+):
+    """Issue #6461 (Judge finding on #6807): whenever a caller opts in with
+    ``include_repo_root`` and an ``input_not_found`` block is emitted at all,
+    ``resolved_repo_root`` is *present* -- ``null`` unless a repo-scoped echo
+    anchored the path -- whatever the echo's shape. Key presence is the
+    caller's opt-in, never inferred from the echo being non-``None``: a
+    report with no ``layout``/``reference`` echo plus an override must keep
+    ``"resolved_repo_root": null`` (documented in ``docs/cli/lvs.md``)."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = str(repo / "pair" / "report.json")
+    override = str(tmp_path / override) if override else None
+
+    def block(include_repo_root):
+        check = input_hash_check(
+            "environment.layout_sha256",
+            "0" * 64,
+            echoed,
+            report,
+            override,
+            include_repo_root=include_repo_root,
+        )
+        assert "input_not_found" in check, "case must emit the diagnostic"
+        return check["input_not_found"]
+
+    opted_in = block(True)
+    assert "resolved_repo_root" in opted_in
+    assert opted_in["resolved_repo_root"] == (str(repo) if anchored_on_repo else None)
+    assert "resolved_repo_root" not in block(False)
 
 
 def test_input_not_found_without_override_hint_names_no_flag(tmp_path):
