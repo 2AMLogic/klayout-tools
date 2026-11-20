@@ -10,6 +10,13 @@ WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
 MAIN_VERDICT_WORKFLOWS = ("file-size-ratchet-main.yml",)
 
 
+def test_main_verdict_registry_is_not_empty() -> None:
+    # An empty parametrize set makes pytest skip the test below rather than
+    # fail it, so emptying the registry would turn CI green with no coverage.
+    # This test is deliberately not parametrized, so it cannot be skipped.
+    assert MAIN_VERDICT_WORKFLOWS, "main verdict workflow registry is empty"
+
+
 @pytest.mark.parametrize("filename", MAIN_VERDICT_WORKFLOWS)
 def test_main_verdict_workflow_concurrency(filename: str) -> None:
     workflow = yaml.safe_load((WORKFLOWS / filename).read_text(encoding="utf-8"))
