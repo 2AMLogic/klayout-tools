@@ -140,7 +140,7 @@ from ..signoff_attest_text import attestation_check_line as _attestation_check_l
 from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
-from ..signoff_details import _format_body_bias
+from ..signoff_details import _pex_citation_lines
 from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
@@ -768,16 +768,16 @@ def _print_foundry_cell_exceptions(citation: dict) -> None:
 
 
 def _print_cite_line(citation: dict) -> None:
-    """The ``cite:`` line naming what an item's evidence was: command-backed
-    evidence (issue #825) has no static file, so the executed command is
-    shown instead; file-backed evidence (issue #722) has no command, so the
-    evidence file is shown, as before."""
+    """The ``cite:`` line naming what an item's evidence was: the executed
+    command (issue #825) or the evidence file (issue #722), as before; a
+    ``content_hash_basis`` (issue #6861) renders bare beside the hash."""
     source = citation["file"] if citation["file"] is not None else citation["command"]
+    basis = citation.get("content_hash_basis")
+    basis = f", content_hash_basis={basis}" if basis is not None else ""
     print(
-        f"        cite: {source} "
-        f"(kind={citation['kind']}, status={citation['check_status']}, "
-        f"content_hash={citation['content_hash']}, "
-        f"exit_status={citation['exit_status']})"
+        f"        cite: {source} (kind={citation['kind']}, "
+        f"status={citation['check_status']}, content_hash={citation['content_hash']}"
+        f"{basis}, exit_status={citation['exit_status']})"
     )
 
 
@@ -876,11 +876,10 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             # netlist with no DC bias path for its device bodies makes those
             # numbers physically wrong (docs/cli/extract.md), and `klt
             # signoff` does not grade on it, so a reviewer of item 7 needs it
-            # in the artifact they read. Absent for evidence committed before
-            # `klt pex` reported body bias.
-            body_bias = citation.get("body_bias")
-            if body_bias:
-                print(f"        body bias: {_format_body_bias(body_bias)}")
+            # in the artifact they read. Issue #6559: and, for a runset leg,
+            # that it carries no parasitics. Absent for older evidence.
+            for line in _pex_citation_lines(citation):
+                print(f"        {line}")
             # Issue #2025: T1 item 11's citation is compound -- the `cite:`
             # line above names its leading (`erc`) part, so every other
             # cited artifact gets its own line rather than being reachable

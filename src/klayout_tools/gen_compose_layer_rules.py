@@ -296,6 +296,41 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     return side_um
 
 
+def _min_enclosing_adjacent_margin_um_for_layer(
+    variant: str,
+    layer: tuple[int, int] | None,
+    other_layer: tuple[int, int] | None,
+) -> tuple[float, str] | None:
+    """Tightest two-adjacent-edges enclosure rule for the layer pair.
+
+    Same shape as :func:`_min_enclosing_margin_um_for_layer` over the
+    ``"enclosing_adjacent"`` check family (sky130's ``via.5a``/``m2.5``
+    rules, #3316): the threshold a *centered* square pad must leave on
+    every side -- a centered square's four margins are equal, so the rule
+    fires (two adjacent edges both under it) unless the margin clears the
+    threshold outright. Used by :func:`_intermediate_landing_pad_floor_um`
+    (issue #6058) to floor a minimal-ladder intermediate pad; terminal
+    pads never shrink below the fixed baseline, so they never need it.
+    """
+    if layer is None or other_layer is None:
+        return None
+    try:
+        family = _pdk_family(variant)
+        deck_rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except (GenError, UnknownDeckError):
+        return None
+    candidates = (
+        (rule.threshold_dbu * nominal_dbu_um, rule.id)
+        for rule in deck_rules
+        if rule.check == "enclosing_adjacent"
+        and rule.layer == layer
+        and rule.other_layer == other_layer
+        and rule.derived_layer is None
+    )
+    return max(candidates, key=lambda entry: entry[0], default=None)
+
+
 def _landing_pad_floor_um(
     variant: str,
     pad_layer: tuple[int, int],

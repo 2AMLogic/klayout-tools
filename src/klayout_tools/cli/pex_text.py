@@ -146,6 +146,14 @@ def _print_text(report: dict) -> None:
         f"extraction: deck={extraction['deck']}  "
         f"devices={extraction['device_count']}  nets={extraction['net_count']}"
     )
+    # Additive (issue #6559): only printed for a runset-engine leg, which has
+    # no curated deck and no parasitics.
+    if extraction.get("engine"):
+        uncarried = extraction.get("params_not_carried") or {}
+        print(
+            f"engine: {extraction['engine']}  parasitics: none  "
+            f"params_not_carried: {', '.join(sorted(uncarried)) or 'none'}"
+        )
     # Additive (issue #2686): only printed when --label-layer was given.
     _print_label_layers(extraction.get("label_layers"))
     # Additive (issue #976): only printed when --critical-net was given.

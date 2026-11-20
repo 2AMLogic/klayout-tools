@@ -6580,27 +6580,25 @@ def _resolve_mos_capacitors(
 ]:
     """Recognise the deck's marker-scoped MOS capacitors (issue #2919).
 
-    Each connected component ("island") of ``active`` that carries a poly
-    gate is offered to ``deck.mos_capacitors`` in declaration order; the
-    first entry whose marker/implant/well/``requires``/``excludes`` tests all
-    hold (see :class:`~klayout_tools.decks.MosCapacitorDevice`) claims it. A
-    claimed island is removed from the returned ``active`` so the MOS
-    source/drain/gate split never sees it -- the PDK likewise excludes
-    ``mos_cap_mk`` from its MOS derivations -- and a capacitor with no
-    claiming entry stays an ordinary MOS device (the unsupported-marker
-    residue still reports it).
+    Each connected component ("island") of ``active`` that carries a poly gate
+    is offered to ``deck.mos_capacitors`` in declaration order; the first entry
+    whose marker/implant/well/``requires``/``excludes`` tests all hold (see
+    :class:`~klayout_tools.decks.MosCapacitorDevice`) claims it. A claimed
+    island is removed from the returned ``active`` so neither the MOS
+    source/drain/gate split nor the PDK's own ``mos_cap_mk``-excluding
+    derivations see it; one with no claiming entry stays an ordinary MOS
+    device (the unsupported-marker residue still reports it).
 
     Returns ``(capacitors, active_without_capacitors, recognised, dropped)``:
-    ``capacitors`` is one ``(entry, gate, source_drain)`` triple per entry
-    that claimed at least one island (``gate`` = ``island & poly``,
-    ``source_drain`` = ``island - poly``, both minus the ``dummy`` marker for
-    the gate), ``recognised`` is the union of the claimed islands, and
-    ``dropped`` counts gate components fully covered by ``dummy``. Everything
-    is empty/``0`` for a deck declaring no ``mos_capacitors``.
+    ``capacitors`` is one ``(entry, gate, source_drain)`` triple per claiming
+    entry (``gate`` = ``island & poly`` minus ``dummy``, ``source_drain`` =
+    ``island - poly``), ``recognised`` the union of the claimed islands, and
+    ``dropped`` the count of gate components ``dummy`` fully covers. A deck
+    declaring no ``mos_capacitors`` returns empty/``0`` results.
 
     Claim sets are resolved with bulk region algebra, not a per-island loop
     (issue #5807): one ``interacting()`` per layer over the merged island
-    set, first-claim-wins via the ordered sweep (derivation: CHANGELOG #5807).
+    set, memoized per layer (issue #6527), first-claim-wins via the ordered sweep.
     """
     import klayout.db as kdb
 
@@ -6616,9 +6614,12 @@ def _resolve_mos_capacitors(
     islands = active.merged()
     gated = islands.interacting(poly & islands)
     in_well = islands.interacting(nwell)
+    outside_well = islands - in_well
 
+    @functools.cache
     def touching(layer: tuple[int, int]) -> kdb.Region:
-        # Empty layer claims nothing; skip the interacting() call (#5807).
+        # Memoized per layer (#6527): the entries share their marker/implant/
+        # requires/excludes layers. An empty layer claims nothing (#5807).
         region = region_of(layer)
         return kdb.Region() if region.is_empty() else islands.interacting(region)
 
@@ -6632,8 +6633,7 @@ def _resolve_mos_capacitors(
             candidates &= touching(layer)
         for layer in entry.excludes:
             candidates -= touching(layer)
-        candidates &= in_well if entry.in_well else islands - in_well
-        candidates -= taken
+        candidates &= (in_well if entry.in_well else outside_well) - taken
         if not candidates.is_empty():
             claimed[index] = candidates
             taken += candidates
@@ -6641,8 +6641,7 @@ def _resolve_mos_capacitors(
     capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]] = []
     recognised = kdb.Region()
     dropped = 0
-    for index in sorted(claimed):
-        island_region = claimed[index]
+    for index, island_region in sorted(claimed.items()):
         recognised += island_region
         gate = island_region & poly
         if not dummy.is_empty():
