@@ -30,15 +30,21 @@ identical to what it documents.
 
 from __future__ import annotations
 
+import os
+import sys
+from dataclasses import dataclass
 from typing import Any
 
-from . import env_provenance
+from . import device_multiplier_lint, env_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
+from ._provenance import sha256_file
 
 __all__ = [
+    "NetlistDigests",
     "backend_environment",
     "budget_environment",
+    "device_multiplier_environment",
     "fail_fast_probe_environment",
     "monte_carlo_environment",
     "netlist_closure_environment",
@@ -73,6 +79,79 @@ def netlist_closure_environment(
         }
     except sim_staging.IncludeStagingError as exc:
         return {"netlist_closure_error": str(exc)}
+
+
+@dataclass(frozen=True)
+class NetlistDigests:
+    """The netlist byte digests a report cites, captured once, before the
+    sweep dispatches any corner (issue #5569).
+
+    ``environment.netlist_sha256``, the ``.include`` closure and
+    ``provenance.input.content_hash`` all pin the bytes the job was staged
+    with. Re-reading the file at report assembly -- minutes to hours after a
+    ``batch`` submit -- would let an edit in between change what the report
+    claims to pin, or crash the epilogue on a file deleted meanwhile.
+
+    ``closure`` is the :func:`netlist_closure_environment` fragment, so the
+    ``netlist_closure``/``netlist_closure_error`` disclosure is unchanged;
+    only the moment of capture moved. ``sha256`` is ``None`` when the file
+    could not be hashed at capture time.
+    """
+
+    sha256: str | None
+    closure: dict[str, Any]
+
+    @classmethod
+    def capture(
+        cls, request: dict[str, Any], netlist_path: str, *, repo_root: str | None
+    ) -> NetlistDigests:
+        return cls(
+            sha256=sha256_file(netlist_path),
+            closure=netlist_closure_environment(
+                request, netlist_path, repo_root=repo_root
+            ),
+        )
+
+    def environment(
+        self,
+        attach_job_id: str | None,
+        resume: bool,
+        remote_environment: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """``environment.netlist_sha256`` and ``netlist_sha256_scope``.
+
+        ``client-at-collection`` describes the request resolved by an attach
+        or a batch resume that only collected previously dispatched jobs.
+        """
+        collection_only = attach_job_id is not None
+        if not collection_only and resume and remote_environment is not None:
+            jobs = remote_environment.get("fleet", [remote_environment])
+            # A missing shard report or timestamp leaves dispatch unknown.
+            collection_only = bool(jobs) and all(
+                job is not None
+                and job.get("client_submitted_at", False) is None
+                and job.get("client_launched_at", False) is None
+                for job in jobs
+            )
+        return {
+            "netlist_sha256": self.sha256,
+            "netlist_sha256_scope": (
+                "client-at-collection" if collection_only else "staged"
+            ),
+        }
+
+    def pin_provenance_input(self, provenance: dict[str, Any]) -> None:
+        """Re-pin ``provenance.input.content_hash`` to the captured digest.
+
+        ``build_provenance`` hashes the path it is handed at call time; this
+        makes the block equal ``sha256:<environment.netlist_sha256>`` by
+        construction, even when the file changed (or vanished) mid-run --
+        ``klt signoff --manifest``'s staleness gate reads the former. A
+        no-op when nothing was captured, leaving the hash-the-path value.
+        """
+        block = provenance.get("input")
+        if block is not None and self.sha256 is not None:
+            block["content_hash"] = f"sha256:{self.sha256}"
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:
@@ -239,3 +318,81 @@ def resume_environment(
             "checkpoint_retained": checkpoint_retained,
         }
     }
+
+
+def device_multiplier_environment(
+    netlist_path: str,
+    *,
+    request: dict[str, Any],
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """``environment.device_multiplier`` (issue #5779): the device-multiplier
+    lint's findings for this run's netlist -- warning-only, never a failing
+    exit.
+
+    Instance cards of the netlist are checked against the device
+    subcircuit texts of the scanned ``.include`` closure (the same shared
+    ``sim_staging`` resolver every other disclosure here uses), so a net
+    carrying ``mult=6`` and no ``m=`` against a subcircuit that declares
+    ``mult`` but never forwards it is named instead of silently simulating
+    1x. Additive/optional: ``{}`` -- the key absent -- when there is
+    nothing to say (no checkable instance, or every checked pair agrees).
+    A closure that cannot be resolved or read is disclosed through the
+    lint's ``note`` (instances whose subcircuit text is missing) and
+    ``not_scanned``, never an error.
+    """
+    try:
+        with open(netlist_path, encoding="utf-8") as handle:
+            netlist_text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return {}
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name="netlist.cir",
+            roots=sim_staging.host_resolved_roots(request or {}),
+        )
+        closure_paths = []
+        for item in staged.files:
+            source = item.source_path or item.local_path
+            # stage_netlist always sets one of the two (source_path whenever
+            # content rewrote the file, local_path otherwise).
+            assert source is not None
+            closure_paths.append(source)
+        not_scanned = [
+            {"target": target, "reason": reason}
+            for target, reason in staged.host_resolved_detail
+        ]
+    except sim_staging.IncludeStagingError:
+        closure_paths = []
+        not_scanned = [{"target": "<include closure>", "reason": "unresolved"}]
+    closure_texts: list[str] = [netlist_text]
+    for path in closure_paths:
+        # Labels follow the scanned-closure convention (issue #2928):
+        # repo-relative, never an absolute external path.
+        info = env_provenance.repo_relative_path(path, repo_root=repo_root)
+        label = info.get("path") or (
+            f"<{info.get('scope', 'external')}>/{os.path.basename(path)}"
+        )
+        try:
+            with open(path, encoding="utf-8") as handle:
+                closure_texts.append(handle.read())
+        except (OSError, UnicodeDecodeError):
+            not_scanned.append({"target": label, "reason": "unreadable"})
+    cards = device_multiplier_lint.instance_cards(netlist_text)
+    subckts = device_multiplier_lint.collect_subckts(closure_texts)
+    report = device_multiplier_lint.instance_report(cards, subckts)
+    has_content = (
+        bool(report["findings"]) or "note" in report or "unevaluated" in report
+    )
+    if not has_content:
+        return {}
+    if not_scanned:
+        report["not_scanned"] = not_scanned
+    if report["findings"]:
+        print(
+            f"warning: {len(report['findings'])} device-multiplier finding(s) "
+            "for this netlist; see environment.device_multiplier.findings",
+            file=sys.stderr,
+        )
+    return {"device_multiplier": report}

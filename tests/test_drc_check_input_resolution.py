@@ -287,11 +287,9 @@ def _crosscheck(tmp_path: Path, curated_file: str, native_file: str) -> str:
     curated = _single_report(curated_file, expected)
     curated["engine"] = "curated"
     curated["deck"] = "sky130"
-    from klayout_tools.decks import deck_source_path
+    from klayout_tools.decks import deck_content_hash
 
-    curated["provenance"]["deck"] = {
-        "content_hash": content_hash(deck_source_path("sky130"))
-    }
+    curated["provenance"]["deck"] = {"content_hash": deck_content_hash("sky130")}
     native = _single_report(native_file, expected)
     return _write(
         tmp_path / "cc.json",

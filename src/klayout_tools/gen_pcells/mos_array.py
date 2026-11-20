@@ -18,6 +18,7 @@ from ._common_params import (
     declare_metal_label_present,
     declare_mos_array_extra_params,
     declare_mos_stack_params,
+    declare_mos_well_tie_params,
     declare_ring_implant_params,
     declare_ring_well_margin,
     declare_voltage_flavor_mark_params,
@@ -31,6 +32,7 @@ from ._mos_array_shapes import (
     _mos_cap_enabled,
     _unit_role_boxes,
 )
+from ._ring_shapes import _draw_composed_guard_ring
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -59,11 +61,8 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _draw_npc_over_poly_contacts,
         _draw_pcell_tap_pads,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _mos_array_layout,
         _pcell_tap_reach_um,
-        _shift_box,
     )
     from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
@@ -189,6 +188,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,  # type: ignore[attr-defined]
                 "PDK MOS-capacitor marker drawing layer (only used when mos_cap)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "gate_contact",
@@ -217,6 +217,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Well drawing layer (only used when flavor is 'pfet' and well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_well_present(self)
             self.param(
@@ -225,31 +226,10 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "PDK dummy-device marker drawing layer, covering each dummy "
                 "unit device's gate footprint (only used when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_dummy_marker_params(self)
-            self.param(
-                "well_tap_implant_layer",
-                self.TypeLayer,
-                "Well-tie implant layer drawn over the well-tap pad (only "
-                "used when flavor is 'pfet', well_present, and "
-                "well_tap_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "well_tap_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "a tap pad on the shared active role as a well tie",
-                default=False,
-            )
-            self.param(
-                "metal_label_layer",
-                self.TypeLayer,
-                "Label layer the well-tap pad's fixed net-name text is drawn "
-                "on (only used when well_tap_implant_present and "
-                "metal_label_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_mos_well_tie_params(self, kdb)
             declare_metal_label_present(self)
             self.param(
                 "voltage_flavor_mark_layer",
@@ -258,6 +238,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer, sized to enclose every unit device (only used when "
                 "voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_voltage_flavor_mark_params(self, kdb)
             self.param(
@@ -267,6 +248,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the array's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
             declare_ring_mv_params(self)
@@ -312,6 +294,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Guard ring tap drawing layer (only used when add_guard_ring is set)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_ring_implant_params(self, kdb)
             self.param(
@@ -515,35 +498,6 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # shared-footprint box, computed above regardless of `flavor`).
             ring_well_mark_box = None
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
                 # The ring's own well tie (independent of the device-array
                 # well drawn above, which already merges with it on the same
                 # `well_layer` -- mirrors `_diff_pair_layout`'s identical
@@ -553,28 +507,23 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # in a well the way #421's diff_pair regression test guards
                 # against.
                 if self.well_present and self.flavor == "pfet":
-                    # Issue #6503: grow off the ring's final Comp edge.
-                    ring_well_mark_box = ring_well_box_um(self, ring, ox, oy, dbu)
-                    well_li = self.layout.layer(self.well_layer)
-                    _insert_boxes(self.cell, well_li, dbu, [ring_well_mark_box])
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- still a ring, never a blanket
-                    # over the enclosed array (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
+                    ring_well_mark_box = ring_well_box_um(
+                        self, info["ring"], *info["ring_offset_um"], dbu
                     )
+                    _insert_boxes(
+                        self.cell,
+                        self.layout.layer(self.well_layer),
+                        dbu,
+                        [ring_well_mark_box],
+                    )
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Tap pads (issue #3648): on a family with a tap-distance rule the
             # ring-less array still gets well/substrate taps of its tie's

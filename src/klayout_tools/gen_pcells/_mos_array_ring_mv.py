@@ -31,6 +31,7 @@ def declare_ring_mv_params(pcell: Any) -> None:
         "when both are drawn (0.0 keeps the marker anchored to the "
         "array alone; see _PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM)",
         default=0.0,
+        hidden=True,
     )
 
 
