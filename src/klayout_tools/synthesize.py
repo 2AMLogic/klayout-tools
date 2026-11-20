@@ -244,9 +244,7 @@ from ._provenance import (
     sha256_file,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -262,6 +260,7 @@ from ._verilog_params import (
 )
 from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .request_paths import RequestPaths
@@ -4558,11 +4557,4 @@ def rerun_synthesize_report(
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)
