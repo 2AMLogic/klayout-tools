@@ -93,7 +93,7 @@ def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
 
 
 def lint_instances(
-    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> list[dict[str, Any]]:
     """Findings for instance cards of subcircuits that declare ``mult``
     but never forward it to drive (the acceptance-criteria pure function:
@@ -105,7 +105,7 @@ def lint_instances(
 
 
 def instance_report(
-    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> dict[str, Any]:
     """:func:`lint_instances` findings plus the non-finding disclosures:
     a ``note`` when instances could not be checked (their subcircuit text
@@ -132,7 +132,7 @@ def instance_report(
 
 
 def _lint(
-    instance_cards: list[str | SourcedCard], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
     """``(findings, unverified, unevaluated)`` behind both public entries."""
     findings: list[dict[str, Any]] = []
