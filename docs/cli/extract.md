@@ -732,7 +732,7 @@ circuits written besides the selected one, `[]` when flat). `device_count`,
 `warnings[]` entry for a multi-circuit netlist states — and the "recognised no
 devices" warning keys on `instantiated_device_counts`, never on that top-only
 count. `klt pex` reports `instantiated_device_counts` as its own
-`extraction.device_counts`. `netlist_path`, `netlist_sha256`, `netlist_path`, `netlist_sha256`,
+`extraction.device_counts`. `netlist_path`, `netlist_sha256`,
 `netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
 mean for the curated engine. **The exit status proves nothing** about the
 extraction: a runset may exit non-zero purely because its (discarded) compare

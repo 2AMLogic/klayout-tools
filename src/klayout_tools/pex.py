@@ -992,20 +992,19 @@ def _model_mismatch(
         )
     elif hierarchical_reference:
         unrelated_clause = (
-            "the reference netlist is hierarchical (it instantiates at "
-            "least one locally-defined `.subckt`), while `klt extract`'s "
-            "output is always flat -- see docs/cli/extract.md's "
-            '"Extraction is flat, not hierarchical" note and issue #1085 '
-            "(the same shape `klt lvs`'s `options.flatten_reference` "
-            "exists for). This divergence may simply be a "
-            "hierarchy-representation artifact -- a device nested inside a "
-            "locally-defined `.subckt` is counted once per definition here, "
-            "not once per physical instance -- rather than a genuine "
-            "device-flavour mismatch; re-run with `klt pex "
-            "--flatten-schematic` (issue #2889), which flattens the "
-            "schematic DUT to PDK leaf devices before the schematic-side "
-            "run, before treating this as evidence the two sides are "
-            "unrelated. "
+            "the reference netlist is hierarchical (it instantiates at least one "
+            "locally-defined `.subckt`), while `klt extract`'s curated engine "
+            "writes a flat netlist (`--engine klayout-runset` may write a "
+            "hierarchical one) -- see docs/cli/extract.md's \"Extraction is flat, "
+            "not hierarchical\" note and issue #1085 (the same shape `klt lvs`'s "
+            "`options.flatten_reference` exists for). This divergence may simply "
+            "be a hierarchy-representation artifact -- a device nested inside a "
+            "locally-defined `.subckt` is counted once per definition here, not "
+            "once per physical instance -- rather than a genuine device-flavour "
+            "mismatch; re-run with `klt pex --flatten-schematic` (issue #2889), "
+            "which flattens the schematic DUT to PDK leaf devices before the "
+            "schematic-side run, before treating this as evidence the two sides "
+            "are unrelated. "
         )
     elif kind == "count_only":
         unrelated_clause = (
@@ -2731,9 +2730,10 @@ def run_pex(
 
 
     **``flatten_schematic`` (issue #2889) flattens the schematic leg.**
-    ``klt extract``'s output is always flat while a schematic DUT is
-    normally hierarchical, which makes ``model_mismatch`` fire on hierarchy
-    alone and can leave the two legs incomparable. With ``flatten_schematic``
+    ``klt extract``'s curated-engine output is flat while a schematic DUT
+    is normally hierarchical (a ``--engine klayout-runset`` extraction may
+    not be), which makes ``model_mismatch`` fire on hierarchy alone and can
+    leave the two legs incomparable. With ``flatten_schematic``
     (``klt pex --flatten-schematic``) the one resolved schematic DUT is
     flattened to PDK leaf devices once (:func:`_flatten_schematic_dut`,
     written to ``<artifacts root>/schematic-dut.flat.spice``), every

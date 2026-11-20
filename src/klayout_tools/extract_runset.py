@@ -24,11 +24,13 @@ to get a simulatable extracted netlist for a block whose core devices live in
 such a family. This engine closes exactly that gap.
 
 **What it does NOT do.** No parasitics (``--parasitics`` and everything built
-on it is refused by name, not silently ignored), so ``klt pex`` cannot use this
-engine: joining runset devices with curated-deck parasitics would need a
-geometric net correspondence between two independent, independently-numbered
-extractions, which nothing in this repo provides. See ``docs/cli/extract.md``'s
-"Engine" section.
+on it is refused by name, not silently ignored): joining runset devices with
+curated-deck parasitics would need a geometric net correspondence between two
+independent, independently-numbered extractions, which nothing in this repo
+provides. ``klt pex`` can still drive this engine parasitics-free (``klt pex
+--engine klayout-runset``, issue #6559 -- :mod:`klayout_tools.pex_runset`),
+and its report discloses the gap as ``extraction.parasitics_carried: false``.
+See ``docs/cli/extract.md``'s "Engine" section.
 
 How a netlist is obtained
 -------------------------
