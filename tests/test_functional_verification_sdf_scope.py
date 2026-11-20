@@ -170,6 +170,20 @@ def test_scope_rejected_with_verilog_top():
         fv._check_verilog_top_sdf(tb, {"file": "x", "scope": "dut"}, None)
 
 
+def test_parameters_rejected_with_verilog_top():
+    tb = {"verilog_top": "tb", "dut_instance": "tb.dut"}
+    with pytest.raises(
+        FunctionalVerificationError,
+        match="request.parameters cannot be combined with testbench.verilog_top",
+    ):
+        fv._check_verilog_top_sdf(tb, None, {"WIDTH": 8})
+    # no parameters: no raise (with sdf=None, dut_instance must be empty --
+    # its own guard, tested with the verilog_top suite)
+    fv._check_verilog_top_sdf({"verilog_top": "tb", "dut_instance": ""}, None, None)
+    # an empty parameter dict is falsy: not a rejection
+    fv._check_verilog_top_sdf(tb, {"file": "x"}, {})
+
+
 def test_run_rejects_mis_scoped_sdf_and_reports_scope(tmp_path, monkeypatch):
     _stage(tmp_path)
     (tmp_path / "test_tb.py").write_text("# stub\n", encoding="utf-8")

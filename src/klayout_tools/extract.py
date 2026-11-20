@@ -165,7 +165,6 @@ from ._provenance import (
 )
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -180,11 +179,12 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
     get_parasitics_deck,
 )
 from .erc_islands import partition_region_by_islands, sorted_islands
+from .evidence_canonicalize import rerun_result_for
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -3690,13 +3690,12 @@ def check_extract_report(
     ``klt extract`` up to the same shared ``_report_verify.py`` machinery
     issue #1106 built for those two verbs: re-hashes the input layout stream
     (``committed["file"]``) and the deck
-    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    (:func:`~klayout_tools.decks.deck_content_hash`, resolved from
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance.content_hash`) -- reusing
-    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
-    hashing. Returns the shared ``--check`` payload built by
+    using the same hash functions as the original report. Returns the
+    shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
     "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
     otherwise.
@@ -3716,7 +3715,7 @@ def check_extract_report(
     extract --deck`` is required for every run, so ``provenance.deck`` is
     always populated for a genuine committed report; an unresolvable deck
     name (e.g. the deck module was since renamed/removed) hashes to ``None``
-    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    via :func:`~klayout_tools.decks.deck_content_hash`, which likewise never
     counts as a match.
 
     Under ``--engine klayout-runset`` the deck entry is replaced by a runset
@@ -3749,7 +3748,7 @@ def check_extract_report(
             ),
         ),
         extract_runset.provenance_hash_check(
-            committed, deck_source_path=deck_source_path
+            committed, deck_content_hash=deck_content_hash
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -4203,13 +4202,7 @@ def rerun_extract_report(
             shutil.rmtree(scratch_dir, ignore_errors=True)
     if scratch_dir is not None and fresh.get("netlist_path") is not None:
         fresh["netlist_path"] = committed_netlist_path
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("extract", report_path, committed=committed, fresh=fresh)
 
 
 def _replay_pin_renames_echo(
@@ -6567,7 +6560,6 @@ def _connect_mos_capacitors(
 def _mos_capacitor_entry_index(
     island: kdb.Region,
     deck: ExtractionDeck,
-    poly: kdb.Region,
     nwell: kdb.Region,
     region_of: Callable[[tuple[int, int]], kdb.Region],
 ) -> int | None:
@@ -6641,7 +6633,7 @@ def _resolve_mos_capacitors(
     for component in active.merged().each():
         island = kdb.Region(component)
         chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
+            _mos_capacitor_entry_index(island, deck, nwell, region_of)
             if not (island & poly).is_empty()
             else None
         )

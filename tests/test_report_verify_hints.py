@@ -6,7 +6,11 @@ import hashlib
 import json
 import os
 
-from klayout_tools._report_verify_hints import input_not_found_entry, stale_pin
+from klayout_tools._report_verify_hints import (
+    input_hash_check,
+    input_not_found_entry,
+    stale_pin,
+)
 from klayout_tools.erc import check_erc_report
 
 
@@ -36,35 +40,82 @@ def test_input_not_found_absolute_path_has_no_anchor_or_hint(tmp_path):
     assert entry["resolved"] == path
 
 
-def test_input_not_found_without_override_hint_omits_the_pass_clause(tmp_path):
-    """Issue #6655: a verb with no input-override flag (``klt erc
-    --check``) gets a hint that names only the report's directory -- no
-    "or pass …" clause for a flag that does not exist."""
-    pair = tmp_path / "pair"
-    pair.mkdir()
-    report = pair / "report.json"
-    found = str(pair / "basic.gds")
-    entry = input_not_found_entry("basic.gds", str(report), found, override_hint=None)
+def test_input_not_found_repo_scoped_echo_names_the_repo_root(tmp_path):
+    """Issue #5845: a repo-scoped `{path, scope}` echo reports the repo root
+    `resolve_committed_path` anchored it on; other echo shapes report
+    `null` (issue #2595's cwd/absolute anchors cover those)."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    report = repo / "pair" / "report.json"
+
+    entry = input_not_found_entry(
+        str(repo / "ref.spice"),
+        str(report),
+        None,
+        echoed={"path": "ref.spice", "scope": "repo"},
+    )
+    assert entry["resolved_repo_root"] == str(repo)
+
+    bare = input_not_found_entry("ref.spice", str(report), None, echoed="ref.spice")
+    assert bare["resolved_repo_root"] is None
+
+    external = input_not_found_entry(
+        str(repo / "ref.spice"),
+        str(report),
+        None,
+        echoed={"path": None, "scope": "external"},
+    )
+    assert external["resolved_repo_root"] is None
+
+
+def test_input_not_found_without_override_hint_names_no_flag(tmp_path):
+    """Issue #6840: ``override_hint=None`` means no flag can fix this input
+    (the runset deck on ``klt lvs --check``), so the remedy names no flag."""
+    entry = input_not_found_entry(
+        "pdk.lvs",
+        str(tmp_path / "report.json"),
+        str(tmp_path / "pdk.lvs"),
+        override_hint=None,
+    )
     assert entry["hint"] == (
         "run --check from the report's directory; "
-        f"request-file-relative paths resolve against {pair}"
+        f"request-file-relative paths resolve against {tmp_path}"
     )
 
 
-def test_input_not_found_with_override_hint_keeps_the_pass_clause(tmp_path):
-    """The default hint still names the override, byte-identically to the
-    pre-#6655 single-shape string (pinned here so the ``None`` branch above
-    cannot silently become the only branch)."""
-    pair = tmp_path / "pair"
-    pair.mkdir()
-    report = pair / "report.json"
-    found = str(pair / "basic.gds")
-    entry = input_not_found_entry("basic.gds", str(report), found)
+def test_input_not_found_default_hint_pins_the_layout_wording(tmp_path):
+    """Issue #6840's second observation: since #6802/#6830 retargeted
+    ``tests/test_lvs.py``'s assertion, nothing pins the default remedy --
+    the one ``klt lvs --check``'s layout entry emits. Pin it byte-for-byte."""
+    entry = input_not_found_entry(
+        "l.gds", str(tmp_path / "report.json"), str(tmp_path / "l.gds")
+    )
     assert entry["hint"] == (
-        "run --check from the report's directory, or pass "
-        "--layout/an absolute path; "
-        f"request-file-relative paths resolve against {pair}"
+        "run --check from the report's directory, or pass --layout/an absolute path; "
+        f"request-file-relative paths resolve against {tmp_path}"
     )
+
+
+def test_input_hash_check_null_hint_when_not_beside_the_report(tmp_path):
+    """The flag-less remedy still appears only when the input sits beside
+    the report: missing everywhere, or recorded absolute, the hint stays
+    ``null`` (issue #6840 edge cases; the absolute shape is #6223's)."""
+    absent = input_hash_check(
+        "provenance.runset.content_hash",
+        None,
+        "gone.lvs",
+        str(tmp_path / "report.json"),
+        override_hint=None,
+    )
+    assert absent["input_not_found"]["hint"] is None
+    absolute = input_hash_check(
+        "provenance.runset.content_hash",
+        None,
+        str(tmp_path / "elsewhere" / "pdk.lvs"),
+        str(tmp_path / "report.json"),
+        override_hint=None,
+    )
+    assert absolute["input_not_found"]["hint"] is None
 
 
 # --- `klt erc --check` carries the same block (issue #6655) ----------------
