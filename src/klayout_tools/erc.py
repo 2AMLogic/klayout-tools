@@ -3407,12 +3407,13 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
     Relative echoed paths are re-hashed relative to the current working
     directory -- the same convention ``klt lvs --check`` uses -- and an
-    echoed path that names no existing file carries the same additive
-    ``input_not_found`` block ``klt lvs``/``klt drc`` attach (issue #6655):
-    ``path``/``resolved``/``found_relative_to_report``/``resolved_against``/
-    ``hint``, with the hint naming only the report's directory, because
-    ``--check`` is mutually exclusive with the positional inputs and so
-    offers no override flag to name.
+    echoed path that names no existing file carries the additive
+    ``input_not_found`` block ``klt drc``/``klt lvs`` attach (issue #6655):
+    the five keys ``path``/``resolved``/``found_relative_to_report``/
+    ``resolved_against``/``hint`` (``klt lvs`` adds a sixth,
+    ``resolved_repo_root``, which ERC does not emit), with the hint naming
+    only the report's directory, because ``--check`` is mutually exclusive
+    with the positional inputs and so offers no override flag to name.
 
     The result additionally carries the informational ``advisories`` list
     (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
@@ -3426,10 +3427,11 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     committed = _load_committed_report(report_path, ErcError)
     checks = [
         # Issue #6655: the shared input_hash_check, so an echoed `file`/`spec`
-        # naming no existing file carries the same five-key `input_not_found`
-        # block `klt lvs`/`klt drc` attach. `override_hint=None`: `--check`
-        # is mutually exclusive with the positional inputs, so there is no
-        # override flag for the hint to name.
+        # naming no existing file carries the five-key `input_not_found`
+        # block `klt drc` attaches (`klt lvs`'s adds `resolved_repo_root`,
+        # via `include_repo_root`, which ERC leaves off). `override_hint=None`:
+        # `--check` is mutually exclusive with the positional inputs, so
+        # there is no override flag for the hint to name.
         input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),

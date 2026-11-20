@@ -118,8 +118,10 @@ def test_input_hash_check_null_hint_when_not_beside_the_report(tmp_path):
     assert absolute["input_not_found"]["hint"] is None
 
 
-# --- `klt erc --check` carries the same block (issue #6655) ----------------
+# --- `klt erc --check` carries the shared `input_not_found` block (#6655) ---
 #
+# ERC's block has five keys, `klt drc --check`'s set; `klt lvs --check`'s
+# three entries add a sixth, `resolved_repo_root`, which ERC does not emit.
 # `tests/test_erc.py` sits at its file-size ceiling, so the five-key pin
 # lives here (the shared helper's own file), driving `check_erc_report`
 # over hand-written reports the way `tests/test_drc_check_input_resolution.py`

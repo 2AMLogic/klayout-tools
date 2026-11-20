@@ -2037,9 +2037,12 @@ All eight share one contract:
   as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
   shared convention, not an oversight, and unchanged here. Since #2659 above
-  this covers only `lvs`'s `reference` and `erc`'s `spec`, whose echo stays
-  a bare string (plus any pre-normalisation report's bare-string field;
-  `erc`'s `file` re-anchors to its repo root, #2703, like `drc`'s). But a
+  this covers only the echoes that are still a bare string: `erc`'s `spec`,
+  the `reference` and `deck_file` of a runset-engine `lvs` report, and any
+  pre-normalisation report's bare-string field. A non-runset `lvs` report
+  echoes its `reference` as the `{path, scope}` object, like its `layout`,
+  and `erc`'s `file` is that object too (#2703), so those re-anchor to the
+  repo root like `drc`'s `file`. But a
   path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
   lvs --check` (its layout, reference and runset-deck lines), `klt drc
@@ -2048,16 +2051,24 @@ All eight share one contract:
   envelope) and `klt erc --check` (its `provenance.input.content_hash` and
   `provenance.spec.content_hash` lines) therefore attach an
   **additive, optional** `input_not_found`
-  block (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
-  `hint`) to such a `checks[]` entry; `expected`/`actual`/`match`/`status` are
+  block to such a `checks[]` entry. The block has five keys on `drc` and
+  `erc` (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
+  `hint`); each of `lvs`'s three entries (layout, reference, runset deck)
+  adds a sixth, `resolved_repo_root` (#5845): the repo root a repo-scoped
+  echo resolved against, `null` for a bare-string echo or an explicit
+  override. `expected`/`actual`/`match`/`status` are
   unchanged, and the key is absent on a genuine content mismatch, on an
   echo that names no path (`scope: "external"`/`"absent"`, or no field) and
   on a path that resolves to an existing file. An explicit input override
-  (`klt drc <file> --check`, `klt lvs --layout`) still wins and is the path
-  diagnosed when *it* is missing; `klt erc --check` has no such override
-  (its `--check` is mutually exclusive with the positional inputs), so its
-  `hint` names only the report's directory, without the "or pass …" clause
-  the other verbs' hints carry. `klt drc --check`'s other echoed-path line,
+  (`klt drc <file> --check`, `klt lvs --layout`/`--reference`) still wins and
+  is the path diagnosed when *it* is missing. `hint` is `null` unless the
+  input sits beside the report. When set, it always names the report's
+  directory to run `--check` from, and adds an "or pass …" clause only
+  where the verb has an override: `lvs`'s layout and reference and `drc`'s
+  input. `lvs`'s runset-deck line (`--deck-file` is refused with `--check`)
+  and both `erc --check` lines (`--check` is mutually exclusive with ERC's
+  positional inputs) have none, so their hints name only the report's
+  directory. `klt drc --check`'s other echoed-path line,
   `provenance.waivers.content_hash`, and `klt erc --check`'s deck line carry
   no such block (they are not routed through the same resolution; the deck
   line resolves packaged decks by name, and DRC's deck line has its own

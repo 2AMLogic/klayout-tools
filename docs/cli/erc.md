@@ -3244,13 +3244,17 @@ compares them with `provenance.input.content_hash` and
 run used `--deck`), with no ERC engine run. A report that recorded no hash is
 `drifted`, never a false pass. Relative echoed paths resolve against the
 current working directory; an echoed path that names no file carries an
-`input_not_found` block on its `checks[]` entry, as in `klt lvs --check`:
-the same five keys (`path`, `resolved`, `found_relative_to_report`,
-`resolved_against`, `hint`). Because `--check` is mutually exclusive with
-the positional inputs, `klt erc` offers no input-override flag, so the
-`hint` names only the report's directory to run `--check` from -- no "or
-pass …" clause. The deck line (`provenance.deck.content_hash`, `--deck`
-runs) carries no such block; it resolves packaged decks by name.
+`input_not_found` block on its `checks[]` entry, the shared diagnostic `klt
+drc --check` and `klt lvs --check` attach: five keys (`path`, `resolved`,
+`found_relative_to_report`, `resolved_against`, `hint`), exactly `klt drc
+--check`'s set. (`klt lvs --check`'s three entries add a sixth,
+`resolved_repo_root`, which ERC does not emit.) Because `--check` is
+mutually exclusive with the positional inputs, `klt erc` offers no
+input-override flag, so the `hint` names only the report's directory to run
+`--check` from -- no "or pass …" clause, as for `klt lvs --check`'s runset
+deck and unlike its layout and reference or `klt drc --check`'s input. The
+deck line (`provenance.deck.content_hash`, `--deck` runs) carries no such
+block; it resolves packaged decks by name.
 
 ```json
 {
