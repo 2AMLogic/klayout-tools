@@ -33,6 +33,7 @@ Three tiers:
 
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import os
@@ -8204,8 +8205,6 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    import argparse
-
     args = argparse.Namespace(
         request=path,
         format="json",
@@ -8215,6 +8214,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         deck_file=None,
         deck_var=None,
         layout=None,
+        reference=None,
         progress=None,
         output=None,
     )
@@ -15816,8 +15816,8 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
         pair / "ref.spice"
     )
     assert missing["hint"] == (
-        "run --check from the report's directory, or pass --layout/an absolute path; "
-        f"request-file-relative paths resolve against {pair.resolve()}"
+        "run --check from the report's directory, or pass --reference/an absolute path;"
+        f" request-file-relative paths resolve against {pair.resolve()}"
     )
     assert by_field["environment.layout_sha256"]["match"] is True
     assert "input_not_found" not in by_field["environment.layout_sha256"]

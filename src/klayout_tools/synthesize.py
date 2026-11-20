@@ -244,9 +244,7 @@ from ._provenance import (
     sha256_file,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -262,6 +260,7 @@ from ._verilog_params import (
 )
 from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .request_paths import RequestPaths
@@ -295,6 +294,7 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_driving_cell import first_matching_glob, resolve_dont_use_globs
 from .synthesize_library_hint import (
     library_capability_warnings as _library_capability_warnings,
 )
@@ -1209,7 +1209,13 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
-    abc_constr_request = _resolve_abc_constr_request(constraints, liberty_path)
+    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    resolved_globs = resolve_dont_use_globs(
+        library_defaults, dont_use_requested, dont_use_mode
+    )
+    abc_constr_request = _resolve_abc_constr_request(
+        constraints, liberty_path, resolved_globs=resolved_globs
+    )
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
     # inputs* to this run exactly as the RTL sources and the standard-cell
@@ -1310,7 +1316,8 @@ def run_synthesize(
         requested=dont_use_requested,
         mode=dont_use_mode,
         validated=dont_use_validated,
-        cell_library=cell_library,
+        library_defaults=library_defaults,
+        resolved=resolved_globs,
     )
 
     engine_options = _EngineOptions(
@@ -2425,7 +2432,10 @@ def _describe_clock_targets(
 
 
 def _resolve_abc_constr_request(
-    constraints: dict[str, Any] | None, liberty_path: str
+    constraints: dict[str, Any] | None,
+    liberty_path: str,
+    *,
+    resolved_globs: tuple[str, ...],
 ) -> tuple[str, float] | None:
     """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
     or ``None`` when the request does not supply one (issue #4662).
@@ -2434,13 +2444,12 @@ def _resolve_abc_constr_request(
     the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
     problem, an unknown key, a ``driving_cell`` absent from the resolved
     liberty (skipped only when the liberty's cell list cannot be established,
-    as for ``dont_use``), or a non-positive/non-finite ``load_ff`` is a
-    :class:`SynthesizeError` naming the field.
+    as for ``dont_use``), an excluded driving cell, or a non-positive/non-finite
+    ``load_ff`` is a :class:`SynthesizeError` naming the field.
     """
     if not constraints or constraints.get("abc_constr") is None:
         return None
-    raw = constraints["abc_constr"]
-    where = "request.constraints.abc_constr"
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
     if not isinstance(raw, dict):
         raise SynthesizeError(f"{where} must be a JSON object")
     unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
@@ -2466,6 +2475,13 @@ def _resolve_abc_constr_request(
             f"{where}.driving_cell '{driving_cell}' is not a cell in the "
             f"resolved liberty '{os.path.basename(liberty_path)}' "
             f"({len(cell_names)} cells)"
+        )
+    pattern = first_matching_glob(driving_cell, resolved_globs)
+    if pattern is not None:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' matches dont_use "
+            f"pattern '{pattern}'. Choose another driving cell or change "
+            "constraints.dont_use or constraints.dont_use_mode."
         )
     return driving_cell, float(load_ff)
 
@@ -2588,7 +2604,7 @@ def _resolve_dont_use_request(
     engine, so it is safe to call before any PDK resolution or run-directory
     creation. The liberty-dependent half (does each pattern actually match a
     cell?) is :func:`_validate_dont_use_against_liberty`; the merge with the
-    built-in per-library table is :func:`_resolve_cell_exclusions`.
+    built-in per-library table is :func:`resolve_dont_use_globs`.
 
     Raises :class:`SynthesizeError` naming the field for a non-array value, a
     non-string/empty entry, an entry containing a character that would corrupt
@@ -2706,44 +2722,18 @@ def _resolve_cell_exclusions(
     requested: tuple[str, ...],
     mode: str,
     validated: bool | None,
-    cell_library: str,
+    library_defaults: tuple[str, ...],
+    resolved: tuple[str, ...],
 ) -> tuple[tuple[str, ...], dict[str, Any]]:
     """``(dont_use_globs, cell_exclusions)`` -- the ``-dont_use`` glob list
     actually passed to ABC, plus the response block disclosing how it was
     arrived at (issue #2382).
 
-    Merges the request's own ``constraints.dont_use`` patterns (already
-    shape-validated by :func:`_resolve_dont_use_request` and liberty-validated
-    by :func:`_validate_dont_use_against_liberty`) with the built-in
-    per-library :data:`_ABC_DONT_USE_GLOBS` table per ``mode`` -- see
-    :data:`_DONT_USE_MODES` for why ``"additive"`` is the default.
-
-    Degradation is shared, never bypassed: the resolved list is passed only
-    when :func:`_abc_supports_dont_use` says the resolved Yosys build's
-    ``abc`` accepts the flag at all, exactly as the built-in table already
-    degraded before this field existed. The probe is still made only when
-    there is something to exclude, so a library with no table entry and a
-    request with no list runs no extra Yosys invocation. Because degrading
-    means a request that asked for an exclusion gets a netlist that still
-    contains those cells, that case is disclosed -- both here (as
-    ``engine_supports_dont_use: false`` alongside a non-empty ``requested``
-    and an empty ``effective``) and, so it cannot be missed, as the
-    ``dont_use_unsupported`` capability warning
-    :func:`_dont_use_unsupported_warning` emits.
-
-    The returned block's ``effective`` is exactly the list handed to ABC, so a
-    committed report records what was excluded instead of leaving it implicit
-    in the tool version that produced it. Additive response field, no
-    ``schema_version`` bump (``docs/json-contract.md``).
+    The resolved patterns have already been checked against the request's
+    driving cell. Probe the engine only if there is something to exclude.
+    If Yosys lacks ``abc -dont_use``, report an empty ``effective`` list.
+    A dropped request pattern also triggers :func:`_dont_use_unsupported_warning`.
     """
-    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
-    if mode == "none":
-        resolved: tuple[str, ...] = ()
-    elif mode == "replace":
-        resolved = requested
-    else:
-        resolved = tuple(dict.fromkeys((*library_defaults, *requested)))
-
     supported: bool | None = None
     if resolved:
         supported = _abc_supports_dont_use()
@@ -4567,11 +4557,4 @@ def rerun_synthesize_report(
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)

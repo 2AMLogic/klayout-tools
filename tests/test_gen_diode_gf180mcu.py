@@ -171,7 +171,11 @@ def test_gf180mcu_diode_rejects_sky130_voltage_classes(tmp_path, pdk_root, vclas
 
 
 def test_gf180mcu_diode_rejects_unknown_voltage_class(tmp_path, pdk_root):
-    with pytest.raises(GenError, match="voltage_class"):
+    with pytest.raises(
+        GenError,
+        match=r"voltage_class '3v3' is not a gf180mcu flavour "
+        r"-- must be one of \['06v0'\]",
+    ):
         _gen(tmp_path, pdk_root, voltage_class="3v3")
 
 

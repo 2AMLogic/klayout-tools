@@ -202,6 +202,30 @@ def _diode_layout(
     }
 
 
+def diode_ports(
+    info: dict[str, Any], metal_layer: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The ``ANODE``/``CATHODE`` ports of a :func:`_diode_layout` result: each
+    terminal's li1 box centre, reported on ``metal_layer``."""
+    ports = []
+    for name, box, direction in (
+        ("ANODE", info["anode_li"], 90),
+        ("CATHODE", info["cathode_li"], 90),
+    ):
+        ports.append(
+            {
+                "name": name,
+                "net": None,
+                "layer": metal_layer,
+                "x_um": (box[0] + box[2]) / 2,
+                "y_um": (box[1] + box[3]) / 2,
+                "width_um": box[2] - box[0],
+                "direction_deg": direction,
+            }
+        )
+    return ports
+
+
 def _bbox(boxes: dict[str, list[Box]]) -> Box:
     every = [b for group in boxes.values() for b in group]
     return (
@@ -222,6 +246,11 @@ def resolve_diode_voltage_class(
     gets a recognised device; an explicit one must be a flavour that family
     has. A family with no diode support is left alone -- ``layer_params``
     reports it ("not yet supported").
+
+    Called from ``_resolve_params`` *before* ``spec.validate`` so an unknown
+    value is reported against the selected family's flavours rather than the
+    union of every family's; ``spec.validate``'s generic union check stays as
+    the backstop for families with no diode support (#6630).
     """
     from .gen import GenError
     from .gen_layer_params import _pdk_family

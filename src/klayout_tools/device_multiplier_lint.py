@@ -1,0 +1,334 @@
+"""Device-multiplier lint (issue #5779): does a device instance's vendor
+``mult`` parameter agree with the SPICE ``m=`` drive multiplier?
+
+Some subcircuits declare ``mult`` without forwarding it to the primitive's
+``m=``. On these instances SPICE's ``m=`` supplies drive. What ``mult``
+does in a Monte Carlo run depends on the model. For example, sky130's
+``nfet_01v8`` uses it in the mismatch sigma denominator ``sqrt(l*w*mult)``.
+The lint checks the pair on declaring, non-forwarding subcircuits and
+recommends keeping both forms equal.
+
+Pure text-in/findings-out: :func:`lint_instances` takes folded instance
+cards plus ``{name: subckt text}`` and returns findings; no I/O of its
+own (``sim_environment_report.device_multiplier_environment`` does the
+reading and reuses the shared ``sim_staging`` include-closure resolver).
+Detection is text-driven -- no hard-coded PDK subckt-name list.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable
+from typing import Any
+
+from ._spice_number import parse as parse_spice_number
+from ._spice_text import circuit_lines, logical_lines
+from ._spice_tokens import split_card_assignments, split_spice_tokens
+
+#: Finding ``kind``: ``mult=N`` (N>1) with no ``m=`` -- the device
+#: simulates 1x drive.
+DRIVE_1X = "drive_1x"
+
+#: Finding ``kind``: ``m=`` present but unequal to ``mult`` (or ``mult``
+#: absent) on a declaring-not-forwarding subcircuit.
+DRIVE_MISMATCH_DISAGREEMENT = "drive_mismatch_disagreement"
+
+#: A value referencing ``mult`` inside a body card's ``m=`` parameter --
+#: the only spelling that counts as forwarding it to drive.
+_MULT_REF_RE = re.compile(r"\bmult\b", re.IGNORECASE)
+
+#: Instances listed by name in the unverifiable note before it falls back
+#: to a count.
+_MAX_LISTED = 5
+
+
+def instance_cards(text: str) -> list[str]:
+    """Subcircuit-instance cards of one netlist text: logical cards
+    (comments stripped, ``+`` continuations folded) whose first token
+    starts with ``X``, outside control blocks."""
+    return [
+        line for line in circuit_lines(logical_lines(text)) if line[0].lower() == "x"
+    ]
+
+
+def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
+    """``{lower-cased name: subckt text}`` across netlist/model texts.
+
+    A subckt's text is its ``.subckt`` header line (parameters included)
+    plus its own body cards: nested ``.subckt`` bodies are excluded (they
+    are collected as their own entries -- an inner ``m={mult}`` forwards
+    the inner subckt's parameter, not the outer's). First definition wins
+    when a name repeats across the closure.
+    """
+    collected: dict[str, str] = {}
+    for text in texts:
+        stack: list[tuple[str, str, list[str]]] = []
+        for line in circuit_lines(logical_lines(text)):
+            word = line.split(None, 1)[0].lower()
+            if word == ".subckt":
+                tokens = line.split()
+                if len(tokens) < 2:
+                    continue
+                stack.append((tokens[1].lower(), line, []))
+            elif word == ".ends":
+                if not stack:
+                    continue
+                name, header, body = stack.pop()
+                collected.setdefault(name, "\n".join([header, *body]))
+            elif stack:
+                stack[-1][2].append(line)
+    return collected
+
+
+def lint_instances(
+    instance_cards: list[str], subckts: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Findings for instance cards of subcircuits that declare ``mult``
+    but never forward it to drive (the acceptance-criteria pure function:
+    cards in, findings out, no I/O)."""
+    return _lint(instance_cards, subckts)[0]
+
+
+def instance_report(
+    instance_cards: list[str], subckts: dict[str, str]
+) -> dict[str, Any]:
+    """:func:`lint_instances` findings plus the non-finding disclosures:
+    a ``note`` when instances could not be checked (their subcircuit text
+    is absent from the scanned closure) and ``unevaluated`` entries when a
+    ``m=``/``mult=`` value is not a plain number. ``findings`` is always
+    present."""
+    findings, unverified, unevaluated = _lint(instance_cards, subckts)
+    report: dict[str, Any] = {"findings": findings}
+    if unverified:
+        listed = [f"{e['instance']} ({e['subckt']})" for e in unverified[:_MAX_LISTED]]
+        if len(unverified) > _MAX_LISTED:
+            listed.append(f"+{len(unverified) - _MAX_LISTED} more")
+        report["note"] = (
+            f"{len(unverified)} instance(s) pass m=/mult= to a subcircuit whose "
+            "text is not in the scanned include closure (models supplied "
+            f"outside it): {', '.join(listed)}. Their vendor-mult/m= pair was "
+            "not cross-checked."
+        )
+    if unevaluated:
+        report["unevaluated"] = unevaluated
+    return report
+
+
+def _lint(
+    instance_cards: list[str], subckts: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
+    """``(findings, unverified, unevaluated)`` behind both public entries."""
+    findings: list[dict[str, Any]] = []
+    unverified: list[dict[str, str]] = []
+    unevaluated: list[dict[str, str]] = []
+    for card in instance_cards:
+        _lint_card(card, subckts, findings, unverified, unevaluated)
+    return findings, unverified, unevaluated
+
+
+def _lint_card(
+    card: str,
+    subckts: dict[str, str],
+    findings: list[dict[str, Any]],
+    unverified: list[dict[str, str]],
+    unevaluated: list[dict[str, str]],
+) -> None:
+    """Fold one card's decision into the shared result lists: skip
+    non-instance and parameterless cards, note a checkable instance whose
+    subcircuit text is missing from the closure, else run the rule table
+    (only for a subcircuit that declares ``mult`` and never forwards it)."""
+    tokens = split_spice_tokens(card)
+    if not tokens or tokens[0][0].lower() != "x":
+        return
+    params, target = _card_params(tokens)
+    if "m" not in params and "mult" not in params:
+        return
+    subckt_text = subckts.get((target or "").lower())
+    if subckt_text is None:
+        if _pair_could_yield_finding(params):
+            unverified.append({"instance": tokens[0], "subckt": target or ""})
+        return
+    header, _, body = subckt_text.partition("\n")
+    header_mult = _header_mult_token(header)
+    if header_mult is None or _body_forwards_mult(body):
+        return
+    _compare_pair(tokens[0], target or "", params, header_mult, findings, unevaluated)
+
+
+def _pair_could_yield_finding(params: dict[str, str]) -> bool:
+    """Could this ``m=``/``mult=`` pair yield a finding under the rule
+    table, whatever the subcircuit does? Pairs that are clean no matter
+    what -- no ``m=`` with ``mult=1``, or an equal ``m=N``/``mult=N``
+    pair -- cannot, so an instance whose subcircuit text is missing is
+    noted only when the pair is worth cross-checking. Without this gate
+    the note would fire on every sky130 run whose models come through
+    ``models.pdk`` rather than a netlist ``.include`` (the common case),
+    naming instances that are unconditionally clean."""
+    m_raw = params.get("m")
+    mult_raw = params.get("mult")
+    if m_raw is None:
+        mult_value = _param_number(mult_raw)
+        return mult_value is not None and mult_value > 1
+    m_value = _param_number(m_raw)
+    mult_value = _param_number(mult_raw)
+    if m_value is None or (mult_raw is not None and mult_value is None):
+        # An expression value compares to nothing, so no finding can fire.
+        return False
+    return m_value != (1.0 if mult_value is None else mult_value)
+
+
+def _compare_pair(
+    instance: str,
+    subckt: str,
+    params: dict[str, str],
+    header_mult: str | None,
+    findings: list[dict[str, Any]],
+    unevaluated: list[dict[str, str]],
+) -> None:
+    """The rule table for one instance of a subcircuit that declares
+    ``mult`` but never forwards it to drive: disclose unevaluated values,
+    then flag a pair that disagrees. An omitted instance ``mult=`` takes
+    the header's declared default (``header_mult``), so the comparison
+    stays text-driven end to end; an explicit instance ``mult=`` always
+    wins over the header."""
+    m_raw = params.get("m")
+    mult_raw = params.get("mult")
+    m_value = _param_number(m_raw)
+    mult_value = _param_number(mult_raw)
+    for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
+        if raw is not None and value is None:
+            unevaluated.append({"instance": instance, "param": name, "value": raw})
+    comparable = (m_raw is None or m_value is not None) and (
+        mult_raw is None or mult_value is not None
+    )
+    if not comparable:
+        return
+    if m_raw is None:
+        if mult_value is not None and mult_value > 1:
+            findings.append(
+                _finding(
+                    DRIVE_1X,
+                    instance,
+                    subckt,
+                    m=None,
+                    mult=mult_raw,
+                    m_value=None,
+                    mult_value=mult_value,
+                )
+            )
+        return
+    if mult_raw is None:
+        declared = _param_number(header_mult)
+        effective = 1.0 if declared is None else declared
+    elif mult_value is None:
+        # Unreachable today: ``comparable`` above already returned the
+        # nonnumeric-mult case. Restated so the checker sees the
+        # invariant (a present ``mult=`` implies a numeric value).
+        return
+    else:
+        effective = mult_value
+    if m_value != effective:
+        findings.append(
+            _finding(
+                DRIVE_MISMATCH_DISAGREEMENT,
+                instance,
+                subckt,
+                m=m_raw,
+                mult=mult_raw,
+                m_value=m_value,
+                mult_value=effective,
+            )
+        )
+
+
+def _finding(
+    kind: str,
+    instance: str,
+    subckt: str,
+    *,
+    m: str | None,
+    mult: str | None,
+    m_value: float | None,
+    mult_value: float | None,
+) -> dict[str, Any]:
+    """One finding: the instance echo plus note text that names both
+    forms' roles (never suggesting either is removable)."""
+    m_text = _number_text(m, m_value)
+    mult_text = _number_text(mult, mult_value)
+    if kind == DRIVE_1X:
+        drive = (
+            f"'{subckt}' declares mult but does not forward mult={mult_text} "
+            "to device drive. With no m= on this instance, the device simulates 1x."
+        )
+    else:
+        pair = "mult absent" if mult is None else f"mult={mult_text}"
+        drive = (
+            f"The multiplier settings on '{subckt}' disagree (m={m_text}, {pair}). "
+            f"The instance simulates {m_text}x drive."
+        )
+    note = (
+        f"{drive} Depending on the model, mult can also scale Monte Carlo mismatch. "
+        "Keep m=N and mult=N for an N-times device."
+    )
+    return {
+        "instance": instance,
+        "subckt": subckt,
+        "kind": kind,
+        "m": m,
+        "mult": mult,
+        "note": note,
+    }
+
+
+def _number_text(raw: str | None, value: float | None) -> str:
+    """Report spelling of a multiplier: the parsed value when it parsed,
+    else the raw token (an unevaluated value never reaches a finding)."""
+    if value is not None:
+        return f"{value:g}"
+    return raw or ""
+
+
+def _header_mult_token(header: str) -> str | None:
+    """The ``mult`` token declared in the ``.subckt`` header -- the value an
+    omitted instance ``mult=`` resolves to. ``None`` when the header does
+    not declare the parameter. Uses the shared tokenizer (not a bare
+    ``split()``) so the spaced ``mult = 1`` spelling reads the same as
+    ``mult=1``."""
+    params, _ = _card_params(split_spice_tokens(header))
+    return params.get("mult")
+
+
+def _body_forwards_mult(body: str) -> bool:
+    """Does any body card's ``m=`` reference ``mult``? That -- and only
+    that -- is forwarding it to drive; ``mult`` appearing in a mismatch
+    expression (``sqrt(l*w*mult)``) is not."""
+    for line in body.splitlines():
+        first = line.split(None, 1)[0]
+        if first.startswith("."):
+            continue
+        params, _ = _card_params(split_spice_tokens(line))
+        if _MULT_REF_RE.search(params.get("m", "")):
+            return True
+    return False
+
+
+def _card_params(tokens: list[str]) -> tuple[dict[str, str], str | None]:
+    """Case-insensitive SPICE parameters and the preceding model name."""
+    assignments, model = split_card_assignments(tokens[1:])
+    return {name.lower(): value for name, value in assignments}, model
+
+
+def _param_number(raw: str | None) -> float | None:
+    """Numeric value of a ``m=``/``mult=`` token: outer braces/quotes
+    stripped, then the shared SPICE-number parser (``None`` when the value
+    is an expression or parameter reference -- nothing to compare)."""
+    if raw is None:
+        return None
+    value = raw.strip()
+    while len(value) >= 2 and (
+        (value[0] == "{" and value[-1] == "}")
+        or (value[0] == "(" and value[-1] == ")")
+        or (value[0] == value[-1] and value[0] in "'\"")
+    ):
+        value = value[1:-1].strip()
+    return parse_spice_number(value)
