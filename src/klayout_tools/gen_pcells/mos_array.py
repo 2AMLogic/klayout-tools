@@ -507,8 +507,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # in a well the way #421's diff_pair regression test guards
                 # against.
                 if self.well_present and self.flavor == "pfet":
+                    ox, oy = info["ring_offset_um"]
                     ring_well_mark_box = ring_well_box_um(
-                        self, info["ring"], *info["ring_offset_um"], dbu
+                        self, info["ring"], ox, oy, dbu
                     )
                     _insert_boxes(
                         self.cell,
