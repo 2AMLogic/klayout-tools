@@ -105,7 +105,8 @@ def _recognition_seconds(n_cells: int) -> float:
     """Seconds the issue #5807 recognition paths take over an ``n_cells``
     array: the MOS-capacitor resolver plus the unsupported-device diagnostic
     that re-runs it and the flavour-recognised-islands sweep. The minimum of
-    two runs, so a shared host's contention on one sample cannot inflate the
+    five runs (issue #3610's sampling posture; two was too few, issue
+    #6502), so a shared host's contention on one sample cannot inflate the
     ratio."""
     deck = get_extraction_deck("gf180mcu")
     layout = _flat_mos_array(n_cells)
@@ -114,7 +115,7 @@ def _recognition_seconds(n_cells: int) -> float:
     poly = _region(layout, top, deck.poly)
     nwell = _region(layout, top, deck.nwell)
     best = None
-    for _ in range(2):
+    for _ in range(5):
         start = time.perf_counter()
         capacitors, remaining, _recognised, _dropped = _resolve_mos_capacitors(
             layout, top, deck, active, poly, nwell, kdb.Region()
@@ -133,6 +134,8 @@ def _recognition_seconds(n_cells: int) -> float:
 def test_device_recognition_scales_linearly_on_flat_arrays():
     quarter = _recognition_seconds(400)
     full = _recognition_seconds(1600)
+    # With five runs per size, PR #6889 measured 4.40x and 5.48x after the
+    # fix and 12.73x on the pre-fix tree (9aff912a9).
     assert full / quarter <= 9.0, (
         f"device recognition grew {full / quarter:.2f}x for a 4x-larger "
         "flat array (near-linear expected; per-island, per-layer "

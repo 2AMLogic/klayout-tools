@@ -130,8 +130,11 @@ def preflight_batch_request(request_path: str, **overrides: Any) -> dict[str, An
         return {}
     # Anything else is a corner request: `load_request` already guarantees
     # `netlist` (and `analysis`) are present, so no further shape check is needed.
+    # The loaded request is handed to `_prepare_sim_request` so the file is
+    # read and expanded once per preflight, never re-read.
     resolved = _prepare_sim_request(
         request_path,
+        request=request,
         artifacts_dir=overrides.get("artifacts_dir"),
         backend="batch",
         max_workers=overrides.get("max_workers"),
