@@ -323,29 +323,25 @@ def merged_runset_extract(
 
     extract_runset.refuse_unsupported(
         {
-            key: value
-            for key, value in {
-                "pdk_variant": pdk_variant,
-                "pdk_root": pdk_root,
-                "deck_options": deck_options,
-                "declared_pins": declared_pins,
-                "rename_declared_pins": rename_declared_pins or None,
-                "tie_declared_pins": tie_declared_pins or None,
-                "critical_nets": critical_nets,
-                "critical_net_patterns": critical_net_patterns,
-                "critical_net_all": critical_net_all or None,
-                "critical_net_excludes": critical_net_excludes,
-                "distributed_rc": distributed_rc or None,
-                "resistance_graph": resistance_graph or None,
-                "resistance_graph_r_cut_ohm": resistance_graph_r_cut_ohm,
-                "parasitic_variants": parasitic_variants,
-                "substrate_tie_ohms": substrate_tie_ohms,
-                "mom_net": mom_rlc_net,
-                "mom_rlc_resistance_ohm": mom_rlc_resistance_ohm,
-                "mom_rlc_capacitance_ff": mom_rlc_capacitance_ff,
-                "mom_rlc_inductance_nh": mom_rlc_inductance_nh,
-            }.items()
-            if value
+            "pdk_variant": pdk_variant,
+            "pdk_root": pdk_root,
+            "deck_options": deck_options,
+            "declared_pins": declared_pins,
+            "rename_declared_pins": rename_declared_pins,
+            "tie_declared_pins": tie_declared_pins,
+            "critical_nets": critical_nets,
+            "critical_net_patterns": critical_net_patterns,
+            "critical_net_all": critical_net_all,
+            "critical_net_excludes": critical_net_excludes,
+            "distributed_rc": distributed_rc,
+            "resistance_graph": resistance_graph,
+            "resistance_graph_r_cut_ohm": resistance_graph_r_cut_ohm,
+            "parasitic_variants": parasitic_variants,
+            "substrate_tie_ohms": substrate_tie_ohms,
+            "mom_net": mom_rlc_net,
+            "mom_rlc_resistance_ohm": mom_rlc_resistance_ohm,
+            "mom_rlc_capacitance_ff": mom_rlc_capacitance_ff,
+            "mom_rlc_inductance_nh": mom_rlc_inductance_nh,
         }
     )
 
@@ -363,11 +359,12 @@ def merged_runset_extract(
             runset_timeout_s=runset.runset_timeout,
             lvsdb_out=lvsdb_out,
         )
-        probes, positions = build_probes(
+        probes, incomplete = build_probes(
             lvsdb_out,
             layout_path,
             top=str(report["top"]),
-            metals=list(deck.metals),
+            metals=deck.metals,
+            contact=deck.contact,
             dbu_um=float(report["dbu_um"]),
         )
         curated = run_extract(
@@ -384,6 +381,7 @@ def merged_runset_extract(
         [str(entry["name"]) for entry in report["nets"]],
         curated.get("probes") or [],
         (curated.get("parasitics") or {}).get("nets") or [],
+        incomplete,
     )
     corr["deck"] = deck_name
     corr["attached_card_count"] = (
@@ -400,6 +398,7 @@ def merged_runset_extract(
         if report.get("netlist_path")
         else 0
     )
+    report["label_layers"] = curated["label_layers"]
     report["net_correspondence"] = corr
     if curated.get("parasitics"):
         report["parasitics"] = curated["parasitics"]

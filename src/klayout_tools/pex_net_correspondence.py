@@ -12,33 +12,12 @@ top of it. The measured decision -- why this rule and not the alternatives
 -- is ``docs/design/runset-pex-net-correspondence.md``; this docstring
 records the rule itself.
 
-The join, in one paragraph
---------------------------
-
-Both extractions cluster the *same original shapes* (the same GDS) into
-nets. For each net of the runset's selected circuit, sample strictly
-interior points of its per-net polygons on the runset database's *metal*
-layers only, and ask the curated extraction which net each point belongs to
-(``klt extract --probe``'s own point-to-net machinery, evaluated on the
-curated run's live ``LayoutToNetlist``). Exactly one distinct curated net
-hit -> a match. More than one -> the runset net spans several curated nets
-(a **split** disagreement). A curated net hit by several runset nets -> a
-**merge** disagreement. No hit -> unmatched. Every outcome is reported in
-the envelope's ``extraction.net_correspondence``; parasitics attach only to
-1:1 matches, and a disagreement is reported, never guessed (issue #6606
-AC 2/3).
-
-Three restrictions the measurements forced (the decision doc carries the
-numbers): sample points are **strictly interior** (a boundary point of one
-net's polygon can lie exactly on another net's shape -- measured: a
-substrate cluster's bbox centre landing on a gate-metal edge probed the
-gate net), the join runs on **metal layers only** (device layers overlap by
-construction -- the channel zone is inside both the source/drain and the
-gate clusters of either engine; a well *contains* the devices' diffusion),
-and a runset-internal layer joins one metal role only when **>= 99% of its
-area lies inside that role's own GDS layer** (the runset database's layer
-indices are anonymous; shape-set identity against the original stream is
-what says "this internal layer *is* metal1").
+Every metal polygon of the selected runset circuit contributes a strictly
+interior probe to the curated extractor. The layer comes from the source
+GDS layer/datatype or, for an anonymous layer, an unambiguous comparison
+with complete stream polygons. Confirmed hits on multiple curated clusters
+show a split. Hits by multiple runset nets on one cluster show a merge.
+Only a unique match with complete coverage receives parasitics.
 """
 
 from __future__ import annotations
@@ -46,15 +25,6 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
-
-MAX_POINTS_PER_LAYER = 16
-MAX_POINTS_PER_NET = 64
-
-#: An internal layer joins a metal role when at least this fraction of its
-#: own area lies inside the role's GDS layer. Original metal layers are
-#: single-source handles, so the real figure is 100%; anything mixed is a
-#: derived layer and joins nothing.
-_LAYER_IDENTITY_AREA_FRACTION = 0.99
 
 
 def _pex_error(message: str) -> Exception:
@@ -96,14 +66,14 @@ def _interior_point(poly: Any) -> Any | None:
 
     box = poly.bbox()
     centre = kdb.Point((box.left + box.right) // 2, (box.bottom + box.top) // 2)
-    if not any(
-        (
-            centre.x == box.left,
-            centre.x == box.right,
-            centre.y == box.bottom,
-            centre.y == box.top,
+
+    def strictly_inside(point: Any) -> bool:
+        # Polygon.inside includes edges. each_edge visits the hull and holes.
+        return poly.inside(point) and not any(
+            e.contains(point) for e in poly.each_edge()
         )
-    ) and poly.inside(centre):
+
+    if strictly_inside(centre):
         return centre
     hull = list(poly.each_point_hull())
     for index, vertex in enumerate(hull):
@@ -124,25 +94,14 @@ def _interior_point(poly: Any) -> Any | None:
         step = kdb.Point(
             vertex.x + sum_x * reach // norm, vertex.y + sum_y * reach // norm
         )
-        if step != vertex and poly.inside(step):
+        if strictly_inside(step):
             return step
     return None
 
 
-def _flat_region(layout: Any, top_cell: Any, layer: int, datatype: int) -> Any:
-    """The flattened original-stream shapes of one GDS layer, or an empty
-    region when the stream does not draw it."""
-    import klayout.db as kdb
-
-    index = layout.find_layer(layer, datatype)
-    if index is None:
-        return kdb.Region()
-    return kdb.Region(top_cell.begin_shapes_rec(index))
-
-
 def _union_of_net_regions(lvs: Any, nets: Sequence[Any], layer_index: int) -> Any:
     """The runset database's whole per-layer region, accumulated over every
-    net of every circuit it carries."""
+    net of the selected circuit, including subcircuit shapes."""
     import klayout.db as kdb
 
     region: Any = None
@@ -153,53 +112,146 @@ def _union_of_net_regions(lvs: Any, nets: Sequence[Any], layer_index: int) -> An
     return kdb.Region() if region is None else region
 
 
-def metal_role_map(
-    lvs: Any, layout: Any, top_cell: Any, metals: Sequence[tuple[int, int]]
-) -> dict[int, str]:
-    """``{internal layer index: metal role}`` for the runset database's own
-    layers whose shape set is (>= 99% by area) one of the curated deck's
-    metal GDS layers -- the layer identity that lets a sampled point probe
-    exactly the role it is real geometry of."""
-    nets = [net for c in lvs.netlist().each_circuit() for net in c.each_net()]
-    gds_regions = {
-        f"metal{index}": _flat_region(layout, top_cell, layer, datatype)
-        for index, (layer, datatype) in enumerate(metals)
-    }
-    roles: dict[int, str] = {}
-    for layer_index in lvs.internal_layout().layer_indexes():
-        region = _union_of_net_regions(lvs, nets, layer_index)
-        if region.is_empty():
-            continue
-        area = region.area()
-        for role in sorted(gds_regions):
-            inside = (region & gds_regions[role]).area()
-            if inside >= area * _LAYER_IDENTITY_AREA_FRACTION:
-                roles[layer_index] = role
-                break
-    return roles
+def _anonymous_role(
+    region: Any, metal_masks: Mapping[str, Any], other_masks: Sequence[Any]
+) -> tuple[str | None, list[str]]:
+    """An anonymous layer can omit islands absent from the selected circuit.
+    Compare complete overlapping islands, so a via cut inside a pad cannot
+    identify the pad's metal. Coincident masks leave the source ambiguous."""
+    if region.is_empty():
+        return None, []
+    area = region.area()
+    candidates = []
+    for role, mask in metal_masks.items():
+        overlap = region & mask
+        if not overlap.is_empty() and overlap.area() >= 0.99 * area:
+            candidates.append(role)
+    if not candidates:
+        return None, []
+
+    def same_islands(mask: Any) -> bool:
+        return (mask.overlapping(region) ^ region).is_empty()
+
+    exact = [role for role in candidates if same_islands(metal_masks[role])]
+    other = any(same_islands(mask) for mask in other_masks)
+    if len(candidates) == 1 and exact and not other:
+        return exact[0], []
+    if other and not exact:
+        return None, []  # identified contact, via or other non-metal mask
+    return None, candidates
 
 
-def _net_probe_points(
-    lvs: Any, net: Any, roles: Mapping[int, str]
-) -> dict[str, list[Any]]:
-    """``{role: [kdb.Point, ...]}`` -- strictly interior sample points of
-    ``net``'s polygons, per matched metal role, capped per layer and net."""
-    points: dict[str, list[Any]] = {}
-    total = 0
-    for layer_index, role in sorted(roles.items()):
-        region = lvs.polygons_of_net(net, layer_index, True)
-        if region is None:
+def _stream_masks(
+    layout: Any, cell: Any, role_by_gds: Mapping[tuple[int, int], str]
+) -> tuple[dict[str, Any], list[Any]]:
+    """Merge each source mask so touching shapes form complete conductor islands."""
+    import klayout.db as kdb
+
+    metal_masks = {}
+    other_masks = []
+    for layer in layout.layer_indexes():
+        mask = kdb.Region(cell.begin_shapes_rec(layer)).merged()
+        info = layout.get_info(layer)
+        role = role_by_gds.get((info.layer, info.datatype))
+        if role is not None:
+            metal_masks[role] = mask
+        elif not mask.is_empty():
+            other_masks.append(mask)
+    return metal_masks, other_masks
+
+
+def _layer_roles(
+    lvs: Any,
+    circuit: Any,
+    layout: Any,
+    top_cell: Any,
+    metals: Sequence[tuple[int, int]],
+) -> tuple[dict[int, str], dict[int, list[str]]]:
+    """Use the stream layer/datatype first, then compare anonymous layers."""
+
+    role_by_gds = {pair: f"metal{i}" for i, pair in enumerate(metals)}
+    roles = {}
+    anonymous = []
+    for layer in lvs.layer_indexes():
+        info = lvs.layer_info(layer)
+        if info.layer < 0:
+            anonymous.append(layer)
+        elif (info.layer, info.datatype) in role_by_gds:
+            roles[layer] = role_by_gds[info.layer, info.datatype]
+    uncertain = {}
+    if anonymous:
+        metal_masks, other_masks = _stream_masks(layout, top_cell, role_by_gds)
+        nets = list(circuit.each_net())
+        for layer in anonymous:
+            region = _union_of_net_regions(lvs, nets, layer)
+            role, candidates = _anonymous_role(region, metal_masks, other_masks)
+            if role is not None:
+                roles[layer] = role
+            elif candidates:
+                uncertain[layer] = candidates
+    return roles, uncertain
+
+
+def _layer_probes(
+    region: Any,
+    name: str,
+    layer: int,
+    roles: Sequence[str],
+    *,
+    certain: bool,
+    dbu_um: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    probes = []
+    missing_point = False
+    prefix = "kltcorr" if certain else "kltmaybe"
+    for index, polygon in enumerate(region.each()):
+        point = _interior_point(polygon)
+        if point is None:
+            missing_point = True
             continue
-        polygons = list(region.each())
-        stride = max(1, len(polygons) // MAX_POINTS_PER_LAYER + 1)
-        for poly in polygons[::stride]:
-            if total >= MAX_POINTS_PER_NET:
-                return points
-            point = _interior_point(poly)
-            if point is not None:
-                points.setdefault(role, []).append(point)
-                total += 1
-    return points
+        for role in roles:
+            probes.append(
+                {
+                    "name": f"{prefix}|{role}|{name}|{layer}-{index}",
+                    "layer": role,
+                    "x": point.x * dbu_um,
+                    "y": point.y * dbu_um,
+                }
+            )
+    details = {"runset_net": name, "layer_index": layer, "candidate_roles": list(roles)}
+    incomplete = []
+    if not certain:
+        reason = "ambiguous_layer" if len(roles) > 1 else "unidentified_layer"
+        incomplete.append({**details, "reason": reason})
+    if missing_point:
+        incomplete.append({**details, "reason": "no_interior_probe"})
+    return probes, incomplete
+
+
+def _contact_landings(
+    lvs: Any,
+    layout: Any,
+    cell: Any,
+    contact: tuple[int, int] | None,
+    metals: Sequence[tuple[int, int]],
+) -> dict[int, Any]:
+    """The curated deck connects its contact layer directly to metal0.
+    Intersect a proven runset contact with that landing metal to detect a
+    runset missing the contact-to-metal connection. An unrelated overlying
+    metal cannot witness this connection."""
+    import klayout.db as kdb
+
+    if not metals or contact is None:
+        return {}
+    first_metal = layout.find_layer(*metals[0])
+    if first_metal is None:
+        return {}
+    landings = {}
+    for index in lvs.layer_indexes():
+        info = lvs.layer_info(index)
+        if (info.layer, info.datatype) == contact:
+            landings[index] = kdb.Region(cell.begin_shapes_rec(first_metal))
+    return landings
 
 
 def build_probes(
@@ -209,12 +261,13 @@ def build_probes(
     top: str,
     metals: Sequence[tuple[int, int]],
     dbu_um: float,
-) -> tuple[list[dict[str, Any]], dict[str, list[tuple[float, float]]]]:
-    """The ``run_extract`` ``probes`` list for the correspondence -- one
-    probe per runset-net sample point, on the metal role its layer matched
-    -- plus ``{runset net name: [(x_um, y_um), ...]}`` keyed in the
-    report's escaped ``nets[].name`` spelling, so the join's keys line up
-    with the curated probe results and the written netlist's node tokens."""
+    contact: tuple[int, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Probe every identified metal polygon and record gaps in net coverage.
+
+    Probes of candidate roles on an unidentified layer can rule out another
+    net's exclusive match. They never establish a match or disagreement.
+    """
     import klayout.db as kdb
 
     layout = kdb.Layout()
@@ -233,24 +286,27 @@ def build_probes(
             "net correspondence: the runset database carries no circuit named "
             f"'{top}', so its nets cannot be joined with the curated deck's"
         )
-    roles = metal_role_map(lvs, layout, top_cell, metals)
-    probes: list[dict[str, Any]] = []
-    positions: dict[str, list[tuple[float, float]]] = {}
+    roles, uncertain = _layer_roles(lvs, circuit, layout, top_cell, metals)
+    landings = _contact_landings(lvs, layout, top_cell, contact, metals)
+    roles.update(dict.fromkeys(landings, "metal0"))
+    layers = sorted(roles.keys() | uncertain.keys())
+    probes = []
+    incomplete = []
     for net in circuit.each_net():
         name = _escaped_net_name(net.expanded_name())
-        for role, pts in _net_probe_points(lvs, net, roles).items():
-            entries = positions.setdefault(name, [])
-            for index, point in enumerate(pts):
-                probes.append(
-                    {
-                        "name": f"kltcorr|{role}|{name}|{index}",
-                        "layer": role,
-                        "x": point.x * dbu_um,
-                        "y": point.y * dbu_um,
-                    }
-                )
-                entries.append((point.x * dbu_um, point.y * dbu_um))
-    return probes, positions
+        for layer in layers:
+            region = lvs.polygons_of_net(net, layer, True)
+            if region is None or region.is_empty():
+                continue
+            if layer in landings:
+                region = region & landings[layer]
+            candidates = [roles[layer]] if layer in roles else uncertain[layer]
+            points, gaps = _layer_probes(
+                region, name, layer, candidates, certain=layer in roles, dbu_um=dbu_um
+            )
+            probes.extend(points)
+            incomplete.extend(gaps)
+    return probes, incomplete
 
 
 # --------------------------------------------------------------------------- #
@@ -260,24 +316,31 @@ def build_probes(
 
 def _probe_hits(
     probe_results: Sequence[Mapping[str, Any]],
-) -> dict[str, set[tuple[str, int]]]:
-    """Curated cluster identities reached by each runset net's geometry probes."""
-    hits: dict[str, set[tuple[str, int]]] = {}
+) -> tuple[dict[str, set[tuple[str, int]]], set[tuple[str, int]], set[str]]:
+    """Return confirmed hits, possible cluster hits and nets with a probe miss."""
+    hits: dict[str, set[tuple[str, int]]] = defaultdict(set)
+    possible: set[tuple[str, int]] = set()
+    missed: set[str] = set()
     for result in probe_results:
-        if not result.get("found"):
-            continue
         parts = str(result.get("name") or "").split("|")
-        if len(parts) != 4 or parts[0] != "kltcorr":
+        if len(parts) != 4 or parts[0] not in {"kltcorr", "kltmaybe"}:
             continue
-        hit = (str(result["net"]), int(result["cluster_id"]))
-        hits.setdefault(parts[2], set()).add(hit)
-    return hits
+        if result.get("found"):
+            hit = (str(result["net"]), int(result["cluster_id"]))
+            if parts[0] == "kltcorr":
+                hits[parts[2]].add(hit)
+            else:
+                possible.add(hit)
+        elif parts[0] == "kltcorr":
+            missed.add(parts[2])
+    return hits, possible, missed
 
 
 def correspondence(
     runset_net_names: Sequence[str],
     probe_results: Sequence[Mapping[str, Any]],
     curated_parasitic_nets: Sequence[Mapping[str, Any]],
+    incomplete_geometry: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """The ``net_correspondence`` envelope block (issue #6606 AC 2/3).
 
@@ -289,7 +352,12 @@ def correspondence(
     a curated parasitic net nobody matched is listed even though it never
     probes anything itself.
     """
-    hits = _probe_hits(probe_results)
+    hits, possible, missed = _probe_hits(probe_results)
+    gaps = list(incomplete_geometry)
+    gaps.extend(
+        {"runset_net": net, "reason": "unresolved_probe"} for net in sorted(missed)
+    )
+    incomplete = {entry["runset_net"] for entry in gaps}
     matched: list[dict[str, Any]] = []
     unmatched_runset: list[str] = []
     disagreements: list[dict[str, Any]] = []
@@ -309,7 +377,12 @@ def correspondence(
             )
     for runset_net in runset_net_names:
         net_hits = sorted(hits.get(runset_net, ()))
-        if len(net_hits) == 1 and len(reverse[net_hits[0]]) == 1:
+        if (
+            len(net_hits) == 1
+            and len(reverse[net_hits[0]]) == 1
+            and net_hits[0] not in possible
+            and runset_net not in incomplete
+        ):
             name, cluster = net_hits[0]
             matched.append(
                 {"runset": runset_net, "curated": name, "cluster_id": cluster}
@@ -346,6 +419,7 @@ def correspondence(
                 str(entry.get("runset_net") or entry.get("curated_net")),
             ),
         ),
+        "incomplete_geometry": gaps,
         "probe_count": len(probe_results),
     }
 

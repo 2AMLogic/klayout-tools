@@ -260,6 +260,8 @@ def test_cli_curated_deck_under_the_runset_engine_runs_the_merged_route(
         "DECKFILE",
         "--deck",
         "sky130",
+        "--label-layer",
+        "metal0=none",
         "--extract-only",
         capsys=capsys,
     )
@@ -268,6 +270,36 @@ def test_cli_curated_deck_under_the_runset_engine_runs_the_merged_route(
     extraction = json.loads(out)["extraction"]
     assert extraction["deck"] == "sky130"
     assert extraction["net_correspondence"]["deck"] == "sky130"
+    assert extraction["label_layers"] == {"metal0": None}
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--resistance-graph-r-cut",
+        "--substrate-tie-ohms",
+        "--mom-rlc-resistance-ohm",
+        "--mom-rlc-capacitance-ff",
+        "--mom-rlc-inductance-nh",
+    ],
+)
+def test_merged_route_refuses_explicit_zero(tmp_path, fake_klayout, capsys, flag):
+    code, _, err = _cli(
+        tmp_path,
+        "--engine",
+        "klayout-runset",
+        "--deck-file",
+        "DECKFILE",
+        "--deck",
+        "sky130",
+        flag,
+        "0",
+        "--extract-only",
+        capsys=capsys,
+    )
+    assert code == 1
+    assert flag in err["error"]["message"]
+    assert "cmd" not in fake_klayout
 
 
 def test_cli_parasitic_only_flag_is_refused_by_name_under_the_runset_engine(

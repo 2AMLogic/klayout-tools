@@ -7,10 +7,10 @@ parasitic nets are put in correspondence, which alternatives were **measured**
 rather than argued, and what `klt signoff` does with a parasitic-free pex leg
 (AC 4).
 
-Measurements ran on `ihp-sg13cmos5l` (IHP SG13CMOS5L install at
-`~/share/pdk/ihp-sg13cmos5l`, KLayout 0.30.12) against two layouts: the PDK's
-own `pnpMPA` LVS testcase and the repo's `tests/test_extract_body_nets_sg13cmos5l.py`
-inverter fixture. Every number below is from those runs.
+Measurements used KLayout 0.30.12 with the IHP SG13CMOS5L `pnpMPA` LVS
+testcase and the inverter fixture in `tests/test_extract_body_nets_sg13cmos5l.py`.
+The table identifies runs using the PDK runset and runs using controlled
+connectivity changes. Separate pad layouts test split detection and stacked metals.
 
 ## The gap
 
@@ -29,8 +29,9 @@ false`.
   returns real per-net shapes over the database's *internal* layout
   (`pnpMPA`: net `$1` holds 62 polygons on one internal layer; the inverter
   fixture: each net 3–4 polygons across cont/metal/sd-like layers). The
-  internal layers are **anonymous** (no GDS layer info), a fact that forces
-  the layer-identity rule below.
+  IHP runset stores anonymous layers. A runset that registers an original
+  stream layer can preserve its GDS layer and datatype in the same database
+  format. KLayout's `layer_info(index)` retrieves that provenance after reload.
 - **M2 — the curated side already has a point→net oracle.** `klt extract
   --probe` (#2986) resolves a point on a conductor role (`metal0`…,
   `poly`, `well`) to the *final* net name and `cluster_id`, post-purge and
@@ -57,29 +58,41 @@ false`.
   are strictly interior** (bbox centre when strictly inside, otherwise an
   inward bisector step from a convex hull vertex); a probe hit then implies
   genuine area overlap, not edge-touching.
-- **R3 — anonymous internal layers cannot be trusted by index.** The
-  runset database's metal-ish layers are anonymous, and a derived layer
-  (e.g. `gate = activ ∧ poly`) would happily donate points that overlap the
-  wrong curated role. **Rule: an internal layer joins one metal role only
-  when ≥ 99 % of its own area lies inside that role's GDS layer in the
-  original stream** (measured: original metal handles are single-source, so
-  real layers identify at 100 %; anything mixed is derived and joins
-  nothing).
+- **R3 — layer index and one-sided area overlap can both misidentify a
+  metal.** In the inverter fixture, a Metal2 pad on 10/0 placed inside the
+  VGND Metal1 pad on 8/0 has 100 % area overlap with both masks. With no
+  via, the curated probe at (0.2, 0.5) µm returns VGND on Metal1 and UPPER
+  on Metal2. The saved stream layer/datatype identifies both correctly.
+  Removing provenance from two coincident metal masks leaves both layer
+  assignments ambiguous.
 
 ## The landed rule
 
-For each net of the runset's selected circuit: sample strictly interior
-points of its polygons on internal layers identified (R3) with one of the
-curated deck's metals, and probe that one role per point (M2). Exactly one
-distinct curated net hit → **match**; more than one → **split
-disagreement** (the runset net spans several curated nets); a curated net
-hit by several runset nets → **merge disagreement** (its parasitics attach
-to *neither* fragment); no hit → **unmatched**. Every outcome lands in the
-envelope's `extraction.net_correspondence` (`matched`,
-`unmatched_runset_nets`, `unmatched_curated_nets`, `disagreements`,
-`probe_count`, `deck`, `attached_card_count`); parasitics attach only to
-1:1 matches. Sampling is capped (16 points/layer, 64/net, strided), so
-split detection is exact within the cap and best-effort beyond it.
+Use the runset layer's original GDS layer and datatype when available. For
+anonymous layers, compare the selected circuit's per-layer union with the
+complete overlapping islands of each original mask. This comparison allows
+the circuit to omit whole islands. Containment of at least 99 % of the
+runset area identifies *candidate* metal roles. A match requires exactly one
+candidate, equal island geometry, and no equally good non-metal source.
+This distinguishes a via inside a pad from the metal that surrounds it.
+The deck also connects its contact layer directly to the first metal.
+For a runset contact with known stream provenance, probe the intersection
+of the contact and that metal landing. This exposes a missing contact
+connection on the runset side, including a fragment with only a contact.
+
+Probe one strictly interior grid point on **every** polygon of each identified
+metal layer. Both the hull and hole edges are excluded. A 16-pad runset net
+whose last pad belongs to a different curated net gives a split even when
+the first 15 belong to the same net. The 17- and 65-pad regressions exercise
+the same case beyond the former sampling limits.
+
+Confirmed hits on several curated clusters establish a **split**. Confirmed
+hits from several runset nets on one curated cluster establish a **merge**.
+A unique pairing with complete probe coverage earns a **match**. A polygon
+without a usable interior point, an unresolved probe, or an ambiguous metal
+assignment leaves the affected runset net unmatched. Probes of candidate
+roles on uncertain layers can rule out exclusive ownership by another net.
+Only confirmed geometry contributes to split and merge reports.
 
 The merged leg is the runset leg's own netlist rewritten in place: matched
 nodes renamed (a named runset net keeps its name — device-side truth; an
@@ -104,8 +117,9 @@ node accompany the item-7 citation so a reader can assess the return path.
 
 | Layout | Result |
 |---|---|
-| inverter fixture (both engines driven for real) | 5/8 runset nets matched (VGND, Y, VPWR, Y, A — five distinct curated cluster IDs), 3 body clusters unmatched, 0 disagreements, 11 cards (5 R/C pairs and the substrate tie). Both Y islands carry their own pair. The substrate return has no runset match |
-| inverter fixture, metal joins removed (deliberate split) | every labelled curated net reported as a merge over exactly its 2 fragments; 0 matches; no cards — and no stray ground tie |
+| inverter fixture, controlled runset with Metal1 contacts | 5/8 runset nets matched (VGND, Y, VPWR, Y, A — five distinct curated cluster IDs), 3 body clusters unmatched, 0 disagreements, 11 cards (5 R/C pairs and the substrate tie). Both Y islands carry their own pair. The substrate return has no runset match |
+| inverter fixture, IHP PDK runset | 3 of 4 runset nets matched (VGND, Y and A), 0 disagreements, 7 cards |
+| inverter fixture, runset contact-to-metal joins omitted | every labelled curated net reported as a merge over exactly its 2 fragments; 0 matches; no cards — and no stray ground tie |
 | inverter fixture, diffusion bridged to gate (deliberate wrong join) | 2 split disagreements naming the curated nets each bridged cluster spans; the one cluster left whole still matches |
 | `pnpMPA` PDK testcase (the flagship gap) | curated leg extracts **nothing but `vsubs`** — its labels sit on `10/25` (the deck reads `.pin` `10/2`) and its vias are KLayout PCell instances the pip `klayout.db` curated engine cannot resolve — so all four runset nets are reported (PAD/VDD unmatched, `$1`+`VSS` a merge onto `vsubs`), 0 cards, `parasitics_carried: false` |
 
