@@ -136,10 +136,9 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _esd_device_layout,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
-        _shift_box,
     )
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _EsdDevicePCell(kdb.PCellDeclarationHelper):
         """Grounded-gate multi-finger ESD protection MOS (issue #569): one
@@ -364,60 +363,20 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(self.cell, li_block, dbu, unit_boxes["active"])
 
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
                 # Deliberately no well tie drawn around the ring here (unlike
                 # `_GuardRingPCell`'s own `add_well` default, and unlike
                 # `diff_pair`'s `flavor="pfet"` case) -- see this class's own
                 # docstring and `_esd_device_layer_params`'s for why: it
                 # would enclose this always-NMOS device in an Nwell and
                 # misclassify it as `pfet` under `klt extract`.
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- always the substrate-tie doping
-                    # (never the well-tie one), since this ring never
-                    # encloses a well (see the no-well-tie note directly
-                    # above).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
-                    )
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.

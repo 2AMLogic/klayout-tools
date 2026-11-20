@@ -40,10 +40,9 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _insert_bjt_unit_implants,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
-        _shift_box,
     )
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _BjtArrayPCell(kdb.PCellDeclarationHelper):
         """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
@@ -283,13 +282,6 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
 
             if info["ring"] is not None and self.add_collector_ring:
-                ring = info["ring"]
-                ox, oy = info["ring_offset_um"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
                 # The ring's own diffusion-role shape goes on the deck's
                 # *tap* role, not its `active` role (issue #2312). A
                 # collector/substrate guard ring is a substrate *tie*, and a
@@ -310,46 +302,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # mechanism is now one mechanism rather than two. On a
                 # family whose `tap` role *is* its `active` role (gf180mcu,
                 # both `(22, 0)`) this is byte-identical geometry.
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
-                if self.ring_implant_present:
-                    # Tracks the collector ring's own tap-layer shape,
-                    # extended `ring_implant_margin_um` past every edge of
-                    # it (issue #2369's NP.5b/PP.5b extension-beyond-COMP
-                    # fix to #1580's originally coincident implant) -- still
-                    # a ring, never a blanket over the enclosed base
-                    # well/array (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
-                    )
+                _draw_composed_guard_ring(self, li_tap, li_metal, li_contact, dbu, info)
 
             # Per-unit bipolar device-mark, drawn on every unit (dummies
             # included -- they are structurally real unit devices too,

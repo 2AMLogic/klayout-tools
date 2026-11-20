@@ -31,6 +31,7 @@ from ._mos_array_shapes import (
     _mos_cap_enabled,
     _unit_role_boxes,
 )
+from ._ring_shapes import _draw_composed_guard_ring
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -59,8 +60,6 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _draw_npc_over_poly_contacts,
         _draw_pcell_tap_pads,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _mos_array_layout,
         _pcell_tap_reach_um,
         _shift_box,
@@ -498,35 +497,6 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             # shared-footprint box, computed above regardless of `flavor`).
             ring_well_mark_box = None
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
                 # The ring's own well tie (independent of the device-array
                 # well drawn above, which already merges with it on the same
                 # `well_layer` -- mirrors `_diff_pair_layout`'s identical
@@ -536,34 +506,30 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # in a well the way #421's diff_pair regression test guards
                 # against.
                 if self.well_present and self.flavor == "pfet":
-                    li_well = self.layout.layer(self.well_layer)
                     margin = self.ring_well_margin_um
-                    ring_well_box = (
-                        -margin,
-                        -margin,
-                        ring["outer_w_um"] + margin,
-                        ring["outer_h_um"] + margin,
+                    ring_well_mark_box = _shift_box(
+                        (
+                            -margin,
+                            -margin,
+                            info["ring"]["outer_w_um"] + margin,
+                            info["ring"]["outer_h_um"] + margin,
+                        ),
+                        *info["ring_offset_um"],
                     )
-                    ring_well_mark_box = _shift_box(ring_well_box, ox, oy)
-                    _insert_boxes(self.cell, li_well, dbu, [ring_well_mark_box])
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- still a ring, never a blanket
-                    # over the enclosed array (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
+                    _insert_boxes(
                         self.cell,
-                        self.layout.layer(self.ring_implant_layer),
+                        self.layout.layer(self.well_layer),
                         dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
+                        [ring_well_mark_box],
                     )
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Tap pads (issue #3648): on a family with a tap-distance rule the
             # ring-less array still gets well/substrate taps of its tie's
