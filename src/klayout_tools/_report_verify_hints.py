@@ -86,12 +86,13 @@ def input_hash_check(
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
-    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``), with issue
-    #2595's ``input_not_found`` diagnostic attached when that path does not
-    name an existing file.
+    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``, ``klt erc``'s
+    ``file``/``spec``), with issue #2595's ``input_not_found`` diagnostic
+    attached when that path does not name an existing file.
 
-    Shared by ``klt lvs --check`` (issues #2595, #6223) and ``klt drc --check``
-    (issue #6466); ``klt erc --check`` keeps its own smaller copy.
+    Shared by ``klt lvs --check`` (issues #2595, #6223), ``klt drc --check``
+    (issue #6466) and ``klt erc --check`` (issue #6655, which until then kept
+    a smaller local copy).
 
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
@@ -122,10 +123,12 @@ def input_hash_check(
     (``sha256:``-prefixed; the LVS runset deck, issue #6223, and ``klt drc``'s
     ``provenance.input.content_hash``, issue #6466).
 
-    ``override_hint`` may be ``None`` (issue #6840): the input then has no
-    override flag on its verb -- the runset ``deck_file`` on ``klt lvs
-    --check``, whose ``--deck-file`` is refused with ``--check`` -- and the
-    ``input_not_found`` remedy names no flag, only the report directory.
+    ``override_hint`` may be ``None`` (issues #6840, #6655): the input then
+    has no override flag on its verb -- the runset ``deck_file`` on ``klt lvs
+    --check``, whose ``--deck-file`` is refused with ``--check``, and every
+    ``klt erc --check`` input, since ``--check`` is mutually exclusive with
+    ERC's positional ``file``/``spec`` -- and the ``input_not_found`` remedy
+    names no flag, only the report directory.
 
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
