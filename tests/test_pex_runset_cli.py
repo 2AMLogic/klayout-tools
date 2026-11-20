@@ -274,6 +274,51 @@ def test_cli_curated_deck_under_the_runset_engine_runs_the_merged_route(
 
 
 @pytest.mark.parametrize(
+    "options,needle",
+    [
+        (["--deck", "misspelled"], "misspelled"),
+        (["--deck", "sky130", "--label-layer", "bogus=1/0"], "bogus"),
+        (["--deck", "sky130"], "merge interrupted"),
+    ],
+)
+def test_merged_failure_preserves_output_and_writes_error_envelope(
+    tmp_path, fake_klayout, capsys, monkeypatch, options, needle
+):
+    from klayout_tools import pex_merged_leg
+    from klayout_tools.pex import PexError
+
+    target = tmp_path / "out.spice"
+    target.write_bytes(b"* previous extraction\n")
+    envelope = tmp_path / "error.json"
+
+    def fail_after_device_extraction(staged, **kwargs):
+        assert target.read_bytes() == b"* previous extraction\n"
+        assert staged != str(target)
+        raise PexError("merge interrupted")
+
+    monkeypatch.setattr(
+        pex_merged_leg, "merge_parasitics", fail_after_device_extraction
+    )
+    code, _, err = _cli(
+        tmp_path,
+        "--engine",
+        "klayout-runset",
+        "--deck-file",
+        "DECKFILE",
+        *options,
+        "--extract-only",
+        "--envelope-out",
+        str(envelope),
+        capsys=capsys,
+    )
+    assert code == 1
+    assert needle in err["error"]["message"]
+    assert json.loads(envelope.read_text()) == err
+    assert target.read_bytes() == b"* previous extraction\n"
+    assert not list(tmp_path.glob(".klt-pex-*"))
+
+
+@pytest.mark.parametrize(
     "flag",
     [
         "--resistance-graph-r-cut",

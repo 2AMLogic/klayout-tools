@@ -50,6 +50,7 @@ def _write_lvsdb(
     *,
     isolate_metals: bool = False,
     bridge_terminals: bool = False,
+    net_labels: dict | None = None,
 ) -> None:
     """Stand in for the PDK runset on the cmos5l inverter fixture.
 
@@ -80,6 +81,9 @@ def _write_lvsdb(
         l2n.connect(metal1, cont)
         l2n.connect(cont, sd)
     l2n.extract_netlist()
+    for net in l2n.netlist().top_circuit().each_net():
+        if net_labels and net.expanded_name() in net_labels:
+            net.name = net_labels[net.expanded_name()]
     l2n.netlist().make_top_level_pins()
     ref = kdb.Netlist()
     ref.read(schem, kdb.NetlistSpiceReader())
@@ -110,6 +114,7 @@ def fake_klayout(monkeypatch, tmp_path):
             args["report"],
             isolate_metals=state["isolate_metals"],
             bridge_terminals=state["bridge_terminals"],
+            net_labels=state.get("net_labels"),
         )
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -240,6 +245,31 @@ def test_a_merge_disagreement_is_reported_never_guessed(tmp_path, fake_klayout):
     assert "_plr " not in text
 
 
+@pytest.mark.parametrize("isolate,expected_cards", [(True, 0), (False, 11)])
+def test_merged_envelope_only_reports_integrity_for_an_assessed_network(
+    tmp_path, fake_klayout, isolate, expected_cards
+):
+    from klayout_tools.pex import run_pex
+
+    fake_klayout["isolate_metals"] = isolate
+    gds = tmp_path / "inv.gds"
+    _write_fixture(str(gds))
+    deck = tmp_path / "test.lvs"
+    deck.touch()
+    envelope = run_pex(
+        str(gds),
+        [],
+        "sg13cmos5l",
+        runset=PexRunset(deck_file=str(deck)),
+        extract_only=True,
+    )
+    extraction = envelope["extraction"]
+    assert extraction["net_correspondence"]["attached_card_count"] == expected_cards
+    assert extraction["parasitic_integrity"] is None
+    assert extraction["model"]
+    assert (tmp_path / "inv.spice").exists()
+
+
 def test_a_split_disagreement_is_reported_not_compared(tmp_path, fake_klayout):
     """A runset cluster spanning several curated nets is refused both ways:
     reported as a split, its curated nets left unmatched, no cards."""
@@ -253,7 +283,9 @@ def test_a_split_disagreement_is_reported_not_compared(tmp_path, fake_klayout):
     )
     assert [s["curated_nets"] for s in splits] == [["VGND", "Y"], ["VPWR", "Y"]]
     # The one cluster the bridge left whole still matches and attaches.
-    assert corr["matched"] == [{"runset": "\\$3", "curated": "A", "cluster_id": 3}]
+    assert corr["matched"] == [
+        {"runset": "\\$3", "runset_cluster_id": 3, "curated": "A", "cluster_id": 3}
+    ]
     assert corr["attached_card_count"] == 3  # A's R + C + the substrate tie
 
 
@@ -262,23 +294,27 @@ def test_a_split_disagreement_is_reported_not_compared(tmp_path, fake_klayout):
 # --------------------------------------------------------------------------- #
 
 
-def _probe(runset_net: str, curated: str, cluster: int, found: bool = True):
+def _probe(runset_cluster: int, curated: str, cluster: int, found: bool = True):
     return {
-        "name": f"kltcorr|metal0|{runset_net}|0",
+        "name": f"kltcorr|metal0|{runset_cluster}|0",
         "found": found,
         "net": curated if found else None,
         "cluster_id": cluster if found else None,
     }
 
 
+def _nets(*names):
+    return [{"net_id": i, "name": name} for i, name in enumerate(names, 1)]
+
+
 def test_correspondence_classifies_every_outcome():
     corr = correspondence(
-        ["\\$1", "\\$2", "\\$3", "\\$4"],
+        _nets("\\$1", "\\$2", "\\$3", "\\$4"),
         [
-            _probe("\\$1", "A", 3),
-            _probe("\\$2", "B", 1),
-            _probe("\\$2", "C", 2),  # \$2 spans two curated nets: split
-            _probe("\\$4", "A", 3),  # A also hit by \$1: merge with \$1
+            _probe(1, "A", 3),
+            _probe(2, "B", 1),
+            _probe(2, "C", 2),  # \$2 spans two curated nets: split
+            _probe(4, "A", 3),  # A also hit by \$1: merge with \$1
             {"name": "user-probe", "found": True, "net": "X", "cluster_id": 9},
         ],
         [{"net": "D", "net_id": 4}, {"net": "A", "net_id": 3}],
@@ -300,16 +336,18 @@ def test_correspondence_classifies_every_outcome():
 
 def test_unmatched_same_label_and_overlapping_disagreements():
     corr = correspondence(
-        ["first", "bridged", "fragment"],
+        _nets("first", "bridged", "fragment"),
         [
-            _probe("first", "Y", 1),
-            _probe("bridged", "Y", 2),
-            _probe("bridged", "B", 3),
-            _probe("fragment", "Y", 2),
+            _probe(1, "Y", 1),
+            _probe(2, "Y", 2),
+            _probe(2, "B", 3),
+            _probe(3, "Y", 2),
         ],
         [{"net": "Y", "net_id": i} for i in [1, 2, 4]],
     )
-    assert corr["matched"] == [{"runset": "first", "curated": "Y", "cluster_id": 1}]
+    assert corr["matched"] == [
+        {"runset": "first", "runset_cluster_id": 1, "curated": "Y", "cluster_id": 1}
+    ]
     assert corr["unmatched_curated_clusters"] == [
         {"curated": "Y", "cluster_id": 2},
         {"curated": "Y", "cluster_id": 4},
@@ -325,7 +363,7 @@ def test_unmatched_same_label_and_overlapping_disagreements():
 
 def test_unfound_probes_are_not_matches():
     corr = correspondence(
-        ["\\$1"], [_probe("\\$1", None, None, found=False)], [{"net": "A", "net_id": 3}]
+        _nets("\\$1"), [_probe(1, None, None, found=False)], [{"net": "A", "net_id": 3}]
     )
     assert corr["matched"] == []
     assert corr["unmatched_runset_nets"] == ["\\$1"]
@@ -347,9 +385,9 @@ def test_preferred_renames_adopt_labels_and_refuse_collisions():
 
 def test_probe_results_parse_only_kltcorr_names():
     corr = correspondence(
-        ["\\$1"],
+        _nets("\\$1"),
         [
-            _probe("\\$1", "A", 1),
+            _probe(1, "A", 1),
             {
                 "name": "kltcorr|metal0|broken",
                 "found": True,
@@ -360,7 +398,9 @@ def test_probe_results_parse_only_kltcorr_names():
         ],
         [],
     )
-    assert corr["matched"] == [{"runset": "\\$1", "curated": "A", "cluster_id": 1}]
+    assert corr["matched"] == [
+        {"runset": "\\$1", "runset_cluster_id": 1, "curated": "A", "cluster_id": 1}
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -436,3 +476,20 @@ def test_real_pnpmpa_merged_run_reports_the_measured_mismatch(tmp_path):
     # The envelope this produces refuses item 7 (no_parasitics), which the
     # signoff tests in test_pex_runset_signoff.py grade separately.
     assert json.dumps(corr)
+
+
+def test_merged_device_and_parasitic_cards_use_the_same_spice_names(
+    tmp_path, fake_klayout
+):
+    labels = {"$1": "XBIAS.vb1", "$2": "A|B", "$3": "A,B", "$4": "XBIAS_vb1"}
+    fake_klayout["net_labels"] = labels
+    corr = _merged(tmp_path, fake_klayout)["net_correspondence"]
+    nodes = {m["runset"] for m in corr["matched"]}
+    assert {"A|B", "A|B_1", "XBIAS_vb1", "XBIAS_vb1_1"} <= nodes
+    cards = [line.split() for line in (tmp_path / "leg.spice").read_text().splitlines()]
+    for node in ("A|B", "A|B_1", "XBIAS_vb1", "XBIAS_vb1_1"):
+        assert any(
+            card and card[0].startswith("X") and node in card[1:-1] for card in cards
+        )
+        assert any(card[:2] == [f"R{node}_plr", node] for card in cards)
+    assert {r["original"] for r in corr["runset_node_renames"]} == {"XBIAS.vb1", "A|B"}

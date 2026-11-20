@@ -31,11 +31,15 @@ import os
 import re
 import tempfile
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .extract import run_extract
+from ._provenance import sha256_file
+from .extract import ExtractError, run_extract
+from .extract_netlist_target import resolve_netlist_target
+from .extract_preflight import preflight_layout
 from .pex_net_correspondence import (
     _pex_error,
     build_probes,
@@ -276,6 +280,20 @@ def _rewrite_netlist(
 # --------------------------------------------------------------------------- #
 
 
+@contextmanager
+def _staged_netlist(target: str) -> Iterator[Path]:
+    """Publish the finished leg by atomic rename after the merge."""
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".klt-pex-", dir=Path(target).parent
+        ) as work:
+            staged = Path(work) / "extracted.spice"
+            yield staged
+            os.replace(staged, target)
+    except OSError as exc:
+        raise ExtractError(f"cannot write merged netlist '{target}': {exc}") from exc
+
+
 def merged_runset_extract(
     *,
     layout_path: str,
@@ -311,15 +329,12 @@ def merged_runset_extract(
     geometry, and merge the curated parasitic network into the runset leg.
 
     Returns the runset extract report, enriched in memory with the
-    ``net_correspondence`` block, the curated ``parasitics`` (so the pex
-    envelope's model/integrity disclosures describe the parasitics actually
-    attached), and re-hashed netlist digests. Every pex option only a
-    richer curated parasitic model could serve is refused by name here,
+    ``net_correspondence`` block, the curated model name, and the final netlist hash.
+    Options requiring a richer parasitic model are refused by name here,
     from the same table ``klt extract`` refuses them by -- minus the two
     this route honours (``--deck`` selects the curated deck;
     ``--label-layer`` its label layers)."""
     from . import extract_runset
-    from .decks import get_extraction_deck
 
     extract_runset.refuse_unsupported(
         {
@@ -345,13 +360,16 @@ def merged_runset_extract(
         }
     )
 
-    deck = get_extraction_deck(deck_name)
-    with tempfile.TemporaryDirectory(prefix="klt-pex-correspondence-") as work:
-        lvsdb_out = os.path.join(work, "runset.lvsdb")
+    source = preflight_layout(
+        layout_path, deck_name, top=top, label_layers=label_layers
+    )
+    target, _ = resolve_netlist_target(layout_path, output, False)
+    with _staged_netlist(target) as staged:
+        lvsdb_out = str(staged.with_name("runset.lvsdb"))
         report = extract_runset.run_extract_klayout_runset(
             layout_path,
             deck_file=runset.deck_file,
-            output=output,
+            output=str(staged),
             top=top,
             deck_vars=runset.deck_vars,
             device_models=device_models,
@@ -361,11 +379,9 @@ def merged_runset_extract(
         )
         probes, incomplete = build_probes(
             lvsdb_out,
-            layout_path,
-            top=str(report["top"]),
-            metals=deck.metals,
-            contact=deck.contact,
-            dbu_um=float(report["dbu_um"]),
+            source.top_cell,
+            metals=source.deck.metals,
+            contact=source.deck.contact,
         )
         curated = run_extract(
             layout_path,
@@ -377,33 +393,31 @@ def merged_runset_extract(
             no_netlist=True,
         )
 
-    corr = correspondence(
-        [str(entry["name"]) for entry in report["nets"]],
-        curated.get("probes") or [],
-        (curated.get("parasitics") or {}).get("nets") or [],
-        incomplete,
-    )
-    corr["deck"] = deck_name
-    corr["attached_card_count"] = (
-        merge_parasitics(
-            report["netlist_path"],
+        parasitics = curated.get("parasitics") or {}
+        corr = correspondence(
+            report["nets"],
+            curated.get("probes") or [],
+            parasitics.get("nets") or [],
+            incomplete,
+        )
+        corr["deck"] = deck_name
+        if "runset_node_renames" in report:
+            corr["runset_node_renames"] = report.pop("runset_node_renames")
+        corr["attached_card_count"] = merge_parasitics(
+            str(staged),
             top=str(report["top"]),
             curated_nets=curated["nets"],
-            substrate=deck.substrate_net,
-            all_runset_nets=[str(entry["name"]) for entry in report["nets"]],
-            parasitics=curated.get("parasitics") or {},
+            substrate=source.deck.substrate_net,
+            all_runset_nets=[entry["name"] for entry in report["nets"]],
+            parasitics=parasitics,
             deck_name=deck_name,
             report_block=corr,
         )
-        if report.get("netlist_path")
-        else 0
-    )
-    report["label_layers"] = curated["label_layers"]
-    report["net_correspondence"] = corr
-    if curated.get("parasitics"):
-        report["parasitics"] = curated["parasitics"]
-    if report.get("netlist_path"):
-        from ._provenance import sha256_file
-
-        report["netlist_sha256"] = sha256_file(report["netlist_path"])
+        report["label_layers"] = curated["label_layers"]
+        report["net_correspondence"] = corr
+        # The curated integrity rows describe its own star, while this writer
+        # emits a lumped network over just the matched clusters.
+        report["parasitics"] = {"model": parasitics.get("model")}
+        report["netlist_sha256"] = sha256_file(str(staged))
+        report["netlist_path"] = target
     return report

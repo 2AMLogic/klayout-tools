@@ -132,6 +132,7 @@ from .extract_runset_spice import (
     _device_params_echo,
     _dropped_parameter_warnings,
     _instantiated_device_counts,
+    _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
 )
@@ -364,6 +365,7 @@ def run_extract_klayout_runset(
 
         # Checked before anything is written: an unknown `--device-param`
         # parameter is an error, never a device silently left at its default.
+        aliases = _prepare_merged_node_names(circuit) if lvsdb_out else []
         declared_warnings = _check_device_params(netlist, declared)
         uncarried = _uncarried_parameters(netlist, declared)
         reported_netlist_path, netlist_sha256 = _write_netlist(
@@ -454,6 +456,7 @@ def run_extract_klayout_runset(
         "device_classes": sorted(device_counts),
         "devices": devices,
         "nets": nets,
+        **({"runset_node_renames": aliases} if aliases else {}),
         "device_models": dict(sorted(models.items())) if models else None,
         # Additive (issue #5513): present only when `--device-param` was given.
         **_device_params_echo(declared),

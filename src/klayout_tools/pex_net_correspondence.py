@@ -1,16 +1,8 @@
-"""The geometric net correspondence joining a runset-engine ``klt pex``
-leg's nets with a curated deck's parasitic extraction (issue #6606).
+"""Geometric correspondence between runset and curated PEX nets (issue #6606).
 
-``klt pex --engine klayout-runset`` (issue #6559) extracts its leg with the
-PDK's own LVS runset, so the device set is the right one -- but with no
-parasitics: the runset and a curated deck number their unlabelled nets
-independently (``\\$1``, ``docs/cli/extract.md``'s "Anonymous net
-numbering"), so curated parasitics cannot be attached to runset devices by
-name. This module puts the two extractions in correspondence **by
-geometry**; :mod:`klayout_tools.pex_merged_leg` builds the merged leg on
-top of it. The measured decision -- why this rule and not the alternatives
--- is ``docs/design/runset-pex-net-correspondence.md``; this docstring
-records the rule itself.
+Both engines allocate anonymous net numbers independently. The merged writer
+uses this join to attach curated parasitics to the runset device nodes.
+See docs/design/runset-pex-net-correspondence.md for the measured decision.
 
 Every metal polygon of the selected runset circuit contributes a strictly
 interior probe to the curated extractor. The layer comes from the source
@@ -22,6 +14,7 @@ Only a unique match with complete coverage receives parasitics.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -38,14 +31,7 @@ def _pex_error(message: str) -> Exception:
 def _is_anonymous(name: str) -> bool:
     """Whether a net name is KLayout's own ``$N`` placeholder -- either
     spelling: bare in memory, backslash-escaped in the written netlist."""
-    return name.lstrip("\\").startswith("$")
-
-
-def _escaped_net_name(raw: str) -> str:
-    """The report/netlist node spelling of a net name (issue #1162's
-    backslash-escaped ``\\$N``) -- the spelling both the curated probe
-    results and the runset leg's own node tokens use."""
-    return "\\" + raw if raw.startswith("$") else raw
+    return re.fullmatch(r"\$[0-9]+", name.removeprefix("\\")) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -194,7 +180,7 @@ def _layer_roles(
 
 def _layer_probes(
     region: Any,
-    name: str,
+    cluster: int,
     layer: int,
     roles: Sequence[str],
     *,
@@ -212,13 +198,17 @@ def _layer_probes(
         for role in roles:
             probes.append(
                 {
-                    "name": f"{prefix}|{role}|{name}|{layer}-{index}",
+                    "name": f"{prefix}|{role}|{cluster}|{layer}-{index}",
                     "layer": role,
                     "x": point.x * dbu_um,
                     "y": point.y * dbu_um,
                 }
             )
-    details = {"runset_net": name, "layer_index": layer, "candidate_roles": list(roles)}
+    details = {
+        "runset_cluster_id": cluster,
+        "layer_index": layer,
+        "candidate_roles": list(roles),
+    }
     incomplete = []
     if not certain:
         reason = "ambiguous_layer" if len(roles) > 1 else "unidentified_layer"
@@ -254,13 +244,52 @@ def _contact_landings(
     return landings
 
 
+def _coordinates_agree(
+    lvs: Any,
+    circuit: Any,
+    cell: Any,
+    metals: Sequence[tuple[int, int]],
+    roles: Mapping[int, str],
+    landings: Mapping[int, Any],
+) -> bool:
+    """Check the frame and the actual islands before interpreting integer points."""
+    import klayout.db as kdb
+
+    layout = cell.layout()
+    # A runset DBU override can rescale even the saved circuit boundary while
+    # the LVS file still advertises the input DBU. Some circuits omit whole
+    # source islands, so either the boundary or a whole mask must anchor them.
+    boundary = circuit.boundary.bbox().to_itype(layout.dbu)
+    if (boundary & cell.bbox()) != boundary:
+        return False
+    anchored = boundary == cell.bbox()
+    nets = list(circuit.each_net())
+    for layer in roles.keys() | landings.keys():
+        info = lvs.layer_info(layer)
+        pair = (
+            (info.layer, info.datatype)
+            if info.layer >= 0
+            else metals[int(roles[layer][5:])]
+        )
+        stream_layer = layout.find_layer(*pair)
+        region = _union_of_net_regions(lvs, nets, layer)
+        if region.is_empty():
+            continue
+        if stream_layer is None:
+            return False
+        source = kdb.Region(cell.begin_shapes_rec(stream_layer)).merged()
+        if (source ^ region).is_empty():
+            anchored = True
+        elif not (source.overlapping(region) ^ region).is_empty():
+            return False
+    return anchored or not (roles or landings)
+
+
 def build_probes(
     lvsdb_path: str,
-    layout_path: str,
+    top_cell: Any,
     *,
-    top: str,
     metals: Sequence[tuple[int, int]],
-    dbu_um: float,
     contact: tuple[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Probe every identified metal polygon and record gaps in net coverage.
@@ -270,14 +299,8 @@ def build_probes(
     """
     import klayout.db as kdb
 
-    layout = kdb.Layout()
-    layout.read(layout_path)
-    top_cell = layout.cell(top)
-    if top_cell is None:
-        raise _pex_error(
-            f"net correspondence: layout '{layout_path}' has no cell '{top}' "
-            "to read the curated deck's metal layers from"
-        )
+    layout = top_cell.layout()
+    top = top_cell.name
     lvs = kdb.LayoutVsSchematic()
     lvs.read(lvsdb_path)
     circuit = lvs.netlist().circuit_by_name(top)
@@ -288,12 +311,16 @@ def build_probes(
         )
     roles, uncertain = _layer_roles(lvs, circuit, layout, top_cell, metals)
     landings = _contact_landings(lvs, layout, top_cell, contact, metals)
+    if not _coordinates_agree(lvs, circuit, top_cell, metals, roles, landings):
+        return [], [
+            {"runset_cluster_id": net.cluster_id, "reason": "coordinate_mismatch"}
+            for net in circuit.each_net()
+        ]
     roles.update(dict.fromkeys(landings, "metal0"))
     layers = sorted(roles.keys() | uncertain.keys())
     probes = []
     incomplete = []
     for net in circuit.each_net():
-        name = _escaped_net_name(net.expanded_name())
         for layer in layers:
             region = lvs.polygons_of_net(net, layer, True)
             if region is None or region.is_empty():
@@ -302,7 +329,12 @@ def build_probes(
                 region = region & landings[layer]
             candidates = [roles[layer]] if layer in roles else uncertain[layer]
             points, gaps = _layer_probes(
-                region, name, layer, candidates, certain=layer in roles, dbu_um=dbu_um
+                region,
+                net.cluster_id,
+                layer,
+                candidates,
+                certain=layer in roles,
+                dbu_um=layout.dbu,
             )
             probes.extend(points)
             incomplete.extend(gaps)
@@ -316,84 +348,96 @@ def build_probes(
 
 def _probe_hits(
     probe_results: Sequence[Mapping[str, Any]],
-) -> tuple[dict[str, set[tuple[str, int]]], set[tuple[str, int]], set[str]]:
+) -> tuple[dict[int, set[tuple[str, int]]], set[tuple[str, int]], set[int]]:
     """Return confirmed hits, possible cluster hits and nets with a probe miss."""
-    hits: dict[str, set[tuple[str, int]]] = defaultdict(set)
+    hits: dict[int, set[tuple[str, int]]] = defaultdict(set)
     possible: set[tuple[str, int]] = set()
-    missed: set[str] = set()
+    missed: set[int] = set()
     for result in probe_results:
         parts = str(result.get("name") or "").split("|")
         if len(parts) != 4 or parts[0] not in {"kltcorr", "kltmaybe"}:
             continue
+        if not parts[2].isdecimal():
+            continue
+        cluster = int(parts[2])
         if result.get("found"):
             hit = (str(result["net"]), int(result["cluster_id"]))
             if parts[0] == "kltcorr":
-                hits[parts[2]].add(hit)
+                hits[cluster].add(hit)
             else:
                 possible.add(hit)
         elif parts[0] == "kltcorr":
-            missed.add(parts[2])
+            missed.add(cluster)
     return hits, possible, missed
 
 
 def correspondence(
-    runset_net_names: Sequence[str],
+    runset_nets: Sequence[Mapping[str, Any]],
     probe_results: Sequence[Mapping[str, Any]],
     curated_parasitic_nets: Sequence[Mapping[str, Any]],
     incomplete_geometry: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """The ``net_correspondence`` envelope block (issue #6606 AC 2/3).
+    """Classify the two extractions by cluster ID on each side.
 
-    ``probe_results`` is the curated run's ``probes[]`` (a ``found`` entry
-    carries the final curated ``net`` name and ``cluster_id`` -- identity,
-    robust to two nets sharing one label); ``runset_net_names`` the selected
-    circuit's nets in the report's escaped spelling;
-    ``curated_parasitic_nets`` the curated ``parasitics.nets[]`` entries, so
-    a curated parasitic net nobody matched is listed even though it never
-    probes anything itself.
+    Runset report rows provide display names. Curated probe results identify
+    hits, and the parasitic rows enumerate even clusters with no probe hit.
     """
     hits, possible, missed = _probe_hits(probe_results)
-    gaps = list(incomplete_geometry)
+    names = {entry["net_id"]: entry["name"] for entry in runset_nets}
+    gaps = [
+        {**gap, "runset_net": names[gap["runset_cluster_id"]]}
+        for gap in incomplete_geometry
+    ]
     gaps.extend(
-        {"runset_net": net, "reason": "unresolved_probe"} for net in sorted(missed)
+        {"runset_cluster_id": i, "runset_net": names[i], "reason": "unresolved_probe"}
+        for i in sorted(missed)
     )
-    incomplete = {entry["runset_net"] for entry in gaps}
+    incomplete = {entry["runset_cluster_id"] for entry in gaps}
+    # A fragment with no probe can belong to any curated cluster, including
+    # one reached from another metal through vias. No peer can prove exclusivity.
+    unbounded = any(gap["reason"] == "no_interior_probe" for gap in gaps)
     matched: list[dict[str, Any]] = []
     unmatched_runset: list[str] = []
     disagreements: list[dict[str, Any]] = []
-    reverse: dict[tuple[str, int], list[str]] = defaultdict(list)
-    for runset_net in runset_net_names:
+    reverse: dict[tuple[str, int], list[int]] = defaultdict(list)
+    for runset_net in names:
         for hit in hits.get(runset_net, ()):
             reverse[hit].append(runset_net)
-    for (name, cluster), runset_nets in sorted(reverse.items()):
-        if len(runset_nets) > 1:
+    for (name, cluster), fragments in sorted(reverse.items()):
+        if len(fragments) > 1:
             disagreements.append(
                 {
                     "kind": "merge",
                     "curated_net": name,
                     "cluster_id": cluster,
-                    "runset_nets": sorted(runset_nets),
+                    "runset_nets": sorted(names[i] for i in fragments),
                 }
             )
-    for runset_net in runset_net_names:
+    for runset_net in names:
         net_hits = sorted(hits.get(runset_net, ()))
         if (
             len(net_hits) == 1
             and len(reverse[net_hits[0]]) == 1
             and net_hits[0] not in possible
+            and not unbounded
             and runset_net not in incomplete
         ):
             name, cluster = net_hits[0]
             matched.append(
-                {"runset": runset_net, "curated": name, "cluster_id": cluster}
+                {
+                    "runset": names[runset_net],
+                    "runset_cluster_id": runset_net,
+                    "curated": name,
+                    "cluster_id": cluster,
+                }
             )
             continue
-        unmatched_runset.append(runset_net)
+        unmatched_runset.append(names[runset_net])
         if len(net_hits) > 1:
             disagreements.append(
                 {
                     "kind": "split",
-                    "runset_net": runset_net,
+                    "runset_net": names[runset_net],
                     "curated_nets": [name for name, _ in net_hits],
                     "curated_cluster_ids": [cluster for _, cluster in net_hits],
                 }
@@ -440,6 +484,10 @@ def preferred_renames(
     for entry in sorted(matched, key=lambda item: item["runset"]):
         runset_net, curated_net = entry["runset"], entry["curated"]
         if not _is_anonymous(runset_net) or _is_anonymous(curated_net):
+            continue
+        # A curated display label can contain spaces or SPICE syntax. Only
+        # adopt labels that form one unambiguous node token in a written card.
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_$|]*", curated_net):
             continue
         if curated_net.casefold() in kept or curated_net.casefold() in adopted:
             continue

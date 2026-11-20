@@ -37,9 +37,12 @@ false`.
   `poly`, `well`) to the *final* net name and `cluster_id`, post-purge and
   post-rename, on the live `LayoutToNetlist`. The join reuses this machinery
   wholesale; no new extraction-side API was added for it.
-- **M3 — coordinates agree.** Both engines' per-net polygons land in the
-  original stream's coordinate space (the inverter fixture's shapes compare
-  equal, dbu 0.001 both sides), so a geometric join needs no transforms.
+- **M3 — the runset can change the coordinate grid.** The IHP inverter
+  uses 0.001 µm/DBU on both sides and its metal islands overlay the source.
+  In a 0.002 µm/DBU GDS, setting `dbu(0.001)` in the runset doubled the
+  persisted integer coordinates. Both saved databases advertised 0.002.
+  A point at x = 1 µm then landed on the neighbouring pad at x = 2 µm.
+  The join checks the saved geometry against the source before probing.
 
 ## Measured refutations (why the rule is what it is)
 
@@ -68,7 +71,10 @@ false`.
 
 ## The landed rule
 
-Use the runset layer's original GDS layer and datatype when available. For
+Use the runset layer's original GDS layer and datatype when available.
+Verify that each identified layer reproduces the complete source islands it
+overlaps. Either the full circuit bounding box or a whole nonempty source
+mask must agree in source coordinates. A mismatch withholds every pairing. For
 anonymous layers, compare the selected circuit's per-layer union with the
 complete overlapping islands of each original mask. This comparison allows
 the circuit to omit whole islands. Containment of at least 99 % of the
@@ -92,12 +98,15 @@ A unique pairing with complete probe coverage earns a **match**. A polygon
 without a usable interior point, an unresolved probe, or an ambiguous metal
 assignment leaves the affected runset net unmatched. Probes of candidate
 roles on uncertain layers can rule out exclusive ownership by another net.
-Only confirmed geometry contributes to split and merge reports.
+When a fragment has no interior grid point its possible curated owners are
+unknown. In that case every pairing is withheld. Confirmed probe hits still
+contribute to split and merge reports. Runset cluster IDs identify the probe
+owners throughout, including nets with multiple labels or punctuation.
 
-The merged leg is the runset leg's own netlist rewritten in place: matched
-nodes renamed (a named runset net keeps its name — device-side truth; an
-anonymous one adopts its curated counterpart's label, never onto a
-colliding name), plus one lumped series `R` (node→hub), one ground `C`,
+The merged leg is staged privately until the merge succeeds. A named runset
+net keeps its SPICE spelling after escaping and collision resolution. An
+anonymous net can adopt a unique, SPICE-safe curated label. The writer
+adds one lumped series `R` (node→hub), one ground `C`,
 matched coupling capacitors, and the deck's substrate DC tie. This is
 deliberately **coarser than the curated engine's own star** — the curated
 netlist distributes a net's R across its *curated* device terminals,
