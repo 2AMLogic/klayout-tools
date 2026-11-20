@@ -78,6 +78,8 @@ from .decks import (
     get_unmodeled_rules,
     get_unmodeled_voltage_markers,
 )
+from .drc_attribution import attribute_to_instance as _attribute_to_instance
+from .drc_attribution import attribute_violation
 from .drc_check_kinds import (
     _ANTENNA_CHECKS,
     _AREA_CHECKS,
@@ -1485,7 +1487,7 @@ def _record_violation(
     points: list[list[int]] | None,
 ) -> None:
     """Append one ``violations[]`` entry for ``rule`` and bump its count."""
-    source_cell, source_path = _attribute_to_instance(cell, bbox)
+    source_cell, source_path = attribute_violation(rule, cell, bbox)
     state.violations.append(
         {
             "rule": rule.id,
@@ -2270,6 +2272,14 @@ def run_drc(
     shared ``source_cell``/``source_path`` name the reused definition; the
     distinct ``bbox`` locates the specific placement).
 
+    The exception is a native physical-layer ``"ongrid"`` marker (issue
+    #6447): a vertex of the *merged* region can land on a child's boundary
+    without the child drawing anything off-grid there. It is attributed to
+    the one placement whose own source edges supply the offending
+    coordinate(s) at that point (:mod:`klayout_tools.drc_attribution`), and
+    both fields are ``None`` when that evidence is absent, conflicting or
+    unprovable.
+
     ``coverage`` reports what was actually checked, purely additive to the
     JSON contract (see ``docs/json-contract.md``; no ``schema_version``
     bump). A rule whose ``layer``/``other_layer`` is absent from ``path``
@@ -2708,72 +2718,6 @@ def rerun_drc_report(
         )
 
     return drc_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
-
-
-def _attribute_to_instance(
-    top_cell: Any, bbox: Any
-) -> tuple[str | None, list[str] | None]:
-    """Map a violation ``bbox`` (in ``top_cell`` coordinates) back to the
-    innermost placed instance whose own bounding box fully contains it.
-
-    Returns a ``(source_cell, source_path)`` pair. ``source_cell`` is the
-    cell-definition name of that innermost instance and ``source_path`` is
-    the chain of cell names from ``top_cell``'s direct child down to it
-    (inclusive). Both are ``None`` when no single placed instance contains
-    ``bbox`` -- i.e. the violation is top-level geometry, or its bbox
-    straddles an instance boundary (a spacing/enclosure violation *between*
-    two placements belongs to neither), so the caller's top-cell attribution
-    is the only honest answer.
-
-    This never touches the flattened geometry the check actually ran on: it
-    is a pure, additive lookup over the instance tree, spatially restricted
-    to ``bbox`` via ``Cell.begin_instances_rec_touching`` so it stays cheap
-    even for macros with hundreds of thousands of placements. The instance
-    tree is walked depth-first by KLayout; among every candidate whose world
-    bbox contains the violation, the *deepest* one (longest instance path)
-    wins, with a deterministic tie-break (smallest world-bbox area, then
-    lexicographic path) so repeated runs and different KLayout builds agree.
-    """
-    best_depth = -1
-    best_area: int | None = None
-    best_path: list[str] | None = None
-
-    it = top_cell.begin_instances_rec_touching(bbox)
-    while not it.at_end():
-        inst_cell = it.inst_cell()
-        world = (it.trans() * it.inst_trans()) * inst_cell.bbox()
-        # Full containment (not mere touching): the violation must sit wholly
-        # inside this placement for it to be the origin. `begin_..._touching`
-        # over-returns edge-touching neighbours, so filter explicitly.
-        if (
-            world.left <= bbox.left
-            and world.bottom <= bbox.bottom
-            and world.right >= bbox.right
-            and world.top >= bbox.top
-        ):
-            path = [ie.inst().cell.name for ie in it.path()]
-            path.append(inst_cell.name)
-            depth = len(path)
-            area = world.width() * world.height()
-            if (
-                depth > best_depth
-                or (depth == best_depth and best_area is not None and area < best_area)
-                or (
-                    depth == best_depth
-                    and best_area is not None
-                    and area == best_area
-                    and best_path is not None
-                    and path < best_path
-                )
-            ):
-                best_depth = depth
-                best_area = area
-                best_path = path
-        it.next()
-
-    if best_path is None:
-        return None, None
-    return best_path[-1], best_path
 
 
 def _run_check(
