@@ -9,7 +9,7 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>]
+klt functional-verification <request> [--base-dir <dir>] [--check <report> | --mutations <proposals>]
                                 [--pdk <variant>] [--pdk-root <root>] [--format text|json]
 ```
 
@@ -58,6 +58,8 @@ args.
   instead of the request file's own directory. See
   "[Archived requests: `--base-dir`](#archived-requests---base-dir)" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `--check <report>` compares a committed report's input hashes with the
+  current request and files. See [Checking a committed report](#checking-a-committed-report).
 - `--mutations <proposals>` — optional, issue #1592: run mutation testing
   against the same `<request>` — see "Mutation testing: `--mutations`"
   below.
@@ -66,6 +68,36 @@ args.
   see "Gate-level cell models: `request.pdk`" below. Each flag overrides the
   corresponding `request.pdk` member (`variant`/`root`); the request block
   itself supplies the required `cell_library`.
+
+## Checking a committed report
+
+```sh
+klt functional-verification request.json --check fv-report.json --format json
+```
+
+This command checks the inputs of either a passing or a failing run. It reads
+files from the current request using the usual file, stdin, inline JSON,
+`--base-dir` and PDK resolution rules. It needs no simulator and writes no
+run artifacts.
+
+| Report field | Input checked |
+| --- | --- |
+| `provenance.request_sha256` | SHA-256 of the complete parsed request serialized as compact JSON with sorted object keys. Formatting and object key order can change. Array order is significant. |
+| `environment.sources[i].sha256` | Bytes of each resolved source in build order, including any resolved PDK cell models. |
+| `provenance.input.content_hash` | The shared source-role hash for an RTL run. |
+| `from_synthesize.netlist_sha256` | Bytes of the current synthesized netlist against the digest captured by the FV run, even if synthesis has since produced a new report. |
+| `provenance.sdf_sha256` | Bytes of the original `options.sdf.file` before simulator-specific rewrites. Present on SDF runs. |
+
+The JSON result has `mode: "check"` and a `checks` array. Each entry contains
+`field`, `expected` (committed), `actual` (current), and `match`. A complete
+match exits **0** (`status: "match"`). Drift exits **3** (`status: "drifted"`).
+Malformed requests or reports, unreadable inputs, and legacy reports missing
+a required hash exit **1**. Regenerate a legacy report to record the pins.
+Text output names each changed field and shows both values.
+
+This check covers input freshness. Tool binaries, cocotb module contents,
+transitive includes, mutation proposals, seed replay, and simulation outputs
+are outside its scope.
 
 ## Archived requests: `--base-dir`
 
@@ -1869,6 +1901,8 @@ rule deck — `provenance.pdk`/`provenance.deck` are always `null` (see
 remains the contract's own reproducibility surface.
 
 ## Exit codes
+
+For `--check` exit codes, see [Checking a committed report](#checking-a-committed-report).
 
 | Code | Meaning |
 | --- | --- |
