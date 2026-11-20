@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -21,7 +23,9 @@ exit 0
 """
 
 
-def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
+def _install(
+    tmp_path: Path, extra_env: dict[str, str | None], *, klt_stub: str | None = None
+) -> list[str]:
     stub_dir = tmp_path / "stub"
     stub_dir.mkdir()
     docker = stub_dir / "docker"
@@ -29,7 +33,9 @@ def _install(tmp_path: Path, extra_env: dict[str, str | None]) -> list[str]:
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     # Keep host PDK discovery out of the recorded mounts, even with HOME unset.
     klt = stub_dir / "klt"
-    klt.write_text("#!/bin/sh\nexit 1\n")
+    if klt_stub is None:
+        klt_stub = "exit 1"
+    klt.write_text(f"#!/bin/sh\n{klt_stub}\n")
     klt.chmod(klt.stat().st_mode | stat.S_IXUSR)
     dest = tmp_path / "dest"
     log = tmp_path / "argv.log"
@@ -93,6 +99,33 @@ def test_wrapper_forwards_nothing_extra_when_unset(tmp_path: Path) -> None:
 
 def _mounts(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+
+
+requires_jq = pytest.mark.skipif(
+    shutil.which("jq") is None, reason="PDK discovery requires jq"
+)
+
+
+@requires_jq
+def test_wrapper_mounts_pdk_find_root_read_only(tmp_path: Path) -> None:
+    root = tmp_path / "pdkstore"
+    (tmp_path / "pdk-find.json").write_text(json.dumps({"root": str(root)}))
+    argv = _install(
+        tmp_path,
+        {},
+        klt_stub='[ "$*" = "pdk find --format json" ] && cat "$HOME/pdk-find.json"',
+    )
+    assert f"{root}:{root}:ro" in _mounts(argv)
+
+
+@requires_jq
+def test_wrapper_skips_pdk_mount_when_pdk_find_omits_root(tmp_path: Path) -> None:
+    argv = _install(tmp_path, {}, klt_stub="echo '{}'")
+    cwd = tmp_path / "cwd"
+    cache = tmp_path / ".cache" / "klt"
+    assert sorted(_mounts(argv)) == sorted(
+        [f"{cwd}:{cwd}", "/tmp:/tmp", f"{cache}:{cache}:ro"]
+    )
 
 
 def test_wrapper_mounts_default_klt_cache_root(tmp_path: Path) -> None:

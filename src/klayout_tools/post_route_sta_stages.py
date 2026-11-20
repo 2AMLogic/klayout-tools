@@ -30,11 +30,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ._sta_request_diag import extract_block as _extract_block
 from .post_route_sta_path_groups import (
     _SLACK_CONSISTENCY_TOL_NS,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
-    _extract_block,
 )
 
 #: Issue #5783: brackets the per-side worst-path stage reports
