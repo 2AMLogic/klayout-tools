@@ -3949,9 +3949,17 @@ declaring-not-forwarding subcircuit:
 | Instance parameters | Verdict |
 | --- | --- |
 | `mult=N` (N>1), no `m=` | finding `drive_1x` — the device simulates 1x drive |
-| `m=M`, `mult` absent (M≠1) or `mult=N≠M` | finding `drive_mismatch_disagreement` — the drive and vendor multiplier settings differ |
+| `m=M`, `mult` absent (M≠D) or `mult=N≠M` | finding `drive_mismatch_disagreement` — the drive and vendor multiplier settings differ |
 | `mult=N m=N` (equal) | clean |
-| Only `mult=1` or only `m=1` | clean |
+| Only `mult=1` or only `m=D` | clean |
+
+When the instance omits `mult=`, the comparison uses the subcircuit
+header's declared default `D` — the value the simulator itself resolves the
+parameter to ([#6812](https://github.com/2AMLogic/klayout-tools/issues/6812))
+— so on a subcircuit whose header says `mult=4`, an instance `m=4` with no
+`mult=` is the clean pair and `m=1` is the disagreement. An explicit
+instance `mult=` always wins over the header, and a nonnumeric declared
+default (an `{expression}`) leaves `D` at 1.
 
 A finding carries the instance name, the target subcircuit, both raw
 parameter values and a note recommending that both forms be set to the
