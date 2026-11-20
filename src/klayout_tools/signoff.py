@@ -50,6 +50,7 @@ from typing import (
     get_type_hints,
 )
 
+from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
@@ -4769,85 +4770,15 @@ def _cited_envelope(
     return value, None
 
 
-def _resolve_json_pointer(document: Any, pointer: str) -> tuple[Any, bool]:
-    """Resolve ``pointer`` -- an RFC 6901 JSON Pointer -- against ``document``,
-    returning ``(value, True)`` on success or ``(None, False)`` on any
-    failure (issue #2342).
-
-    Implements RFC 6901 as written, and nothing beyond it:
-
-    - A non-empty pointer must start with ``"/"``; each subsequent
-      ``"/"``-separated token names one step down.
-    - Each token is unescaped ``~1`` -> ``"/"`` **then** ``~0`` -> ``"~"``,
-      in that order (the order matters: the reverse would turn an escaped
-      ``~1`` back into a separator). A ``~`` followed by anything other than
-      ``0`` or ``1`` is malformed.
-    - Against a JSON object, a token is a key, matched literally.
-    - Against a JSON array, a token must be ``"0"`` or a digit string with
-      no leading zero, and must be in range. ``"-"`` (RFC 6901's
-      "past the last element") never resolves to an existing value, so it is
-      a failure here.
-    - Against any other value (a string, number, boolean, or ``null``) there
-      is nothing to step into: failure.
-
-    The empty pointer ``""`` -- "the whole document" -- never reaches this
-    function: :func:`_normalize_evidence_pointer` normalizes it to ``None``
-    (an absent pointer), which is the same citation by definition.
-
-    Deliberately pure and total: no exception escapes, because a manifest is
-    caller-supplied data and a mistyped pointer must degrade *that one item*
-    to ``"unmet"``/:data:`_REASON_INVALID_POINTER`, never abort the report.
-    """
-    if not pointer.startswith("/"):
-        return None, False
-
-    current = document
-    for raw_token in pointer.split("/")[1:]:
-        token, ok = _unescape_json_pointer_token(raw_token)
-        if not ok:
-            return None, False
-        if isinstance(current, dict):
-            if token not in current:
-                return None, False
-            current = current[token]
-        elif isinstance(current, list):
-            if not token.isdigit() or (len(token) > 1 and token.startswith("0")):
-                return None, False
-            index = int(token)
-            if index >= len(current):
-                return None, False
-            current = current[index]
-        else:
-            return None, False
-    return current, True
-
-
-def _unescape_json_pointer_token(token: str) -> tuple[str, bool]:
-    """Unescape one RFC 6901 reference token: ``~1`` -> ``"/"``, then ``~0``
-    -> ``"~"``. Returns ``(unescaped, False)`` for a malformed escape -- a
-    ``~`` that is last in the token or is followed by anything other than
-    ``0``/``1`` -- which RFC 6901 leaves undefined and this module treats as
-    an error rather than silently passing through (a pointer nobody can read
-    as written must not be read as something else)."""
-    out: list[str] = []
-    index = 0
-    while index < len(token):
-        char = token[index]
-        if char != "~":
-            out.append(char)
-            index += 1
-            continue
-        if index + 1 >= len(token):
-            return "", False
-        escaped = token[index + 1]
-        if escaped == "0":
-            out.append("~")
-        elif escaped == "1":
-            out.append("/")
-        else:
-            return "", False
-        index += 2
-    return "".join(out), True
+# The RFC 6901 traversal itself moved to :mod:`._json_pointer` when
+# ``evidence claims``/``evidence render`` adopted it (issue #6860); these
+# aliases keep this module's long-standing private names -- and the tests
+# that import them -- pointing at the one shared implementation. The empty
+# pointer ``""`` ("the whole document") still never reaches the resolver
+# through this module: :func:`_normalize_evidence_pointer` normalizes it to
+# ``None`` (an absent pointer), which is the same citation by definition.
+_resolve_json_pointer = _json_pointer.resolve_json_pointer
+_unescape_json_pointer_token = _json_pointer.unescape_json_pointer_token
 
 
 def _yield_samples_content_hash(

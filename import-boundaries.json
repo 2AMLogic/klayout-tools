@@ -756,6 +756,7 @@
         "klayout_tools._engine_proc",
         "klayout_tools._engine_remedy",
         "klayout_tools._git_tracked",
+        "klayout_tools._json_pointer",
         "klayout_tools._jsongz",
         "klayout_tools._jsonnum",
         "klayout_tools._layout",
