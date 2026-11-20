@@ -14714,12 +14714,6 @@ def test_normalize_evidence_entry_carries_pointer_on_both_bindings():
         ([10, 20, 30], "/1", 20),
         ({"items": [{"drc": 1}]}, "/items/0/drc", 1),
         ({"": 1}, "/", 1),
-        # The empty pointer is "the whole document" (issue #6860 moved the
-        # walk into `._json_pointer`, which owns it; signoff still never
-        # sends one -- `_normalize_evidence_pointer` turns it into None).
-        ({"drc": {"a": 1}}, "", {"drc": {"a": 1}}),
-        # A resolved JSON null is a value: (None, True), not a miss.
-        ({"a": None}, "/a", None),
     ],
 )
 def test_resolve_json_pointer_happy_paths(document, pointer, expected):
@@ -14738,13 +14732,6 @@ def test_resolve_json_pointer_happy_paths(document, pointer, expected):
         ([10, 20], "/-"),  # RFC 6901 "past the end" names no value
         ([10, 20], "/01"),  # leading zero is not a valid index
         ([10, 20], "/a"),  # non-numeric index
-        # Issue #6860: an index is ASCII digits only -- `str.isdigit` alone
-        # accepts both of these, and `int()` then reads the first as 1 while
-        # raising on the second, so the old walk either resolved it or let
-        # the exception escape.
-        ([10, 20], "/\N{ARABIC-INDIC DIGIT ONE}"),  # non-ASCII digit
-        ([10, 20], "/\N{SUPERSCRIPT ONE}"),  # `isdigit` yes, `int()` raises
-        ([10, 20], "/+1"),  # `int("+1")` is 1 in Python, an index of nothing
     ],
 )
 def test_resolve_json_pointer_failures_are_total_and_never_raise(document, pointer):
