@@ -224,14 +224,17 @@ compiles ngspice and xschem from source, which under arm64 emulation is a
 
 Issue #6219 (fleet rule 2am#7275): `tools.xschem` is the fleet's master xschem
 pin, and chip CI installs that exact build **credential-free** from a public
-release asset of this repo -- not from the batch image's private S3 artifact.
+release asset of [2AMLogic/xschem](https://github.com/2AMLogic/xschem), the
+fleet's public fork of upstream xschem (operator ruling 2026-11-19) -- not from
+the batch image's private S3 artifact, and not from a release of this repo.
 
 | | |
 |---|---|
-| release | `xschem-3.4.7` (`tools.xschem.release_tag`; deliberately not `v*`, which would trigger the PyPI publish workflow) |
+| release repo | `2AMLogic/xschem` (`tools.xschem.release_repo`) |
+| release | `3.4.7-2am.1` (`tools.xschem.release_tag`; the fork's `<upstream tag>-2am.<build>`) |
 | asset | `xschem-3.4.7-noble-x86_64.tar.gz` (`tools.xschem.asset`), Ubuntu 24.04 x86_64 |
 | integrity | `tools.xschem.sha256`, verified **before** unpacking |
-| built by | `.github/workflows/publish-xschem-asset.yml` (`workflow_dispatch`; same recipe as the Dockerfile's stage-1 xschem block, fails if the tag resolves to anything but the pinned commit) |
+| built by | the fork's `.github/workflows/release.yml` (`workflow_dispatch`, operator-run) |
 
 Copy [`scripts/install-xschem.sh`](../../scripts/install-xschem.sh) into the chip
 repo (it is self-contained; needs `curl`, `jq`, `tar`) and run it:
@@ -244,16 +247,23 @@ xschem -q -n -x -o out/ top.sch           # headless netlist
 ```
 
 The script reads the pin from this repo's manifest (the local copy when run
-inside this repo, else `main`'s; override with `XSCHEM_MANIFEST`), fails closed
-if `sha256` is absent or mismatches, and installs `bin/xschem` as a wrapper that
-exports `XSCHEM_SHAREDIR`, so the tree is relocatable even though it was built
-with `--prefix=/opt/eda/xschem`. Runtime libraries on a bare runner: `libcairo2
-libx11-6 libxcb1 libxpm4 libxrender1 tcl tk`.
+inside this repo, else `main`'s; override with `XSCHEM_MANIFEST`), downloads
+`https://github.com/<release_repo>/releases/download/<release_tag>/<asset>`,
+fails closed if `sha256` is absent or mismatches, and installs `bin/xschem` as a
+wrapper that exports `XSCHEM_SHAREDIR`, so the tree is relocatable even though
+it was built with `--prefix=/opt/eda/xschem`. Runtime libraries on a bare
+runner: `libcairo2 libx11-6 libxcb1 libxpm4 libxrender1 tcl tk`.
 
-**Publishing / re-pinning** is two steps because the sha256 is the hash of the
-uploaded bytes: run the workflow, then copy the sha256 from its job summary into
-`tools.xschem.sha256`. The tarball is not bit-reproducible, so a re-dispatch
-changes the sha256.
+**Publishing / re-pinning** happens in the fork, not here, and is two steps
+because the sha256 is the hash of the uploaded bytes: dispatch the fork's
+**Build and publish an xschem release** workflow with the upstream `tag` and a
+`build` number (a rebuild of the same tag takes the next number), then record
+the values from its run summary in `tools.xschem` (`release_tag`, `sha256`) by
+PR. The tarball is not bit-reproducible, so a rebuild changes the sha256. The
+release's git tag points at the upstream commit, so its source archives are the
+exact source the binary was built from, and upstream's `LICENSE` is attached.
+Until the first fork release is recorded, `tools.xschem.sha256` is absent and
+`install-xschem.sh` fails closed with an explicit message.
 
 ## Known gap
 

@@ -2,9 +2,10 @@
 # Install the fleet's pinned xschem build, credential-free -- issue #6219
 # (fleet rule: 2AMLogic/2am#7275).
 #
-# Downloads the PUBLIC release asset that .github/workflows/publish-xschem-asset.yml
-# published, verifies its sha256 against the value recorded beside the pin in
-# docker/eda-sim/pdk-versions.json (`tools.xschem.sha256`) BEFORE anything is
+# Downloads the PUBLIC release asset published by 2AMLogic's xschem fork
+# (https://github.com/<release_repo>/releases/download/<release_tag>/<asset>,
+# all three read from `tools.xschem` in docker/eda-sim/pdk-versions.json),
+# verifies its sha256 against `tools.xschem.sha256` BEFORE anything is
 # unpacked, then unpacks it. No token, no AWS credentials.
 #
 # SELF-CONTAINED ON PURPOSE: chip-repo CI copies this one file, so it does not
@@ -21,6 +22,8 @@
 #   $XSCHEM_MANIFEST            a path or http(s) URL of pdk-versions.json
 #   ../docker/eda-sim/pdk-versions.json next to this script (inside this repo)
 #   the manifest on this repo's main branch (a copied script, e.g. chip CI)
+#   -- this repo hosts the pin; the release asset lives in the fork named by
+#   the manifest's `release_repo`
 # A copied script therefore tracks the fleet pin; to freeze a chip repo on a
 # specific pin, point XSCHEM_MANIFEST at a vendored manifest or a commit-pinned
 # raw URL.
@@ -36,8 +39,8 @@
 
 set -euo pipefail
 
-RELEASE_REPO="${XSCHEM_RELEASE_REPO:-2AMLogic/klayout-tools}"
-DEFAULT_MANIFEST_URL="https://raw.githubusercontent.com/${RELEASE_REPO}/main/docker/eda-sim/pdk-versions.json"
+MANIFEST_REPO="2AMLogic/klayout-tools"
+DEFAULT_MANIFEST_URL="https://raw.githubusercontent.com/${MANIFEST_REPO}/main/docker/eda-sim/pdk-versions.json"
 
 die() { echo "error: $*" >&2; exit 1; }
 
@@ -86,6 +89,7 @@ fi
 
 tag="$(jq -er '.tools.xschem.tag' "$manifest")" || die "manifest has no tools.xschem.tag"
 asset="$(jq -er '.tools.xschem.asset' "$manifest")" || die "manifest has no tools.xschem.asset"
+release_repo="$(jq -er '.tools.xschem.release_repo' "$manifest")" || die "manifest has no tools.xschem.release_repo"
 release_tag="$(jq -er '.tools.xschem.release_tag' "$manifest")" || die "manifest has no tools.xschem.release_tag"
 expected_sha256="$(jq -er '.tools.xschem.sha256' "$manifest")" \
     || die "manifest has no tools.xschem.sha256 yet -- the asset has not been published/recorded (issue #6219)"
@@ -102,7 +106,7 @@ if [[ -f "$marker" && "$FORCE" -eq 0 && "$(cat "$marker")" == "$want" ]]; then
 fi
 
 # -- download, verify, THEN unpack -------------------------------------------
-url="https://github.com/${RELEASE_REPO}/releases/download/${release_tag}/${asset}"
+url="https://github.com/${release_repo}/releases/download/${release_tag}/${asset}"
 echo "Fetching $url ..."
 curl -fL --connect-timeout 15 --retry 3 --retry-all-errors -o "$work/$asset" "$url" \
     || die "failed to fetch $url"

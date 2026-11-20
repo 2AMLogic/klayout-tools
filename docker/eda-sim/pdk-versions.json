@@ -118,19 +118,25 @@
       "commit": "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0",
       "repo": "https://github.com/StefanSchippers/xschem",
       "asset": "xschem-3.4.7-noble-x86_64.tar.gz",
-      "release_tag": "xschem-3.4.7",
+      "release_repo": "2AMLogic/xschem",
+      "release_tag": "3.4.7-2am.1",
       "_comment": [
         "Same pin 2AMLogic/gf180-sar-adc's sim/toolchain.json carries. Tag ->",
         "commit re-verified live against the upstream GitHub API on 2026-09-09:",
         "refs/tags/3.4.7 is an annotated tag (3851bc5a...) dereferencing to",
         "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0.",
         "",
-        "`asset` / `release_tag` / `sha256` (issue #6219) name the PUBLIC release",
-        "asset chip CI installs credential-free via scripts/install-xschem.sh;",
-        ".github/workflows/publish-xschem-asset.yml builds and uploads it. `sha256`",
-        "is the hash of the uploaded bytes, so it is recorded AFTER the first",
-        "publish run (the job summary prints it). `release_tag` must not start with",
-        "`v` -- that namespace triggers the PyPI publish workflow."
+        "`release_repo` / `release_tag` / `asset` / `sha256` (issue #6219) name the",
+        "PUBLIC release asset chip CI installs credential-free via",
+        "scripts/install-xschem.sh, which downloads",
+        "https://github.com/<release_repo>/releases/download/<release_tag>/<asset>.",
+        "The release lives in 2AMLogic's public fork of xschem, not in this repo",
+        "(operator ruling 2026-11-19): its release workflow is dispatched with an",
+        "upstream `tag` and a `build` number and publishes release",
+        "`<tag>-2am.<build>`, whose git tag is the upstream commit, so the",
+        "release's source archives are the source the binary was built from.",
+        "`sha256` is the hash of the uploaded bytes, so it is recorded AFTER the",
+        "first fork release (an operator dispatch; the run summary prints it)."
       ]
     },
     "ciel": {

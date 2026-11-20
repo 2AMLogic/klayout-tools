@@ -1,9 +1,9 @@
 """Tests for the public xschem release asset route (issue #6219).
 
 The fleet pin lives in docker/eda-sim/pdk-versions.json `tools.xschem`; chip CI
-installs that build credential-free from a public release of this repo via
-scripts/install-xschem.sh. Split out of test_eda_sim_image.py to stay under the
-500-line file-size limit.
+installs that build credential-free from a public release of 2AMLogic's xschem
+fork (`tools.xschem.release_repo`) via scripts/install-xschem.sh. Split out of
+test_eda_sim_image.py to stay under the 500-line file-size limit.
 """
 
 from __future__ import annotations
@@ -42,27 +42,39 @@ def _code_only(path: Path) -> str:
 # Public xschem release asset (issue #6219): the credential-free install route.
 # ---------------------------------------------------------------------------
 
-XSCHEM_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-xschem-asset.yml"
 INSTALL_XSCHEM = REPO_ROOT / "scripts" / "install-xschem.sh"
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 
 
-def test_xschem_release_tag_cannot_trigger_a_publish_workflow(manifest):
-    """`v*` fires publish.yml (PyPI); `klt-*-native-v*` fires publish-native.yml."""
-    tag = manifest["tools"]["xschem"]["release_tag"]
-    assert not tag.startswith("v"), f"release_tag {tag!r} would trigger publish.yml"
-    assert not re.fullmatch(r"klt-.*-native-v.*", tag)
-    assert tag != manifest["tools"]["xschem"]["tag"], "bare upstream tag collides"
+def test_xschem_release_fields_agree_with_the_pin(manifest):
+    """The fork cuts `<tag>-2am.<build>` and names the asset after the tag.
 
-
-def test_xschem_asset_workflow_is_manual_only_and_reads_the_manifest():
-    body = _code_only(XSCHEM_WORKFLOW)
-    assert "workflow_dispatch:" in body
-    assert "push:" not in body and "tags:" not in body, (
-        "the asset workflow must never fire from a tag push"
+    Bumping `tools.xschem.tag` without repointing `release_tag`/`asset` would
+    leave the installer fetching a build of the OLD version, which the sha256
+    would still bless if the stale hash were left in place.
+    """
+    xschem = manifest["tools"]["xschem"]
+    assert re.fullmatch(r"[\w.-]+/[\w.-]+", xschem["release_repo"]), (
+        "release_repo must be an `owner/name` GitHub repository"
     )
-    for field in ("tag", "commit", "repo", "asset", "release_tag"):
-        assert f".tools.xschem.{field}" in body, f"workflow must read {field} via jq"
-    assert "resolved" in body and "!= " in body, "commit-vs-pin assertion is gone"
+    assert re.fullmatch(re.escape(xschem["tag"]) + r"-2am\.\d+", xschem["release_tag"])
+    assert xschem["asset"] == f"xschem-{xschem['tag']}-noble-x86_64.tar.gz"
+
+
+def test_this_repo_publishes_no_xschem_release():
+    """Operator ruling 2026-11-19: the release asset lives in the xschem fork.
+
+    A workflow here that built xschem and ran `gh release` would be a second,
+    competing publisher (and a privileged `contents: write` one) for a binary
+    whose source and licence are not in this repository.
+    """
+    publishers = [
+        workflow.name
+        for workflow in sorted(WORKFLOWS.glob("*.y*ml"))
+        if "xschem" in _code_only(workflow).lower()
+        and "gh release" in _code_only(workflow)
+    ]
+    assert not publishers, f"xschem release published from this repo: {publishers}"
 
 
 def _fake_asset(tmp_path: Path) -> Path:
@@ -76,13 +88,29 @@ def _fake_asset(tmp_path: Path) -> Path:
     return asset
 
 
-def _run_install(tmp_path: Path, asset: Path, sha256: str | None):
-    """Run install-xschem.sh with `curl` shimmed to serve `asset` (no network)."""
+def _run_install(
+    tmp_path: Path,
+    asset: Path,
+    sha256: str | None,
+    fields: dict[str, str | None] | None = None,
+):
+    """Run install-xschem.sh with `curl` shimmed to serve `asset` (no network).
+
+    `fields` overrides keys of `tools.xschem` in the manifest the script reads
+    (a `None` value removes the key). The URL the script asked curl for is
+    recorded in `tmp_path / "curl-url"`.
+    """
     manifest = json.loads(MANIFEST_PATH.read_text())
+    xschem = manifest["tools"]["xschem"]
     if sha256 is None:
-        manifest["tools"]["xschem"].pop("sha256", None)
+        xschem.pop("sha256", None)
     else:
-        manifest["tools"]["xschem"]["sha256"] = sha256
+        xschem["sha256"] = sha256
+    for key, value in (fields or {}).items():
+        if value is None:
+            xschem.pop(key, None)
+        else:
+            xschem[key] = value
     mpath = tmp_path / "manifest.json"
     mpath.write_text(json.dumps(manifest))
     shim = tmp_path / "shim"
@@ -90,7 +118,8 @@ def _run_install(tmp_path: Path, asset: Path, sha256: str | None):
     curl = shim / "curl"
     curl.write_text(
         "#!/bin/sh\n"
-        'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+        'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; url="$1"; shift; done\n'
+        f'echo "$url" > "{tmp_path}/curl-url"\n'
         f'cp "{asset}" "$out"\n'
     )
     curl.chmod(0o755)
@@ -126,6 +155,15 @@ class TestInstallXschem:
         assert "sha256" in proc.stderr
         assert not prefix.exists()
 
+    def test_missing_release_repo_fails_closed(self, tmp_path):
+        asset = _fake_asset(tmp_path)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        proc, prefix = _run_install(tmp_path, asset, digest, {"release_repo": None})
+        assert proc.returncode != 0
+        assert "release_repo" in proc.stderr
+        assert not (tmp_path / "curl-url").exists(), "downloaded with no release_repo"
+        assert not prefix.exists()
+
     def test_verified_asset_is_unpacked_behind_a_relocating_wrapper(self, tmp_path):
         asset = _fake_asset(tmp_path)
         digest = hashlib.sha256(asset.read_bytes()).hexdigest()
@@ -138,3 +176,35 @@ class TestInstallXschem:
             [str(prefix / "bin" / "xschem")], capture_output=True, text=True
         )
         assert "XSCHEM V3.4.7" in out.stdout
+
+    def test_download_url_is_read_from_the_manifest_fork_release(
+        self, tmp_path, manifest
+    ):
+        """The repo, release tag and asset all come from the manifest.
+
+        Overriding them proves none is hardcoded in the script; the default
+        run then pins the shipped manifest to the fork's URL shape.
+        """
+        asset = _fake_asset(tmp_path)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        override = {
+            "release_repo": "example-org/xschem-fork",
+            "release_tag": "9.9.9-2am.7",
+            "asset": "custom-asset.tar.gz",
+        }
+        proc, _ = _run_install(tmp_path, asset, digest, override)
+        assert proc.returncode == 0, proc.stderr
+        assert (tmp_path / "curl-url").read_text().strip() == (
+            "https://github.com/example-org/xschem-fork"
+            "/releases/download/9.9.9-2am.7/custom-asset.tar.gz"
+        )
+
+        shipped = tmp_path / "shipped"
+        shipped.mkdir()
+        proc, _ = _run_install(shipped, asset, digest)
+        assert proc.returncode == 0, proc.stderr
+        xschem = manifest["tools"]["xschem"]
+        assert (shipped / "curl-url").read_text().strip() == (
+            f"https://github.com/{xschem['release_repo']}"
+            f"/releases/download/{xschem['release_tag']}/{xschem['asset']}"
+        )
