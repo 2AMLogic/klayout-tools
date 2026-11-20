@@ -238,6 +238,72 @@ def test_sg13g2_mos_array_rejects_ring_gap_below_psd_minimum(
     assert not output.exists()
 
 
+def _write_sg13g2_tech_lef(root, database_microns):
+    techlef = root / _SG13G2_VARIANT / "libs.ref" / "probe" / "techlef"
+    techlef.mkdir(parents=True)
+    (techlef / "probe__nom.tlef").write_text(
+        f"UNITS\n  DATABASE MICRONS {database_microns} ;\nEND UNITS\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("side", "gap_um", "drawn_open_um"),
+    [
+        # The PCell draws on its library grid (0.001 µm), so these cuts snap
+        # to 0.305 / 0.300 µm even though the output stream is 0.0005 µm;
+        # snapping on the output grid would draw 0.310 µm and accept them.
+        ("W", 0.661, "0.305"),
+        ("S", 0.661, "0.300"),
+    ],
+)
+def test_sg13g2_mos_array_rejects_psd_notch_on_finer_output_dbu(
+    tmp_path, sg13g2_pdk_root, side, gap_um, drawn_open_um
+):
+    _write_sg13g2_tech_lef(sg13g2_pdk_root, 2000)
+    output = tmp_path / "finer_dbu_notch.gds"
+    with pytest.raises(
+        GenError,
+        match=(
+            rf"ring_gap_um={gap_um} on SG13G2 draws a {drawn_open_um} µm pSD "
+            r"opening.*psd\.space\.1.*0\.31 µm.*increase ring_gap_um"
+        ),
+    ):
+        generate(
+            _sg13g2_mos_array_request(
+                sg13g2_pdk_root,
+                output,
+                flavor="nfet",
+                ring_gap_side=side,
+                ring_gap_um=gap_um,
+            )
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("gap_um", "expected_open_um"),
+    [(0.665, 0.31), (0.675, 0.32)],
+)
+def test_sg13g2_mos_array_accepts_psd_boundary_on_finer_output_dbu(
+    tmp_path, sg13g2_pdk_root, gap_um, expected_open_um
+):
+    _write_sg13g2_tech_lef(sg13g2_pdk_root, 2000)
+    output = tmp_path / "finer_dbu_ok.gds"
+    report = generate(
+        _sg13g2_mos_array_request(
+            sg13g2_pdk_root,
+            output,
+            flavor="nfet",
+            ring_gap_side="W",
+            ring_gap_um=gap_um,
+        )
+    )
+    assert report["dbu_um"] == 0.0005
+    assert _psd_opening_um(output, "W") == pytest.approx(expected_open_um)
+    assert run_drc(str(output), "sg13g2")["violations"] == []
+
+
 @pytest.mark.parametrize(
     ("gap_um", "offset_um", "expected_open_um"),
     [

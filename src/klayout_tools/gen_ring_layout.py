@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .gen_layer_params import (
@@ -93,11 +94,20 @@ def _validate_mos_array_implant_gap(
     the *snapped, offset-shifted* ring gap minus ``2 * margin``, while the
     PDK-agnostic :func:`klayout_tools.gen_describe._validate_ring_gap` only
     compares the *requested* gap against the generic
-    ``MIN_SAME_LAYER_SPACING_UM`` floor. On sg13g2 every request in
-    ``[0.4, 0.67)`` um therefore passed validation and drew a pSD notch that
-    ``psd.space.1`` (0.31 um) then flagged -- measured in #6790, where a
-    0.665 um gap passes or fails depending solely on where the shifted cut
-    faces snap on the manufacturing grid.
+    ``MIN_SAME_LAYER_SPACING_UM`` floor, so a request below ~0.67 um could
+    pass validation and draw a pSD notch that ``psd.space.1`` (0.31 um) then
+    flagged. #6790 measured the boundary on the default 0.001 um grid: at
+    offset 0, 0.66 um draws a 0.300 um opening (rejected) and 0.665 um draws
+    0.310 um (accepted), yet 0.665 um at offset 0.0025 um draws 0.305 um
+    (rejected) -- whether a request near 0.67 um passes depends on where the
+    shifted cut faces snap, so the *drawn* opening is checked, never the
+    requested width.
+
+    The PCell draws on the PCell library layout's dbu, which is not the output
+    stream's (a tech LEF declaring ``DATABASE MICRONS 2000`` writes 0.0005 um):
+    the cut is snapped and inset on the library grid, and only then converted
+    to the output grid, as KLayout rescales the PCell's geometry on
+    instantiation.
 
     Only the drawn notch is checked here -- deliberately *not* the GF180
     standalone validator's additional nominal ``spacing + 2 * margin``
@@ -105,16 +115,17 @@ def _validate_mos_array_implant_gap(
     the clean 0.665 um case #6790 measured as exactly on the boundary.
 
     sg13g2 only, deliberately (#6790's own scope): gf180mcu's ``mos_array``
-    ring (Pplus/Nplus, ``pplus.space.1`` 0.4 um) has the same arithmetic but
-    was not measured there, so its behaviour is left unchanged -- the
-    standalone ``guard_ring`` already has its own GF180-only validator, and
-    extending this check to further families/generators (``diff_pair``) is
+    ring (Pplus/Nplus, ``pplus.space.1`` 0.4 um) has the same arithmetic and
+    the same exposure (tracked in #6827), so its behaviour is left unchanged
+    -- the standalone ``guard_ring`` already has its own GF180-only validator,
+    and extending this check to further families/generators (``diff_pair``) is
     #6790's explicit out-of-scope.
     """
     from .decks import get_deck, get_layer_names, get_nominal_dbu
     from .gen import (
         GenError,
         _mos_array_layout,
+        _pcell_library,
         _shift_box,
         _snap_ring_box_um,
     )
@@ -193,23 +204,34 @@ def _validate_mos_array_implant_gap(
     ring = info["ring"]
     assert ring is not None and ring["gap"] is not None  # add_guard_ring=True
     ox, oy = info["ring_offset_um"]
-    dbu = resolve_pdk_dbu(pdk_info) or default_dbu
+    # The PCell draws on the library layout's dbu (`produce_impl`'s
+    # `self.layout.dbu`), not the output stream's: snap and inset the cut on
+    # that grid, exactly as `_insert_implant_ring` does ...
+    pcell_dbu = _pcell_library().layout().dbu
     snapped = _snap_ring_box_um(
-        _shift_box(ring["gap"]["box_um"], ox, oy), layer["mfg_grid_um"], dbu
+        _shift_box(ring["gap"]["box_um"], ox, oy), layer["mfg_grid_um"], pcell_dbu
     )
     axis = 0 if side in ("N", "S") else 1
-    gap_dbu = round(snapped[axis + 2] / dbu) - round(snapped[axis] / dbu)
-    opening_dbu = gap_dbu - 2 * round(margin_um / dbu)
-    if opening_dbu <= 0:
+    margin_dbu = round(margin_um / pcell_dbu)
+    lo_dbu = round(snapped[axis] / pcell_dbu) + margin_dbu
+    hi_dbu = round(snapped[axis + 2] / pcell_dbu) - margin_dbu
+    if hi_dbu - lo_dbu <= 0:
         # The implant opening closes entirely (a tap-ring gap of
         # 2 * margin_um or less): there is no notch, so the implant that
         # runs across the opening is doping field oxide -- harmless.
         return
-    if opening_dbu * dbu + 1e-9 >= required_um:
+    # ... then rescale each edge onto the output grid, as KLayout does when
+    # it instantiates the PCell into the output layout (half rounds up).
+    out_dbu = resolve_pdk_dbu(pdk_info) or default_dbu
+    scale = pcell_dbu / out_dbu
+    out_lo = math.floor(lo_dbu * scale + 0.5 + 1e-9)
+    out_hi = math.floor(hi_dbu * scale + 0.5 + 1e-9)
+    opening_um = (out_hi - out_lo) * out_dbu
+    if opening_um + 1e-9 >= required_um:
         return
     raise GenError(
         f"generator 'mos_array': params.ring_gap_um={gap_um} on "
-        f"{family.upper()} draws a {opening_dbu * dbu:.3f} µm {implant_name} "
+        f"{family.upper()} draws a {opening_um:.3f} µm {implant_name} "
         f"opening across ring_gap_side='{side}' -- below rule {rule.id} "
         f"({rule.description}, {required_um:.2f} µm) once the ring implant "
         f"extends {margin_um:.2f} µm into the opening from each cut face; "
