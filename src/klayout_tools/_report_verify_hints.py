@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from . import env_provenance
 from ._provenance import sha256_file
 from ._report_verify import hash_check, resolve_committed_path
 
@@ -26,7 +27,10 @@ def input_not_found_entry(
     report_path: str,
     found_relative_to_report: str | None,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
+    echoed: Any = None,
+    override: str | None = None,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -37,23 +41,49 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
+    - ``resolved_repo_root`` -- emitted exactly when the caller opts in
+      with ``include_repo_root``, whatever ``echoed`` is (an absent echo
+      under an override still reports the key, as ``None``). The value is
+      the repo root a repo-scoped ``{path, scope}`` echo (issue #5845) was
+      anchored on; ``None`` for every other echo shape and whenever
+      ``override`` supplied the reported ``path`` (issue #6461: anchored on
+      the cwd, not a repo root).
     - ``hint`` -- when the input sits next to the report, how to reach it;
-      ``None`` otherwise.
+      ``None`` otherwise. ``override_hint=None`` (issue #6840) means no
+      override flag exists for this input, and the remedy names no flag.
     """
     report_dir = os.path.dirname(os.path.abspath(report_path))
+    remedy = (
+        f"run --check from the report's directory, or pass {override_hint}"
+        if override_hint is not None
+        else "run --check from the report's directory"
+    )
     hint = (
         None
         if found_relative_to_report is None
-        else f"run --check from the report's directory, or pass {override_hint}; "
-        f"request-file-relative paths resolve against {report_dir}"
+        else f"{remedy}; request-file-relative paths resolve against {report_dir}"
     )
-    return {
+    entry = {
         "path": path,
         "resolved": os.path.abspath(path),
         "found_relative_to_report": found_relative_to_report,
         "resolved_against": None if os.path.isabs(path) else os.getcwd(),
         "hint": hint,
     }
+    if include_repo_root:
+        # Key presence is the caller's opt-in, never inferred from `echoed`
+        # (a report with no echo + an override still emits it, as `None`).
+        # Issue #6461: the value gates on the override *here* -- an override
+        # supplied the reported `path` (anchored on the cwd), so the echo's
+        # repo root must never name an anchor the path did not use.
+        entry["resolved_repo_root"] = (
+            env_provenance.find_repo_root(report_dir)
+            if not override
+            and isinstance(echoed, Mapping)
+            and echoed.get("scope") == "repo"
+            else None
+        )
+    return entry
 
 
 def input_hash_check(
@@ -64,16 +94,18 @@ def input_hash_check(
     override: str | None = None,
     hasher: Callable[[str | None], str | None] = sha256_file,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
-    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``), with issue
-    #2595's ``input_not_found`` diagnostic attached when that path does not
-    name an existing file.
+    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``, ``klt erc``'s
+    ``file``/``spec``), with issue #2595's ``input_not_found`` diagnostic
+    attached when that path does not name an existing file.
 
-    Shared by ``klt lvs --check`` (issues #2595, #6223) and ``klt drc --check``
-    (issue #6466); ``klt erc --check`` keeps its own smaller copy.
+    Shared by ``klt lvs --check`` (issues #2595, #6223), ``klt drc --check``
+    (issue #6466) and ``klt erc --check`` (issue #6655, which until then kept
+    a smaller local copy).
 
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
@@ -104,6 +136,13 @@ def input_hash_check(
     (``sha256:``-prefixed; the LVS runset deck, issue #6223, and ``klt drc``'s
     ``provenance.input.content_hash``, issue #6466).
 
+    ``override_hint`` may be ``None`` (issues #6840, #6655): the input then
+    has no override flag on its verb -- the runset ``deck_file`` on ``klt lvs
+    --check``, whose ``--deck-file`` is refused with ``--check``, and every
+    ``klt erc --check`` input, since ``--check`` is mutually exclusive with
+    ERC's positional ``file``/``spec`` -- and the ``input_not_found`` remedy
+    names no flag, only the report directory.
+
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
     ``{path, scope}`` object ``layout`` carries today is joined to the repo
@@ -125,7 +164,13 @@ def input_hash_check(
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
     check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report, override_hint=override_hint
+        path,
+        report_path,
+        found_relative_to_report,
+        override_hint=override_hint,
+        include_repo_root=include_repo_root,
+        echoed=echoed,
+        override=override,
     )
     return check
 

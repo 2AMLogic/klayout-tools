@@ -4,7 +4,7 @@ its per-file size-ratchet ceiling (scripts/README.md, "per-file size ratchet").
 
 The ASAP7 ``asap7sc7p5t`` PDN recipe is written against the 7.5-track M1-M6
 stack, not one cell flavour: ORFS names its library ``asap7sc7p5t_28`` while
-open_pdks ships the same cells as ``asap7sc7p5t_rvt`` -- the name the
+lambdapdk ships the same cells as ``asap7sc7p5t_rvt`` -- the name the
 post-route SPEF/SDF pass resolves its extract deck for (issue #4559).
 Accepting only the ORFS name made the preset and that pass mutually
 exclusive; either name must validate, unrelated stacks must stay refused.
@@ -25,7 +25,7 @@ from test_place_and_route import (
 #: Issue #6029: additional standard-cell library names a preset also accepts
 #: -- flavours of the same routing stack the recipe is equally valid for.
 #: The ASAP7 grid is written against the 7.5-track M1-M6 stack, which
-#: open_pdks ships under a second cell-flavour name, `asap7sc7p5t_rvt` --
+#: lambdapdk ships under a second cell-flavour name, `asap7sc7p5t_rvt` --
 #: the one the post-route SPEF/SDF pass resolves its extract deck for
 #: (issue #4559). Accepting only the transcribed `_28` name made the preset
 #: and that pass mutually exclusive; presets absent here keep their single
@@ -44,7 +44,7 @@ _PRESET_ALSO_CELL_LIBRARIES: dict[str, tuple[str, ...]] = {
 )
 def test_asap7_preset_accepts_both_asap7_library_names(library):
     """Issue #6029: the recipe is written against the ASAP7 7.5-track stack,
-    which ORFS and open_pdks name differently (`asap7sc7p5t_28` vs
+    which ORFS and lambdapdk name differently (`asap7sc7p5t_28` vs
     `asap7sc7p5t_rvt`). Either name resolves the same geometry."""
     validated = place_and_route._validate_power({"preset": "asap7sc7p5t"}, library)
     assert validated["preset"] == "asap7sc7p5t"

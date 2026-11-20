@@ -64,6 +64,7 @@
         "tile": {"$ref": "#/$defs/tile"},
         "engine_deck_errors": {"$ref": "#/$defs/engine_deck_errors"},
         "coverage_assertion": {"$ref": "#/$defs/coverage_assertion"},
+        "deck_output": {"$ref": "#/$defs/deck_output"},
         "native_deck": {
           "type": "object",
           "description": "`--engine klayout`/`both` without `--deck-file`, when the PDK's family main script (gf180mcu `tech/drc/gf180mcu.drc`) was resolved (issue #4002). Absent otherwise.",
@@ -81,7 +82,7 @@
       },
       "if": {"required": ["engine"], "properties": {"engine": {"const": "klayout"}}},
       "then": {
-        "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given.",
+        "description": "Native-KLayout report: no `metrics`; `coverage` additionally lists the RDB `rule_categories`. `engine_deck_errors` appears only when --allow-deck-errors tolerated a failed deck run; `coverage_assertion` only when --expect-rule-categories(-file) was given; current producers include `deck_output` (issue #6613) on every native report as execution evidence. Older reports may omit it.",
         "properties": {
           "coverage": {"required": ["rule_categories"]},
           "rule_selection": false,
@@ -94,6 +95,7 @@
         "properties": {
           "engine_deck_errors": false,
           "coverage_assertion": false,
+          "deck_output": false,
           "violations_truncated": false,
           "violations_serialized": false
         }
@@ -387,6 +389,17 @@
           "required": ["kind", "expected_names", "observed_names", "missing_names", "unexpected_names", "satisfied"]
         }
       ],
+      "additionalProperties": true
+    },
+    "deck_output": {
+      "description": "The deck's own captured stdout, kept as additive execution evidence on every `--engine klayout` run that produced a report (issue #6613) -- citable, never a verdict change. `stdout` holds the whole log (work-dir paths scrubbed to a placeholder) or, past the 500-line cap, its tail; `line_count` counts the whole captured stdout, so `truncated: true` means `line_count - 500` lines were dropped. Excluded from the `--rerun` diff.",
+      "type": "object",
+      "required": ["stdout", "truncated", "line_count"],
+      "properties": {
+        "stdout": {"type": "string"},
+        "truncated": {"type": "boolean"},
+        "line_count": {"type": "integer", "minimum": 0}
+      },
       "additionalProperties": true
     },
     "listed_rule": {
