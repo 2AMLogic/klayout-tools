@@ -2656,13 +2656,14 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 
 | Field | Meaning |
 | --- | --- |
-| `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, preflight observations are `null` -- never the client's values. `ngspice_init` is collected independently from the simulation report. |
+| `capture` | `ok`, `absent` (older worker, no artifact, poll timeout) or `malformed`. When not `ok`, preflight observations are `null`. The worker's simulation report supplies `ngspice_init` and `threads_per_worker` independently. |
 | `simulator` | `requested_binary`, `binary_source` (`request` / `KLT_NGSPICE_BINARY` / `PATH`), `selected_path` (binary actually selected on the worker), `version_banner` (full `--version` text, bounded to 2000 chars), `version_probe` (`ok` / `timeout` / `exit_N` / `error` / `unavailable`). |
 | `ngspice_init` | Issue #6045. Corner-mode worker report's `{source, lines, sha256}`: path-free `source` is `request`, `thread_pin`, `home` or `none`; `lines` is retained only for klt-written `request`/`thread_pin` files, never home contents. Digest is `sha256:<hex>` (`null` for `none`). Missing/legacy, Xyce or malformed observations are `null`. Collected from the worker's simulation report after execution, independently of preflight `capture`, including recovered failed jobs and each fleet shard. Init lines are bounded to 256 entries, 2000 characters per entry and 32768 characters total including newlines; oversized content is rejected as `null`, never truncated beside its full-file digest. The client's `environment.ngspice_init.source` remains `runner`; SSH and deck-mode provenance are outside this field's scope. |
 | `model_inputs` | Under `options.stage_model_inputs`: `[{name, sha256}]` digests of the staged model files in `$EDA_INPUT_DIR` (bounded to 64); `null` otherwise or when an older worker does not report it. Lifted to `environment.remote.runner_model_inputs`. **Staged files only**: a runner-resolved, image-baked `.osdi` (issue #3819) is never staged, so it can never appear here -- its digest is `environment.remote.runner_osdi_preload` instead. |
 | `pdk` | `variant`, worker `root`, `stamp_scheme` (`sources-sha256`), `stamp_sha256`, `stamp_text` (bounded `SOURCES` text) for the resolved variant, `models_staged` (true under `options.stage_model_inputs`: the executed models then came from the request, not the image tree), `stamp_scope` (`image` when `models_staged` is true: `stamp_*` then describes the worker image's tree, not the models that ran; `executed` otherwise). Stamp fields are `null` when neither `SOURCES` nor a bundle `.pdk-store.json` is readable; with only the latter, `stamp_scheme` is `store-version-sha256` (sha256 of its `version` string; `stamp_text` is `store:<version>`). |
 | `cpu_model` | First `model name` from the worker's `/proc/cpuinfo`, else `null`. CPU count stays `physical_cores` / `concurrency` from `status.json`. |
-| `omp_num_threads` | The worker's effective `OMP_NUM_THREADS`, `null` when unset. |
+| `omp_num_threads` | The worker's ambient `OMP_NUM_THREADS` at preflight, before klt launches ngspice. A successful capture reports `null` when unset. |
+| `threads_per_worker` | Positive integer launch pin from the worker's corner-mode simulation report. An unpinned run, missing report, legacy field omission or malformed value gives `null`. |
 | `image_manifest` | Allowlisted fields of a worker-local manifest (`$KLT_IMAGE_MANIFEST`, `/etc/klt-image-manifest.json`, `/opt/klt/image-manifest.json`), or `null` when none exists. This is the worker's own file, not the submitter's AMI selection metadata (`ami_id`, `data/remote-sim-ami-manifest.json`); a selected image is not evidence of the model bytes executed. Whether an image pins its PDK revision is reported only if the worker manifest says so (`pdk_pinned`); otherwise unknown. |
 | `diagnostics` | Bounded list of capture problems (missing binary, unreadable stamp, ...). |
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
@@ -3004,36 +3005,64 @@ the cause (worker solver build, init file, thread settings, model closure, or
 the deck itself); the batch report already carries the worker-side evidence
 that separates them. When **every** unit (at least two) of a `batch` run fails
 this way, the report's top-level `diagnostics[]` carries one
-`batch_convergence_all_failed` warning that quotes the current values of the
-fields below and points here. It is absent when any unit is ok, on any other
-backend, and for other error codes.
-
-Read these, all existing fields of the batch report (with `hosts > 1` they
-repeat per `environment.remote.fleet[]` entry, and the warning's `workers[]`
-lists each shard):
+`batch_convergence_all_failed` warning with a summary of the worker evidence.
+The fields below are also available for a single corner. On a sharded run,
+read `worker_environment` under each `environment.remote.fleet[]` entry.
 
 | Field | What it tells you |
 | --- | --- |
 | `environment.remote.worker_environment.engine_build_comparison.status` | `match`, `mismatch` or `not_comparable`: the worker's `ngspice --version` banner against the client's (`environment.client_engine_build`). `mismatch` means the solver build can differ; `match` proves only the same banner, not identical build options. |
 | `environment.remote.worker_environment.ngspice_init.source` and `.sha256` | Which init file the worker's ngspice read (`request`, `thread_pin`, `home` or `none`) and its digest. The digest is comparable to `environment.ngspice_init.sha256` of a `--backend local` run: a different digest means different init content. For `request`/`thread_pin` the entry's `lines` show the file (a `thread_pin` digest also covers the `set num_threads=N` line, so compare `lines` before reading a mismatch as a settings difference); for `home` only the digest is kept ([#6045](https://github.com/2AMLogic/klayout-tools/issues/6045)). |
-| `environment.remote.worker_environment.omp_num_threads` | The worker's effective `OMP_NUM_THREADS`; `null` when unset. |
-| `environment.ngspice_options` | The `options.ngspice_options` the run declared. The runner echoes them back and klt fails the run when the echo differs, so this is the set the worker applied. Absent when none was declared. |
+| `environment.remote.worker_environment.omp_num_threads` | Ambient `OMP_NUM_THREADS` from worker preflight. Check `capture` to distinguish an unset variable from an absent or malformed capture. |
+| `environment.remote.worker_environment.threads_per_worker` | The pin klt resolved for the simulator launch, from the collected worker report. For example, `omp_num_threads: null` with `capture: "ok"` and `threads_per_worker: 2` records an unset ambient variable and a launch pin of two. Neither field measures runtime thread usage. |
+| `environment.ngspice_options` | The solver options the request declared. Normal batch collection checks the runner's echo. Absent when none was declared. |
 
 For a model-closure difference rather than a solver one, read
 `pdk_stamp_comparison` and `models_lib_comparison` as in steps 0 and 3 of the
 gf180 checklist above.
 
-**One-corner canary.** To test the worker on a single corner before
-committing a full grid, submit a one-corner copy of the request with batch
-chosen **explicitly** (`"backend": "batch"` in the request, or
-`--backend batch`), `options.keep_artifacts: true` and `--outdir DIR`, then
-read that corner's `artifacts.log` (and `artifacts.deck`) under `DIR` as in
-"Getting the per-corner deck and ngspice log through klt" and diff it against
-the same corner's log from a `--backend local` run. Pass
-`--wait-for-capacity SECONDS` if the fleet may be at capacity. A host-default
-`KLT_SIM_BACKEND=batch` alone is not enough: a single unit under a host-default
-backend runs locally, whereas an explicit choice is submitted as a one-job
-batch.
+**One-corner canary.** Select one transient corner in a copy of the request,
+keep the same deck and models, and set `options.keep_artifacts: true`. Run it
+twice with separate output directories. Explicit backend selection sends the
+single batch unit to the fleet even on hosts that default single units to local.
+
+```sh
+klt sim one-corner.json --backend local --outdir local
+klt sim one-corner.json --backend batch --wait-for-capacity 600 --outdir batch
+```
+
+Compare the two saved reports, including a completed run with an errored corner.
+An error before submission produces no worker evidence.
+
+```sh
+jq -s '
+  def init: if . == null then null else
+    {source, sha256} + (if .source == "request" or .source == "thread_pin"
+                        then {lines} else {} end) end;
+  def outcomes: [.corners[] | {corner_id, status}];
+  .[0] as $l | .[1] as $b |
+  $l.environment as $le | $b.environment as $be |
+  {local: {outcomes: ($l | outcomes), probe: $le.engine_build.probe,
+           banner: $le.engine_build.version_banner, init: ($le.ngspice_init | init),
+           declared_options: $le.ngspice_options, launch_pin: $le.threads_per_worker,
+           ambient_omp: "unrecorded"},
+   batch: {outcomes: ($b | outcomes), declared_options: $be.ngspice_options,
+           workers: [($be.remote | .fleet // [.])[] | .worker_environment as $w |
+             {job_id, runner_klt_version, capture: ($w.capture // "unknown"),
+              probe: $w.simulator.version_probe, banner: $w.simulator.version_banner,
+              init: ($w.ngspice_init | init), launch_pin: $w.threads_per_worker,
+              ambient_omp: $w.omp_num_threads}]}}
+' local/report.json batch/report.json
+```
+
+Each job supplies its own banner and probe status even when the fleet-wide
+`environment.engine_build.probe` reports `disagreement`. A null init block
+means the observation is unavailable. A recorded `source: "none"` means the
+worker found no init file. Compare home files by digest only. A null launch
+pin means the report supplies no pin. The local report omits ambient OpenMP
+settings. For the generated cards and the first solver error, compare the
+paths in each corner's `artifacts.deck` and `artifacts.log` as described in
+"Getting the per-corner deck and ngspice log through klt".
 
 `--dry-run` cannot serve as the canary: by contract it returns before any
 backend, so it never contacts the worker (it checks the request, not the

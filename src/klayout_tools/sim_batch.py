@@ -246,6 +246,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     assess_par_backend_support,
     par_backend_preflight_lines,
     runner_ngspice_init,
+    runner_threads_per_worker,
 )
 from .sim_batch_job_timeout import (
     _resolve_job_ceiling_check,
@@ -2340,6 +2341,7 @@ def _read_job_identity(
     into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
     worker_environment["ngspice_init"] = runner_ngspice_init(report)
+    worker_environment["threads_per_worker"] = runner_threads_per_worker(report)
     return {
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
@@ -2612,13 +2614,10 @@ def _recover_failed_job_corners(
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            identity = _read_job_identity(collected, request)
             log_note, log_diagnostic = _engine_log_note(collected)
+            report = None
             try:
                 report = read_collected_report(collected)
-                identity["worker_environment"]["ngspice_init"] = runner_ngspice_init(
-                    report
-                )
                 kind, runner_error = _classify_collected_report(report)
                 if kind == "report":
                     note = "collected report is not a klt error envelope"
@@ -2626,6 +2625,7 @@ def _recover_failed_job_corners(
                     note = "collected report has an unrecognized shape"
             except BatchError as exc:
                 note = str(exc)
+            identity = _read_job_identity(collected, request, report=report)
             if runner_error is None:
                 runner_error, stderr_note = _read_stderr_envelope(collected)
                 if runner_error is None:
