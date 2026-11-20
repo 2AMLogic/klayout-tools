@@ -2,7 +2,8 @@
 
 ``post_route_sta.py`` is under the per-file size ratchet (issue #2766), so
 the ``klt sta`` known-request-key list (issue #5065), the SPEF net-name
-mismatch hint, and the SPEF missing-nets sample parser live here.
+mismatch hint, the SPEF missing-nets sample parser, and the marker-block
+extractor every ``klt sta`` stdout parser shares (issue #6767) live here.
 """
 
 from __future__ import annotations
@@ -36,6 +37,21 @@ SPEF_MISSING_NETS_BEGIN = "===KLT_STA_SPEF_MISSING_NETS_BEGIN==="
 SPEF_MISSING_NETS_END = "===KLT_STA_SPEF_MISSING_NETS_END==="
 
 
+def extract_block(text: str, begin: str, end: str) -> str | None:
+    """The text between the ``begin``/``end`` markers, or ``None`` when
+    either marker is absent (an OpenROAD build that never reached that part
+    of the script, a truncated run, or a caller parsing a stream the markers
+    aren't in). Adjacent markers give ``""`` -- a present, empty block, which
+    callers must keep distinct from a missing one. The first ``begin`` and
+    the first ``end`` after it win when markers repeat."""
+    try:
+        start_idx = text.index(begin) + len(begin)
+        stop_idx = text.index(end, start_idx)
+    except ValueError:
+        return None
+    return text[start_idx:stop_idx]
+
+
 def parse_spef_missing_nets(stdout: str) -> list[str]:
     """A capped sample of design-side net names that failed to correlate
     against the SPEF's own declared name set, parsed from
@@ -45,10 +61,7 @@ def parse_spef_missing_nets(stdout: str) -> list[str]:
     ``get_full_name``'s own output). Returns ``[]`` when the markers aren't
     found (defensive; should not happen for a successful run) or the block
     is empty (nothing missing)."""
-    try:
-        start_idx = stdout.index(SPEF_MISSING_NETS_BEGIN) + len(SPEF_MISSING_NETS_BEGIN)
-        stop_idx = stdout.index(SPEF_MISSING_NETS_END, start_idx)
-    except ValueError:
+    block = extract_block(stdout, SPEF_MISSING_NETS_BEGIN, SPEF_MISSING_NETS_END)
+    if block is None:
         return []
-    block = stdout[start_idx:stop_idx]
     return [line.strip() for line in block.splitlines() if line.strip()]

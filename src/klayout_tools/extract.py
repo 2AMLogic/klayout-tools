@@ -165,7 +165,6 @@ from ._provenance import (
 )
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -180,11 +179,12 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
     get_parasitics_deck,
 )
 from .erc_islands import partition_region_by_islands, sorted_islands
+from .evidence_canonicalize import rerun_result_for
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -227,9 +227,7 @@ from .extract_detect_block import build_detection_findings
 # `_diode_required_terms` and `_is_synthesized_substrate_net_name` are
 # re-exported for `tests/test_extract.py`, `extract_parasitics.py` and (with
 # `_extraction_deck_name`) `extract_finfet.py`.
-from .extract_detect_diode_near_miss import (
-    _collect_diode_near_miss_warnings,
-)
+from .extract_detect_diode_near_miss import _collect_diode_near_miss_warnings
 from .extract_detect_diode_near_miss import (
     _diode_required_terms as _diode_required_terms,
 )
@@ -330,18 +328,11 @@ from .extract_progress import StageTimer, active_timer, stage
 # three internal helpers (`_describe_layers_in_set`, `_pin_index_by_net_id`,
 # `_each_pin_net`) have no caller here and are deliberately not imported.
 from .extract_report import (  # noqa: F401 -- re-exports, see comment above
-    _case_collision_warnings,
-    _describe_device_recognition_only_layers,
     _describe_devices,
-    _describe_ignored_layers,
     _describe_matched_device_groups,
     _describe_nets,
-    _detect_merged_net_labels,
     _detect_single_terminal_nets,
-    _detect_split_net_labels,
-    _detect_unbiased_pmos_body_nets,
     _net_label_positions,
-    _split_net_label_warnings,
 )
 from .extract_report import (
     _describe_parasitics_metal_gaps as _describe_parasitics_metal_gaps,
@@ -367,17 +358,6 @@ from .extract_validate import validate_run_extract_args
 # `cli/extract_cmd.py`, `place_and_route.py`, and the test suite). The
 # redundant `X as X` aliases mark them explicit re-exports, so neither reads as
 # an unused import in a module that never calls them itself.
-# The `extract_warnings` group below is a re-export for the same reason: every
-# warning builder it exports is now called from `extract_detect_block.py`
-# (issue #5196, stage 7) rather than from `run_extract` here, and the test
-# suite still reaches them through `klayout_tools.extract`.
-from .extract_warnings import (  # noqa: F401 -- re-exported, see comment above
-    ignored_layer_warnings,
-    merged_net_label_warnings,
-    pdk_dropped_param_warnings,
-    single_terminal_net_warnings,
-    unbiased_pmos_body_warnings,
-)
 from .metrics import is_registered
 from .pdk_models import (
     MOS_FLAVOUR_PROPERTY,
@@ -1597,6 +1577,7 @@ def run_extract(
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     spef_output: str | None = None,
+    report_parasitics: str = "full",
     def_net_names: bool = False,
     critical_nets: Sequence[str] | None = None,
     parasitics_nets: Sequence[str] | None = None,
@@ -1635,6 +1616,7 @@ def run_extract(
     engine: str = "klayout",
     deck_file: str | None = None,
     deck_vars: Mapping[str, str] | None = None,
+    device_params: Mapping[str, Mapping[str, tuple[str, str]]] | None = None,
     runset_timeout: float | None = None,
     klayout_binary: str | None = None,
 ) -> dict[str, Any]:
@@ -1644,9 +1626,9 @@ def run_extract(
     runs. ``"klayout"`` (the default) is the curated-deck engine every
     paragraph below describes, byte-identical to this function before the
     parameter existed. ``"klayout-runset"`` runs a PDK's **own** KLayout LVS
-    runset (``deck_file``, ``deck_vars``) instead -- devices and connectivity
-    only, with every curated-engine-specific parameter refused by name. See
-    :mod:`klayout_tools.extract_runset` and ``docs/cli/extract.md``, "Engine".
+    runset (``deck_file``, ``deck_vars``, ``device_params``) instead -- devices
+    and connectivity only, with every curated-engine-specific parameter refused
+    by name. See :mod:`klayout_tools.extract_runset` and docs/cli/extract.md, "Engine".
 
     The report carries an additive ``timing`` object (issue #3181):
     ``stages`` (wall seconds per named stage), ``total_seconds`` and
@@ -1950,18 +1932,12 @@ def run_extract(
     omitted (the default) skips this entirely -- byte-identical to before
     this feature existed.
 
-    ``spef_output`` (``klt extract --spef <path>``, issue #948, Epic #700
-    Phase 3) additionally writes ``parasitics``'s per-net R/C model as a
-    Standard Parasitic Exchange Format file at the given path -- see
-    :func:`_write_spef` for the exact translation and its documented
-    net-name-only correlation scope, and ``docs/cli/extract.md``'s "SPEF
-    export" section for the CLI contract. Requires ``parasitics=True``
-    (there is nothing to translate otherwise); given without it, this is an
-    :class:`ExtractError`, the same "a flag naming something invalid is an
-    error, not a silent no-op" convention ``mom_net`` above already follows.
-    ``None`` (the default) skips this entirely -- byte-identical to before
-    this feature existed. The resolved path is echoed back as the response's
-    ``spef_path`` field (``null`` when omitted).
+    ``spef_output`` (issue #948) writes the per-net R/C model as SPEF and
+    requires ``parasitics=True``. See :func:`_write_spef` and "SPEF export"
+    in ``docs/cli/extract.md`` for details. The report's ``spef_path`` holds
+    the resolved path or ``null`` when omitted.
+    ``report_parasitics="slim"`` (issue #5816) requires ``spef_output`` and
+    reduces the JSON report after SPEF export and metrics calculation.
 
     ``substrate_spreading_net`` (``klt extract --substrate-spreading <net>``,
     issue #2561, Phase 2 of issue #2515, requires ``parasitics=True``)
@@ -2614,9 +2590,9 @@ def run_extract(
     :func:`_wire_abstract_cells`. ``abstract_cell_patterns`` empty (the
     default) skips this mode entirely; the written SPICE and every other
     field are then byte-identical to before this feature existed.
-    ``abstract_cell_lef_paths`` is only ever consulted as the fallback pin
-    source and has no effect when every matched cell type resolves its pins
-    from in-cell labels.
+    ``abstract_cell_lef_paths`` is a pin source *merged* with the
+    label-derived pins (#3749): labels win per pin name, LEF-only pins are
+    appended, and `klt lvs` discloses the LEF's well/substrate ports (#5842).
 
     ``abstracted_cells`` reports this mode's own result: one entry per
     *distinct* matched cell type (sorted by cell name), each
@@ -2953,13 +2929,14 @@ def run_extract(
             top=top,
             deck_vars=deck_vars,
             device_models=device_models,
+            device_params=device_params,
             no_netlist=no_netlist,
             runset_timeout_s=runset_timeout,
             klayout_binary=klayout_binary,
         )
-    if runset_timeout is not None or klayout_binary is not None:
+    if runset_timeout is not None or klayout_binary is not None or device_params:
         raise ExtractError(
-            "runset_timeout/klayout_binary are only used by engine "
+            "runset_timeout/klayout_binary/device_params are only used by engine "
             f"'{extract_runset.RUNSET_ENGINE}' (this run uses '{engine}')"
         )
 
@@ -3006,6 +2983,7 @@ def run_extract(
     ) = validate_run_extract_args(
         mom_net=mom_net,
         spef_output=spef_output,
+        report_parasitics=report_parasitics,
         substrate_spreading_net=substrate_spreading_net,
         substrate_tie_ohms=substrate_tie_ohms,
         critical_nets=critical_nets,
@@ -3364,6 +3342,7 @@ def run_extract(
         parasitics_report=parasitics_report,
         path=path,
         pdk_info=pdk_info,
+        report_parasitics_shape=report_parasitics,
         pin_renames=pin_renames,
         pin_ties=pin_ties,
         probe_results=probe_results,
@@ -3711,13 +3690,12 @@ def check_extract_report(
     ``klt extract`` up to the same shared ``_report_verify.py`` machinery
     issue #1106 built for those two verbs: re-hashes the input layout stream
     (``committed["file"]``) and the deck
-    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    (:func:`~klayout_tools.decks.deck_content_hash`, resolved from
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance.content_hash`) -- reusing
-    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
-    hashing. Returns the shared ``--check`` payload built by
+    using the same hash functions as the original report. Returns the
+    shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
     "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
     otherwise.
@@ -3737,7 +3715,7 @@ def check_extract_report(
     extract --deck`` is required for every run, so ``provenance.deck`` is
     always populated for a genuine committed report; an unresolvable deck
     name (e.g. the deck module was since renamed/removed) hashes to ``None``
-    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    via :func:`~klayout_tools.decks.deck_content_hash`, which likewise never
     counts as a match.
 
     Under ``--engine klayout-runset`` the deck entry is replaced by a runset
@@ -3770,7 +3748,7 @@ def check_extract_report(
             ),
         ),
         extract_runset.provenance_hash_check(
-            committed, deck_source_path=deck_source_path
+            committed, deck_content_hash=deck_content_hash
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -4224,13 +4202,7 @@ def rerun_extract_report(
             shutil.rmtree(scratch_dir, ignore_errors=True)
     if scratch_dir is not None and fresh.get("netlist_path") is not None:
         fresh["netlist_path"] = committed_netlist_path
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("extract", report_path, committed=committed, fresh=fresh)
 
 
 def _replay_pin_renames_echo(
@@ -4812,8 +4784,15 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    warnings = warnings + _detect_unsupported_devices(
-        layout, top_cell, deck, unsupported_devices
+    # Timed as its own stage (#5807): it re-runs the recogniser walks, a
+    # superlinear share previously hidden in `unattributed_seconds`.
+    warnings = warnings + _staged(
+        "unsupported_devices",
+        _detect_unsupported_devices,
+        layout,
+        top_cell,
+        deck,
+        unsupported_devices,
     )
 
     # Unmodelled device markers (issue #3858): prose-only diagnostic.
@@ -6585,33 +6564,6 @@ def _connect_mos_capacitors(
         l2n.connect(sd, contact)
 
 
-def _mos_capacitor_entry_index(
-    island: kdb.Region,
-    deck: ExtractionDeck,
-    poly: kdb.Region,
-    nwell: kdb.Region,
-    region_of: Callable[[tuple[int, int]], kdb.Region],
-) -> int | None:
-    """Index into ``deck.mos_capacitors`` of the first entry that claims
-    ``island`` (see :class:`~klayout_tools.decks.MosCapacitorDevice` for the
-    tests), or ``None`` when none does."""
-    in_well = not island.interacting(nwell).is_empty()
-
-    def touches(layer: tuple[int, int]) -> bool:
-        return not island.interacting(region_of(layer)).is_empty()
-
-    for index, entry in enumerate(deck.mos_capacitors):
-        if (
-            entry.in_well == in_well
-            and touches(entry.marker)
-            and touches(entry.implant)
-            and all(touches(layer) for layer in entry.requires)
-            and not any(touches(layer) for layer in entry.excludes)
-        ):
-            return index
-    return None
-
-
 def _resolve_mos_capacitors(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6645,6 +6597,10 @@ def _resolve_mos_capacitors(
     the gate), ``recognised`` is the union of the claimed islands, and
     ``dropped`` counts gate components fully covered by ``dummy``. Everything
     is empty/``0`` for a deck declaring no ``mos_capacitors``.
+
+    Claim sets are resolved with bulk region algebra, not a per-island loop
+    (issue #5807): one ``interacting()`` per layer over the merged island
+    set, first-claim-wins via the ordered sweep (derivation: CHANGELOG #5807).
     """
     import klayout.db as kdb
 
@@ -6657,19 +6613,30 @@ def _resolve_mos_capacitors(
             layers[layer] = _region(layout, top_cell, layer)
         return layers[layer]
 
+    islands = active.merged()
+    gated = islands.interacting(poly & islands)
+    in_well = islands.interacting(nwell)
+
+    def touching(layer: tuple[int, int]) -> kdb.Region:
+        # Empty layer claims nothing; skip the interacting() call (#5807).
+        region = region_of(layer)
+        return kdb.Region() if region.is_empty() else islands.interacting(region)
+
     claimed: dict[int, kdb.Region] = {}
-    remaining = kdb.Region()
-    for component in active.merged().each():
-        island = kdb.Region(component)
-        chosen = (
-            _mos_capacitor_entry_index(island, deck, poly, nwell, region_of)
-            if not (island & poly).is_empty()
-            else None
-        )
-        if chosen is None:
-            remaining += island
-        else:
-            claimed[chosen] = claimed.get(chosen, kdb.Region()) + island
+    taken = kdb.Region()
+    for index, entry in enumerate(deck.mos_capacitors):
+        if region_of(entry.marker).is_empty():
+            continue  # no marker shapes: this entry can claim no island
+        candidates = gated & touching(entry.marker) & touching(entry.implant)
+        for layer in entry.requires:
+            candidates &= touching(layer)
+        for layer in entry.excludes:
+            candidates -= touching(layer)
+        candidates &= in_well if entry.in_well else islands - in_well
+        candidates -= taken
+        if not candidates.is_empty():
+            claimed[index] = candidates
+            taken += candidates
 
     capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]] = []
     recognised = kdb.Region()
@@ -6684,7 +6651,7 @@ def _resolve_mos_capacitors(
                     dropped += 1
             gate = gate - dummy
         capacitors.append((deck.mos_capacitors[index], gate, island_region - poly))
-    return capacitors, remaining, recognised, dropped
+    return capacitors, islands - taken, recognised, dropped
 
 
 def _deck_complement_well_tie(
@@ -7601,8 +7568,10 @@ def _extract_netlist(
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
-            remaining = kdb.Region()
-            for component in active.merged().each():
+            # Non-marker-touching islands claim nothing and pass through whole (#5807).
+            candidates = active.merged().interacting(marker_region)
+            remaining = active - candidates
+            for component in candidates.each():
                 component_region = kdb.Region(component)
                 claimed_part, remaining_part = _flavour_split_island(
                     component_region,

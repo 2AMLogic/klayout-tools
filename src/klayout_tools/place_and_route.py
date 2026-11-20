@@ -69,14 +69,13 @@ from ._paths import _tcl_net_list as _tcl_net_list
 from ._power_activity import power_basis_block, validate_power_activity
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, content_hash
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
 )
 from .env_provenance import find_repo_root, repo_relative_path
+from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_cells import list_lib_corners
 
@@ -355,8 +354,8 @@ SCHEMA_VERSION = 1
 #: is an additive enum value, never a contract-shape change.
 SUPPORTED_ENGINES = ("openroad",)
 
-#: The four stages ``target_stage`` names, in execution order -- see this
-#: module's own docstring "Stage granularity and invocation shape".
+#: The four stages ``target_stage`` names, in execution order. See
+#: "Stage granularity and invocation shape" in docs/cli/place-and-route.md.
 STAGE_ORDER = ("floorplan", "place", "cts", "route")
 
 
@@ -1731,8 +1730,8 @@ def _run_single_corner(
     # Issue #1973: fail here, naming the construct and its line, rather than
     # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
     # error at the floorplan stage or a bare `x` constant as TritonRoute's
-    # `DRT-0305` a full route attempt later. See this module's docstring
-    # "Netlist pre-flight" section.
+    # `DRT-0305` a full route attempt later. See "Netlist pre-flight"
+    # in docs/cli/place-and-route.md.
     _reject_unsupported_netlist_constructs(netlist_path)
 
     hdl_toplevel = request["hdl_toplevel"]
@@ -2195,8 +2194,8 @@ def _run_single_corner(
     # Additive field (issue #1091): reports what `request.power` actually
     # drove, so a caller can tell a signal-only "route" result from a
     # power-complete one without parsing the DEF for a missing
-    # `SPECIALNETS` section -- see this module's own docstring "Power
-    # delivery" section. `pdn`/`global_connect` are `True` once
+    # `SPECIALNETS` section. See "Power delivery" in
+    # docs/cli/place-and-route.md. `pdn`/`global_connect` are `True` once
     # `request.power` is present (both run unconditionally together, at the
     # end of the `"floorplan"` stage -- every run reaches at least that
     # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
@@ -3337,13 +3336,6 @@ def rerun_place_and_route_report(
         backend=backend,
         reuse_outputs_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(
-            committed
-        ),
-        fresh_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(fresh),
+    return rerun_result_for(
+        "place-and-route", report_path, committed=committed, fresh=fresh
     )

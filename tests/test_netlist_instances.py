@@ -162,6 +162,79 @@ def test_comments_and_control_cards_are_not_instances():
     assert [e["name"] for e in orphans] == ["X1"]
 
 
+def test_control_block_interior_lines_are_not_instances():
+    """Lines between ``.control`` and ``.endc`` are ngspice commands, not
+    device cards -- ``run`` / ``write`` must not surface as instances
+    (issue #6442)."""
+    deck = ".control\nrun\nwrite out.raw\n.endc\n"
+    assert parse_instance_cards(deck) == []
+    assert instances_payload(deck.encode()) == {
+        "instances": [],
+        "instances_truncated": False,
+    }
+
+
+def test_control_block_assignment_lines_yield_no_entry():
+    """``let vgs = 0.5`` would otherwise parse as an instance named ``let``
+    carrying ``params={"vgs": "0.5"}``."""
+    deck = ".control\nlet vgs = 0.5\nalter @m1[w] = 2\n.endc\n"
+    assert parse_instance_cards(deck) == []
+
+
+def test_device_cards_around_a_control_block_still_parse():
+    deck = (
+        "X1 a b c d mod m=1\n"
+        ".control\n"
+        "run\n"
+        "let vgs = 0.5\n"
+        "write out.raw\n"
+        ".endc\n"
+        "R2 a b 1k\n"
+        ".end\n"
+    )
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1", "R2"]
+
+
+def test_control_block_keywords_are_case_insensitive():
+    deck = ".CONTROL\nrun\n.ENDC\nX1 a b c d mod m=1\n.Control\nwrite\n.EndC\n"
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1"]
+
+
+def test_control_block_state_is_per_block_not_sticky():
+    """Two blocks with a device card between them: the flag clears at each
+    ``.endc`` so the middle card is kept and both interiors are dropped."""
+    deck = ".control\nrun\n.endc\nX1 a b c d mod m=1\n.control\nplot v(a)\n.endc\n"
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1"]
+
+
+def test_control_block_keyword_match_is_the_whole_first_token():
+    """``.controlled`` / ``.endcap`` are not the block delimiters: only the
+    exact ``.control`` / ``.endc`` first token opens / closes a block."""
+    deck = (
+        ".controlled foo\n"
+        "X1 a b c d mod m=1\n"
+        ".control\n"
+        "run\n"
+        ".endcap x\n"
+        "let y = 1\n"
+        ".endc\n"
+        "X2 a b c d mod m=2\n"
+    )
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1", "X2"]
+
+
+def test_control_block_continuation_lines_fold_and_stay_skipped():
+    """A ``+`` continuation inside the block folds onto its (skipped)
+    command line and must not resurface as an orphan card."""
+    deck = ".control\nlet vgs =\n+ 0.5\nrun\n.endc\nX1 a b c d mod m=1\n"
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1"]
+
+
+def test_unterminated_control_block_skips_through_the_end_of_the_deck():
+    deck = "X1 a b c d mod m=1\n.control\nrun\nX2 a b c d mod m=2\n"
+    assert [e["name"] for e in parse_instance_cards(deck)] == ["X1"]
+
+
 def test_a_bare_positional_card_is_still_an_instance_with_null_model():
     (r1,) = parse_instance_cards("R1 a b 1k\n")
     assert r1["model"] is None
@@ -172,9 +245,10 @@ def test_a_bare_positional_card_is_still_an_instance_with_null_model():
 
 
 def test_a_duplicate_parameter_keys_last_one_wins():
-    (x1,) = parse_instance_cards("X1 a b c d mod m=1 m=2\n")
-    assert x1["params"]["m"] == "2"
-    assert x1["multiplier"] == {"m": "2", "mult": None, "agree": None}
+    (x1,) = parse_instance_cards("X1 a b c d mod PaRaMs: m=1 m=2 M=3 m=4 MULT=4\n")
+    assert x1["model"] == "mod"
+    assert x1["params"] == {"m": "4", "M": "3", "MULT": "4"}
+    assert x1["multiplier"] == {"m": "4", "mult": "4", "agree": True}
 
 
 def test_zero_device_instances_is_an_empty_array_not_a_missing_key():

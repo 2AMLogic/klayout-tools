@@ -49,22 +49,23 @@ Two failure classes, deliberately distinct:
 
 Hashing is raw-byte SHA-256 (``sha256:<hex>``), the same
 :func:`~klayout_tools._provenance.sha256_file` convention the grader re-hashes
-with. Nothing is normalised.
+with. The one normalisation is ``attest: "yaml"`` (issue #5862), binding
+:mod:`.signoff_attest_canonical_yaml`'s named digest so comments are not drift.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._provenance import sha256_file
 from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
@@ -82,17 +83,19 @@ from .signoff import (
 )
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import command_env, klt_shim_scope
-from .signoff_attest_input import input_binding
+from .signoff_attest_glob import expand_entry
+from .signoff_attest_input import attestation_block, input_binding
+from .signoff_attest_pins import item9_pin_checks, json_node
 from .signoff_attest_presence import file_check as _file_check
-from .signoff_attest_presence import split_entries
+from .signoff_attest_presence import path_checks, split_entries
 
-#: The attestation-inventory schema versions this build reads. An inventory
-#: declaring any other version is refused (exit ``1``) rather than read with
-#: guessed semantics -- the inventory is a public, versioned contract
-#: (``docs/json-contract.md``).
-INVENTORY_SCHEMA_VERSION = 1
+#: The attestation-inventory schema version this build mints against. The
+#: inventory is a public, versioned contract (``docs/json-contract.md``);
+#: older versions stay readable so an inventory never breaks the ``klt``
+#: that wrote it.
+INVENTORY_SCHEMA_VERSION = 2
 SUPPORTED_INVENTORY_SCHEMA_VERSIONS: frozenset[int] = frozenset(
-    {INVENTORY_SCHEMA_VERSION}
+    {1, INVENTORY_SCHEMA_VERSION}
 )
 
 #: The literal ``kind`` every inventory must declare, so an unrelated JSON
@@ -295,6 +298,9 @@ def _normalize_repo_path(raw: Any, field: str, root: str) -> str:
 def _path_list(
     inventory: Mapping[str, Any], field: str, root: str, seen: dict[str, str]
 ) -> list[str]:
+    """The normalised members of one path-list field, each claimed in
+    ``seen``. A member is accepted -- and a ``{"glob": ...}`` entry expanded
+    -- by :func:`~klayout_tools.signoff_attest_glob.expand_entry`."""
     value = inventory.get(field)
     if not isinstance(value, list):
         raise AttestationError(f"inventory field '{field}' must be a list of paths")
@@ -304,14 +310,9 @@ def _path_list(
         )
     paths = []
     for raw in value:
-        path = _normalize_repo_path(raw, field, root)
-        if path in seen:
-            raise AttestationError(
-                f"path '{path}' is listed more than once (in '{seen[path]}' and "
-                f"'{field}') -- each inventoried file must appear exactly once"
-            )
-        seen[path] = field
-        paths.append(path)
+        paths.extend(
+            expand_entry(raw, field, root, seen, inventory.get("schema_version"))
+        )
     return paths
 
 
@@ -355,9 +356,7 @@ def _command_spec(
     if "timeout_s" in raw:
         timeout_s = raw["timeout_s"]
         if (
-            isinstance(timeout_s, bool)
-            or not isinstance(timeout_s, (int, float))
-            or not math.isfinite(timeout_s)
+            not is_finite_number(timeout_s)
             or timeout_s <= 0
             or timeout_s > COMMAND_TIMEOUT_CEILING_S
         ):
@@ -408,11 +407,13 @@ def _validated_inventory(
         inventory, bench_extra = item9.split_testbenches(
             inventory, root, _normalize_repo_path, _command_spec
         )
-    inventory, presence = split_entries(
+    inventory, presence, yaml_selects = split_entries(
         inventory, item, _PATH_LISTS[item], root, _normalize_repo_path
     )
     seen: dict[str, str] = {}
     normalized: dict[str, Any] = {"presence": sorted(presence)} if presence else {}
+    if yaml_selects:
+        normalized["yaml"] = dict(sorted(yaml_selects.items()))
     for field, _role in _PATH_LISTS[item]:
         normalized[field] = _path_list(inventory, field, root, seen)
     if item == 1:
@@ -850,45 +851,31 @@ def _skipped_check(
 
 def _metric_value(root: str, path: str, field: str) -> float | int | None:
     """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric."""
-    try:
-        with open(os.path.join(root, path), "rb") as handle:
-            node: Any = json.loads(
-                handle.read().decode("utf-8"),
-                parse_constant=_reject_json_constant,
-                parse_float=_finite_json_float,
-            )
-    except (OSError, UnicodeDecodeError, ValueError):
-        return None
-    for segment in field.split("."):
-        if isinstance(node, Mapping) and segment in node:
-            node = node[segment]
-        elif isinstance(node, list) and segment.isdigit() and int(segment) < len(node):
-            node = node[int(segment)]
-        else:
-            return None
+    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric.
+    The walk itself is shared with item 9's reference-form pins
+    (:func:`~.signoff_attest_pins.json_node`, issue #5563)."""
+    node = json_node(root, path, field)
     return node if is_number(node) else None
 
 
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
-    """Item 8's checks, in fixed order: report present, cited envelopes
-    present, one citation check per spec row, each envelope's own freshness
-    command, then (digital) one metric check per corner x required metric."""
+    """Item 8's checks, in order: report, cited envelopes present + recognised,
+    a citation per spec row, each freshness command, then (digital) metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
-    cited = sorted({p for paths in normalized["citations"].values() for p in paths})
-    present = {path: _file_check(root, path, "evidence") for path in cited}
-    checks.extend(present.values())
+    cites = normalized["citations"]
+    cited, present, envelopes = item8.evidence_checks(root, cites, _file_check)
+    checks.extend((*present.values(), *envelopes.values()))
     for row in sorted(normalized["spec_rows"]):
-        paths = normalized["citations"][row]
+        paths = cites[row]
         checks.append(
             {
                 "check": "citation",
                 "role": "spec_row",
                 "row": row,
                 "envelopes": paths,
-                "passed": bool(paths) and all(present[p]["passed"] for p in paths),
+                "passed": bool(paths) and all(envelopes[p]["passed"] for p in paths),
             }
         )
     for path in cited:
@@ -958,10 +945,9 @@ def _run_checks(
     normalized: Mapping[str, Any],
     committed_checks: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every check for ``item``, in a deterministic order: file-presence
-    checks sorted by path (independent of inventory listing order), then
-    the item's command and pin checks. With ``committed_checks`` (the
-    ``--check`` path) every ``local_only`` command is skipped, not run."""
+    """Run the item's artifact and command checks in deterministic order.
+    Item 9's pin checks follow once the envelope's build version is known.
+    With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
@@ -970,11 +956,7 @@ def _run_checks(
         return _command_check(root, spec, role, **identity)
 
     for field, role in _PATH_LISTS[item]:
-        presence = normalized.get("presence", ())
-        checks.extend(
-            _file_check(root, path, role, presence=path in presence)
-            for path in sorted(normalized[field])
-        )
+        checks.extend(path_checks(root, normalized, field, role))
     if item == 1:
         for entry in normalized["derived"]:
             checks.append(_file_check(root, entry["path"], "derived"))
@@ -986,7 +968,6 @@ def _run_checks(
         checks.extend(_characterization_checks(root, normalized, command))
     elif item == 9:
         checks.extend(item9.item9_checks(normalized, command, root, _file_check))
-        checks.extend(item9.pin_checks(normalized["pins"]))
     else:
         checks.extend(_audit_command_checks(normalized["checks"], command))
     return checks
@@ -1032,9 +1013,13 @@ def build_attestation(
     normalized = _validated_inventory(inventory, item, root, inventory_path)
     with klt_shim_scope():
         checks = _run_checks(item, root, normalized, committed_checks)
+    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
+    klt_version = build_version()
+    if item == 9:
+        pins = normalized["pins"]
+        checks.extend(item9_pin_checks(pins, root, _normalize_repo_path, klt_version))
     passed_count = sum(1 for check in checks if check["passed"])
     status = "pass" if passed_count == len(checks) else "fail"
-    prov, digest = input_binding(item, root, normalized, inventory_rel, inventory_hash)
     envelope: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "kind": "generic",
@@ -1045,16 +1030,15 @@ def build_attestation(
             f"attestation checks passed ({PRODUCER})"
         ),
         "source": inventory_rel,
-        "attestation": {
-            "producer": PRODUCER,
-            "inventory_schema_version": inventory["schema_version"],
-            "hash_algorithm": HASH_ALGORITHM,
-            "check_count": len(checks),
-            "passed_count": passed_count,
-            "checks": checks,
-        },
+        "attestation": attestation_block(
+            PRODUCER,
+            HASH_ALGORITHM,
+            checks,
+            passed_count,
+            inventory=inventory,
+        ),
         "provenance": {
-            "klt_version": build_version(),
+            "klt_version": klt_version,
             "klayout_version": klayout_version(),
             "pdk": None,
             "deck": None,
@@ -1122,11 +1106,11 @@ def check_attestation(
     plus ``fresh_status`` -- the re-attested envelope's own ``status``. The
     CLI exits ``0`` only for ``status: "match"`` *and* ``fresh_status:
     "pass"``: a faithfully reproduced failing attestation is still not a
-    passing gate. Only the producing build's version strings are excluded
-    from the diff
-    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`); a change to
-    the inventory, to any inventoried file, to a check's outcome, or to the
-    committed envelope itself is drift.
+    passing gate. Only the producing build's version strings
+    (:data:`~.signoff_attest_drift.VOLATILE_ATTESTATION_PATHS`) and a yaml
+    check's informational ``raw_content_hash`` (issue #5862, a live note
+    instead) are excluded; a change to the inventory, to any inventoried
+    file, to a check's outcome, or to the committed envelope is drift.
 
     A ``local_only`` command is not run: it is listed in ``skipped_checks``
     (never counted as passed by this run) and its committed outcome is carried

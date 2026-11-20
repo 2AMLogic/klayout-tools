@@ -64,7 +64,6 @@ from ._paths import (
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -72,7 +71,12 @@ from ._report_verify import (
 from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .coverage_work import coverage_work_count
-from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
+from .decks import (
+    ExtractionDeck,
+    UnknownExtractionDeckError,
+    deck_content_hash,
+    deck_source_path,
+)
 from .decks import get_extraction_deck as _get_extraction_deck
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
@@ -100,11 +104,7 @@ from .erc_substrate import (
     substrate_coverage_work,
     substrate_provenance,
 )
-from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
-    REASON_DEGENERATE_TAP_DECLARATION,
-    REASON_DEGENERATE_WELL_ASSERTION,
-    REASON_DEGENERATE_WELL_SELECTION,
-    REASON_EMPTY_WELL_REGION,
+from .erc_ties import (
     _degenerate_tie_reasons,
     _tie_findings,
 )
@@ -115,6 +115,7 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
     _tie_well_region,
     _well_assertion_coverage_entry,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     _capacitor_plate_regions,
     _capacitor_top_via_overlap_region,
@@ -3431,10 +3432,8 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     (``committed["spec"]``) exactly as echoed back by the original run and
     compares each against ``provenance.input.content_hash`` /
     ``provenance.spec.content_hash``; when the report used ``--deck``, also
-    re-hashes that deck's source against ``provenance.deck.content_hash``.
-    Each mismatch names which input moved. A report with no recorded hash
-    never counts as a match
-    (:func:`klayout_tools._report_verify.hash_check`).
+    re-hashes its rule sources against ``provenance.deck.content_hash``. A
+    missing recorded hash fails the check.
 
     Relative echoed paths are re-hashed relative to the current working
     directory -- the same convention (and the same ``input_not_found``
@@ -3466,12 +3465,9 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     ]
     deck = get_path(committed, ("provenance", "deck"))
     if isinstance(deck, dict) and deck.get("name") is not None:
+        actual = deck_content_hash(deck["name"])
         checks.append(
-            hash_check(
-                "provenance.deck.content_hash",
-                deck.get("content_hash"),
-                content_hash(deck_source_path(deck["name"])),
-            )
+            hash_check("provenance.deck.content_hash", deck.get("content_hash"), actual)
         )
     result = build_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
@@ -3514,4 +3510,4 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)

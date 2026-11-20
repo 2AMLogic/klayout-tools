@@ -530,8 +530,8 @@ _MAX_CAP_TOP_PLATE_REQUIRES = max(
 )
 
 #: ``cap_array``'s top-plate requires-mask slots (``cap_top_requires_<i>_*``)
-#: are generated from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: are generated from this value, declared with ``hidden=True`` (issue #6757)
+#: in :mod:`klayout_tools.gen_pcells.cap_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 
@@ -796,8 +796,8 @@ _MAX_RES_FLAVOR_LAYERS = max(
 )
 
 #: ``res_array``'s flavour mask slots (``res_flavor_<i>_*``) are generated
-#: from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: from this value, declared with ``hidden=True`` (issue #6757) in
+#: :mod:`klayout_tools.gen_pcells.res_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 #: The default ``res_array`` flavour: the first flavour listed for each family
@@ -1755,7 +1755,7 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: ``diff_pair`` a second, opt-in way to draw the same GDS layer without
 #: renaming or otherwise disturbing ``esd_device``'s existing role.
 #:
-#: sky130's single supported flavour, ``"hvi"`` (issue #1912, unblocked by
+#: sky130's first supported flavour, ``"hvi"`` (issue #1912, unblocked by
 #: #1369's own citation), reuses ``klayout_tools.decks.sky130``'s curated
 #: *extraction* deck's ``EXTRACTION_DECK.mos_flavours``
 #: ``MOSFlavour(marker=(75, 20), flavour="hvi", ...)`` entry -- the same
@@ -1767,25 +1767,25 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: subcircuits -- so requesting ``voltage_flavor="hvi"`` here draws the
 #: identical marker the deck already extracts a device-class split on,
 #: mirroring gf180mcu's/sg13g2's own "reuse the deck's own marker citation"
-#: precedent above rather than inventing a new one. Before #1912, sky130 had
-#: no entry here at all: this deck's own transcription cited no numbered
-#: medium/high-voltage transistor marker layer (the same gap
-#: :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role still documents -- sky130's
-#: ``hvtr``/``hvtp`` *implant* names remain cited only as unnumbered
-#: exclusions in the official ``sky130.lvs``, never with a transcribed
-#: layer/datatype pair this module could cite without guessing; ``hvi`` is a
-#: distinct, numbered *identification* layer #1369 separately transcribed and
-#: verified, not one of those two names). A ``voltage_flavor`` request naming
-#: anything other than ``"hvi"`` still resolves to no layer on this family --
-#: reported via ``drc_hints.notes``, never silently dropped (see
-#: :func:`_voltage_flavor_mark_layer`). Needs no
-#: :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM` entry of its own: like
-#: sg13g2/sg13cmos5l's ``"hv"`` marker, no rule in this deck's own curated DRC
-#: deck reads ``hvi`` at all (`decks/sky130.py`'s own ``hvi`` layer-name
-#: comment: "no DRC rule here reads hvi, so every rule still applies its
-#: general-case threshold to geometry drawn inside hvi"), so the default
-#: :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
+#: precedent above rather than inventing a new one. Before #1912, sky130 had no entry
+#: here at all: this deck's own transcription cited no numbered medium/high-voltage
+#: transistor marker layer (the same gap :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role
+#: still documents -- sky130's ``hvtr``/``hvtp`` *implant* names remain cited only as
+#: unnumbered exclusions in the official ``sky130.lvs``, never with a transcribed
+#: layer/datatype pair this module could cite without guessing; ``hvi`` is a distinct,
+#: numbered *identification* layer #1369 separately transcribed and verified, not one of
+#: those two names). A ``voltage_flavor`` request naming anything other than ``"hvi"``
+#: still resolves to no layer on this family -- reported via ``drc_hints.notes``, never
+#: silently dropped (see :func:`_voltage_flavor_mark_layer`). Needs no
+#: :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM` entry of its own: like sg13g2/sg13cmos5l's
+#: ``"hv"`` marker, no rule in this deck's own curated DRC deck reads ``hvi`` at all
+#: (`decks/sky130.py`'s own ``hvi`` layer-name comment: "no DRC rule here reads hvi, so
+#: every rule still applies its general-case threshold to geometry drawn inside hvi"),
+#: so the default :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
 #: enlargement.
+#:
+#: ``"lvt"`` (issue #5607) draws ``lvtn.drawing`` (125/44) alone (no
+#: ``EXTRA_LAYERS`` hvi half), for nfet and pfet (``pfet_01v8_lvt`` exists).
 #:
 #: ``sg13g2``/``sg13cmos5l`` (issue #1472) both share the single flavour name
 #: ``"hv"``, transcribed directly from the curated decks' own
@@ -1807,11 +1807,11 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "hvi": (75, 20),  # hvi.drawing -- same citation as
         # decks.sky130.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hvi").
-        # Native-Vt NMOS (issue #3600): hvi AND lvtn. This is the primary
-        # (hvi) half; the lvtn half lives in
-        # :data:`_PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS`.
+        # Native-Vt NMOS (issue #3600): hvi AND lvtn; this is the primary (hvi)
+        # half; the lvtn half lives in _PDK_VOLTAGE_FLAVOR_EXTRA_LAYERS.
         "native": (75, 20),
         "nvt": (75, 20),
+        "lvt": (125, 44),  # lvtn.drawing -- decks.sky130_lvt.lvt_mos_flavour's key
     },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
@@ -2372,7 +2372,7 @@ def _cap_array_layer_params(
     ``top_plate_via_metal`` being optional fields.
 
     Also resolves, all of them harness-computed from the resolved family and
-    never request-facing (see :data:`_HIDDEN_PARAMS`):
+    never request-facing (each declared ``hidden=True``, issue #6757):
 
     - the :data:`_CAP_GEOMETRY_MIN_KEYS` geometry floors (issues #1455/#1555,
       see :func:`_cap_geometry_min_um`) -- ``0.0`` each for a family that
@@ -2844,30 +2844,26 @@ def _esd_device_layer_params(
 def _diode_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
-    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
-    the other curated decks' diode recognition has not been exercised against
-    this geometry."""
+    """Hidden layer params for ``diode`` (issues #4300, #6614): sky130 and
+    gf180mcu. A role the family has no layer for (sky130's Dualgate, gf180mcu's
+    ``hvi``) gets a placeholder that ``_diode_layout`` never draws; the other
+    curated decks' diode recognition has not been exercised against this
+    geometry."""
+    import klayout.db as kdb
+
     from .gen import GenError
+    from .gen_diode import DIODE_FAMILY_VOLTAGE_CLASSES
+    from .gen_pcells.diode import DIODE_LAYER_ROLES
 
     family = _pdk_family(pdk_info["variant"])
-    if family != "sky130":
+    if family not in DIODE_FAMILY_VOLTAGE_CLASSES:
         raise GenError(
             f"generator 'diode': PDK family '{family}' is not yet supported "
             "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
             "section"
         )
+    infos = {role: _role_layer_info(family, role) for role in DIODE_LAYER_ROLES}
     return {
-        f"{role}_layer": _role_layer_info(family, role)
-        for role in (
-            "active",
-            "tap",
-            "nplus",
-            "pplus",
-            "well",
-            "hvi",
-            "diode_mark",
-            "contact",
-            "metal",
-        )
+        f"{role}_layer": info if info is not None else kdb.LayerInfo(0, 0)
+        for role, info in infos.items()
     }

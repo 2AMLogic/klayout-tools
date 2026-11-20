@@ -84,10 +84,10 @@ result in the same corner stays inspectable.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
 from .sim_step_shadow import validate_step_measurement_name
@@ -255,7 +255,7 @@ def resolve_analysis_steps(
     known: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(raw_steps):
         step = _resolve_step(raw, index, known)
-        step_specs = _resolve_step_measurements(raw, step, index, known)
+        step_specs = _resolve_step_measurements(raw, step, known)
         known[step["name"].lower()] = {
             "index": index,
             "name": step["name"],
@@ -405,12 +405,7 @@ def _resolve_pwl_alter(value: dict[str, Any], target: str, step: str) -> dict[st
         not isinstance(vector, list)
         or len(vector) < 4
         or len(vector) % 2
-        or any(
-            isinstance(v, bool)
-            or not isinstance(v, (int, float))
-            or not math.isfinite(v)
-            for v in vector
-        )
+        or any(not is_finite_number(v) for v in vector)
     ):
         raise SimError(
             f"step {step!r}: alter pwl for {target!r} must be an even-length "
@@ -467,11 +462,7 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
             )
         if isinstance(value, dict):
             value = _resolve_pwl_alter(value, target, step)
-        elif (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
+        elif not is_finite_number(value):
             raise SimError(
                 f"step {step!r}: alter value for {target!r} must be a finite "
                 f'number or a {{"pwl": [t0, v0, t1, v1, ...]}} object '
@@ -484,7 +475,6 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
 def _resolve_step_measurements(
     raw: dict[str, Any],
     step: dict[str, Any],
-    index: int,
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
@@ -509,7 +499,7 @@ def _resolve_step_measurements(
         local = spec["name"]
         validate_step_measurement_name(spec, local, local_names, step)
         local_names[local.lower()] = local
-        resolved.append(_flatten_step_measurement(spec, step, index, known))
+        resolved.append(_flatten_step_measurement(spec, step, known))
     return resolved
 
 
@@ -554,7 +544,6 @@ def refuse_scalar_intermediate(measurements_spec: list[dict[str, Any]]) -> None:
 def _flatten_step_measurement(
     spec: dict[str, Any],
     step: dict[str, Any],
-    index: int,
     known: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     local = spec["name"]
@@ -614,7 +603,7 @@ def _meas_command(card: str, local: str, step: dict[str, Any]) -> str:
             "'.meas <type> <name> ...' card"
         )
     meas_type, card_name, rest = match.groups()
-    _validate_meas_card(local, card)
+    _validate_meas_card(local, card, control_scope=True)  # issue #5651 lint
     if meas_type.lower() != step["kind"]:
         raise SimError(
             f"step {step['name']!r}: measurement {local!r} is a '.meas "

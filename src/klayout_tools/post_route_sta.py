@@ -240,7 +240,7 @@ macro's real arcs participate in this verb's slack/``fmax``/power numbers
 rather than being blackboxed; a ``lib`` map with no entry for the corner
 being run is a named error, never a silent fallback to another corner's
 timing, which matters most in a ``request.pdk.corners`` sweep. See
-:func:`_macro_liberty_paths`.
+:func:`~klayout_tools._macros_blackbox.macro_liberty_paths`.
 """
 
 from __future__ import annotations
@@ -253,6 +253,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
+from . import _macros_blackbox as macro_blackbox
 from . import env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
@@ -299,15 +300,15 @@ from ._sta_request_diag import (
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
+from ._sta_request_diag import extract_block as _extract_block
 from ._sta_request_diag import parse_spef_missing_nets as _parse_spef_missing_nets
 from ._sta_sdc_check import attach_sdc_drift, resolve_sdc_check
 from ._tcl import tcl_literal as _tcl_literal
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
-from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
+from .post_route_sta_electrical import (
     _ELECTRICAL_NET_PREFIX,
     _ELECTRICAL_OK,
-    _ELECTRICAL_ROW_RE,
     _ELECTRICAL_UNSUPPORTED,
     _MAX_CAP_BEGIN,
     _MAX_CAP_END,
@@ -317,9 +318,6 @@ from .post_route_sta_electrical import (  # noqa: F401 -- re-exported names
     _MIN_PERIOD_END,
     _MIN_PULSE_BEGIN,
     _MIN_PULSE_END,
-    _SLACK_ROW_RE,
-    _electrical_class,
-    _electrical_slack_class,
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
@@ -330,16 +328,13 @@ from .post_route_sta_instance_paths import (
     _validate_report_instances,
 )
 from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
-    _CHECK_ROLE_TYPES,
     _PORT_PATHS_BEGIN,
     _PORT_PATHS_END,
-    _SLACK_CONSISTENCY_TOL_NS,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
     _apply_port_record,
     _empty_path_record,
     _parse_port_path_rows,
-    _parse_worst_path_rows,
     _port_paths,
     _worst_path_record,
     _worst_paths,
@@ -680,7 +675,7 @@ def run_sta(
     # before any PDK resolution or engine invocation; the corner-dependent
     # half (which of a macro's per-corner liberties applies) is resolved
     # per corner inside `_run_corner_session`.
-    macros = _validate_macros(request.get("macros"), request_dir)
+    macros = _validate_macros(request.get("macros"), request_dir, has_def=has_def)
 
     (
         clock_port,
@@ -1127,6 +1122,9 @@ def _dispatch_sta(
         # declaration round-trips through both verbs' reports unchanged.
         # `[]` when the request declared none.
         "macros": macro_spec.macros_response(macros),
+        # Additive field (issue #5707): cells linked as untimed black boxes
+        # (always present; their delay/power is excluded from the numbers).
+        "blackboxed_cells": macro_blackbox.blackboxed_cells_response(macros),
         # Additive field (issue #2739): which clock mode every analyzed
         # corner was timed with -- "ideal" (the default, this command's
         # pre-#2739 behaviour) or "propagated". Present on both response
@@ -1270,7 +1268,7 @@ def _run_corner_session(
     -- which is what makes a macro-bearing ``def``/``verilog`` load at all
     instead of failing ``[ERROR ORD-2013] instance <inst> LEF master <cell>
     not found`` -- plus one ``read_liberty`` per macro that declared a
-    liberty for *this* corner (:func:`_macro_liberty_paths`). ``[]`` (the
+    liberty for *this* corner (:func:`macro_blackbox.macro_liberty_paths`). ``[]`` (the
     default for every pre-#2635 request) emits neither and leaves the
     generated script byte-identical.
     ``sdf_stem`` (issue #2886) -- when given (only ever for a ``def``-mode
@@ -1292,8 +1290,11 @@ def _run_corner_session(
         cell_library, corner_name, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
-    macro_lefs = [macro["lef"] for macro in macros]
-    macro_liberty_paths = _macro_liberty_paths(macros, corner)
+    macro_lefs = [macro["lef"] for macro in macros if macro["lef"] is not None]
+    macro_lefs.extend(macro_blackbox.write_stub_lefs(macros, output_dir, script_tag))
+    macro_liberty_paths = macro_blackbox.macro_liberty_paths(
+        macros, corner, error_cls=PostRouteStaError
+    )
 
     script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
     metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
@@ -1381,7 +1382,9 @@ def _run_corner_session(
         if port_errors:
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
-            raise PostRouteStaError(_engine_error_message(completed))
+            raise PostRouteStaError(
+                _engine_error_message(completed, verilog_mode=not has_def)
+            )
 
         metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
@@ -1686,6 +1689,9 @@ def _run_multi_corner(
         # liberties was loaded varies, and that is already determined by
         # each corner's own name plus this one `macros` block.
         "macros": macro_spec.macros_response(macros),
+        # Additive field (issue #5707): cells linked as untimed black boxes
+        # (always present; their delay/power is excluded from the numbers).
+        "blackboxed_cells": macro_blackbox.blackboxed_cells_response(macros),
         # Additive field (issue #2739): one clock mode for the whole
         # characterization -- every per-corner session runs the same
         # request-level `constraints.propagated_clock`, so this is hoisted
@@ -2810,43 +2816,23 @@ def _validate_wire_load_estimate(
     return wire_load_model, wire_load_mode
 
 
-def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
+def _validate_macros(
+    macros: Any, request_dir: str, *, has_def: bool = False
+) -> list[dict[str, Any]]:
     """Validate the optional ``request.macros`` array (issue #2635) -- the
     same shared hard-macro declaration ``klt synthesize`` accepts, field for
-    field, documented once in :mod:`klayout_tools.macros`.
-
-    Returns ``[]`` when the field is omitted, so every request written
-    before this field existed analyses exactly as it did. A thin wrapper
-    rather than a second validator: only the exception class differs per
-    verb.
+    field, documented once in :mod:`klayout_tools.macros`. Returns ``[]``
+    when the field is omitted, so every request written before this field
+    existed analyses exactly as it did. A thin wrapper rather than a second
+    validator: only the exception class differs per verb. Issue #5707: a
+    LEF-less entry is a verilog-mode-only untimed black box (see
+    :mod:`klayout_tools._macros_blackbox`); ``def`` mode rejects it.
     """
-    return macro_spec.validate_macros(macros, request_dir, error_cls=PostRouteStaError)
-
-
-def _macro_liberty_paths(macros: list[dict[str, Any]], corner: str) -> list[str]:
-    """The macro liberties to ``read_liberty`` alongside the standard-cell
-    library for the corner actually being analysed (issue #2635).
-
-    A macro that declared no ``lib`` at all contributes nothing: its LEF is
-    what fixes ``ORD-2013``, and OpenSTA then times the instance as an
-    untimed blackbox (``[WARNING STA-0198] module <cell> not found.
-    Creating black box for <inst>``) -- a legitimate, explicit choice for a
-    caller doing a geometry-only run. A macro that *did* declare a ``lib``
-    map with no entry for this corner is a hard error naming the corner and
-    the keys that are available
-    (:func:`~klayout_tools.macros.macro_lib_for_corner`), never a silent
-    fallback to some other corner's timing -- which matters most in a
-    ``request.pdk.corners`` multi-corner run, where the right answer for
-    one corner is the wrong answer for the next.
-    """
-    paths: list[str] = []
-    for macro in macros:
-        lib_path = macro_spec.macro_lib_for_corner(
-            macro, corner, error_cls=PostRouteStaError
-        )
-        if lib_path is not None:
-            paths.append(lib_path)
-    return paths
+    if has_def:
+        macro_blackbox.reject_lefless_in_def(macros, error_cls=PostRouteStaError)
+    return macro_spec.validate_macros(
+        macros, request_dir, error_cls=PostRouteStaError, allow_blackbox=not has_def
+    )
 
 
 def _resolve_liberty(
@@ -4009,7 +3995,9 @@ def _spef_name_map(text: str) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: _OpenRoadResult) -> str:
+def _engine_error_message(
+    completed: _OpenRoadResult, *, verilog_mode: bool = False
+) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
@@ -4053,7 +4041,8 @@ def _engine_error_message(completed: _OpenRoadResult) -> str:
     # hits first. Appended as a further `--` clause, the same
     # recognized-hint structure `container_runtime_hint` above uses.
     macro_hint = macro_spec.missing_lef_master_hint(
-        (completed.stdout or "") + "\n" + (completed.stderr or "")
+        (completed.stdout or "") + "\n" + (completed.stderr or ""),
+        blackbox_form=verilog_mode,
     )
     if macro_hint is not None:
         message = f"{message} -- {macro_hint}"
@@ -4082,18 +4071,6 @@ def _read_metrics(metrics_path: str) -> dict[str, Any]:
             f"sta metrics '{metrics_path}' must contain a JSON object"
         )
     return data
-
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when
-    either marker is absent (an OpenROAD build that never reached that part
-    of the script, or a caller parsing a stream the markers aren't in)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
 
 
 def _spef_reader_warnings(stdout: str, stderr: str) -> tuple[int, list[str]]:

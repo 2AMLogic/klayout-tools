@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -230,9 +231,7 @@ def _mark_map_collected(
     for entry in document.get("shards") or ():
         if _entry_index(entry) not in wanted:
             continue
-        order = ["pending", "submitted", "launching", "launched", "collected"]
-        current = str(entry.get("state") or "")
-        if current in order and order.index(current) >= order.index("collected"):
+        if entry.get("state") == "collected":
             continue
         entry["state"] = "collected"
         if not entry.get("collected_at"):
@@ -254,7 +253,7 @@ def harvest_resume_shards(
     request_dir: str | None,
     fingerprint: str,
     known: frozenset[str] | set[str],
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """``--resume``'s harvest of a retained shard map (issue #5775): collect
     the corners of every shard whose remote job is already terminal, so the
     ordinary resume flow re-dispatches only what is genuinely outstanding.
@@ -265,11 +264,12 @@ def harvest_resume_shards(
     unchanged). A terminal entry is collected through the plain attach
     machinery (:func:`sim_batch._run_batch_job` with ``attach=True``) and
     marked ``collected`` in the map; anything else is left alone. Returns
-    ``(corners, engine_version)`` -- the corners
+    ``(corners, engine_version, remote_environment)`` -- the corners
     :func:`_record_batch_checkpoint` filters and records (a terminally
     *failed* shard returns unrun corners, which that filter leaves
-    outstanding); ``([], None)`` when there is no map or nothing new to
-    collect.
+    outstanding). The environment carries only shards whose corners ran,
+    in map order, with ``None`` for a shard without provenance. Returns
+    ``([], None, None)`` when there is no map or nothing new to collect.
 
     A map written for a different request refuses with
     :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
@@ -278,13 +278,14 @@ def harvest_resume_shards(
     path = os.path.join(artifacts_dir, sim_batch.BATCH_SHARDS_FILENAME)
     loaded = _load_resume_shard_map(path, fingerprint, request)
     if loaded is None:
-        return [], None
+        return [], None, None
     document, entries, hosts = loaded
     by_id = {point.corner_id: point for point in corner_points}
     partition = sim_batch._shard_corner_points(corner_points, hosts)
     corners_out: list[dict[str, Any]] = []
     engine_version: str | None = None
     harvested_indexes: list[int] = []
+    fleet: list[dict[str, Any] | None] = []
     collected_indexes: list[int] = []
     for entry in sorted(entries, key=_entry_index):
         outcome = _collect_resume_entry(
@@ -308,6 +309,11 @@ def harvest_resume_shards(
         corners_out.extend(corners)
         if any(not _is_unrun_batch_corner(corner) for corner in corners):
             harvested_indexes.append(index)
+            fleet.append(
+                sim_batch._mark_resumed(
+                    (corners, entry_engine_version, environment), True
+                )[2]
+            )
         if entry_engine_version is not None:
             engine_version = entry_engine_version
         # Only a shard whose outputs were actually collected is marked
@@ -320,7 +326,7 @@ def harvest_resume_shards(
     if collected_indexes:
         _mark_map_collected(path, document, collected_indexes)
     _report_harvest(corners_out, harvested_indexes, path)
-    return corners_out, engine_version
+    return corners_out, engine_version, {"fleet": fleet} if fleet else None
 
 
 def harvest_resume_shard_map(
@@ -336,13 +342,13 @@ def harvest_resume_shard_map(
     request_dir: str | None,
     checkpoint: Any,
     pre_completed: dict[str, dict[str, Any]],
-) -> str | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     """Harvest the retained shard map and absorb what it yields: the
     harvested corners are recorded into the live checkpoint (so an
     interrupted resumed run keeps them) and merged into ``pre_completed``
     (so ``dispatch_points`` shrinks and the ``resume: reused N`` summary
-    counts them). Returns the harvested engine version, or ``None`` when
-    nothing was harvested.
+    counts them). Returns the harvested engine version and remote
+    environment, or ``(None, None)`` when nothing was harvested.
 
     Without ``--resume`` a sharded run persists no checkpoint, so this -- not
     ``checkpoint.json`` -- is what makes ``environment.remote.resumable:
@@ -351,7 +357,7 @@ def harvest_resume_shard_map(
     config = sim_batch._resolve_batch_config(
         request, corner_count=len(corner_points), timeout_s=timeout_s
     )
-    corners, engine_version = harvest_resume_shards(
+    corners, engine_version, environment = harvest_resume_shards(
         artifacts_dir=artifacts_dir,
         config=config,
         corner_points=corner_points,
@@ -366,7 +372,7 @@ def harvest_resume_shard_map(
         known=frozenset(pre_completed),
     )
     if not corners:
-        return None
+        return None, None
     _record_batch_checkpoint(checkpoint, "batch", corners, engine_version)
     pre_completed.update(
         {
@@ -375,7 +381,7 @@ def harvest_resume_shard_map(
             if not _is_unrun_batch_corner(corner)
         }
     )
-    return engine_version
+    return engine_version, environment
 
 
 def maybe_harvest_resume_shards(
@@ -387,13 +393,13 @@ def maybe_harvest_resume_shards(
     submit_only: bool,
     attach_job_id: str | None,
     **harvest_kwargs: Any,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     """``_run_sim_corners``'s whole resume-harvest step (issue #5775): with
     ``--resume`` on the batch backend -- never for ``--attach`` (the
     explicit re-attach form), ``--submit-only`` (refused with ``--resume``
     before any S3 write) or ``--dry-run`` (which must not touch S3 at all)
     -- harvest the retained shard map into the checkpoint and return the
-    harvested engine version; otherwise ``None``."""
+    harvested engine version and remote environment; otherwise ``(None, None)``."""
     if not (
         resume
         and backend == "batch"
@@ -402,5 +408,60 @@ def maybe_harvest_resume_shards(
         and not submit_only
         and attach_job_id is None
     ):
-        return None
+        return None, None
     return harvest_resume_shard_map(checkpoint=checkpoint, **harvest_kwargs)
+
+
+def resume_hosts(
+    hosts: int, corner_points: Sequence[Any], dispatch_points: Sequence[Any]
+) -> int:
+    """The fleet size a resumed dispatch may ask for (issue #6685).
+
+    ``--resume`` reuses finished units, so ``dispatch_points`` (what is still
+    outstanding) can be shorter than ``corner_points`` (the whole request) and
+    fall below the requested ``hosts``. The "hosts exceeds the units to
+    dispatch" refusal guards a user asking for more hosts than units; on a
+    resume the user asked for nothing new, so refusing would strand a
+    half-finished sweep. Cap ``hosts`` at the outstanding unit count -- but
+    only when the resume actually reused something: a request whose own
+    ``hosts`` exceeds its own units is still refused, resume or not. Nothing
+    outstanding (everything reused) dispatches nothing, so there is nothing to
+    cap.
+    """
+    if 0 < len(dispatch_points) < len(corner_points):
+        return min(hosts, len(dispatch_points))
+    return hosts
+
+
+def merge_resume_environment(
+    harvested: dict[str, Any] | None,
+    dispatched: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Combine provenance for harvested and dispatched shards (issue #6423).
+
+    Keep harvested map order, then dispatch order, preserving unknown shard
+    entries and dispatch-level signals. A job observed in both phases uses
+    the newer dispatch observation once. Single-job dispatch metadata belongs
+    inside ``fleet[]``, never at the fleet level. Neither input is mutated.
+    """
+    if harvested is None:
+        return dispatched
+    if dispatched is None:
+        return harvested
+    if isinstance(dispatched.get("fleet"), list):
+        result = dict(dispatched)
+        dispatched_fleet = dispatched["fleet"]
+    else:
+        result = {}
+        dispatched_fleet = [dispatched]
+    dispatched_jobs = {
+        entry["job_id"]
+        for entry in dispatched_fleet
+        if isinstance(entry, dict) and entry.get("job_id") is not None
+    }
+    result["fleet"] = [
+        entry
+        for entry in harvested["fleet"]
+        if not (isinstance(entry, dict) and entry.get("job_id") in dispatched_jobs)
+    ] + dispatched_fleet
+    return result
