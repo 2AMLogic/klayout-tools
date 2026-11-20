@@ -161,7 +161,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
-from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
+from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
 from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
@@ -205,6 +205,7 @@ from .sim_batch_features import (
     pop_remote_diagnostics,
     worker_ngspice_binary,
 )
+from .sim_batch_hints import attach_runner_hints as _attach_runner_hints
 from .sim_batch_plan import dry_run_job_ceiling
 from .sim_batch_resume import _is_unrun_batch_corner, _record_batch_checkpoint
 from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
@@ -235,7 +236,6 @@ from .sim_corners import (
 from .sim_corners import _corner_points_to_wire as _corner_points_to_wire
 from .sim_decks import run_deck_request
 from .sim_echo_messages import echo_unsupported_message
-from .sim_expr_hint import attach_expr_runner_hint as _attach_expr_runner_hint
 from .sim_osdi_pin import osdi_pdk_root_pin
 from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
 from .sim_osdi_settle import (
@@ -389,15 +389,12 @@ assert is_registered(_CORNER_INCONCLUSIVE_COUNT_METRIC_NAME)
 
 #: Every ``diagnostics[].code`` this command can emit -- the authoritative
 #: vocabulary ``options.fail_on_diagnostic`` is validated against (issue
-#: #2492), and the same table ``docs/cli/sim.md``'s "Failure classification"
-#: section documents. Kept as an explicit literal (rather than derived) so
-#: the accepted option vocabulary is readable in one place and stable
-#: independent of which engine/backend module happens to define a pattern;
-#: ``test_sim.py`` asserts it stays a superset of every code the classifier
-#: tables and the unrun-report paths can actually produce, so it cannot
-#: silently drift -- including a code emitted only through a named constant
-#: or an ``_unrun_corner_report`` call, which it resolves rather than
-#: restates (see :data:`_GRADING_MARKER_CODES`).
+#: #2492), and the table ``docs/cli/sim.md``'s "Failure classification"
+#: section documents. An explicit literal, so the vocabulary is readable in
+#: one place; ``test_sim.py`` asserts it stays a superset of every code the
+#: emitting modules (classifier tables, unrun-report paths, report-level
+#: hints) can produce, resolving codes emitted through a named constant or
+#: ``_unrun_corner_report`` (see :data:`_GRADING_MARKER_CODES`).
 DIAGNOSTIC_CODES: frozenset[str] = frozenset(
     {
         # ngspice/Xyce log classifiers (`_DIAGNOSTIC_PATTERNS`,
@@ -470,6 +467,8 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         # Report-level (top-level `diagnostics[]`, issue #5385): process legs
         # with bit-identical results; a warning.
         "process_leg_check",
+        # Report-level (top-level `diagnostics[]`, issue #6720); a warning.
+        "batch_convergence_all_failed",
     }
 )
 
@@ -4431,6 +4430,13 @@ def _run_sim_corners(
             repo_root=repo_root,
         )
     )
+    # Additive/optional (issue #5779): the device-multiplier lint's findings
+    # -- warning-only, never a failing exit.
+    environment.update(
+        sim_env_report.device_multiplier_environment(
+            netlist_path, request=request, repo_root=repo_root
+        )
+    )
     environment.update(
         sim_env_report.remote_entry_environment(
             remote_environment,
@@ -4539,7 +4545,7 @@ def _run_sim_corners(
         if d
     ]:
         report["diagnostics"] = top_diags
-    _attach_expr_runner_hint(report, measurements_spec, corners, backend=backend)
+    _attach_runner_hints(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
     _attach_not_reached_count(report, measurements_spec, corners)
     if plot_dir is not None:
@@ -7101,19 +7107,11 @@ def _logical_netlist_lines(netlist_text: str) -> list[str]:
     Comments and ``+`` continuations go through the shared helpers, so a
     ``$`` glued to the next token (``.include $PDK_ROOT/...``) survives and
     an orphan ``+`` is dropped, as it always was here. Deliberately lexical,
-    not a complete SPICE parser: ``.include``/``.lib`` are not followed."""
-    logical: list[str] = []
-    for raw in netlist_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("*"):
-            continue
-        line = strip_spice_inline_comment(line)
-        if not line:
-            continue
-        logical.append(line)
-    return [
-        line for line in fold_spice_continuations(logical) if not line.startswith("+")
-    ]
+    not a complete SPICE parser: ``.include``/``.lib`` are not followed.
+    Shared implementation in :func:`_spice_text.logical_lines` (issue #5779
+    moved it out so this module keeps its size ratchet while the
+    device-multiplier lint reads cards the same way)."""
+    return _spice_text_logical_lines(netlist_text)
 
 
 _NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)

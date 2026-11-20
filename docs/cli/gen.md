@@ -1710,10 +1710,26 @@ opening through the ring's band so a route can pass through it instead:
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
-  violation in `klt drc` after the fact. The window's extent across the
-  side is the ring band's full thickness (a strap crossing the ring is
-  constrained only along it, so its footprint extends past the window
-  across the side by construction). The field is `null` when the
+  violation in `klt drc` after the fact. That makes the window the
+  DRC-clean envelope for a **hand-drawn** strap only, and deliberately
+  wider than the clearance [`klt gen-compose`](gen-compose.md) requires
+  of a *routed* crossing through the same opening: a `connectivity[]`
+  route is held to the stricter per-cut-end clearance
+  `width_um / 2 + drc_hints.min_spacing_um`, where `width_um` is the
+  route's width. The ring's `drc_hints.min_spacing_um` comes from the
+  generator's PDK-independent 0.4 µm spacing floor. For `guard_ring`,
+  the strap window's inset at each cut end is 0.17 µm on sky130 `li1`,
+  0.23 µm on gf180mcu `metal1`, and 0.18 µm on sg13g2 `metal1`. These
+  smaller insets allow a hand-drawn strap to fit where a route of the
+  same width would fail the crossing clearance.
+  A crossing can use a different supported routing layer, whose own
+  spacing rule may exceed the ring's fixed margin. For example, on
+  sky130 the `top_metal` role selects `met5`, where `met5.space.1`
+  requires 1.60 µm between shapes on that layer.
+  The window's extent across the side is the ring band's full thickness
+  (a strap crossing the ring is constrained only along it, so its
+  footprint extends past the window across the side by construction).
+  The field is `null` when the
   along-side extent is narrower than the layer's minimum width (or ≤ 0
   after the spacing inset) — no same-layer-legal strap fits, because a
   strap filling the window is only as wide as the window's along-side
@@ -2588,7 +2604,7 @@ family/variant split the resolver doesn't have. The response's
 | `device_count` | integer | Number of unit instances placed (`resistor_strip`'s `num`). |
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
-| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). `res_array` snaps a poly resistor's off-grid `length_um` by default (see `drc_hints.length_snap`; `params.snap=false` restores the warning path) and likewise warns when it is drawn verbatim off that grid's `length_um` is off that grid (nearest lengths below/above named), and on gf180mcu when `length_um` is below the deck's minimum SAB/Pplus mask width (read from the deck rule, e.g. `sab.width.1`); advisory only, the geometry is unchanged (issue #4203). |
+| `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. `mos_array`/`diff_pair` also warn when `w_um`/`l_um` is not a multiple of the resolved family's manufacturing grid (read from the curated deck's `ongrid` rule; none for a family without one), naming the nearest representable values -- for `diff_pair` `splits` (and parallel `mos_array` `fingers`) the total width must be a multiple of `splits x grid` (issue #2933). `res_array` snaps a poly resistor's off-grid `length_um` by default (see `drc_hints.length_snap`). With `params.snap=false`, it draws the requested length and, if that length is off-grid, reports the nearest on-grid lengths below and above it. On gf180mcu it also warns when `length_um` is below the deck's minimum SAB/Pplus mask width (read from the deck rule, e.g. `sab.width.1`); advisory only, the geometry is unchanged (issue #4203). `diode` warns the same way, one entry per off-grid edge, when `width_um` or `length_um` (both diffusion extents) is not a multiple of that grid -- advisory only, `klt drc` stays the authority (issue #6643). |
 | `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries

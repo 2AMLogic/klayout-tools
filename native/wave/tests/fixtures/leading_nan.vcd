@@ -1,0 +1,17 @@
+$timescale 1ns $end
+$scope module tb $end
+$var real 64 ! leading $end
+$var real 64 " never $end
+$var real 64 # initial $end
+$var real 64 % mid $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+rnan #
+r1.25 %
+$end
+#10
+rnan !
+rnan %
+#30
+r3.5 !
