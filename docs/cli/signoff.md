@@ -6476,7 +6476,11 @@ citation that pins `content_hash`, the grader re-hashes the cited file itself
 (`sha256:<hex>`, the same form every `klt` re-hash produces). An equal pin
 grades on the normal verdict; a differing one renders `unmet` /
 `stale_evidence`. The `met` citation carries `content_hash` plus the additive
-field `content_hash_basis: "evidence_file"`. Unlike other kinds, this pin binds
+field `content_hash_basis: "evidence_file"`. Since issue #6861 the text format
+discloses it too: `--format text` renders `content_hash_basis=<token>` on the
+`cite:` line, right after the hash it qualifies and verbatim for any token,
+so a text reader can tell a pinned digest from a re-hashed one. Unlike other
+kinds, this pin binds
 the *evidence envelope's bytes* (it detects an edit or re-run since pinning),
 **not** a design input. A command-backed citation stays `unverifiable` (its
 stdout is not a stable file) and the note says so. With no pin in the manifest

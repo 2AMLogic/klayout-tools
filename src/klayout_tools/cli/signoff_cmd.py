@@ -768,16 +768,16 @@ def _print_foundry_cell_exceptions(citation: dict) -> None:
 
 
 def _print_cite_line(citation: dict) -> None:
-    """The ``cite:`` line naming what an item's evidence was: command-backed
-    evidence (issue #825) has no static file, so the executed command is
-    shown instead; file-backed evidence (issue #722) has no command, so the
-    evidence file is shown, as before."""
+    """The ``cite:`` line naming what an item's evidence was: the executed
+    command (issue #825) or the evidence file (issue #722), as before; a
+    ``content_hash_basis`` (issue #6861) renders bare beside the hash."""
     source = citation["file"] if citation["file"] is not None else citation["command"]
+    basis = citation.get("content_hash_basis")
+    basis = f", content_hash_basis={basis}" if basis is not None else ""
     print(
-        f"        cite: {source} "
-        f"(kind={citation['kind']}, status={citation['check_status']}, "
-        f"content_hash={citation['content_hash']}, "
-        f"exit_status={citation['exit_status']})"
+        f"        cite: {source} (kind={citation['kind']}, "
+        f"status={citation['check_status']}, content_hash={citation['content_hash']}"
+        f"{basis}, exit_status={citation['exit_status']})"
     )
 
 
