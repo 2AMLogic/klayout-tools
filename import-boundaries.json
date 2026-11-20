@@ -217,7 +217,8 @@
         "klayout_tools.equiv_errors",
         "klayout_tools.equiv_replay",
         "klayout_tools.equiv_sequential",
-        "klayout_tools.equiv_stage"
+        "klayout_tools.equiv_stage",
+        "klayout_tools.equiv_verdict"
       ]
     },
     "erc": {
@@ -360,6 +361,7 @@
         "klayout_tools.gen_hbt",
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_params_checks",
+        "klayout_tools.gen_layer_mv_ring",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_res_head",
         "klayout_tools.gen_pcells",
@@ -375,6 +377,7 @@
         "klayout_tools.gen_pcells.guard_ring",
         "klayout_tools.gen_pcells.pdk_cell",
         "klayout_tools.gen_pcells._common_params",
+        "klayout_tools.gen_pcells._mos_array_ring_mv",
         "klayout_tools.gen_pcells._mos_array_shapes",
         "klayout_tools.gen_pcells._ring_shapes",
         "klayout_tools.gen_pcells.mos_array",

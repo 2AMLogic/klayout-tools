@@ -95,6 +95,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   at the units still outstanding; a fresh run (or a resume that reused nothing)
   with `hosts` above its unit count is refused exactly as before. No JSON field
   changes.
+
+- **`klt gen mos_array`'s auto tap ring now meets gf180mcu's native
+  medium-voltage well/Dualgate rules** (#6503, 2026-11-18): a `pfet` +
+  `medium_voltage` array's ring Nwell was sized off the ring's *nominal*
+  outer box, so on the emitted GDS it enclosed the drawn `Comp` edge by only
+  0.15um -- 10nm short of the `gf180mcu.drc` runset's `DF.4d_MV` (0.16um
+  Nwell overlap of NCOMP) at the default `ring_padding_um`, a further
+  manufacturing-grid step short on off-grid paddings (also tripping
+  `nwell_OFFGRID`), while the
+  core-anchored `Dualgate` marker traded `DV.6` (0.24um enclose COMP) for
+  `DV.7`/`DV.3` inside a 1.05..1.28um rule-swapping window no padding
+  sweep could monotonically escape. The ring's well is now grown from the
+  ring's final grid-snapped edge (the same snap-then-grow discipline
+  `_insert_implant_ring` uses) by an MV-gated 0.16um margin, and the marker
+  grows to enclose that same edge by `DV.6`'s 0.24um -- clearing
+  `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` at every padding from 0.5 to 2.0um while
+  keeping non-medium-voltage and non-gf180mcu arrays unchanged, including at
+  off-grid paddings (the snap-then-grow well is applied only to the
+  gf180mcu medium-voltage case).
+  Ringless MV pfet tap pads also need `DF.4d_MV`'s 0.16um well margin:
+  their well grows 0.01um per side, with pads and marker unchanged.
+  An nfet MV ring gets the marker growth too, and still draws no Nwell.
+  Other families resolve no ring margin; 3.3V-only gf180mcu rings and
+  tap pads keep their 0.15um default.
+
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
   sim`'s netlist identity cut every line at the first whitespace-preceded `$`

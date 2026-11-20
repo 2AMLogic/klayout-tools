@@ -164,6 +164,7 @@ from .signoff_tier_text import (
     _not_applicable_suffix,
     _print_justified_gaps,
     _print_not_applicable,
+    input_verified_statement,
 )
 
 EXIT_PASS = 0
@@ -586,32 +587,10 @@ def _print_text(result: dict) -> None:
 
 
 def _print_input_verified(citation: dict) -> None:
-    """Print one line stating whether a citation's ``content_hash`` was
-    verified against the **input artifact** the cited envelope names, or
-    only against the envelope's own claim about it (issue #2196) -- or
-    nothing at all, when there is nothing to say: no input hash recorded
-    and none re-derivable, so ``content_hash: None`` already says it. Every
-    other case prints, including the unverified one -- a freshness claim
-    checked against a file and one checked only against another claim being
-    indistinguishable is the exact gap this discloses. Since #6403 a citation
-    carrying ``input_verified_note`` also prints an ``input note:`` line;
-    its own function so the branches stay out of the caller's C901 budget.
-    """
-    verified = citation.get("input_verified")
-    if verified is None and citation.get("content_hash") is None:
+    """Print the citation's hash source and any verification details."""
+    statement = input_verified_statement(citation)
+    if statement is None:
         return
-    if verified is True:
-        statement = "re-hashed the artifact this envelope names -- matches"
-    elif verified is False:
-        statement = (
-            "CHANGED -- the artifact this envelope names no longer matches "
-            "the content_hash it recorded"
-        )
-    else:
-        statement = (
-            "not re-hashed (content_hash compared against this envelope's own "
-            "claim only -- the artifact itself was not read)"
-        )
     print(f"        input: {statement}")
     note = citation.get("input_verified_note")
     if note is not None:

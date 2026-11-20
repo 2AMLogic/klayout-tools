@@ -329,7 +329,8 @@ file's own bytes — a pinned `functional-verification` citation, reported as
 `content_hash_basis: "evidence_file"` (issue #4893) — keeps hashing the file
 **as committed**, so a pin taken over a `.json.gz` binds those compressed
 bytes and a pin taken over the decompressed copy binds those; the two are not
-interchangeable for that one basis.
+interchangeable for that one basis. A stale pin's `detail.compared_against`
+names the cited file, and its hint directs you to use that file's own sha256.
 
 **Pin-basis change for `functional-verification` (issue #5550).** A
 `functional-verification` envelope from a `klt` that records the shared
@@ -1554,15 +1555,17 @@ finds the named member — `artifact_member`, or by default the entry whose
 basename match) — and takes its recorded `sha256` as the live hash the
 `content_hash` pin compares. The citation discloses this honestly:
 `content_hash_basis: "artifact_manifest"` and `input_verified: null` (the
-bytes were not read; `klt artifact get`/`verify` remain the byte-level
-check). Nothing here needs a broker, an environment variable or a network:
+bytes were not read). The text report's `input:` line says it used the
+sha256 recorded for the member in the committed store manifest and did not
+read the artifact itself. Use `klt artifact get`/`verify` for a byte-level
+check. Nothing here needs a broker, an environment variable or a network:
 the grade stays a pure function of the git tree. A store manifest that is
 unreadable or invalid, a member that is missing, duplicated by name, or
 ambiguous by basename leaves the hash unresolved with a named
 `content_hash_unresolved["reason"]` — a pinned entry then renders `unmet`
 (`unverifiable_provenance`), never a guess and never an exception. A
-non-string `artifact_manifest`/`artifact_member` fails closed
-(`invalid_evidence`) for that item. Command-backed entries also render
+non-string `artifact_manifest`/`artifact_member` or an empty `artifact_manifest`
+fails closed (`invalid_evidence`) for that item. Command-backed entries also render
 `invalid_evidence` if they declare either store-pin key.
 
 ### The declared partition boundary (issue #2278)
@@ -6535,16 +6538,14 @@ citation that pins `content_hash`, the grader re-hashes the cited file itself
 (`sha256:<hex>`, the same form every `klt` re-hash produces). An equal pin
 grades on the normal verdict; a differing one renders `unmet` /
 `stale_evidence`. The `met` citation carries `content_hash` plus the additive
-field `content_hash_basis: "evidence_file"`. Since issue #6861 the text format
-discloses it too: `--format text` renders `content_hash_basis=<token>` on the
-`cite:` line, right after the hash it qualifies and verbatim for any token,
-so a text reader can tell a pinned digest from a re-hashed one. Unlike other
-kinds, this pin binds
-the *evidence envelope's bytes* (it detects an edit or re-run since pinning),
-**not** a design input. A command-backed citation stays `unverifiable` (its
-stdout is not a stable file) and the note says so. With no pin in the manifest
-the output is unchanged and no new key appears. Unprovenanced `generic`
-envelopes have the same gap and are not covered here.
+field `content_hash_basis: "evidence_file"`. The text format prints the basis
+verbatim after the hash on the `cite:` line (issue #6861). For this basis,
+the `input:` line reads `re-hashed the evidence file itself -- matches`.
+For a stale pin, `detail.compared_against` names that file and `detail.hint`
+directs you to pin the sha256 of its committed bytes. A command-backed citation
+stays `unverifiable` (its stdout is not a stable file) and the note says so.
+With no pin in the manifest the output is unchanged and no new key appears.
+Unprovenanced `generic` envelopes have the same gap and are not covered here.
 
 **Why the third is a disclosure rather than a refusal.** `klt yield` itself
 draws that line: an undeclared control is a run-level warning with "no

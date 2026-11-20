@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 # Data tables live in gen_layer_tables.py (#3722); re-exported here.
+from .gen_layer_mv_ring import apply_mos_array_mv_ring_margins
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
@@ -2565,15 +2566,14 @@ def _mos_array_layer_params(
     layer_params = _device_layer_params(pdk_info, params)
     # Issue #3648: a family with a tap-distance rule gets tap pads even
     # without a ring, which need the ring role's tap/implant layers.
-    if params.get("add_guard_ring") or _tap_pads_wanted(
-        _pdk_family(pdk_info["variant"])
-    ):
+    family = _pdk_family(pdk_info["variant"])
+    if params.get("add_guard_ring") or _tap_pads_wanted(family):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
         )
     else:
         layer_params.setdefault("tap_layer", kdb.LayerInfo(0, 0))
-    return layer_params
+    return apply_mos_array_mv_ring_margins(layer_params, family)
 
 
 def _bjt_layer_params(

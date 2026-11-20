@@ -9,8 +9,9 @@ The lint checks the pair on declaring, non-forwarding subcircuits and
 recommends keeping both forms equal.
 
 Pure text-in/findings-out: :func:`lint_instances` takes folded instance
-cards plus ``{name: subckt text}`` and returns findings; no I/O of its
-own (``sim_environment_report.device_multiplier_environment`` does the
+cards (bare, or tagged with their closure-file label -- issue #6684) plus
+``{name: subckt text}`` and returns findings; no I/O of its own
+(:func:`sim_environment_report.device_multiplier_environment` does the
 reading and reuses the shared ``sim_staging`` include-closure resolver).
 Detection is text-driven -- no hard-coded PDK subckt-name list.
 """
@@ -41,6 +42,26 @@ _MULT_REF_RE = re.compile(r"\bmult\b", re.IGNORECASE)
 #: to a count.
 _MAX_LISTED = 5
 
+#: The ``.subckt`` names enclosing a card, lower-cased, outermost first;
+#: ``()`` is the deck's top level (issue #6684). A nested ``.subckt`` is
+#: private to its parent, so this is what a card needs to resolve the
+#: callee its own enclosing subcircuits make visible.
+Scope = tuple[str, ...]
+
+#: An instance card optionally paired with the repo-relative label of the
+#: closure file it was read from (issue #6684), and optionally its
+#: :data:`Scope`: ``(card, label)`` or ``(card, label, scope)``. A bare
+#: ``str`` card -- or a ``None`` label -- is a card of the top-level
+#: netlist, whose findings keep the pre-#6684 shape (no ``file`` key) and
+#: whose uncheckable pairs keep their ``note``/``unevaluated``
+#: disclosures; those disclosures are deliberately scoped to the netlist
+#: the caller wrote, so a library file's parametric internals (an
+#: ``X… mult={mult}`` wrapper inside a PDK ``.subckt`` body) cannot add
+#: noise to a run that merely includes it. A card without a scope resolves
+#: its callee in the flat first-definition-wins view; one with a scope
+#: resolves it the way the simulator does (:meth:`SubcktTable.resolve`).
+SourcedCard = tuple[str, str | None] | tuple[str, str | None, Scope]
+
 
 def instance_cards(text: str) -> list[str]:
     """Subcircuit-instance cards of one netlist text: logical cards
@@ -51,52 +72,139 @@ def instance_cards(text: str) -> list[str]:
     ]
 
 
-def collect_subckts(texts: Iterable[str]) -> dict[str, str]:
-    """``{lower-cased name: subckt text}`` across netlist/model texts.
+# Only calls between members of this foundry primitive library are exempt.
+_SKY130_PRIMITIVES = "sky130_fd_pr__"
 
-    A subckt's text is its ``.subckt`` header line (parameters included)
-    plus its own body cards: nested ``.subckt`` bodies are excluded (they
-    are collected as their own entries -- an inner ``m={mult}`` forwards
-    the inner subckt's parameter, not the outer's). First definition wins
-    when a name repeats across the closure.
+
+class SubcktTable(dict[str, str]):
+    """:func:`collect_subckts`' ``{lower-cased name: subckt text}`` view,
+    which also remembers the scope each definition was written in.
+
+    The flat mapping keeps its first-definition-wins contract for callers
+    that only know a name. :attr:`scoped` and :meth:`resolve` serve a card
+    that knows where it sits: two files may each define a private ``leaf``
+    inside their own DUT, and the call inside each must reach its own.
     """
-    collected: dict[str, str] = {}
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: ``{(enclosing scope, name): text}``; first definition wins.
+        self.scoped: dict[tuple[Scope, str], str] = {}
+
+    def resolve(self, name: str, scope: Scope | None) -> str | None:
+        """The subcircuit text a card in ``scope`` reaches for ``name``.
+
+        ``None`` scope is the flat view. Otherwise the search runs from the
+        card's innermost enclosing subcircuit out to the top level, as the
+        simulator does: a nested definition shadows a global one inside its
+        parent, and is not visible outside it (``None`` when nothing is).
+        """
+        if scope is None:
+            return self.get(name)
+        for depth in range(len(scope), -1, -1):
+            text = self.scoped.get((scope[:depth], name))
+            if text is not None:
+                return text
+        return None
+
+
+# Each open definition holds its header and its own body cards. Nested
+# definitions close into the table separately.
+_OpenSubckts = list[tuple[str, list[str]]]
+
+
+def _collect_line(
+    word: str, line: str, stack: _OpenSubckts, table: SubcktTable
+) -> None:
+    if word == ".subckt":
+        tokens = line.split(None, 2)
+        if len(tokens) >= 2:
+            stack.append((tokens[1].lower(), [line]))
+    elif word == ".ends":
+        if stack:
+            name, lines = stack.pop()
+            definition = "\n".join(lines)
+            table.setdefault(name, definition)
+            table.scoped.setdefault(
+                (tuple(parent for parent, _ in stack), name), definition
+            )
+    elif stack:
+        stack[-1][1].append(line)
+
+
+def collect_subckts(texts: Iterable[str]) -> SubcktTable:
+    """Definitions in independent texts, with a fresh outer scope for each."""
+    table = SubcktTable()
     for text in texts:
-        stack: list[tuple[str, str, list[str]]] = []
+        stack: _OpenSubckts = []
         for line in circuit_lines(logical_lines(text)):
-            word = line.split(None, 1)[0].lower()
-            if word == ".subckt":
-                tokens = line.split()
-                if len(tokens) < 2:
-                    continue
-                stack.append((tokens[1].lower(), line, []))
-            elif word == ".ends":
-                if not stack:
-                    continue
-                name, header, body = stack.pop()
-                collected.setdefault(name, "\n".join([header, *body]))
-            elif stack:
-                stack[-1][2].append(line)
-    return collected
+            _collect_line(line.split(None, 1)[0].lower(), line, stack, table)
+    return table
+
+
+def scan_closure(
+    netlist: str, sources: dict[str, tuple[str, str | None]]
+) -> tuple[list[tuple[str, str | None, Scope]], SubcktTable]:
+    """Read a staged deck in include-site order using one subcircuit stack.
+
+    Keys are the unique names assigned by staging. Each value is the staged
+    text and its physical source label. Only includes already in this map
+    contribute cards or definitions. Report cards in the original file order.
+    """
+    table = SubcktTable()
+    stack: _OpenSubckts = []
+    by_file: dict[str, list[tuple[str, str | None, Scope]]] = {k: [] for k in sources}
+    seen: set[tuple[str, Scope]] = set()
+    active: set[str] = set()
+
+    def visit(name: str) -> None:
+        site = (name, tuple(parent for parent, _ in stack))
+        if name not in sources or name in active or site in seen:
+            return
+        seen.add(site)
+        active.add(name)
+        text, label = sources[name]
+        for line in circuit_lines(logical_lines(text)):
+            parts = line.split(None, 1)
+            word = parts[0].lower()
+            if word in (".include", ".inc") and len(parts) == 2:
+                # Staging rewrites local targets to quoted, flat filenames.
+                visit(parts[1].strip('"'))
+            else:
+                _collect_line(word, line, stack, table)
+                if word.startswith("x"):
+                    scope = tuple(parent for parent, _ in stack)
+                    by_file[name].append((line, label, scope))
+        active.remove(name)
+
+    visit(netlist)
+    return [card for cards in by_file.values() for card in cards], table
 
 
 def lint_instances(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> list[dict[str, Any]]:
     """Findings for instance cards of subcircuits that declare ``mult``
     but never forward it to drive (the acceptance-criteria pure function:
-    cards in, findings out, no I/O)."""
+    cards in, findings out, no I/O). Cards may be bare strings (the
+    top-level netlist's) or ``(card, file_label)`` pairs from the scanned
+    include closure (issue #6684); a closure card's finding carries the
+    additive ``file`` field. A ``(card, file_label, scope)`` entry, as
+    :func:`scan_closure` yields, also resolves its callee from the
+    card's enclosing subcircuits outward."""
     return _lint(instance_cards, subckts)[0]
 
 
 def instance_report(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> dict[str, Any]:
     """:func:`lint_instances` findings plus the non-finding disclosures:
     a ``note`` when instances could not be checked (their subcircuit text
     is absent from the scanned closure) and ``unevaluated`` entries when a
-    ``m=``/``mult=`` value is not a plain number. ``findings`` is always
-    present."""
+    ``m=``/``mult=`` value is not a plain number. Both disclosures cover
+    the top-level netlist's own cards only (issue #6684): closure-file
+    cards yield findings, not library-internal chatter. ``findings`` is
+    always present."""
     findings, unverified, unevaluated = _lint(instance_cards, subckts)
     report: dict[str, Any] = {"findings": findings}
     if unverified:
@@ -115,19 +223,32 @@ def instance_report(
 
 
 def _lint(
-    instance_cards: list[str], subckts: dict[str, str]
+    instance_cards: Iterable[str | SourcedCard], subckts: dict[str, str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, str]]]:
     """``(findings, unverified, unevaluated)`` behind both public entries."""
     findings: list[dict[str, Any]] = []
     unverified: list[dict[str, str]] = []
     unevaluated: list[dict[str, str]] = []
-    for card in instance_cards:
-        _lint_card(card, subckts, findings, unverified, unevaluated)
+    for entry in instance_cards:
+        card, source, scope = _unpack(entry)
+        _lint_card(card, source, scope, subckts, findings, unverified, unevaluated)
     return findings, unverified, unevaluated
+
+
+def _unpack(entry: str | SourcedCard) -> tuple[str, str | None, Scope | None]:
+    """``(card, closure-file label, scope)`` of one entry; ``None`` for a
+    part the entry does not carry."""
+    if isinstance(entry, str):
+        return entry, None, None
+    if len(entry) == 3:
+        return entry
+    return entry[0], entry[1], None
 
 
 def _lint_card(
     card: str,
+    source: str | None,
+    scope: Scope | None,
     subckts: dict[str, str],
     findings: list[dict[str, Any]],
     unverified: list[dict[str, str]],
@@ -136,23 +257,44 @@ def _lint_card(
     """Fold one card's decision into the shared result lists: skip
     non-instance and parameterless cards, note a checkable instance whose
     subcircuit text is missing from the closure, else run the rule table
-    (only for a subcircuit that declares ``mult`` and never forwards it)."""
+    (only for a subcircuit that declares ``mult`` and never forwards it).
+    ``source`` is the card's closure-file label (``None`` for the
+    top-level netlist): it reaches the finding as ``file``, and only a
+    top-level card can land in ``unverified``. ``scope`` picks the
+    callee the card's enclosing subcircuits make visible."""
     tokens = split_spice_tokens(card)
     if not tokens or tokens[0][0].lower() != "x":
         return
     params, target = _card_params(tokens)
     if "m" not in params and "mult" not in params:
         return
-    subckt_text = subckts.get((target or "").lower())
+    name = (target or "").lower()
+    # Vendored sky130 primitive models instantiate other members of the
+    # foundry's primitive library (e.g. FET parasitics). Restrict this
+    # exception to internal calls. A parameterized DUT calling the very
+    # same primitive is still a user of the model.
+    if (
+        source is not None
+        and scope
+        and scope[-1].startswith(_SKY130_PRIMITIVES)
+        and name.startswith(_SKY130_PRIMITIVES)
+    ):
+        return
+    if scope is not None and isinstance(subckts, SubcktTable):
+        subckt_text = subckts.resolve(name, scope)
+    else:
+        subckt_text = subckts.get(name)
     if subckt_text is None:
-        if _pair_could_yield_finding(params):
+        if source is None and _pair_could_yield_finding(params):
             unverified.append({"instance": tokens[0], "subckt": target or ""})
         return
     header, _, body = subckt_text.partition("\n")
     header_mult = _header_mult_token(header)
     if header_mult is None or _body_forwards_mult(body):
         return
-    _compare_pair(tokens[0], target or "", params, header_mult, findings, unevaluated)
+    _compare_pair(
+        tokens[0], target or "", params, header_mult, findings, unevaluated, source
+    )
 
 
 def _pair_could_yield_finding(params: dict[str, str]) -> bool:
@@ -184,20 +326,24 @@ def _compare_pair(
     header_mult: str | None,
     findings: list[dict[str, Any]],
     unevaluated: list[dict[str, str]],
+    source: str | None = None,
 ) -> None:
     """The rule table for one instance of a subcircuit that declares
     ``mult`` but never forwards it to drive: disclose unevaluated values,
-    then flag a pair that disagrees. An omitted instance ``mult=`` takes
-    the header's declared default (``header_mult``), so the comparison
-    stays text-driven end to end; an explicit instance ``mult=`` always
-    wins over the header."""
+    then flag a pair that disagrees. ``unevaluated`` is a top-level-only
+    disclosure (``source is None``); findings fire for closure cards too,
+    tagged with ``source`` as their ``file``. An omitted instance
+    ``mult=`` takes the header's declared default (``header_mult``), so
+    the comparison stays text-driven end to end; an explicit instance
+    ``mult=`` always wins over the header."""
     m_raw = params.get("m")
     mult_raw = params.get("mult")
     m_value = _param_number(m_raw)
     mult_value = _param_number(mult_raw)
-    for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
-        if raw is not None and value is None:
-            unevaluated.append({"instance": instance, "param": name, "value": raw})
+    if source is None:
+        for name, raw, value in (("m", m_raw, m_value), ("mult", mult_raw, mult_value)):
+            if raw is not None and value is None:
+                unevaluated.append({"instance": instance, "param": name, "value": raw})
     comparable = (m_raw is None or m_value is not None) and (
         mult_raw is None or mult_value is not None
     )
@@ -214,6 +360,7 @@ def _compare_pair(
                     mult=mult_raw,
                     m_value=None,
                     mult_value=mult_value,
+                    file=source,
                 )
             )
         return
@@ -237,6 +384,7 @@ def _compare_pair(
                 mult=mult_raw,
                 m_value=m_value,
                 mult_value=effective,
+                file=source,
             )
         )
 
@@ -250,9 +398,13 @@ def _finding(
     mult: str | None,
     m_value: float | None,
     mult_value: float | None,
+    file: str | None = None,
 ) -> dict[str, Any]:
     """One finding: the instance echo plus note text that names both
-    forms' roles (never suggesting either is removable)."""
+    forms' roles (never suggesting either is removable). ``file`` -- the
+    scanned-closure label of the file the card came from -- is present
+    only on a closure-file finding (issue #6684); a top-level netlist
+    finding keeps the exact pre-#6684 shape."""
     m_text = _number_text(m, m_value)
     mult_text = _number_text(mult, mult_value)
     if kind == DRIVE_1X:
@@ -270,7 +422,7 @@ def _finding(
         f"{drive} Depending on the model, mult can also scale Monte Carlo mismatch. "
         "Keep m=N and mult=N for an N-times device."
     )
-    return {
+    finding: dict[str, Any] = {
         "instance": instance,
         "subckt": subckt,
         "kind": kind,
@@ -278,6 +430,9 @@ def _finding(
         "mult": mult,
         "note": note,
     }
+    if file is not None:
+        finding["file"] = file
+    return finding
 
 
 def _number_text(raw: str | None, value: float | None) -> str:

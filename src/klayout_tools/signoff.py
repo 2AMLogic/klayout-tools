@@ -4627,10 +4627,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     ``coverage_disclosed`` (issue #5789) is validated lazily by
     :mod:`.signoff_coverage_disclosure`, so it is read only when the
     ratchet is on. ``artifact_manifest``/``artifact_member`` (issue #5963)
-    name the committed store manifest (and, optionally, its member) a
-    `klt yield` entry's store-pinned samples companion is pinned through --
-    strings or absent; any other type fails closed, here, rather than
-    silently reading as "no pin declared".
+    name the committed store manifest and optional member for a yield samples
+    pin. Both must be strings when present, and the manifest path must be non-empty.
     """
     require_annotation = raw.get("require_annotation_complete", False)
     if not isinstance(require_annotation, bool):
@@ -4642,6 +4640,8 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
         raw.get("foundry_cell_exceptions")
     )
     if cell_exceptions is None:
+        return None
+    if raw.get("artifact_manifest") == "":
         return None
     for key in ("artifact_manifest", "artifact_member"):
         if key in raw and not isinstance(raw[key], str):
