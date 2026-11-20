@@ -330,12 +330,19 @@ def device_multiplier_environment(
     lint's findings for this run's netlist -- warning-only, never a failing
     exit.
 
-    Instance cards of the netlist are checked against the device
-    subcircuit texts of the scanned ``.include`` closure (the same shared
-    ``sim_staging`` resolver every other disclosure here uses), so a net
-    carrying ``mult=6`` and no ``m=`` against a subcircuit that declares
-    ``mult`` but never forwards it is named instead of silently simulating
-    1x. Additive/optional: ``{}`` -- the key absent -- when there is
+    Instance cards are read from the netlist and included DUT files (issue
+    #6684). Included calls between sky130 primitive-library devices are
+    model internals. Other calls inherit their include site's scope. The shared
+    ``sim_staging`` resolver supplies the full closure for checking each
+    card, and a card resolves its callee from its own enclosing
+    subcircuits outward, so a net carrying
+    ``mult=6`` and no ``m=`` against a subcircuit that declares ``mult``
+    but never forwards it is named instead of silently simulating 1x. A
+    finding from a closure file carries that file's repo-relative label as
+    ``file``; a top-level finding keeps the pre-#6684 shape, and the
+    ``note``/``unevaluated`` disclosures cover the netlist's own cards
+    only (a PDK library's parametric internals must not add noise).
+    Additive/optional: ``{}`` -- the key absent -- when there is
     nothing to say (no checkable instance, or every checked pair agrees).
     A closure that cannot be resolved or read is disclosed through the
     lint's ``note`` (instances whose subcircuit text is missing) and
@@ -346,41 +353,11 @@ def device_multiplier_environment(
             netlist_text = handle.read()
     except (OSError, UnicodeDecodeError):
         return {}
-    try:
-        staged = sim_staging.stage_netlist(
-            netlist_path,
-            netlist_staged_name="netlist.cir",
-            roots=sim_staging.host_resolved_roots(request or {}),
-        )
-        closure_paths = []
-        for item in staged.files:
-            source = item.source_path or item.local_path
-            # stage_netlist always sets one of the two (source_path whenever
-            # content rewrote the file, local_path otherwise).
-            assert source is not None
-            closure_paths.append(source)
-        not_scanned = [
-            {"target": target, "reason": reason}
-            for target, reason in staged.host_resolved_detail
-        ]
-    except sim_staging.IncludeStagingError:
-        closure_paths = []
-        not_scanned = [{"target": "<include closure>", "reason": "unresolved"}]
-    closure_texts: list[str] = [netlist_text]
-    for path in closure_paths:
-        # Labels follow the scanned-closure convention (issue #2928):
-        # repo-relative, never an absolute external path.
-        info = env_provenance.repo_relative_path(path, repo_root=repo_root)
-        label = info.get("path") or (
-            f"<{info.get('scope', 'external')}>/{os.path.basename(path)}"
-        )
-        try:
-            with open(path, encoding="utf-8") as handle:
-                closure_texts.append(handle.read())
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": label, "reason": "unreadable"})
-    cards = device_multiplier_lint.instance_cards(netlist_text)
-    subckts = device_multiplier_lint.collect_subckts(closure_texts)
+    root_name = "netlist.cir"
+    sources, not_scanned = _multiplier_sources(
+        root_name, netlist_path, netlist_text, request, repo_root
+    )
+    cards, subckts = device_multiplier_lint.scan_closure(root_name, sources)
     report = device_multiplier_lint.instance_report(cards, subckts)
     has_content = (
         bool(report["findings"]) or "note" in report or "unevaluated" in report
@@ -396,3 +373,50 @@ def device_multiplier_environment(
             file=sys.stderr,
         )
     return {"device_multiplier": report}
+
+
+def _multiplier_sources(
+    root_name: str,
+    netlist_path: str,
+    netlist_text: str,
+    request: dict[str, Any],
+    repo_root: str | None,
+) -> tuple[dict[str, tuple[str, str | None]], list[dict[str, str]]]:
+    """Pair each staged text with its original report label. Rewritten include
+    targets are the edges between these texts, including in nested fragments."""
+    sources: dict[str, tuple[str, str | None]] = {root_name: (netlist_text, None)}
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name=root_name,
+            roots=sim_staging.host_resolved_roots(request or {}),
+        )
+    except sim_staging.IncludeStagingError:
+        return sources, [{"target": "<include closure>", "reason": "unresolved"}]
+
+    not_scanned = [
+        {"target": target, "reason": reason}
+        for target, reason in staged.host_resolved_detail
+    ]
+    if staged.netlist.content is not None:
+        sources[root_name] = (staged.netlist.content, None)
+    netlist_real = os.path.realpath(netlist_path)
+    for item in staged.includes:
+        path = item.source_path or item.local_path
+        assert path is not None
+        if os.path.realpath(path) == netlist_real:
+            continue
+        info = env_provenance.repo_relative_path(path, repo_root=repo_root)
+        label = info.get("path") or (
+            f"<{info.get('scope', 'external')}>/{os.path.basename(path)}"
+        )
+        text = item.content
+        if text is None:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                not_scanned.append({"target": label, "reason": "unreadable"})
+                continue
+        sources[item.staged_name] = (text, label)
+    return sources, not_scanned
