@@ -400,8 +400,8 @@ def unbenched_row_checks(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
 def with_progress(
     run: Callable[..., dict[str, Any]], label_of: Callable[..., str]
 ) -> Callable[..., dict[str, Any]]:
-    """Wrap a command-check runner so each run writes a start and finish line
-    to stderr. Timing stays out of the returned check (reproducible envelope)."""
+    """Write start and finish lines to stderr. The CLI reports elapsed time
+    in live output and omits it from committed checks and drift comparisons."""
 
     def wrapped(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         label = label_of(role, identity)

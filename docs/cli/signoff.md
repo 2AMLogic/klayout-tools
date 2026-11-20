@@ -2564,6 +2564,17 @@ command's merged stdout+stderr is kept as a bounded tail (last 20 lines, at most
 the live `--format json` result (issue #4698) -- never in an `--output` file,
 nor in the `--check` diff, so the envelope and its content hash stay
 reproducible across hosts; passing, skipped and unlaunchable checks omit it.
+Every command that actually launched -- passing, failing and timed-out alike
+-- also carries an additive `duration_s` number in that live result: the
+observed wall time in seconds, one decimal (issue #5817), with the same
+live-only lifecycle, so a check drifting toward its declared `timeout_s`
+budget is visible before the timeout fires. A wall-clock value never repeats,
+so a duration inside the envelope would rewrite the committed bytes on every
+run and read as permanent drift; held out of band the envelope stays
+byte-identical however long the commands took. A command that never launched
+(``error: "launch_failed"``), a skipped or carried `local_only` command, and
+a check of a different attestation run omit it, and `--format text` names it
+on the check's line (`... (exit 0) in 99.6s`).
 A failing command that re-verifies a tier-verdict record -- its `argv`
 contains `signoff`, `--manifest` (or `--manifest=...`) and `--check` (or
 `--check=...`), whatever wrapper prefixes it carries -- additionally gets an
@@ -2571,9 +2582,11 @@ advisory `hint` string (issue #5538), with exactly the same lifecycle as
 `output_tail` and under the same `[FAIL]` line in text output. It is attached
 in generate mode only: `--attest --check` mints nothing, a `local_only`
 command carried under `--skip-local-only` was not run, and a passing or
-differently-shaped check is not advised, so none of them carry it. Neither
-field is a `schema_version` change: both are additive, live-only, and absent
-unless the check failed in this run. `cwd` defaults to the repository root. A command that cannot
+differently-shaped check is not advised, so none of them carry it. None
+of these fields is a `schema_version` change: all three are additive and
+live-only; `output_tail` and `hint` are absent unless the check failed in
+this run, while `duration_s` marks every command this run launched. `cwd`
+defaults to the repository root. A command that cannot
 be launched or times out fails its check with `exit_status: null` and
 `error: "launch_failed"`/`"timeout"`.
 
@@ -2878,9 +2891,10 @@ top-level `cold_start` stays valid and produces the same envelope as before):
 
 Each command run under `--attest 9` prints `attest item 9: running <role> [<name>] [<bench>] ...`
 and a `... ok|FAILED|skipped in N.Ns` line to **stderr**, regardless of
-`--format`; the `<name>` segment appears only for a member of a `cold_start`
-list. stdout (and so the JSON envelope) is unchanged and carries no timing,
-keeping `--check` drift comparison reproducible.
+`--format`. The `<name>` segment appears only for a member of a `cold_start`
+list. Each launched command also reports its wall time as `duration_s` in
+live JSON and on its text check line (issue #5817). The envelope written by
+`--output` omits timing, keeping the `--check` comparison reproducible.
 
 **Several cold starts over one file: `cold_start` as a list (issue #5641).**
 When several testbenches are implemented by one shared module — invoked with
