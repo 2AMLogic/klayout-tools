@@ -1696,7 +1696,7 @@
     {
       "consumer": "signoff",
       "exporter": "artifact",
-      "reason": "Signoff resolves manifest-backed citations using the artifact broker and its verified fetch API (issue #5882)."
+      "reason": "Signoff resolves manifest-backed citations using the artifact broker and its verified fetch API (issue #5882). Issue #5963: a `klt yield` evidence entry's store-pinned samples companion resolves its content hash offline from a committed `*.manifest.json`, read through artifact_verify.load_manifest -- the same stdlib-only manifest reader `klt artifact verify` uses, so the two can never disagree about what a valid manifest is. Read-only; no broker contact at grade time."
     },
     {
       "consumer": "signoff",
@@ -1922,11 +1922,6 @@
       "consumer": "route",
       "exporter": "gen_compose",
       "reason": "`klt route` deliberately reuses gen_compose's router, landing-pad sizing and label-port derivation so labelled-pin routing in a placed layout matches klt gen-compose output (issue #5205); promote the private helpers to a shared module when either is next reworked."
-    },
-    {
-      "consumer": "signoff",
-      "exporter": "artifact",
-      "reason": "Issue #5963: a `klt yield` evidence entry's store-pinned samples companion resolves its content hash offline from a committed `*.manifest.json`, read through artifact_verify.load_manifest -- the same stdlib-only manifest reader `klt artifact verify` uses, so the two can never disagree about what a valid manifest is. Read-only; no broker contact at grade time."
     },
     {
       "consumer": "em",
