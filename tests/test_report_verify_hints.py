@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 
 from klayout_tools._report_verify_hints import (
@@ -10,6 +11,7 @@ from klayout_tools._report_verify_hints import (
     input_not_found_entry,
     stale_pin,
 )
+from klayout_tools.erc import check_erc_report
 
 
 def test_input_not_found_relative_path_names_anchor_and_working_dir(
@@ -114,6 +116,126 @@ def test_input_hash_check_null_hint_when_not_beside_the_report(tmp_path):
         override_hint=None,
     )
     assert absolute["input_not_found"]["hint"] is None
+
+
+# --- `klt erc --check` carries the shared `input_not_found` block (#6655) ---
+#
+# ERC's block has five keys, `klt drc --check`'s set; `klt lvs --check`'s
+# three entries add a sixth, `resolved_repo_root`, which ERC does not emit.
+# `tests/test_erc.py` sits at its file-size ceiling, so the five-key pin
+# lives here (the shared helper's own file), driving `check_erc_report`
+# over hand-written reports the way `tests/test_drc_check_input_resolution.py`
+# does for `klt drc --check`.
+
+
+def _erc_report(tmp_path, *, file_value, spec_value, input_hash, spec_hash):
+    doc = {
+        "file": file_value,
+        "spec": spec_value,
+        "provenance": {
+            "input": {"content_hash": input_hash},
+            "spec": {"content_hash": spec_hash},
+        },
+    }
+    path = tmp_path / "erc-report.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def _check(result, field):
+    return next(c for c in result["checks"] if c["field"] == field)
+
+
+def test_erc_check_input_not_found_pins_the_five_key_shape(tmp_path, monkeypatch):
+    """A relative `file` echo that misses at the cwd but sits beside the
+    report gets the five-key block, with no "or pass ..." clause (`klt erc
+    --check` has no input-override flag); the untouched `spec` line gets
+    none."""
+    pair = tmp_path / "pair"
+    pair.mkdir()
+    (pair / "basic.gds").write_bytes(b"gds-bytes")
+    (pair / "basic.erc.json").write_text("{}")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    report = _erc_report(
+        pair,
+        file_value="basic.gds",
+        spec_value=str(pair / "basic.erc.json"),
+        input_hash="sha256:recorded-input",
+        spec_hash="sha256:recorded-spec",
+    )
+
+    result = check_erc_report(report)
+
+    assert result["status"] == "drifted"
+    assert _check(result, "provenance.input.content_hash")["input_not_found"] == {
+        "path": "basic.gds",
+        "resolved": str(elsewhere / "basic.gds"),
+        "found_relative_to_report": str(pair / "basic.gds"),
+        "resolved_against": str(elsewhere),
+        "hint": (
+            "run --check from the report's directory; "
+            f"request-file-relative paths resolve against {pair}"
+        ),
+    }
+    assert "input_not_found" not in _check(result, "provenance.spec.content_hash")
+
+
+def test_erc_check_input_not_found_spec_line_absolute(tmp_path):
+    """The spec line carries the same block; its absolute echo has no anchor
+    and therefore no hint."""
+    spec = tmp_path / "basic.erc.json"
+    report = _erc_report(
+        tmp_path,
+        file_value=str(tmp_path / "basic.gds"),
+        spec_value=str(spec),
+        input_hash="sha256:recorded-input",
+        spec_hash="sha256:recorded-spec",
+    )
+
+    result = check_erc_report(report)
+
+    assert result["status"] == "drifted"
+    assert _check(result, "provenance.spec.content_hash")["input_not_found"] == {
+        "path": str(spec),
+        "resolved": str(spec),
+        "found_relative_to_report": None,
+        "resolved_against": None,
+        "hint": None,
+    }
+
+
+def test_erc_check_input_not_found_absent_when_input_resolves(tmp_path):
+    """No block when the echoed file exists (a genuine content mismatch is a
+    plain drifted hash) and none when the echo names no path at all."""
+    gds = tmp_path / "basic.gds"
+    gds.write_bytes(b"gds-bytes")
+    report = _erc_report(
+        tmp_path,
+        file_value=str(gds),
+        spec_value=str(tmp_path / "basic.erc.json"),
+        input_hash="sha256:recorded-input",
+        spec_hash="sha256:recorded-spec",
+    )
+
+    drifted = check_erc_report(report)
+
+    input_check = _check(drifted, "provenance.input.content_hash")
+    assert input_check["match"] is False
+    assert "input_not_found" not in input_check
+
+    echoless = _erc_report(
+        tmp_path,
+        file_value={"path": None, "scope": "external"},
+        spec_value=str(tmp_path / "basic.erc.json"),
+        input_hash="sha256:recorded-input",
+        spec_hash="sha256:recorded-spec",
+    )
+
+    external = check_erc_report(echoless)
+
+    assert "input_not_found" not in _check(external, "provenance.input.content_hash")
 
 
 def test_stale_pin_names_the_failed_comparison():
