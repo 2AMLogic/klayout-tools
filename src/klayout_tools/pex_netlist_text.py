@@ -270,16 +270,18 @@ def _reference_is_hierarchical(netlist_text: str) -> bool:
     -- i.e. the netlist is hierarchical (a leaf `.subckt` plus one or more
     instance calls of it) rather than flat.
 
-    `klt extract`'s own output is always flat, by design
-    (``docs/cli/extract.md``: "Extraction is flat, not hierarchical"), so a
-    hierarchical *reference* netlist compared against it is exactly the
+    `klt extract`'s curated-engine output is flat, by design
+    (``docs/cli/extract.md``: "Extraction is flat, not hierarchical"; a
+    ``--engine klayout-runset`` extraction may instead be hierarchical,
+    whose devices are counted by instantiation), so a hierarchical
+    *reference* netlist compared against a flat extraction is exactly the
     shape issue #1085 already documents for `klt lvs` (a leaf `.subckt`
     called N times on the reference side has no counterpart circuit on the
     flat extracted side to pair against). The same mismatch shows up here:
     a device nested inside a locally-defined `.subckt` appears once per
     *definition* in `_device_model_counts`'s card scan, not once per
-    physical *instance*, while the flat extracted side always counts once
-    per instance -- so a purely hierarchy-representation difference can
+    physical *instance*, while a flat extracted side counts once per
+    instance -- so a purely hierarchy-representation difference can
     produce the same divergent multiset a genuine device-flavour swap
     would, without being one. See :func:`_model_mismatch`.
     """

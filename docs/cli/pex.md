@@ -1012,21 +1012,25 @@ consumer of the evidence (see [`signoff.md`](signoff.md) and
 this command answers on the caller's behalf.
 
 **Caveat: a hierarchical reference netlist is a known false-positive
-shape.** `klt extract`'s output is always flat, by design
+shape.** `klt extract`'s curated engine writes a flat netlist, by design
 ([`extract.md`](extract.md)'s "Extraction is flat, not hierarchical" note,
 issue #1085 — the same mismatch `klt lvs`'s `options.flatten_reference`
-exists to fix). If the reference (schematic) netlist is instead
-hierarchical — a leaf `.subckt` plus one or more `X`-card instance calls of
-it — a device nested inside that leaf is counted once per *definition* by
-this comparison, not once per physical *instance*, while the flat extracted
-side always counts once per instance. That can produce the same divergent
-multiset a genuine device-flavour swap would, without the two sides
-actually naming different devices. `model_mismatch`'s `detail` names this
-explicitly (rather than asserting the two sides are electrically unrelated)
-whenever the reference netlist is hierarchical; treat a hierarchical-shaped
-`detail` as inconclusive on its own and re-run with `--flatten-schematic`
-(below), which removes the hierarchy from the comparison, before discarding
-the run's `delta[]` evidence.
+exists to fix), while `--engine klayout-runset` may write a hierarchical
+one, which `model_mismatch` then counts by what it instantiates from the
+extracted top (see the ["Runset engine" section
+below](#runset-engine-a-device-family-only-the-pdk-runset-recognises---engine-klayout-runset)).
+If the reference (schematic) netlist is instead hierarchical — a leaf
+`.subckt` plus one or more `X`-card instance calls of it — a device nested
+inside that leaf is counted once per *definition* by this comparison, not
+once per physical *instance*, while a flat extracted side counts once per
+instance. That can produce the same divergent multiset a genuine
+device-flavour swap would, without the two sides actually naming different
+devices. `model_mismatch`'s `detail` names this explicitly (rather than
+asserting the two sides are electrically unrelated) whenever the reference
+netlist is hierarchical; treat a hierarchical-shaped `detail` as
+inconclusive on its own and re-run with `--flatten-schematic` (below),
+which removes the hierarchy from the comparison, before discarding the
+run's `delta[]` evidence.
 
 **Available without a measurement leg (issue #5477).** `model_mismatch` is
 the only one of this command's netlist diagnostics that reads the two
@@ -1238,7 +1242,8 @@ both netlists. Without the flag none of these fields exist.
 `klt pex` swaps only the testbench's single DUT `.include`, so the
 schematic leg runs whatever that file contains — normally a hierarchical
 netlist (user subcircuits instantiated from the top subcircuit), while the
-extracted leg is always flat. Besides the `model_mismatch` false positive
+extracted leg is flat for the curated deck (`--engine klayout-runset` may
+write a hierarchical one). Besides the `model_mismatch` false positive
 above, that leaves every caller with a hierarchical design writing its own
 flattener. `--flatten-schematic` (issue #2889) does it once, up front:
 
