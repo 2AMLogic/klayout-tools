@@ -233,6 +233,28 @@ def test_curated_deck_under_the_runset_engine_is_the_merged_route(
     assert "parasitics attached" not in text
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "flag"),
+    [
+        ({"pdk_variant": "sky130A"}, "--pdk"),
+        ({"pdk_root": "/nonexistent"}, "--pdk-root"),
+        ({"deck_options": {"poly_res": "2k"}}, "--deck-option"),
+        ({"critical_nets": ["n1"]}, "--critical-net"),
+    ],
+)
+def test_merged_route_refuses_what_the_docs_say_it_refuses(
+    tmp_path, fake_klayout, kwargs, flag
+):
+    """Issue #6606: `docs/cli/pex.md` promises the refusals hold "under the
+    merged route too" -- `--pdk`/`--pdk-root` included. The merged branch
+    builds its refusal dict by hand, so a key missing there is a flag silently
+    dropped (the curated leg would run at the default PDK resolution)."""
+    with pytest.raises(PexError, match=rf"cannot honour .*{flag}\b"):
+        _extract_only(tmp_path, deck="sky130", **kwargs)
+    # Refused before either extraction launched.
+    assert "cmd" not in fake_klayout
+
+
 def test_every_refusal_is_named_at_once(tmp_path, fake_klayout):
     with pytest.raises(PexError) as excinfo:
         _extract_only(tmp_path, distributed_rc=True, critical_nets=["n1"])

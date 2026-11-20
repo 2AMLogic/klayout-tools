@@ -2793,10 +2793,10 @@ def run_pex(
     ``device_cards_match``. Without it the report is byte-identical.
     Incompatible with ``measure_command`` (:class:`PexError`).
 
-    **``runset`` (issue #6559)** swaps the curated-deck extraction for ``klt
-    extract --engine klayout-runset`` (``deck_name`` is then ``None``): a
-    device-level leg with **no parasitics**, reported in ``extraction.engine``/
-    ``parasitics_carried``/``params_not_carried`` (see :mod:`.pex_runset`).
+    **``runset`` (issues #6559/#6606)** swaps the curated-deck extraction for
+    ``klt extract --engine klayout-runset``: no parasitics when ``deck_name`` is
+    ``None``, else that curated deck's parasitics attached by net correspondence;
+    ``extraction.engine``/``parasitics_carried`` say which (see :mod:`.pex_runset`).
     ``None`` -- the curated route -- leaves the envelope byte-identical.
 
     **Output-directory ownership (issue #2770).** The run owns its artifact

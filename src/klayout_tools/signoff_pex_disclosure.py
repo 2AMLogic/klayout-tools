@@ -77,10 +77,10 @@ def _pex_engine_disclosure(
     quote.
 
     ``klt pex --engine klayout-runset`` extracts a device-level netlist with
-    **no parasitics** (``docs/cli/pex.md``, "Runset engine"), so its
-    ``delta[]`` rows are device-representation deltas, not parasitic ones: a
-    passing report does not by itself earn T1 item 7's intent. The envelope
-    says so in ``extraction.engine``/``parasitics_carried``/
+    **no parasitics** unless ``--deck`` attaches some (issue #6606), so its
+    ``delta[]`` rows are, absent them, device-representation deltas, not
+    parasitic ones: a passing report does not by itself earn T1 item 7's
+    intent. The envelope says so in ``extraction.engine``/``parasitics_carried``/
     ``params_not_carried``; this quotes them verbatim, never re-deriving them,
     so a reader of the citation sees the caveat beside the verdict.
 

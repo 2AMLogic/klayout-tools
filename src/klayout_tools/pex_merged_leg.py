@@ -283,6 +283,8 @@ def merged_runset_extract(
     top: str | None,
     runset: Any,
     deck_name: str,
+    pdk_variant: str | None,
+    pdk_root: str | None,
     label_layers: Mapping[str, tuple[int, int] | None] | None,
     device_models: Mapping[str, str] | None,
     deck_options: Mapping[str, str] | None,
@@ -323,6 +325,8 @@ def merged_runset_extract(
         {
             key: value
             for key, value in {
+                "pdk_variant": pdk_variant,
+                "pdk_root": pdk_root,
                 "deck_options": deck_options,
                 "declared_pins": declared_pins,
                 "rename_declared_pins": rename_declared_pins or None,

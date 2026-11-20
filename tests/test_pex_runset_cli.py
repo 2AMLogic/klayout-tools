@@ -14,7 +14,7 @@ import pytest
 
 from klayout_tools.cli import main, pex_cmd
 from klayout_tools.cli.parser import create_parser
-from klayout_tools.pex_runset import runset_from_args
+from klayout_tools.pex_runset import extraction_fields, runset_from_args
 from test_extract_runset import _inputs
 from test_extract_runset import fake_klayout as fake_klayout
 
@@ -78,6 +78,71 @@ def test_cli_text_output_names_the_engine(tmp_path, fake_klayout, capsys):
 
     assert code == 4
     assert "engine: klayout-runset  parasitics: none" in capsys.readouterr().out
+
+
+def _runset_text_line(capsys, report):
+    """The `engine:` line(s) `klt pex --format text` prints for ``report``'s
+    extract report, through the real `extraction_fields` producer."""
+    from klayout_tools.cli.pex_text import _print_runset_engine
+
+    _print_runset_engine(extraction_fields(report))
+    return capsys.readouterr().out
+
+
+def _runset_report(**extra):
+    return {
+        "engine": "klayout-runset",
+        "device_counts": {"NMOS": 2},
+        "params_not_carried": {},
+        "extra_circuits": [],
+        **extra,
+    }
+
+
+def test_text_output_for_a_plain_runset_leg_still_says_parasitics_none(capsys):
+    out = _runset_text_line(capsys, _runset_report())
+
+    assert out == "engine: klayout-runset  parasitics: none  params_not_carried: none\n"
+
+
+def test_text_output_for_a_merged_leg_states_what_the_envelope_carries(capsys):
+    """Issue #6606: a merged leg sets `engine` *and* `parasitics_carried:
+    true`; the default (text) format must not print the plain route's
+    constant `parasitics: none` beside an envelope saying the opposite."""
+    out = _runset_text_line(
+        capsys,
+        _runset_report(
+            net_correspondence={
+                "deck": "sg13cmos5l",
+                "attached_card_count": 11,
+                "matched": [{"runset": f"n{i}", "curated": "A"} for i in range(5)],
+                "substrate_return": {
+                    "curated": "vsubs",
+                    "runset": None,
+                    "node": "vsubs",
+                    "tie_resistance_ohm": 1e12,
+                },
+            }
+        ),
+    )
+
+    assert "parasitics: none" not in out
+    assert "parasitics: carried (11 cards, 5 nets matched)" in out
+    assert "substrate_return: vsubs (runset unmatched)" in out
+
+
+def test_text_output_for_a_merged_leg_that_attached_nothing_says_none(capsys):
+    """The correspondence ran but matched nothing (`attached_card_count` 0):
+    `parasitics_carried` is false, and the line must agree with it."""
+    out = _runset_text_line(
+        capsys,
+        _runset_report(
+            net_correspondence={"deck": "sg13cmos5l", "attached_card_count": 0}
+        ),
+    )
+
+    assert "parasitics: none" in out
+    assert "parasitics: carried" not in out
 
 
 def test_cli_device_param_reaches_the_cards_and_the_disclosure(

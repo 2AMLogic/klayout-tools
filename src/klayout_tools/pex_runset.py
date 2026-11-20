@@ -272,6 +272,8 @@ def run_extract_leg(
             top=top,
             runset=runset,
             deck_name=deck_name,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
             label_layers=label_layers,
             device_models=device_models,
             deck_options=deck_options,
