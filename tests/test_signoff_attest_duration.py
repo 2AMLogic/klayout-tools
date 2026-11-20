@@ -43,7 +43,7 @@ from test_signoff_attest_item8 import _analog_inventory, _attest, _repo
 #: Shared with test_signoff_attest_description.py, whose 500-line ratchet
 #: has no room for the pair.
 _AUDIT_SECONDS_RE = re.compile(
-    r"(?m)^(?P<line>\[PASS\] audit ci: .*\(exit \d+\) in )\d+\.\d+s$"
+    r"(?m)^(?P<line>\[PASS\] audit ci: .*\(exit \d+\) in )[0-9]+\.[0-9]s$"
 )
 
 
@@ -270,6 +270,8 @@ def test_audit_seconds_mask_absorbs_only_the_timed_audit_line():
     assert _audit_seconds_masked(report("0.0s", "d")) == _audit_seconds_masked(
         report("0.1s", "d")
     )
+    with pytest.raises(AssertionError):
+        _audit_seconds_masked(report("0.00s", "d"))
     assert _audit_seconds_masked(report("0.1s", "x took 0.0s")) != (
         _audit_seconds_masked(report("0.1s", "x took 0.1s"))
     )
