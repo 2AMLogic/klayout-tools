@@ -377,3 +377,43 @@ def test_two_templates_expanding_to_one_name_are_refused(tmp_path):
     )
     with pytest.raises(sim.SimError, match="'ax'"):
         sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize(
+    ("cases", "expanded"),
+    [
+        (["ab", "b"], ["m_ab", "m_b", "m_aab", "m_ab"]),
+        (["b", "ab"], ["m_b", "m_ab", "m_ab", "m_aab"]),
+    ],
+)
+def test_prefix_overlapping_cases_collide_after_expansion_not_before(
+    tmp_path, cases, expanded
+):
+    """Issue #6429 (AC3 of #6289): ``m_{case}`` and ``m_a{case}`` over the
+    prefix-overlapping cases ``ab``/``b`` both expand to ``m_ab``, a collision
+    that is invisible at the declaration site -- the two declared names differ.
+
+    The refusal only fires if ``load_request`` expands ``measurement_cases``
+    *before* ``_validate_measurement_forms`` walks the list, so the request is
+    driven through ``load_request`` rather than a pre-expanded literal. The
+    expanded-name assertion keeps the test honest: it fails there, not on a
+    vacuous ``DID NOT RAISE``, if expansion ever stops running first.
+    """
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 10n"},
+            "options": {"measurement_cases": cases},
+            "measurements": [
+                {"name": "m_{case}", "expr": "v(out)"},
+                {"name": "m_a{case}", "expr": "v(out)"},
+            ],
+        },
+    )
+    loaded = sim.load_request(str(request))
+    assert [spec["name"] for spec in loaded["measurements"]] == expanded
+    with pytest.raises(
+        sim.SimError, match="measurement 'm_ab' is declared more than once"
+    ):
+        sim._validate_measurement_forms(loaded["measurements"])

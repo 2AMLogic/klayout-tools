@@ -14,6 +14,65 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen mos_array` rejects an sg13g2 ring opening that would draw a
+  sub-rule pSD notch** (#6790, additive — a new `GenError`, no
+  `schema_version` bump): the guard-ring opening was validated only against
+  the generic 0.4 µm same-layer floor, but the tap ring's pSD implant
+  extends 0.18 µm into the opening from each cut face, so the drawn pSD
+  opening is the snapped cut width minus 0.36 µm and a request below ~0.67 µm
+  could draw a DRC-dirty `psd.space.1` (0.31 µm) notch. Where the cut faces
+  snap decides the outcome near the boundary: on the default 0.001 µm grid,
+  at offset 0, `ring_gap_um=0.66` draws 0.300 µm (rejected) and `0.665` draws
+  0.310 µm (accepted), while `0.665` at `ring_gap_offset_um=0.0025` draws
+  0.305 µm (rejected). The drawn opening — snapped and margin-inset on the
+  PCell's own drawing grid, then converted to the output stream's database
+  unit, and checked against the curated deck's own rule — is now validated
+  before GDS is written (a tech LEF declaring `DATABASE MICRONS 2000` changes
+  the output grid but not the PCell's); the error names `ring_gap_um`, the
+  rule, and the remedy. Closed-ring, ring-less, PFET, and standalone
+  `guard_ring` requests are unchanged. Other PDKs and `diff_pair` are
+  deliberately untouched (out of #6790's scope).
+
+- **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
+  the `diode` generator now runs on gf180mcu. `voltage_class` accepts
+  `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck
+  recognises); `kind="n_psub"` extracts as `diode_nd2ps_06v0` and
+  `"p_nwell"` as `diode_pd2nw_06v0`, both DRC-clean and LVS-matching. An
+  *omitted* `voltage_class` now resolves to the PDK's own flavour (still
+  `"05v5"` on sky130, so sky130 output is unchanged); naming the other
+  family's flavour is a `GenError`. The declared `voltage_class` default stays
+  `"05v5"`, so on gf180mcu `klt gen --list` shows a default that is not the
+  one applied. The `Dualgate` and `Nwell` margins are not deck-verified.
+
+- **`klt sim` complex-vector save-mode refusal names the waveform-limiting
+  remedy** (#6749, 2026-11-19): an AC request combining
+  `options.complex_vectors` with `options.save_mode: "netlist"` was refused
+  before launch, but the message only said to omit `options.save_mode`, so a
+  caller following it literally accepted a waveform of every node. The
+  refusal now also directs the caller to `options.save_vectors` with each
+  requested complex vector listed there, and spells out the corrected
+  options for the request (e.g. `{"complex_vectors": ["v(out)"],
+  "save_vectors": ["v(out)"]}`). Message-only: the refusal still fires
+  before launch and no JSON field moves. Docs: `docs/cli/sim.md`'s "Complex
+  AC vectors" section.
+- **`klt mcp serve` tool descriptions for `klt_sim_merge` and `klt_sim_plan`
+  link to their manual sections** (#6793, 2026-11-19): both descriptions ended
+  in `(CLI docs: …/docs/cli/sim-merge.md)` / `…/sim-plan.md`, pages that do not
+  exist. They now point at the "Merging per-request reports" and "Planning
+  shards" sections of `docs/cli/sim.md`; every other tool's link, including
+  `klt_sim`'s plain `sim.md`, is unchanged. Description text only: no tool name,
+  input schema or JSON field moves. A test now checks every catalog docs link
+  against the checkout, fragment included.
+- **`klt sim --resume` no longer refuses a sharded resume that has fewer
+  outstanding units than `--hosts`** (#6685, 2026-11-18): after `--resume`
+  reused finished shards, the replacement dispatch still asked for the
+  originally requested fleet size and tripped the `remote.hosts (N) exceeds
+  the number of units to dispatch (M) -- an idle fleet member would still be
+  billed` refusal, stranding a half-finished sweep (e.g. `--hosts 2` with one
+  shard collected and one lost). A resume that reused units now caps the fleet
+  at the units still outstanding; a fresh run (or a resume that reused nothing)
+  with `hosts` above its unit count is refused exactly as before. No JSON field
+  changes.
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
   sim`'s netlist identity cut every line at the first whitespace-preceded `$`
@@ -31,6 +90,48 @@ not `klt --version`, if you need to detect this kind of drift. See
   the case (raw `sha256` match + identity mismatch) as
   `normalization_changed`. The stamp format and JSON fields do not change.
   Docs: `docs/cli/sim.md`'s "`environment.netlist_identity`" section.
+- **`klt sim --backend batch`: a grid where every unit fails to converge now
+  says where to look** (#6720, 2026-11-18). When every unit (at least two) of a
+  `batch` run errors with `singular_matrix` or `nonconvergence`, the report's
+  top-level `diagnostics[]` gains one `batch_convergence_all_failed` warning
+  that quotes the worker-reported fields to compare with a `--backend local`
+  run (`engine_build_comparison.status`, `ngspice_init.source`/`.sha256`,
+  `omp_num_threads`, and `environment.ngspice_options`) and names a one-corner
+  canary. Additive only: no existing field changes, nothing is emitted when any
+  unit is ok, on another backend or for other codes, and no new flag or
+  worker-side `--dry-run` is added (`--dry-run` still never contacts the
+  worker). The code is report-level and registered in `DIAGNOSTIC_CODES`, so
+  `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
+  Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
+  batch".
+
+- **`klt extract --deck gf180mcu` no longer scales quadratically with device
+  count on flat arrays** (#5807, 2026-11-17): the gf180mcu MOS-capacitor
+  recogniser (#2919, dfc9ae034) walked every `active` island and ran one
+  full-layout `interacting()` per island per marker/implant layer, and
+  `klt extract`'s unsupported-device diagnostic re-ran that walk plus a
+  second per-island flavour sweep (#4587) — so an ~8k-cell flat SRAM array
+  went from 202 s on v0.5.0 to unfinished after 1831 s on v0.8.0, with the
+  cost attributed to `device_extraction`. Both paths now resolve their claim
+  sets with bulk island-set region algebra (one `interacting()` per layer
+  over the merged region, first-claim-wins preserved by an ordered entry
+  sweep), and the per-gate flavour split only visits islands touching the
+  flavour marker. Equivalence with the per-island form: merged islands are
+  mutually disjoint, so `&`/`-` between island unions stay island-granular,
+  and the ordered entry sweep with a cumulative `taken` union reproduces
+  first-claim-wins exactly; the gate predicate keeps its area-overlap
+  semantics (`island & poly` non-empty) by testing islands against
+  `poly & islands` — the overlap fragments, disjoint islands sharing none —
+  rather than `poly` itself, whose mere edge-touch would widen it to a touch
+  test; empty `requires` layers claim nothing and empty `excludes` layers
+  are a no-op, matching the old `touches()` predicate. Extraction output is
+  byte-identical: the netlist (and its normalized hash) is unchanged on
+  plain and marker-rich fixtures. The previously unattributed
+  unsupported-device block is now timed as its own
+  `timing.stages.unsupported_devices` key (additive; no `schema_version`
+  bump). A 4x-larger flat array now costs ~4x the recognition block instead
+  of ~16x (`tests/test_extract_scaling.py`).
+
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
@@ -442,6 +543,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   has no such gap (its `V*.AUX.1` rules already contain every via). No JSON
   field or `schema_version` changes; the deck's `provenance.deck` hash
   changes.
+- **`klt gen-compose` gains `routing.landing_pad_size_um` — a request-level
+  landing-pad size override — and names pad-vs-pitch conflicts as such**
+  (#5803, 2026-11-17): every via-drop's landing pad was a fixed 0.42 µm
+  square (contact-enclosure convention, grown per `(landing, via)` pair by
+  the #2072/#2074 area/enclosure floors), independent of the route's own
+  width — so a generator family whose terminals are pitched *finer* than
+  that footprint (e.g. `mos_array`'s 0.335 µm terminal columns) deposited
+  overlapping pads on every plane the ladders share, with no parameter on
+  either side to reconcile them, and the resulting rejections surfaced as
+  generic "crosses already-routed net" / "comes within N um" messages that
+  read as backbone problems:
+  - **`routing.landing_pad_size_um`** sets the pad side from the caller's
+    side. Validated against each drawn `(landing, via)` pair's own deck
+    floor — an override below the floor is an application error (exit 1)
+    naming the binding rule id and threshold (a smaller pad would be a
+    guaranteed `klt drc` violation, so it is never silently grown back);
+    where the floors allow it, pads draw at exactly the override, and the
+    route-vs-route collision checks measure the same footprint. Omitted ⇒
+    default pads, byte-for-byte unchanged.
+  - **Pad-vs-pitch conflicts are named.** A route-vs-route conflict whose
+    geometry is a landing pad now reports the pad footprint, the terminal
+    pitch, and the deck's spacing rule, with the override named as the
+    escape hatch — instead of a generic crossing/spacing rejection on a
+    plane the caller never assigned anything to. Backbone-only conflicts
+    keep the generic (accurate) messages.
+  Request/response shape change is additive only (a new optional
+  `routing.*` request field; no response field changed).
 - **Fixed** (#5664, `klt lvs` `--engine klayout-runset`; no JSON field
   changes, `schema_version` stays 3): a `pin.unmatched` finding whose pin
   pair KLayout's own comparer graded `Match`/`MatchWithWarning` — a
@@ -1036,6 +1164,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   in `unrouted_reasons[]` — an honest report of a tie that was previously
   missing. A group enclosed by its own ring typically needs
   `routing.cross_block_layer_role` for the tie to route out.
+- **`klt evidence canonicalize`: ask for the view `--rerun` diffs, instead of
+  copying the exclusion list** (#5541, 2026-11-13): `klt evidence canonicalize
+  REPORT --kind {drc,lvs,erc,extract,synthesize,place-and-route,equiv}` emits a
+  report reduced to exactly the fields that verb's `--check <report> --rerun`
+  compares — the kind's by-path exclusion set *and* its bookkeeping
+  canonicalizer (`run_id`, `script_path`, `blackbox_path`, `engine_logs`,
+  `elapsed_s`, `extract`'s `net_id`/anonymous-`$N` normalization), with
+  verdict-bearing fields untouched and keys sorted at every depth so the bytes
+  are a function of content alone. A repo that commits a report as regenerable
+  evidence can now commit *that* and diff the whole file, instead of
+  hand-maintaining a copy of an exclusion list that grows per release and whose
+  newer entries are nested rather than top-level — the failure that makes a
+  staleness guard report a difference on every run, including two back-to-back
+  runs of a byte-identical request. `provenance.pdk.ambiguous_sources` (#2564),
+  present only on a machine carrying more than one PDK store for the variant,
+  is removed for every kind. Equal canonical views of one kind mean that
+  kind's `--rerun` reports no drift; the converse does not hold — `--rerun`'s
+  comparison is directional and pair-dependent (committed-only `provenance`
+  leaves surface as `not_compared` per #5866, `drc` drops the redefined
+  `klayout_version_mismatch` flag across the #5660 boundary, and `klt lvs`'s
+  pair-dependent tolerance #1952/#2692), so a whole-file diff of canonical
+  views is the stricter check; the caveats are documented in
+  [`docs/cli/evidence.md`](docs/cli/evidence.md). The pairing of a kind with
+  its exclusion set and canonicalizer now lives in exactly one place
+  (`src/klayout_tools/evidence_canonicalize.py`) which every verb's own
+  `--rerun` reads, so the two cannot diverge. `--format` defaults to `json`
+  for this sub-verb (the payload *is* the document); `--rerun` behavior and
+  every report's own fields are unchanged, and no `schema_version` moves.
 
 ## 0.9.2 (2026-11-14)
 

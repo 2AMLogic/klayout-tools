@@ -237,7 +237,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
 
     layout = kdb.Layout()
     top, base_name, dbu_um = _seed_layout(
-        layout, kdb, cell_name, dbu_um, params, base_gds, base_cell
+        layout, cell_name, dbu_um, params, base_gds, base_cell
     )
 
     # Track per-(layer, datatype) shape counts and names for the response, in
@@ -371,7 +371,7 @@ def _resolve_shapes(params: dict[str, Any], base_gds: Any, erase_windows: list) 
     )
 
 
-def _seed_layout(layout, kdb, cell_name, dbu_um, params, base_gds, base_cell):
+def _seed_layout(layout, cell_name, dbu_um, params, base_gds, base_cell):
     """Create the output top cell; return ``(top, base_cell_name, dbu_um)``.
 
     Without a base this is an empty cell at ``dbu_um`` (``base_cell_name`` is
