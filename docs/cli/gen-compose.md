@@ -116,7 +116,9 @@ cleanly.
     override (issue #5803).** Every via-drop draws a square landing pad on
     each of its `landing_layers` — on the sky130 curated deck a fixed 0.42 µm
     square (sized from the contact-enclosure convention), grown per
-    `(landing, via)` pair by the area/enclosure floors #2072/#2074 added, and
+    `(landing, via)` pair by the area/enclosure floors #2072/#2074 added
+    (and, on gf180mcuC/D top metal, by the native `MT.1`/`MT.4` floors
+    #6612/#6645 — see "Via-drop routing" below), and
     independent of `routing.width_um`. A generator whose terminals are pitched
     tighter than that footprint cannot be landed on independently — exactly
     the compatibility wall #5803 records. This field sets the pad side from
@@ -1360,16 +1362,24 @@ the met4 pad to 1.18 µm (0.8 + 2 × 0.19), while met5's 2 µm area floor
 already exceeds its 1.42 µm enclosure floor (0.8 + 2 × 0.31). Missing
 enclosure rules leave the existing baseline and area floors intact.
 On gf180mcuC/D the top-metal pad is additionally floored to 0.44 µm
-(#6612): the native metaltop deck both 5LM variants select enforces
-`MT.1` width ≥ 0.44 µm on Metal5, a rule the curated deck cannot express
-(its `metal5.width.1` is 0.28 µm and its `metaltop.width.1` sits on
-MetalTop, a layer no 5LM composition draws), so that one floor is keyed
-by variant instead of resolved from the deck. The floor shapes the drawn
-pads (it composes into the same per-pair floor as the area and enclosure
-rules) and the landing search's reserved footprint alike. Because it is
+(#6612) and 0.75 µm (#6645): the native metaltop deck both 5LM variants
+select enforces `MT.1` width ≥ 0.44 µm and `MT.4` area ≥ 0.5625 µm² on
+Metal5 — rules the curated deck cannot express (its `metal5.width.1` is
+0.28 µm, its `metaltop.width.1` sits on MetalTop, a layer no 5LM
+composition draws, and `MT.4` is not transcribed at all), so those two
+floors are keyed
+by variant instead of resolved from the deck. The area floor is the
+binding one: its 0.75 µm square side subsumes `MT.1`'s 0.44 µm, and an
+isolated top-metal landing pad — the exact geometry #6645 reproduced
+routing two coincident lower-metal ports through `top_metal` — drawn at
+the width-only floor was 0.1936 µm², below `MT.4`. The floors shape the
+drawn pads (they compose into the same per-pair floor as the area and
+enclosure rules) and the landing search's reserved footprint alike.
+Because they are
 part of the resolved per-pair floor, a `routing.landing_pad_size_um`
-override below 0.44 µm on gf180mcuC/D Metal5 is rejected up front as an
-application error naming `MT.1` (native runset, 9K/11K), like any other
+override below 0.75 µm on gf180mcuC/D Metal5 is rejected up front as an
+application error naming `MT.4` (native runset, 9K/11K) — the binding,
+largest floor — like any other
 below-deck-floor override.
 Pads round outward onto the output grid, preserving their margin against
 the rounded via cut as well as their minimum size.
