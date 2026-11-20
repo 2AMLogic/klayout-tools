@@ -105,13 +105,13 @@ def _sever_terminal_enclosure_bands(
     """Cut enclosure-band flanks from terminal and connectivity regions (#5889).
 
     Keep band conductor within one enclosure width of conductor outside
-    the band. This keeps leads crossing the band and preserves a real
-    short where conductor continues around the body beyond the band.
+    the band (crossing leads and real shorts stay connected).
 
-    The caller has already removed the bodies from ``bases``, so intersecting
-    a sized body with its conductor gives just the drawn enclosure band.
-    Each cut is computed against the same conductor before any cuts are
-    applied, so nearby bodies can use the shared poly as a series lead.
+    The caller has already removed the bodies from ``bases``, so a sized
+    body's conductor overlap is just the drawn enclosure band; each cut
+    uses the same pre-cut conductor (nearby bodies can share the poly as
+    a series lead) and, at local cost (#6493), only the whole conductor
+    polygons interacting with ``ring.sized(2 * enc_dbu)`` (#6688, no clipping).
     """
     import klayout.db as kdb
 
@@ -125,11 +125,11 @@ def _sever_terminal_enclosure_bands(
         # Per-component rings preserve the series lead between nearby bodies.
         for component in body.merged().each():
             ring = kdb.Region(component).sized(enc_dbu)
-            band = conductor & ring
+            local = conductor.interacting(ring.sized(2 * enc_dbu))
+            band = local & ring
             if band.is_empty():
                 continue
-            outer = conductor - ring
-            layer_severed += band - outer.sized(enc_dbu)
+            layer_severed += band - (local - ring).sized(enc_dbu)
     for layer, severed in severed_by_layer.items():
         if not severed.is_empty():
             bases[layer] = bases[layer] - severed

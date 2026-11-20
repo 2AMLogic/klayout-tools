@@ -10,16 +10,17 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ._deck_hash import source_file_hash
 from ._provenance import content_hash
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
-    build_rerun_result,
     get_path,
     hash_check,
     strip_path_patterns,
 )
 from ._report_verify_hints import deck_not_found_entry, input_hash_check
 from .decks import deck_source_path
+from .evidence_canonicalize import rerun_result_for
 
 
 def _packaged_deck_path(name: Any) -> str | None:
@@ -97,7 +98,9 @@ def _report_hash_checks(
     deck_check = hash_check(
         f"{prefix}provenance.deck.content_hash",
         get_path(committed, ("provenance", "deck", "content_hash")),
-        content_hash(resolved_deck),
+        content_hash(resolved_deck)
+        if committed.get("engine") == "klayout"
+        else source_file_hash(resolved_deck),
     )
     if deck_missing is not None:
         deck_check["deck_not_found"] = deck_missing
@@ -191,16 +194,17 @@ def report_checks(
     return checks
 
 
-#: ``klt drc --check --rerun`` exclusions (issue #5660): the volatile
-#: provenance fields plus the two surfaces an ``--engine klayout`` run now
-#: always populates. The same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` -- "a
-#: field a report never carried cannot itself have drifted".
+#: DRC reruns exclude volatile provenance and native-deck execution details.
+#: Same rule as ``lvs._LVS_RERUN_EXCLUDE_PATHS`` (issue #5660) -- "a field a
+#: report never carried cannot itself have drifted".
 #:
 #: * ``environment.klayout_binary`` -- a host-local path (#2849 precedent): the
 #:   same KLayout installed under another prefix is not a change in evidence.
 #: * ``provenance.klayout_module_version`` -- the pip-wheel axis, volatile like
 #:   its sibling ``provenance.klayout_version``.
+#: * ``deck_output`` -- the deck log can include per-run paths and timings.
 DRC_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("deck_output",),
     ("environment", "klayout_binary"),
     ("provenance", "klayout_module_version"),
 }
@@ -255,9 +259,11 @@ def _mismatch_redefined(committed: dict[str, Any], fresh: dict[str, Any]) -> boo
 def drc_rerun_result(
     *, report_path: str, committed: dict[str, Any], fresh: dict[str, Any]
 ) -> dict[str, Any]:
-    """:func:`~klayout_tools._report_verify.build_rerun_result` with the
-    DRC-specific exclusions of :data:`DRC_RERUN_EXCLUDE_PATHS`. ``fresh`` is
-    still embedded verbatim.
+    """``klt drc``'s ``--rerun`` payload: the ``drc`` entry of
+    :data:`~klayout_tools.evidence_canonicalize._KIND_SOURCES` (the
+    DRC-specific exclusions of :data:`DRC_RERUN_EXCLUDE_PATHS` and
+    :func:`_rerun_diff_view`), so ``klt evidence canonicalize --kind drc``
+    sees the same view (#5541). ``fresh`` is still embedded verbatim.
 
     Across the #5660 definition boundary the two reports' mismatch flags are
     not comparable (a divergent host flips ``true`` -> ``false`` with nothing
@@ -266,14 +272,12 @@ def drc_rerun_result(
     (a provenance scalar the fresh side does not carry) -- auditable, and
     neither ``status`` nor the exit code reflects it. Between two post-#5660
     reports (or two curated ones) the flag is compared as before."""
-    fresh_view = _rerun_diff_view(fresh)
-    if _mismatch_redefined(committed, fresh):
-        fresh_view = strip_path_patterns(fresh_view, _MISMATCH_PATH)
-    return build_rerun_result(
-        report_path=report_path,
+    return rerun_result_for(
+        "drc",
+        report_path,
         committed=committed,
         fresh=fresh,
-        exclude=DRC_RERUN_EXCLUDE_PATHS,
-        committed_for_diff=_rerun_diff_view(committed),
-        fresh_for_diff=fresh_view,
+        fresh_view_exclude=(
+            _MISMATCH_PATH if _mismatch_redefined(committed, fresh) else ()
+        ),
     )
