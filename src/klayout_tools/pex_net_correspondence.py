@@ -43,6 +43,7 @@ what says "this internal layer *is* metal1").
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -257,6 +258,22 @@ def build_probes(
 # --------------------------------------------------------------------------- #
 
 
+def _probe_hits(
+    probe_results: Sequence[Mapping[str, Any]],
+) -> dict[str, set[tuple[str, int]]]:
+    """Curated cluster identities reached by each runset net's geometry probes."""
+    hits: dict[str, set[tuple[str, int]]] = {}
+    for result in probe_results:
+        if not result.get("found"):
+            continue
+        parts = str(result.get("name") or "").split("|")
+        if len(parts) != 4 or parts[0] != "kltcorr":
+            continue
+        hit = (str(result["net"]), int(result["cluster_id"]))
+        hits.setdefault(parts[2], set()).add(hit)
+    return hits
+
+
 def correspondence(
     runset_net_names: Sequence[str],
     probe_results: Sequence[Mapping[str, Any]],
@@ -272,60 +289,56 @@ def correspondence(
     a curated parasitic net nobody matched is listed even though it never
     probes anything itself.
     """
-    hits: dict[str, set[tuple[str, int]]] = {}
-    for result in probe_results:
-        if not result.get("found"):
-            continue
-        parts = str(result.get("name") or "").split("|")
-        if len(parts) != 4 or parts[0] != "kltcorr":
-            continue
-        hit = (str(result["net"]), int(result["cluster_id"]))
-        hits.setdefault(parts[2], set()).add(hit)
-
+    hits = _probe_hits(probe_results)
     matched: list[dict[str, Any]] = []
     unmatched_runset: list[str] = []
     disagreements: list[dict[str, Any]] = []
-    reverse: dict[tuple[str, int], list[str]] = {}
+    reverse: dict[tuple[str, int], list[str]] = defaultdict(list)
     for runset_net in runset_net_names:
-        net_hits = sorted(hits.get(runset_net, ()))
-        if len(net_hits) == 1:
-            reverse.setdefault(net_hits[0], []).append(runset_net)
-        else:
-            unmatched_runset.append(runset_net)
-            if net_hits:
-                disagreements.append(
-                    {
-                        "kind": "split",
-                        "runset_net": runset_net,
-                        "curated_nets": [name for name, _ in net_hits],
-                    }
-                )
-    for curated_hit, runset_nets in sorted(reverse.items()):
+        for hit in hits.get(runset_net, ()):
+            reverse[hit].append(runset_net)
+    for (name, cluster), runset_nets in sorted(reverse.items()):
         if len(runset_nets) > 1:
-            # A curated net several runset nets reach is a merge
-            # disagreement: its parasitics attach to neither fragment, so
-            # every fragment is unmatched too -- never silently merged.
-            unmatched_runset.extend(runset_nets)
             disagreements.append(
                 {
                     "kind": "merge",
-                    "curated_net": curated_hit[0],
+                    "curated_net": name,
+                    "cluster_id": cluster,
                     "runset_nets": sorted(runset_nets),
                 }
             )
-        else:
-            matched.append({"runset": runset_nets[0], "curated": curated_hit[0]})
-    matched_curated = {entry["curated"] for entry in matched}
+    for runset_net in runset_net_names:
+        net_hits = sorted(hits.get(runset_net, ()))
+        if len(net_hits) == 1 and len(reverse[net_hits[0]]) == 1:
+            name, cluster = net_hits[0]
+            matched.append(
+                {"runset": runset_net, "curated": name, "cluster_id": cluster}
+            )
+            continue
+        unmatched_runset.append(runset_net)
+        if len(net_hits) > 1:
+            disagreements.append(
+                {
+                    "kind": "split",
+                    "runset_net": runset_net,
+                    "curated_nets": [name for name, _ in net_hits],
+                    "curated_cluster_ids": [cluster for _, cluster in net_hits],
+                }
+            )
+
+    matched_clusters = {entry["cluster_id"] for entry in matched}
+    unmatched = sorted(
+        (entry["net"], entry["net_id"])
+        for entry in curated_parasitic_nets
+        if entry["net_id"] not in matched_clusters
+    )
     return {
         "matched": sorted(matched, key=lambda entry: entry["runset"]),
         "unmatched_runset_nets": sorted(unmatched_runset),
-        "unmatched_curated_nets": sorted(
-            {
-                str(entry["net"])
-                for entry in curated_parasitic_nets
-                if str(entry["net"]) not in matched_curated
-            }
-        ),
+        "unmatched_curated_nets": [name for name, _ in unmatched],
+        "unmatched_curated_clusters": [
+            {"curated": name, "cluster_id": cluster} for name, cluster in unmatched
+        ],
         "disagreements": sorted(
             disagreements,
             key=lambda entry: (
@@ -347,15 +360,15 @@ def preferred_renames(
     net adopting the same label), in which case the anonymous spelling
     stands. Mirrors the curated writer's own duplicate-label discipline
     (its ``_dup<n>`` suffixing) with the runset's own fallback: no rename."""
-    kept = {net for net in all_runset_nets if not _is_anonymous(net)}
+    kept = {net.casefold() for net in all_runset_nets if not _is_anonymous(net)}
     renames: dict[str, str] = {}
     adopted: set[str] = set()
     for entry in sorted(matched, key=lambda item: item["runset"]):
         runset_net, curated_net = entry["runset"], entry["curated"]
         if not _is_anonymous(runset_net) or _is_anonymous(curated_net):
             continue
-        if curated_net in kept or curated_net in adopted:
+        if curated_net.casefold() in kept or curated_net.casefold() in adopted:
             continue
         renames[runset_net] = curated_net
-        adopted.add(curated_net)
+        adopted.add(curated_net.casefold())
     return renames

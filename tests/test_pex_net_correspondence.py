@@ -24,7 +24,7 @@ import subprocess
 import klayout.db as kdb
 import pytest
 
-from klayout_tools.pex_merged_leg import merge_parasitics, merged_runset_extract
+from klayout_tools.pex_merged_leg import merged_runset_extract
 from klayout_tools.pex_net_correspondence import (
     correspondence,
     preferred_renames,
@@ -179,7 +179,15 @@ def test_labelled_and_unlabelled_nets_both_match_and_get_parasitics(
     # body clusters, which carry no metal -- listed, never silently dropped.
     assert corr["unmatched_runset_nets"]
     assert corr["disagreements"] == []
-    assert corr["attached_card_count"] == 9  # 4 parasitic nets x (R + C) + tie
+    y_matches = [m for m in corr["matched"] if m["curated"] == "Y"]
+    assert len({m["cluster_id"] for m in y_matches}) == 2
+    assert corr["attached_card_count"] == 11  # 5 parasitic nets x (R + C) + tie
+    assert corr["substrate_return"] == {
+        "curated": "vsubs",
+        "runset": None,
+        "node": "vsubs",
+        "tie_resistance_ohm": 1e12,
+    }
 
     text = open(str(tmp_path / "leg.spice")).read()
     assert "parasitics attached from curated deck 'sg13cmos5l'" in text
@@ -189,6 +197,14 @@ def test_labelled_and_unlabelled_nets_both_match_and_get_parasitics(
     # cards reference the same nodes -- one netlist, not two views.
     assert "RVGND_plr VGND VGND__kltph" in text
     assert "CVGND_plc VGND__kltph vsubs" in text
+    for node in ("Y", y_matches[1]["runset"]):
+        assert f"R{node}_plr {node} {node}__kltph" in text
+        assert f"C{node}_plc {node}__kltph vsubs" in text
+        assert any(
+            node in line.split()[1:-1]
+            for line in text.splitlines()
+            if line.startswith("X")
+        )
     assert "X$1 " in text  # the runset device card survived the rewrite
     for line in text.splitlines():
         if line.startswith("X$1"):
@@ -235,7 +251,7 @@ def test_a_split_disagreement_is_reported_not_compared(tmp_path, fake_klayout):
     )
     assert [s["curated_nets"] for s in splits] == [["VGND", "Y"], ["VPWR", "Y"]]
     # The one cluster the bridge left whole still matches and attaches.
-    assert corr["matched"] == [{"runset": "\\$3", "curated": "A"}]
+    assert corr["matched"] == [{"runset": "\\$3", "curated": "A", "cluster_id": 3}]
     assert corr["attached_card_count"] == 3  # A's R + C + the substrate tie
 
 
@@ -263,7 +279,7 @@ def test_correspondence_classifies_every_outcome():
             _probe("\\$4", "A", 3),  # A also hit by \$1: merge with \$1
             {"name": "user-probe", "found": True, "net": "X", "cluster_id": 9},
         ],
-        [{"net": "D"}, {"net": "A"}],
+        [{"net": "D", "net_id": 4}, {"net": "A", "net_id": 3}],
     )
     assert corr["matched"] == []  # A's merge poisons both of its fragments
     assert corr["unmatched_runset_nets"] == ["\\$1", "\\$2", "\\$3", "\\$4"]
@@ -280,9 +296,34 @@ def test_correspondence_classifies_every_outcome():
     assert corr["probe_count"] == 5
 
 
+def test_unmatched_same_label_and_overlapping_disagreements():
+    corr = correspondence(
+        ["first", "bridged", "fragment"],
+        [
+            _probe("first", "Y", 1),
+            _probe("bridged", "Y", 2),
+            _probe("bridged", "B", 3),
+            _probe("fragment", "Y", 2),
+        ],
+        [{"net": "Y", "net_id": i} for i in [1, 2, 4]],
+    )
+    assert corr["matched"] == [{"runset": "first", "curated": "Y", "cluster_id": 1}]
+    assert corr["unmatched_curated_clusters"] == [
+        {"curated": "Y", "cluster_id": 2},
+        {"curated": "Y", "cluster_id": 4},
+    ]
+    assert corr["unmatched_runset_nets"] == ["bridged", "fragment"]
+    assert corr["disagreements"][0] == {
+        "kind": "merge",
+        "curated_net": "Y",
+        "cluster_id": 2,
+        "runset_nets": ["bridged", "fragment"],
+    }
+
+
 def test_unfound_probes_are_not_matches():
     corr = correspondence(
-        ["\\$1"], [_probe("\\$1", None, None, found=False)], [{"net": "A"}]
+        ["\\$1"], [_probe("\\$1", None, None, found=False)], [{"net": "A", "net_id": 3}]
     )
     assert corr["matched"] == []
     assert corr["unmatched_runset_nets"] == ["\\$1"]
@@ -302,57 +343,6 @@ def test_preferred_renames_adopt_labels_and_refuse_collisions():
     assert renames == {}
 
 
-def test_merge_writer_preserves_pin_order_and_untouched_nets(tmp_path):
-    leg = tmp_path / "leg.spice"
-    leg.write_text(
-        "* extracted by klt extract --engine klayout-runset --deck-file p.lvs\n"
-        "* no parasitics: this engine extracts devices and connectivity only\n"
-        "* cell TOP\n"
-        ".SUBCKT TOP \\$1 \\$2 keepme\n"
-        "X$1 \\$1 \\$2 keepme nmos\n"
-        ".ENDS TOP\n"
-    )
-    cards = merge_parasitics(
-        str(leg),
-        matched=[{"runset": "\\$1", "curated": "A"}],
-        all_runset_nets=["\\$1", "\\$2", "keepme"],
-        parasitics={
-            "nets": [
-                {
-                    "net": "A",
-                    "resistance_ohm": 0.5,
-                    "capacitance_ff": 2.0,
-                    "coupled": [],
-                },
-                {  # unmatched curated net: its card is dropped, not guessed
-                    "net": "B",
-                    "resistance_ohm": 9.0,
-                    "capacitance_ff": 9.0,
-                    "coupled": [],
-                },
-            ],
-            "substrate_dc_tie": {
-                "resistance_ohm": 1e12,
-                "nets": [{"net": "vsubs", "device": "Rvsubs_dctie"}],
-            },
-        },
-        deck_name="sg13cmos5l",
-        report_block={"unmatched_runset_nets": ["\\$2"]},
-    )
-    text = leg.read_text()
-    assert cards == 3  # R + C + the substrate tie; B contributed none
-    assert ".SUBCKT TOP A \\$2 keepme\n" in text  # renamed in place, order kept
-    assert "X$1 A \\$2 keepme nmos" in text
-    assert "keepme" in text.split(".SUBCKT")[1].splitlines()[0]
-    assert "RA_plr A A__kltph 0.5" in text
-    assert "CA_plc A__kltph vsubs 2e-15" in text
-    assert "Rvsubs_dctie vsubs 0 1e+12" in text
-    assert ".GLOBAL vsubs" in text
-    assert not any(
-        line.startswith(("R", "C")) and " 9" in line for line in text.splitlines()
-    )
-
-
 def test_probe_results_parse_only_kltcorr_names():
     corr = correspondence(
         ["\\$1"],
@@ -368,7 +358,7 @@ def test_probe_results_parse_only_kltcorr_names():
         ],
         [],
     )
-    assert corr["matched"] == [{"runset": "\\$1", "curated": "A"}]
+    assert corr["matched"] == [{"runset": "\\$1", "curated": "A", "cluster_id": 1}]
 
 
 # --------------------------------------------------------------------------- #

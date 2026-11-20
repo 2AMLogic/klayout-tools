@@ -1147,7 +1147,7 @@ the route existed; `schema_version` stays `2`):
 |---|---|
 | `extraction.engine` | `"klayout-runset"`. |
 | `extraction.parasitics_carried` | `false` for a plain runset leg (no R/C cards). For a merged leg (`--deck`, issue #6606): `true` exactly when the net correspondence attached at least one parasitic card; `klt signoff` refuses a `false` for item 7 (`no_parasitics`). |
-| `extraction.net_correspondence` | Present only on a merged leg (issue #6606): `matched` (`[{runset, curated}]`), `unmatched_runset_nets`, `unmatched_curated_nets`, `disagreements` (`{kind: split\|merge, …}` — a connectivity disagreement between the two engines, reported never guessed), `probe_count`, `deck`, `attached_card_count`. A net that cannot be matched is listed, never silently dropped or silently merged. |
+| `extraction.net_correspondence` | Merged legs only. Each `matched[]` row gives the runset node, curated label and `cluster_id` (the curated parasitic row’s `net_id`). `unmatched_runset_nets` and `unmatched_curated_nets` list names. `unmatched_curated_clusters[]` identifies each unmatched parasitic island by `{curated, cluster_id}`. Split disagreements include `curated_cluster_ids` in the same order as `curated_nets`. Merge disagreements include the curated `cluster_id`. The block also gives `probe_count`, `deck` and `attached_card_count`. |
 | `extraction.params_not_carried` | `{class: [PARAM, …]}` — the measured parameters the `X` cards do **not** carry, per device class, copied from `klt extract`'s own `params_not_carried`. `{}` once every parameter is declared with `--device-param`. |
 | `extraction.device_counts` | `{class: count}` — what the runset recognised, so a reader sees a family is present (or absent) without the extract JSON. Counted over the **instantiated hierarchy**, not the selected circuit alone: a hierarchical runset's top often holds no device itself (its devices sit in called cells), and the selected circuit's own count would read `{}` for a design full of them. Equal to `klt extract`'s `device_counts` for a flat runset, and to its `instantiated_device_counts` always. |
 | `extraction.device_count` | The total of `extraction.device_counts` — under this engine it replaces the echo of `klt extract`'s selected-circuit `device_count`, so the two never disagree. |
@@ -1164,6 +1164,18 @@ series `R` per matched net, a ground `C`, matched coupling, the substrate
 DC tie) — see
 [`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)
 for why it is coarser than the curated engine's own star.
+Renames and parasitic cards apply only inside the selected subcircuit.
+Each same-labelled island retains its own R/C values. Curated coupling rows
+identify endpoints by label. The writer records each skipped pair in
+`omitted_couplings[]` with its two `curated_nets` and a reason of
+`ambiguous_label` or `unmatched_endpoint`.
+
+When ground capacitors are written, `substrate_return` records their actual
+SPICE `node`, the `curated` substrate name, its original `runset` match and
+`tie_resistance_ohm`. A null `runset` means the caps return to a separate
+substrate node with a DC tie to SPICE ground. Its connection to a runset
+device body is unverified. The signoff citation carries this disclosure.
+
 `body_bias.status` is **`"not_assessed"`** (with `null` counts): the runset
 engine never runs the curated deck's floating-PMOS-body check, so `"biased"`
 would state a clean result nothing measured.

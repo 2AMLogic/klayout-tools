@@ -92,11 +92,19 @@ terminals that do not exist in a runset leg; the merged writer collapses to
 the single-lumped form `parasitics.nets[]` already publishes
 (`rc_model: "lumped"`).
 
+The selected subcircuit owns these cards. A cluster ID joins each probe match
+to the curated R/C row even when disconnected islands share a label.
+Coupling rows identify their endpoints by label alone. Ambiguous pairs appear
+in `omitted_couplings`. Ground capacitors use the runset substrate match when
+one exists. Otherwise they use a separate node with the deck's DC tie, and
+`substrate_return.runset` is null. The tie resistance and the actual return
+node accompany the item-7 citation so a reader can assess the return path.
+
 ### Measured outcomes
 
 | Layout | Result |
 |---|---|
-| inverter fixture (both engines driven for real) | 5/8 runset nets matched (VGND, Y, VPWR, Y, A — all anonymous runset nets adopting labels), 3 body clusters unmatched, 0 disagreements, 9 parasitic cards; the leg's device cards sit on the same nodes as the cards |
+| inverter fixture (both engines driven for real) | 5/8 runset nets matched (VGND, Y, VPWR, Y, A — five distinct curated cluster IDs), 3 body clusters unmatched, 0 disagreements, 11 cards (5 R/C pairs and the substrate tie). Both Y islands carry their own pair. The substrate return has no runset match |
 | inverter fixture, metal joins removed (deliberate split) | every labelled curated net reported as a merge over exactly its 2 fragments; 0 matches; no cards — and no stray ground tie |
 | inverter fixture, diffusion bridged to gate (deliberate wrong join) | 2 split disagreements naming the curated nets each bridged cluster spans; the one cluster left whole still matches |
 | `pnpMPA` PDK testcase (the flagship gap) | curated leg extracts **nothing but `vsubs`** — its labels sit on `10/25` (the deck reads `.pin` `10/2`) and its vias are KLayout PCell instances the pip `klayout.db` curated engine cannot resolve — so all four runset nets are reported (PAD/VDD unmatched, `$1`+`VSS` a merge onto `vsubs`), 0 cards, `parasitics_carried: false` |
@@ -119,7 +127,7 @@ rows are device-representation deltas. The remedy is re-running *this*
 artifact with `--deck <curated>` (the same artifact-kind discipline as
 `not_post_layout`); a merged leg that attached cards discloses
 `parasitics_carried: true` and grades exactly as a curated one. The
-disclosure itself stays beside the verdict, unchanged.
+citation identifies an unmatched substrate return when one was used.
 
 ## What is deliberately still not carried
 

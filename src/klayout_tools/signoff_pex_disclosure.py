@@ -4,8 +4,8 @@ size-ratchet ceiling -- the ``signoff_yield_disclosure`` precedent: pure
 functions over an envelope dict, importing nothing from the module they were
 split out of, re-imported there by name so ``signoff.<name>`` keeps resolving.
 
-Both are **reported, never graded on**: item 7's verdict is still
-``status == "pass"`` alone.
+Item 7 checks whether a passing runset leg carried parasitics. Its body-bias
+and substrate-return disclosures travel with the citation.
 """
 
 from __future__ import annotations
@@ -105,8 +105,11 @@ def _pex_engine_disclosure(
     if not isinstance(extraction, dict) or not extraction.get("engine"):
         return None
     uncarried = extraction.get("params_not_carried")
+    corr = extraction.get("net_correspondence")
+    substrate = corr.get("substrate_return") if isinstance(corr, dict) else None
     return {
         "pex_extraction": {
+            **({"substrate_return": substrate} if isinstance(substrate, dict) else {}),
             "engine": extraction.get("engine"),
             "parasitics_carried": extraction.get("parasitics_carried"),
             "params_not_carried": (

@@ -46,6 +46,12 @@ PEX_RUNSET_MERGED_PASS_ENVELOPE = {
             "probe_count": 6,
             "deck": "sg13cmos5l",
             "attached_card_count": 7,
+            "substrate_return": {
+                "curated": "vsubs",
+                "node": "vsubs",
+                "runset": None,
+                "tie_resistance_ohm": 1e12,
+            },
         },
     },
 }
@@ -85,6 +91,12 @@ def test_signoff_citation_surfaces_the_runset_engine_disclosure(tmp_path):
     assert item_7["citation"]["pex_extraction"] == {
         "engine": "klayout-runset",
         "parasitics_carried": True,
+        "substrate_return": {
+            "curated": "vsubs",
+            "node": "vsubs",
+            "runset": None,
+            "tie_resistance_ohm": 1e12,
+        },
         "params_not_carried": {"pnpMPA": ["A", "P"]},
     }
 
@@ -109,7 +121,9 @@ def test_item_7_refuses_a_parasitic_free_runset_leg(tmp_path):
     remedy ("re-run *this* artifact with `--deck`"), never `check_failed`."""
     path = _write(tmp_path, "pex.json", PEX_RUNSET_PASS_ENVELOPE)
 
-    report = build_tier_report(_manifest(evidence={"7": path}))
+    report = build_tier_report(_manifest(evidence={"2": path, "7": path}))
+    item_2 = next(item for item in report["items"] if item["id"] == 2)
+    assert item_2["status"] == "met"
 
     item_7 = next(item for item in report["items"] if item["id"] == 7)
     assert item_7["status"] == "unmet"
@@ -161,6 +175,7 @@ def test_text_output_states_the_runset_leg_carries_no_parasitics(tmp_path, capsy
     line = next(line for line in lines if "pex extraction:" in line)
     assert "engine=klayout-runset" in line
     assert "parasitics_carried=true" in line
+    assert "substrate return vsubs (runset unmatched)" in line
     assert "params_not_carried=[pnpMPA: A, P]" in line
 
 

@@ -230,6 +230,12 @@ def _format_pex_extraction(pex_extraction: dict) -> str:
             for device_class, params in uncarried.items()
         )
         parts.append(f"params_not_carried=[{shown}]")
+    substrate = pex_extraction.get("substrate_return")
+    if substrate:
+        match = substrate.get("runset")
+        parts.append(
+            f"substrate return {substrate.get('node')} (runset {match or 'unmatched'})"
+        )
     line = ", ".join(parts)
     if carried is False:
         line += (
