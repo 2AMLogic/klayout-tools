@@ -3348,8 +3348,8 @@ def _prepare_sim_request(
         corners_spec=corners_spec,
         monte_carlo_declared=monte_carlo_spec is not None,
         fail_fast_probe=fail_fast_probe,
+        measurements_spec=measurements_spec,
         osdi_preload_declared=bool(osdi_preload or osdi_runner_resolved),
-        expr_measurements_declared=bool(_expr_measurements(measurements_spec)),
         save_mode_declared=save_mode_declared,
         save_vectors_declared=save_vectors_declared,
         ngspice_options_declared=bool(ngspice_options),
@@ -3358,27 +3358,6 @@ def _prepare_sim_request(
         analysis_steps_declared=sim_steps.is_steps_analysis(analysis),
         linearize_declared=analysis.get("linearize") is True,
         op_check_declared=sim_op_check.is_declared(analysis),
-        crossings_declared=bool(
-            sim_crossings.crossings_measurements(measurements_spec)
-        ),
-        energy_declared=bool(sim_energy.energy_measurements(measurements_spec)),
-        stress_declared=bool(sim_stress.stress_measurements(measurements_spec)),
-        cycle_mean_declared=bool(
-            sim_cycle_mean.cycle_mean_measurements(measurements_spec)
-        ),
-        transfer_declared=bool(
-            sim_transfer_meas.transfer_measurements(measurements_spec)
-        ),
-        snm_declared=bool(sim_snm_meas.snm_measurements(measurements_spec)),
-        slope_band_declared=bool(
-            sim_slope_band_meas.slope_band_measurements(measurements_spec)
-        ),
-        search_declared=bool(sim_search.search_measurements(measurements_spec)),
-        eye_declared=bool(sim_eye.eye_measurements(measurements_spec)),
-        step_resolution_declared=bool(
-            sim_step_resolution.step_resolution_measurements(measurements_spec)
-        ),
-        settled_declared=bool(sim_settled.settled_measurements(measurements_spec)),
     )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
@@ -6505,8 +6484,8 @@ def _enforce_xyce_support_boundary(
     corners_spec: dict[str, Any],
     monte_carlo_declared: bool,
     fail_fast_probe: bool,
+    measurements_spec: list[dict[str, Any]] | None = None,
     osdi_preload_declared: bool = False,
-    expr_measurements_declared: bool = False,
     save_mode_declared: bool = False,
     save_vectors_declared: bool = False,
     ngspice_options_declared: bool = False,
@@ -6515,17 +6494,6 @@ def _enforce_xyce_support_boundary(
     analysis_steps_declared: bool = False,
     linearize_declared: bool = False,
     op_check_declared: bool = False,
-    crossings_declared: bool = False,
-    cycle_mean_declared: bool = False,
-    energy_declared: bool = False,
-    stress_declared: bool = False,
-    transfer_declared: bool = False,
-    snm_declared: bool = False,
-    slope_band_declared: bool = False,
-    search_declared: bool = False,
-    eye_declared: bool = False,
-    step_resolution_declared: bool = False,
-    settled_declared: bool = False,
 ) -> None:
     """Refuse the ``engine: "xyce"`` combinations the v1 path does not
     implement (issue #2016) -- up front, with the same clean
@@ -6588,20 +6556,7 @@ def _enforce_xyce_support_boundary(
             "Verilog-A models as its own compiled plugins (`-plugin`), not "
             "OSDI shared libraries; use engine 'ngspice' or drop the option"
         )
-    sim_xyce_refusals.refuse_control_block_measurements(
-        expr_declared=expr_measurements_declared,
-        crossings_declared=crossings_declared,
-        cycle_mean_declared=cycle_mean_declared,
-        energy_declared=energy_declared,
-        stress_declared=stress_declared,
-        transfer_declared=transfer_declared,
-        snm_declared=snm_declared,
-        slope_band_declared=slope_band_declared,
-        search_declared=search_declared,
-        eye_declared=eye_declared,
-        step_resolution_declared=step_resolution_declared,
-        settled_declared=settled_declared,
-    )
+    sim_xyce_refusals.refuse_control_block_measurements(measurements_spec or [])
     for declared, message in (
         # Issue #2732: `save_mode` selects whether klt's generated ngspice
         # `.control` block carries `save all`; the Xyce deck has no control
