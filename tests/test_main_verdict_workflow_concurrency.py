@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
-MAIN_VERDICT_WORKFLOWS = ("file-size-ratchet-main.yml",)
+MAIN_VERDICT_WORKFLOWS = ("file-size-ratchet-main.yml", "main-lint.yml")
 
 
 def test_main_verdict_registry_is_not_empty() -> None:
