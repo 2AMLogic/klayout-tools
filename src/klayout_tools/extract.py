@@ -165,7 +165,6 @@ from ._provenance import (
 )
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -185,6 +184,7 @@ from .decks import (
     get_parasitics_deck,
 )
 from .erc_islands import partition_region_by_islands, sorted_islands
+from .evidence_canonicalize import rerun_result_for
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -4202,13 +4202,7 @@ def rerun_extract_report(
             shutil.rmtree(scratch_dir, ignore_errors=True)
     if scratch_dir is not None and fresh.get("netlist_path") is not None:
         fresh["netlist_path"] = committed_netlist_path
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("extract", report_path, committed=committed, fresh=fresh)
 
 
 def _replay_pin_renames_echo(
@@ -4790,8 +4784,15 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    warnings = warnings + _detect_unsupported_devices(
-        layout, top_cell, deck, unsupported_devices
+    # Timed as its own stage (#5807): it re-runs the recogniser walks, a
+    # superlinear share previously hidden in `unattributed_seconds`.
+    warnings = warnings + _staged(
+        "unsupported_devices",
+        _detect_unsupported_devices,
+        layout,
+        top_cell,
+        deck,
+        unsupported_devices,
     )
 
     # Unmodelled device markers (issue #3858): prose-only diagnostic.
@@ -6563,32 +6564,6 @@ def _connect_mos_capacitors(
         l2n.connect(sd, contact)
 
 
-def _mos_capacitor_entry_index(
-    island: kdb.Region,
-    deck: ExtractionDeck,
-    nwell: kdb.Region,
-    region_of: Callable[[tuple[int, int]], kdb.Region],
-) -> int | None:
-    """Index into ``deck.mos_capacitors`` of the first entry that claims
-    ``island`` (see :class:`~klayout_tools.decks.MosCapacitorDevice` for the
-    tests), or ``None`` when none does."""
-    in_well = not island.interacting(nwell).is_empty()
-
-    def touches(layer: tuple[int, int]) -> bool:
-        return not island.interacting(region_of(layer)).is_empty()
-
-    for index, entry in enumerate(deck.mos_capacitors):
-        if (
-            entry.in_well == in_well
-            and touches(entry.marker)
-            and touches(entry.implant)
-            and all(touches(layer) for layer in entry.requires)
-            and not any(touches(layer) for layer in entry.excludes)
-        ):
-            return index
-    return None
-
-
 def _resolve_mos_capacitors(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -6622,6 +6597,10 @@ def _resolve_mos_capacitors(
     the gate), ``recognised`` is the union of the claimed islands, and
     ``dropped`` counts gate components fully covered by ``dummy``. Everything
     is empty/``0`` for a deck declaring no ``mos_capacitors``.
+
+    Claim sets are resolved with bulk region algebra, not a per-island loop
+    (issue #5807): one ``interacting()`` per layer over the merged island
+    set, first-claim-wins via the ordered sweep (derivation: CHANGELOG #5807).
     """
     import klayout.db as kdb
 
@@ -6634,19 +6613,30 @@ def _resolve_mos_capacitors(
             layers[layer] = _region(layout, top_cell, layer)
         return layers[layer]
 
+    islands = active.merged()
+    gated = islands.interacting(poly & islands)
+    in_well = islands.interacting(nwell)
+
+    def touching(layer: tuple[int, int]) -> kdb.Region:
+        # Empty layer claims nothing; skip the interacting() call (#5807).
+        region = region_of(layer)
+        return kdb.Region() if region.is_empty() else islands.interacting(region)
+
     claimed: dict[int, kdb.Region] = {}
-    remaining = kdb.Region()
-    for component in active.merged().each():
-        island = kdb.Region(component)
-        chosen = (
-            _mos_capacitor_entry_index(island, deck, nwell, region_of)
-            if not (island & poly).is_empty()
-            else None
-        )
-        if chosen is None:
-            remaining += island
-        else:
-            claimed[chosen] = claimed.get(chosen, kdb.Region()) + island
+    taken = kdb.Region()
+    for index, entry in enumerate(deck.mos_capacitors):
+        if region_of(entry.marker).is_empty():
+            continue  # no marker shapes: this entry can claim no island
+        candidates = gated & touching(entry.marker) & touching(entry.implant)
+        for layer in entry.requires:
+            candidates &= touching(layer)
+        for layer in entry.excludes:
+            candidates -= touching(layer)
+        candidates &= in_well if entry.in_well else islands - in_well
+        candidates -= taken
+        if not candidates.is_empty():
+            claimed[index] = candidates
+            taken += candidates
 
     capacitors: list[tuple[MosCapacitorDevice, kdb.Region, kdb.Region]] = []
     recognised = kdb.Region()
@@ -6661,7 +6651,7 @@ def _resolve_mos_capacitors(
                     dropped += 1
             gate = gate - dummy
         capacitors.append((deck.mos_capacitors[index], gate, island_region - poly))
-    return capacitors, remaining, recognised, dropped
+    return capacitors, islands - taken, recognised, dropped
 
 
 def _deck_complement_well_tie(
@@ -7578,8 +7568,10 @@ def _extract_netlist(
         not_regions = [_region(layout, top_cell, m) for m in flavour.not_markers]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
-            remaining = kdb.Region()
-            for component in active.merged().each():
+            # Non-marker-touching islands claim nothing and pass through whole (#5807).
+            candidates = active.merged().interacting(marker_region)
+            remaining = active - candidates
+            for component in candidates.each():
                 component_region = kdb.Region(component)
                 claimed_part, remaining_part = _flavour_split_island(
                     component_region,

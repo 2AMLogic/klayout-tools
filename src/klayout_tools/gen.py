@@ -343,6 +343,7 @@ from .gen_ring_layout import (
     _guard_ring_layer_params,
     _ring_layout,
     _validate_guard_ring_implant_gap,
+    _validate_mos_array_implant_gap,
 )
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
@@ -3628,11 +3629,8 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
-# PCell harness -- adapts a request's `params` to a PCellDeclarationHelper
-# subclass's declared parameter schema + produce_impl(), per spike section 1's
-# "KLayout PCells (native)" entry. Generic across every registered generator;
-# generator-specific knowledge (validation, port/bbox reporting) lives in each
-# _GeneratorSpec, not here.
+# PCell harness for request parameters and produce_impl(). Each _GeneratorSpec
+# supplies generator-specific validation and reporting.
 # --------------------------------------------------------------------------- #
 
 
@@ -3642,9 +3640,8 @@ def _resolve_params(
     """Merge and validate ``raw_params`` against the generator's PCell defaults.
 
     Every declared, non-hidden parameter ends up in the result: the request's
-    value when given (type-checked against the PCell's declared type), the
-    PCell's own default otherwise. Raises :class:`GenError` for an unknown
-    parameter name or a value that doesn't match the declared type.
+    type-checked value, or the PCell default otherwise; raises
+    :class:`GenError` for an unknown name or mismatched type.
     """
     pcell_classes = _build_pcell_classes()
     decl = pcell_classes[spec.name]()
@@ -3666,9 +3663,12 @@ def _resolve_params(
         _esd_device_resolve_total_width(raw_params, resolved)
     if spec.name == "guard_ring":
         _validate_guard_ring_implant_gap(resolved, pdk_info, spec.dbu)
-    spec.validate(resolved)
     if spec.name == "diode":
+        # Before spec.validate: report the family's flavours, not the union (#6630).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
+    spec.validate(resolved)
+    if spec.name == "mos_array":
+        _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
     return resolved
 
 

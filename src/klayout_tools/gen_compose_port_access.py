@@ -43,6 +43,7 @@ from .gen_compose_routing import (
     _resolve_route_layer,
     _resolve_via_drop_layer,
 )
+from .gen_compose_via_cuts import landing_pad_half_dbu
 from .gen_layer_params import mfg_grid_um
 
 #: Default cap on landing candidates evaluated per port (nearest-first).
@@ -353,9 +354,9 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
 
 def _stack_sizes(
     variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
-) -> tuple[dict[_LayerPair, float], dict[_LayerPair, float]]:
-    """``(pad side per metal, cut side per via)`` in um, sized exactly as
-    ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
+) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
+    """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
+    as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
     from .gen_compose import _VIA_DROP_SIZE_UM, _fixed_cut_side_um, _via_fixed_size_um
 
     cuts: dict[_LayerPair, float] = {}
@@ -365,14 +366,14 @@ def _stack_sizes(
             max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
             _via_fixed_size_um(variant, via),
         )
-    pads: dict[_LayerPair, float] = {}
+    pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
     for via, lower, upper in ladder:
         for metal in (lower, upper):
             side = _landing_pad_side_um_for_layer(variant, metal)
             enclosure = _min_enclosing_margin_um_for_layer(variant, metal, via)
             if enclosure is not None:
                 side = max(side, cuts[via] + 2 * enclosure[0])
-            pads[metal] = max(pads.get(metal, 0.0), side)
+            pads[metal, via] = side
     return pads, cuts
 
 
@@ -543,22 +544,20 @@ def _search_landing(
         raise _err(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    pads_um, cuts_um = _stack_sizes(variant, ladder)
+    hop_pads_um, cuts_um = _stack_sizes(variant, ladder)
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
-    pad_extra_um: dict[_LayerPair, float] = {}
+    pads_um: dict[_LayerPair, float] = {}
+    pad_half: dict[_LayerPair, int] = {}
     cut_half: dict[_LayerPair, int] = {}  # Round outward with a DBU tolerance.
     for via, lower, upper in ladder:
         extra = _array_extra_um(array, pitches_um[via]) if pitches_um else 0.0
-        cut_half[via] = max(1, math.ceil((cuts_um[via] + extra) / (2 * dbu) - 1e-9))
         for metal in (lower, upper):
-            pad_extra_um[metal] = max(pad_extra_um.get(metal, 0.0), extra)
-    for metal, extra in pad_extra_um.items():
-        pads_um[metal] += extra
-    if not ladder:
-        pads_um = {net_layer: 0.0}
-    to_half = lambda um: max(1, int(math.ceil(um / dbu / 2.0)))  # noqa: E731
-    pad_half = {pair: to_half(side) for pair, side in pads_um.items() if side > 0}
+            side = hop_pads_um[metal, via] + extra
+            pads_um[metal] = max(pads_um.get(metal, 0.0), side)
+            half = landing_pad_half_dbu(side, cuts_um[via], dbu)
+            pad_half[metal] = max(pad_half.get(metal, 0), half)
+        cut_half[via] = max(1, math.ceil((cuts_um[via] + extra) / (2 * dbu) - 1e-9))
     space_dbu = {
         pair: int(round(_min_spacing_um(variant, pair) / dbu))
         for pair in {**pad_half, **cut_half}

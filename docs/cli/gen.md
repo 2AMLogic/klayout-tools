@@ -996,7 +996,7 @@ with their `.drc.json` reports checked in alongside).
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 | `add_guard_ring` | bool | `false`           | Enclose the array in an automatically-sized tap/guard ring (issue #1493) — see above. Unlike `diff_pair`'s own param of the same name, defaults to `false`. |
 | `ring_gap_side` | string | `""`              | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
-| `ring_gap_um`  | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_um`  | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. On `ihp-sg13g2` (nfet) the *drawn* pSD opening — the requested gap snapped to the manufacturing grid on the PCell's own drawing grid, then inset by the tap-ring implant margin at each cut face — must additionally clear the deck's `psd.space.1` (0.31 µm). Near ~0.67 µm the outcome depends on where the cut faces snap (offset 0: `0.66` draws 0.300 µm and is rejected, `0.665` draws 0.310 µm and is accepted), so a request is rejected exactly when its drawn opening is below the rule, with the drawn opening and the rule named (issue #6790). |
 | `ring_gap_offset_um` | double | `0.0`         | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
@@ -1710,10 +1710,26 @@ opening through the ring's band so a route can pass through it instead:
   extent **along the ring side** stays within the window is spacing-clean
   against the ring metal on both sides of the opening — so a caller can
   assert clearance up front, per sweep point, instead of discovering a
-  violation in `klt drc` after the fact. The window's extent across the
-  side is the ring band's full thickness (a strap crossing the ring is
-  constrained only along it, so its footprint extends past the window
-  across the side by construction). The field is `null` when the
+  violation in `klt drc` after the fact. That makes the window the
+  DRC-clean envelope for a **hand-drawn** strap only, and deliberately
+  wider than the clearance [`klt gen-compose`](gen-compose.md) requires
+  of a *routed* crossing through the same opening: a `connectivity[]`
+  route is held to the stricter per-cut-end clearance
+  `width_um / 2 + drc_hints.min_spacing_um`, where `width_um` is the
+  route's width. The ring's `drc_hints.min_spacing_um` comes from the
+  generator's PDK-independent 0.4 µm spacing floor. For `guard_ring`,
+  the strap window's inset at each cut end is 0.17 µm on sky130 `li1`,
+  0.23 µm on gf180mcu `metal1`, and 0.18 µm on sg13g2 `metal1`. These
+  smaller insets allow a hand-drawn strap to fit where a route of the
+  same width would fail the crossing clearance.
+  A crossing can use a different supported routing layer, whose own
+  spacing rule may exceed the ring's fixed margin. For example, on
+  sky130 the `top_metal` role selects `met5`, where `met5.space.1`
+  requires 1.60 µm between shapes on that layer.
+  The window's extent across the side is the ring band's full thickness
+  (a strap crossing the ring is constrained only along it, so its
+  footprint extends past the window across the side by construction).
+  The field is `null` when the
   along-side extent is narrower than the layer's minimum width (or ≤ 0
   after the spacing inset) — no same-layer-legal strap fits, because a
   strap filling the window is only as wide as the window's along-side

@@ -19,10 +19,10 @@ them, so this module never has a load-time dependency back on it.
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from .gen_compose_routing import _polyline_midpoint_um as _polyline_midpoint_um
+from .gen_compose_via_cuts import landing_pad_half_dbu
 
 
 def _insert_via_cuts(
@@ -177,16 +177,9 @@ def _draw_routed_entry(
                     (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
                 )
             landing_size_um += array_extra_um
-            # Round minimum sizes outward, preserving the margin
-            # against the *rounded* via too. The epsilon only removes
-            # floating-point noise at an integer grid coordinate.
-            landing_half_dbu = math.ceil(
-                max(
-                    landing_size_um / (2.0 * dbu),
-                    via_half_dbu + (landing_size_um - via_size_um) / (2.0 * dbu),
-                )
-                - 1e-9
-            )
+            # Outward rounding keeping the *rounded* via's margin; the
+            # access search sizes its pad with the same helper (#6572).
+            landing_half_dbu = landing_pad_half_dbu(landing_size_um, via_size_um, dbu)
             landing_box = kdb.Box(
                 cx - landing_half_dbu,
                 cy - landing_half_dbu,

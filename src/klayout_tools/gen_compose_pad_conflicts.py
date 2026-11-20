@@ -260,10 +260,8 @@ def _drawn_pad_side_um(
     rather than re-max-ing the baseline over it.
     """
     from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_layer_rules import (
-        _intermediate_landing_pad_floor_um,
-        _landing_pad_floor_um,
-    )
+    from .gen_compose_ladder_floors import _intermediate_landing_pad_floor_um
+    from .gen_compose_layer_rules import _landing_pad_floor_um
     from .gen_compose_routing import _drop_array_extra_um
     from .gen_compose_via_cuts import via_drop_cut_side_um
 

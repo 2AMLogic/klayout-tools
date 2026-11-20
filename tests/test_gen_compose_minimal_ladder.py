@@ -15,8 +15,8 @@ control.
 
 import pytest
 
+from klayout_tools import gen_compose_ladder_floors as ladder_floors
 from klayout_tools import gen_compose_landing_pads as pads
-from klayout_tools import gen_compose_layer_rules as layer_rules
 from klayout_tools.gen_compose import (
     _VIA_LANDING_SIZE_UM,
     _drawn_leg_footprint_region,
@@ -55,7 +55,7 @@ def test_intermediate_floor_uses_the_adjacent_edge_rule(pdk_root):
     # met1 square over a via1 cut (0.15um) at 0.32um -- above both the
     # plain 0.055um enclosure (0.26um) and the met1.area.1 side (0.2881um).
     # This is the value the curated deck measured in the issue body.
-    floor, floors = layer_rules._intermediate_landing_pad_floor_um(
+    floor, floors = ladder_floors._intermediate_landing_pad_floor_um(
         "sky130A", _MET1, _VIA1, via_drop_cut_side_um("sky130A", _VIA1)
     )
     assert floor == pytest.approx(0.32)
@@ -65,7 +65,7 @@ def test_intermediate_floor_uses_the_adjacent_edge_rule(pdk_root):
 def test_intermediate_floor_keeps_the_area_dominated_upper_metal(pdk_root):
     # met3's 0.24um^2 minimum area squares at ~0.4899um -- the area floor an
     # intermediate met3 pad must clear regardless of enclosure margins.
-    floor, floors = layer_rules._intermediate_landing_pad_floor_um(
+    floor, floors = ladder_floors._intermediate_landing_pad_floor_um(
         "sky130A", (70, 20), (69, 44), via_drop_cut_side_um("sky130A", (69, 44))
     )
     assert floor == pytest.approx(0.4899, abs=1e-4)
@@ -76,7 +76,7 @@ def test_intermediate_floor_keeps_the_baseline_without_enclosure_info(pdk_root):
     # sky130's deck declares no met2-encloses-mcon rule at all: no
     # information justifies shrinking below the contact-derived baseline,
     # so the mode's conservative answer is today's fixed size.
-    floor, _floors = layer_rules._intermediate_landing_pad_floor_um(
+    floor, _floors = ladder_floors._intermediate_landing_pad_floor_um(
         "sky130A", _MET2, _MCON, via_drop_cut_side_um("sky130A", _MCON)
     )
     assert floor == pytest.approx(_VIA_LANDING_SIZE_UM)

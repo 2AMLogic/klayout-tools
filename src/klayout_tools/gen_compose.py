@@ -208,20 +208,21 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_derived_frame import add_composed_frames as _framed
 from .gen_compose_draw import (
     _draw_routed_entry as _draw_routed_entry,
 )
 from .gen_compose_draw import (
     _insert_via_cuts as _insert_via_cuts,
 )
+from .gen_compose_ladder_floors import (
+    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
+)
 from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
     _make_landing_pad_side_um,
     _parse_landing_pad_override,
-)
-from .gen_compose_layer_rules import (
-    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
 )
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -230,8 +231,7 @@ from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 # imports/monkeypatches several of them by that path from before this split,
 # issue #1708). The redundant `X as X` aliases mark them as intentional
 # re-exports (mirrors `extract.py`'s `_sanitize_instance_name`/`ExtractError`/
-# `def_net_instance_pins` re-exports from `extract_abstract.py`/
-# `extract_spef.py`).
+# `def_net_instance_pins` re-exports from `extract_abstract.py`/`extract_spef.py`).
 from .gen_compose_routing import (
     _MAX_SAME_BLOCK_CROSS_LAYER_LANES as _MAX_SAME_BLOCK_CROSS_LAYER_LANES,
 )
@@ -270,7 +270,10 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
-from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
+from .gen_compose_via_cuts import (
+    own_via_cut_clearance_reason,
+    via_drop_cut_side_um,
+)
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -4518,7 +4521,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # #2927: additive -- only present for blocks that used
             # `cell.ports_from_labels`.
             **(
-                {"derived_ports": blocks[block_id]["derived_ports"]}
+                {"derived_ports": _framed(blocks[block_id], offsets_um[block_id])}
                 if blocks[block_id]["derived_ports"]
                 else {}
             ),

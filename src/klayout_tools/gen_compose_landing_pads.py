@@ -111,7 +111,7 @@ class _LandingPadSideResolver:
     ``drop``: a landing that drop's own ``terminal_landing_layers`` marking
     (:func:`.gen_compose_routing._resolve_via_drops`) classifies as
     *intermediate* answers that hop's per-pair enclosure/area floor
-    (:func:`.gen_compose_layer_rules._intermediate_landing_pad_floor_um`)
+    (:func:`.gen_compose_ladder_floors._intermediate_landing_pad_floor_um`)
     -- the drawn side without the contact-derived baseline -- instead of
     the baseline. A two-argument call (every pre-#6058 caller, and any drop
     without the marking) never sees the difference, so the mode-off
@@ -158,7 +158,9 @@ class _LandingPadSideResolver:
         key = (pad_layer, via_layer, intermediate)
         if key not in self._pair_cache:
             if intermediate:
-                from .gen_compose_layer_rules import _intermediate_landing_pad_floor_um
+                from .gen_compose_ladder_floors import (
+                    _intermediate_landing_pad_floor_um,
+                )
 
                 floor_side, _floors = _intermediate_landing_pad_floor_um(
                     self._variant, pad_layer, via_layer, self._via_side_um(via_layer)

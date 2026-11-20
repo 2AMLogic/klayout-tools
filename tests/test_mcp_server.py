@@ -11,6 +11,7 @@ so neither exceeds the 500-line per-file ratchet ceiling.
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import subprocess
@@ -19,6 +20,8 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools.cli._doc_paths import _DOC_POINTER
+from klayout_tools.mcp_doc_links import DOCS_BASE_URL
 from klayout_tools.mcp_tools import (
     HIDDEN_BY_DEFAULT,
     BridgePolicy,
@@ -66,6 +69,31 @@ def test_every_registered_verb_yields_a_valid_tool(tools):
         assert "format" not in schema["properties"]
         # json round-trips (an MCP client serialises it).
         json.dumps(schema)
+
+
+def test_tool_and_argument_descriptions_link_to_cli_docs(tools):
+    for tool in tools:
+        descriptions = [tool.description]
+        descriptions.extend(
+            prop.get("description", "")
+            for prop in tool.input_schema["properties"].values()
+        )
+        for text in descriptions:
+            assert _DOC_POINTER.search(text) is None, (tool.name, text)
+
+
+def test_doc_links_preserve_existing_urls_and_punctuation(monkeypatch):
+    root = argparse.ArgumentParser()
+    url = f"{DOCS_BASE_URL}/layers.md"
+    text = f"See (docs/cli/layers.md), {url}, or docs/cli/layers.md."
+    verb = root.add_subparsers().add_parser("layers", description=text)
+    verb.add_argument("--example", help=text)
+    monkeypatch.setattr("klayout_tools.cli.parser.create_parser", lambda: root)
+
+    (tool,) = derive_tools()
+    expected = f"See ({url}), {url}, or {url}."
+    assert tool.description == f"klt layers: {expected} (CLI docs: {url})"
+    assert tool.input_schema["properties"]["example"]["description"] == expected
 
 
 def test_bridge_does_not_expose_itself(tools):
