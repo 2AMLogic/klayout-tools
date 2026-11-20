@@ -1834,11 +1834,11 @@ DECK: list[DrcRule] = [
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
-for _hook in ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes"):
+DRC_RULE_SOURCES = ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes")
+for _hook in DRC_RULE_SOURCES:
     __import__(f"{__package__}.{_hook}", fromlist=["x"]).apply(DECK)
-# Foundry rules this curated deck knows about but cannot evaluate (issue
-# #3571, mirroring #3012): `{rule id: (layer, description)}`. `drc.py`
-# reports each one under `coverage.unchecked_rules` whenever its layer is
+# Known but unevaluated rules (#3571): `{rule id: (layer, description)}`.
+# DRC reports each under `coverage.unchecked_rules` whenever its layer is
 # present in the stream, so a `clean` verdict cannot be read as "this rule
 # was checked".
 UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
