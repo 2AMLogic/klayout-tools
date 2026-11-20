@@ -35,7 +35,7 @@ from .signoff_attest import (
     _skipped_check,
     _validate_header,
 )
-from .signoff_attest_command import reset_durations
+from .signoff_attest_command import reset_command_side_channels
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_input import attestation_block, normalized_description
@@ -224,7 +224,7 @@ def _inventory_checks(
     checks are the hash-pinned ``role: "input"`` pins of ``inputs`` (issue
     #5724); empty when the inventory declares none. ``description`` is the
     inventory's normalized ``description`` (issue #5573), or ``None``."""
-    reset_durations()
+    reset_command_side_channels()
     inventory, inventory_hash = _read_inventory(inventory_path)
     inv_absolute = os.path.realpath(os.path.abspath(inventory_path))
     root = find_repo_root(os.path.dirname(absolute))
