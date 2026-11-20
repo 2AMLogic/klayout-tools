@@ -14,7 +14,10 @@ diff, exactly like ``output_tail`` (issue #4698).
 from __future__ import annotations
 
 import json
+import re
 import sys
+
+import pytest
 
 from klayout_tools.signoff_attest import (
     check_attestation,
@@ -32,6 +35,27 @@ from klayout_tools.signoff_attest_stream import (
 )
 from test_signoff_attest_item2 import _inv, _stream
 from test_signoff_attest_item8 import _analog_inventory, _attest, _repo
+
+#: The text report's one timed audit line, ``[PASS] audit ci: <argv> (exit
+#: N) in M.Ns``: the seconds are the run's own wall clock, so no two runs
+#: ever print the same value there -- a stdout comparison that keeps them
+#: compares clocks, not reports (issue #6868's legacy-stdout CI flake).
+#: Shared with test_signoff_attest_description.py, whose 500-line ratchet
+#: has no room for the pair.
+_AUDIT_SECONDS_RE = re.compile(
+    r"(?m)^(?P<line>\[PASS\] audit ci: .*\(exit \d+\) in )[0-9]+\.[0-9]s$"
+)
+
+
+def _audit_seconds_masked(report: str) -> str:
+    """The report with exactly its one timed audit line's seconds masked.
+
+    The command, exit status, and the line's newline stay in the comparison;
+    a report whose timed audit line is missing (or duplicated) fails here
+    rather than silently passing (issue #6868)."""
+    masked, found = _AUDIT_SECONDS_RE.subn(r"\g<line><d>s", report)
+    assert found == 1, report
+    return masked
 
 
 def test_command_duration_is_live_only_and_never_in_built_envelope(tmp_path):
@@ -228,6 +252,32 @@ def test_text_line_names_the_observed_runtime():
     assert attestation_check_line({**failed, "duration_s": 3.4}).endswith(
         "timeout) in 3.4s"
     )
+
+
+def test_audit_seconds_mask_absorbs_only_the_timed_audit_line():
+    """A pair of reports differing only in the audit line's own seconds --
+    the 0.0s-vs-0.1s legacy-stdout CI flake (issue #6868) -- compares equal
+    through the mask; a duration-like string in the disclosure, or a report
+    that lost its timed audit line, still compares unequal."""
+
+    def report(seconds: str, disclosure: str) -> str:
+        return (
+            "attest: T1 item 10  status: pass\n"
+            f"description: {disclosure}\n\n"
+            f"[PASS] audit ci: py -c pass (exit 0) in {seconds}\n"
+        )
+
+    assert _audit_seconds_masked(report("0.0s", "d")) == _audit_seconds_masked(
+        report("0.1s", "d")
+    )
+    with pytest.raises(AssertionError):
+        _audit_seconds_masked(report("0.00s", "d"))
+    assert _audit_seconds_masked(report("0.1s", "x took 0.0s")) != (
+        _audit_seconds_masked(report("0.1s", "x took 0.1s"))
+    )
+    untimed = report("0.0s", "d").replace(" in 0.0s", "")
+    with pytest.raises(AssertionError):
+        _audit_seconds_masked(untimed)
 
 
 def test_stream_skipped_local_only_check_has_no_duration_or_stale_tail(tmp_path):
