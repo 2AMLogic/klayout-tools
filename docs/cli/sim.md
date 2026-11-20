@@ -3960,11 +3960,20 @@ Carlo mismatch depends on the model. The sky130 `nfet_01v8` uses
 for an N-times device.
 
 After the corners run, `klt sim` checks instance cards in the netlist and
-its scanned includes (#6684). An included file containing a SPICE
-`.model` directive outside a control block supplies subcircuit definitions
-only. This keeps a vendored device library’s internal parasitic instances
-out of the report. The top-level netlist is always checked, including when
-it declares local models. Detection is text-driven — a
+its scanned includes (#6684). Inside an included file, the body of a
+subcircuit whose own `.subckt` header declares `mult` is that device's
+definition and is not scanned. This keeps a vendored device library's
+internal parasitic instances (a sky130 FET wrapper handing its diodes a
+literal `m = 0.5`) out of the report. The rule reads only that enclosing
+header: it does not depend on `.model` directives, on what else the file
+defines, or on where the definitions sit. Every other included card is
+checked, and so is every card of the netlist itself, whatever it declares.
+A hand-written included cell that declares `mult` is skipped like a
+library device; keep a literal pair you want checked in the netlist's own
+subcircuits. Each card resolves its callee the way the simulator does,
+from its own enclosing `.subckt` outward: a nested definition is private to
+its parent, so two included DUTs may each carry their own `leaf`, and each
+call reaches its own whatever the include order. Detection is text-driven — a
 subcircuit "declares `mult`" when its `.subckt` header has the parameter,
 and "forwards it" only when a body card's `m=` references `mult` (a
 mismatch expression such as `sqrt(l*w*mult)` is not forwarding) — so no

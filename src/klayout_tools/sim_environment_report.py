@@ -331,9 +331,12 @@ def device_multiplier_environment(
     exit.
 
     Instance cards are read from the netlist and included DUT files (issue
-    #6684). Includes containing a ``.model`` directive supply subcircuit
-    definitions only. The shared ``sim_staging`` resolver supplies the
-    full closure for checking each card, so a net carrying
+    #6684). Inside an included file, the body of a subcircuit that itself
+    declares ``mult`` is a device definition and is not scanned; every other
+    card is, wherever the file's other definitions sit. The shared
+    ``sim_staging`` resolver supplies the full closure for checking each
+    card, and a card resolves its callee from its own enclosing
+    subcircuits outward, so a net carrying
     ``mult=6`` and no ``m=`` against a subcircuit that declares ``mult``
     but never forwards it is named instead of silently simulating 1x. A
     finding from a closure file carries that file's repo-relative label as
@@ -397,11 +400,15 @@ def device_multiplier_environment(
             continue
         scanned_sources.add(real)
         card_texts.append((text, label))
+    # Each card keeps its enclosing-subckt scope, so a call resolves to the
+    # callee its own file's definitions make visible. A closure file's
+    # device definitions (subckts declaring `mult`) are the library's own
+    # internals, not cards the user wrote; the netlist's own are all kept.
     cards = [
-        (card, label)
+        card
         for text, label in card_texts
-        for card in device_multiplier_lint.instance_cards(
-            text, skip_model_file=label is not None
+        for card in device_multiplier_lint.scan_instance_cards(
+            text, label=label, skip_device_internals=label is not None
         )
     ]
     subckts = device_multiplier_lint.collect_subckts(closure_texts)

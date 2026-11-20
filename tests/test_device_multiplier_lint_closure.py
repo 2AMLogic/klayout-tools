@@ -157,6 +157,12 @@ def test_vendored_model_internals_are_quiet_but_dut_cards_are_checked(
         "M1 d g s b nch\n"
         ".MODEL nch NMOS\n"
         ".ends\n"
+        # sky130's nfet_g5v0d16v0 shape: a wrapper that declares mult and
+        # carries parasitic cards, but whose `.model` lives in a sibling.
+        ".subckt wrap d g s b mult=1\n"
+        "Xpar b d diode m = 0.5\n"
+        "Xcore d g s b fet\n"
+        ".ends\n"
     )
     (models / "models_diodes.spice").write_text(
         ".subckt diode a b mult=1\nD1 a b junction\n.model junction D\n.ends\n"
@@ -184,3 +190,152 @@ def test_vendored_model_internals_are_quiet_but_dut_cards_are_checked(
         ("Xtop", lint.DRIVE_MISMATCH_DISAGREEMENT, None),
         ("XD", lint.DRIVE_1X, "<external>/dut.spice"),
     ]
+
+
+_LEAF_PLAIN = ".subckt leaf a b mult=1\nRcore a b 1k\n.ends leaf\n"
+_LEAF_FORWARD = ".subckt leaf a b mult=1\nRcore a b 1k m={mult}\n.ends leaf\n"
+
+
+def _dut_with_private_leaf(name, leaf, call):
+    # `leaf` is nested in `name`, so it is private to it: ngspice resolves the
+    # call inside `name` to this definition whatever the include order is.
+    return f".subckt {name} p n\n{leaf}{call}\n.ends {name}\n"
+
+
+def _closure_findings(tmp_path, monkeypatch, *, body):
+    request = _write_fixtures(tmp_path, body=body, models=None)
+    _stub_subprocess_run(monkeypatch)
+    report = sim.run_sim(request)
+    return report["environment"].get("device_multiplier", {}).get("findings", [])
+
+
+@pytest.mark.parametrize(
+    "plain_first", [True, False], ids=["plain-first", "forward-first"]
+)
+@pytest.mark.parametrize(
+    ("call", "kind"),
+    [
+        ("XU1 p n leaf mult=6", lint.DRIVE_1X),
+        ("XU1 p n leaf m=3", lint.DRIVE_MISMATCH_DISAGREEMENT),
+    ],
+)
+def test_private_callee_resolves_in_its_own_scope_in_either_include_order(
+    tmp_path, monkeypatch, plain_first, call, kind
+):
+    # Two DUTs each carry a private `leaf`; only plain.spice's ignores mult.
+    # The report must flag plain.spice/XU1 and nothing else, not the first
+    # `leaf` read for both calls (or for neither).
+    (tmp_path / "plain.spice").write_text(
+        _dut_with_private_leaf("dut_plain", _LEAF_PLAIN, call)
+    )
+    (tmp_path / "forward.spice").write_text(
+        _dut_with_private_leaf("dut_forward", _LEAF_FORWARD, call)
+    )
+    order = ["plain.spice", "forward.spice"]
+    if not plain_first:
+        order.reverse()
+    body = "".join(f'.include "{name}"\n' for name in order)
+    body += "Xa a 0 dut_plain\nXb b 0 dut_forward\nV1 a 0 1\nV2 b 0 1\n"
+
+    findings = _closure_findings(tmp_path, monkeypatch, body=body)
+
+    assert [(f["instance"], f["kind"], f["file"]) for f in findings] == [
+        ("XU1", kind, "<external>/plain.spice")
+    ]
+
+
+_CLAMP = (
+    ".subckt clamp a b\nD1 a b local_diode\n"
+    ".model local_diode D(Is=1e-16)\n.ends clamp\n"
+)
+_DUT = ".subckt dut a b\nXU1 a b leaf mult=6\n.ends dut\n"
+
+
+@pytest.mark.parametrize("layout", ["clamp-first", "clamp-last", "clamp-own-include"])
+def test_sibling_subckt_with_a_local_model_does_not_hide_the_dut_finding(
+    tmp_path, monkeypatch, layout
+):
+    # Where a sibling subcircuit that declares its own `.model` sits relative
+    # to the DUT must not change whether the DUT's call is reported.
+    (tmp_path / "leaf.spice").write_text(_LEAF_PLAIN)
+    includes = '.include "leaf.spice"\n.include "dut.spice"\n'
+    if layout == "clamp-own-include":
+        (tmp_path / "clamp.spice").write_text(_CLAMP)
+        (tmp_path / "dut.spice").write_text(_DUT)
+        includes += '.include "clamp.spice"\n'
+    else:
+        parts = [_CLAMP, _DUT] if layout == "clamp-first" else [_DUT, _CLAMP]
+        (tmp_path / "dut.spice").write_text("".join(parts))
+
+    findings = _closure_findings(tmp_path, monkeypatch, body=includes + "Xd a b dut\n")
+
+    assert [(f["instance"], f["kind"], f["file"]) for f in findings] == [
+        ("XU1", lint.DRIVE_1X, "<external>/dut.spice")
+    ]
+
+
+_NESTED_SHADOWS_GLOBAL = (
+    ".subckt leaf a b mult=1\nRg a b 1k m={mult}\n.ends leaf\n"
+    ".subckt outer p n\n"
+    ".subckt leaf a b mult=1\nRn a b 1k\n.ends leaf\n"
+    "Xin p n leaf mult=6\n"
+    ".ends outer\n"
+    "Xout p n leaf mult=6\n"
+)
+
+
+def test_scan_tags_each_card_with_its_enclosing_subckt_chain():
+    text = (
+        "X0 a b top m=2\n"
+        ".subckt Outer p n\nX1 p n leaf m=2\n"
+        ".subckt inner p n\nX2 p n leaf m=2\n.ends\n"
+        "X3 p n leaf m=2\n.ends\n"
+    )
+    scanned = [
+        (card.split()[0], scope) for card, _, scope in lint.scan_instance_cards(text)
+    ]
+    assert scanned == [
+        ("X0", ()),
+        ("X1", ("outer",)),
+        ("X2", ("outer", "inner")),
+        ("X3", ("outer",)),
+    ]
+    assert {label for _, label, _ in lint.scan_instance_cards(text, label="f.sp")} == {
+        "f.sp"
+    }
+
+
+def test_scan_skips_a_device_definitions_body_wherever_it_sits():
+    # A subckt declaring `mult` is a device definition: its own body cards are
+    # the library's internals. A sibling that declares a `.model`, or none,
+    # is scanned either way -- the decision reads only the enclosing header.
+    device = ".subckt dev a b mult=1\nXpar a b diode m=0.5\n.ends\n"
+    dut = ".subckt dut a b\nXu a b dev mult=6\n.ends\n"
+    clamp = ".subckt clamp a b\nD1 a b d\n.model d D\n.ends\n"
+    for text in (device + dut + clamp, clamp + dut + device, dut + clamp + device):
+        names = [c.split()[0] for c, _, _ in lint.scan_instance_cards(text)]
+        assert sorted(names) == ["Xpar", "Xu"]
+        skipped = lint.scan_instance_cards(text, skip_device_internals=True)
+        assert [c.split()[0] for c, _, _ in skipped] == ["Xu"]
+
+
+def test_card_resolves_to_the_callee_its_enclosing_subckt_makes_visible():
+    table = lint.collect_subckts([_NESTED_SHADOWS_GLOBAL])
+    findings = lint.lint_instances(
+        lint.scan_instance_cards(_NESTED_SHADOWS_GLOBAL), table
+    )
+    # Inside `outer` the nested, non-forwarding `leaf` shadows the global
+    # forwarding one; outside it the global one is the callee.
+    assert [(f["instance"], f["kind"]) for f in findings] == [("Xin", lint.DRIVE_1X)]
+
+
+def test_nested_subckt_is_not_visible_outside_its_parent():
+    text = ".subckt outer p n\n.subckt inner a b mult=1\nRn a b 1k\n.ends\n.ends\n"
+    table = lint.collect_subckts([text])
+    card = "Xtop p n inner mult=6"
+    # A bare card keeps the flat view (the name is found)...
+    assert [f["kind"] for f in lint.lint_instances([card], table)] == [lint.DRIVE_1X]
+    # ...a scoped top-level card sees what the simulator sees: no `inner`.
+    report = lint.instance_report([(card, None, ())], table)
+    assert report["findings"] == []
+    assert "not cross-checked" in report["note"]
