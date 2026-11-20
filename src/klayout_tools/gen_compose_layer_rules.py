@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from . import gen_compose_top_metal_floors as _top_metal_floors
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 
@@ -180,35 +181,6 @@ def _min_enclosing_margin_um_for_layer(
     return max(candidates, key=lambda entry: entry[0], default=None)
 
 
-#: Variant-keyed top-metal landing-pad *width* floors in um (issue #6612) --
-#: the one size gen-compose floors off a rule its curated decks *cannot*
-#: express, so it is keyed by exact variant string here rather than resolved
-#: from a deck. gf180mcu's curated deck carries no MetalTop thickness
-#: option: its only width rules touching Metal5 ``(81, 0)`` are
-#: ``metal5.width.1`` = 0.28um (below the 0.42um ``_VIA_LANDING_SIZE_UM``
-#: baseline, so a deck-driven width floor is a no-op) and
-#: ``metaltop.width.1`` = 0.36um on MetalTop ``(53, 0)`` -- a layer no 5LM
-#: composition draws -- while the 0.44um DRM value is documented there as
-#: not modeled. The *native* runset both shipped 5LM variants select does
-#: model it: its variant table maps ``gf180mcuC`` -> ``5LM, 9K`` and
-#: ``gf180mcuD`` -> ``5LM, 11K`` (5LM being the only stack where Metal5
-#: *is* the top metal, the stack this package's role table resolves), and
-#: ``metaltop.drc`` applies ``MT.1`` = 0.44um for both ``'9K'`` and
-#: ``'11K'`` -- 0.36um only for ``'6K'``, which no shipped variant selects.
-#: gf180mcuA/B (3LM/4LM) are deliberately absent: Metal5 is not their top
-#: metal, and their landing sizes stay exactly as before (#6612 scope).
-_TOP_METAL_LANDING_WIDTH_FLOOR_UM: dict[str, float] = {
-    "gf180mcuC": 0.44,
-    "gf180mcuD": 0.44,
-}
-
-#: The rule identity the width floor reports itself under in
-#: :func:`_landing_pad_floor_um`'s ``floors`` -- the native runset's own
-#: rule id, so a ``routing.landing_pad_size_um`` rejection (#5803) names
-#: the binding rule instead of a bare threshold.
-_TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID = "MT.1 (native runset, 9K/11K)"
-
-
 def _top_metal_width_floor_um(
     variant: str, layer: tuple[int, int] | None
 ) -> float | None:
@@ -225,12 +197,34 @@ def _top_metal_width_floor_um(
     variants) family resolution, so an unknown variant still degrades to
     ``None``, never raises.
     """
-    width_floor_um = _TOP_METAL_LANDING_WIDTH_FLOOR_UM.get(variant)
+    width_floor_um = _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_UM.get(variant)
     if width_floor_um is None:
         return None
     if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
         return None
     return width_floor_um
+
+
+def _top_metal_area_floor_side_um(
+    variant: str, layer: tuple[int, int] | None
+) -> float | None:
+    """The variant-keyed native top-metal area floor expressed as the
+    square side (um) it requires on ``layer``, or ``None`` when the
+    variant has none or ``layer`` is not that family's own ``top_metal``
+    role layer (#6645).
+
+    Same exact-variant dict + top-metal role check as
+    :func:`_top_metal_width_floor_um` above -- the native ``MT.4``
+    minimum *area* expressed as the side of the smallest square that
+    clears it (``sqrt``), so both pad-size resolvers can compose it as a
+    plain ``max`` beside every other floor.
+    """
+    area_floor_um2 = _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_UM2.get(variant)
+    if area_floor_um2 is None:
+        return None
+    if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
+        return None
+    return math.sqrt(area_floor_um2)
 
 
 def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
@@ -261,12 +255,16 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     when the layer has no such rule (or the family/deck cannot be
     resolved) -- an unresolvable family degrades to the pre-#2072 fixed
     size, never blocks routing. A variant's native top-metal width floor
-    (:data:`_TOP_METAL_LANDING_WIDTH_FLOOR_UM`, #6612) additionally raises
-    the result on that variant's own ``top_metal`` layer only, as a
-    ``max`` -- a larger area-driven side still wins. That floor is the
-    same :func:`_top_metal_width_floor_um` lookup the drawing-path floor
+    (:data:`.gen_compose_top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_UM`,
+    #6612) and area floor
+    (:data:`.gen_compose_top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_UM2`,
+    #6645) additionally raise
+    the result on that variant's own ``top_metal`` layer only, each as a
+    ``max`` -- a larger area-driven side still wins. Those floors are the
+    same :func:`_top_metal_width_floor_um` /
+    :func:`_top_metal_area_floor_side_um` lookups the drawing-path floor
     :func:`_landing_pad_floor_um` composes, so this search footprint and
-    the pad ``compose()`` actually draws cannot disagree on it.
+    the pad ``compose()`` actually draws cannot disagree on them.
 
     Same known, already-accepted scoping trade-off as ``via_drop_size_um``
     (issue #1501): this resolved size is threaded into *drawing*
@@ -293,6 +291,11 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     top_metal_floor = _top_metal_width_floor_um(variant, layer)
     if top_metal_floor is not None:
         side_um = max(side_um, top_metal_floor)
+    # #6645: the variant-keyed native top-metal area floor, expressed as
+    # the square side it requires -- same composition, same layer gate.
+    top_metal_area_side = _top_metal_area_floor_side_um(variant, layer)
+    if top_metal_area_side is not None:
+        side_um = max(side_um, top_metal_area_side)
     return side_um
 
 
@@ -344,19 +347,23 @@ def _landing_pad_floor_um(
     of the pad layer's minimum-area side (issue #2072) and via side plus
     twice the pair's minimum enclosing-margin (issue #2074), additionally
     raised on a 5LM gf180mcu variant's own top metal by the native-runset
-    ``MT.1`` width floor of issue #6612 (variant-keyed because the
-    curated deck cannot express it) -- and ``floors`` is one ``(rule_id,
-    required_side_um)`` entry per rule that shapes it, so a rejection can
-    name the binding rule rather than a bare threshold. Both are empty when
+    ``MT.1`` width floor of issue #6612 and ``MT.4`` area floor of issue
+    #6645 (variant-keyed because the curated deck cannot express either) --
+    and ``floors`` is one ``(rule_id, required_side_um)`` entry per rule
+    that shapes it, so a rejection can name the binding rule rather than a
+    bare threshold. Both are empty when
     the layer carries no such rule (or the family/deck cannot be resolved):
     anything the caller asks for is then legal.
 
     Issue #5803: this is the floor ``routing.landing_pad_size_um``'s
     override is validated against -- a pad the deck forbids is an
-    application error naming the rule, not a silently grown one. The
-    #6612 width floor participates in that validation: an override below
+    application error naming the rule, not a silently grown one. The #6612
+    width floor participates in that validation: an override below
     0.44um on gf180mcuC/D Metal5 is rejected naming ``MT.1``, exactly as
-    a below-deck-floor override on any other layer is.
+    a below-deck-floor override on any other layer is. So does the #6645
+    area floor: an override below 0.75um on the same pair is rejected
+    naming ``MT.4`` -- the larger floor, and therefore the binding rule
+    an override there actually violates.
     """
     floor_side = 0.0
     floors: list[tuple[str, float]] = []
@@ -372,8 +379,16 @@ def _landing_pad_floor_um(
         floor_side = max(floor_side, needed)
     width_floor = _top_metal_width_floor_um(variant, pad_layer)
     if width_floor is not None:
-        floors.append((_TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID, width_floor))
+        floors.append(
+            (_top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID, width_floor)
+        )
         floor_side = max(floor_side, width_floor)
+    area_side = _top_metal_area_floor_side_um(variant, pad_layer)
+    if area_side is not None:
+        floors.append(
+            (_top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID, area_side)
+        )
+        floor_side = max(floor_side, area_side)
     return floor_side, floors
 
 
@@ -388,7 +403,8 @@ def _resolve_landing_pad_sizes(
     Each side of each hop independently clears the fixed baseline, its
     metal's area floor (#2072), the actual via side plus twice that
     pair's enclosure margin, and -- on a 5LM gf180mcu variant's own top
-    metal -- the native ``MT.1`` width floor (#6612). Include the via in
+    metal -- the native ``MT.1`` width floor (#6612) and ``MT.4`` area
+    floor (#6645). Include the via in
     the key: the same metal can enclose different cuts with different
     margins on adjacent hops. Missing enclosure rules leave the
     baseline/area floor unchanged.
