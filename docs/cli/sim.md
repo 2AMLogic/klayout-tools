@@ -5347,6 +5347,11 @@ name:
 ]
 ```
 
+End-to-end verification of `top_n` on the `batch` backend is pending and
+remains tracked in
+[#6470](https://github.com/2AMLogic/klayout-tools/issues/6470), the same item
+as for `mechanism`.
+
 `value`, `status`, `margin` and grading are **exactly** what the same entry
 returns without `top_n` (with or without `mechanism`): the list is an
 additive sibling and never changes what the entry means, so `limits`, Monte
@@ -5371,7 +5376,7 @@ without `top_n` is byte-identical to before.
 | Field | Meaning |
 | ----- | ------- |
 | `name` | The leaf's ngspice vector name without its leading `onoise` and the one separator after it -- the flattened instance path plus generator, e.g. `m1_1overf`, `m.x1.mi_1overf`. Report output only; never parsed, split or normalised, and never accepted as request input. |
-| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (exactly for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
+| `value` | That generator's own density at `at_hz`, or rms over `band_hz`, computed exactly as the entry's `value` is and in the same unit. Amplitudes add in **power**: `sqrt(Σ value²)` over every contributor reproduces `value` (to within floating-point error for `band_hz` and for an `at_hz` on a grid point; to well under 1e-3 relative between grid points, where each generator is interpolated on its own). |
 | `mechanism` | `"thermal"`, `"flicker"`, or `null` for a generator the suffix table does not classify (gate leakage, junction shot noise). |
 
 - **Leaves, not device totals.** A device's total vector would hide which of
@@ -9834,11 +9839,19 @@ than a standard: sky130 names it `m` + the subcircuit name
 (`msky130_fd_pr__nfet_01v8`), gf180mcu names it `m0`. Both are probed
 automatically — the generated deck `print`s every candidate path and an
 unknown vector name is a harmless log line in ngspice batch mode — so this
-override is only needed for a PDK following neither convention. When no
-candidate answers for a device, a `op_point_unavailable` diagnostic names
-the device and the paths that were tried instead of silently reporting
-nothing. `models.<model>.kind` likewise resolves a model name this tool
-cannot classify as n- or p-channel.
+override is only needed for a PDK following neither convention. When a PDK
+device cell wraps an **OSDI (Verilog-A) instance** instead of a built-in
+MOS element, ngspice exposes its vectors under the `n.` prefix rather than
+`m.`, and the drain saturation voltage is named `vdss` rather than `vdsat`
+(a PSP103-class model exposes no `vdsat` at all); every candidate path is
+probed under both prefixes and both saturation-voltage spellings parse into
+`values.vdsat_v`. Written with a prefix — `"op_point_element": "n.nsg13_hv_pmos"`
+— the override pins the element type as well as the name, which is the way
+to reach an OSDI inner element directly; a bare name is tried under both
+prefixes. When no candidate answers for a device, a `op_point_unavailable`
+diagnostic names the device and the paths that were tried instead of
+silently reporting nothing. `models.<model>.kind` likewise resolves a model
+name this tool cannot classify as n- or p-channel.
 
 ### Response
 
