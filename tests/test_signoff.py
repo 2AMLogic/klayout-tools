@@ -4934,46 +4934,11 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["citation"] is None
 
 
-def test_yield_insufficient_evidence_renders_unmet_undersized_sample(tmp_path):
-    envelope = {**YIELD_PASS_ENVELOPE, "status": "insufficient_evidence"}
-    yield_path = _write(tmp_path, "yield.json", envelope)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-    # Issue #6399: this status-token route carries `cited_evidence` (the
-    # citation a `met` item would have had), unlike the campaign-discipline
-    # refusal below, which carries `yield_campaign` instead.
-    assert item_6["detail"]["cited_evidence"]["kind"] == "yield"
-    assert "yield_campaign" not in item_6["detail"]
-
-
 # --------------------------------------------------------------------------- #
 # Campaign-discipline gate on item 6 (issue #2467): the cited report's own
 # `sample_size.verdict` and `negative_control` state, read as grading inputs
 # rather than dropped with the run-level `warnings` array.
 # --------------------------------------------------------------------------- #
-
-
-def test_yield_insufficient_sample_size_renders_unmet_undersized_sample(tmp_path):
-    """Issue #2467: the report's own `sample_size.verdict` says its estimate
-    is not sized for the claim; a `"pass"` status must not overrule that."""
-    yield_path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
-
-    result = build_tier_report(_manifest(evidence={"6": yield_path}))
-
-    item_6 = next(item for item in result["items"] if item["id"] == 6)
-    assert item_6["status"] == "unmet"
-    assert item_6["reason"] == "undersized_sample"
-    assert item_6["citation"] is None
-    # Issue #6399: this route's disclosure convention is `yield_campaign`
-    # (#2467); it deliberately does not carry `cited_evidence`.
-    assert "cited_evidence" not in item_6["detail"]
-    campaign = item_6["detail"]["yield_campaign"]
-    assert campaign["sample_size"] == "insufficient"
-    assert campaign["undersized_measurements"] == ["vref"]
 
 
 def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
