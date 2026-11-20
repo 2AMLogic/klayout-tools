@@ -14,16 +14,11 @@ The test times the two recognition paths directly -- in-process, over the
 synthetic flat array below at two sizes -- because an end-to-end wall-time
 ratio also sees KLayout's own C++ net clustering (superlinear at high
 device counts in every version, v0.5.0 included) and shared-CI contention.
-Each size samples the minimum of 5 timed runs, the posture of the
-netlist-hash scaling test (issue #3610): ``min`` of 2 left the ratio at
-the mercy of one contended sample and produced a spurious 6.12x on a
-clean tree during PR #6072's review (issue #6502). On the pre-fix tree
-(``9aff912a9``) the 1600/400 ratio of this block measured ~16x
-(quadratic); the bulk-island-set rewrite holds it at ~4.5-5.4x on shared
-runners -- near the 4x of linear growth. The bound 9 leaves ~2x jitter
-headroom above that while still tripping any return to per-island,
-per-layer full-layout scans. Full-run wall times per size are recorded in
-the PR, not asserted here.
+Before the fix, recognition took 15.9x as long at 1600 cells as at 400
+cells (quadratic growth). Linear growth predicts 4x. After the bulk-island-set
+rewrite, six runs measured 3.1x to 5.1x. The 9x bound allows for timing
+jitter and still catches the original per-island, per-layer scans. Full-run
+wall times per size are recorded in PR #6072.
 
 The second test (issue #6527) pins result identity, not timing: with the
 gf180mcu MOS-cap marker drawn, the resolver's per-layer ``touching()``
@@ -139,14 +134,8 @@ def _recognition_seconds(n_cells: int) -> float:
 def test_device_recognition_scales_linearly_on_flat_arrays():
     quarter = _recognition_seconds(400)
     full = _recognition_seconds(1600)
-    # 4x the layout must not cost ~16x the recognition block: linear growth
-    # is 4x and the per-island loops this guards against were quadratic
-    # before issue #5807's bulk-island-set rewrite -- 12.7x measured at the
-    # pre-fix tree 9aff912a9 (min-of-5 on a contended host; 14.3-16.0x at
-    # min-of-2 during PR #6072's review), while post-fix ratios measure
-    # ~4.4-5.4x on shared runners. Bound 9 sits ~2x above the post-fix
-    # range and ~1.4x below the lowest pre-fix measurement (issue #6502; a
-    # literal 3x-above-linear, ~13.5, would sit inside it).
+    # With five runs per size, PR #6889 measured 4.40x and 5.48x after the
+    # fix and 12.73x on the pre-fix tree (9aff912a9).
     assert full / quarter <= 9.0, (
         f"device recognition grew {full / quarter:.2f}x for a 4x-larger "
         "flat array (near-linear expected; per-island, per-layer "
