@@ -3794,6 +3794,23 @@ block is T1. Re-grade with `--manifest` afterwards.
 | Pinned entry whose evidence will not resolve | Left alone, skipped (`unresolved_evidence` / `invalid_evidence`) | Nothing was read, so nothing is known |
 | Entry that pins nothing (bare-string form, or no `content_hash`) | Left alone, **never given a pin**, not reported | `--repin` updates an existing claim; it does not manufacture one |
 
+A **store-pinned `yield` samples companion** (issue #6584; see "Citing an
+object in the artifact store" above) is that second row's `null` case, not
+an exception to it. The live hash the grader compared was the `sha256` a
+committed `*.manifest.json` records for the member —
+`content_hash_basis: "artifact_manifest"`, `input_verified: null` — so no
+bytes were read and there is nothing this run re-derived to repin *from*.
+When such a pin goes stale (the object rotated in the store, so the
+committed manifest now records a new digest), `--repin` skips the entry as
+`input_not_verified` and writes nothing: copying the manifest's recorded
+digest into the manifest being repinned would be offline manifest
+comparison, not verification, and the bytes are in the store, not the tree.
+Updating a store-only pin stays an explicit author-reviewed edit of the
+evidence entry's `content_hash`, made after a byte-level check of the
+object itself with `klt artifact get`/`verify`, followed by re-grading
+with `--manifest`. A fresh store pin is a plain no-op — `unchanged`, not
+reported as skipped — the same as any other verified-fresh pin.
+
 A manifest with nothing to re-pin is **not written at all** — its bytes and
 mtime are untouched, so a no-op `--repin` cannot show up in a diff. A
 rewritten manifest is serialized as 2-space-indented JSON with a trailing
