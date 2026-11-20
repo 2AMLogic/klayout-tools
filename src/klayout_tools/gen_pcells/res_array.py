@@ -223,7 +223,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 )
                 # Issue #2449: > 0.0 draws this mask over the whole unit
                 # (body + end heads) at this enclosure instead of the
-                # body-only marker box -- see gen._res_flavor_mask_box_um.
+                # body-only marker box -- see gen_res_head._res_flavor_mask_box_um.
                 self.param(
                     f"res_flavor_{i}_head_enclosure_um",
                     self.TypeDouble,
