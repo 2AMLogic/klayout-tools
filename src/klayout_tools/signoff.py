@@ -257,6 +257,23 @@ from .signoff_sta_constraints import (
     sta_annotation_refusal,
     sta_constraint_refusal,
 )
+
+# The store-pin companion resolution (issue #5963): a `klt yield` citation
+# whose samples document lives in the artifact store, pinned offline through
+# a committed store manifest -- plus the report-relative path resolvers the
+# envelope-companion lookups share (issues #2197, #2608), moved here for
+# this file's size-ratchet ceiling and re-imported by name so
+# `signoff.<name>` keeps resolving exactly as it did before the move.
+from .signoff_store_pin import (
+    CONTENT_HASH_BASIS_ARTIFACT_MANIFEST as CONTENT_HASH_BASIS_ARTIFACT_MANIFEST,
+)
+from .signoff_store_pin import (
+    _resolve_relative_to_report as _resolve_relative_to_report,
+)
+from .signoff_store_pin import (
+    _resolve_relative_to_spec as _resolve_relative_to_spec,
+)
+from .signoff_store_pin import store_pin_samples_entry
 from .signoff_unmet_reasons import unmet_reason_counts
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
@@ -4647,7 +4664,11 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     (disclosed foundry-cell DRC exceptions for item 3) is issue #4530.
     ``coverage_disclosed`` (issue #5789) is validated lazily by
     :mod:`.signoff_coverage_disclosure`, so it is read only when the
-    ratchet is on.
+    ratchet is on. ``artifact_manifest``/``artifact_member`` (issue #5963)
+    name the committed store manifest (and, optionally, its member) a
+    `klt yield` entry's store-pinned samples companion is pinned through --
+    strings or absent; any other type fails closed, here, rather than
+    silently reading as "no pin declared".
     """
     require_annotation = raw.get("require_annotation_complete", False)
     if not isinstance(require_annotation, bool):
@@ -4660,11 +4681,16 @@ def _normalize_evidence_options(raw: dict[str, Any]) -> dict[str, Any] | None:
     )
     if cell_exceptions is None:
         return None
+    for key in ("artifact_manifest", "artifact_member"):
+        if key in raw and not isinstance(raw[key], str):
+            return None
     return {
         "require_annotation_complete": require_annotation,
         "require_complete_constraints": require_constraints,
         "foundry_cell_exceptions": cell_exceptions,
         "coverage_disclosed": raw.get("coverage_disclosed"),
+        "artifact_manifest": raw.get("artifact_manifest"),
+        "artifact_member": raw.get("artifact_member"),
     }
 
 
@@ -4715,15 +4741,18 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     if options is None:
         return None
 
+    expected_hash = raw.get("content_hash")
+    if expected_hash is not None and not isinstance(expected_hash, str):
+        expected_hash = None
+
     command = raw.get("command")
     if (
         isinstance(command, list)
         and command
         and all(isinstance(part, str) for part in command)
     ):
-        expected_hash = raw.get("content_hash")
-        if expected_hash is not None and not isinstance(expected_hash, str):
-            expected_hash = None
+        if "artifact_manifest" in raw or "artifact_member" in raw:
+            return None  # Store pins require a file-backed envelope.
         cwd = raw.get("cwd")
         if not isinstance(cwd, str):
             cwd = None
@@ -4739,9 +4768,6 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     file = raw.get("file")
     if not isinstance(file, str):
         return None
-    expected_hash = raw.get("content_hash")
-    if expected_hash is not None and not isinstance(expected_hash, str):
-        expected_hash = None
     return {
         "kind": "file",
         "file": file,
@@ -4861,50 +4887,9 @@ def _unescape_json_pointer_token(token: str) -> tuple[str, bool]:
     return "".join(out), True
 
 
-def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
-    """Resolve ``path`` -- a document a **file-backed** evidence entry's own
-    report *names* (not one the manifest names) -- against that report
-    file's own directory, the way a reader who opened the report and
-    followed its reference would.
-
-    Returns ``None`` when there is no report file to be relative to (a
-    command-backed ``spec`` -- :func:`_resolve_relative_to_spec` already
-    resolves such a reference against the producing subprocess's own
-    ``cwd``, the command-backed analogue of "the report's own directory";
-    or a file-backed ``spec`` with no ``file`` recorded), or when ``path``
-    is already absolute (nothing to rebase).
-
-    Issue #2197: `klt yield`'s JSON report records the samples document path
-    exactly as it was invoked with -- the ordinary ``klt yield
-    mc-samples.json`` run made from inside its own evidence directory
-    records ``"samples": "mc-samples.json"``, a path that resolves only from
-    that directory. Grading a manifest from the repo root -- the only place
-    a manifest with repo-relative evidence paths *can* be graded from --
-    previously resolved that path against this process's own cwd instead,
-    silently failing to find it. Resolving it against the report file's own
-    directory first -- see :func:`_yield_samples_content_hash` -- fixes that
-    without requiring the manifest or the `klt yield` invocation to change.
-
-    Issue #2608: `klt erc`'s spec document (``envelope["spec"]``) is the
-    same shape of reference and is resolved the same way -- see
-    :func:`_erc_supply_spec_candidates`. A `klt erc` run made from the
-    layout directory records ``"spec": "erc_supply_spec.json"``, which a
-    repo-root ``klt signoff --manifest`` could not open before that
-    fallback existed.
-    """
-    if os.path.isabs(path):
-        return path
-    if spec.get("kind") != "file":
-        return None
-    file = spec.get("file")
-    if not file:
-        return None
-    return os.path.join(os.path.dirname(file), path)
-
-
 def _yield_samples_content_hash(
     envelope: dict[str, Any], spec: dict[str, Any]
-) -> tuple[str | None, dict[str, Any] | None, str | None]:
+) -> tuple[str | None, dict[str, Any] | None, str | None, str | None]:
     """The citation's ``content_hash`` for a ``klt yield`` evidence entry
     (issue #870, Phase 2a of epic #706).
 
@@ -4931,17 +4916,30 @@ def _yield_samples_content_hash(
     is unaffected by this issue (that directory is recorded independently of
     where `klt signoff` itself is invoked from).
 
-    Returns ``(content_hash, unresolved, hashed_path)`` (``hashed_path``, issue
-    #5392: the samples file hashed, else ``None``). ``content_hash`` is ``None``
-    when the envelope names no ``samples`` document (or it isn't a string),
-    or when neither candidate location could be hashed (missing,
-    unreadable) -- exactly mirroring ``sha256_file``'s own "unhashable
-    input" fallback, never raising. ``unresolved`` is ``None`` unless a
-    ``samples`` document *was* named but could not be found anywhere tried
-    -- populated in that one case so a reader (and :func:`_citation`) can
-    tell "this input could not be verified" apart from "no hash was ever
-    recorded", per issue #2197 -- previously both collapsed into the same
-    silent ``content_hash: null``.
+    **Store-pin fallback** (issue #5963): when -- and only when -- no disk
+    candidate could be hashed and the entry names an ``artifact_manifest``,
+    the live hash is the ``sha256`` that *committed* store manifest records
+    for the samples member (``store_pin_samples_entry``). The disk re-hash
+    always wins; the store-resolved hash is a pin to compare, never a
+    re-hash of bytes -- the returned basis marks it, and per the operator
+    ruling of 2026-11-17 it never supplies a verdict: the envelope itself
+    stays file-backed and committed.
+
+    Returns ``(content_hash, unresolved, source, basis)``. The source names
+    the hashed samples file or the selected ``manifest#member``.
+    ``basis``, issue #5963: :data:`CONTENT_HASH_BASIS_ARTIFACT_MANIFEST`
+    when the hash came from the store manifest, else ``None`` -- a disk
+    re-hash needs no marker. ``content_hash`` is ``None`` when the
+    envelope names no ``samples`` document (or it isn't a string), or when
+    neither candidate location could be hashed and no store pin resolved it
+    -- exactly mirroring ``sha256_file``'s own "unhashable input" fallback,
+    never raising. ``unresolved`` is ``None`` unless a ``samples`` document
+    *was* named but could not be found anywhere tried -- populated in that
+    one case so a reader (and :func:`_citation`) can tell "this input could
+    not be verified" apart from "no hash was ever recorded", per issue #2197
+    -- previously both collapsed into the same silent ``content_hash:
+    null``. A declared store pin that fails to resolve extends that
+    disclosure with the manifest path and a named ``reason`` (issue #5963).
 
     Follow-up reconciliation: if a later #710 phase adds its own
     ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
@@ -4950,7 +4948,7 @@ def _yield_samples_content_hash(
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
-        return None, None, None
+        return None, None, None, None
 
     candidates: list[str] = []
     report_relative = _resolve_relative_to_report(samples, spec)
@@ -4963,9 +4961,22 @@ def _yield_samples_content_hash(
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
-            return f"sha256:{digest}", None, candidate
+            return f"sha256:{digest}", None, candidate, None
 
-    return None, {"samples": samples, "searched": candidates}, None
+    entry, pin_failure = store_pin_samples_entry(samples, spec)
+    if entry is not None:
+        source = f"{spec['artifact_manifest']}#{entry['name']}"
+        return (
+            f"sha256:{entry['sha256']}",
+            None,
+            source,
+            CONTENT_HASH_BASIS_ARTIFACT_MANIFEST,
+        )
+
+    unresolved: dict[str, Any] = {"samples": samples, "searched": candidates}
+    if pin_failure is not None:
+        unresolved.update(pin_failure)
+    return None, unresolved, None, None
 
 
 def _resolve_input_artifact_value(
@@ -6253,20 +6264,17 @@ def _resolve_evidence(
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
     content_hash_unresolved: dict[str, Any] | None = None
-    yield_samples_path: str | None = None
+    yield_samples_source: str | None = None
+    samples_basis: str | None = None
     input_verified: bool | None
     if actual_hash is None and check_kind == "yield":
-        # klt yield's current JSON shape (issue #816) carries no
-        # `provenance` block of its own -- see this module's "Statistical-
-        # evidence binding" docstring section and
-        # :func:`_yield_samples_content_hash`.
-        actual_hash, content_hash_unresolved, yield_samples_path = (
+        actual_hash, content_hash_unresolved, yield_samples_source, samples_basis = (
             _yield_samples_content_hash(envelope, spec)
         )
-        # A live re-hash of the samples document (issue #2196 by construction);
-        # `None` only when nothing could be hashed (issue #2197's
-        # `content_hash_unresolved` then names why).
-        input_verified = True if actual_hash is not None else None
+        # Only an on-disk samples hash verifies the bytes.
+        input_verified = (
+            True if actual_hash is not None and samples_basis is None else None
+        )
     else:
         # Issue #2196: the manifest's pinned hash is checked against
         # `actual_hash` by the caller; this checks `actual_hash` itself
@@ -6276,7 +6284,7 @@ def _resolve_evidence(
             check_kind, envelope, spec, actual_hash, local_file, repo_root
         )
 
-    actual_hash, content_hash_basis, input_verified = rehash_evidence_file(
+    actual_hash, file_hash_basis, input_verified = rehash_evidence_file(
         check_kind, spec, local_file, actual_hash, input_verified, provenance
     )
 
@@ -6294,8 +6302,8 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
-            "yield_samples_path": yield_samples_path,
-            "content_hash_basis": content_hash_basis,
+            "yield_samples_source": yield_samples_source,
+            "content_hash_basis": samples_basis or file_hash_basis,
             "input_verified": input_verified,
             "pex_inputs": pex_inputs,
             "input_members": input_members,
@@ -6422,24 +6430,6 @@ def _citation(
 # --------------------------------------------------------------------------- #
 # T1 item 11: power delivery (structural) -- issue #2025
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
-    """Resolve a path an envelope *names* (not one the manifest names)
-    against the directory the producing run itself used: ``spec["cwd"]`` for
-    a command-backed entry, this process's own cwd otherwise.
-
-    Shared by :func:`_yield_samples_content_hash` (the `klt yield` samples
-    document) and :func:`_erc_supply_spec_candidates` (the `klt erc` spec
-    document) -- both are "the envelope points at a second document this
-    module has to read, because the envelope itself does not carry what we
-    need", and both try this resolution as the compatibility fallback
-    *after* :func:`_resolve_relative_to_report` (issues #2197 and #2608).
-    """
-    cwd = spec.get("cwd") if spec.get("kind") == "command" else None
-    if cwd and not os.path.isabs(path):
-        return os.path.join(cwd, path)
-    return path
 
 
 def _build_tier_item(
