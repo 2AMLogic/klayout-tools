@@ -2,14 +2,16 @@
 
 Split into its own module (the ``_mos_array_shapes`` precedent) because the
 repo's monotonic file-size ratchet requires additive work to land in new
-files. Both helpers size a shape off the tap ring's **final** Comp edge --
-what :func:`klayout_tools.gen._insert_ring` actually draws after snapping
-the ring's outer box outward onto the manufacturing grid (issue #3364) --
-never off the nominal box, which can sit a grid step inside the drawn edge
-and silently spend the enclosure margin (and draw the well itself
-off-grid, tripping ``nwell_OFFGRID``). Growth is quantized on the dbu grid
-via :func:`klayout_tools.gen._grow_box_um`, so the drawn margin is exact
-whatever the caller's own grid alignment.
+files. For gf180mcu medium-voltage requests (:func:`mv_ring_resolved`) both
+helpers size a shape off the tap ring's **final** Comp edge -- what
+:func:`klayout_tools.gen._insert_ring` actually draws after snapping the
+ring's outer box outward onto the manufacturing grid (issue #3364) -- never
+off the nominal box, which can sit a grid step inside the drawn edge and
+silently spend the enclosure margin (and draw the well itself off-grid,
+tripping ``nwell_OFFGRID``). Growth is quantized on the dbu grid via
+:func:`klayout_tools.gen._grow_box_um`, so the drawn margin is exact
+whatever the caller's own grid alignment. Any other request keeps the
+original nominal ring-well box, so its geometry is untouched.
 """
 
 from __future__ import annotations
@@ -35,6 +37,19 @@ def declare_ring_mv_params(pcell: Any) -> None:
     )
 
 
+def mv_ring_resolved(pcell: Any) -> bool:
+    """Whether this request resolves gf180mcu's medium-voltage ring geometry
+    (issue #6503): the ``voltage_flavor`` marker is drawn *and* the family
+    resolved a marker-past-ring margin. This is exactly the case whose
+    ``ring_well_margin_um`` was raised to DF.4d_MV's 0.16um (see
+    :func:`klayout_tools.gen_layer_mv_ring.apply_mos_array_mv_ring_margins`),
+    and the only one that needs the ring well sized off the final snapped
+    edge."""
+    return bool(pcell.voltage_flavor_mark_present) and (
+        pcell.voltage_flavor_ring_margin_um > 0.0
+    )
+
+
 def ring_well_box_um(
     pcell: Any,
     ring: dict[str, Any],
@@ -42,13 +57,35 @@ def ring_well_box_um(
     oy_um: float,
     dbu: float,
 ) -> tuple[float, float, float, float]:
-    """The ring's well tie box: the ring's final (grid-snapped) outer box
-    grown by the PCell's ``ring_well_margin_um`` on all four sides (issue
-    #6503) -- the same snap-then-grow discipline
+    """The ring's well tie box.
+
+    For gf180mcu medium-voltage (:func:`mv_ring_resolved`), the ring's final
+    (grid-snapped) outer box grown by the PCell's ``ring_well_margin_um`` on
+    all four sides (issue #6503) -- the same snap-then-grow discipline
     :func:`klayout_tools.gen._insert_implant_ring` applies to its own
-    extension past the ring."""
+    extension past the ring.
+
+    Every other request keeps the original *nominal* box -- the unsnapped
+    ring outer box grown by the margin -- byte-for-byte. At an off-grid
+    ``ring_padding_um`` the outward snap would otherwise move that well one
+    grid step (and, through the #6025 union, a sky130 ``hvi`` marker with
+    it), breaking #6503's preservation criterion for every family and
+    voltage flavour that never asked for DF.4d_MV.
+    """
     from klayout_tools.gen import _grow_box_um, _shift_box, _snap_ring_box_um
 
+    if not mv_ring_resolved(pcell):
+        margin = pcell.ring_well_margin_um
+        return _shift_box(
+            (
+                -margin,
+                -margin,
+                ring["outer_w_um"] + margin,
+                ring["outer_h_um"] + margin,
+            ),
+            ox_um,
+            oy_um,
+        )
     return _grow_box_um(
         _snap_ring_box_um(
             _shift_box(ring["outer_box_um"], ox_um, oy_um),

@@ -251,6 +251,109 @@ def test_mos_array_gf180_pfet_ring_without_mv_keeps_default_well_margin(
     assert 55 not in {layout.get_info(i).layer for i in layout.layer_indexes()}
 
 
+#: Merge-base (`0f94f6cb7`) well/marker boxes, in um, of the issue #6503 cell
+#: at *off-grid* ring paddings, for every request that does NOT resolve
+#: gf180mcu's MV well margin. The snap-then-grow well is that fix's mechanism
+#: only: applied elsewhere it moves the well (and, through the #6025 marker
+#: union, an HVI marker) one grid step outward, so these keep the nominal,
+#: unsnapped ring-well box. (variant, extra params, ring_padding_um,
+#: well layer, marker layer, well box, marker box).
+_NW64, _HVI75, _NW21, _DG55 = (64, 20), (75, 20), (21, 0), (55, 0)
+_OFF_GRID_PRESERVED = [
+    pytest.param(
+        "gf180mcuD",
+        {},
+        0.5015,
+        _NW21,
+        _DG55,
+        (-1.221, -1.221, 2.772, 3.062),
+        None,
+        id="gf180-lv-0.5015",
+    ),
+    pytest.param(
+        "gf180mcuD",
+        {},
+        1.0475,
+        _NW21,
+        _DG55,
+        (-1.768, -1.768, 3.317, 3.607),
+        None,
+        id="gf180-lv-1.0475",
+    ),
+    pytest.param(
+        "sky130A",
+        {},
+        0.5015,
+        _NW64,
+        _HVI75,
+        (-1.271, -1.271, 2.662, 2.812),
+        None,
+        id="sky130-novf-0.5015",
+    ),
+    pytest.param(
+        "sky130A",
+        {"voltage_flavor": "hvi"},
+        0.5015,
+        _NW64,
+        _HVI75,
+        (-1.271, -1.271, 2.662, 2.812),
+        (-1.271, -1.271, 2.662, 2.812),
+        id="sky130-hvi-0.5015",
+    ),
+    pytest.param(
+        "sky130A",
+        {"voltage_flavor": "hvi"},
+        1.0475,
+        _NW64,
+        _HVI75,
+        (-1.818, -1.818, 3.207, 3.357),
+        (-1.818, -1.818, 3.207, 3.357),
+        id="sky130-hvi-1.0475",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("variant", "extra", "padding", "well", "marker", "well_box", "marker_box"),
+    _OFF_GRID_PRESERVED,
+)
+def test_mos_array_off_grid_ring_well_outside_gf180_mv_is_unsnapped(
+    tmp_path, both_pdk_root, variant, extra, padding, well, marker, well_box, marker_box
+):
+    """Issue #6503's preservation criterion at off-grid paddings: a ringed
+    pfet that is not gf180mcu medium-voltage (3.3V gf180mcu, or sky130 with
+    or without its `hvi` marker) keeps the original nominal ring-well box
+    byte-for-byte -- the outward snap that makes the MV well exact must not
+    leak into requests that never asked for DF.4d_MV's 0.16um."""
+    import klayout.db as kdb
+
+    output = tmp_path / "issue_6503_off_grid.gds"
+    params = {k: v for k, v in _ISSUE_6503_PARAMS.items() if k != "voltage_flavor"}
+    params.update(extra, ring_padding_um=padding)
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": variant, "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.top_cells()[0]
+    top.flatten(-1, True)
+
+    def expected(box_um):
+        return kdb.Box(*(int(round(v / layout.dbu)) for v in box_um))
+
+    assert top.bbox_per_layer(layout.layer(*well)) == expected(well_box)
+    marker_bbox = top.bbox_per_layer(layout.layer(*marker))
+    if marker_box is None:
+        assert marker_bbox.empty()
+    else:
+        assert marker_bbox == expected(marker_box)
+
+
 def test_mos_array_gf180_nfet_ring_mv_draws_no_well_but_encloses_ring(
     tmp_path, both_pdk_root
 ):
