@@ -120,6 +120,7 @@
       "asset": "xschem-3.4.7-noble-x86_64.tar.gz",
       "release_repo": "2AMLogic/xschem",
       "release_tag": "3.4.7-2am.1",
+      "sha256": "c9681e382a8fb31b006be58cca2a8ef15fbfb41d3f29c3351912073838d7ac7c",
       "_comment": [
         "Same pin 2AMLogic/gf180-sar-adc's sim/toolchain.json carries. Tag ->",
         "commit re-verified live against the upstream GitHub API on 2026-09-09:",
@@ -135,8 +136,16 @@
         "upstream `tag` and a `build` number and publishes release",
         "`<tag>-2am.<build>`, whose git tag is the upstream commit, so the",
         "release's source archives are the source the binary was built from.",
-        "`sha256` is the hash of the uploaded bytes, so it is recorded AFTER the",
-        "first fork release (an operator dispatch; the run summary prints it)."
+        "`sha256` is the hash of the uploaded bytes, so it is recorded AFTER each",
+        "fork release (an operator dispatch; the run summary prints it). The",
+        "value above is release 3.4.7-2am.1 (fork run 44671921761); a rebuild is",
+        "not bit-reproducible, so a new build number means a new `sha256`.",
+        "",
+        "The tree is NOT relocatable: it is built with --prefix=/opt/eda/xschem",
+        "and, outside its source tree, xschem takes XSCHEM_LIBRARY_PATH from that",
+        "compile-time prefix, so a copy unpacked anywhere else cannot find",
+        "res.sym / lab_pin.sym. scripts/install-xschem.sh therefore unpacks at",
+        "/opt/eda/xschem."
       ]
     },
     "ciel": {

@@ -129,6 +129,7 @@ _VERSION_PIN_PATHS = [
     ("tools", "xschem", "asset"),
     ("tools", "xschem", "release_repo"),
     ("tools", "xschem", "release_tag"),
+    ("tools", "xschem", "sha256"),
     ("tools", "ciel", "version"),
     ("tools", "klayout_tools", "version"),
 ]

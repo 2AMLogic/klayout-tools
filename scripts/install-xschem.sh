@@ -10,13 +10,14 @@
 #
 # SELF-CONTAINED ON PURPOSE: chip-repo CI copies this one file, so it does not
 # source scripts/_install_common.sh. Needs bash, curl, jq, tar, sha256sum or
-# shasum. Linux x86_64 (Ubuntu 24.04 "noble") only; the asset is not built for
-# other platforms.
+# shasum, plus sudo when the prefix is not writable. Linux x86_64 (Ubuntu 24.04
+# "noble") only; the asset is not built for other platforms.
 #
 # Usage: install-xschem.sh [--force]
-#   Installs into $XSCHEM_INSTALL_PREFIX (default: ~/.cache/xschem-<tag>) and
-#   prints the directory to add to PATH. Idempotent: a prior install of the same
-#   tag + sha256 is left alone unless --force is given.
+#   Installs into $XSCHEM_INSTALL_PREFIX (default: /opt/eda/xschem) and prints
+#   the directory to add to PATH. Idempotent: a prior install of the same
+#   tag + sha256 is left alone unless --force is given. --force also replaces a
+#   non-empty prefix that this script did not create (see "Install location").
 #
 # Where the pin comes from (first that applies):
 #   $XSCHEM_MANIFEST            a path or http(s) URL of pdk-versions.json
@@ -28,17 +29,23 @@
 # specific pin, point XSCHEM_MANIFEST at a vendored manifest or a commit-pinned
 # raw URL.
 #
-# Relocation: the asset is built with --prefix=/opt/eda/xschem, so xschem's
-# compiled-in data directory is wrong anywhere else. The installed
-# `bin/xschem` is therefore a two-line wrapper that exports XSCHEM_SHAREDIR for
-# the real binary (`bin/xschem.real`) -- the same mechanism the fleet's other
-# relocated xschem installs use.
+# Install location: the asset is built with --prefix=/opt/eda/xschem and the
+# tree is NOT relocatable. Outside its source tree xschem takes
+# XSCHEM_LIBRARY_PATH from the compile-time prefix, so a copy unpacked anywhere
+# else cannot find its symbol library (res.sym, lab_pin.sym) -- and an
+# XSCHEM_SHAREDIR wrapper only moves the Tcl files, not that library. The script
+# therefore unpacks at /opt/eda/xschem and leaves bin/xschem as shipped.
+# /opt/eda is root-owned: when the prefix is not writable the write steps go
+# through `sudo -n` (passwordless on GitHub-hosted runners; it never prompts).
+# XSCHEM_INSTALL_PREFIX exists for tests and for inspecting an unpack; xschem
+# installed at any other prefix will not find its symbols, and the script warns.
 #
 # Exit codes: 0 installed/already installed; 1 any failure (fails closed: a
 # missing sha256 in the manifest is an error, never a skipped check).
 
 set -euo pipefail
 
+DEFAULT_PREFIX="/opt/eda/xschem"   # the asset's compile-time --prefix
 MANIFEST_REPO="2AMLogic/klayout-tools"
 DEFAULT_MANIFEST_URL="https://raw.githubusercontent.com/${MANIFEST_REPO}/main/docker/eda-sim/pdk-versions.json"
 
@@ -92,17 +99,42 @@ asset="$(jq -er '.tools.xschem.asset' "$manifest")" || die "manifest has no tool
 release_repo="$(jq -er '.tools.xschem.release_repo' "$manifest")" || die "manifest has no tools.xschem.release_repo"
 release_tag="$(jq -er '.tools.xschem.release_tag' "$manifest")" || die "manifest has no tools.xschem.release_tag"
 expected_sha256="$(jq -er '.tools.xschem.sha256' "$manifest")" \
-    || die "manifest has no tools.xschem.sha256 yet -- the asset has not been published/recorded (issue #6219)"
+    || die "manifest has no tools.xschem.sha256 -- refusing to install an unverified asset (issue #6219)"
 [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]] || die "tools.xschem.sha256 is not a 64-hex digest: $expected_sha256"
 
-prefix="${XSCHEM_INSTALL_PREFIX:-$HOME/.cache/xschem-${tag}}"
+prefix="${XSCHEM_INSTALL_PREFIX:-$DEFAULT_PREFIX}"
+[[ "$prefix" == /* ]] || die "XSCHEM_INSTALL_PREFIX must be an absolute path: $prefix"
 marker="$prefix/.installed-version"
 want="${tag} ${expected_sha256}"
+
+if [[ "$prefix" != "$DEFAULT_PREFIX" ]]; then
+    echo "warning: this xschem build is compiled for $DEFAULT_PREFIX; installed at" \
+        "$prefix it cannot find its symbol library (res.sym, lab_pin.sym)." >&2
+fi
+
+# Write steps run through `sudo -n` when the nearest existing ancestor of the
+# prefix is not writable (the default prefix is under root-owned /opt).
+as_root=()
+probe="$(dirname "$prefix")"
+while [[ ! -e "$probe" ]]; do probe="$(dirname "$probe")"; done
+if [[ ! -w "$probe" ]]; then
+    command -v sudo > /dev/null \
+        || die "$prefix is not writable by $(id -un) and sudo is not available"
+    as_root=(sudo -n)
+fi
+priv() { ${as_root[@]+"${as_root[@]}"} "$@"; }
 
 if [[ -f "$marker" && "$FORCE" -eq 0 && "$(cat "$marker")" == "$want" ]]; then
     echo "xschem $tag already installed at $prefix (use --force to reinstall)"
     echo "  Add to PATH: $prefix/bin"
     exit 0
+fi
+
+# The replace step below removes the prefix, possibly as root: never do that to
+# a non-empty directory this script did not create (a mistyped
+# XSCHEM_INSTALL_PREFIX) unless --force says so.
+if [[ "$FORCE" -eq 0 && -d "$prefix" && ! -f "$marker" && -n "$(ls -A "$prefix" 2> /dev/null)" ]]; then
+    die "$prefix exists and was not installed by this script; refusing to replace it (use --force)"
 fi
 
 # -- download, verify, THEN unpack -------------------------------------------
@@ -120,20 +152,14 @@ if [[ "$actual_sha256" != "$expected_sha256" ]]; then
 fi
 
 echo "Installing into $prefix ..."
-rm -rf "$prefix"
-mkdir -p "$prefix"
-tar -C "$prefix" -xzf "$work/$asset"
+priv rm -rf "$prefix" || die "could not clear $prefix"
+priv mkdir -p "$prefix" || die "could not create $prefix"
+# --no-same-owner: under sudo the files belong to root, not to whatever uid the
+# build runner had when it packed the tarball.
+priv tar -C "$prefix" --no-same-owner -xzf "$work/$asset" || die "could not unpack into $prefix"
 
 [[ -x "$prefix/bin/xschem" ]] || die "asset did not contain bin/xschem"
-mv "$prefix/bin/xschem" "$prefix/bin/xschem.real"
-cat > "$prefix/bin/xschem" <<WRAPPER
-#!/bin/sh
-XSCHEM_SHAREDIR="$prefix/share/xschem"
-export XSCHEM_SHAREDIR
-exec "$prefix/bin/xschem.real" "\$@"
-WRAPPER
-chmod 0755 "$prefix/bin/xschem"
 
-echo "$want" > "$marker"
+printf '%s\n' "$want" | priv tee "$marker" > /dev/null || die "could not write $marker"
 echo "Installed xschem $tag into $prefix"
 echo "  Add to PATH: $prefix/bin"

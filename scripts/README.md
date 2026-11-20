@@ -154,8 +154,10 @@ Credential-free install of the fleet's pinned xschem (issue #6219, fleet rule
 2am#7275): downloads the public release asset of the `2AMLogic/xschem` fork
 (`tools.xschem.release_repo` / `release_tag` / `asset` in
 `docker/eda-sim/pdk-versions.json`), checks it against `tools.xschem.sha256`
-**before** unpacking, and installs a relocatable wrapper. Self-contained so chip
-CI can copy the single file. See `docker/eda-sim/README.md` for the full route.
+**before** unpacking, and unpacks it as shipped at `/opt/eda/xschem` (via
+`sudo -n` when that is not writable): the build is not relocatable, so there is
+no other supported prefix. Self-contained so chip CI can copy the single file.
+See `docker/eda-sim/README.md` for the full route.
 
 ```
 scripts/install-xschem.sh [--force]
