@@ -68,7 +68,6 @@ from ._provenance import (
 from ._report_verify import (
     VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -91,6 +90,7 @@ from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public h
     resolve_sim_backend,
 )
 from .equiv_stage import stage_record_path
+from .evidence_canonicalize import rerun_result_for
 from .request_paths import RequestPaths
 
 _rpath = RequestPaths(EquivError)
@@ -1093,11 +1093,4 @@ def rerun_equiv_report(
     """
     committed = load_committed_report(report_path, EquivError)
     fresh = run_equiv(request, timeout_s=timeout_s, sim_backend=sim_backend)
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=_EQUIV_RERUN_EXCLUDE_PATHS,
-        committed_for_diff=_canonicalize_equiv_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_equiv_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("equiv", report_path, committed=committed, fresh=fresh)

@@ -244,9 +244,7 @@ from ._provenance import (
     sha256_file,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -262,6 +260,7 @@ from ._verilog_params import (
 )
 from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .request_paths import RequestPaths
@@ -1215,7 +1214,7 @@ def run_synthesize(
         library_defaults, dont_use_requested, dont_use_mode
     )
     abc_constr_request = _resolve_abc_constr_request(
-        constraints, liberty_path, resolved_globs
+        constraints, liberty_path, resolved_globs=resolved_globs
     )
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
@@ -2435,7 +2434,8 @@ def _describe_clock_targets(
 def _resolve_abc_constr_request(
     constraints: dict[str, Any] | None,
     liberty_path: str,
-    resolved_globs: tuple[str, ...] = (),
+    *,
+    resolved_globs: tuple[str, ...],
 ) -> tuple[str, float] | None:
     """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
     or ``None`` when the request does not supply one (issue #4662).
@@ -2449,8 +2449,7 @@ def _resolve_abc_constr_request(
     """
     if not constraints or constraints.get("abc_constr") is None:
         return None
-    raw = constraints["abc_constr"]
-    where = "request.constraints.abc_constr"
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
     if not isinstance(raw, dict):
         raise SynthesizeError(f"{where} must be a JSON object")
     unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
@@ -4558,11 +4557,4 @@ def rerun_synthesize_report(
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)

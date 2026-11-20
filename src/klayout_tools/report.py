@@ -23,6 +23,12 @@ produced it:
   report (``klt drc``'s shape today; any future verb reusing the same
   ``violations[]``/``status: "clean"|"violations"`` convention is picked up
   automatically, with no code change here).
+  A ``klt drc --engine both`` cross-check envelope (``mode: "crosscheck"``,
+  violations nested under ``reports.curated`` / ``reports.native``) is
+  first projected to that same shape by
+  :func:`klayout_tools.signoff_drc_crosscheck.crosscheck_project` -- the
+  curated side's rows under the cross-check's own top-level ``status``
+  verdict -- so ``klt report`` and ``klt signoff`` read it identically.
 - an object with a top-level ``mismatches`` list is a *mismatches-style*
   report (``klt lvs``'s shape today), rendered the same way as
   violations-style reports (a table of structured findings) under a
@@ -49,6 +55,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env_provenance import render_path_field
+from .signoff_drc_crosscheck import crosscheck_project
 
 __all__ = ["ReportError", "build_report"]
 
@@ -123,6 +130,10 @@ def build_report(sources: list[str]) -> dict[str, Any]:
                 f"envelope '{source}' must be a JSON object, got "
                 f"{type(envelope).__name__}"
             )
+        # A `klt drc --engine both` envelope nests its violations[] under
+        # reports.*; project it to the single-engine drc shape `klt signoff`
+        # grades (a no-op returning None for every other envelope, #6125).
+        envelope = crosscheck_project(envelope) or envelope
         kind = _classify(envelope, source)
         sections.append(_build_section(kind, envelope, source))
 

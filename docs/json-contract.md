@@ -1435,9 +1435,9 @@ stability statement, concrete precedents, and drift-detection guidance, and
 
     | `role` | Meaning | Verbs |
     |---|---|---|
-    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
-    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039) |
-    | `"source"` | HDL source | `synthesize`, `equiv` |
+    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `power`, `array-check`, `ring-check`, `lef-abstract` (layout-bearing mode only; layout-free `--no-layout` hashes a `source` instead — see [`cli/signoff.md`](cli/signoff.md#provenance-consistency)), `lvs` (`layout.file` shape), `sta` (`def` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039), `characterize` |
+    | `"source"` | HDL source, or the socket descriptor hashed by layout-free `lef-abstract` | `synthesize`, `equiv` (both its `yosys` and `yosys-sequential` engines), `formal`, `functional-verification`, `lef-abstract` (`--no-layout` only) |
 
     The field exists because the hash alone is kind-blind, and one verb can
     pin either kind: `klt lvs`'s `layout.file` shape hashes the original
@@ -1775,7 +1775,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). Unlike the cwd-relative default above, every `functional-verification` envelope here (and `environment.sources[]`) is relative to the repo containing the **request** (its own directory, or `--base-dir`), so the same run yields the same report from any invoking directory; a request outside every repo reports `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1942,6 +1942,15 @@ No field is added or removed by this list; `schema_version` is unchanged.
 Verb-specific extras (e.g. `engine_version` for the flow verbs) are
 documented with their verb.
 
+**Do not copy this table into a consumer.** `klt evidence canonicalize
+--kind <verb> REPORT` emits the report with these paths (and the verb's own
+extras and bookkeeping keys) already removed — the *static* view `--rerun`
+diffs, as a document to commit and diff whole. `--rerun` additionally
+tolerates directional, pair-dependent differences a single report cannot
+express — see the caveats in
+[`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize) (issue
+#5541).
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Eight verbs let a consumer verify that a previously committed `--format json`
@@ -1976,6 +1985,17 @@ All eight share one contract:
   and compares them. No engine runs.
 - **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
   verdict-bearing fields against the committed report.
+- **The view full mode diffs is available on its own** (issue #5541): `klt
+  evidence canonicalize --kind <verb> REPORT` emits a report reduced to the
+  static fields full mode compares, so a consumer that commits a report and
+  guards it with its own regenerate-and-diff check does not re-implement
+  the exclusion list. The same definition feeds both, so they cannot
+  diverge. Equal canonical views imply no drift; the converse does not
+  hold, because full mode's comparison is directional and pair-dependent
+  (committed-only `provenance` leaves are `not_compared`, issue #5866;
+  `drc` across the #5660 version boundary; the `lvs` pair tolerance) —
+  documented with the sub-verb in
+  [`cli/evidence.md`](cli/evidence.md#klt-evidence-canonicalize).
 - **`klt signoff` has one mode, not two** (issue #2249): re-grading the
   manifest *is* the whole verification — there is no engine run to hold back
   — so `--check` alone produces the full-mode `{status, drift, fresh}` shape

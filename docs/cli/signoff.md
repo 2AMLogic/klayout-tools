@@ -216,11 +216,17 @@ two steps:
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
    (`klt drc`/`klt extract`, `klt lvs`, and `klt pex`, which pins its own
-   extracted layout the same way — see [`pex.md`](pex.md)) must
+   extracted layout the same way — see [`pex.md`](pex.md) — plus `klt erc`,
+   `klt power`, `klt lef-abstract`, `klt place-and-route`, `klt sim`,
+   `klt sta`, `klt synthesize` and `klt functional-verification`, the full
+   set the "Provenance consistency" table below lists) must
    agree on `input.content_hash` **with the other checks declaring the same
    `input.role`** (issue #2027 — a `klt lvs` run given a pre-extracted
    netlist hashes a SPICE file, not a layout stream, so its digest is never
-   compared against a layout digest); any two
+   compared against a layout digest; the roles the code records are
+   `layout`, `netlist` and `source`, and digests are compared only within
+   one role, so a netlist and a layout describing the same design
+   legitimately carry different hashes); any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
    produce a pass/fail verdict at all (`status: "refused"`) — a "clean" DRC
@@ -423,7 +429,7 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)), `klt erc` (role `layout`), `klt power` (role `layout`), `klt lef-abstract` (pins the layout it abstracted, role `layout`; in layout-free `--no-layout` mode it pins the socket descriptor instead, role `source`, issue #6671 — see [`lef-abstract.md`](lef-abstract.md)), `klt place-and-route` and `klt sim` (role `netlist`), `klt sta` (role `layout` when driven by a DEF request, `netlist` when driven by a Verilog netlist), `klt synthesize` and a provenance-bearing `klt functional-verification` report (role `source`, the RTL digest — issues #2027/#5550); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 **Verilog-top functional-verification citations (issue #6488).** On the
@@ -2535,7 +2541,7 @@ an inventory the author did not write.
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
 | | `depends_on`: list of paths, on an object-form `testbenches` entry (issue #5850) | no | each declared dependency exists and is hashed (`present`, role `testbench_dependency`, carrying its `testbench`), so editing a helper a shipped bench depends on is caught by `--check` instead of passing green. Binding is **shallow**: a member's own dependencies are not resolved and not checked unless `depends_on` declares them — the always-passing `dependency_binding` row makes that visible instead of inferred from a green check. A path repeated across entries is fine (a shared helper is the normal case) and may also be an inventoried member; a repeat *within* one entry, or a non-list value, is refused (exit `1`), as is any path under the ordinary path rules (absolute, `..`, symlink). *First ships in the first release after `v0.9.2`.* |
 | | `unbenched_rows`: list of `{"row": "<id>", "issue": <positive int>}` | no | one `unbenched_row` check per entry (role `row`), **passing**: the gap and its owner issue are visible to the grader, not refused. Empty/duplicate `row` or a non-positive `issue` is refused (exit `1`). Whether bench-less rows should fail T1 item 9 is a grading-policy decision this producer does not make. *First ships in 0.9.0; 0.8.0 refuses `unbenched_rows` as an unknown field.* |
-| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563; see the item-9 section below). |
+| | `pins`: `{"pdk": {"name", "revision"} \| {"none": true, "reason"}, "tools": {<tool>: <version \| {"from", "key"}>} }` | checked, not structurally required | `pdk.name` and `pdk.revision` non-empty, or, for a partition whose cold start consumes no PDK, the explicit no-PDK form `{"none": true, "reason": "<non-empty>"}` (`pin`, role `pdk`; `none` mixed with `name`/`revision`, or with an empty `reason`, fails; an absent `pdk` still fails -- silence never means "no PDK"; a `pdk` of the wrong type, e.g. a string, fails with an additive `reason` naming the type error rather than reading as missing); `tools` a non-empty map of non-empty versions (`pin`, role `tools`). A missing pin is a **failed check**, not a malformed inventory. Each of `pdk.name`, `pdk.revision` and every `tools.<tool>` value may be a **literal** (checked for shape only -- klt never compares a literal with the thing it names) or a `{"from", "key"}` **reference** resolved from a repo JSON file at attest and `--check` time (issue #5563). Starting in the first release after `v0.9.2`, a declared `tools.klt` is the one exception to shape-only: it also gets a `pin` check with role `tool_version` against the running build. See the item-9 example below. |
 | **10** Repo hygiene | `hygiene`: list of paths — each entry a literal path, a `{"glob": "<pattern>"}` object (schema 2), or a `{"path", "attest": "presence"\|"content"\|"yaml", "select"?}` object (mixing is fine) | yes, non-empty | each file exists (`present`, role `hygiene`); a `"presence"` entry omits `content_hash`, so content edits are not drift; a `"yaml"` entry (optional `select`, item 10 only) binds the canonical parse (`sha256-canonical-yaml-v1`), so comments and reformatting are not drift while key/value edits still are |
 | | `checks`: list of `{name, argv, cwd?, local_only?, timeout_s?}` | yes, non-empty | each exits `0` (`command`, role `audit`); `name` must be unique |
 
@@ -2666,8 +2672,9 @@ sorted by path (regardless of inventory order; item 9's `present` checks run
 `testbench` first, then `testbench_dependency` bench by sorted bench, then
 `source` sorted by path), then the item's
 command checks (item 1's `freshness` checks sorted by target), then item 9's
-disclosure rows (`unbenched_row`, `dependency_binding`), then item 9's two
-`pin` checks. Two runs over the same bytes with the same outcomes produce
+disclosure rows (`unbenched_row`, `dependency_binding`), then item 9's
+`pdk` and `tools` pin checks and, when declared, its `klt` version check.
+Two runs over the same bytes with the same build and outcomes produce
 byte-identical output.
 
 ```json
@@ -2676,25 +2683,28 @@ byte-identical output.
   "kind": "generic",
   "status": "pass",
   "t1_item": 9,
-  "summary": "T1 item 9 (Testbenches shipped): 5/5 attestation checks passed (klt signoff --attest)",
+  "summary": "T1 item 9 (Testbenches shipped): 8/8 attestation checks passed (klt signoff --attest)",
   "source": "attest/item9.json",
   "attestation": {
     "producer": "klt signoff --attest",
     "inventory_schema_version": 1,
     "hash_algorithm": "sha256-raw-bytes",
-    "check_count": 5,
-    "passed_count": 5,
+    "check_count": 8,
+    "passed_count": 8,
     "checks": [
       {"check": "present", "role": "testbench", "path": "tb/ota_ac.spice", "passed": true, "content_hash": "sha256:9a1e..."},
       {"check": "present", "role": "testbench", "path": "tb/ota_tran.spice", "passed": true, "content_hash": "sha256:4c07..."},
       {"check": "command", "role": "cold_start", "argv": ["make", "sim"], "cwd": ".", "exit_status": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_ac.spice", "declared": 0, "passed": true},
+      {"check": "dependency_binding", "role": "testbench", "testbench": "tb/ota_tran.spice", "declared": 0, "passed": true},
       {"check": "pin", "role": "pdk", "passed": true, "value": {"name": "sky130A", "revision": "0fe599b2"}},
-      {"check": "pin", "role": "tools", "passed": true, "value": {"klt": "0.7.0", "ngspice": "42"}}
+      {"check": "pin", "role": "tools", "passed": true, "value": {"klt": "0.9.3", "ngspice": "42"}},
+      {"check": "pin", "role": "tool_version", "tool": "klt", "passed": true, "value": "0.9.3"}
     ],
     "description": "testbenches cover tt only; no corner matrix"
   },
   "provenance": {
-    "klt_version": "0.7.0",
+    "klt_version": "0.9.3",
     "klayout_version": null,
     "pdk": null,
     "deck": null,
@@ -2795,7 +2805,7 @@ Item 9: testbenches, a cold-start invocation and reproducibility pins
   "cold_start": {"argv": ["klt", "sim", "sim/request.json", "--format", "json"]},
   "pins": {
     "pdk": {"name": "sky130A", "revision": "0fe599b2afb6708d281543108caf8310912f54af"},
-    "tools": {"klt": "0.7.0", "ngspice": "42"}
+    "tools": {"klt": "0.9.3", "ngspice": "42"}
   }
 }
 ```
@@ -2811,11 +2821,19 @@ form instead of a placeholder name:
 }
 ```
 
-A **literal** pin is checked for shape only: klt verifies `pdk.name` and
-`pdk.revision` are non-empty and each `tools.<tool>` version is a non-empty
-string, but never compares the literal with the artifact it names -- a literal
-that has drifted from the repo's own pin of record passes silently, which is
-why the reference form below exists.
+Set `pins.tools.klt` to the exact build version you intend to run (the example
+uses `0.9.3`). Both `--attest 9` and `--check` compare the literal or resolved
+version string with the full `provenance.klt_version`, including any development
+suffix. On a mismatch the `tool_version` check records `"passed": false` and
+the running version in `running`. Attestation exits 3 and leaves the
+output file untouched. If the running version contains `+unknown`, the check
+passes with `"unverifiable": true`. A pinned value containing `+unknown` is
+compared literally when the running build is known.
+
+When upgrading an inventory that already pins klt, update the pin to the
+build you will use and regenerate its committed envelope to include the new
+check. The other tool versions and the PDK name and revision are checked for
+non-empty strings.
 
 **A pin declared by the file that owns it (issue #5563).** Instead of
 hand-copying a value the repo already tracks (a tool commit, a PDK revision),
@@ -2836,11 +2854,10 @@ reference object that klt resolves from a JSON file in the repo at attest and
 `from` is a repo-relative path (absolute paths, `..` escapes and symlinks are
 refused, exactly like every other inventory path); `key` is a dotted path into
 that file's JSON (digit segments index lists, as for item-8 metric bindings).
-The check's `value` carries the **resolved** string, and a check that used at
-least one reference records where each value came from as `resolved_from`
-(a literal-only inventory emits the check it always did -- no
-`resolved_from` key). A reference whose file is missing, is not readable JSON,
-lacks the key, or resolves to anything but a non-empty string grades the pin
+The `pdk` or `tools` check's `value` carries the **resolved** strings. When
+that section uses a reference, `resolved_from` records its file and key.
+A reference whose file is missing, is not readable JSON, lacks the key, or
+resolves to anything but a non-empty string grades the pin
 `passed: false` -- a failed check, not a malformed inventory. Because `--check`
 re-resolves from the owning file, a pin bump drifts the committed envelope the
 same way a source edit does: no re-attest can re-legitimize a stale copy.

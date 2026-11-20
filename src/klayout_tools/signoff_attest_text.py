@@ -103,6 +103,13 @@ def _what_metric(c: dict) -> str:
 
 
 def _what_pin(c: dict) -> str:
+    if c["role"] == "tool_version":
+        what = f"pin {c['tool']} {c['value']}"
+        if c.get("unverifiable"):
+            return f"{what} (running version unverifiable)"
+        if not c["passed"]:
+            return f"{what} (running {c['running']})"
+        return what
     shown = c["value"] if c["passed"] else c.get("reason", "missing")
     return f"pin {c['role']}: {shown}"
 

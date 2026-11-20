@@ -728,25 +728,12 @@ def load_request_arg(
 
 
 def _resolve_testbench(
-    testbench: Any, request_dir: str
+    testbench: Any, request_dir: str, *, require_module: bool = True
 ) -> tuple[str, str, str | list[str] | None]:
-    """Validate ``request.testbench`` and return
-    ``(module, module_dir, testcase)``.
+    """Resolve a cocotb module name, search directory, and selected testcases.
 
-    ``module`` is a Python *module name* (``"test_gcd"``), not a path -- it is
-    what cocotb's ``Runner.test(test_module=...)`` imports. By default the
-    module's file is located next to the request
-    (``<request_dir>/<module>.py``) so a missing testbench is a clear
-    request-level error here rather than a ``ModuleNotFoundError`` raised deep
-    inside the simulator process (where, verified live, cocotb still exits
-    ``0`` and simply writes no ``results.xml``).
-
-    An optional ``testbench.search_path`` overrides *where* ``module`` is
-    looked up -- resolved absolute-or-relative-to-``request_dir`` the same way
-    ``_resolve_sources()`` resolves each ``request.sources`` entry -- so one
-    unmodified testbench module can be shared by several requests that live in
-    different directories. When omitted, behavior is unchanged: the module is
-    resolved next to the request.
+    A run needs the module file under ``testbench.search_path`` (defaulting
+    to the request directory). An offline check only validates the declaration.
     """
     if not isinstance(testbench, dict):
         raise FunctionalVerificationError("request.testbench must be a JSON object")
@@ -768,12 +755,16 @@ def _resolve_testbench(
             raise FunctionalVerificationError(
                 "request.testbench.search_path must be a non-empty string when given"
             )
-        search_dir = _rpath(search_path, request_dir, "request.testbench.search_path")
+        search_dir = (
+            _rpath(search_path, request_dir, "request.testbench.search_path")
+            if require_module
+            else search_path
+        )
     else:
         search_dir = request_dir
 
     module_path = os.path.join(search_dir, f"{module}.py")
-    if not os.path.isfile(module_path):
+    if require_module and not os.path.isfile(module_path):
         location = (
             "request.testbench.search_path"
             if search_path is not None
@@ -808,7 +799,7 @@ def _resolve_testbench(
 
 
 def _resolve_options(
-    options: Any, engine: str, request_dir: str
+    options: Any, engine: str, request_dir: str, *, require_include_dirs: bool = True
 ) -> tuple[
     bool,
     tuple[str, str],
@@ -887,7 +878,9 @@ def _resolve_options(
 
     defines = _resolve_defines(options.get("defines"))
     build_args = _resolve_build_args(options.get("build_args"))
-    includes = _resolve_includes(options.get("includes"), request_dir)
+    includes = _resolve_includes(
+        options.get("includes"), request_dir, require_dirs=require_include_dirs
+    )
     sdf = _resolve_sdf_option(options.get("sdf"), engine, request_dir)
     _reject_sdf_with_functional_models(sdf, defines)
 
@@ -928,7 +921,7 @@ def _resolve_initial_state_seeds(mode: str, seeds: Any) -> list[int]:
 
 
 def _resolve_initial_state(
-    options: Any, engine: str, request_dir: str
+    options: Any, engine: str, request_dir: str, *, require_netlist: bool = True
 ) -> dict[str, Any] | None:
     """Validate ``request.options.initial_state`` (issue #2998); ``None`` when
     the key is absent. Shape: ``{"mode": "x" | "random", "seeds": [int, ...],
@@ -981,8 +974,12 @@ def _resolve_initial_state(
             f"options.initial_state requires engine 'icarus' -- engine "
             f"'{engine}' cannot force cell-model pins hierarchically"
         )
-    netlist_path = _rpath(netlist, request_dir, "request.options.initial_state.netlist")
-    if not os.path.isfile(netlist_path):
+    netlist_path = (
+        _rpath(netlist, request_dir, "request.options.initial_state.netlist")
+        if require_netlist
+        else netlist
+    )
+    if require_netlist and not os.path.isfile(netlist_path):
         raise FunctionalVerificationError(
             f"request.options.initial_state.netlist '{netlist_path}' not found"
         )
@@ -1325,7 +1322,9 @@ def _resolve_build_args(build_args: Any) -> list[str]:
     return list(build_args)
 
 
-def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
+def _resolve_includes(
+    includes: Any, request_dir: str, *, require_dirs: bool = True
+) -> list[str]:
     """Validate the optional ``request.options.includes`` array and resolve
     each entry to an absolute directory path (relative to ``request_dir`` --
     the same convention :func:`_resolve_sources`/:func:`_resolve_testbench`
@@ -1343,6 +1342,8 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
             "request.options.includes must be an array of non-empty strings"
         )
 
+    if not require_dirs:
+        return includes
     resolved: list[str] = []
     for entry in includes:
         path = _rpath(entry, request_dir, "request.options.includes entry")
@@ -1457,19 +1458,7 @@ def _resolve_requires_tools(
     binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
     Returns the ``environment.tools`` echo (``[]`` when omitted).
     """
-    if requires_tools is None:
-        return []
-    if not isinstance(requires_tools, list):
-        raise FunctionalVerificationError(
-            "request.requires_tools must be a JSON array of "
-            '{"name": ..., "version": ..., "sha256": ...} objects'
-        )
-
-    entries = [
-        _parse_requires_tool_entry(index, entry)
-        for index, entry in enumerate(requires_tools)
-    ]
-
+    entries = _requires_tool_entries(requires_tools)
     search_path = env.get("PATH")
     run_env = {**os.environ, **env}
     tools: list[dict[str, Any]] = []
@@ -1486,6 +1475,23 @@ def _resolve_requires_tools(
     if unmet:
         raise _MissingToolError(unmet)
     return tools
+
+
+def _requires_tool_entries(
+    requires_tools: Any,
+) -> list[tuple[str, str | None, str | None]]:
+    if requires_tools is None:
+        return []
+    if not isinstance(requires_tools, list):
+        raise FunctionalVerificationError(
+            "request.requires_tools must be a JSON array of "
+            '{"name": ..., "version": ..., "sha256": ...} objects'
+        )
+
+    return [
+        _parse_requires_tool_entry(index, entry)
+        for index, entry in enumerate(requires_tools)
+    ]
 
 
 def _parse_requires_tool_entry(
@@ -1603,11 +1609,9 @@ class _MissingToolError(FunctionalVerificationError):
 def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     """Parse a cocotb ``results.xml`` into the contract's ``tests[]`` list.
 
-    Structure (spike section 4, captured live): a ``<testcase>`` with no
-    child element is a pass, a ``<failure>`` child is a failure, a
-    ``<skipped>`` child is a skip. ``error_type``/``error_message`` are taken
-    verbatim from the ``<failure>`` element's own attributes and are present
-    only on failing entries.
+    A testcase passes unless it contains a failure or skip. Only failures
+    carry an error type and message. The parser reads the raw diagnostic
+    from the failure attributes or element text.
 
     Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
     *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``
@@ -2498,10 +2502,6 @@ def run_functional_verification(
     engine = _resolve_engine(request_doc)
 
     hdl_toplevel = request_doc["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise FunctionalVerificationError(
-            "request.hdl_toplevel must be a non-empty string"
-        )
     # Issue #5684: verify the synthesized netlist before anything is built.
     # Issue #5782: the CLI's --pdk/--pdk-root merge over request.pdk here.
     sources, run_inputs = resolve_run_inputs(
@@ -2529,11 +2529,9 @@ def run_functional_verification(
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
-    # Issue #5782: defines the pdk input derives (FUNCTIONAL, only when no
-    # options.sdf) land *under* the caller's own -- caller values win, and
-    # the rejection inside _resolve_options ran on caller defines only, so
-    # a derived FUNCTIONAL (which exists only when sdf is None) can never
-    # trip it. Unconditional merge: {} under {} is the same dict.
+    run_inputs.pin_sdf(sdf)
+    # Caller defines override PDK defaults. Derived FUNCTIONAL only applies
+    # when the request has no SDF (#5782).
     defines = {**run_inputs.pdk_defines, **defines}
     _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
     initial_state = _resolve_initial_state(
@@ -2949,6 +2947,7 @@ def run_functional_verification(
             repo_root=repo_root,
         )
     )
+    run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
     if coverage_requested:

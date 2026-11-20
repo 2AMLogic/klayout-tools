@@ -15816,8 +15816,8 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
         pair / "ref.spice"
     )
     assert missing["hint"] == (
-        "run --check from the report's directory, or pass --layout/an absolute path; "
-        f"request-file-relative paths resolve against {pair.resolve()}"
+        "run --check from the report's directory, or pass --reference/an absolute path;"
+        f" request-file-relative paths resolve against {pair.resolve()}"
     )
     assert by_field["environment.layout_sha256"]["match"] is True
     assert "input_not_found" not in by_field["environment.layout_sha256"]
