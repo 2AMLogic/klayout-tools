@@ -14,9 +14,14 @@ The test times the two recognition paths directly -- in-process, over the
 synthetic flat array below at two sizes -- because an end-to-end wall-time
 ratio also sees KLayout's own C++ net clustering (superlinear at high
 device counts in every version, v0.5.0 included) and shared-CI contention.
-On the pre-fix tree the 800/200 ratio of this block measured ~16x
-(quadratic); the bulk-island-set rewrite holds it near 1. The bound 6
-leaves jitter headroom while still tripping any return to per-island,
+Each size samples the minimum of 5 timed runs, the posture of the
+netlist-hash scaling test (issue #3610): ``min`` of 2 left the ratio at
+the mercy of one contended sample and produced a spurious 6.12x on a
+clean tree during PR #6072's review (issue #6502). On the pre-fix tree
+(``9aff912a9``) the 1600/400 ratio of this block measured ~16x
+(quadratic); the bulk-island-set rewrite holds it at ~4.5-5.4x on shared
+runners -- near the 4x of linear growth. The bound 9 leaves ~2x jitter
+headroom above that while still tripping any return to per-island,
 per-layer full-layout scans. Full-run wall times per size are recorded in
 the PR, not asserted here.
 
@@ -105,7 +110,8 @@ def _recognition_seconds(n_cells: int) -> float:
     """Seconds the issue #5807 recognition paths take over an ``n_cells``
     array: the MOS-capacitor resolver plus the unsupported-device diagnostic
     that re-runs it and the flavour-recognised-islands sweep. The minimum of
-    two runs, so a shared host's contention on one sample cannot inflate the
+    five runs (issue #3610's sampling posture; two was too few, issue
+    #6502), so a shared host's contention on one sample cannot inflate the
     ratio."""
     deck = get_extraction_deck("gf180mcu")
     layout = _flat_mos_array(n_cells)
@@ -114,7 +120,7 @@ def _recognition_seconds(n_cells: int) -> float:
     poly = _region(layout, top, deck.poly)
     nwell = _region(layout, top, deck.nwell)
     best = None
-    for _ in range(2):
+    for _ in range(5):
         start = time.perf_counter()
         capacitors, remaining, _recognised, _dropped = _resolve_mos_capacitors(
             layout, top, deck, active, poly, nwell, kdb.Region()
@@ -135,9 +141,13 @@ def test_device_recognition_scales_linearly_on_flat_arrays():
     full = _recognition_seconds(1600)
     # 4x the layout must not cost ~16x the recognition block: linear growth
     # is 4x and the per-island loops this guards against were quadratic
-    # (~16x here, measured) before issue #5807's bulk-island-set rewrite --
-    # bound 6 sits between the two with jitter headroom on both sides.
-    assert full / quarter <= 6.0, (
+    # before issue #5807's bulk-island-set rewrite -- 12.7x measured at the
+    # pre-fix tree 9aff912a9 (min-of-5 on a contended host; 14.3-16.0x at
+    # min-of-2 during PR #6072's review), while post-fix ratios measure
+    # ~4.4-5.4x on shared runners. Bound 9 sits ~2x above the post-fix
+    # range and ~1.4x below the lowest pre-fix measurement (issue #6502; a
+    # literal 3x-above-linear, ~13.5, would sit inside it).
+    assert full / quarter <= 9.0, (
         f"device recognition grew {full / quarter:.2f}x for a 4x-larger "
         "flat array (near-linear expected; per-island, per-layer "
         "full-layout scans regressed superlinearly before issue #5807)"
