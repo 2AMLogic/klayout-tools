@@ -185,7 +185,11 @@ def test_check_drift_entry_names_the_drifted_source_path(tmp_path):
     ]
     # The pointer is unchanged: still the dotted positional one.
     assert hashed["field"] == "attestation.checks.1.content_hash"
-    assert hashed["check"] == {"role": "source", "path": "rtl/top.v"}
+    assert hashed["check"] == {
+        "role": "source",
+        "check": "present",
+        "path": "rtl/top.v",
+    }
     assert hashed["committed"].startswith("sha256:")
     assert hashed["fresh"].startswith("sha256:")
     assert hashed["committed"] != hashed["fresh"]
@@ -197,11 +201,15 @@ def test_check_drift_entry_names_a_drifted_freshness_check_by_target(tmp_path):
 
     passed = [e for e in result["drift"] if e["field"].endswith(".3.passed")]
     assert [e["check"] for e in passed] == [
-        {"role": "freshness", "target": "netlist/top.v"}
+        {"role": "freshness", "check": "recorded_hash", "target": "netlist/top.v"}
     ]
     # A leaf nested deeper inside the check is annotated too.
     (mismatches,) = [e for e in result["drift"] if e["field"].endswith(".mismatches")]
-    assert mismatches["check"] == {"role": "freshness", "target": "netlist/top.v"}
+    assert mismatches["check"] == {
+        "role": "freshness",
+        "check": "recorded_hash",
+        "target": "netlist/top.v",
+    }
 
 
 def test_check_drift_entries_outside_the_checks_list_carry_no_check_key(tmp_path):
@@ -255,7 +263,9 @@ def test_check_drift_text_output_names_the_drifted_file_on_the_pointer_line(
     out = capsys.readouterr().out
 
     assert code == 3
-    assert "attestation.checks.1.content_hash  [source rtl/top.v]:" in out
-    assert "attestation.checks.3.passed  [freshness netlist/top.v]:" in out
+    assert "attestation.checks.1.content_hash  [source present rtl/top.v]:" in out
+    assert (
+        "attestation.checks.3.passed  [freshness recorded_hash netlist/top.v]:" in out
+    )
     # An entry naming no single check keeps its bare pointer line.
     assert "\n  status:\n" in out

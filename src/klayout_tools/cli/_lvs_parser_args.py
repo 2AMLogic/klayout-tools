@@ -1,0 +1,165 @@
+"""``klt lvs`` argparse flags (split out of ``parser.py``, issue #5845, to
+keep that module under its file-size ceiling -- the same split
+``_drc_parser_args.py``/``parser_sim.py`` made before it).
+
+``add_lvs_parser`` registers the whole ``lvs`` verb exactly as
+``parser._add_lvs_parser`` used to inline; the shared helpers
+(``_deck_names_str``, ``_add_format_arg``) are passed in by the caller so
+this module stays free of ``parser`` imports (which would be circular).
+"""
+
+from __future__ import annotations
+
+import argparse
+from collections.abc import Callable
+
+from . import lvs_cmd
+
+
+def add_lvs_parser(
+    subparsers: argparse._SubParsersAction,
+    deck_names_str: Callable[[], str],
+    add_format_arg: Callable[..., None],
+) -> None:
+    """Register the ``lvs`` verb for comparing netlist pairs.
+
+    Compare a layout-derived netlist against a reference SPICE netlist and
+    report mismatches. See docs/cli/lvs.md for full details.
+    """
+    lvs_parser = subparsers.add_parser(
+        "lvs",
+        help="compare an extracted/reference netlist pair and report mismatches",
+        description=(
+            "Compare a layout-derived netlist (extracted inline, or a "
+            "pre-extracted `klt extract` output) against a reference "
+            "(schematic/golden) SPICE netlist and report structured "
+            "mismatches -- see docs/design/lvs-extraction-spike.md section "
+            "2b for the request/response contract and docs/cli/lvs.md for "
+            "the CLI surface. Runs fully headless via KLayout's native "
+            "NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a "
+            "request-document path (like `klt sim`/`klt gen`), not "
+            "positional netlist file args."
+        ),
+    )
+    # `request` (positional) and `--check` (issue #1106) are mutually
+    # exclusive input sources -- exactly one is required. See the matching
+    # `drc_input_group` comment in parser.py for why this is a required
+    # mutually-exclusive group rather than a manual runtime check.
+    lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
+    lvs_input_group.add_argument(
+        "request",
+        nargs="?",
+        default=None,
+        help=(
+            "klt lvs request: a path to a JSON file, '-' to read the "
+            "request from stdin, or an inline JSON object string. Omit "
+            "when using --check (inputs are read from the committed "
+            "report instead)"
+        ),
+    )
+    lvs_input_group.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt lvs --format json' report "
+            "(REPORT) instead of running a fresh compare: mutually exclusive "
+            "with the positional 'request', since inputs are read from "
+            "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
+            "REPORT's recorded inputs; combine with --rerun for full mode "
+            "(re-run the compare and diff verdict-bearing fields). Exits 0 "
+            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
+            "'--check'"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--layout",
+        default=None,
+        metavar="PATH",
+        help=(
+            "explicit layout/netlist input for --check/--rerun (issue "
+            "#2699): overrides the layout path REPORT recorded, "
+            "unconditionally -- use it when REPORT's layout is outside any "
+            "repository or the verifying clone is laid out differently; a "
+            "layout that no longer hashes to the recorded value reports "
+            "'drifted'. Requires --check; a clean error (exit 1) otherwise"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="PATH",
+        help=(
+            "explicit reference-netlist input for --check/--rerun (issue "
+            "#5845): the --layout counterpart for REPORT's reference side. "
+            "Overrides the reference path REPORT recorded, "
+            "unconditionally -- use it when REPORT's reference is outside "
+            "any repository (scope 'external') or wrongly anchored (an "
+            "already-committed report of a nested-repo input, where the "
+            "recorded relative path is ambiguous); a reference that no "
+            "longer hashes to the recorded value reports 'drifted'. "
+            "Requires --check; a clean error (exit 1) otherwise. Note "
+            "--deck-file applies to a fresh klayout-runset run, never to "
+            "--check"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issue #1106): best-effort re-run of "
+            "the compare REPORT names (reconstructed from REPORT's own "
+            "echoed layout/reference/engine/deck/parameter_tolerance "
+            "fields -- see docs/cli/lvs.md for reconstruction limits) and "
+            "diff verdict-bearing fields against the committed report, "
+            "excluding the provenance version echoes. Requires --check; a "
+            "clean error (exit 1) otherwise"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--deck",
+        default=None,
+        metavar="NAME",
+        help=f"extraction deck to run (currently: {deck_names_str()}); fills "
+        "the request's layout.deck only, never reference.deck (issue "
+        "#5733); a clean error (exit 1) if the request sets layout.deck too",
+    )
+    lvs_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for request.engine "
+            "'klayout-runset' (issue #3206); fills request.deck_file, and "
+            "is a clean error (exit 1) if the request already sets it or "
+            "uses another engine. A relative PATH resolves against the "
+            "current directory"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (engine "
+            "'klayout-runset' only; issue #3206). Repeatable; fills "
+            "request.deck_vars; a clean error (exit 1) if the request "
+            "already sets it or uses another engine"
+        ),
+    )
+    lvs_parser.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "write stage start/finish lines and a periodic heartbeat for "
+            "inline layout extraction to stderr (stdout stays the pure "
+            "response). Default: heartbeat lines only (every 30s of a long "
+            "stage) when stderr is not a TTY; --no-progress forces off"
+        ),
+    )
+    add_format_arg(lvs_parser)
+    lvs_cmd.configure(lvs_parser)  # -o/--output (issue #4984) + func=run

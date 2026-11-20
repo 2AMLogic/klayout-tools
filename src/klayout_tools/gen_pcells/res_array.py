@@ -32,13 +32,15 @@ def _series_joint_boxes(info: dict, series: bool) -> list:
     return [j["box_um"] for j in info["jumpers"]] if series else []
 
 
-def _declare_double_param(helper: Any, name: str, description: str) -> None:
+def _declare_double_param(
+    helper: Any, name: str, description: str, *, hidden: bool = False
+) -> None:
     """Declare a ``0.0``-default ``TypeDouble`` PCell parameter.
 
     Takes the helper as ``Any`` so a new parameter does not grow the type
     baseline with another untyped ``PCellDeclarationHelper`` attribute access.
     """
-    helper.param(name, helper.TypeDouble, description, default=0.0)
+    helper.param(name, helper.TypeDouble, description, default=0.0, hidden=hidden)
 
 
 def _grow_boxes_across_axis(
@@ -173,6 +175,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Resistor body drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_cut_and_metal_params(self, kdb)
             self.param(
@@ -181,6 +184,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Resistor-ID (device-mark) drawing layer covering each unit's "
                 "body segment (only used when res_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "res_mark_present",
@@ -188,6 +192,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether res_mark_layer is a real, DRC-checked layer for the "
                 "resolved PDK",
                 default=False,
+                hidden=True,
             )
             # One static slot per mask the *widest* flavour in
             # `_PDK_RES_FLAVOR_LAYERS` requires (issue #1451). A KLayout
@@ -206,6 +211,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     "drawn over the body segment for device recognition "
                     f"(only used when res_flavor_{i}_present)",
                     default=kdb.LayerInfo(0, 0),
+                    hidden=True,
                 )
                 self.param(
                     f"res_flavor_{i}_present",
@@ -213,6 +219,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"Whether res_flavor_{i}_layer is a real, DRC-checked "
                     "layer the resolved PDK's requested flavour requires",
                     default=False,
+                    hidden=True,
                 )
                 # Issue #2449: > 0.0 draws this mask over the whole unit
                 # (body + end heads) at this enclosure instead of the
@@ -223,6 +230,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"Enclosure (um) of the whole unit (end heads included) by "
                     f"res_flavor_{i}_layer -- 0.0 covers the body segment only",
                     default=0.0,
+                    hidden=True,
                 )
                 # Issue #3000: > 0.0 grows this mask across the body axis,
                 # beyond the poly body (gf180mcu SAB, SB.9/SB.10).
@@ -231,6 +239,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     f"res_flavor_{i}_side_extension_um",
                     f"Extension (um) of res_flavor_{i}_layer past the body "
                     "edges across the current-flow axis -- 0.0 matches the body",
+                    hidden=True,
                 )
             self.param(
                 "dummy_layer",
@@ -239,6 +248,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "unit resistor's recognised body segment (only used when "
                 "dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_dummy_marker_params(self)
             # `metal_level`'s own per-level geometry floors (issue #1639) --
@@ -254,6 +264,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "resolved PDK family -- 0.0 leaves the generic "
                 "CONTACT_SIZE_UM cut unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "metal_res_via_enclosure_min_um",
@@ -262,6 +273,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "and landing-pad layers on the resolved PDK family -- 0.0 "
                 "leaves the generic ENCLOSURE_MARGIN_UM unchanged",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "metal_res_via_space_min_um",
@@ -270,6 +282,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "adjacent unit resistors on the resolved PDK family -- 0.0 "
                 "draws exactly the requested spacing_um",
                 default=0.0,
+                hidden=True,
             )
             # Issue #2449: rectangular precision-poly end contact (sky130
             # high/xhigh licon.1b/c = 0.19um x 2.0um); 0.0 = square cut.
@@ -279,6 +292,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Rectangular end-contact extent (um) along the current-flow "
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "end_contact_h_um",
@@ -286,6 +300,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Rectangular end-contact extent (um) across the current-flow "
                 "axis -- 0.0 draws the ordinary square cut",
                 default=0.0,
+                hidden=True,
             )
             # Issue #3000: gf180mcu salicide block (SAB) clearance from the
             # end contacts (SB.4); 0.0 = the generic enclosure margin.
@@ -294,6 +309,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "res_contact_space_um",
                 "Minimum space (um) from the body-segment marker / salicide "
                 "block to the end contact -- 0.0 keeps the generic margin",
+                hidden=True,
             )
             # Issue #5704: sky130 high/xhigh end-head extension to the PDK's
             # 2.16um precision-resistor contact-extension rule (licon.1c +
@@ -303,6 +319,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "res_head_len_um",
                 "Minimum end-head length (um) along the current-flow axis -- "
                 "0.0 keeps the generic enclosure-derived head",
+                hidden=True,
             )
             self.param(
                 "res_poly_heads_only",
@@ -311,6 +328,7 @@ def _build_res_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "body is the res_mark_layer segment alone, abutting them) -- "
                 "the IHP sg13g2 PCell convention (issue #2679)",
                 default=False,
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:

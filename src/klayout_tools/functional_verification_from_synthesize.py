@@ -107,6 +107,7 @@ def resolve_from_synthesize(
     envelope,
     *,
     pdk_cell_library: str | None = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[str, dict[str, Any]] | None:
     """Resolve and verify ``options.from_synthesize``.
 
@@ -161,7 +162,9 @@ def resolve_from_synthesize(
         raise _err(f"options.from_synthesize netlist not found: {netlist}")
     expected = report.get("netlist_sha256")
     check = hash_check("netlist_sha256", expected, sha256_file(netlist))
-    if not check["match"]:
+    # A run requires the synthesis pin. An FV check compares the same file
+    # to the FV report's own pin, even when synthesis has since been rerun.
+    if verify_synthesis_pin and not check["match"]:
         why = (
             "the report records no netlist_sha256"
             if expected is None
@@ -186,6 +189,7 @@ def resolve_sources_with_synthesize(
     envelope,
     *,
     pdk_input: Any = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[list[str], dict[str, Any] | None]:
     """The effective ``sources`` and the response block, or ``(sources,
     None)`` when ``options.from_synthesize`` is unused.
@@ -203,6 +207,7 @@ def resolve_sources_with_synthesize(
         request_dir,
         hdl_toplevel,
         envelope,
+        verify_synthesis_pin=verify_synthesis_pin,
         pdk_cell_library=(pdk_input.cell_library if pdk_input is not None else None),
     )
     sources = _resolve_sources(
