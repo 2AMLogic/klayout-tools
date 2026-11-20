@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt extract --deck gf180mcu` resolves marker-scoped MOS capacitors ~2x
+  faster on marker-rich layouts** (#6527, 2026-11-20): the bulk-algebra
+  resolver #5807 introduced memoized its layer *read* (`region_of`) but not
+  the `islands.interacting(region)` claim set, so the same full-island-set
+  `interacting()` re-ran once per deck entry per layer — on the gf180mcu
+  deck, 248 calls over 21 distinct layers (11.8x redundancy), since the 12
+  entries draw their `excludes`/`requires` layers from one small shared set.
+  `touching()` is now memoized per layer (a `functools.cache` on the nested
+  closure, so the cache is per resolver call, never module-level), and the
+  `islands - in_well` complement is hoisted out of the entry loop. Measured
+  on the 800-cell flat fixture of `tests/test_extract_scaling.py` with
+  `MOS_CAP_MK` (166/5) drawn over the whole array (4800 active islands),
+  resolver only, min of 3 runs: 0.994 s → 0.438 s (the issue reported
+  1.133 s → 0.562 s), with identical results — claimed entries
+  `[0, 2]` (`cap_nmos_03v3`, `cap_pmos_03v3`), `remaining` empty,
+  `recognised` 4800, `dropped` 0. Layouts drawing no MOS-cap marker are
+  unaffected (#5807's empty-marker short-circuit skips the entry loop
+  before `touching` is ever called); this is a constant-factor saving on
+  the marker-rich path, which #5807 already made linear. A differential
+  test (`tests/test_extract_scaling.py`) pins result identity against an
+  unmemoised reference over a marker-rich fixture — no polygon may move
+  between entries. No JSON-contract change.
 - **`klt gen mos_array` rejects an sg13g2 ring opening that would draw a
   sub-rule pSD notch** (#6790, additive — a new `GenError`, no
   `schema_version` bump): the guard-ring opening was validated only against

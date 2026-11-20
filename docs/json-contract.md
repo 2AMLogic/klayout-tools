@@ -764,6 +764,14 @@ as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
 
+The same worker block carries `threads_per_worker`, the positive integer pin
+from the worker report's `environment.threads_per_worker`. Each shard,
+including a recovered failed job, reports its own value. An unpinned run or
+a missing, legacy or malformed observation yields `null`. The client request
+cannot supply a missing value. The sibling `omp_num_threads` records the
+ambient variable at worker preflight, so a successful capture can report
+`omp_num_threads: null` alongside `threads_per_worker: 2`.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
