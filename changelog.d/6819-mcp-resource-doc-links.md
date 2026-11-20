@@ -1,1 +1,0 @@
-- **MCP schema-resource descriptions link to CLI documentation on GitHub** (#6819, 2026-11-19).

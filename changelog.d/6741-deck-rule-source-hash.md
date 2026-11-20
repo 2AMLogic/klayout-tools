@@ -1,1 +1,0 @@
-- **Named deck pins include sibling rule sources** (#6741, 2026-11-18). Regenerate `sky130` and `sg13g2` pins when upgrading. Historical release hashes still resolve.

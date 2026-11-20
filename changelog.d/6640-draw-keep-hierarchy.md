@@ -1,1 +1,0 @@
-- **`klt draw` can patch a hierarchical layout in place.** Set `params.keep_hierarchy` to `true` with `base_gds` to preserve child instances when adding shapes and labels to the top cell (#6640, 2026-11-18).

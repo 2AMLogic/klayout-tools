@@ -1,1 +1,0 @@
-- **`klt drc --check` names the positional `<file>` override in its JSON hint for a missing layout** (#6582, 2026-11-18).
