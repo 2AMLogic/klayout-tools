@@ -480,9 +480,7 @@ def _resolve_step_measurements(
     """One step's measurements, flattened and named ``<step>.<name>``."""
     from .sim_validate import _validate_measurement_form
 
-    specs = raw.get("measurements")
-    if specs is None:
-        return []
+    specs = raw.get("measurements", [])  # an explicit null is refused too (#6412)
     if not isinstance(specs, list) or not all(isinstance(s, dict) for s in specs):
         raise SimError(
             f"step {step['name']!r}: measurements must be an array of objects"
@@ -746,7 +744,8 @@ def _resolve_derived_measurements(
     entries evaluated after every step, in declared order."""
     from .sim_validate import _validate_measurement_forms
 
-    specs = request.get("measurements") or []
+    # Only an absent key defaults (#6412); `or []` read null/{}/""/false/0 as absent.
+    specs = request.get("measurements", [])
     _validate_measurement_forms(specs)
     derived_names = [str(spec["name"]) for spec in specs]
     resolved: list[dict[str, Any]] = []

@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt gen mos_array` rejects an sg13g2 ring opening that would draw a
+  sub-rule pSD notch** (#6790, additive — a new `GenError`, no
+  `schema_version` bump): the guard-ring opening was validated only against
+  the generic 0.4 µm same-layer floor, but the tap ring's pSD implant
+  extends 0.18 µm into the opening from each cut face, so the drawn pSD
+  opening is the snapped cut width minus 0.36 µm and a request below ~0.67 µm
+  could draw a DRC-dirty `psd.space.1` (0.31 µm) notch. Where the cut faces
+  snap decides the outcome near the boundary: on the default 0.001 µm grid,
+  at offset 0, `ring_gap_um=0.66` draws 0.300 µm (rejected) and `0.665` draws
+  0.310 µm (accepted), while `0.665` at `ring_gap_offset_um=0.0025` draws
+  0.305 µm (rejected). The drawn opening — snapped and margin-inset on the
+  PCell's own drawing grid, then converted to the output stream's database
+  unit, and checked against the curated deck's own rule — is now validated
+  before GDS is written (a tech LEF declaring `DATABASE MICRONS 2000` changes
+  the output grid but not the PCell's); the error names `ring_gap_um`, the
+  rule, and the remedy. Closed-ring, ring-less, PFET, and standalone
+  `guard_ring` requests are unchanged. Other PDKs and `diff_pair` are
+  deliberately untouched (out of #6790's scope).
+
 - **Added** (#6614, `klt gen diode`; additive — no `schema_version` bump):
   the `diode` generator now runs on gf180mcu. `voltage_class` accepts
   `"06v0"` there (the `Dualgate` 6V flavour, the only one the curated deck
@@ -85,6 +104,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
   Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
   batch".
+
+- **`klt extract --deck gf180mcu` no longer scales quadratically with device
+  count on flat arrays** (#5807, 2026-11-17): the gf180mcu MOS-capacitor
+  recogniser (#2919, dfc9ae034) walked every `active` island and ran one
+  full-layout `interacting()` per island per marker/implant layer, and
+  `klt extract`'s unsupported-device diagnostic re-ran that walk plus a
+  second per-island flavour sweep (#4587) — so an ~8k-cell flat SRAM array
+  went from 202 s on v0.5.0 to unfinished after 1831 s on v0.8.0, with the
+  cost attributed to `device_extraction`. Both paths now resolve their claim
+  sets with bulk island-set region algebra (one `interacting()` per layer
+  over the merged region, first-claim-wins preserved by an ordered entry
+  sweep), and the per-gate flavour split only visits islands touching the
+  flavour marker. Equivalence with the per-island form: merged islands are
+  mutually disjoint, so `&`/`-` between island unions stay island-granular,
+  and the ordered entry sweep with a cumulative `taken` union reproduces
+  first-claim-wins exactly; the gate predicate keeps its area-overlap
+  semantics (`island & poly` non-empty) by testing islands against
+  `poly & islands` — the overlap fragments, disjoint islands sharing none —
+  rather than `poly` itself, whose mere edge-touch would widen it to a touch
+  test; empty `requires` layers claim nothing and empty `excludes` layers
+  are a no-op, matching the old `touches()` predicate. Extraction output is
+  byte-identical: the netlist (and its normalized hash) is unchanged on
+  plain and marker-rich fixtures. The previously unattributed
+  unsupported-device block is now timed as its own
+  `timing.stages.unsupported_devices` key (additive; no `schema_version`
+  bump). A 4x-larger flat array now costs ~4x the recognition block instead
+  of ~16x (`tests/test_extract_scaling.py`).
+
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
