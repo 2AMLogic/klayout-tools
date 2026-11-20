@@ -45,12 +45,12 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   invocation (there are two per run, one per side). Default `1800`, the same
   cap [`signoff.md`](signoff.md) puts on a command-backed evidence entry.
   Requires `--measure-command`.
-- `--deck` — required (except for a bare `--attach`, and under `--engine klayout-runset`, where it is refused by name), passed through to `klt extract --parasitics`.
+- `--deck` — required (except for a bare `--attach`; optional under `--engine klayout-runset`, where giving it selects the merged route of issue #6606), passed through to `klt extract --parasitics`.
 - `--engine`, `--deck-file`, `--deck-var`, `--device-param`, `--runset-timeout` —
   select and drive the runset-engine route (issue #6559); same spelling and
   validation as [`klt extract`](extract.md)'s. See
   ["Runset engine"](#runset-engine-a-device-family-only-the-pdk-runset-recognises---engine-klayout-runset)
-  below, including what it does **not** give you: **no parasitics**.
+  below, including what that route gives you only with `--deck`: **parasitics**.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Same default
   as `klt extract`: `<layout>` with its extension replaced by `.spice`, next
   to the input.
