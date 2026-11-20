@@ -1940,17 +1940,21 @@ and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
 "poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
 mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
 licons by an approximation (see the `licon1.width.1` note below), not
-replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
-reads `clean` here while the PDK's own Magic `drc(full)` still reports those
-head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
-them. Both `licon.1c` and `rpm.1` are head-geometry-derived — measured
-2026-11-15 (Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
-`0.9.3.dev3+gd5d57daf9a14`), a uniform 0.2 µm marker (`spacing_um` <= 0.4)
-leaves `rpm.1` unchanged while head length alone clears it — so the marker
-overhang is ruled out and the head-length fix is tracked in #5704. `klt
-drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the independent
-check. This gap is documentation-only: no field of the JSON `coverage`
-object changes.
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell reads
+`clean` here, and since issue #5704 the generator also draws its end heads
+to the 2.16 µm extension — the two verdicts no longer disagree on that rule
+for generated cells (verified live, 2026-11-17: the pre-#5704 cell reported
+`licon.1c + li.5` under Magic `drc(fast)`/`drc(full)` while this deck said
+`clean`; the fixed cell reports `No errors found.` under both). Both
+`licon.1c` and `rpm.1` were head-geometry-derived — measured 2026-11-15
+(Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev3+gd5d57daf9a14`): a uniform 0.2 µm marker (`spacing_um` <= 0.4)
+left `rpm.1` unchanged while head length alone cleared it. For
+arbitrary layout a `klt drc --deck sky130` pass still is not evidence the
+heads meet `licon.1b/c` — the deck has no such rule;
+`klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two

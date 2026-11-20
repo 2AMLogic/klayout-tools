@@ -1666,6 +1666,7 @@ def _res_unit_layout(
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
     marker_contact_space_um: float = 0.0,
+    head_len_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """One unit resistor (or unit MoM/MiM cap cell footprint): a poly body
@@ -1699,7 +1700,7 @@ def _res_unit_layout(
     ``end_contact_h_um`` across it (y). sky130's precision-poly resistor
     flavours (``high``/``xhigh``) need this -- upstream ``licon.1b/c`` pins a
     licon on a precision resistor to 0.19um x 2.0um (see
-    :data:`~klayout_tools.gen_layer_params._PDK_RES_FLAVOR_END_CONTACT_UM`).
+    :data:`~klayout_tools.gen_res_head._PDK_RES_FLAVOR_END_CONTACT_UM`).
     The poly and local-metal end pads grow with the cut: they are
     ``end_contact_w_um + 2 * enclosure`` wide and, when taller than the
     resistor body, ``end_contact_h_um + 2 * enclosure`` tall, centred on the
@@ -1713,6 +1714,15 @@ def _res_unit_layout(
     the marker. gf180mcu's ``SB.4`` needs 0.15um where the generic enclosure
     margin leaves 0.10um.
 
+    ``head_len_um`` (issue #5704, ``0.0`` by default) is a PDK-resolved
+    minimum end-head length along the current-flow axis -- sky130's
+    ``licon.1c + li.5`` precision-resistor contact extension (see
+    :data:`~klayout_tools.gen_res_head._PDK_RES_FLAVOR_HEAD_LEN_UM`):
+    ``contact_region_um`` becomes ``max(enclosure-derived, head_len_um)``,
+    lengthening the poly/local-metal end pads and the unit pitch without
+    touching the body segment, the pad height or the centred contact.
+    ``0.0`` keeps every existing caller unchanged.
+
     ``poly_heads_only`` (issue #2679, ``False`` by default) draws the
     ``"poly"`` role as just the two end heads, leaving the body span between
     them undrawn on the poly layer -- the IHP sg13g2 PCell convention where
@@ -1725,7 +1735,9 @@ def _res_unit_layout(
     enclosure_um = max(ENCLOSURE_MARGIN_UM, via_enclosure_min_um)
     contact_w_um = end_contact_w_um if rect_contact else contact_side_um
     contact_h_um = end_contact_h_um if rect_contact else contact_side_um
-    contact_region_um = contact_w_um + 2 * max(enclosure_um, marker_contact_space_um)
+    contact_region_um = max(
+        contact_w_um + 2 * max(enclosure_um, marker_contact_space_um), head_len_um
+    )
     # Pad extent across the body axis: the body width, grown to enclose a
     # taller-than-body rectangular contact (dogbone head).
     pad_h_um = (
@@ -1797,6 +1809,7 @@ def _res_array_layout(
     end_contact_w_um: float = 0.0,
     end_contact_h_um: float = 0.0,
     marker_contact_space_um: float = 0.0,
+    head_len_um: float = 0.0,
     poly_heads_only: bool = False,
 ) -> dict[str, Any]:
     """``num`` matched unit resistors (see :func:`_res_unit_layout`), folded
@@ -1845,6 +1858,8 @@ def _res_array_layout(
     :func:`_res_unit_layout`'s rectangular precision-poly end contact; a
     dogbone head taller than the body also widens the row-to-row pitch.
     ``marker_contact_space_um`` (issue #3000) forwards likewise.
+    ``head_len_um`` (issue #5704) forwards to :func:`_res_unit_layout`'s
+    PDK-resolved minimum end-head length; only the unit pitch moves.
     """
     unit = _res_unit_layout(
         length_um,
@@ -1854,6 +1869,7 @@ def _res_array_layout(
         end_contact_w_um,
         end_contact_h_um,
         marker_contact_space_um,
+        head_len_um,
         poly_heads_only,
     )
     effective_spacing_um = max(spacing_um, min_spacing_um)
@@ -1968,33 +1984,6 @@ def _res_array_layout(
         "jumpers": jumpers,
         "spacing_um": effective_spacing_um,
     }
-
-
-def _res_flavor_mask_box_um(
-    info: dict[str, Any], enclosure_um: float
-) -> tuple[float, float, float, float]:
-    """Per-unit box (unit-local um) for a precision-resistor requires-mask
-    that must cover the *whole* unit -- body plus contacted dogbone heads --
-    rather than just :func:`_res_unit_layout`'s body-only ``"marker"`` box
-    (issue #2449).
-
-    sky130's upstream deck only exempts a licon from the ordinary 0.17um
-    ``licon.1`` rule inside ``prec_resistor = (rpm | urpm) & psdm &
-    poly.interacting(poly_rs)`` (``sky130A_mr.drc``), so ``rpm``/``urpm`` and
-    ``psdm`` must enclose the end-pad licons too, as the foundry
-    ``res_high_po``/``res_xhigh_po`` cells do. ``enclosure_um`` is the
-    official enclosure of the poly resistor by that mask (``rpm.3`` 0.2um,
-    ``rpm.4`` 0.11um for ``psdm``). Toward a neighbouring unit (within a row
-    or across a row fold) the box grows to half the gap when that is larger,
-    so neighbouring masks abut and merge instead of leaving a sliver gap
-    below ``rpm.2``'s 0.84um / ``psdm``'s 0.38um spacing floor.
-    """
-    unit = info["unit"]
-    pad_y0 = unit["pad_y0_um"]
-    pad_y1 = pad_y0 + unit["pad_height_um"]
-    ext_x = max(enclosure_um, info["spacing_um"] / 2.0)
-    ext_y = max(enclosure_um, (info["row_pitch_um"] - unit["pad_height_um"]) / 2.0)
-    return (-ext_x, pad_y0 - ext_y, unit["total_len_um"] + ext_x, pad_y1 + ext_y)
 
 
 def _cap_unit_layout(
