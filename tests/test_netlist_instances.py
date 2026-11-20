@@ -245,9 +245,10 @@ def test_a_bare_positional_card_is_still_an_instance_with_null_model():
 
 
 def test_a_duplicate_parameter_keys_last_one_wins():
-    (x1,) = parse_instance_cards("X1 a b c d mod m=1 m=2\n")
-    assert x1["params"]["m"] == "2"
-    assert x1["multiplier"] == {"m": "2", "mult": None, "agree": None}
+    (x1,) = parse_instance_cards("X1 a b c d mod PaRaMs: m=1 m=2 M=3 m=4 MULT=4\n")
+    assert x1["model"] == "mod"
+    assert x1["params"] == {"m": "4", "M": "3", "MULT": "4"}
+    assert x1["multiplier"] == {"m": "4", "mult": "4", "agree": True}
 
 
 def test_zero_device_instances_is_an_empty_array_not_a_missing_key():
