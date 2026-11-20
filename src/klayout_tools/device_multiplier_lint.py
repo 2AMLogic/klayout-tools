@@ -149,9 +149,10 @@ def _lint_card(
             unverified.append({"instance": tokens[0], "subckt": target or ""})
         return
     header, _, body = subckt_text.partition("\n")
-    if not _header_declares_mult(header) or _body_forwards_mult(body):
+    header_mult = _header_mult_token(header)
+    if header_mult is None or _body_forwards_mult(body):
         return
-    _compare_pair(tokens[0], target or "", params, findings, unevaluated)
+    _compare_pair(tokens[0], target or "", params, header_mult, findings, unevaluated)
 
 
 def _pair_could_yield_finding(params: dict[str, str]) -> bool:
@@ -180,12 +181,16 @@ def _compare_pair(
     instance: str,
     subckt: str,
     params: dict[str, str],
+    header_mult: str | None,
     findings: list[dict[str, Any]],
     unevaluated: list[dict[str, str]],
 ) -> None:
     """The rule table for one instance of a subcircuit that declares
     ``mult`` but never forwards it to drive: disclose unevaluated values,
-    then flag a pair that disagrees."""
+    then flag a pair that disagrees. An omitted instance ``mult=`` takes
+    the header's declared default (``header_mult``), so the comparison
+    stays text-driven end to end; an explicit instance ``mult=`` always
+    wins over the header."""
     m_raw = params.get("m")
     mult_raw = params.get("mult")
     m_value = _param_number(m_raw)
@@ -212,7 +217,16 @@ def _compare_pair(
                 )
             )
         return
-    effective = 1.0 if mult_value is None else mult_value
+    if mult_raw is None:
+        declared = _param_number(header_mult)
+        effective = 1.0 if declared is None else declared
+    elif mult_value is None:
+        # Unreachable today: ``comparable`` above already returned the
+        # nonnumeric-mult case. Restated so the checker sees the
+        # invariant (a present ``mult=`` implies a numeric value).
+        return
+    else:
+        effective = mult_value
     if m_value != effective:
         findings.append(
             _finding(
@@ -274,12 +288,14 @@ def _number_text(raw: str | None, value: float | None) -> str:
     return raw or ""
 
 
-def _header_declares_mult(header: str) -> bool:
-    """Does the ``.subckt`` header declare a ``mult`` parameter? Uses the
-    shared tokenizer (not a bare ``split()``) so the spaced ``mult = 1``
-    spelling reads the same as ``mult=1``."""
+def _header_mult_token(header: str) -> str | None:
+    """The ``mult`` token declared in the ``.subckt`` header -- the value an
+    omitted instance ``mult=`` resolves to. ``None`` when the header does
+    not declare the parameter. Uses the shared tokenizer (not a bare
+    ``split()``) so the spaced ``mult = 1`` spelling reads the same as
+    ``mult=1``."""
     params, _ = _card_params(split_spice_tokens(header))
-    return "mult" in params
+    return params.get("mult")
 
 
 def _body_forwards_mult(body: str) -> bool:

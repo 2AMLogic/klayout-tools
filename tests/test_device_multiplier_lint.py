@@ -163,6 +163,72 @@ def test_no_message_suggests_dropping_a_form():
 
 
 # --------------------------------------------------------------------------- #
+# The header's declared mult default (issue #6812)
+# --------------------------------------------------------------------------- #
+
+
+#: The future-PDK shape from issue #6812: the declared default is not 1,
+#: so an omitted instance ``mult=`` means 4, not 1.
+NON_UNITY_DEFAULT = """
+.subckt dev4 a b mult=4
+R1 a b 1k
+.ends
+"""
+
+
+def test_omitted_mult_equal_to_the_declared_default_is_clean():
+    assert _findings("X1 a b dev4 m=4\n", NON_UNITY_DEFAULT) == []
+
+
+def test_omitted_mult_below_the_declared_default_is_a_disagreement():
+    (finding,) = _findings("X1 a b dev4 m=1\n", NON_UNITY_DEFAULT)
+    assert finding["kind"] == lint.DRIVE_MISMATCH_DISAGREEMENT
+    assert finding["m"] == "1"
+    assert finding["mult"] is None
+    assert "disagree" in finding["note"]
+
+
+@pytest.mark.parametrize("params", ["m=2 mult=2", "m=4 mult=4"])
+def test_explicit_instance_mult_overrides_the_header_default(params):
+    assert _findings(f"X1 a b dev4 {params}\n", NON_UNITY_DEFAULT) == []
+
+
+def test_explicit_instance_mult_unequal_to_m_stays_a_disagreement():
+    (finding,) = _findings("X1 a b dev4 m=4 mult=2\n", NON_UNITY_DEFAULT)
+    assert finding["kind"] == lint.DRIVE_MISMATCH_DISAGREEMENT
+
+
+def test_expression_instance_m_stays_unevaluated_with_non_unity_default():
+    report = _report("X1 a b dev4 m={2*2}\n", NON_UNITY_DEFAULT)
+    assert report["findings"] == []
+    assert report["unevaluated"] == [{"instance": "X1", "param": "m", "value": "{2*2}"}]
+
+
+def test_nonnumeric_declared_default_keeps_the_unity_fallback():
+    expression_default = ".subckt devx a b mult={l*w}\nR1 a b 1k\n.ends\n"
+    assert _findings("X1 a b devx m=1\n", expression_default) == []
+    (finding,) = _findings("X1 a b devx m=3\n", expression_default)
+    assert finding["kind"] == lint.DRIVE_MISMATCH_DISAGREEMENT
+
+
+def test_numeric_zero_declared_default_survives():
+    zero_default = ".subckt dev0 a b mult=0\nR1 a b 1k\n.ends\n"
+    assert _findings("X1 a b dev0 m=0\n", zero_default) == []
+    (finding,) = _findings("X1 a b dev0 m=1\n", zero_default)
+    assert finding["kind"] == lint.DRIVE_MISMATCH_DISAGREEMENT
+
+
+def test_missing_declaration_with_m_only_is_skipped():
+    plain = ".subckt plain a b\nR1 a b 1k\n.ends\n"
+    assert _findings("X1 a b plain m=2\n", plain, NON_UNITY_DEFAULT) == []
+
+
+def test_forwarding_body_with_non_unity_default_is_skipped():
+    forwarding_non_unity = ".subckt dev4f a b mult=4\nR1 a b 1k m={mult}\n.ends\n"
+    assert _findings("X1 a b dev4f m=7\n", forwarding_non_unity) == []
+
+
+# --------------------------------------------------------------------------- #
 # Reading cards: folding, case, hierarchy, unknown targets
 # --------------------------------------------------------------------------- #
 
