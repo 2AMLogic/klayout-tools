@@ -721,8 +721,18 @@ report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
 before it existed. It always carries `params_not_carried` (issue #6559: `{class: [PARAM, …]}`,
 sorted — the measured parameters the `X` cards do not carry, the structured form
 of the per-class `warnings[]` prose; `{}` once every parameter is declared), which
-`klt pex` copies into its own `extraction` block. `device_count`,
-`device_counts`, `devices[]`, `nets[]`, `netlist_path`, `netlist_sha256`,
+`klt pex` copies into its own `extraction` block. It also always carries two
+additive fields for a runset that does not flatten (issue #6559):
+`instantiated_device_counts` (`{class: count}` — the devices instantiated from
+the selected circuit through every circuit it calls, once per call; equal to
+`device_counts` for a flat runset) and `extra_circuits` (`[circuit, …]` — the
+circuits written besides the selected one, `[]` when flat). `device_count`,
+`device_counts`, `devices[]`, `nets[]` describe the **selected circuit alone**
+— `{}`/`0`/empty for a top whose devices all sit in called cells, which the
+`warnings[]` entry for a multi-circuit netlist states — and the "recognised no
+devices" warning keys on `instantiated_device_counts`, never on that top-only
+count. `klt pex` reports `instantiated_device_counts` as its own
+`extraction.device_counts`. `netlist_path`, `netlist_sha256`, `netlist_path`, `netlist_sha256`,
 `netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
 mean for the curated engine. **The exit status proves nothing** about the
 extraction: a runset may exit non-zero purely because its (discarded) compare

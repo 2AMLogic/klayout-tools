@@ -129,6 +129,7 @@ from .extract_runset_spice import (
     _check_device_params,
     _device_params_echo,
     _dropped_parameter_warnings,
+    _instantiated_device_counts,
     _uncarried_parameters,
     _write_netlist,
 )
@@ -367,6 +368,7 @@ def run_extract_klayout_runset(
         )
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
+        instantiated = _instantiated_device_counts(circuit)
         nets = _staged("describe_nets", _describe_nets, circuit)
         runset_block = {
             "deck_file": deck_file,
@@ -388,12 +390,13 @@ def run_extract_klayout_runset(
         warnings.append(
             f"the runset's netlist holds {len(extra_circuits) + 1} circuits "
             f"({', '.join([circuit_name] + extra_circuits)}); all of them are "
-            f"written, but devices[]/nets[] and every count describe "
-            f"'{circuit_name}' alone. Re-run the runset in flat mode (for "
+            f"written, but devices[]/nets[] and every count other than "
+            f"instantiated_device_counts describe '{circuit_name}' alone. "
+            "Re-run the runset in flat mode (for "
             "sg13cmos5l.lvs: --deck-var run_mode=flat) for the single-circuit "
             "shape the curated engine always produces"
         )
-    if not devices:
+    if not instantiated:
         warnings.append(
             "the runset recognised no devices in this layout -- an empty "
             "extraction is not evidence. Check that the runset matches this "
@@ -448,6 +451,13 @@ def run_extract_klayout_runset(
         # carry, per class -- the structured form of the `warnings[]` prose,
         # `{}` once every parameter is declared. `klt pex` copies it.
         "params_not_carried": {k: sorted(v) for k, v in sorted(uncarried.items())},
+        # Additive (issue #6559, hierarchical runsets): `device_counts` covers
+        # the selected circuit alone, so these two say what is outside it --
+        # the devices instantiated through every called circuit, and the
+        # circuits written besides the selected one (`[]` for a flat runset,
+        # where the former equals `device_counts`).
+        "instantiated_device_counts": instantiated,
+        "extra_circuits": extra_circuits,
         # This engine extracts devices and connectivity only, so there are no
         # parasitics; `klt pex --engine klayout-runset` reports that as
         # `extraction.parasitics_carried: false` (docs/cli/pex.md, "Runset

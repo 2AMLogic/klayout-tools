@@ -162,15 +162,31 @@ def extraction_fields(extract_report: Mapping[str, Any]) -> dict[str, Any]:
       ``--device-param``; copied from ``klt extract``'s own report.
     - ``device_counts`` -- per device class, what the runset recognised, so a
       reader can see a family is present (or absent) without the extract JSON.
+      Counted over the **instantiated hierarchy** (``klt extract``'s
+      ``instantiated_device_counts``): a hierarchical runset's top often holds
+      no device itself, and ``klt extract``'s own ``device_counts`` -- the
+      selected circuit alone -- would then read ``{}`` for a design full of
+      them. Identical to it for a flat runset.
+    - ``device_count`` -- overrides the envelope's echo of ``klt extract``'s
+      selected-circuit ``device_count``: the total of ``device_counts``, so the
+      two never disagree.
+    - ``extra_circuits`` -- the circuits written besides the selected one
+      (``[]`` for a flat runset). ``net_count`` still describes the selected
+      circuit alone; a non-empty list is how a reader knows that.
     """
     if extract_report.get("engine") != RUNSET_ENGINE:
         return {}
     uncarried = extract_report.get("params_not_carried") or {}
+    counts = extract_report.get("instantiated_device_counts")
+    if counts is None:  # an extract report predating the hierarchy-aware count
+        counts = extract_report.get("device_counts") or {}
     return {
         "engine": RUNSET_ENGINE,
         "parasitics_carried": False,
         "params_not_carried": {
             name: list(uncarried[name]) for name in sorted(uncarried)
         },
-        "device_counts": dict(extract_report.get("device_counts") or {}),
+        "device_counts": dict(counts),
+        "device_count": sum(counts.values()),
+        "extra_circuits": list(extract_report.get("extra_circuits") or []),
     }

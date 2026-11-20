@@ -248,6 +248,7 @@ from .pex_netlist_text import (
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
+    _instantiated_model_counts,
     _logical_cards,
     _reference_is_hierarchical,
     _subckt_interfaces,
@@ -894,7 +895,7 @@ def _flat_dut_mismatch(
 
 
 def _model_mismatch(
-    *, reference_netlist: str, extracted_netlist: str
+    *, reference_netlist: str, extracted_netlist: str, extracted_top: str | None = None
 ) -> dict[str, Any] | None:
     """The structured ``model_mismatch`` diagnostic (issue #2402), or
     ``None`` when the reference (schematic) and extracted netlists'
@@ -934,6 +935,12 @@ def _model_mismatch(
     should not be blocked; the point is only that the divergence must be
     *visible* rather than silently folded into an ordinary, gradeable delta.
 
+    **A hierarchical extraction is expanded, not scanned** (issue #6559): the
+    runset engine writes every circuit it produced, so the extracted side is
+    counted as the devices instantiated from ``extracted_top``
+    (:func:`_instantiated_model_counts`) -- a local cell name is never a
+    device family. A flat extraction counts exactly as before.
+
     The comparison is a multiset (instance *count* per model name, not just
     which names appear): a run whose two sides name the same models but a
     different number of each still reports the divergence, since that
@@ -949,7 +956,9 @@ def _model_mismatch(
     reference_counts = _device_model_counts(
         _expand_reference_includes(reference_text, reference_netlist)
     )
-    extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
+    extracted_counts = _instantiated_model_counts(
+        _read_text(extracted_netlist) or "", extracted_top
+    )
 
     reference_multiset = {
         key: count for key, (_name, count) in reference_counts.items()
@@ -3124,6 +3133,7 @@ def run_pex(
         else _model_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
+            extracted_top=extract_report["top"],
         )
     )
 
