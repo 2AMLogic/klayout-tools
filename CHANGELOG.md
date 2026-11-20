@@ -85,6 +85,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   `options.fail_on_diagnostic` accepts it but it never matches (a no-op).
   Docs: `docs/cli/sim.md`'s "Transient convergence differs between local and
   batch".
+
+- **`klt extract --deck gf180mcu` no longer scales quadratically with device
+  count on flat arrays** (#5807, 2026-11-17): the gf180mcu MOS-capacitor
+  recogniser (#2919, dfc9ae034) walked every `active` island and ran one
+  full-layout `interacting()` per island per marker/implant layer, and
+  `klt extract`'s unsupported-device diagnostic re-ran that walk plus a
+  second per-island flavour sweep (#4587) — so an ~8k-cell flat SRAM array
+  went from 202 s on v0.5.0 to unfinished after 1831 s on v0.8.0, with the
+  cost attributed to `device_extraction`. Both paths now resolve their claim
+  sets with bulk island-set region algebra (one `interacting()` per layer
+  over the merged region, first-claim-wins preserved by an ordered entry
+  sweep), and the per-gate flavour split only visits islands touching the
+  flavour marker. Equivalence with the per-island form: merged islands are
+  mutually disjoint, so `&`/`-` between island unions stay island-granular,
+  and the ordered entry sweep with a cumulative `taken` union reproduces
+  first-claim-wins exactly; the gate predicate keeps its area-overlap
+  semantics (`island & poly` non-empty) by testing islands against
+  `poly & islands` — the overlap fragments, disjoint islands sharing none —
+  rather than `poly` itself, whose mere edge-touch would widen it to a touch
+  test; empty `requires` layers claim nothing and empty `excludes` layers
+  are a no-op, matching the old `touches()` predicate. Extraction output is
+  byte-identical: the netlist (and its normalized hash) is unchanged on
+  plain and marker-rich fixtures. The previously unattributed
+  unsupported-device block is now timed as its own
+  `timing.stages.unsupported_devices` key (additive; no `schema_version`
+  bump). A 4x-larger flat array now costs ~4x the recognition block instead
+  of ~16x (`tests/test_extract_scaling.py`).
+
 - **`klt extract` gf180mcu deck: an SB.10-compliant (SAB-enclosed) poly
   resistor now extracts as a two-terminal device instead of silently
   vanishing** (#5889, 2026-11-17). The DRM's own SB.10
