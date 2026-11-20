@@ -974,7 +974,7 @@ def test_checked_in_history_table_covers_every_release():
     data = json.loads(real_path.read_text())
     entries = data["entries"]
 
-    tags = sorted({e["git_tag"] for e in entries})
+    tags = list(dict.fromkeys(e["git_tag"] for e in entries))  # table order
     decks = sorted({e["deck"] for e in entries})
     assert tags, "expected at least one release tag in the checked-in table"
     assert decks, "expected at least one deck in the checked-in table"
