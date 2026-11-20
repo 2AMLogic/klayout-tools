@@ -1076,7 +1076,13 @@ two things let a caller tell a slow run from a hang and budget the step:
   `unattributed_seconds` (the remainder no stage covers, so
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
   **exclusive**: a stage opened inside another is credited to the inner stage
-  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  only, so the parent's value excludes it (issue #5716). The `--progress`
+  `finished in Ns` line is **not** this quantity: it is wall time *inside* the
+  stage, inclusive of any stage nested in it, so for a parent stage it exceeds
+  that stage's `timing.stages` value by its children's time (e.g.
+  `device_extraction` with `--parasitics`, whose `parasitics_compute` runs
+  inside it). Use the stderr line to see how long a stage has been open, and
+  `timing.stages` to see where the time went. Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
   and passive-region work; **excludes** the `--parasitics` compute),
   `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
@@ -8824,7 +8830,7 @@ Every field in this report falls into exactly one of four classes:
 | **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
-| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift; a hand-rolled comparer should drop it. The full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
+| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift. Rather than hand-rolling a comparer that drops it, pipe the report through `klt evidence canonicalize --kind extract` (issue #5541), which emits exactly the `--rerun` view; the full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
 
 `klt extract --check <report> --rerun` (below) normalizes every
 **bookkeeping** field before diffing (an anonymous net's committed and

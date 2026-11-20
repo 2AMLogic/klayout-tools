@@ -128,6 +128,7 @@ from ..signoff import (
     check_tier_report,
     describe_grader,
 )
+from ..signoff_artifact import artifact_resolution
 from ..signoff_attest import STREAM_ATTESTABLE_ITEM, write_attestation
 from ..signoff_attest_build import attach_build_drift, build_drift_line
 from ..signoff_attest_carry import compute_attestation as _compute_attestation
@@ -139,6 +140,7 @@ from ..signoff_attest_text import attestation_check_line as _attestation_check_l
 from ..signoff_attest_text import check_label, note_lines
 from ..signoff_coverage_disclosure import format_coverage as _format_coverage
 from ..signoff_coverage_disclosure import format_undisclosed
+from ..signoff_details import _format_body_bias
 from ..signoff_evidence_pin import INPUT_VERIFIED_NOTE_GLOSSES
 from ..signoff_generator_batch import (
     GeneratorApprovalError,
@@ -148,9 +150,14 @@ from ..signoff_generator_batch import (
 from ..signoff_grouped_citations import print_group_coverage as _print_group_coverage
 from ..signoff_grouped_citations import print_power_delivery as _print_power_delivery
 from ..signoff_output import non_attest_problem, write_output_or_message
+from ..signoff_spec_row_table import print_spec_row_table
 from .color import Palette, resolve_palette
 from .output import emit_error, emit_success, render_rerun_drift
-from .signoff_flags import mode_flag_problem
+from .signoff_flags import (
+    artifact_manifest_problem,
+    describe_grader_problem,
+    mode_flag_problem,
+)
 from .signoff_repin_cmd import run_repin
 from .signoff_tier_text import (
     _justified_gap_suffix,
@@ -177,6 +184,9 @@ _CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    problem = artifact_manifest_problem(args, manifest_source, fleet_source)
+    if problem:
+        return emit_error("signoff", problem, args.format)
     if getattr(args, "repin", False):
         # Checked before every other mode so `--repin --attest 9` refuses the
         # combination rather than quietly running the attestation (issue
@@ -191,10 +201,11 @@ def run(args: argparse.Namespace) -> int:
     if problem is not None:
         return emit_error("signoff", problem, args.format)
     repo_root = getattr(args, "repo_root", None)
-    if fleet_source:
-        return _run_fleet_report(args, fleet_source, repo_root=repo_root)
-    if manifest_source:
-        return _run_tier_report(args, manifest_source, repo_root=repo_root)
+    with artifact_resolution(getattr(args, "artifact_manifest", None)):
+        if fleet_source:
+            return _run_fleet_report(args, fleet_source, repo_root=repo_root)
+        if manifest_source:
+            return _run_tier_report(args, manifest_source, repo_root=repo_root)
     return _run_envelope_aggregation(args)
 
 
@@ -223,35 +234,9 @@ def _run_describe_grader(
     manifest_source: str | None,
     fleet_source: str | None,
 ) -> int:
-    if args.files or manifest_source or fleet_source:
-        return emit_error(
-            "signoff",
-            "--describe-grader cannot be combined with <file> arguments, "
-            "--manifest, or --fleet",
-            args.format,
-        )
-    if getattr(args, "tiers_doc", None):
-        return emit_error(
-            "signoff",
-            "--tiers-doc is not meaningful with --describe-grader -- it "
-            "always reports this build's own shipped grading rules, never "
-            "an overridden doc's item list",
-            args.format,
-        )
-    if getattr(args, "check", None):
-        return emit_error(
-            "signoff",
-            "--check is not meaningful with --describe-grader -- it verifies "
-            "a committed tier/fleet report, and this mode renders none",
-            args.format,
-        )
-    if getattr(args, "repo_root", None) is not None:
-        return emit_error(
-            "signoff",
-            "--repo-root is not meaningful with --describe-grader -- it "
-            "grades no evidence, so there are no repo-scoped inputs to resolve",
-            args.format,
-        )
+    problem = describe_grader_problem(args, manifest_source, fleet_source)
+    if problem is not None:
+        return emit_error("signoff", problem, args.format)
     result = describe_grader()
     emit_success(result, args.format, _print_describe_grader_text)
     return EXIT_PASS
@@ -600,13 +585,6 @@ def _print_text(result: dict) -> None:
         print(line)
 
 
-#: How many entries of each `coverage` list the text rendering names before
-#: summarising the rest as `+N more`. The JSON output always carries every
-#: entry -- this cap only keeps a terminal line readable for a deck with
-#: dozens of rule-free layers.
-_COVERAGE_PREVIEW = 4
-
-
 def _print_input_verified(citation: dict) -> None:
     """Print one line stating whether a citation's ``content_hash`` was
     verified against the **input artifact** the cited envelope names, or
@@ -715,34 +693,6 @@ def _print_regeneration(regeneration: Any) -> None:
         f"the bound artifact; generator `{regeneration.get('generator')}` was "
         "attested, not run by klt (generator correctness and topical relevance "
         "not checked)"
-    )
-
-
-def _format_body_bias(body_bias: dict) -> str:
-    """One line summarising a `pex` citation's `body_bias` statement (issue
-    #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
-    and which synthesized nets are involved.
-
-    The verdict is always shown, including `"biased"`, for the same reason
-    `_format_coverage` always shows a `0`: "every device body had a DC bias
-    path" is the statement item 7's evidence is being asked to make, and it
-    must not be indistinguishable from an artifact that never made it (an
-    envelope with no `body_bias` block prints no line at all; see the call
-    site).
-    """
-    status = body_bias.get("status") or "unknown"
-    if status == "biased":
-        return f"{status} (every device body has a DC bias path)"
-    count = body_bias.get("unbiased_device_count") or 0
-    nets = body_bias.get("unbiased_nets") or []
-    shown = ", ".join(str(net) for net in nets[:_COVERAGE_PREVIEW])
-    if len(nets) > _COVERAGE_PREVIEW:
-        shown += f", +{len(nets) - _COVERAGE_PREVIEW} more"
-    suffix = f" on {shown}" if nets else ""
-    return (
-        f"{status} ({count} device(s) with no DC bias path{suffix}) -- "
-        "these post-layout numbers are not comparable to the schematic leg; "
-        "see docs/cli/extract.md"
     )
 
 
@@ -963,6 +913,10 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
             _print_binding_members(
                 (item.get("detail") or {}).get("artifact_binding", {}).get("members")
             )
+
+    # Issue #5691: the per-spec-row table, when the manifest declared a
+    # top-level `spec_rows` map (silent otherwise, like every disclosure).
+    print_spec_row_table(result.get("spec_rows"), palette)
 
     print()
     print(
