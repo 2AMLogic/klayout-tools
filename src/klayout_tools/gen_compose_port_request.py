@@ -158,7 +158,7 @@ def _check_grid(ctx: _Ctx, where: str, request: dict, layer: tuple[int, int]) ->
 
 def _stub_width(ctx: _Ctx, where: str, port: dict, layer: tuple[int, int]) -> float:
     reported = port.get("width_um")
-    reported_um = float(reported) if isinstance(reported, (int, float)) else 0.0
+    reported_um = float(reported) if is_finite_number(reported) else 0.0
     width = max(reported_um, ctx.min_width_for_layer(layer) or 0.0)
     if width <= 0:
         raise _error(

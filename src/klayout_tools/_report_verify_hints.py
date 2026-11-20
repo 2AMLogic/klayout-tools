@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from . import env_provenance
 from ._provenance import sha256_file
 from ._report_verify import hash_check, resolve_committed_path
 
@@ -26,7 +27,8 @@ def input_not_found_entry(
     report_path: str,
     found_relative_to_report: str | None,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    echoed: Any = None,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -37,23 +39,38 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
+    - ``resolved_repo_root`` -- when LVS supplies the effective input echo
+      (issue #5845), the repo root used for a repo-scoped path. A bare path
+      or explicit override has no repo anchor and reports ``None``.
     - ``hint`` -- when the input sits next to the report, how to reach it;
-      ``None`` otherwise.
+      ``None`` otherwise. ``override_hint=None`` (issue #6840) means no
+      override flag exists for this input, and the remedy names no flag.
     """
     report_dir = os.path.dirname(os.path.abspath(report_path))
+    remedy = (
+        f"run --check from the report's directory, or pass {override_hint}"
+        if override_hint is not None
+        else "run --check from the report's directory"
+    )
     hint = (
         None
         if found_relative_to_report is None
-        else f"run --check from the report's directory, or pass {override_hint}; "
-        f"request-file-relative paths resolve against {report_dir}"
+        else f"{remedy}; request-file-relative paths resolve against {report_dir}"
     )
-    return {
+    entry = {
         "path": path,
         "resolved": os.path.abspath(path),
         "found_relative_to_report": found_relative_to_report,
         "resolved_against": None if os.path.isabs(path) else os.getcwd(),
         "hint": hint,
     }
+    if echoed is not None:
+        entry["resolved_repo_root"] = (
+            env_provenance.find_repo_root(report_dir)
+            if isinstance(echoed, Mapping) and echoed.get("scope") == "repo"
+            else None
+        )
+    return entry
 
 
 def input_hash_check(
@@ -64,7 +81,8 @@ def input_hash_check(
     override: str | None = None,
     hasher: Callable[[str | None], str | None] = sha256_file,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
@@ -104,6 +122,11 @@ def input_hash_check(
     (``sha256:``-prefixed; the LVS runset deck, issue #6223, and ``klt drc``'s
     ``provenance.input.content_hash``, issue #6466).
 
+    ``override_hint`` may be ``None`` (issue #6840): the input then has no
+    override flag on its verb -- the runset ``deck_file`` on ``klt lvs
+    --check``, whose ``--deck-file`` is refused with ``--check`` -- and the
+    ``input_not_found`` remedy names no flag, only the report directory.
+
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
     ``{path, scope}`` object ``layout`` carries today is joined to the repo
@@ -125,7 +148,11 @@ def input_hash_check(
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
     check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report, override_hint=override_hint
+        path,
+        report_path,
+        found_relative_to_report,
+        override_hint=override_hint,
+        echoed=(override or echoed) if include_repo_root else None,
     )
     return check
 
