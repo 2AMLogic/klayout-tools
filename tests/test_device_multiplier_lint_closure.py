@@ -150,39 +150,44 @@ def test_vendored_model_internals_are_quiet_but_dut_cards_are_checked(
     monkeypatch.setenv("PDK_ROOT", str(tmp_path / "installed-pdks"))
     models = tmp_path / "models"
     models.mkdir()
+    fet = "sky130_fd_pr__nfet_20v0"
+    diode = "sky130_fd_pr__model__parasitic__diode_pw2dn_defet"
+    wrapper = "sky130_fd_pr__nfet_g5v0d16v0"
     (models / "models_fet.spice").write_text(
-        ".subckt fet d g s b mult=1\n"
-        "Xdrain b d diode m = 0.5\n"
-        "Xsrc b s diode mult=6\n"
+        f".subckt {fet} d g s b mult=1\n"
+        f"Xdrain b d {diode} m = 0.5\n"
+        f"Xsrc b s {diode} mult=6\n"
         "M1 d g s b nch\n"
         ".MODEL nch NMOS\n"
         ".ends\n"
         # sky130's nfet_g5v0d16v0 shape: a wrapper that declares mult and
         # carries parasitic cards, but whose `.model` lives in a sibling.
-        ".subckt wrap d g s b mult=1\n"
-        "Xpar b d diode m = 0.5\n"
-        "Xcore d g s b fet\n"
+        f".subckt {wrapper} d g s b mult=1\n"
+        f"Xpar b d {diode} m = 0.5\n"
+        f"Xcore d g s b {fet}\n"
         ".ends\n"
     )
     (models / "models_diodes.spice").write_text(
-        ".subckt diode a b mult=1\nD1 a b junction\n.model junction D\n.ends\n"
+        f".subckt {diode} a b mult=1\nD1 a b junction\n.model junction D\n.ends\n"
     )
     includes = (
         '.include "models/models_fet.spice"\n.include "models/models_diodes.spice"\n'
     )
     _stub_subprocess_run(monkeypatch)
-    request = _write_fixtures(tmp_path, body=includes + "X1 d g 0 0 fet\n", models=None)
+    request = _write_fixtures(
+        tmp_path, body=includes + f"X1 d g 0 0 {fet}\n", models=None
+    )
     assert "device_multiplier" not in sim.run_sim(request)["environment"]
     assert "device-multiplier finding(s)" not in capsys.readouterr().err
 
     (tmp_path / "dut.spice").write_text(
         "* .model in a comment\n.control\n.model ctrl D\n.endc\n"
-        ".subckt dut d g\nXD d g 0 0 fet mult=6\n.ends\n"
+        f".subckt dut d g\nXD d g 0 0 {fet} mult=6\n.ends\n"
     )
     request = _write_fixtures(
         tmp_path,
         body=includes + '.include "dut.spice"\n.model local D\n'
-        "Xtop d g 0 0 fet m=2\nXuut d g dut\n",
+        f"Xtop d g 0 0 {fet} m=2\nXuut d g dut\n",
         models=None,
     )
     findings = sim.run_sim(request)["environment"]["device_multiplier"]["findings"]
@@ -291,39 +296,40 @@ def test_scan_tags_each_card_with_its_enclosing_subckt_chain():
         ".subckt inner p n\nX2 p n leaf m=2\n.ends\n"
         "X3 p n leaf m=2\n.ends\n"
     )
-    scanned = [
-        (card.split()[0], scope) for card, _, scope in lint.scan_instance_cards(text)
-    ]
+    cards, _ = lint.scan_closure("f.sp", {"f.sp": (text, "f.sp")})
+    scanned = [(card.split()[0], scope) for card, _, scope in cards]
     assert scanned == [
         ("X0", ()),
         ("X1", ("outer",)),
         ("X2", ("outer", "inner")),
         ("X3", ("outer",)),
     ]
-    assert {label for _, label, _ in lint.scan_instance_cards(text, label="f.sp")} == {
-        "f.sp"
-    }
+    assert {label for _, label, _ in cards} == {"f.sp"}
 
 
-def test_scan_skips_a_device_definitions_body_wherever_it_sits():
-    # A subckt declaring `mult` is a device definition: its own body cards are
-    # the library's internals. A sibling that declares a `.model`, or none,
-    # is scanned either way -- the decision reads only the enclosing header.
-    device = ".subckt dev a b mult=1\nXpar a b diode m=0.5\n.ends\n"
-    dut = ".subckt dut a b\nXu a b dev mult=6\n.ends\n"
-    clamp = ".subckt clamp a b\nD1 a b d\n.model d D\n.ends\n"
-    for text in (device + dut + clamp, clamp + dut + device, dut + clamp + device):
-        names = [c.split()[0] for c, _, _ in lint.scan_instance_cards(text)]
-        assert sorted(names) == ["Xpar", "Xu"]
-        skipped = lint.scan_instance_cards(text, skip_device_internals=True)
-        assert [c.split()[0] for c, _, _ in skipped] == ["Xu"]
+def test_only_library_to_library_calls_in_an_include_are_exempt():
+    device = ".subckt sky130_fd_pr__dev a b mult=1\nR1 a b 1k\n.ends\n"
+    text = (
+        device
+        + _LEAF_PLAIN
+        + (
+            ".subckt SKY130_FD_PR__wrapper a b mult=1\n"
+            "Xinternal a b SKY130_FD_PR__dev m=2\n"
+            "Xoutside a b leaf m=2\n.ends\n"
+            ".subckt dut a b mult=1\nXuser a b sky130_fd_pr__dev m=2\n.ends\n"
+        )
+    )
+    for label, expected in [
+        (None, ["Xinternal", "Xoutside", "Xuser"]),
+        ("lib.sp", ["Xoutside", "Xuser"]),
+    ]:
+        cards, table = lint.scan_closure("lib", {"lib": (text, label)})
+        assert [f["instance"] for f in lint.lint_instances(cards, table)] == expected
 
 
 def test_card_resolves_to_the_callee_its_enclosing_subckt_makes_visible():
-    table = lint.collect_subckts([_NESTED_SHADOWS_GLOBAL])
-    findings = lint.lint_instances(
-        lint.scan_instance_cards(_NESTED_SHADOWS_GLOBAL), table
-    )
+    cards, table = lint.scan_closure("deck", {"deck": (_NESTED_SHADOWS_GLOBAL, None)})
+    findings = lint.lint_instances(cards, table)
     # Inside `outer` the nested, non-forwarding `leaf` shadows the global
     # forwarding one; outside it the global one is the callee.
     assert [(f["instance"], f["kind"]) for f in findings] == [("Xin", lint.DRIVE_1X)]
@@ -339,3 +345,63 @@ def test_nested_subckt_is_not_visible_outside_its_parent():
     report = lint.instance_report([(card, None, ())], table)
     assert report["findings"] == []
     assert "not cross-checked" in report["note"]
+
+
+@pytest.mark.parametrize("fragment", ["inline", "call", "definition", "body"])
+@pytest.mark.parametrize("private_forwards", [False, True])
+def test_fragment_inherits_include_site_scope(
+    tmp_path, monkeypatch, fragment, private_forwards
+):
+    private, outer = (
+        (_LEAF_FORWARD, _LEAF_PLAIN)
+        if private_forwards
+        else (_LEAF_PLAIN, _LEAF_FORWARD)
+    )
+    call = "Xinner a b leaf mult=6\n"
+    if fragment == "call":
+        (tmp_path / "fragment.sp").write_text(call)
+        call = '.inc "fragment.sp"\n'
+    elif fragment == "definition":
+        (tmp_path / "fragment.sp").write_text(private)
+        private = '.include "fragment.sp"\n'
+    elif fragment == "body":
+        header, resistor, end = private.splitlines(keepends=True)
+        (tmp_path / "fragment.sp").write_text(resistor)
+        private = header + '.include "fragment.sp"\n' + end
+    (tmp_path / "dut.sp").write_text(
+        ".subckt dut a b\n" + private + call + ".ends dut\n"
+    )
+
+    findings = _closure_findings(
+        tmp_path, monkeypatch, body=outer + '.include "dut.sp"\nXd a 0 dut\n'
+    )
+    file = "fragment.sp" if fragment == "call" else "dut.sp"
+    assert [(f["instance"], f["kind"], f["file"]) for f in findings] == (
+        [] if private_forwards else [("Xinner", lint.DRIVE_1X, f"<external>/{file}")]
+    )
+
+
+@pytest.mark.parametrize("header_params", ["", " mult=1"])
+def test_literal_call_inside_parameterized_dut(tmp_path, monkeypatch, header_params):
+    (tmp_path / "dut.sp").write_text(
+        f".subckt dut a b{header_params}\nXinner a b leaf mult=6\n.ends dut\n"
+    )
+    findings = _closure_findings(
+        tmp_path, monkeypatch, body=_LEAF_PLAIN + '.include "dut.sp"\nXd a 0 dut\n'
+    )
+    assert [(f["instance"], f["kind"], f["file"]) for f in findings] == [
+        ("Xinner", lint.DRIVE_1X, "<external>/dut.sp")
+    ]
+
+
+def test_shared_fragment_checked_in_each_distinct_include_scope(tmp_path, monkeypatch):
+    (tmp_path / "call.sp").write_text("Xshared p n leaf mult=6\n")
+    (tmp_path / "relay.sp").write_text('.include "call.sp"\n')
+    body = "".join(
+        _dut_with_private_leaf(name, leaf, '.inc "relay.sp"\n.inc "relay.sp"')
+        for name, leaf in [("first", _LEAF_FORWARD), ("second", _LEAF_PLAIN)]
+    )
+    findings = _closure_findings(tmp_path, monkeypatch, body=body)
+    assert [(f["instance"], f["kind"], f["file"]) for f in findings] == [
+        ("Xshared", lint.DRIVE_1X, "<external>/call.sp")
+    ]

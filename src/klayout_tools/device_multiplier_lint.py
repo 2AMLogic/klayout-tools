@@ -43,7 +43,7 @@ _MULT_REF_RE = re.compile(r"\bmult\b", re.IGNORECASE)
 _MAX_LISTED = 5
 
 #: The ``.subckt`` names enclosing a card, lower-cased, outermost first;
-#: ``()`` is a file's top level (issue #6684). A nested ``.subckt`` is
+#: ``()`` is the deck's top level (issue #6684). A nested ``.subckt`` is
 #: private to its parent, so this is what a card needs to resolve the
 #: callee its own enclosing subcircuits make visible.
 Scope = tuple[str, ...]
@@ -72,38 +72,8 @@ def instance_cards(text: str) -> list[str]:
     ]
 
 
-def scan_instance_cards(
-    text: str, *, label: str | None = None, skip_device_internals: bool = False
-) -> list[tuple[str, str | None, Scope]]:
-    """:func:`instance_cards` with each card tagged ``(card, label,
-    scope)``, ``scope`` being the ``.subckt`` names enclosing it.
-
-    ``skip_device_internals`` omits the cards inside a ``.subckt`` whose own
-    header declares ``mult`` (issue #6684). Such a subcircuit is a device
-    definition, and its body cards implement that device: a PDK's
-    ``nfet`` wrapper hands its parasitic diodes a literal ``m = 0.5``,
-    which is the library author's choice, not a pair the user wrote. The
-    decision reads only the card's own innermost enclosing ``.subckt``, so
-    it cannot change with what else the file defines or where. A file's
-    other subcircuits are scanned as usual, which is why this narrows what
-    the caller gets to see instead of dropping a whole include.
-    """
-    stack: list[tuple[str, bool]] = []  # (name, header declares mult)
-    cards: list[tuple[str, str | None, Scope]] = []
-    for line in circuit_lines(logical_lines(text)):
-        word = line.split(None, 1)[0].lower()
-        if word == ".subckt":
-            tokens = line.split()
-            if len(tokens) >= 2:
-                stack.append((tokens[1].lower(), _header_mult_token(line) is not None))
-        elif word == ".ends":
-            if stack:
-                stack.pop()
-        elif line[0].lower() == "x":
-            if skip_device_internals and stack and stack[-1][1]:
-                continue
-            cards.append((line, label, tuple(name for name, _ in stack)))
-    return cards
+# Only calls between members of this foundry primitive library are exempt.
+_SKY130_PRIMITIVES = "sky130_fd_pr__"
 
 
 class SubcktTable(dict[str, str]):
@@ -138,38 +108,77 @@ class SubcktTable(dict[str, str]):
         return None
 
 
-def collect_subckts(texts: Iterable[str]) -> SubcktTable:
-    """``{lower-cased name: subckt text}`` across netlist/model texts.
+# Each open definition holds its header and its own body cards. Nested
+# definitions close into the table separately.
+_OpenSubckts = list[tuple[str, list[str]]]
 
-    A subckt's text is its ``.subckt`` header line (parameters included)
-    plus its own body cards: nested ``.subckt`` bodies are excluded (they
-    are collected as their own entries -- an inner ``m={mult}`` forwards
-    the inner subckt's parameter, not the outer's). First definition wins
-    when a name repeats across the closure. The result is a plain mapping
-    to callers that only look names up; a scoped card also resolves through
-    :meth:`SubcktTable.resolve` (issue #6684).
-    """
-    collected = SubcktTable()
+
+def _collect_line(
+    word: str, line: str, stack: _OpenSubckts, table: SubcktTable
+) -> None:
+    if word == ".subckt":
+        tokens = line.split(None, 2)
+        if len(tokens) >= 2:
+            stack.append((tokens[1].lower(), [line]))
+    elif word == ".ends":
+        if stack:
+            name, lines = stack.pop()
+            definition = "\n".join(lines)
+            table.setdefault(name, definition)
+            table.scoped.setdefault(
+                (tuple(parent for parent, _ in stack), name), definition
+            )
+    elif stack:
+        stack[-1][1].append(line)
+
+
+def collect_subckts(texts: Iterable[str]) -> SubcktTable:
+    """Definitions in independent texts, with a fresh outer scope for each."""
+    table = SubcktTable()
     for text in texts:
-        stack: list[tuple[str, str, list[str]]] = []
+        stack: _OpenSubckts = []
         for line in circuit_lines(logical_lines(text)):
-            word = line.split(None, 1)[0].lower()
-            if word == ".subckt":
-                tokens = line.split()
-                if len(tokens) < 2:
-                    continue
-                stack.append((tokens[1].lower(), line, []))
-            elif word == ".ends":
-                if not stack:
-                    continue
-                name, header, body = stack.pop()
-                definition = "\n".join([header, *body])
-                collected.setdefault(name, definition)
-                parents = tuple(parent for parent, _, _ in stack)
-                collected.scoped.setdefault((parents, name), definition)
-            elif stack:
-                stack[-1][2].append(line)
-    return collected
+            _collect_line(line.split(None, 1)[0].lower(), line, stack, table)
+    return table
+
+
+def scan_closure(
+    netlist: str, sources: dict[str, tuple[str, str | None]]
+) -> tuple[list[tuple[str, str | None, Scope]], SubcktTable]:
+    """Read a staged deck in include-site order using one subcircuit stack.
+
+    Keys are the unique names assigned by staging. Each value is the staged
+    text and its physical source label. Only includes already in this map
+    contribute cards or definitions. Report cards in the original file order.
+    """
+    table = SubcktTable()
+    stack: _OpenSubckts = []
+    by_file: dict[str, list[tuple[str, str | None, Scope]]] = {k: [] for k in sources}
+    seen: set[tuple[str, Scope]] = set()
+    active: set[str] = set()
+
+    def visit(name: str) -> None:
+        site = (name, tuple(parent for parent, _ in stack))
+        if name not in sources or name in active or site in seen:
+            return
+        seen.add(site)
+        active.add(name)
+        text, label = sources[name]
+        for line in circuit_lines(logical_lines(text)):
+            parts = line.split(None, 1)
+            word = parts[0].lower()
+            if word in (".include", ".inc") and len(parts) == 2:
+                # Staging rewrites local targets to quoted, flat filenames.
+                visit(parts[1].strip('"'))
+            else:
+                _collect_line(word, line, stack, table)
+                if word.startswith("x"):
+                    scope = tuple(parent for parent, _ in stack)
+                    by_file[name].append((line, label, scope))
+        active.remove(name)
+
+    visit(netlist)
+    return [card for cards in by_file.values() for card in cards], table
 
 
 def lint_instances(
@@ -181,7 +190,7 @@ def lint_instances(
     top-level netlist's) or ``(card, file_label)`` pairs from the scanned
     include closure (issue #6684); a closure card's finding carries the
     additive ``file`` field. A ``(card, file_label, scope)`` entry, as
-    :func:`scan_instance_cards` yields, also resolves its callee from the
+    :func:`scan_closure` yields, also resolves its callee from the
     card's enclosing subcircuits outward."""
     return _lint(instance_cards, subckts)[0]
 
@@ -260,6 +269,17 @@ def _lint_card(
     if "m" not in params and "mult" not in params:
         return
     name = (target or "").lower()
+    # Vendored sky130 primitive models instantiate other members of the
+    # foundry's primitive library (e.g. FET parasitics). Restrict this
+    # exception to internal calls. A parameterized DUT calling the very
+    # same primitive is still a user of the model.
+    if (
+        source is not None
+        and scope
+        and scope[-1].startswith(_SKY130_PRIMITIVES)
+        and name.startswith(_SKY130_PRIMITIVES)
+    ):
+        return
     if scope is not None and isinstance(subckts, SubcktTable):
         subckt_text = subckts.resolve(name, scope)
     else:

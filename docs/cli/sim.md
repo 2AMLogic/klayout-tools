@@ -3960,24 +3960,22 @@ Carlo mismatch depends on the model. The sky130 `nfet_01v8` uses
 for an N-times device.
 
 After the corners run, `klt sim` checks instance cards in the netlist and
-its scanned includes (#6684). Inside an included file, the body of a
-subcircuit whose own `.subckt` header declares `mult` is that device's
-definition and is not scanned. This keeps a vendored device library's
-internal parasitic instances (a sky130 FET wrapper handing its diodes a
-literal `m = 0.5`) out of the report. The rule reads only that enclosing
-header: it does not depend on `.model` directives, on what else the file
-defines, or on where the definitions sit. Every other included card is
-checked, and so is every card of the netlist itself, whatever it declares.
-A hand-written included cell that declares `mult` is skipped like a
-library device; keep a literal pair you want checked in the netlist's own
-subcircuits. Each card resolves its callee the way the simulator does,
-from its own enclosing `.subckt` outward: a nested definition is private to
-its parent, so two included DUTs may each carry their own `leaf`, and each
-call reaches its own whatever the include order. Detection is text-driven — a
-subcircuit "declares `mult`" when its `.subckt` header has the parameter,
-and "forwards it" only when a body card's `m=` references `mult` (a
-mismatch expression such as `sqrt(l*w*mult)` is not forwarding) — so no
-PDK subckt-name list is involved. Cards inside `.subckt` bodies count:
+its scanned includes (#6684). A call or definition in an included fragment inherits the
+enclosing subcircuit at its `.include` or `.inc` site. For example, if a DUT
+defines a private `leaf`, a call to `leaf` inside that DUT reaches the private
+definition even when the call and definition live in separate files. The
+finding's `file` identifies the file containing the call.
+
+The lint checks literal calls inside parameterized DUTs, including a DUT
+that declares its own `mult`. In included files it omits calls between two
+members of the sky130 foundry primitive library (both the enclosing subcircuit
+and the callee have the `sky130_fd_pr__` prefix). This keeps a vendored sky130
+FET's internal parasitic diodes quiet. A user DUT that instantiates the same
+FET or diode is checked.
+
+The callee declares `mult` when its `.subckt` header has the parameter,
+and forwards it when a body card's `m=` references `mult`. A reference in
+a mismatch expression such as `sqrt(l*w*mult)` only scales mismatch. Cards inside `.subckt` bodies count:
 a hierarchical DUT file is mostly `X` cards in subcircuit bodies. For
 every instance of a declaring-not-forwarding subcircuit:
 
