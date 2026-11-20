@@ -2591,9 +2591,8 @@ def rerun_lvs_report(
     """``klt lvs --check <report> --rerun`` (full mode, issue #1106):
     verify a previously committed ``klt lvs --format json`` report at
     ``report_path`` by best-effort re-running the compare it describes
-    (:func:`_reconstruct_lvs_request` -- see its docstring for exactly
-    what is and isn't reconstructible from the response alone) and diffing
-    the fresh report against the committed one.
+    (:func:`_reconstruct_lvs_request` -- its docstring says what is and
+    isn't reconstructible) and diffing the fresh report against it.
 
     Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
     excluding :data:`_LVS_RERUN_EXCLUDE_PATHS` --
@@ -2602,41 +2601,42 @@ def rerun_lvs_report(
     ``pdk`` is always ``null`` for LVS, so only the first two ever apply)
     plus ``environment.extracted_netlist`` (issue #1223: populated only
     under ``options.keep_extracted: true``, anchored to the original
-    request document's own directory, and never re-asserted by
-    reconstruction -- so a fresh rerun always reports it ``null``, a false
-    drift, not a real one) plus ``environment.netgen_binary`` (issue
-    #2373: a host-local absolute path that legitimately differs between
-    the committing and the verifying host; the comparator's semantic
-    identity stays diffed via the not-excluded
+    request document's directory and never re-asserted by reconstruction,
+    so a fresh rerun reports it ``null`` -- false drift, not real) plus
+    ``environment.netgen_binary`` (issue #2373: a host-local absolute path
+    that legitimately differs between the committing and verifying hosts;
+    the comparator's semantic identity stays diffed via the not-excluded
     ``environment.engine_version``). ``status:
     "drifted"`` names every other changed field, including a changed
     ``status``/``mismatch_count``/``mismatches`` (the LVS-outcome-changed
     case) as well as changed ``environment.layout_sha256``/
     ``reference_sha256`` (the input-moved case ``--check`` also catches,
-    redundantly but harmlessly here since this mode always re-hashes as a
-    side effect of re-running).
+    redundantly but harmlessly: a rerun re-hashes anyway).
 
     Additionally excludes request-echo fields issue #1205 added
     (``reference_top``, ``options``) that the *committed* report predates:
     a field a report never carried cannot itself have drifted, so such a
-    report keeps re-running exactly as before rather than reporting the
-    current build's richer echo as drift. (It is still only best-effort
-    reconstructible -- it records no reference-side top and no ``options``,
-    the very gap #1205 closed. Use cheap ``--check`` on such reports.)
+    report re-runs as before rather than reporting the current build's
+    richer echo as drift (still only best-effort reconstructible -- use
+    cheap ``--check`` on such reports).
 
     ``layout_path`` (issue #2699, ``--layout``) / ``reference_path``
     (issue #5845, ``--reference``) override the recorded layout/reference
     unconditionally -- how to rerun an external-scope or mis-anchored input.
 
     Raises :class:`LvsError` for a missing/unparseable committed report, a
-    report missing ``layout``/``reference`` to rerun, or any error the
-    rerun itself raises -- never a traceback.
+    report with no layout/reference to rerun (both sides tested
+    post-override, issue #6461, so either flag rescues a missing echo), or
+    any error the rerun itself raises -- never a traceback.
     """
     committed = _load_committed_report(report_path, LvsError)
     layout = resolve_committed_path(
         committed.get("layout"), report_path=report_path, override=layout_path
     )
-    if layout is None or committed.get("reference") is None:
+    reference = resolve_committed_path(
+        committed.get("reference"), report_path=report_path, override=reference_path
+    )
+    if layout is None or reference is None:
         raise LvsError(
             f"committed report has no 'layout'/'reference' field to rerun: "
             f"{report_path}"

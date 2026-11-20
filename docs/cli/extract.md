@@ -3709,16 +3709,16 @@ reported (not asserted)." This section is the gf180mcu counterpart of the
 sky130 section immediately above, reusing the exact same infrastructure
 (`run_extract_klayout_engine`) and reporting discipline.
 
-**Unlike gf180mcu's own DRC deck** (which ships only as unassembled
-per-feature fragments under `libs.tech/klayout/drc/rule_decks/*.drc` with no
-single runnable file, per `docs/cli/drc.md`'s "Engine" → "klayout"
-limitation — the reason gf180mcu's *DRC*-side native cross-check remains
-deferred), **gf180mcu's native LVS deck ships as a single, directly-runnable
-`libs.tech/klayout/lvs/gf180mcu.lvs`** — verified against a real
-`volare`-fetched `gf180mcuD` install for this issue, resolved the same way
-`sky130.lvs` is via `klayout_tools.pdk.lvs_deck_file` (whose own docstring
-already flagged this exact possibility as of issue #869: "a future caller
-is free to attempt it").
+**gf180mcu's native LVS deck is a single, directly runnable file.** For #904,
+`klayout_tools.pdk.lvs_deck_file` resolved `libs.tech/klayout/lvs/gf180mcu.lvs`
+in a `volare`-fetched `gf180mcuD` install, just as it resolves `sky130.lvs`.
+
+The gf180mcu golden-pair DRC cross-check remains deferred because the manifest
+tests do not yet run those fixtures through the native engine. Since #4002,
+`klt drc --engine klayout|both --pdk <variant>`
+resolves the family main script `tech/drc/gf180mcu.drc` as
+`native_deck.kind: pdk_main_script`. Both engines completed a live
+`--engine both` run on `gf180mcuA` (premise corrected 2026-11-18, issue #5720).
 
 **A generalization `run_extract_klayout_engine` needed for a second PDK.**
 sky130.lvs's own custom SPICE-writer delegate emits length/area parameters

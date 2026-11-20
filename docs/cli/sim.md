@@ -2566,23 +2566,18 @@ the packaged `data/` copy. See
   naming the variants the image carries, before any S3 write or launch. A
   legacy entry without the field, an absent manifest, or a request without
   `models.pdk` is unchanged.
-- **Which gf180mcu variant the published images ship.** As of the 2026-08-24
-  gf180mcu image, `build-remote-sim-ami.sh` bakes a single variant
-  (`volare enable --pdk gf180mcu` into `PDK_ROOT=/opt/pdk`), which is
-  `gf180mcuD`; check the manifest's `pdk_variants` for the authoritative list
-  once an entry publishes it. **`gf180mcuC` is not shipped.** A
-  `models.pdk: "gf180mcuC"` request passes the client's family-level check and
-  then fails on the runner, one `batch_job_failed` per corner
-  (`no supported-layout PDK install providing variant 'gf180mcuC' was found`).
-  The early refusal above cannot catch it yet: no manifest entry publishes
-  `pdk_variants` (`grep -c pdk_variants data/remote-sim-ami-manifest.json` →
-  `0`), so the check stays dormant until an operator backfills the field from
-  an inspected image. To run a variant the image lacks, either use
-  `--backend local` on a host whose `$PDK_ROOT` has that variant installed, or
-  pin to the shipped one (`models.pdk: "gf180mcuD"`). Provisioning
-  `gf180mcuC` in the fleet image is an infra change tracked outside this repo
-  (`2AMLogic/2am:infra/aws/batch-fleet-provision.sh` provisions the batch
-  fleet).
+- <a name="gf180mcu-image-variants"></a>**Which gf180mcu variants an image ships.**
+  Find the `gf180mcu` entry matching the runner's region and AMI ID in the
+  [AMI manifest](../../data/remote-sim-ami-manifest.json). Its optional
+  `pdk_variants` array lists the installed variant directories. If the field
+  is absent, the inventory for that image is unknown.
+  AMI `ami-04591566329422a44` lacked a supported `gf180mcuC` install
+  ([#4947](https://github.com/2AMLogic/klayout-tools/issues/4947)).
+  Later deck probes found the model file under both `gf180mcuC` and
+  `gf180mcuD`. Those probes establish file lookup on that runner only
+  ([#6854](https://github.com/2AMLogic/klayout-tools/issues/6854)).
+  If the image lacks the variant you need, you can use `--backend local`
+  on a host where it is installed.
 - **Discovering the runner version before submit.** Read the manifest:
   `jq '.images[] | {pdk, region, ami_id, built_at, klt_version, klt_ref}'
   "${KLT_AMI_MANIFEST:-$HOME/.config/klt/remote-sim-ami-manifest.json}"`.
@@ -3142,6 +3137,33 @@ job id; see "Asynchronous submit and status"); they cannot be combined with
   `deck_sha256` stay byte-for-byte as submitted. An absolute path under the
   *submitting* host's `$PDK_ROOT` is not rewritten (the deck is never
   modified) and is refused with a message naming this spelling.
+
+  For example, on a runner with `gf180mcuD` installed, a corner request
+  resolves `models.lib` relative to the variant selected by `models.pdk`.
+
+  ```json
+  {
+    "models": {"pdk": "gf180mcuD", "lib": "libs.tech/ngspice/sm141064.ngspice"},
+    "corners": {"process": ["typical"]}
+  }
+  ```
+
+  The runner's `$PDK_ROOT` points to the parent of the variant directory.
+  Include the variant in the deck's `.lib` card to load the same section.
+
+  ```spice
+  .lib "$PDK_ROOT/gf180mcuD/libs.tech/ngspice/sm141064.ngspice" typical
+  ```
+
+  With `PDK_ROOT=/opt/pdk`, the runner expands the path to
+  `/opt/pdk/gf180mcuD/libs.tech/ngspice/sm141064.ngspice`.
+  The braced spelling `${PDK_ROOT}/` gives the same path.
+  Omitting `gf180mcuD/` gives `/opt/pdk/libs.tech/ngspice/sm141064.ngspice`
+  even when the request selects `gf180mcuD`. An off-host `--dry-run` can
+  classify either reference as runner-resolved (`host_resolved`) without
+  checking whether the library exists on the runner. See
+  [which gf180mcu variants an image ships](#gf180mcu-image-variants).
+
   `pre_osdi` targets are classified like include targets: `$VAR` →
   `host_resolved`, absolute elsewhere → named error before launch, relative →
   staged at its declared path (shipped, not scanned).

@@ -18236,7 +18236,7 @@ def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
 
 
 def _capture_attest_timeout(monkeypatch, spec):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -18244,8 +18244,8 @@ def _capture_attest_timeout(monkeypatch, spec):
         seen["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", spec)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", spec)
     return seen["timeout"]
 
 

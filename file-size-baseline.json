@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc.py",
-      "lines": 3735
+      "lines": 3679
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
@@ -293,7 +293,7 @@
     },
     {
       "path": "src/klayout_tools/extract.py",
-      "lines": 9827
+      "lines": 9825
     },
     {
       "path": "src/klayout_tools/extract_abstract.py",
@@ -569,7 +569,7 @@
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
-      "lines": 1137
+      "lines": 1067
     },
     {
       "path": "src/klayout_tools/signoff_generator_batch.py",
