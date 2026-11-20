@@ -318,6 +318,7 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_check",
         "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
         "klayout_tools.functional_verification_mutation",
