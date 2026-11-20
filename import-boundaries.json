@@ -947,6 +947,7 @@
         "klayout_tools.sim_measurement_kind",
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
+        "klayout_tools.sim_netlist_identity",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",

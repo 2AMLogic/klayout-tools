@@ -149,6 +149,7 @@ from . import sim_analysis_overrides as _sao
 from . import sim_bin_range as sim_bin_range
 from . import sim_cause as sim_cause
 from . import sim_environment_report as sim_env_report
+from . import sim_netlist_identity as sim_netlist_identity
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
@@ -2604,6 +2605,7 @@ def run_sim(
         )
     return _run_sim_corners(
         request_path,
+        request=request,
         artifacts_dir=artifacts_dir,
         backend=backend,
         max_workers=max_workers,
@@ -2859,42 +2861,6 @@ def _with_forwarded_budget(
     return {**request, "options": {**options, "wall_clock_budget_s": budget_s}}
 
 
-def _check_expected_netlist_identity(
-    expect_identity: Any,
-    netlist_identity: str | None,
-    netlist_identity_error: str | None,
-    netlist_ref: str,
-) -> None:
-    """Issue #3074: refuse to simulate when the request's
-    ``expect_netlist_identity`` does not match the netlist's stamp."""
-    if expect_identity is None:
-        return
-    if not isinstance(expect_identity, str) or not expect_identity:
-        raise SimError("expect_netlist_identity must be a non-empty string")
-    if netlist_identity is None:
-        raise SimError(
-            "expect_netlist_identity was given but the netlist identity "
-            f"could not be computed: {netlist_identity_error}"
-        )
-    if expect_identity != netlist_identity:
-        raise SimError(
-            "netlist identity mismatch: request expects "
-            f"{expect_identity} but '{netlist_ref}' has {netlist_identity} "
-            "(the referenced record was produced from a different netlist)"
-        )
-
-
-def _stamp_netlist_identity(
-    environment: dict[str, Any],
-    netlist_identity: str | None,
-    netlist_identity_error: str | None,
-) -> None:
-    """Issue #3074: record the netlist identity (or why it is unavailable)."""
-    environment["netlist_identity"] = netlist_identity
-    if netlist_identity_error is not None:
-        environment["netlist_identity_error"] = netlist_identity_error
-
-
 @dataclass(frozen=True)
 class _ResolvedSimRequest:
     """Everything :func:`_prepare_sim_request` validated and resolved, before any
@@ -2963,6 +2929,7 @@ class _ResolvedSimRequest:
 def _prepare_sim_request(
     request_path: str,
     *,
+    request: dict[str, Any],
     artifacts_dir: str | None,
     backend: str | None,
     max_workers: int | None,
@@ -2981,10 +2948,16 @@ def _prepare_sim_request(
 ) -> _ResolvedSimRequest:
     """The up-front validate-and-resolve phase of :func:`_run_sim_corners`.
 
+    ``request`` is the caller's already-loaded request (the
+    :func:`load_request` result from :func:`run_sim` or batch preflight);
+    the file is read and its measurement templates expanded exactly once
+    per entry point, never re-read here. ``request_path`` is still used to
+    resolve relative inputs and provenance.
+
     Everything here runs before the first artifact write or backend dispatch;
     the order of the checks is the error precedence the JSON reports, so it
     must not be reordered."""
-    request = _with_max_units_override(load_request(request_path), max_units_per_job)
+    request = _with_max_units_override(request, max_units_per_job)
     request = _with_max_concurrent_override(request, max_concurrent_jobs)
     request = _with_capacity_wait_override(request, capacity_wait_s)
     request = _with_capacity_retries_override(request, capacity_retries)
@@ -3057,7 +3030,7 @@ def _prepare_sim_request(
     netlist_identity, netlist_identity_error = sim_staging.netlist_identity(
         request, netlist_path
     )
-    _check_expected_netlist_identity(
+    sim_netlist_identity.check_expected_netlist_identity(
         request.get("expect_netlist_identity"),
         netlist_identity,
         netlist_identity_error,
@@ -3624,6 +3597,7 @@ def _prepare_sim_request(
 def _run_sim_corners(
     request_path: str,
     *,
+    request: dict[str, Any],
     artifacts_dir: str | None = None,
     backend: str | None = None,
     max_workers: int | None = None,
@@ -3648,9 +3622,12 @@ def _run_sim_corners(
     """The corner-sweep body of :func:`run_sim` -- every parameter, the
     request/response contract, and the deck-list dispatch alternative
     are documented there. Kept as its own function so the deck dispatch
-    in ``run_sim`` adds nothing to this sweep's own complexity budget."""
+    in ``run_sim`` adds nothing to this sweep's own complexity budget.
+    ``request`` is ``run_sim``'s already-loaded request, passed through so
+    the request file is read and expanded once per run."""
     resolved = _prepare_sim_request(
         request_path,
+        request=request,
         artifacts_dir=artifacts_dir,
         backend=backend,
         max_workers=max_workers,
@@ -4367,7 +4344,9 @@ def _run_sim_corners(
     # Additive/optional (issue #3111): the declared solver options, verbatim,
     # so the setting is part of the report's evidence.
     environment.update({"ngspice_options": ngspice_options} if ngspice_options else {})
-    _stamp_netlist_identity(environment, netlist_identity, netlist_identity_error)
+    sim_netlist_identity.stamp_netlist_identity(
+        environment, netlist_identity, netlist_identity_error
+    )
     environment.update(sim_env_report.netlist_source_environment(netlist_source))
     # Additive/optional, one key each and only when the request declared that
     # kind of input: `osdi_preload` (issue #2513) and `corner_section_libs`
