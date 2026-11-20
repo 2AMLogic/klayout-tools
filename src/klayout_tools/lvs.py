@@ -137,7 +137,6 @@ from ._provenance import (
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -150,6 +149,7 @@ from .decks import (
     deck_content_hash,
     get_extraction_deck,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     ExtractError,
     apply_resistor_fixed_offset_corrections,
@@ -2085,10 +2085,9 @@ def check_lvs_report(
     compares against ``provenance.deck.content_hash``. Each mismatch names
     which of the (up to three) inputs moved -- never a single pass/fail bit.
 
-    Since #2659 / #4984 ``layout`` and ``reference`` are ``{path, scope}``
-    objects resolved against the report's own repo root (cwd-independent);
-    only a pre-#4984 or ``klayout-runset`` report's bare ``reference``
-    string stays cwd-anchored (issue #2595's ``input_not_found`` diagnostic).
+    Repo-scoped layout and reference paths resolve against the report's repo root
+    (#2659, #4984). Bare reference strings in legacy or ``klayout-runset`` reports
+    resolve against the working directory (#2595).
     ``--layout`` (#2699) and ``--reference`` (#5845) override their recorded
     paths through :func:`~klayout_tools._report_verify.resolve_committed_path`.
 
@@ -2118,6 +2117,7 @@ def check_lvs_report(
             committed.get("reference"),
             report_path,
             override=reference_path,
+            override_hint="--reference/an absolute path",
             include_repo_root=True,
         ),
     ]
@@ -2136,8 +2136,7 @@ def check_lvs_report(
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
     if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
-        # Issue #2849: the PDK runset is an input too -- a changed runset
-        # can change the verdict without moving the layout or reference.
+        # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
                 "provenance.runset.content_hash",
@@ -2145,6 +2144,7 @@ def check_lvs_report(
                 committed.get("deck_file"),
                 report_path,
                 hasher=content_hash,
+                override_hint=None,
                 include_repo_root=True,
             )
         )
@@ -2652,7 +2652,10 @@ def rerun_lvs_report(
         )
     )
     fresh = _run_reconstructed_lvs(request)
-    exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
+    # Pair-dependent additions only: the static `_LVS_RERUN_EXCLUDE_PATHS`
+    # part arrives from the one place that pairs it with this kind, so
+    # `klt evidence canonicalize --kind lvs` cannot fall behind it (#5541).
+    exclude: set[tuple[str, ...]] = set()
     if isinstance(committed.get("reference"), str) and not isinstance(
         fresh.get("reference"), str
     ):
@@ -2690,11 +2693,8 @@ def rerun_lvs_report(
     ):
         if not isinstance(committed_options, dict) or option not in committed_options:
             exclude.add(("options", option))
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=frozenset(exclude),
+    return rerun_result_for(
+        "lvs", report_path, committed=committed, fresh=fresh, extra_exclude=exclude
     )
 
 
