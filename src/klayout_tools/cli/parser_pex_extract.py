@@ -306,3 +306,87 @@ def add_pex_extraction_args(
             "Requires --mom-rlc-net."
         ),
     )
+    _add_runset_engine_args(pex_parser)
+
+
+def _add_runset_engine_args(pex_parser: argparse.ArgumentParser) -> None:
+    """``--engine klayout-runset`` and its flags (issue #6559): the same
+    spelling ``klt extract`` registers (issues #5481, #5513), selecting the
+    runset-engine route of :mod:`klayout_tools.pex_runset`."""
+    pex_parser.add_argument(
+        "--engine",
+        default="klayout",
+        choices=("klayout", "klayout-runset"),
+        help=(
+            "which extractor produces the extracted leg (issue #6559). "
+            "'klayout' (the default) is the curated --deck with lumped-RC "
+            "parasitics, unchanged by this flag's existence. 'klayout-runset' "
+            "extracts through the PDK's own KLayout LVS runset (--deck-file; "
+            "`klt extract --engine klayout-runset`) -- the only way to reach "
+            "a device family the curated deck declares no class for. The leg "
+            "is a device-level netlist with NO parasitics, so the report does "
+            "not by itself satisfy docs/design-evidence-tiers.md T1 item 7; "
+            "`extraction.engine`/`parasitics_carried`/`params_not_carried` "
+            "say so. Every option only the parasitic-annotated engine can "
+            "honour (--critical-net*, --distributed-rc, --resistance-graph*, "
+            "--mom-rlc-*, --parasitic-variant, --substrate-tie-ohms, "
+            "--device-only-leg, --tie-net, --deck, --pdk, ...) is refused by "
+            "name. See docs/cli/pex.md, 'Runset engine'."
+        ),
+    )
+    pex_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for --engine "
+            "klayout-runset (issue #6559), spelled as on `klt extract` and "
+            "`klt lvs`. Required under that engine, a usage error (exit 2) "
+            "under any other. Recorded as an absolute path in a "
+            "--submit-only manifest."
+        ),
+    )
+    pex_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (--engine "
+            "klayout-runset only; issue #6559). Repeatable. A usage error "
+            "(exit 2) under any other engine, or for a name the engine sets "
+            "itself (input, schematic, report, top, topcell)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--device-param",
+        dest="device_params",
+        action="append",
+        default=None,
+        metavar="CLASS:PARAM=NAME[:SUFFIX]",
+        help=(
+            "with --engine klayout-runset, carry the measured KLayout "
+            "parameter PARAM of device CLASS onto every `X` call of that "
+            "class as `NAME=<value><SUFFIX>` (issues #5513, #6559); "
+            "repeatable, e.g. `--device-param sg13_hv_nmos:W=w:u`. Passed "
+            "through verbatim to `klt extract --device-param`. Without it "
+            "each device simulates at the PDK subcircuit's own defaults, and "
+            "`extraction.params_not_carried` names what is missing -- a "
+            "delta over default-sized devices is not a parasitic delta. A "
+            "usage error (exit 2) under any other engine."
+        ),
+    )
+    pex_parser.add_argument(
+        "--runset-timeout",
+        dest="runset_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "wall-clock budget for the runset subprocess (--engine "
+            "klayout-runset only; default 600). A runset that exceeds it is "
+            "an extraction failure (exit 1), never a partial netlist."
+        ),
+    )

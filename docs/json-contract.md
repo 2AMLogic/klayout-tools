@@ -523,6 +523,23 @@ so no `schema_version` bump. It varies run to run by nature, so `--check
 --rerun` excludes it (`VOLATILE_PROVENANCE_PATHS`). Progress lines for the same
 run go to stderr only; stdout stays the envelope.
 
+**`klt pex --engine klayout-runset` adds fields, never changes one** (issue
+#6559). The `extraction` block gains `engine`, `parasitics_carried`,
+`params_not_carried`, `device_counts` and `extra_circuits` — present **only**
+under that engine, so a default-engine envelope is byte-identical to before —
+and
+`body_bias.status` gains the value `"not_assessed"` (only ever emitted by that
+engine). `klt extract --engine klayout-runset` reports gain a top-level
+`params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
+`instantiated_device_counts` (`{class: count}` across the instantiated
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
+instantiated hierarchy, which for a flat runset is the selected circuit's own
+count.
+Consumers that switch on `body_bias.status` already must tolerate an unknown
+value per the rule above. No `schema_version` bump on either verb. See
+[`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
+
 ## Requested-but-unperformed analysis
 
 When a request asks for an analysis or capability, its response must make

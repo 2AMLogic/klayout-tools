@@ -230,6 +230,11 @@ from .signoff_na import (
     _na_statistical_detail,
 )
 
+# The cited `klt pex` envelope's extraction disclosures (issues #1983, #6559),
+# split out of this file for its size-ratchet ceiling and re-imported by name so
+# `signoff.<name>` keeps resolving.
+from .signoff_pex_disclosure import _pex_body_bias_disclosure, _pex_engine_disclosure
+
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
 # the same precedent as `extract.py`'s splits. `_build_power_delivery_item`
@@ -3247,51 +3252,6 @@ def _kind_gated_check(
     return _yield_campaign_refusal(check_kind, envelope), rehash_unverifiable
 
 
-def _pex_body_bias_disclosure(
-    kind: str, envelope: dict[str, Any]
-) -> dict[str, Any] | None:
-    """The cited `klt pex` envelope's own statement about whether the
-    extracted netlist it re-simulated had a DC bias path for every device
-    body (issue #1983) -- or ``None`` when there is nothing to quote.
-
-    Quoted verbatim off the envelope, never re-derived: `klt pex` builds it
-    from the extraction it drove itself (``docs/cli/pex.md`` ->
-    ``body_bias``), which is the only place the information exists.
-
-    ``None`` in exactly two cases, and they mean the same thing to a reader
-    ("this artifact makes no body-bias statement"), never "the bodies were
-    biased":
-
-    - ``kind != "pex"``. No other envelope kind carries a ``body_bias``
-      block. (`klt lvs`'s parallel ``body_verification`` block is surfaced
-      separately, as ``detail.body_verification_status`` -- it answers a
-      related but distinct question: whether the *compare* verified the body
-      ties, not whether the *simulated* netlist had a bias path.)
-    - The envelope has no ``body_bias`` key at all, or a non-object one:
-      post-layout evidence committed before `klt pex` reported it.
-      Back-compat is the whole reason this is ``None`` rather than a
-      fabricated ``"biased"`` -- an old record must not read as a netlist
-      that was checked and found clean.
-
-    ``unbiased_pmos_body_nets`` is deliberately **not** carried through: the
-    per-device list can run to hundreds of entries on a real block, and a
-    reader who needs it has the cited envelope. The count and the distinct
-    net names are enough to tell a clean run from a compromised one and to
-    find the devices in the source artifact.
-    """
-    if kind != "pex":
-        return None
-    body_bias = envelope.get("body_bias")
-    if not isinstance(body_bias, dict):
-        return None
-    nets = body_bias.get("unbiased_nets")
-    return {
-        "status": body_bias.get("status"),
-        "unbiased_device_count": body_bias.get("unbiased_device_count"),
-        "unbiased_nets": list(nets) if isinstance(nets, list) else [],
-    }
-
-
 def _yield_campaign_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     """The reason :func:`_grade_evidence` must refuse this *passing* `klt
     yield` envelope on its own campaign-discipline self-report (issue #2467)
@@ -3450,6 +3410,9 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         body_bias = _pex_body_bias_disclosure(kind, envelope)
         if body_bias is not None:
             detail["body_bias"] = body_bias
+        # Issue #6559: which extractor built the leg -- a runset leg has no
+        # parasitics. Reported, never graded on; absent for a curated run.
+        detail.update(_pex_engine_disclosure(kind, envelope) or {})
     elif kind == "power":
         em_verdict = envelope.get("em_verdict") or {}
         detail = {
@@ -6390,6 +6353,12 @@ def _citation(
     body_bias = _pex_body_bias_disclosure(resolution["kind"], resolution["envelope"])
     if body_bias is not None:
         citation["body_bias"] = body_bias
+    # Issue #6559: and which extractor built the cited leg -- a runset-engine
+    # leg carries no parasitics, which this item's intent needs. Disclosure
+    # only, like `body_bias` above; present only for a runset-engine run.
+    citation.update(
+        _pex_engine_disclosure(resolution["kind"], resolution["envelope"]) or {}
+    )
     # Issue #2109: a citation whose cited run's common coverage reports
     # skipped *requested* work carries that statement, so an item graded
     # `"met"` off a pre-adapter producer -- one still reporting its
