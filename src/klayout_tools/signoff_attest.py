@@ -79,7 +79,7 @@ from .signoff import (
     _generic_item_binding_refusal,
     _reject_json_constant,
 )
-from .signoff_attest_command import _run_command, reset_durations
+from .signoff_attest_command import _run_command, reset_command_side_channels
 from .signoff_attest_drift import drift_result
 from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_glob import expand_entry
@@ -878,7 +878,7 @@ def _run_checks(
     """Run the item's artifact and command checks in deterministic order.
     Item 9's pin checks follow once the envelope's build version is known.
     With ``committed_checks`` (the ``--check`` path) local-only commands skip."""
-    reset_durations()
+    reset_command_side_channels()
     checks: list[dict[str, Any]] = []
 
     def command(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:

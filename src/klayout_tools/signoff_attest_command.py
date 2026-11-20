@@ -70,6 +70,17 @@ def attach_output_tails(envelope: Mapping[str, Any]) -> None:
                 check["output_tail"] = tail
 
 
+def reset_failed_output() -> None:
+    """Forget every recorded output tail. Called at the start of each
+    attestation build: a tail marks the run that produced it, so a later
+    build in the same process -- one that skips or carries a check without
+    re-running it -- must never serve this build's tail to a check that did
+    not run (issue #6804). (The per-key ``pop`` in :func:`_run_command`
+    alone cannot give that guarantee: a skipped command is never entered,
+    so its key would keep the previous build's tail alive.)"""
+    _failed_output.clear()
+
+
 # Observed wall time of each command this run launched, in seconds rounded to
 # one decimal (issue #5817). Held out of band exactly like ``_failed_output``
 # above, and for the same reason -- see the module docstring. The CLI adds it
@@ -116,6 +127,18 @@ def attach_durations(envelope: Mapping[str, Any]) -> None:
             duration = command_duration(check)
             if duration is not None:
                 check["duration_s"] = duration
+
+
+def reset_command_side_channels() -> None:
+    """Start-of-build reset for both live side channels: forget every
+    recorded output tail and wall time, so a later build in the same process
+    cannot serve an earlier build's values to a check it did not run
+    (issues #5817, #6804). Each attestation builder calls this once from its
+    single reset line -- :mod:`.signoff_attest` sits at its file-size
+    ceiling, so the two per-channel resets compose here rather than growing
+    every call site."""
+    reset_failed_output()
+    reset_durations()
 
 
 def _run_command(root: str, spec: Mapping[str, Any]) -> tuple[int | None, str | None]:

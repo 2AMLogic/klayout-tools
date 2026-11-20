@@ -23,6 +23,8 @@ from klayout_tools.signoff_attest import (
 )
 from klayout_tools.signoff_attest_command import (
     attach_durations,
+    attach_output_tails,
+    failed_output_tail,
 )
 from klayout_tools.signoff_attest_stream import (
     build_stream_attestation,
@@ -136,32 +138,50 @@ def test_duration_covers_timeout_but_not_launch_failure(tmp_path):
     assert "duration_s" not in unlaunched
 
 
-def test_skipped_local_only_check_has_no_duration(tmp_path):
+def test_skipped_local_only_check_has_no_duration_or_stale_tail(tmp_path):
     repo = _repo(tmp_path)
     inventory = _analog_inventory()
     inventory["envelope_checks"]["evidence/sim_ss.json"] = {
-        "argv": [sys.executable, "-c", "import sys; sys.exit(0)"],
+        "argv": [
+            sys.executable,
+            "-c",
+            "import sys; print('BOOM-TAIL'); sys.exit(7)",
+        ],
         "local_only": True,
     }
-    envelope = _attest(repo, inventory)  # generate mode runs it
+    envelope = _attest(repo, inventory)  # generate mode runs it; it fails
     committed = repo / "evidence" / "item8.json"
-    committed.write_text(render_envelope(envelope))
+    committed.write_text(render_envelope(envelope))  # saved before decorating
+    assert "output_tail" not in committed.read_text()
+    attach_output_tails(envelope)
+    ran_local = next(
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "command" and c.get("local_only")
+    )
+    assert ran_local["output_tail"] == "BOOM-TAIL"  # build 1 captured it
     inv_path = str(repo / "inventory.json")
 
     result = check_attestation(8, inv_path, str(committed))
+    assert result["status"] == "match"
     skipped = result["skipped_checks"]
     assert len(skipped) == 1
     attach_durations(result["fresh"])
-    assert all("duration_s" not in c for c in skipped)
+    attach_output_tails(result["fresh"])
+    assert all("duration_s" not in c and "output_tail" not in c for c in skipped)
     # The carried check also stays in checks[] (its `skipped` marker is popped
     # into skipped_checks by the drift result), marked only by local_only: it
-    # never ran, so it has no duration either.
+    # never ran, so it has no duration -- and no stale tail from build 1
+    # (#6804), while its committed failure is still carried.
     carried = next(
         c
         for c in result["fresh"]["attestation"]["checks"]
         if c["check"] == "command" and c.get("local_only")
     )
+    assert not carried["passed"] and carried["exit_status"] == 7
     assert "duration_s" not in carried
+    assert "output_tail" not in carried
+    assert failed_output_tail(carried) == ""
     ran = [
         c
         for c in result["fresh"]["attestation"]["checks"]
@@ -210,35 +230,52 @@ def test_text_line_names_the_observed_runtime():
     )
 
 
-def test_stream_skipped_local_only_check_has_no_duration(tmp_path):
+def test_stream_skipped_local_only_check_has_no_duration_or_stale_tail(tmp_path):
     # Stream sibling of test_skipped_local_only_check_has_no_duration: the
     # item-2 builder reaches _command_check via _inventory_checks, which never
     # entered _run_checks' reset, so an earlier build in the same process
-    # could serve its wall time to a carried check (#6250).
+    # could serve its wall time -- or, before #6804, its output tail -- to a
+    # carried check (#6250).
     repo, stream = _stream(tmp_path)
     local = {
         "name": "lo",
-        "argv": ["python3", "-c", "print('lo')"],
+        "argv": ["python3", "-c", "import sys; print('LO-TAIL'); sys.exit(7)"],
         "local_only": True,
     }
     inv = _inv(repo, [{"name": "ok", "argv": ["python3", "-c", "pass"]}, local])
     envelope = build_stream_attestation(stream, inventory_path=inv)  # runs both
     committed = repo / "evidence" / "item2.json"
-    committed.write_text(render_envelope(envelope))
+    committed.write_text(render_envelope(envelope))  # saved before decorating
+    assert "output_tail" not in committed.read_text()
+    attach_output_tails(envelope)
+    ran_local = next(
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "command" and c.get("local_only")
+    )
+    assert ran_local["output_tail"] == "LO-TAIL"  # build 1 captured it
 
     result = check_stream_attestation(stream, str(committed), inventory_path=inv)
     assert result["status"] == "match"
     assert [c["name"] for c in result["skipped_checks"]] == ["lo"]
     attach_durations(result["fresh"])
-    assert all("duration_s" not in c for c in result["skipped_checks"])
+    attach_output_tails(result["fresh"])
+    assert all(
+        "duration_s" not in c and "output_tail" not in c
+        for c in result["skipped_checks"]
+    )
     # The carried local_only check also stays in checks[], marked only by
-    # local_only: it never ran in this build, so it has no duration either.
+    # local_only: it never ran in this build, so it has no duration -- and,
+    # since #6804, no stale tail from the generating build either.
     carried = next(
         c
         for c in result["fresh"]["attestation"]["checks"]
         if c["check"] == "command" and c.get("local_only")
     )
+    assert not carried["passed"]
     assert "duration_s" not in carried
+    assert "output_tail" not in carried
+    assert failed_output_tail(carried) == ""
     ran = [
         c
         for c in result["fresh"]["attestation"]["checks"]
