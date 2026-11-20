@@ -839,16 +839,32 @@ fail on an empty run. An older gf180mcu layout (fragments under
 returns nothing and you pass a `run_drc.py --macro_gen` output via
 `--deck-file`.
 
-**Known limitation: 3LM gf180mcu variants.** As reported in issue #5091 (not
-re-verified by klt), the native deck's `rule_decks/mslot.rb` uses
-`metal4_drawn` unguarded, so on a 3-metal-layer stack the deck aborts after
-`Executing deck mslot1 ...` with `undefined local variable or method
-'metal4_drawn'`, and `--deck-var metal_level=3LM --deck-var metal_top=30K`
-does not help. The run ends as an error (`klayout_deck_aborted`; the structured
-`error.abort` names the deck and symbol) and any partial report is never
-`clean` (`--allow-deck-errors` only records it under `engine_deck_errors`).
-Not yet reported upstream to gf180mcu-pdk. A per-deck subset runner is not
-provided.
+**Metal slotting on 3LM gf180mcu.** To check slotting on a three-metal stack,
+use the family deck.
+
+```sh
+klt drc block.gds --engine klayout --pdk gf180mcuA --deck-var decks=mslot --format json
+```
+
+The foundry’s `mslot.rb` reads `metal4_drawn` while checking the three lower
+metals. For the auto-resolved family script, klt loads a packaged Ruby macro
+before the deck when the effective stack is `3LM`. The macro supplies an empty
+Metal4 layer when the PDK omits it. This keeps the slot checks in the foundry
+deck and avoids maintaining a second implementation or patching the PDK.
+An explicit stack such as `--deck-var metal_level=4LM` takes precedence over
+the variant preset.
+Other stacks and explicit `--deck-file` runs load the original script directly.
+
+On KLayout 0.30.12 with the `f6eeac7dad08` PDK, a 40 µm square of unslotted
+Metal1 on 34/0 produced one `MSLOT1.1` violation (exit 3). The deck logged
+slot checks for Metal1 through Metal3 and declared 27 unique categories.
+Native rule IDs use `MSLOT<n>.<k>`, where `n` is the metal level. The curated
+deck lists the separate `MSLOT.<k>` IDs under `coverage.unmodeled_rules`.
+
+`native_deck.preludes` and `provenance.deck.preludes` record the macro’s name,
+SHA-256 digest and reason. `klt drc --check` verifies its digest. Selecting
+`decks=mslot` checks slotting alone. Without an independent category assertion,
+a zero-finding native run returns `coverage_unknown` (exit 4).
 
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory

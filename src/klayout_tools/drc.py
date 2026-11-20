@@ -2684,23 +2684,21 @@ def rerun_drc_report(
             raise DrcError(
                 f"committed report has no resolvable deck to rerun: {report_path}"
             )
+        from ._drc_gf180_3lm import replay_prelude_kwargs
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
-        # A committed report carrying `engine_deck_errors` was produced with
-        # `--allow-deck-errors` (issue #1941); re-running it strictly would
-        # fail the verification outright rather than diffing it, so the
-        # rerun reproduces the original invocation's own error tolerance.
+        prelude_kwargs = replay_prelude_kwargs(committed, deck)
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
             top=None,
+            # Replay the original error tolerance and caller-vouched coverage.
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
-            # Issue #2697: reproduce the original coverage assertion too,
-            # or a committed `clean` would always drift to `coverage_unknown`.
-            # Issue #2806: dispatched on its `kind`; a set assertion replays
-            # its embedded names, never the original manifest file.
             **_rerun_assertion_kwargs(committed),
+            **prelude_kwargs,
         )
+        if prelude_kwargs:
+            fresh["native_deck"] = prelude_kwargs["native_deck"]
     else:
         # Issue #2768: a committed `--rules` subset replays its own recorded
         # selectors (so a deck change that alters what a glob matches shows

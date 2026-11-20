@@ -11,6 +11,7 @@ import os
 from typing import Any
 
 from ._deck_hash import source_file_hash
+from ._drc_gf180_3lm import prelude_checks
 from ._provenance import content_hash
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
@@ -128,6 +129,7 @@ def _report_hash_checks(
                 content_hash(waivers_file),
             )
         )
+    checks.extend(prelude_checks(committed, prefix))
     recorded_tree = get_path(committed, ("provenance", "deck", "tree", "content_hash"))
     if recorded_tree is not None:
         from .drc_klayout_engine import _deck_tree_identity
