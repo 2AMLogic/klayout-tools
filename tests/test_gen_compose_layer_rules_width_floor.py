@@ -24,6 +24,7 @@ import pytest
 
 from klayout_tools import gen
 from klayout_tools import gen_compose_layer_rules as layer_rules
+from klayout_tools import gen_compose_top_metal_floors as top_metal_floors
 from klayout_tools.decks import get_deck
 from klayout_tools.gen_compose import (
     _VIA_LANDING_SIZE_UM,
@@ -53,7 +54,7 @@ def test_gf180mcu_5lm_top_metal_landing_pad_floors_to_native_mt4():
 def test_mt1_width_floor_still_sizes_the_pad_without_mt4(monkeypatch):
     # Retain the #6612 coverage: the width floor still binds on its own
     # -- with the MT.4 table emptied, 0.44um is what sizes the pad.
-    monkeypatch.setattr(layer_rules, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
+    monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
     for variant in ("gf180mcuC", "gf180mcuD"):
         side = layer_rules._landing_pad_side_um_for_layer(variant, (81, 0))
         assert side == pytest.approx(0.44)
@@ -156,12 +157,12 @@ def test_drawing_path_floor_names_the_native_rules():
         )
         assert floor_side == pytest.approx(0.75)
         named = dict(floors)
-        assert layer_rules._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID in named
+        assert top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID in named
         assert named[
-            layer_rules._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID
+            top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID
         ] == pytest.approx(0.44)
-        assert layer_rules._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID in named
-        mt4_side = named[layer_rules._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID]
+        assert top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID in named
+        mt4_side = named[top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID]
         assert mt4_side == pytest.approx(0.75)
     # No other variant/layer pair gains a floors entry.
     for variant in ("gf180mcuA", "gf180mcuB", "gf180mcuD"):
@@ -174,8 +175,8 @@ def test_drawing_path_floor_names_the_native_rules():
         assert all(
             rule_id
             not in (
-                layer_rules._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
-                layer_rules._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
+                top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
+                top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
             )
             for rule_id, _side in floors
         )
@@ -217,21 +218,21 @@ def test_override_below_the_mt4_floor_is_rejected_naming_the_rule():
         )
     message = str(excinfo.value)
     assert "routing.landing_pad_size_um" in message
-    assert layer_rules._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID in message
+    assert top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID in message
     assert ">= 0.75um" in message
 
 
 def test_override_below_the_mt1_floor_alone_names_mt1(monkeypatch):
     # Retain the #6612 coverage: with MT.4 out of the picture, the
     # sub-0.44 rejection still names MT.1.
-    monkeypatch.setattr(layer_rules, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
+    monkeypatch.setattr(top_metal_floors, "_TOP_METAL_LANDING_AREA_FLOOR_UM2", {})
     with pytest.raises(GenComposeError) as excinfo:
         _resolve_landing_pad_sizes(
             _gf180_drop(_MET5, (41, 0)), "gf180mcuD", {}, override_um=0.43
         )
     message = str(excinfo.value)
     assert "routing.landing_pad_size_um" in message
-    assert layer_rules._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID in message
+    assert top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID in message
     assert ">= 0.44um" in message
 
 
