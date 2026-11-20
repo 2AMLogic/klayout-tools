@@ -2136,8 +2136,7 @@ def check_lvs_report(
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
     if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
-        # Issue #2849: the PDK runset is an input too -- a changed runset
-        # can change the verdict without moving the layout or reference.
+        # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
                 "provenance.runset.content_hash",
@@ -2145,6 +2144,7 @@ def check_lvs_report(
                 committed.get("deck_file"),
                 report_path,
                 hasher=content_hash,
+                override_hint=None,
                 include_repo_root=True,
             )
         )
