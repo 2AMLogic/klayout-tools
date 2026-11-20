@@ -267,10 +267,23 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     still flags a pin of the evidence file's own sha256.
     """
     expected = spec.get("content_hash")
+    actual = resolution["content_hash"]
+    if resolution.get("content_hash_basis") == "evidence_file":
+        path = resolution["file"]
+        return {
+            "content_hash_pin": "stale",
+            "hash_check": hash_check(
+                "evidence_file (sha256 of the cited evidence file)", expected, actual
+            ),
+            "compared_against": path,
+            "hint": (
+                f"content_hash must be the sha256 of the evidence file itself ({path})"
+            ),
+        }
     field, source, what = _stale_pin_target(resolution)
     detail: dict[str, Any] = {
         "content_hash_pin": "stale",
-        "hash_check": hash_check(field, expected, resolution["content_hash"]),
+        "hash_check": hash_check(field, expected, actual),
     }
     if source is not None:
         detail["compared_against"] = source

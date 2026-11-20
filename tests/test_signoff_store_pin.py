@@ -386,9 +386,11 @@ def test_explicit_member_disambiguates_the_basename(tmp_path, monkeypatch):
         {"artifact_member": ["x"]},
         {"artifact_manifest": None},
         {"artifact_member": None},
+        {"artifact_manifest": ""},
+        {"artifact_manifest": "", "content_hash": "sha256:" + _sha("samples")},
     ],
 )
-def test_non_string_store_pin_keys_fail_closed(tmp_path, monkeypatch, overrides):
+def test_malformed_store_pin_keys_fail_closed(tmp_path, monkeypatch, overrides):
     """A malformed store-pin option affects only the item that declares it."""
     monkeypatch.chdir(tmp_path)
     drc = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)

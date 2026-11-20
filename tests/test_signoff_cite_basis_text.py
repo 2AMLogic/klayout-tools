@@ -10,8 +10,14 @@ from __future__ import annotations
 
 import hashlib
 
+import pytest
+
 from klayout_tools.cli.color import PLAIN
-from klayout_tools.cli.signoff_cmd import _print_cite_line, _print_tier_report_text
+from klayout_tools.cli.signoff_cmd import (
+    _print_cite_line,
+    _print_input_verified,
+    _print_tier_report_text,
+)
 from klayout_tools.signoff import build_tier_report
 from test_signoff import FUNCTIONAL_VERIFICATION_SDF_ENVELOPE, _manifest, _write
 
@@ -93,7 +99,44 @@ def test_text_report_shows_basis_for_fv_pinned_citation(tmp_path, capsys):
         build_tier_report(_manifest(kind="digital", evidence={"7": spec})), PLAIN
     )
 
-    assert "content_hash_basis=evidence_file," in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "content_hash_basis=evidence_file," in out
+    assert (
+        "        input: re-hashed the evidence file itself -- matches"
+        in out.splitlines()
+    )
+
+
+@pytest.mark.parametrize(
+    ("basis", "verified", "statement"),
+    [
+        (
+            "artifact_manifest",
+            None,
+            "used the sha256 recorded for the member in the committed store manifest "
+            "-- the artifact itself was not read",
+        ),
+        (None, True, "re-hashed the artifact this envelope names -- matches"),
+        (
+            None,
+            False,
+            "CHANGED -- the artifact this envelope names no longer matches "
+            "the content_hash it recorded",
+        ),
+        (
+            None,
+            None,
+            "not re-hashed (content_hash compared against this envelope's own "
+            "claim only -- the artifact itself was not read)",
+        ),
+    ],
+)
+def test_input_line_names_the_hash_source(basis, verified, statement, capsys):
+    citation = {**CITATION, "input_verified": verified}
+    if basis is not None:
+        citation["content_hash_basis"] = basis
+    _print_input_verified(citation)
+    assert capsys.readouterr().out == f"        input: {statement}\n"
 
 
 def test_text_report_without_a_pin_shows_todays_line(tmp_path, capsys):
