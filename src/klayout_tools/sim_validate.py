@@ -152,9 +152,9 @@ def _validate_noise_measurement(
     if has_other_form or name is None:
         raise SimError(
             f"measurement '{name}' declares 'noise' together with "
-            "another form (or has no name): declare a 'name' and "
-            "exactly one of 'spice', 'expr', 'crossings', 'cycle_mean', "
-            "'energy', 'stress' or 'noise'"
+            "another form (or has no name): they are alternative "
+            "forms of a measurement -- declare exactly one (use a "
+            "separate measurements[] entry, with a 'name', for 'noise')"
         )
     sim_noise.validate_noise_spec(name, spec["noise"])
     if not _EXPR_MEAS_NAME_RE.match(str(name)):
