@@ -7,7 +7,29 @@ per-file size ratchet). ``gen_compose`` imports this module, which imports
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+
+def landing_pad_half_dbu(landing_size_um: float, via_size_um: float, dbu: float) -> int:
+    """Half-side (DBU) of the landing-pad square drawn for one via hop (#6572).
+
+    The one definition shared by ``_draw_routed_entry`` (which draws the pad)
+    and the ``ports_from_labels`` access search (which clears it), so the
+    footprint the search tests is the footprint compose emits. A minimum size
+    rounds *outward* to whole DBU while keeping the margin against the
+    *rounded* via. The epsilon only strips floating-point noise at an integer
+    DBU coordinate: a computed ``0.42000000000000004`` um side is 210 DBU, not
+    211, so the search cannot reject a pad compose draws one DBU smaller.
+    """
+    via_half_dbu = int(round((via_size_um / 2.0) / dbu))
+    return math.ceil(
+        max(
+            landing_size_um / (2.0 * dbu),
+            via_half_dbu + (landing_size_um - via_size_um) / (2.0 * dbu),
+        )
+        - 1e-9
+    )
 
 
 def via_cut_block_spacing_violation_um(
