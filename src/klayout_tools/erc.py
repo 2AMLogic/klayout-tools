@@ -42,7 +42,6 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Any
 
@@ -64,14 +63,20 @@ from ._paths import (
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_hash_check
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
-from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
+from .coverage_work import coverage_work_count
+from .decks import (
+    ExtractionDeck,
+    UnknownExtractionDeckError,
+    deck_content_hash,
+    deck_source_path,
+)
 from .decks import get_extraction_deck as _get_extraction_deck
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
@@ -99,11 +104,7 @@ from .erc_substrate import (
     substrate_coverage_work,
     substrate_provenance,
 )
-from .erc_ties import (  # noqa: F401 -- REASON_* are re-exported public names
-    REASON_DEGENERATE_TAP_DECLARATION,
-    REASON_DEGENERATE_WELL_ASSERTION,
-    REASON_DEGENERATE_WELL_SELECTION,
-    REASON_EMPTY_WELL_REGION,
+from .erc_ties import (
     _degenerate_tie_reasons,
     _tie_findings,
 )
@@ -114,6 +115,7 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
     _tie_well_region,
     _well_assertion_coverage_entry,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     _capacitor_plate_regions,
     _capacitor_top_via_overlap_region,
@@ -337,21 +339,26 @@ def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
     return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
 
 
-def _compact_antenna_records(
-    gates: list[dict[str, Any]], reason: str
+def _counted_antenna_records(
+    gates: list[dict[str, Any]], reason: str, checked_count: int, omit_tables: bool
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The aggregate ``(skipped, inapplicable)`` antenna records ``--compact``
-    emits in place of the per-(gate, level) and per-gate-reference ones."""
-    skipped = []
-    if sum(len(gate["levels"]) - 1 for gate in gates):
-        skipped.append({"id": work_id("antenna", "levels"), "reason": reason})
-    inapplicable = [
+    """Each gate has one reference, and all unchecked non-reference levels
+    share the run's skip reason. The groups partition those two sets."""
+    skipped_count = sum(len(gate["levels"]) - 1 for gate in gates) - checked_count
+    skip_id = work_id("antenna") if omit_tables else work_id("antenna", "levels")
+    reference = "gate_reference_level" if omit_tables else "gate_reference_levels"
+    skipped = (
+        [{"id": skip_id, "reason": reason, "count": skipped_count}]
+        if skipped_count
+        else []
+    )
+    return skipped, [
         {
-            "id": work_id("antenna", "gate_reference_levels"),
+            "id": work_id("antenna", reference),
             "reason": "gate_reference_level",
+            "count": len(gates),
         }
     ]
-    return skipped, inapplicable
 
 
 def _antenna_coverage(
@@ -361,51 +368,36 @@ def _antenna_coverage(
     omit_tables: bool = False,
     compact: bool = False,
 ) -> dict[str, Any]:
-    """Grade coverage against actual non-gate antenna levels, not gate count.
-
-    ``omit_tables`` (issue #3011) collapses the per-gate/per-level
-    ``skipped`` and ``gate_reference_level`` ``inapplicable`` entries to one
-    aggregate entry each (same reason, distinct ids so the common validator's
-    one-category-per-identity rule holds). ``checked`` is left verbatim.
-
-    ``compact`` (issue #2965) collapses the per-(gate, level) ``skipped``
-    records and per-gate ``gate_reference_level`` ``inapplicable`` records
-    into one aggregate record each (counts live in the top-level
-    ``compact`` block), so the declined antenna work is still disclosed.
-    """
+    """Count skipped and reference work for graded runs and collapsed modes."""
     checked = []
-    skipped = []
-    inapplicable = []
+    if not findings_only:
+        checked = [
+            work_id("antenna", gate["gate_id"], level["layer"])
+            for gate in gates
+            for level in gate["levels"][1:]
+            if level["verdict"] in {"pass", "violate"}
+        ]
+    skipped: list[dict[str, Any]] = []
+    inapplicable: list[dict[str, Any]] = []
     reason = _antenna_skip_reason(pdk, findings_only)
-    if compact and gates:
-        compact_skipped, compact_inapplicable = _compact_antenna_records(gates, reason)
-        skipped += compact_skipped
-        inapplicable += compact_inapplicable
     if not gates:
         # (issue #2896) Nothing to accumulate against: inapplicable, not
         # skipped -- no antenna work was requested that failed to run.
         inapplicable.append({"id": work_id("antenna"), "reason": REASON_NO_GATES})
-    for gate in [] if compact else gates:
-        for index, level in enumerate(gate["levels"]):
-            identity = work_id("antenna", gate["gate_id"], level["layer"])
-            if index == 0:
-                inapplicable.append({"id": identity, "reason": "gate_reference_level"})
-            elif level["verdict"] in {"pass", "violate"}:
-                checked.append(identity)
-            else:
-                skipped.append({"id": identity, "reason": reason})
-    if omit_tables:
-        if skipped:
-            skipped = [{"id": work_id("antenna"), "reason": reason}]
-        if any(r["reason"] == "gate_reference_level" for r in inapplicable):
-            inapplicable = [
-                r for r in inapplicable if r["reason"] != "gate_reference_level"
-            ] + [
-                {
-                    "id": work_id("antenna", "gate_reference_level"),
-                    "reason": "gate_reference_level",
-                }
-            ]
+    elif checked or omit_tables or compact:
+        skipped, inapplicable = _counted_antenna_records(
+            gates, reason, len(checked), omit_tables
+        )
+    else:
+        for gate in gates:
+            for index, level in enumerate(gate["levels"]):
+                identity = work_id("antenna", gate["gate_id"], level["layer"])
+                if index == 0:
+                    inapplicable.append(
+                        {"id": identity, "reason": "gate_reference_level"}
+                    )
+                else:
+                    skipped.append({"id": identity, "reason": reason})
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -3331,7 +3323,9 @@ def run_erc(
     compact_block = (
         {
             "gate_count": len(gates),
-            "antenna_levels_skipped": sum(len(g["levels"]) - 1 for g in gates),
+            "antenna_levels_skipped": sum(
+                map(coverage_work_count, coverage["skipped"])
+            ),
             "antenna_reference_levels": len(gates),
             "floating_gate_checked": len(gates),
             "skipped_reason": REASON_FINDINGS_ONLY,
@@ -3399,36 +3393,6 @@ def run_erc(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str, expected: str | None, echoed: Any, report_path: str
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
-    path the committed report echoes back (``file``/``spec``).
-
-    Hashes via :func:`~klayout_tools._provenance.content_hash` because the
-    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
-    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
-    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
-    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
-    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
-    """
-    path = echoed if isinstance(echoed, str) and echoed else None
-    check = hash_check(field, expected, content_hash(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-    }
-    return check
-
-
 def check_erc_report(report_path: str) -> dict[str, Any]:
     """``klt erc --check`` (cheap mode, issue #3060): verify a previously
     committed ``klt erc --format json`` report at ``report_path`` still
@@ -3438,14 +3402,18 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     (``committed["spec"]``) exactly as echoed back by the original run and
     compares each against ``provenance.input.content_hash`` /
     ``provenance.spec.content_hash``; when the report used ``--deck``, also
-    re-hashes that deck's source against ``provenance.deck.content_hash``.
-    Each mismatch names which input moved. A report with no recorded hash
-    never counts as a match
-    (:func:`klayout_tools._report_verify.hash_check`).
+    re-hashes its rule sources against ``provenance.deck.content_hash``. A
+    missing recorded hash fails the check.
 
     Relative echoed paths are re-hashed relative to the current working
-    directory -- the same convention (and the same ``input_not_found``
-    diagnostic) ``klt lvs --check`` uses.
+    directory -- the same convention ``klt lvs --check`` uses -- and an
+    echoed path that names no existing file carries the additive
+    ``input_not_found`` block ``klt drc``/``klt lvs`` attach (issue #6655):
+    the five keys ``path``/``resolved``/``found_relative_to_report``/
+    ``resolved_against``/``hint`` (``klt lvs`` adds a sixth,
+    ``resolved_repo_root``, which ERC does not emit), with the hint naming
+    only the report's directory, because ``--check`` is mutually exclusive
+    with the positional inputs and so offers no override flag to name.
 
     The result additionally carries the informational ``advisories`` list
     (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
@@ -3458,27 +3426,34 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
     committed = _load_committed_report(report_path, ErcError)
     checks = [
-        _input_hash_check(
+        # Issue #6655: the shared input_hash_check, so an echoed `file`/`spec`
+        # naming no existing file carries the five-key `input_not_found`
+        # block `klt drc` attaches (`klt lvs`'s adds `resolved_repo_root`,
+        # via `include_repo_root`, which ERC leaves off). `override_hint=None`:
+        # `--check` is mutually exclusive with the positional inputs, so
+        # there is no override flag for the hint to name.
+        input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            resolve_committed_path(committed.get("file"), report_path=report_path),
+            committed.get("file"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
-        _input_hash_check(
+        input_hash_check(
             "provenance.spec.content_hash",
             get_path(committed, ("provenance", "spec", "content_hash")),
             committed.get("spec"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
     if isinstance(deck, dict) and deck.get("name") is not None:
+        actual = deck_content_hash(deck["name"])
         checks.append(
-            hash_check(
-                "provenance.deck.content_hash",
-                deck.get("content_hash"),
-                content_hash(deck_source_path(deck["name"])),
-            )
+            hash_check("provenance.deck.content_hash", deck.get("content_hash"), actual)
         )
     result = build_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
@@ -3521,4 +3496,4 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)

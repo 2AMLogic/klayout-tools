@@ -5,8 +5,8 @@ Version 1 adds ``schema_version``, ``known``, ``checked`` identities and
 ``skipped``/``inapplicable``/``unknown`` identity/reason records to a producer's
 existing ``coverage`` fields. ``nothing_checked`` remains available, but
 requires *known* zero checked work: unknown execution is not proof of zero
-or complete execution. Skips describe requested work; inapplicable records
-never count as skipped requests. All identities are unique within a block.
+or complete execution. Skipped and inapplicable records may carry a count.
+All identities are unique within a block.
 
 ``coverage_state`` validates the versioned contract before classifying it.
 It reports full/partial/zero/unknown/malformed or legacy. Optional Verilator
@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from .coverage_work import _identity_list_error, _work_lists_error
+from .coverage_work import CoverageWorkRecord, _identity_list_error, _work_lists_error
 
 COVERAGE_SCHEMA_VERSION = 1
 REASON_NO_RELEVANT_CHECKS = "no_relevant_checks"
@@ -155,9 +156,9 @@ def _coverage_consistency_error(block: dict[str, Any]) -> str | None:
 def build_check_coverage(
     *,
     checked: list[str],
-    skipped: list[dict[str, str]] | None = None,
-    inapplicable: list[dict[str, str]] | None = None,
-    unknown: list[dict[str, str]] | None = None,
+    skipped: Sequence[Mapping[str, Any]] | None = None,
+    inapplicable: Sequence[Mapping[str, Any]] | None = None,
+    unknown: Sequence[Mapping[str, Any]] | None = None,
     nothing_checked_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build one deterministic common block without aliasing producer data."""
@@ -174,7 +175,7 @@ def build_check_coverage(
         block[key] = sorted((dict(r) for r in values or []), key=lambda r: r["id"])
     zero = block["known"] and not checked
     reasons = nothing_checked_reasons or sorted(
-        {r["reason"] for r in (skipped or []) + (inapplicable or [])}
+        {r["reason"] for records in (skipped, inapplicable) for r in records or ()}
     )
     block.update(
         build_nothing_checked((reasons or [REASON_NO_RELEVANT_CHECKS]) if zero else [])
@@ -437,19 +438,18 @@ def rollup_status(
     }[rollup.result]
 
 
-def coverage_skipped_work(envelope: dict[str, Any]) -> list[dict[str, str]]:
+def coverage_skipped_work(envelope: dict[str, Any]) -> list[CoverageWorkRecord]:
     """The requested work a :data:`RESULT_PARTIAL` envelope did not check.
 
     ``[]`` for every other row, including a legacy envelope whose own
     verb-specific fields describe a gap (`klt drc`'s ``rules_skipped``, say):
-    those are not the versioned, identity-bearing records this contract
-    defines, and re-reading them here would relabel legacy data as a common
-    partial claim. Records are returned as copies, in the producer's own
-    sorted order, so a consumer can quote them without aliasing the source.
+    legacy fields do not establish partial coverage. Records are copied in
+    producer order so a consumer can quote them without editing the source.
     """
     if coverage_state(envelope) != RESULT_PARTIAL:
         return []
-    return [dict(record) for record in envelope["coverage"]["skipped"]]
+    records: list[CoverageWorkRecord] = envelope["coverage"]["skipped"]
+    return [record.copy() for record in records]
 
 
 def coverage_nothing_checked(envelope: dict[str, Any]) -> bool:

@@ -4,9 +4,7 @@ First seam split out of :mod:`klayout_tools.sim_batch` (issue #4065), moved
 verbatim, then split by section so each file stays within the size limit:
 this module holds the constants and exceptions; ``sim_batch_contract_spec``,
 ``_worker``, ``_preflight`` and ``_jobspec`` hold the rest.
-:mod:`klayout_tools.sim_batch` re-exports every name, so ``from
-klayout_tools.sim_batch import _x`` keeps working. Names a test patches must be
-patched in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
+Patch names in the module that defines them (e.g. ``_WORKER_CAPTURE_PROGRAM`` in
 ``sim_batch_contract_worker``).
 """
 
@@ -295,6 +293,12 @@ BATCH_MAX_CONCURRENT_CODE = "batch_max_concurrent_jobs_invalid"
 #: The ``environment.remote.job_ceiling.basis`` value: the assessment is the
 #: request-derived fully-serial upper bound, never a measured runtime.
 JOB_CEILING_BASIS = "conservative_serial_bound"
+
+#: ``environment.remote.job_ceiling``'s ``basis`` when the caller states the
+#: whole-job wall bound via ``request.batch.job_timeout_s`` (issue #5544):
+#: every field of the assessment is then defined by that stated bound, not
+#: by the serial formula (see ``sim_batch_job_timeout.assess_caller_job_timeout``).
+JOB_CEILING_BASIS_CALLER = "caller_job_timeout"
 
 #: Per-invocation timeout for one `aws` CLI call (upload/poll/collect).
 _BATCH_AWS_TIMEOUT_S = 900.0
