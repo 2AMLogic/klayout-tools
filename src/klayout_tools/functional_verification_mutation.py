@@ -227,6 +227,9 @@ def run_functional_verification_with_mutations(
     )
 
     output_dir = _fv._resolve_output_dir(request_dir, output_dir)
+    # Issue #6762: `log_path` envelopes are relative to the request's repo (as
+    # the baseline run's are), never the cwd's.
+    repo_root = _fv.find_repo_root(request_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
     try:
         os.makedirs(mutants_dir, exist_ok=True)
@@ -288,7 +291,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": doc_rejections[index],
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(None),
+                    "log_path": _fv._path_envelope(None, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -346,7 +349,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             killed_count += 1
@@ -359,7 +362,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": detail,
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -374,7 +377,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": str(exc),
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -387,7 +390,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": first_killing_test,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             killed_count += 1
@@ -397,7 +400,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "survived",
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             survived_count += 1
