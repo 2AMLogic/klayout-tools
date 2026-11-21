@@ -1537,6 +1537,7 @@ def run_lvs(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
     ) = layout_stage
 
     ref_stage = _read_reference_stage(
@@ -1564,6 +1565,7 @@ def run_lvs(
     unresolved_subckt_call_findings = ref_stage.unresolved_subckt_call_findings
     reference_pin_order_files = ref_stage.reference_pin_order_files
     reference_netlist = ref_stage.reference_netlist
+    reference_known_limit_counts = ref_stage.reference_known_limit_counts
 
     (
         layout_circuit,
@@ -1997,7 +1999,13 @@ def run_lvs(
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
     )
     note_known_limit(
-        mismatches, opts.finfet_layout, status, reference_spec, layout_spec
+        mismatches,
+        opts.finfet_layout,
+        status,
+        reference_spec,
+        layout_spec,
+        layout_counts=layout_known_limit_counts,
+        reference_counts=reference_known_limit_counts,
     )
 
     return assemble_lvs_report(
