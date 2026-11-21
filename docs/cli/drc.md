@@ -739,9 +739,11 @@ that is not runnable is an error naming the flag or variable; it never falls
 back to `PATH`. Every `--engine klayout` report records
 `environment.klayout_binary` naming the binary that ran (issues #4950/#5844):
 the resolved override path when one was in force, else the PATH-resolved
-absolute path of the `klayout` that ran — so a committed envelope can always
-answer *which* `klayout` produced it. `klt` does not fetch KLayout — supply
-any build you trust. In a pinned throwaway environment:
+absolute path of the `klayout` that ran — the bare name `klayout` only when
+nothing on `PATH` resolves — so a committed envelope can always answer
+*which* `klayout` produced it. A `--list-rule-categories` listing records
+the same field. `klt` does not fetch KLayout — supply any build you trust.
+In a pinned throwaway environment:
 
 ```
 KLT_KLAYOUT_BINARY=/opt/klayout-0.30.12/klayout \
@@ -756,6 +758,21 @@ deck revision.
 Note what this does *not* fix: the rule tables a PDK ships are the portable
 part, and there is still no way to run them **without** the vendor's driver.
 Composing a deck from a PDK's rule tables directly is tracked separately.
+
+Recording the binary has a consequence for a **committed** envelope: an
+absolute tool path is exactly what `klt env-provenance lint-envelope` flags,
+so an envelope or listing carrying a PATH-resolved `environment.klayout_binary`
+reports one finding under an empty allow-list, and `klt env-provenance scan`
+classes the same value as a `home-path` disclosure when the KLayout install
+lives under `$HOME`. The remedy is to scrub before committing — rewrite the
+field with `scrub_payload` per [`env-provenance.md`](env-provenance.md) →
+"Redacting a foreign payload: `scrub_payload`" — not to reach for
+`lint-envelope --allow-prefix`: this repo's own CI lint keeps an empty
+allow-list on purpose ("the tree passes today with an EMPTY allow-list, and
+that is the property worth keeping", `.github/workflows/ci.yml`), and
+`--allow-prefix` suits only a consumer whose CI does not defend that
+property. The bare-name recording (`klayout`, nothing on `PATH` resolved)
+is not a finding.
 
 **`--deck-var NAME=VALUE` (issue #1302, repeatable).** Passes an additional
 `-rd NAME=VALUE` script global to the `klayout` subprocess, beyond the
@@ -857,6 +874,24 @@ real open_pdks install never pays for the extra probe.
   contains only rules with actual findings. `coverage.known` is false and
   `unknown` names `unmeasured_rule_execution`. No findings means
   `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Deck stdout as additive evidence (issue #6613).** Every `--engine
+  klayout` run that produced a report carries the deck's own captured
+  stdout in the additive top-level `deck_output` field:
+  `{"stdout": "<text>", "truncated": <bool>, "line_count": <int>}`. A
+  PDK-native deck logs real execution evidence klt otherwise discarded on
+  success (gf180mcu's density deck logs each computed coverage ratio;
+  several decks end with a `DRC RESULT: ...` summary line). The log is
+  bounded: past 500 lines only the tail is stored, `truncated: true` is
+  set, and `line_count` keeps the *whole* stdout's line count (so exactly
+  `line_count - 500` lines were dropped). The run's temporary work
+  directory is scrubbed to `<klt-drc-klayout-workdir>` so otherwise
+  identical runs store identical text. **It never changes the verdict**:
+  klt parses nothing out of the log, a zero-finding, zero-category run is
+  still `coverage_unknown` (exit 4), and `--expect-rule-categories 0`
+  stays rejected (a count of zero certifies nothing -- see the coverage
+  contract). `--rerun` excludes the field from its diff, since a deck may
+  legitimately echo timings or per-run paths; treat the log as evidence a
+  human or downstream consumer cites, not a status upgrade.
 - **Opt-in rule-category assertion (issue #2697).** The conservative default
   above means a layout that is genuinely clean under its PDK's own deck can
   never earn `clean` on its own. A caller who knows how many unique rule
@@ -1162,8 +1197,15 @@ has no compound-layer expression for "one of": `poly2.enclosing.contact.1` /
 `comp.enclosing.contact.1` (a contact lands on poly2 *or* comp), and
 `metal4.enclosing.via4.1` / `mim.enclosing.via4.1` (a MiM via4 lands on the
 `mim` plate rather than on Metal4). A fully orphan cut is therefore still not
-reported by those four rules. sky130 has its own opt-in issue (#5737) and
-keeps the legacy behaviour until it lands.
+reported by those four rules. sky130 is opted in (#5737) on eight single-population sides
+(`li1.enclosing.licon1.1`, `met1.enclosing.mcon.1`,
+`met1.`/`met2.enclosing.via.1`, `met2.`/`met3.enclosing.via2.1`,
+`met4.enclosing.via3.1`, `met5.enclosing.via4.1`). Seven sky130 cut sides stay
+on the legacy behaviour because each is one of several disjoint populations:
+`diff.`/`tap.`/`poly.enclosing.licon.1` (a diffusion licon never touches
+poly), `met3.enclosing.via3.1` and `capm.enclosing.via3.1` (a capm via3 lands
+on capm, not met3), `met4.enclosing.via4.1` and `capm2.enclosing.via4.1`
+(likewise for capm2).
 
 asap7 has **no** cut-containment gap, and `require_containment` does not apply
 to it: it is a native KLayout DRC-DSL deck (`decks/asap7.drc`), not a curated
@@ -1898,17 +1940,21 @@ and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
 "poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
 mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
 licons by an approximation (see the `licon1.width.1` note below), not
-replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
-reads `clean` here while the PDK's own Magic `drc(full)` still reports those
-head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
-them. Both `licon.1c` and `rpm.1` are head-geometry-derived — measured
-2026-11-15 (Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
-`0.9.3.dev3+gd5d57daf9a14`), a uniform 0.2 µm marker (`spacing_um` <= 0.4)
-leaves `rpm.1` unchanged while head length alone clears it — so the marker
-overhang is ruled out and the head-length fix is tracked in #5704. `klt
-drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the independent
-check. This gap is documentation-only: no field of the JSON `coverage`
-object changes.
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell reads
+`clean` here, and since issue #5704 the generator also draws its end heads
+to the 2.16 µm extension — the two verdicts no longer disagree on that rule
+for generated cells (verified live, 2026-11-17: the pre-#5704 cell reported
+`licon.1c + li.5` under Magic `drc(fast)`/`drc(full)` while this deck said
+`clean`; the fixed cell reports `No errors found.` under both). Both
+`licon.1c` and `rpm.1` were head-geometry-derived — measured 2026-11-15
+(Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev3+gd5d57daf9a14`): a uniform 0.2 µm marker (`spacing_um` <= 0.4)
+left `rpm.1` unchanged while head length alone cleared it. For
+arbitrary layout a `klt drc --deck sky130` pass still is not evidence the
+heads meet `licon.1b/c` — the deck has no such rule;
+`klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -3521,6 +3567,35 @@ inside only that placement's world bounding box, so they attribute to the
 correct occurrence — the shared `source_cell`/`source_path` name the reused
 definition, while the distinct `bbox` locates the specific placement.
 
+**Grid markers (`check: "ongrid"`) are attributed by geometry, not by
+bounding box** (issue #6447). `ongrid` runs on the *merged* layer, so when a
+top-level shape overlaps a child on the same layer, the union gains
+T-vertices on the child's boundary — and a marker there can sit inside a
+child that drew nothing off-grid. For a native (non-derived) physical-layer
+`ongrid` marker, `klt drc` instead looks at the source shapes on the rule's
+layer at that exact point, in the checked cell's coordinates (so an
+off-grid *placement* offset counts, and a clean cell moved off-grid by its
+transform is the owner of the edges it contributes). Each offending axis
+needs a source edge through the point at that coordinate — a horizontal
+edge supplies Y, a vertical edge supplies X. The marker is attributed to a
+child only when that evidence names **exactly one placement** (placements
+are told apart by transform, not by cell name):
+
+- `source_cell`/`source_path` are `null` for a marker owed to top-level
+  geometry, so a waiver for the clean child cannot hide it;
+- they are also `null` when an offending axis has no source edge,
+  when two placements both supply an edge there (overlapping or
+  duplicated placements, or an edge from one placement crossing a
+  coordinate from another), or when a diagonal edge passes through the point
+  — the owner is then unproven, and no bounding-box fallback is applied;
+- otherwise they carry the owning placement's cell and instance path as
+  usual, including for a child's own corners and for a T-vertex where the
+  child's edge supplies the offending coordinate.
+
+Detection is unchanged — the same markers are reported at the same
+coordinates; only who they are filed under differs. Spacing, enclosure and
+other rule kinds, and derived-layer rules, keep the bounding-box rule above.
+
 These two fields are **purely additive** to the JSON contract — the existing
 `cell` field keeps its meaning (the top cell) and the sort key is unchanged
 — so this did not bump `drc`'s `schema_version` (see
@@ -3824,7 +3899,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, `"net_space"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
-| `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
+| `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). For a native physical-layer `ongrid` marker the owner is the one placement whose own source edges supply the offending coordinate, else `null` — never a mere bounding-box match. See "Per-instance attribution" below. |
 | `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
 | `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
