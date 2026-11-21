@@ -1,0 +1,499 @@
+"""``klt signoff --attest 8 --inventory FILE`` (issue #4311)."""
+
+from __future__ import annotations
+
+import gzip
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+from klayout_tools.signoff import build_tier_report
+from klayout_tools.signoff_attest import (
+    _REQUIRED_METRICS,
+    AttestationError,
+    build_attestation,
+    check_attestation,
+    render_envelope,
+)
+from klayout_tools.signoff_attest_command import attach_output_tails
+
+_PASS = {"argv": [sys.executable, "-c", "pass"]}
+_ENV = {"schema_version": 1, "kind": "generic"}
+_FAIL = {"argv": [sys.executable, "-c", "raise SystemExit(1)"]}
+
+
+def _repo(tmp_path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "evidence").mkdir()
+    (repo / "report.md").write_text("# characterization\n")
+    for name in ("sim_tt", "sim_ss"):
+        (repo / "evidence" / f"{name}.json").write_text(
+            json.dumps(
+                {
+                    **_ENV,
+                    "status": "pass",
+                    "result": {"fmax": 100, "area": 5, "power": 2},
+                }
+            )
+        )
+    return repo
+
+
+def _analog_inventory(**overrides) -> dict:
+    inventory = {
+        "schema_version": 1,
+        "kind": "t1-attestation-inventory",
+        "t1_item": 8,
+        "report": "report.md",
+        "spec_rows": ["gain", "bandwidth"],
+        "citations": {
+            "gain": ["evidence/sim_tt.json"],
+            "bandwidth": ["evidence/sim_tt.json", "evidence/sim_ss.json"],
+        },
+        "envelope_checks": {
+            "evidence/sim_tt.json": _PASS,
+            "evidence/sim_ss.json": _PASS,
+        },
+    }
+    inventory.update(overrides)
+    return inventory
+
+
+def _digital_inventory(**overrides) -> dict:
+    metrics = {
+        corner: {
+            name: {"envelope": f"evidence/sim_{corner}.json", "field": f"result.{name}"}
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+    return _analog_inventory(corners=["tt", "ss"], metrics=metrics, **overrides)
+
+
+def _attest(repo: Path, inventory: dict) -> dict:
+    path = repo / "inventory.json"
+    path.write_text(json.dumps(inventory))
+    return build_attestation(8, str(path))
+
+
+def _failed(envelope: dict) -> list[tuple]:
+    return [
+        (c["check"], c.get("row") or c.get("target") or c.get("metric") or c["role"])
+        for c in envelope["attestation"]["checks"]
+        if not c["passed"]
+    ]
+
+
+def _grade(repo: Path, envelope: dict) -> dict:
+    env_path = repo / "evidence" / "characterization.json"
+    env_path.write_text(render_envelope(envelope))
+    manifest = {
+        "block": "demo",
+        "kind": "analog",
+        "evidence": {
+            "8": {
+                "file": str(env_path),
+                "content_hash": envelope["provenance"]["input"]["content_hash"],
+            }
+        },
+    }
+    report = build_tier_report(manifest)
+    return next(i for i in report["items"] if i["id"] == 8)
+
+
+def test_analog_pass_shape_and_grades_met_with_disclosure(tmp_path):
+    repo = _repo(tmp_path)
+
+    envelope = _attest(repo, _analog_inventory())
+
+    assert envelope["status"] == "pass"
+    assert envelope["kind"] == "generic"
+    assert envelope["t1_item"] == 8
+    assert envelope["attestation"]["hash_algorithm"] == "sha256-raw-bytes"
+    item = _grade(repo, envelope)
+    assert item["status"] == "met"
+    disclosure = item["citation"]["attestation"]
+    assert disclosure["tool_produced"] is True
+    assert disclosure["producer"] == "klt signoff --attest"
+    assert disclosure["check_count"] == envelope["attestation"]["check_count"]
+
+
+def test_bare_generic_still_grades_with_tool_produced_false(tmp_path):
+    repo = _repo(tmp_path)
+    bare = {
+        "schema_version": 1,
+        "kind": "generic",
+        "status": "pass",
+        "summary": "hand written",
+    }
+    env_path = repo / "evidence" / "bare.json"
+    env_path.write_text(json.dumps(bare))
+    report = build_tier_report(
+        {"block": "demo", "kind": "analog", "evidence": {"8": {"file": str(env_path)}}}
+    )
+
+    item = next(i for i in report["items"] if i["id"] == 8)
+
+    assert item["status"] == "met"
+    assert item["citation"]["attestation"] == {"tool_produced": False}
+
+
+def test_spec_row_without_citation_fails(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory(spec_rows=["gain", "bandwidth", "psrr"])
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "fail"
+    assert _failed(envelope) == [("citation", "psrr")]
+
+
+def test_missing_cited_envelope_fails(tmp_path):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_ss.json").unlink()
+
+    envelope = _attest(repo, _analog_inventory())
+
+    assert envelope["status"] == "fail"
+    assert ("citation", "bandwidth") in _failed(envelope)
+
+
+def test_failing_envelope_check_fails(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = _FAIL
+
+    envelope = _attest(repo, inventory)
+
+    assert _failed(envelope) == [("command", "evidence/sim_ss.json")]
+
+
+def test_digital_metrics_pass_and_are_recorded(tmp_path):
+    repo = _repo(tmp_path)
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+def test_digital_missing_metric_for_one_corner_fails(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    del inventory["metrics"]["ss"]["fmax"]
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "fail"
+    assert _failed(envelope) == [("metric", "fmax")]
+
+
+def test_digital_non_numeric_metric_field_fails(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    inventory["metrics"]["tt"]["power"]["field"] = "status"
+
+    envelope = _attest(repo, inventory)
+
+    assert _failed(envelope) == [("metric", "power")]
+
+
+def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
+    repo = _repo(tmp_path)
+    payload = json.dumps(
+        {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+    )
+    for corner in ("tt", "ss"):
+        (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
+            gzip.compress(payload.encode())
+        )
+    inventory = _digital_inventory()
+    inventory["citations"] = {
+        "gain": ["evidence/sim_tt.json.gz"],
+        "bandwidth": ["evidence/sim_tt.json.gz", "evidence/sim_ss.json.gz"],
+    }
+    inventory["envelope_checks"] = {
+        "evidence/sim_tt.json.gz": _PASS,
+        "evidence/sim_ss.json.gz": _PASS,
+    }
+    inventory["metrics"] = {
+        corner: {
+            name: {
+                "envelope": f"evidence/sim_{corner}.json.gz",
+                "field": f"result.{name}",
+            }
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "1e999"])
+def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass", "result": {"fmax": 0}}).replace(
+            '"fmax": 0', f'"fmax": {literal}'
+        )
+    )
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "fail"
+    # The shared reader refuses the nonfinite literal, so the recogniser
+    # (#5688) rejects the cited file, both spec rows citing it, and each
+    # metric bound to it.
+    assert _failed(envelope) == [
+        ("envelope", "evidence"),
+        ("citation", "bandwidth"),
+        ("citation", "gain"),
+        *[("metric", name) for name in _REQUIRED_METRICS],
+    ]
+
+
+def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    inventory["citations"]["gain"] = ["evidence/sim_tt.json", "evidence/sim_tt.json"]
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    cited_once = [
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["role"] == "evidence" and c["check"] == "present"
+    ]
+    assert len(cited_once) == 2
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda inv: inv.pop("report"),
+        lambda inv: inv.update(spec_rows=[]),
+        lambda inv: inv["citations"].update(unknown=["evidence/sim_tt.json"]),
+        lambda inv: inv.pop("envelope_checks"),
+        lambda inv: inv["envelope_checks"].pop("evidence/sim_ss.json"),
+        lambda inv: inv.update(corners=["tt"]),
+        lambda inv: inv.update(typo=1),
+        lambda inv: inv["citations"].update(gain=["../outside.json"]),
+    ],
+)
+def test_malformed_inventory_is_refused(tmp_path, mutate):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    mutate(inventory)
+
+    with pytest.raises(AttestationError):
+        _attest(repo, inventory)
+
+
+def test_check_reports_drift_on_cited_envelope_and_row_map(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    envelope = _attest(repo, inventory)
+    committed = repo / "evidence" / "item8.json"
+    committed.write_text(render_envelope(envelope))
+    inv_path = str(repo / "inventory.json")
+
+    clean = check_attestation(8, inv_path, str(committed))
+    assert clean["status"] == "match"
+    assert clean["fresh_status"] == "pass"
+
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass"})
+    )
+    drifted = check_attestation(8, inv_path, str(committed))
+    assert drifted["status"] != "match"
+
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+        )
+    )
+    inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
+    (repo / "inventory.json").write_text(json.dumps(inventory))
+    remapped = check_attestation(8, inv_path, str(committed))
+    assert remapped["status"] != "match"
+
+
+def test_report_cited_as_evidence_is_refused(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["citations"]["gain"] = ["report.md"]
+    inventory["envelope_checks"]["report.md"] = _PASS
+
+    with pytest.raises(AttestationError):
+        _attest(repo, inventory)
+
+
+def _failing_inventory(text: str) -> dict:
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [sys.executable, "-c", f"import sys; print({text!r}); sys.exit(2)"]
+    }
+    return inventory
+
+
+def test_failing_command_tail_is_live_only_and_never_in_built_envelope(tmp_path):
+    repo = _repo(tmp_path)
+    envelope = _attest(repo, _failing_inventory("boom"))
+    checks = envelope["attestation"]["checks"]
+    assert all("output_tail" not in c for c in checks)
+
+    attach_output_tails(envelope)
+
+    failed = [c for c in checks if c["check"] == "command" and not c["passed"]]
+    assert [c["output_tail"] for c in failed] == ["boom"]
+    assert all(
+        "output_tail" not in c
+        for c in checks
+        if c["check"] == "command" and c["passed"]
+    )
+
+
+def test_host_specific_tail_text_does_not_change_the_envelope_bytes(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {
+        "argv": [
+            sys.executable,
+            "-c",
+            "import os, sys; print(os.environ['TAIL_X']); sys.exit(2)",
+        ]
+    }
+    rendered = []
+    for host_text in ("host-a-text", "host-b-text"):
+        monkeypatch.setenv("TAIL_X", host_text)
+        envelope = _attest(repo, inventory)
+        rendered.append(render_envelope(envelope))
+        attach_output_tails(envelope)
+        assert host_text in render_envelope(envelope)  # live result only
+
+    assert rendered[0] == rendered[1]
+    assert "host-" not in rendered[0]
+
+
+def test_text_line_names_failing_citation_row(tmp_path):
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory(spec_rows=["gain", "bandwidth", "psrr"])
+
+    envelope = _attest(repo, inventory)
+
+    lines = [
+        attestation_check_line(c)
+        for c in envelope["attestation"]["checks"]
+        if c["check"] == "citation"
+    ]
+    assert "[FAIL] spec row psrr: no envelope cited" in lines
+    assert any(line.startswith("[PASS] spec row gain: ") for line in lines)
+
+
+def test_text_line_per_check_kind():
+    from klayout_tools.signoff_attest_text import attestation_check_line
+
+    assert (
+        attestation_check_line(
+            {
+                "check": "recorded_hash",
+                "role": "freshness",
+                "target": "a.gds",
+                "passed": False,
+                "mismatches": [{"path": "a.gds"}],
+            }
+        )
+        == "[FAIL] freshness a.gds recorded hash mismatch: a.gds"
+    )
+    assert (
+        attestation_check_line(
+            {
+                "check": "metric",
+                "role": "digital",
+                "corner": "tt",
+                "metric": "fmax",
+                "value": None,
+                "passed": False,
+            }
+        )
+        == "[FAIL] digital tt fmax: missing"
+    )
+    with pytest.raises(ValueError):
+        attestation_check_line({"check": "bogus", "passed": True})
+
+
+# --------------------------------------------------------------------------- #
+# `--attest --check` drift names the check, not only its list index
+# (issue #5460). Item 8 is the shape with two identity keys: a metric check is
+# one per corner x metric, so the corner alone would not name it.
+# --------------------------------------------------------------------------- #
+
+
+def _committed_item8(repo: Path, inventory: dict) -> str:
+    committed = repo / "evidence" / "item8.json"
+    committed.write_text(render_envelope(_attest(repo, inventory)))
+    return str(committed)
+
+
+def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _digital_inventory()
+    committed = _committed_item8(repo, inventory)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}}
+        )
+    )
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
+    assert value["check"] == {
+        "role": "digital",
+        "check": "metric",
+        "corner": "tt",
+        "metric": "fmax",
+    }
+    assert (value["committed"], value["fresh"]) == (100, 120)
+    # The evidence file's own presence check names the path that moved.
+    (hashed,) = [
+        e
+        for e in result["drift"]
+        if e["field"].startswith("attestation.checks.")
+        and e["field"].endswith(".content_hash")
+    ]
+    assert hashed["check"] == {
+        "role": "evidence",
+        "check": "present",
+        "path": "evidence/sim_tt.json",
+    }
+
+
+def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    committed = _committed_item8(repo, inventory)
+    inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
+    (repo / "inventory.json").write_text(json.dumps(inventory))
+
+    result = check_attestation(8, str(repo / "inventory.json"), committed)
+
+    rows = [e for e in result["drift"] if e.get("check", {}).get("role") == "spec_row"]
+    assert rows, result["drift"]
+    assert {e["check"]["row"] for e in rows} == {"gain"}

@@ -21,6 +21,8 @@ from typing import Any
 
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout
+from ._provenance import layout_geometry_digest
+from ._stats_density import MAX_DENSITY_WINDOWS, density_windows
 
 
 class StatsError(Exception):
@@ -161,9 +163,9 @@ def _accumulate(
     exactly like ``area_dbu2`` above, so a shape drawn once in a cell placed
     N times via a ``CellInstArray`` contributes N to these totals -- matching
     ``klt layers --flattened``'s ``flattened_shapes`` convention. Overlapping
-    shapes are **not** merged, so area and the flattened counts may
-    double-count overlapping geometry; this keeps the computation cheap and
-    exactly reproducible.
+    shapes are **not** merged here, so area and the flattened counts may
+    double-count overlapping geometry (``merged_area_um2`` in
+    :func:`stats_report` is the unioned figure).
     """
     area_dbu2 = 0
     polygon_count = 0
@@ -190,6 +192,63 @@ def _accumulate(
     )
 
 
+def _merged_region(top_cell: Any, layer_index: int, kdb: Any) -> Any:
+    """Flattened, boolean-merged region of one layer under ``top_cell``.
+
+    ``Region`` over a shape iterator keeps only area-bearing shapes (boxes,
+    polygons, paths); texts are ignored.
+    """
+    if top_cell is None:
+        return kdb.Region()
+    return kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
+
+
+def _density_report(
+    layout: Any,
+    top_cell: Any,
+    bbox: Any,
+    window_um: float,
+    window_layers: list[tuple[int, int]] | None,
+    kdb: Any,
+) -> dict[str, Any]:
+    dbu = layout.dbu
+    window_dbu = round(window_um / dbu)
+    if window_um <= 0 or window_dbu <= 0:
+        raise StatsError(
+            f"--density-window must be a positive size of at least one "
+            f"database unit ({dbu} um); got {window_um}"
+        )
+    if bbox.empty() or bbox.width() == 0 or bbox.height() == 0:
+        n_windows = 0
+    else:
+        n_windows = -(-bbox.width() // window_dbu) * -(-bbox.height() // window_dbu)
+    if n_windows > MAX_DENSITY_WINDOWS:
+        raise StatsError(
+            f"--density-window {window_um} um would tile {n_windows} windows "
+            f"per layer (limit {MAX_DENSITY_WINDOWS}); use a larger window"
+        )
+
+    layers: list[dict[str, Any]] = []
+    for layer_index in layout.layer_indexes():
+        info = layout.get_info(layer_index)
+        pair = (info.layer, info.datatype)
+        if window_layers is None:
+            if is_reserved_annotation_layer(*pair):
+                continue
+        elif pair not in window_layers:
+            continue
+        if n_windows == 0:
+            continue
+        region = _merged_region(top_cell, layer_index, kdb)
+        if window_layers is None and region.is_empty():
+            continue
+        entry: dict[str, Any] = {"layer": pair[0], "datatype": pair[1]}
+        entry.update(density_windows(region, bbox, window_dbu, dbu, kdb))
+        layers.append(entry)
+    layers.sort(key=lambda e: (e["layer"], e["datatype"]))
+    return {"window_um": window_dbu * dbu, "window_count": n_windows, "layers": layers}
+
+
 def _density(area_dbu2: int, bbox_area_dbu2: int) -> float:
     if bbox_area_dbu2 <= 0:
         return 0.0
@@ -197,7 +256,12 @@ def _density(area_dbu2: int, bbox_area_dbu2: int) -> float:
 
 
 def stats_report(
-    path: str, per_layer: bool = False, top: str | None = None
+    path: str,
+    per_layer: bool = False,
+    top: str | None = None,
+    density_window: float | None = None,
+    window_layers: list[tuple[int, int]] | None = None,
+    geometry_digest: bool = False,
 ) -> dict[str, Any]:
     """Compute area/density/polygon/vertex statistics for a GDSII or OASIS stream.
 
@@ -212,6 +276,9 @@ def stats_report(
             "file": <path as provided>,
             "dbu_um": <database unit in micrometres, float>,
             "top_cell": <top cell name, or None if the layout has no cells>,
+            "geometry_digest": <"sha256:<64 hex>" of the stream's decoded
+                                geometry when geometry_digest=True, else
+                                None (also None if it cannot be computed)>,
             "bbox_um": {"left": .., "bottom": .., "right": .., "top": ..,
                         "width": .., "height": ..},
             "total": {"area_um2": .., "density": .., "polygon_count": ..,
@@ -241,8 +308,8 @@ def stats_report(
     each cell *definition*'s own area regardless of how many times it is
     placed. ``polygon_count``/``vertex_count`` are **not** weighted this way
     -- they stay per cell definition (each shape counted once where it is
-    defined), matching ``klt layers``' shape-count convention. Overlapping
-    shapes are not merged, so area may double-count overlapping geometry.
+    defined), matching ``klt layers``' shape-count convention. ``area_um2``
+    does not merge overlapping shapes, so it may double-count them.
 
     ``flattened_polygon_count``/``flattened_vertex_count`` (issue #2366) give
     a consumer that same instance-resolved multiplicity for the polygon and
@@ -253,6 +320,30 @@ def stats_report(
     ``vertex_count`` (which are unchanged), and mirror ``klt layers
     --flattened``'s ``flattened_shapes`` field/convention -- see
     ``docs/cli/layers.md`` -- extended here to also cover vertex counts.
+
+    ``merged_area_um2``/``merged_density`` (issue #3107) are additive
+    counterparts of ``area_um2``/``density`` computed on the flattened,
+    boolean-merged (unioned) geometry of the reporting scope, so overlapping
+    shapes count once. ``total.merged_area_um2`` is the sum of the per-layer
+    merged areas (no cross-layer union), keeping ``total == sum(layers)``.
+
+    ``density_window`` (um, issue #3107) adds a ``density_windows`` block of
+    per-layer windowed drawn-area fractions over merged geometry (``None``
+    when not requested); ``window_layers`` restricts it to ``(layer,
+    datatype)`` pairs, default every non-annotation layer with geometry.
+
+    ``geometry_digest`` (issue #5551) is
+    :func:`klayout_tools._provenance.layout_geometry_digest` of ``path`` --
+    a ``"sha256:<64 hex>"`` digest of the stream's *decoded geometry*, which
+    ignores the write timestamps and record order a raw-byte hash is
+    sensitive to, so two writes of identical geometry share it. It is
+    reported for the whole stream, never scoped by ``top``. This is the
+    public producer of the value ``klt signoff --attest 2 --hash-kind
+    geometry`` is graded against (``docs/cli/signoff.md``), which previously
+    had none -- note it is **not** ``klt diff``'s ``canonical_hash``, a
+    different digest. ``None`` unless ``geometry_digest=True`` (opt-in: the
+    digest re-reads and walks the whole layout, ~2.5x the cost of the rest of
+    the report on large flat layouts), and when the digest cannot be computed.
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
@@ -311,6 +402,7 @@ def stats_report(
     weights = _instance_weights(scope_cells)
 
     total_area_dbu2 = 0
+    total_merged_area_dbu2 = 0
     total_polygon_count = 0
     total_vertex_count = 0
     total_flattened_polygon_count = 0
@@ -325,7 +417,9 @@ def stats_report(
             flattened_polygon_count,
             flattened_vertex_count,
         ) = _accumulate(scope_cells, layer_index, weights)
+        merged_area_dbu2 = _merged_region(top_cell, layer_index, kdb).area()
         total_area_dbu2 += area_dbu2
+        total_merged_area_dbu2 += merged_area_dbu2
         total_polygon_count += polygon_count
         total_vertex_count += vertex_count
         total_flattened_polygon_count += flattened_polygon_count
@@ -340,6 +434,8 @@ def stats_report(
                     "name": info.name if info.name else None,
                     "area_um2": area_dbu2 * dbu * dbu,
                     "density": _density(area_dbu2, bbox_area_dbu2),
+                    "merged_area_um2": merged_area_dbu2 * dbu * dbu,
+                    "merged_density": _density(merged_area_dbu2, bbox_area_dbu2),
                     "polygon_count": polygon_count,
                     "vertex_count": vertex_count,
                     "flattened_polygon_count": flattened_polygon_count,
@@ -353,19 +449,29 @@ def stats_report(
     if per_layer_entries is not None:
         per_layer_entries.sort(key=lambda entry: (entry["layer"], entry["datatype"]))
 
+    density_windows = (
+        _density_report(layout, top_cell, bbox, density_window, window_layers, kdb)
+        if density_window is not None
+        else None
+    )
+
     return {
         "schema_version": 1,
         "file": path,
         "dbu_um": dbu,
         "top_cell": top_cell.name if top_cell is not None else None,
+        "geometry_digest": layout_geometry_digest(path) if geometry_digest else None,
         "bbox_um": bbox_um_dict(bbox, dbu),
         "total": {
             "area_um2": total_area_dbu2 * dbu * dbu,
             "density": _density(total_area_dbu2, bbox_area_dbu2),
+            "merged_area_um2": total_merged_area_dbu2 * dbu * dbu,
+            "merged_density": _density(total_merged_area_dbu2, bbox_area_dbu2),
             "polygon_count": total_polygon_count,
             "vertex_count": total_vertex_count,
             "flattened_polygon_count": total_flattened_polygon_count,
             "flattened_vertex_count": total_flattened_vertex_count,
         },
         "layers": per_layer_entries,
+        "density_windows": density_windows,
     }

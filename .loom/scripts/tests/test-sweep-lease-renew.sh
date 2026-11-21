@@ -24,7 +24,7 @@
 #       "sweep exits -> renewal naturally stops" contract, entirely via a
 #       real background process against the real script (no `gh` needed
 #       for the termination half; the PATCH stub records call count too)
-#   (h) stop kills a given PID
+#   (h) stop refuses a non-renewer PID (fail closed)
 #   (i) renew-once's own-yield guard (#6485): a candidate lease whose own
 #       (host, sweep) has a matching `loom:lease-yield` comment is NOT
 #       PATCHed and exits 4 — both the miss (no matching yield) and hit
@@ -108,45 +108,10 @@ TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
 SCRIPT="$SCRIPTS_DIR/sweep-lease-renew.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
 
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
-
-# assert_contains/assert_not_contains use a pure-bash substring match (no
-# forked printf|grep pipeline) so a transient fork/exec failure under
-# run-ci-suites.sh's parallel suite pool can never masquerade as a genuine
-# content mismatch (#7819, #7874).
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected substring: '$needle'"
-        echo "    In: '$haystack'"
-    fi
-}
 
 assert_true() {
     local cond="$1" msg="$2"
@@ -354,7 +319,7 @@ reset_state() {
     # path must not inherit them -- otherwise "newest wins" tests silently
     # become exact-match tests against identity values the fixtures were
     # never written to match.
-    unset LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME 2> /dev/null || true
+    unset LOOM_TERMINAL_ID LOOM_HOST_ID LOOM_LEASE_HOST_ID LOOM_LEASE_PUBLISH_HOSTNAME HOSTNAME 2> /dev/null || true
     # Same reason for the gh-call attribution vars (#10139): test (x) sets them
     # deliberately; everything else must start from an absent pair.
     unset LOOM_SWEEP_ID LOOM_ROLE 2> /dev/null || true
@@ -488,14 +453,18 @@ fi
 # Defensive cleanup in case the assertion above failed the self-termination.
 kill "$LOOP_PID" 2>/dev/null || true
 
-# --- (h) stop kills a given PID -------------------------------------------
+# --- (h) stop refuses a non-renewer PID, failing closed (#11086) ------------
+# Non-zero exits are asserted only with a real binary (LEASE_RENEWER_DAEMON);
+# the default stub daemon answers every `lease renewer` verb with 0. Positive
+# stop cases live in test-sweep-lease-renew-lifecycle.sh.
 sleep 30 &
 BG_PID=$!
-"$SCRIPT" stop "$BG_PID" > /dev/null 2>&1
+H_RC=0
+"$SCRIPT" stop "$BG_PID" > /dev/null 2>&1 || H_RC=$?
+LOOM_DAEMON_BIN=/nonexistent/loom-daemon "$SCRIPT" stop "$BG_PID" > /dev/null 2>&1 || true
 sleep 0.3
-STILL_ALIVE="false"
-kill -0 "$BG_PID" 2>/dev/null && STILL_ALIVE="true"
-assert_true "$([[ "$STILL_ALIVE" == "false" ]] && echo true || echo false)" "(h) stop kills the given PID"
+assert_true "$(kill -0 "$BG_PID" 2>/dev/null && echo true || echo false)" "(h) stop leaves an unrelated PID alive (also with no loom-daemon)"
+[[ -z "${LEASE_RENEWER_DAEMON:-}" ]] || assert_true "$([[ "$H_RC" -ne 0 ]] && echo true || echo false)" "(h) stop of an unrelated PID exits non-zero"
 kill "$BG_PID" 2>/dev/null || true
 
 # --- (i) own-yield guard (#6485) -------------------------------------------
@@ -614,6 +583,31 @@ sleep 0.5
 kill "$LOOP_PID_J" 2> /dev/null || true
 assert_true "$([[ -f "$STUB_DIR/patch-10-1.body" ]] && echo true || echo false)" "(j) start renewed its OWN lease comment (id 10), not the newer peer comment"
 assert_true "$([[ ! -f "$STUB_DIR/patch-99-1.body" ]] && echo true || echo false)" "(j) start did NOT renew the peer's newer lease comment (id 99)"
+
+# --- (j2) LOOM_LEASE_HOST_ID outranks LOOM_HOST_ID in that auto-resolution -
+# A session in a container is handed its dispatcher's lease host id; the
+# lease to renew is the one published under THAT host, not under the
+# telemetry host id or the container's hostname.
+reset_state
+cat > "$STUB_DIR/comments.json" <<JSON
+[
+  {"id": 11, "body": "<!-- loom:lease host=${OWN_OPAQUE_HOST} sweep=sweep-mine-1001 -->\nprose"},
+  {"id": 98, "body": "<!-- loom:lease host=$(compute_opaque_host_id other-host) sweep=sweep-mine-1001 -->\nprose"}
+]
+JSON
+sleep 4 &
+WATCH_PID_J2=$!
+export LOOM_LEASE_HOST_ID="$OWN_RAW_HOST" LOOM_HOST_ID="other-host"
+export LOOM_TERMINAL_ID="daemon-sweep-mine-1001"
+LOOP_PID_J2="$("$SCRIPT" start 6485 --interval 1 --watch-pid "$WATCH_PID_J2" 2> "$STUB_DIR/start-j2-stderr.log")"
+unset LOOM_LEASE_HOST_ID LOOM_HOST_ID LOOM_TERMINAL_ID
+wait_until test -f "$STUB_DIR/patch-11-1.body"
+kill "$WATCH_PID_J2" 2> /dev/null || true
+wait "$WATCH_PID_J2" 2> /dev/null || true
+sleep 0.5
+kill "$LOOP_PID_J2" 2> /dev/null || true
+assert_true "$([[ -f "$STUB_DIR/patch-11-1.body" ]] && echo true || echo false)" "(j2) start renewed the lease under LOOM_LEASE_HOST_ID's host (id 11)"
+assert_true "$([[ ! -f "$STUB_DIR/patch-98-1.body" ]] && echo true || echo false)" "(j2) start did NOT renew the LOOM_HOST_ID host's lease (id 98)"
 
 # --- (k) start's loop stops as soon as its own-yield guard fires ----------
 echo ""

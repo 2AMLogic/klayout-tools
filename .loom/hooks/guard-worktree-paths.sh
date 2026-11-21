@@ -233,7 +233,8 @@ if declare -F loom_installed_write_denied >/dev/null 2>&1 \
     _IFW_GUARD_ON=true
 fi
 
-if [[ "$_WT_GUARD_ON" != true && "$_IFW_GUARD_ON" != true ]]; then
+# A role session always continues: the per-role tool restriction below has no toggle.
+if [[ "$_WT_GUARD_ON" != true && "$_IFW_GUARD_ON" != true && -z "${LOOM_ROLE:-}" ]]; then
     exit 0
 fi
 
@@ -410,11 +411,32 @@ any_managed_worktree_exists() {
     [[ -n "$hit" ]]
 }
 
+# True if $1 (an absolute, normalized path) is exactly one of the Champion
+# state files, a DIRECT child of the git common dir (#13180).
+champion_state_path_ok() {
+    local p="$1" common dir phys
+    [[ "$p" =~ ^(.*)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)$ ]] || return 1
+    dir="${BASH_REMATCH[1]}"
+    [[ "$dir" == *"/../"* || "$dir" == */.. || "$dir" == *"/./"* ]] && return 1
+    common="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)" || return 1
+    [[ -n "$common" ]] || return 1
+    [[ "$dir" == "$common" ]] && return 0
+    phys="$(cd "$dir" 2>/dev/null && pwd -P)" || return 1
+    [[ "$phys" == "$common" ]]
+}
+
 # Decide allow(0)/deny(1) for a resolved target path when no
 # LOOM_WORKTREE_PATH fast path is set. See the mechanism-2 comment above for
 # the rationale.
 path_derived_allow() {
     local target="$1"
+
+    # (a0) The Champion pin / PR-facts file, a direct child of the git common
+    # dir (#13180) -> allow. Exactly those two name patterns; `.git/config`,
+    # siblings, nested paths and `..` traversal never match.
+    if champion_state_path_ok "$target"; then
+        return 0
+    fi
 
     # (a) Already inside some managed worktree -> allow.
     if walk_up_for_sentinel "$target" >/dev/null; then
@@ -523,6 +545,33 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# Per-role tool restriction (#8256): the Edit/Write half of the Bash rule in
+# guard-loom-workflow.sh — a role whose JSON does not declare
+# `credential-store` cannot write under ~/.ssh and the other credential
+# stores. Same call, same fail-closed rule; see guard-hooks.md.
+# --------------------------------------------------------------------------
+# requires-daemon: role-tool-policy optional   #8256 — `check --path`; with no usable answer the built-in read-only roles are denied, every other role is allowed.
+if [[ -n "${LOOM_ROLE:-}" ]]; then
+    # Judge BOTH spellings (#11227): the credential-store matcher is name-based,
+    # so a symlinked credential dir (~/.config/gh -> ~/dotfiles/gh) loses its
+    # name in $NORM_PATH. The raw absolutized $FILE_PATH keeps it; the matcher
+    # normalizes `.`/`..` lexically, so passing it unresolved is safe. One call
+    # when the two spellings agree; deny if either answers BLOCKED.
+    RTP_PATHS=("$NORM_PATH")
+    [[ "$FILE_PATH" == "$NORM_PATH" ]] || RTP_PATHS+=("$FILE_PATH")
+    for RTP_PATH in "${RTP_PATHS[@]}"; do
+        RTP_RC=0
+        RTP_OUT=$("${LOOM_DAEMON_SELF_BIN:-loom-daemon}" role-tool-policy check --roles-dir "$SCRIPT_DIR/../roles" --workspace "$SCRIPT_DIR/../.." --path "$RTP_PATH" 2>/dev/null) || RTP_RC=$?
+        if [[ "$RTP_RC" -eq 1 && "$RTP_OUT" == "BLOCKED [role-tool-policy]"* ]]; then
+            emit_deny "$RTP_OUT"
+        elif [[ "$RTP_RC" -ne 0 && " architect auditor champion curator guide hermit judge " == *" $(printf '%s' "$LOOM_ROLE" | tr '[:upper:]_' '[:lower:]-') "* ]]; then
+            emit_deny "BLOCKED [role-tool-policy]: role '$LOOM_ROLE' is restricted, and loom-daemon role-tool-policy check could not answer (exit $RTP_RC), so this write is denied rather than allowed unchecked (#8256)."
+        fi
+    done
+    [[ "$_WT_GUARD_ON" == true || "$_IFW_GUARD_ON" == true ]] || exit 0
+fi
+
+# --------------------------------------------------------------------------
 # Installed-managed-file write confinement (#7995)
 #
 # Runs BEFORE either worktree mechanism below, because both of them ALLOW the
@@ -557,7 +606,7 @@ if [[ -n "$WORKTREE_PATH" ]]; then
         exit 0
     fi
 
-    emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' is outside worktree '${WORKTREE_PATH}'. Use paths within the worktree directory."
+    emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' is outside worktree '${WORKTREE_PATH}'. Use paths within the worktree directory. Gitignored status does not exempt a path: Edit/Write and Bash writes are confined by the same rule. For repo-local scratch/notes/journal files, write under your issue worktree or under /tmp (session scratch) instead."
 fi
 
 # --------------------------------------------------------------------------
@@ -567,4 +616,4 @@ if path_derived_allow "$NORM_PATH"; then
     exit 0
 fi
 
-emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' resolves to the main repository checkout ('${MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). Builders must write inside their issue worktree ($(worktree_hint)), never the main checkout. Do NOT retry this write via Bash redirection/tee/sed -i/cp/mv -- that is also confined (guard-destructive-generic.sh, #4178) and denied for the same reason. cd into your issue worktree and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4007)"
+emit_deny "BLOCKED: Edit/Write path '${NORM_PATH}' resolves to the main repository checkout ('${MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). Builders must write inside their issue worktree ($(worktree_hint)), never the main checkout. Do NOT retry this write via Bash redirection/tee/sed -i/cp/mv -- that is also confined (guard-destructive-generic.sh, #4178) and denied for the same reason. cd into your issue worktree and write there instead. Gitignored status does not exempt a path: Edit/Write and Bash writes are confined by the same rule. For repo-local scratch/notes/journal files, write under your issue worktree or under /tmp (session scratch) instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4007)"

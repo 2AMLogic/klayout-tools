@@ -1,0 +1,25 @@
+Mechanical check of a repo-committed corner matrix (process / supply_v /
+temperature_c / params axes plus exclude[]) against a klt sim request
+(conformance: missing/extra/duplicate tuples) or a klt sim report
+(completeness: every tuple once, simulated, finite, in limits). Reports, does
+not judge: the repo owns which matrix is full and any subset_reason policy.
+See docs/cli/corner-matrix.md.
+
+positional arguments:
+  {check} check diff a declared matrix against a request or a report
+
+options:
+  -h, --help show this help message and exit
+
+--- klt corner-matrix check ---
+
+Diff a declared corner matrix against a request or a report.
+
+positional arguments:
+  matrix path to the matrix JSON file
+
+options:
+  -h, --help show this help message and exit
+  --request REQUEST klt sim request JSON to check for conformance
+  --report REPORT klt sim report JSON to check for completeness
+  --format {text,json} output format (default: text)

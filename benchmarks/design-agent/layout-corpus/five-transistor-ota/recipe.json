@@ -1,0 +1,133 @@
+{
+  "schema": "klt.design_agent_benchmark.layout_recipe/1",
+  "pdk": "sky130A",
+  "steps": [
+    {
+      "id": "tail",
+      "verb": "gen",
+      "generator": "mos_array",
+      "cell_name": "ota_tail",
+      "params": {
+        "rows": 1,
+        "cols": 1,
+        "dummy": 0,
+        "w_um": 10,
+        "l_um": 1
+      }
+    },
+    {
+      "id": "diffpair",
+      "verb": "gen",
+      "generator": "diff_pair",
+      "cell_name": "ota_diffpair",
+      "params": {
+        "w_um": 8,
+        "l_um": 0.5,
+        "mirror": false,
+        "splits": 1,
+        "add_guard_ring": false
+      }
+    },
+    {
+      "id": "mirror",
+      "verb": "gen",
+      "generator": "diff_pair",
+      "cell_name": "ota_mirror",
+      "params": {
+        "w_um": 6,
+        "l_um": 1,
+        "mirror": true,
+        "splits": 1,
+        "add_guard_ring": false
+      }
+    },
+    {
+      "id": "compose",
+      "verb": "gen-compose",
+      "cell_name": "five_transistor_ota",
+      "request": {
+        "blocks": [
+          {
+            "id": "tail",
+            "step": "tail"
+          },
+          {
+            "id": "diffpair",
+            "step": "diffpair"
+          },
+          {
+            "id": "mirror",
+            "step": "mirror"
+          }
+        ],
+        "placement": {
+          "strategy": "row",
+          "order": [
+            "tail",
+            "diffpair",
+            "mirror"
+          ],
+          "spacing_um": 1.0
+        },
+        "connectivity": [
+          {
+            "net": "TAIL_A",
+            "pins": [
+              {
+                "block": "tail",
+                "port": "U0_D"
+              },
+              {
+                "block": "diffpair",
+                "port": "Q1_1_S"
+              }
+            ]
+          },
+          {
+            "net": "TAIL_B",
+            "pins": [
+              {
+                "block": "tail",
+                "port": "U0_D"
+              },
+              {
+                "block": "diffpair",
+                "port": "Q2_1_S"
+              }
+            ]
+          },
+          {
+            "net": "N1",
+            "pins": [
+              {
+                "block": "diffpair",
+                "port": "Q1_1_D"
+              },
+              {
+                "block": "mirror",
+                "port": "M1_1_S"
+              }
+            ]
+          },
+          {
+            "net": "VOUT",
+            "pins": [
+              {
+                "block": "diffpair",
+                "port": "Q2_1_D"
+              },
+              {
+                "block": "mirror",
+                "port": "M2_1_S"
+              }
+            ]
+          }
+        ],
+        "routing": {
+          "layer_role": "metal",
+          "width_um": 0.17
+        }
+      }
+    }
+  ]
+}

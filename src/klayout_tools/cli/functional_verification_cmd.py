@@ -5,8 +5,9 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
-    0 - every test passed (``status: "pass"``); under ``--mutations``, the
-        baseline passed and no valid proposal survived
+    0 - all input hashes matched under ``--check``, or every test passed in
+        a run (``status: "pass"``). Under ``--mutations``, the baseline passed
+        and no valid proposal survived
     1 - failed to run (bad request, unresolvable RTL source or testbench
         module, coverage requested on an engine that has none, missing
         cocotb/simulator install, build/elaboration error, simulator crash,
@@ -16,9 +17,9 @@ Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
         outside ``request.sources``, the baseline itself failing (the
         mutation-testing "baseline-must-pass gate"), or every proposal
         ending up ``"rejected"``
-    3 - ran successfully, at least one test failed (``status: "fail"``);
-        under ``--mutations``, the baseline passed but at least one valid
-        proposal ``"survived"``
+    3 - input hashes drifted under ``--check``, or at least one test failed
+        in a run (``status: "fail"``). Under ``--mutations``, the baseline
+        passed but at least one valid proposal ``"survived"``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. This is the same 0/1/2/3 trichotomy ``klt drc`` uses,
 not ``klt sim``'s 3/4 split -- a cocotb regression has no "ran but part of
@@ -41,10 +42,12 @@ import argparse
 
 from ..functional_verification import (
     FunctionalVerificationError,
+    _log_tail,
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
-from .output import emit_error, emit_success
+from ..functional_verification_check import check_functional_verification_report
+from .output import emit_error, emit_success, render_check_text
 
 EXIT_PASS = 0
 EXIT_TESTS_FAILED = 3
@@ -52,15 +55,46 @@ EXIT_TESTS_FAILED = 3
 
 def run(args: argparse.Namespace) -> int:
     mutations_path = getattr(args, "mutations", None)
+    outdir = getattr(args, "outdir", None)
+    base_dir = getattr(args, "base_dir", None)
+    pdk_variant = getattr(args, "pdk", None)
+    pdk_root = getattr(args, "pdk_root", None)
     try:
+        if getattr(args, "check", None) is not None:
+            result = check_functional_verification_report(
+                args.check,
+                args.request,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+            )
+            emit_success(result, args.format, render_check_text)
+            return 0 if result["status"] == "match" else 3
         if mutations_path:
             report = run_functional_verification_with_mutations(
-                args.request, mutations_path
+                args.request,
+                mutations_path,
+                output_dir=outdir,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
             )
         else:
-            report = run_functional_verification(args.request)
+            report = run_functional_verification(
+                args.request,
+                output_dir=outdir,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+            )
     except FunctionalVerificationError as exc:
-        return emit_error("functional-verification", str(exc), args.format)
+        return emit_error(
+            "functional-verification",
+            str(exc),
+            args.format,
+            code=getattr(exc, "code", None),
+            details=getattr(exc, "details", None),
+        )
 
     emit_success(report, args.format, _print_text)
 
@@ -76,6 +110,45 @@ def run(args: argparse.Namespace) -> int:
         )
 
     return EXIT_TESTS_FAILED if report["status"] == "fail" else EXIT_PASS
+
+
+def _print_initial_state(initial_state: dict | None) -> None:
+    """One line, only when `options.initial_state` was requested (issue #2998)."""
+    if initial_state is None:
+        return
+    seeds = ",".join(str(seed) for seed in initial_state["seeds"]) or "-"
+    print(
+        f"initial_state: {initial_state['mode']}  seeds: {seeds}  "
+        f"state_elements: {initial_state['state_elements']}  "
+        f"clock: {initial_state['clock']}"
+    )
+
+
+def _local_path(report: dict, key: str) -> str | None:
+    """The resolved absolute path for ``environment.<key>``. The JSON carries
+    only a repo-relative ``{path, scope}`` envelope (#2224), which is null for
+    an external outdir, so the text view reads the path the run kept aside."""
+    local_paths = getattr(report, "local_paths", None)
+    if local_paths is not None:
+        return local_paths.get(key)
+    return (report["environment"].get(key) or {}).get("path")
+
+
+def _print_log_lines(report: dict) -> None:
+    test_log = _local_path(report, "test_log")
+    status = report["status"]
+    if test_log is None:
+        return
+    print(f"test_log: {test_log}")
+    if status == "fail":
+        print(f"test_log tail: {_log_tail(test_log, lines=40)}")
+
+
+def _print_results_xml(report: dict) -> None:
+    # Null on the Verilog-bench path (issue #4083): no cocotb run, no XML.
+    results_xml = _local_path(report, "results_xml")
+    if results_xml is not None:
+        print(f"results_xml: {results_xml}")
 
 
 def _print_text(report: dict) -> None:
@@ -121,10 +194,12 @@ def _print_text(report: dict) -> None:
         )
 
     print()
-    print(f"results_xml: {environment['results_xml']}")
+    _print_results_xml(report)
+    _print_log_lines(report)
     random_seed = environment.get("random_seed")
     if random_seed is not None:
         print(f"random_seed: {random_seed}")
+    _print_initial_state(environment.get("initial_state"))
     # Printed only on an SDF-annotated run (issue #1002): a reader glancing
     # at a gate-level report has no other way to tell a delay-annotated
     # verdict from a zero-delay one, and the two mean very different things.

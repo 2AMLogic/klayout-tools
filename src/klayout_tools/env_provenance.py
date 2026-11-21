@@ -8,7 +8,7 @@ the first place. A 2026-08 disclosure audit of the public canary repos found
 ~3,937 committed records carrying three identifier classes written *by
 design* by each canary's own harness:
 
-    - PDK: volare `gf180mcuD`, open_pdks `c6d73a3`
+    - PDK: volare `gf180mcuD`, open_pdks `f6eeac7`
       (/Users/<author>/.volare/gf180mcuD, found via search_root:~/.volare)
     - Host: macOS-26.6.1-arm64-arm-64bit-Mach-O (<hostname>)
 
@@ -66,13 +66,16 @@ the evidence is published at all. The fix belongs at the writer.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import platform
 import re
 import socket
 from collections.abc import Iterable, Mapping
 from typing import Any
+
+from ._paths import _load_request_json
+from .env_provenance_scrub import scrub_payload
+from .env_provenance_walk import walk_lintable_string_fields, walk_string_fields
 
 __all__ = [
     "DEFAULT_HOST_ID_SALT",
@@ -93,6 +96,7 @@ __all__ = [
     "render_text_lines",
     "repo_relative_path",
     "scan_files",
+    "scrub_payload",
 ]
 
 #: ``klt env-provenance``'s own payload version (``docs/json-contract.md``).
@@ -215,6 +219,21 @@ def find_repo_root(start: str | os.PathLike[str] | None = None) -> str | None:
         current = parent
 
 
+def repo_root_for(path: str | os.PathLike[str] | None) -> str | None:
+    """The repo root a run over ``path`` normalises its input-path fields
+    against -- :func:`find_repo_root` from ``path``'s own directory (``None``
+    for ``None``).
+
+    Anchoring on the input itself, not on a request document or the process
+    cwd, keeps ``scope: "repo"`` meaning the same thing for every verb that
+    emits a :func:`repo_relative_path` field (`klt drc`/`extract`/`lvs`/
+    `erc`/`pex`).
+    """
+    if path is None:
+        return None
+    return find_repo_root(os.path.dirname(os.path.abspath(path)))
+
+
 def repo_relative_path(
     path: str | os.PathLike[str] | None,
     *,
@@ -234,6 +253,13 @@ def repo_relative_path(
     ``repo_root`` defaults to :func:`find_repo_root`'s answer for ``path``'s
     own directory. With no repo root at all, every path is ``external``: the
     failure mode is losing detail, never leaking it.
+
+    Every verb emits its input/output path fields through this one
+    normalizer (no module-local wrappers) so they agree on exactly one
+    ``{path, scope}`` shape. Resolve ``path`` first (e.g. against the request
+    file's own directory); a bare relative string resolves against the
+    process cwd. The reader counterpart is
+    :func:`~klayout_tools._report_verify.resolve_committed_path`.
     """
     if path is None:
         return {"path": None, "scope": "absent"}
@@ -351,10 +377,10 @@ def scan_files(paths: Iterable[str]) -> dict[str, Any]:
 #: emitted once per :func:`lint_envelope_files` payload so a consumer reading
 #: only the JSON still gets the remedy, not just the complaint.
 ENVELOPE_LINT_RECOMMENDATION = (
-    "replace each absolute host path with a repo-relative reference (the "
-    "{path, scope} shape env_provenance.repo_relative_path() builds) or with "
-    "a content hash (provenance.input.content_hash) -- an absolute path is "
-    "not reproducible on another checkout. Declare a genuinely machine-wide "
+    "for a klt-produced envelope, re-run with request.portable_paths: true so "
+    "the writer rewrites absolute host paths to a committable form; otherwise "
+    "replace each with a repo-relative reference or a content hash -- an absolute "
+    "path is not reproducible on another checkout. Declare a genuinely machine-wide "
     "PDK/tool install prefix with --allow-prefix if it must appear."
 )
 
@@ -445,31 +471,6 @@ def _absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
     return found
 
 
-def _walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
-    """Every string in a JSON-decoded ``value`` as ``(dotted_field, text)``.
-
-    Mapping *keys* are yielded too (a dict keyed by an absolute path leaks
-    just as thoroughly as one valued by it), and list elements are addressed
-    by index -- the same dotted-path convention ``_report_verify
-    .diff_verdict_fields`` reports drift under, so a field named by one tool
-    is findable with the other.
-    """
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            child = f"{path}.{key}" if path else str(key)
-            if isinstance(key, str):
-                yield child, key
-            yield from _walk_string_fields(item, child)
-        return
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            child = f"{path}.{index}" if path else str(index)
-            yield from _walk_string_fields(item, child)
-        return
-    if isinstance(value, str):
-        yield (path or "<root>"), value
-
-
 def find_absolute_path_fields(
     payload: Any, *, allow_prefixes: Iterable[str] = ()
 ) -> list[dict[str, Any]]:
@@ -493,10 +494,13 @@ def find_absolute_path_fields(
 
     ``field`` is a dotted path (``provenance.input.path``,
     ``macros.0.lef``); a top-level bare string payload reports ``<root>``.
+
+    Remote-worker observations are skipped (issue #5133); see
+    :mod:`klayout_tools.env_provenance_walk`.
     """
     prefixes = tuple(allow_prefixes)
     findings: list[dict[str, Any]] = []
-    for field, text in _walk_string_fields(payload, ""):
+    for field, text in walk_lintable_string_fields(payload):
         for match in _absolute_paths_in(text, prefixes):
             findings.append({"field": field, "match": match})
     return findings
@@ -535,13 +539,7 @@ def lint_envelope_files(
 
 
 def _load_json_envelope(path: str) -> Any:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except OSError as exc:
-        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
+    return _load_request_json(path, EnvironmentProvenanceError)
 
 
 # --------------------------------------------------------------------------- #
@@ -642,27 +640,11 @@ def _klayout_version() -> str | None:
     return resolve()
 
 
-def _string_values(value: Any) -> list[str]:
-    """Every string leaf in a nested payload -- what the self-check scans."""
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, Mapping):
-        found: list[str] = []
-        for key, item in value.items():
-            found.extend(_string_values(key))
-            found.extend(_string_values(item))
-        return found
-    if isinstance(value, (list, tuple)):
-        found = []
-        for item in value:
-            found.extend(_string_values(item))
-        return found
-    return []
-
-
 def _assert_no_leaks(report: Mapping[str, Any]) -> None:
     identifiers = _local_identifiers()
-    for value in _string_values(report):
+    # Unlike the old ``_string_values`` walk, ``walk_string_fields`` skips
+    # non-``str`` keys; safe here (JSON keys are strings, docs/json-contract.md).
+    for value in (text for _field, text in walk_string_fields(report, "")):
         leaks = find_leaks(value, extra_identifiers=identifiers)
         if leaks:
             kinds = ", ".join(sorted({leak["kind"] for leak in leaks}))
@@ -674,18 +656,18 @@ def _assert_no_leaks(report: Mapping[str, Any]) -> None:
             )
 
 
-def render_path_field(entry: Mapping[str, Any] | None) -> str:
+def render_path_field(entry: Mapping[str, Any] | str | None) -> str:
     """Human-readable rendering of one :func:`repo_relative_path` entry.
 
-    Shared by :func:`render_text_lines` and any other ``--format text``
-    renderer that reports a normalised ``{path, scope}`` input field (e.g.
-    ``klt pex``/``klt sim``'s own ``layout``/``netlist``/``reference_netlist``/
-    ``request``/``schematic_netlist``/``checkpoint_path`` fields, issue
-    #1261) -- ``"repo"`` renders the repo-relative path itself, ``"external"``
-    renders ``<outside repo>`` (the absolute path is never rendered, even in
-    text mode), and anything else (``"absent"``, or a missing/malformed
-    entry) renders ``<unresolved>``.
+    Shared by :func:`render_text_lines` and any ``--format text`` renderer
+    of a normalised ``{path, scope}`` field (issue #1261): ``"repo"`` renders
+    the repo-relative path, ``"external"`` ``<outside repo>`` (never the
+    absolute path), anything else ``<unresolved>``; a bare ``str`` (a
+    request's own string echo) renders verbatim (issue #5666) so a schema
+    slip degrades to a less-informative line, never a traceback.
     """
+    if isinstance(entry, str):
+        return entry
     if not entry:
         return "<unresolved>"
     scope = entry.get("scope")

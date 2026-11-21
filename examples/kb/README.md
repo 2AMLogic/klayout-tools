@@ -239,6 +239,27 @@ only realized with much longer cascode channel lengths and/or the cited
 paper's auxiliary gain-boosting amplifiers, both out of scope for this
 general-purpose reference stage).
 
+## `telescopic-ota/`
+
+Backs [`kb/entries/telescopic-ota.json`](../../kb/entries/telescopic-ota.json)
+— `telescopic_ota.spice` is a from-scratch netlist (real
+`sky130_fd_pr__nfet_01v8`/`pfet_01v8` devices throughout, not behavioral):
+an NMOS input differential pair with NMOS cascodes stacked directly on it,
+PMOS cascodes above those, and a PMOS current-mirror load that converts the
+differential current to a single-ended output. The tail and both cascode
+gate biases come from diode-connected replica stacks driven by ideal DC
+current references, not a full wide-swing bias generator.
+
+```
+uv run klt sim examples/kb/telescopic-ota/request.json
+```
+
+Reproduces `av_db`, `gbw_hz` and `pm_deg` at `tt`, 1.8V, 27C (single corner;
+values are in the entry's `measured.figures`). `av_db` lands above
+`folded-cascode-ota`'s 40.5 dB but well below the idealized gm*ro^2 gain,
+because a 1.8V supply leaves little headroom for the five-high stack — see
+`measured.notes` on the entry.
+
 ## `cml-tx-line-driver/`
 
 Backs [`kb/entries/cml-tx-line-driver.json`](../../kb/entries/cml-tx-line-driver.json)

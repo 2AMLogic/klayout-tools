@@ -21,7 +21,16 @@ import json
 import os
 from typing import Any
 
+from ._jsonnum import is_int, is_number
 from ._layout import write_layout
+from .draw_base import (
+    _base_report_fields,
+    _erase_base,
+    _parse_base_params,
+    _seed_layout,
+)
+from .draw_validation import ANNOTATION_KEY_PREFIX as ANNOTATION_KEY_PREFIX
+from .draw_validation import DrawError, _reject_unknown_keys
 
 #: Request-envelope schema identifier (see ``docs/cli/draw.md``).
 REQUEST_SCHEMA = "klt.draw.request/1"
@@ -44,22 +53,20 @@ NOT_DESIGN_LEGAL_WARNING = (
     "were applied; this cell is not guaranteed to be design-legal"
 )
 
-#: Prefix reserved for caller annotations. JSON has no comment syntax, so a
-#: request file checked into a repository (the motivating case: a known-bad DRC
-#: fixture whose dimensions must stay "wrong") has nowhere to record *why* it is
-#: shaped the way it is. Any key beginning with this prefix -- ``_purpose``,
-#: ``_expected_rules``, a per-shape ``_rule`` note -- is accepted and ignored
-#: everywhere in the request, at every nesting level, and is guaranteed never to
-#: be given meaning by a future version. Every *other* unrecognised key is an
-#: application error (issue #950), so a typo in a real key (``rect_nm`` for
-#: ``rect_um``) is caught instead of silently dropped. Same posture as
-#: ``klt gen-compose``'s ``request.pdk`` (``gen_compose._ALLOWED_PDK_KEYS``).
-ANNOTATION_KEY_PREFIX = "_"
-
 #: Allowed keys per request object, enforced by :func:`_reject_unknown_keys`.
 #: See ``docs/cli/draw.md`` -> "Unrecognised keys".
 _ALLOWED_REQUEST_KEYS = frozenset({"schema", "params", "options"})
-_ALLOWED_PARAMS_KEYS = frozenset({"dbu_um", "shapes", "labels"})
+_ALLOWED_PARAMS_KEYS = frozenset(
+    {
+        "dbu_um",
+        "shapes",
+        "labels",
+        "base_gds",
+        "base_cell",
+        "erase_um",
+        "keep_hierarchy",
+    }
+)
 _ALLOWED_OPTIONS_KEYS = frozenset({"cell_name", "output"})
 _ALLOWED_SHAPE_KEYS = frozenset({"layer", "name", "rect_um", "polygon_um", "array"})
 _ALLOWED_ARRAY_KEYS = frozenset({"pitch_um", "count"})
@@ -71,45 +78,6 @@ _ALLOWED_ENTRY_KEYS: dict[str, frozenset[str]] = {
     "shape": _ALLOWED_SHAPE_KEYS,
     "label": _ALLOWED_LABEL_KEYS,
 }
-
-
-def _is_annotation_key(key: Any) -> bool:
-    """True for a reserved caller-annotation key (see :data:`ANNOTATION_KEY_PREFIX`)."""
-    return isinstance(key, str) and key.startswith(ANNOTATION_KEY_PREFIX)
-
-
-def _reject_unknown_keys(
-    mapping: dict[Any, Any], allowed: frozenset[str], context: str
-) -> None:
-    """Raise :class:`DrawError` if ``mapping`` carries an unrecognised key.
-
-    Keys beginning with :data:`ANNOTATION_KEY_PREFIX` are the documented escape
-    hatch and are always accepted. Everything else must be in ``allowed``.
-    """
-    unknown = [k for k in mapping if k not in allowed and not _is_annotation_key(k)]
-    if not unknown:
-        return
-    raise DrawError(
-        f"{context} has unknown key(s): {', '.join(sorted(str(k) for k in unknown))}"
-        f" -- allowed: {', '.join(sorted(allowed))}"
-        f" (keys beginning with '{ANNOTATION_KEY_PREFIX}' are reserved for "
-        "caller annotations and ignored)"
-    )
-
-
-def _is_number(value: Any) -> bool:
-    """True for a JSON number (int/float), excluding ``bool`` (a Python int)."""
-    return not isinstance(value, bool) and isinstance(value, (int, float))
-
-
-class DrawError(Exception):
-    """A ``klt draw`` request could not be satisfied.
-
-    Raised for a malformed request (bad shape/label description, empty
-    ``shapes``, an unwritable output path, ...). The CLI layer turns it into
-    the documented error envelope; it is importable so callers embedding the
-    library can ``except DrawError``.
-    """
 
 
 def load_params_arg(value: str | None) -> dict[str, Any]:
@@ -137,7 +105,7 @@ def load_params_arg(value: str | None) -> dict[str, Any]:
         try:
             with open(value, encoding="utf-8") as handle:
                 data = json.load(handle)
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise DrawError(f"could not read params file '{value}': {exc}") from exc
         except json.JSONDecodeError as exc:
             raise DrawError(f"params file '{value}' is not valid JSON: {exc}") from exc
@@ -178,10 +146,17 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
             "options": {"cell_name": "TOP", "output": "out.gds"},
         }
 
-    ``params.dbu_um`` and ``options`` are optional; ``params.shapes`` is
-    required and must be non-empty. Returns a dict matching the documented
-    response schema (see ``docs/cli/draw.md``). Raises :class:`DrawError` for a
-    malformed request or a write failure.
+    Supply ``params.base_gds`` to start from an existing stream.
+    ``params.base_cell`` selects the input cell and defaults to its sole top
+    cell. By default, draw flattens that cell and subtracts any
+    ``params.erase_um`` windows before adding shapes and labels. Set
+    ``params.keep_hierarchy`` to preserve child instances and add shapes and
+    labels directly to the output top cell. Erase windows require flattening.
+    ``params.shapes`` must be non-empty unless the request specifies at least one
+    erase window.
+
+    Returns the response documented in ``docs/cli/draw.md``. Raises
+    :class:`DrawError` for a malformed request or a write failure.
 
     Unrecognised keys are **rejected** at every level of the request, so a typo
     in an optional key is an error rather than a silently-dropped value. Keys
@@ -203,16 +178,11 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         raise DrawError("request.options must be a JSON object")
     _reject_unknown_keys(options, _ALLOWED_OPTIONS_KEYS, "options")
 
+    base_gds, base_cell, erase_windows, keep_hierarchy = _parse_base_params(params)
+
     dbu_um = _resolve_dbu(params.get("dbu_um"))
 
-    shapes = params.get("shapes")
-    if not isinstance(shapes, list):
-        raise DrawError("params.shapes is required and must be a list")
-    if not shapes:
-        raise DrawError(
-            "params.shapes must not be empty -- `klt draw` will not write an "
-            "empty layout (nothing to prove a DRC flow against)"
-        )
+    shapes = _resolve_shapes(params, base_gds, erase_windows)
 
     labels = params.get("labels") or []
     if not isinstance(labels, list):
@@ -234,8 +204,9 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
     import klayout.db as kdb
 
     layout = kdb.Layout()
-    layout.dbu = dbu_um
-    top = layout.create_cell(cell_name)
+    top, base_name, dbu_um = _seed_layout(
+        layout, cell_name, dbu_um, params, base_gds, base_cell, keep_hierarchy
+    )
 
     # Track per-(layer, datatype) shape counts and names for the response, in
     # first-seen order, so the report reads back deterministically.
@@ -259,6 +230,10 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
 
     def _to_dbu(value_um: float) -> int:
         return int(round(value_um / dbu_um))
+
+    erased_shapes, erased_labels = _erase_base(
+        top, layout, erase_windows, _to_dbu, kdb, layer_order, layer_counts, layer_names
+    )
 
     for i, shape in enumerate(shapes):
         pair, name = _shape_layer(shape, i)
@@ -306,7 +281,7 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         for pair in layer_order
     ]
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "generator": "draw",
         "gds_path": output_path,
@@ -318,12 +293,36 @@ def draw(request: dict[str, Any]) -> dict[str, Any]:
         "bbox_um": bbox_um,
         "warnings": [NOT_DESIGN_LEGAL_WARNING],
     }
+    report.update(
+        _base_report_fields(base_gds, base_name, erased_shapes, erased_labels)
+    )
+    return report
+
+
+def _resolve_shapes(params: dict[str, Any], base_gds: Any, erase_windows: list) -> list:
+    """Return ``params.shapes``, enforcing the non-empty rule (relaxed for erases)."""
+    shapes = params.get("shapes")
+    if base_gds is not None and shapes is None:
+        shapes = []
+    if not isinstance(shapes, list):
+        raise DrawError("params.shapes is required and must be a list")
+    if shapes or (base_gds is not None and erase_windows):
+        return shapes
+    if base_gds is not None:
+        raise DrawError(
+            "params.shapes and params.erase_um must not both be empty -- "
+            "`klt draw` will not write an unchanged copy of the base"
+        )
+    raise DrawError(
+        "params.shapes must not be empty -- `klt draw` will not write an "
+        "empty layout (nothing to prove a DRC flow against)"
+    )
 
 
 def _resolve_dbu(value: Any) -> float:
     if value is None:
         return DEFAULT_DBU_UM
-    if not _is_number(value):
+    if not is_number(value):
         raise DrawError("params.dbu_um must be a positive number")
     if value <= 0:
         raise DrawError("params.dbu_um must be a positive number")
@@ -346,7 +345,7 @@ def _shape_layer(
     if (
         not isinstance(layer, list)
         or len(layer) != 2
-        or any(isinstance(v, bool) or not isinstance(v, int) for v in layer)
+        or any(not is_int(v) for v in layer)
         or any(v < 0 for v in layer)
     ):
         raise DrawError(
@@ -377,7 +376,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
         if (
             not isinstance(rect, list)
             or len(rect) != 4
-            or any(not _is_number(v) for v in rect)
+            or any(not is_number(v) for v in rect)
         ):
             raise DrawError(
                 f"shape[{index}].rect_um must be [x0, y0, x1, y1] of numbers"
@@ -399,7 +398,7 @@ def _build_shape_geometry(shape: dict[str, Any], index: int, to_dbu, kdb) -> Any
         if (
             not isinstance(point, list)
             or len(point) != 2
-            or any(not _is_number(v) for v in point)
+            or any(not is_number(v) for v in point)
         ):
             raise DrawError(f"shape[{index}].polygon_um[{j}] must be an [x, y] pair")
         kdb_points.append(kdb.Point(to_dbu(point[0]), to_dbu(point[1])))
@@ -431,7 +430,7 @@ def _parse_array(
     if (
         not isinstance(pitch, list)
         or len(pitch) != 2
-        or any(not _is_number(v) for v in pitch)
+        or any(not is_number(v) for v in pitch)
     ):
         raise DrawError(f"shape[{index}].array.pitch_um must be [dx, dy] of numbers")
 
@@ -439,7 +438,7 @@ def _parse_array(
     if (
         not isinstance(count, list)
         or len(count) != 2
-        or any(isinstance(v, bool) or not isinstance(v, int) for v in count)
+        or any(not is_int(v) for v in count)
         or any(v <= 0 for v in count)
     ):
         raise DrawError(
@@ -456,7 +455,7 @@ def _build_label(label: dict[str, Any], index: int, to_dbu, kdb) -> Any:
         raise DrawError(f"label[{index}].text must be a non-empty string")
 
     at = label.get("at_um")
-    if not isinstance(at, list) or len(at) != 2 or any(not _is_number(v) for v in at):
+    if not isinstance(at, list) or len(at) != 2 or any(not is_number(v) for v in at):
         raise DrawError(f"label[{index}].at_um must be an [x, y] pair of numbers")
 
     return kdb.Text(text, kdb.Trans(kdb.Vector(to_dbu(at[0]), to_dbu(at[1]))))

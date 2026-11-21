@@ -49,7 +49,7 @@ categories. Only include work that was actually surfaced — do not invent tasks
   intentionally punted work.
 - **Documentation gaps** — missing/stale/wrong docs noticed while working.
 - **Upstream tool limitations** — a bug, missing feature, or rough edge in an
-  installed tool (Loom, Anvil, Repo Skills, kicad-tools) hit while using it.
+  installed tool (Loom, Anvil, Repo Skills, squad, kicad-tools) hit while using it.
 
 For each candidate capture: a one-line title, the context / where it came up in
 the session (repro if it's a bug), and suggested acceptance criteria.
@@ -127,6 +127,16 @@ Every candidate has to land in *some* repo. Build the routing table by reusing
   degrades to "source unknown" exactly like a fresh clone, not an error, and
   the slug can be read straight off `source_ref` (a `<git-url>@<tag-or-rev>`
   string) without a `git -C <source> config` lookup.
+
+  **squad's sidecar `source` is a release install, not a git clone.** When
+  the sidecar `source` resolves to a directory with no git remote (so
+  `git -C <source> config --get remote.origin.url` yields nothing) **and**
+  `.claude/skills/squad/install-metadata.json` names `package: @rjwalters/squad`,
+  resolve the slug from a recorded repository URL if the metadata has one, else
+  from the package name (`@scope/name` → `scope/name`, i.e. `rjwalters/squad`),
+  stating that it is inferred. The target is then not UNKNOWN. If `package` is
+  absent or names another package, it stays UNKNOWN. Full detail:
+  `/repo:update-tools` step 1.
 
   **Loom's sidecar is named differently, but still conforms to C6's ladder.**
   Where C6 step 1 names the sidecar `<tool-root>/.install-local.json`, Loom's
@@ -523,13 +533,62 @@ otherwise spell out a `/tmp/...` path directly:
 #
 #      ## Suggested acceptance criteria
 #      - [ ] …
+#
+#      <!-- loom:requested-by login=<login> via=<session|agent> -->
+#
+#    The last line is the requested-by marker (see "Attribute the requester"
+#    below) — the real one, on its own line, outside any code fence.
 
-# 2. Build the create payload, then POST it (REST `core` pool, not GraphQL).
+# 2. Verify the body carries exactly one effective requested-by marker outside
+#    code fences; do not build the payload until this exits 0.
+awk '/^[[:space:]]*(```|~~~)/ { f = !f; next } !f && /^[[:space:]]*<!-- loom:requested-by login=[^ ]+ via=(session|agent) -->[[:space:]]*$/ { n++ } END { exit (n == 1 ? 0 : 1) }' /tmp/followup-body.md
+
+# 3. Build the create payload, then POST it (REST `core` pool, not GraphQL).
 jq -n --arg t "<title>" --rawfile b /tmp/followup-body.md \
   '{title: $t, body: $b, labels: []}' > /tmp/followup-payload.json
 
 gh api --method POST "repos/<slug>/issues" --input /tmp/followup-payload.json --jq '.html_url'
 ```
+
+**Attribute the requester.** Every newly filed issue body MUST end with exactly
+one requested-by marker, written into the scratch body before the payload is
+built, for this-repo and upstream targets alike:
+
+`<!-- loom:requested-by login=<login> via=<session|agent> -->`
+
+A dashboard reading the filed issue otherwise sees only the token's login,
+which on a shared host is usually the operator's even when an agent started the
+follow-up on its own (repo#556). Resolve `login` and `via` from the
+**invocation context**, once per run:
+
+- **Operator session** — a human operator ran `/repo:followups` in this
+  session: `login=<operator GitHub login> via=session`.
+- **Agent-originated** — an autonomous agent ran it as part of its own work
+  (a Loom role such as builder, doctor, or champion, with no operator turn
+  asking for it): `login=<initiating role> via=agent`, e.g.
+  `login=builder via=agent`. This holds even when the agent and the operator
+  share the same token.
+
+**The token's authenticated login alone does not establish the requester.**
+`gh api user --jq .login` names whoever owns the token, not who asked; never
+infer a human requester from a shared agent token, and never mark agent work
+`via=session`. If a human requester is established but their GitHub login is
+not known, ask for it before filing (the token's login may be offered as a
+suggestion, not assumed) rather than inventing one. If an agent-originated run
+cannot name its initiating role, leave its candidates unfiled and list them,
+the same way an UNKNOWN target is handled. Attribution never bypasses step 4:
+an unattended run still needs the same explicit prior authorization to file.
+
+The marker is appended after step 3b's scrub and carries only the login and
+`via` — no session, sweep, or host identifiers. Show it in step 4's body
+preview so the operator approves the attribution along with the body. **Only
+the real marker counts:** a marker inside a fenced example does not attribute
+anything, and any requested-by line the drafted body already carries outside a
+fence (quoted from the session, say) is removed so the appended one is the only
+effective marker — step 2 of the recipe above fails on zero or on more than
+one. Because `jq --rawfile` serializes the file verbatim, the marker reaches
+the POSTed `body` unchanged. Comments posted on existing matches (below) are
+outside this rule and carry no marker.
 
 Two reasons this is the documented form rather than
 `gh issue create --body "$(cat <<'EOF' … EOF)"`:
@@ -643,3 +702,9 @@ Filed issues are triaged like any other afterward — this command does not appl
     reported or commented on — `gh issue view` / `close` / `comment` all accept
     a PR number without saying so — and an item that lists the other in
     `closingIssuesReferences` is an implementation, not a duplicate.
+11. **Attribute every filed issue to its requester** — each new issue body
+    (this repo or upstream) ends with exactly one
+    `<!-- loom:requested-by login=<login> via=<session|agent> -->` marker
+    outside any code fence, resolved from the invocation context per step 5:
+    the operator's GitHub login with `via=session`, or the initiating role with
+    `via=agent`. The token's login alone never establishes the requester.

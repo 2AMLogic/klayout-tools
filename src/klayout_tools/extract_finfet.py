@@ -1,0 +1,1066 @@
+"""FinFET device extraction for ``klt extract`` (issue #2761, ASAP7 first).
+
+``extract.py``'s planar recogniser derives a MOS device from the drawn gate
+rectangle alone (``W`` = gate/diffusion edge, ``L`` = gate extent). A
+FinFET's drive strength is set by the **number of fins** the gate wraps,
+which that measurement cannot see, so a
+:class:`~klayout_tools.decks.FinFETExtractionDeck` is dispatched here
+instead (``extract.extract_netlist_from_layout`` selects
+:func:`extract_netlist_tuple` in place of the planar ``_extract_netlist``).
+Nothing in the planar path changes.
+
+Device contract
+---------------
+
+Each device class is a ``kdb.DeviceClassMOS4Transistor`` named after the
+compact model the PDK's own reference netlist uses (ASAP7: ``nmos_rvt``,
+``pmos_lvt``, ...; chosen by the deck's VT marker layers), with two added
+parameters:
+
+- ``NFIN`` -- fins crossing the channel, **counted from drawn fin
+  geometry**: the connected pieces of ``fin & channel``, where *channel* is
+  one gate finger over one select-classified active island. Never derived
+  from ``W``.
+- ``FINGERS`` -- gate fingers merged into this device.
+
+``L`` is the channel area over half its source/drain edge length (the
+planar MOS4 measurement); ``W`` is the drawn active width under the gate.
+``AS``/``AD``/``PS``/``PD`` are not measured and stay ``0``; they are
+neither reported in JSON nor written to SPICE (see :func:`finfet_card`).
+
+After extraction, fingers that are exactly parallel -- the same gate, bulk
+and (unordered) source/drain nets and the same ``L`` -- are merged into one
+device with ``NFIN``, ``W`` and ``FINGERS`` summed. That is the reference
+CDL's own convention (ASAP7's ``INVx2`` is two 3-fin fingers written as one
+``nfin=6`` device), and it is the only combination performed: series stacks
+are left exactly as drawn.
+
+Geometry that cannot be extracted faithfully is **refused**, never
+approximated as a planar device: a finger with no crossing fin, a fin
+clipped by the active edge, a fin that does not cross the channel, a
+channel without exactly two source/drain neighbours, a gate length outside
+the deck's declared set, active under the gate with no (or both) select
+implants, a PMOS channel outside the well or an NMOS channel inside it, a
+channel touching two VT markers, or a layout whose database unit differs
+from the deck's. Each raises :class:`FinFETGeometryError` (``error.code``
+``finfet_malformed_geometry`` / ``finfet_dbu_mismatch`` under
+``--format json``) listing every offending location in micrometres.
+
+Scope
+-----
+
+Flat extraction over the top cell, like the planar path. ``--parasitics``
+runs the shared ``_compute_parasitics`` pass over the deck's metal stack
+(issue #4558); ``--def-net-names`` and ``--pins`` reuse the planar
+reconciliation so a routed ASAP7 GDS names its nets from the DEF (issue
+#4559). Options that depend on planar-only machinery (abstract
+cells, DEF pin promotion, ``--subcircuit``, ...) are rejected up front by
+:func:`reject_unsupported_options` rather than half-applied.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
+
+from .decks.finfet import FinFETExtractionDeck
+from .extract_spef import ExtractError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import klayout.db as kdb
+
+#: Device parameter carrying the geometry-counted fin total.
+NFIN_PARAM = "NFIN"
+#: Device parameter carrying the number of merged gate fingers.
+FINGERS_PARAM = "FINGERS"
+
+#: ``error.code`` for refused device geometry (see module docstring).
+CODE_MALFORMED = "finfet_malformed_geometry"
+#: ``error.code`` for a layout database unit the deck does not accept.
+CODE_DBU_MISMATCH = "finfet_dbu_mismatch"
+
+#: At most this many findings are spelled out in one error message.
+_MAX_REPORTED = 20
+
+
+class FinFETGeometryError(ExtractError):
+    """A FinFET layout the extractor refuses rather than approximates.
+
+    ``code`` is surfaced as the JSON error envelope's optional
+    ``error.code``; ``findings`` is the full list of
+    ``{"problem": str, "bbox_um": [l, b, r, t]}`` entries the message
+    summarises.
+    """
+
+    def __init__(
+        self, message: str, code: str, findings: list[dict[str, Any]] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.findings = findings or []
+
+
+def is_finfet_deck(deck: object) -> bool:
+    return isinstance(deck, FinFETExtractionDeck)
+
+
+def reject_unsupported_options(deck_name: str, **options: Any) -> None:
+    """Raise :class:`ExtractError` naming every non-default option the FinFET
+    path does not implement. ``options`` maps a CLI-facing option name to its
+    value; any truthy value is a request for planar-only machinery."""
+    requested = sorted(name for name, value in options.items() if value)
+    if requested:
+        raise ExtractError(
+            f"deck '{deck_name}' is a FinFET extraction deck; "
+            f"{', '.join(requested)} "
+            f"{'is' if len(requested) == 1 else 'are'} not supported for FinFET "
+            "extraction (see docs/cli/extract.md, 'ASAP7 FinFET extraction')"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Device class + combination
+# --------------------------------------------------------------------------- #
+
+#: Python-side combiners must outlive every netlist that references them --
+#: KLayout holds a raw pointer, and a collected combiner is a hard crash.
+_COMBINER_KEEPALIVE: list[Any] = []
+
+
+def _net_key(device: kdb.Device, terminal_id: int) -> int | None:
+    net = device.net_for_terminal(terminal_id)
+    return None if net is None else net.cluster_id
+
+
+def _make_combiner() -> Any:
+    import klayout.db as kdb
+
+    class _ParallelFingerCombiner(kdb.GenericDeviceCombiner):
+        """Merge exactly-parallel fingers (see module docstring)."""
+
+        def combine_devices(self, a: kdb.Device, b: kdb.Device) -> bool:
+            cls = a.device_class()
+            s, g, d, bulk = (cls.terminal_id(n) for n in ("S", "G", "D", "B"))
+            if _net_key(a, g) != _net_key(b, g):
+                return False
+            if _net_key(a, bulk) != _net_key(b, bulk):
+                return False
+            sa, da = _net_key(a, s), _net_key(a, d)
+            sb, db = _net_key(b, s), _net_key(b, d)
+            if not ((sa == sb and da == db) or (sa == db and da == sb)):
+                return False
+            if abs(a.parameter("L") - b.parameter("L")) > 1e-9:
+                return False
+            for name in (NFIN_PARAM, FINGERS_PARAM, "W"):
+                a.set_parameter(name, a.parameter(name) + b.parameter(name))
+            for terminal in (s, g, d, bulk):
+                b.disconnect_terminal(terminal)
+            return True
+
+    combiner = _ParallelFingerCombiner()
+    _COMBINER_KEEPALIVE.append(combiner)
+    return combiner
+
+
+def finfet_device_class(name: str) -> kdb.DeviceClassMOS4Transistor:
+    """A MOS4 device class carrying ``NFIN``/``FINGERS`` and the
+    parallel-finger combiner. Also used by tests and future LVS readers so
+    both sides of a comparison share one parameter contract."""
+    import klayout.db as kdb
+
+    device_class = kdb.DeviceClassMOS4Transistor()
+    device_class.name = name
+    device_class.add_parameter(
+        kdb.DeviceParameterDefinition(NFIN_PARAM, "Fin count", 0.0, True)
+    )
+    device_class.add_parameter(
+        kdb.DeviceParameterDefinition(FINGERS_PARAM, "Gate fingers", 0.0, False)
+    )
+    device_class.combiner = _make_combiner()
+    device_class.supports_parallel_combination = True
+    device_class.supports_serial_combination = False
+    return device_class
+
+
+# --------------------------------------------------------------------------- #
+# Per-channel measurement
+# --------------------------------------------------------------------------- #
+
+
+def _bbox_um(box: kdb.Box, dbu: float) -> list[float]:
+    return [
+        round(box.left * dbu, 6),
+        round(box.bottom * dbu, 6),
+        round(box.right * dbu, 6),
+        round(box.top * dbu, 6),
+    ]
+
+
+class _Channel:
+    """One gate finger over one active island, measured once."""
+
+    def __init__(
+        self, polygon: kdb.Polygon, sd: kdb.Region, fin: kdb.Region, dbu: float
+    ) -> None:
+        import klayout.db as kdb
+
+        self.polygon = polygon
+        self.region = kdb.Region(polygon)
+        self.neighbours = sd.interacting(self.region).merged()
+        self.width_dbu = (self.region.edges() & self.neighbours.edges()).length() / 2.0
+        self.length_um = (
+            polygon.area() / self.width_dbu * dbu if self.width_dbu > 0 else 0.0
+        )
+        self.fins = (fin & self.region).merged()
+        self.dbu = dbu
+
+
+def _ordered_source_drain(neighbours: Iterable[Any]) -> tuple[Any, Any]:
+    """The channel's two S/D neighbours as ``(source, drain)``, ordered by
+    geometry rather than by region iteration order.
+
+    A merged :class:`klayout.db.Region` iterates in an order that is an
+    implementation detail of its storage -- it differs between the macOS and
+    Linux ``klayout`` wheels -- so taking the neighbours "as iterated" made
+    the S/D assignment (and with it the emitted ``M… D G S B`` card and the
+    JSON ``nets``) depend on the host platform (issue #3154). The rule here
+    is fixed: the neighbour whose bbox sorts first by ``(left, bottom,
+    right, top)`` is the source. S/D interchange stays electrically legal
+    (LVS and the parallel-finger combiner both accept it); this only makes
+    the choice reproducible.
+    """
+
+    def key(polygon: Any) -> tuple[int, int, int, int]:
+        box = polygon.bbox()
+        return (box.left, box.bottom, box.right, box.top)
+
+    source, drain = sorted(neighbours, key=key)
+    return source, drain
+
+
+def _neighbour_problem(ch: _Channel, _deck: FinFETExtractionDeck) -> str | None:
+    count = ch.neighbours.count()
+    if count != 2:
+        return f"channel has {count} source/drain neighbours (expected 2)"
+    if ch.width_dbu <= 0:
+        return "channel shares no edge with its source/drain"
+    return None
+
+
+def _length_problem(ch: _Channel, deck: FinFETExtractionDeck) -> str | None:
+    allowed = deck.gate_lengths_um
+    if not allowed or any(abs(ch.length_um - v) <= ch.dbu / 2 for v in allowed):
+        return None
+    declared = ", ".join(f"{v * 1000:g} nm" for v in allowed)
+    return (
+        f"gate length {ch.length_um * 1000:.3f} nm is not a declared gate "
+        f"length ({declared})"
+    )
+
+
+def _fin_presence_problem(ch: _Channel, _deck: FinFETExtractionDeck) -> str | None:
+    if ch.fins.is_empty():
+        return "channel has no fin crossing it (planar gate over active)"
+    return None
+
+
+def _clipped_fin_problem(ch: _Channel, _deck: FinFETExtractionDeck) -> str | None:
+    # A fin touching a channel edge that is *not* shared with source/drain is
+    # clipped by the active boundary: a partial fin, not a countable one.
+    clipped = ch.fins.interacting(ch.region.edges() - ch.neighbours.edges())
+    if clipped.is_empty():
+        return None
+    return f"channel has {clipped.count()} fin(s) clipped by the active edge"
+
+
+def _crossing_problem(ch: _Channel, _deck: FinFETExtractionDeck) -> str | None:
+    import klayout.db as kdb
+
+    sides = [kdb.Region(piece) for piece in ch.neighbours.each()]
+    not_crossing = [
+        piece
+        for piece in ch.fins.each()
+        if not all(kdb.Region(piece).interacting(side).count() for side in sides)
+    ]
+    if not not_crossing:
+        return None
+    return (
+        f"channel has {len(not_crossing)} fin(s) that do not cross from source to drain"
+    )
+
+
+#: Checked in order; the first problem found is the one reported.
+_CHANNEL_CHECKS = (
+    _neighbour_problem,
+    _length_problem,
+    _fin_presence_problem,
+    _clipped_fin_problem,
+    _crossing_problem,
+)
+
+
+def _channel_problem(ch: _Channel, deck: FinFETExtractionDeck) -> str | None:
+    for check in _CHANNEL_CHECKS:
+        problem = check(ch, deck)
+        if problem is not None:
+            return problem
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Extractor
+# --------------------------------------------------------------------------- #
+
+
+def _make_extractor(
+    class_name: str,
+    deck: FinFETExtractionDeck,
+    findings: list[dict[str, Any]],
+) -> Any:
+    import klayout.db as kdb
+
+    class _FinFETExtractor(kdb.GenericDeviceExtractor):
+        """Layers: SD (0), channel seed (1), gate conductor (2), body (3),
+        fin (4). One device per merged channel polygon (gate finger)."""
+
+        def __init__(self) -> None:
+            self.name = class_name
+
+        def setup(self) -> None:
+            self.define_layer("SD", "Source/drain diffusion")
+            self.define_layer("G", "Channel (gate finger over active)")
+            self.define_layer("P", "Gate conductor (G terminal)")
+            self.define_layer("W", "Body (B terminal)")
+            self.define_layer("FIN", "Fins (counted, not connected)")
+            self.register_device_class(finfet_device_class(class_name))
+
+        def get_connectivity(self, _layout: kdb.Layout, layers: list[int]) -> Any:
+            sd, channel, gate, body, fin = layers
+            conn = kdb.Connectivity()
+            for other in (channel, sd, gate, body, fin):
+                conn.connect(channel, other)
+            return conn
+
+        def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
+            sd, channels, _gate, _body, fin = layer_geometry
+            for polygon in channels.merged().each():
+                ch = _Channel(polygon, sd, fin, self.dbu())
+                problem = _channel_problem(ch, deck)
+                if problem is not None:
+                    findings.append(
+                        {
+                            "problem": f"{class_name} {problem}",
+                            "bbox_um": _bbox_um(polygon.bbox(), ch.dbu),
+                        }
+                    )
+                    continue
+                self._emit(ch)
+
+        def _emit(self, ch: _Channel) -> None:
+            device = self.create_device()
+            cls = device.device_class()
+            device.set_parameter("L", ch.length_um)
+            device.set_parameter("W", ch.width_dbu * ch.dbu)
+            device.set_parameter(NFIN_PARAM, float(ch.fins.count()))
+            device.set_parameter(FINGERS_PARAM, 1.0)
+            source, drain = _ordered_source_drain(ch.neighbours.each())
+            self.define_terminal(device, cls.terminal_id("S"), 0, source)
+            self.define_terminal(device, cls.terminal_id("D"), 0, drain)
+            self.define_terminal(device, cls.terminal_id("G"), 2, ch.polygon)
+            self.define_terminal(device, cls.terminal_id("B"), 3, ch.polygon)
+
+    return _FinFETExtractor()
+
+
+# --------------------------------------------------------------------------- #
+# Layer-level checks
+# --------------------------------------------------------------------------- #
+
+
+def _region_findings(
+    region: kdb.Region, problem: str, dbu: float
+) -> Iterable[dict[str, Any]]:
+    for polygon in region.merged().each():
+        yield {"problem": problem, "bbox_um": _bbox_um(polygon.bbox(), dbu)}
+
+
+def _raise_findings(findings: list[dict[str, Any]], deck_name: str) -> None:
+    if not findings:
+        return
+    shown = "; ".join(
+        f"{f['problem']} at {f['bbox_um']}" for f in findings[:_MAX_REPORTED]
+    )
+    hidden = len(findings) - _MAX_REPORTED
+    more = f" (+{hidden} more)" if hidden > 0 else ""
+    raise FinFETGeometryError(
+        f"deck '{deck_name}': {len(findings)} FinFET device(s) cannot be "
+        f"extracted faithfully and were not approximated: {shown}{more}",
+        CODE_MALFORMED,
+        findings,
+    )
+
+
+def check_dbu(layout: kdb.Layout, deck: FinFETExtractionDeck, deck_name: str) -> None:
+    if deck.nominal_dbu_um and abs(layout.dbu - deck.nominal_dbu_um) > 1e-12:
+        raise FinFETGeometryError(
+            f"deck '{deck_name}' measures FinFET geometry at dbu "
+            f"{deck.nominal_dbu_um} um, but the layout's dbu is {layout.dbu} um; "
+            "refusing to rescale (a stream written at a different scale would "
+            "extract wrong gate lengths and fin pitches)",
+            CODE_DBU_MISMATCH,
+        )
+
+
+class _Layers:
+    """Every derived region the FinFET flow needs, registered with ``l2n``."""
+
+    def __init__(
+        self, l2n: kdb.LayoutToNetlist, layout: kdb.Layout, deck: FinFETExtractionDeck
+    ) -> None:
+        import klayout.db as kdb
+
+        self._l2n = l2n
+        self._layout = layout
+
+        self.well = self.polygons(deck.nwell, "well")
+        self.fin = self.polygons(deck.fin, "fin")
+        self.active = self.polygons(deck.active, "active")
+        self.nselect = self.polygons(deck.nselect, "nselect")
+        self.pselect = self.polygons(deck.pselect, "pselect")
+        self.lisd = self.polygons(deck.lisd, "lisd")
+        self.lig = self.polygons(deck.lig, "lig")
+        self.v0 = self.polygons(deck.contact, "v0")
+        self.metals = [
+            self.polygons(ld, f"metal{i + 1}") for i, ld in enumerate(deck.metals)
+        ]
+        self.vias = [self.polygons(ld, f"via{i + 1}") for i, ld in enumerate(deck.vias)]
+        gate = self.polygons(deck.poly, "gate_drawn")
+        if deck.gate_cut is not None:
+            gate = gate - self.polygons(deck.gate_cut, "gate_cut")
+        self.gate = self.register(gate, "gate")
+        self.channel = self.active & self.gate
+        ndiff = (self.active & self.nselect) - self.pselect
+        pdiff = (self.active & self.pselect) - self.nselect
+        self.nchannel = ndiff & self.gate
+        self.pchannel = pdiff & self.gate
+        self.nsd = self.register(ndiff - self.gate, "nsd")
+        self.psd = self.register(pdiff - self.gate, "psd")
+        # NMOS body: a synthesized global (the cells draw no substrate tie).
+        self.nbody = self.register(kdb.Region(), "nbody")
+        self.markers = [
+            (flavour, self.polygons(flavour.marker, f"vt_{flavour.name}"))
+            for flavour in deck.vt_flavours
+        ]
+        self._build_passives(deck)
+
+    def _metal_index(self, deck: FinFETExtractionDeck, ld: tuple[int, int]) -> int:
+        if ld not in deck.metals:
+            raise ExtractError(
+                f"FinFET passive layer {ld} is not one of the deck's metals"
+            )
+        return deck.metals.index(ld)
+
+    def _build_passives(self, deck: FinFETExtractionDeck) -> None:
+        """Resistor bodies are cut out of their metal's connectivity (the
+        terminals are the metal beyond the marker); capacitor markers leave
+        the metal intact. ``self.resistors`` / ``self.capacitors`` hold
+        ``(entry, marker, metal_index, ...)`` tuples used by the findings and
+        the device extractors."""
+        self.raw_metals = list(self.metals)
+        self.resistors: list[tuple[Any, kdb.Region, kdb.Region, int]] = []
+        self.capacitors: list[tuple[Any, kdb.Region, int]] = []
+        for res in deck.resistors:
+            index = self._metal_index(deck, res.body)
+            marker = self.polygons(res.marker, f"{res.name}_marker")
+            body = self.metals[index] & marker
+            for ld in res.requires:
+                body &= self.polygons(ld, f"{res.name}_requires")
+            for ld in res.excludes:
+                body -= self.polygons(ld, f"{res.name}_excludes")
+            body = self.register(body.merged(), f"{res.name}_body")
+            self.metals[index] = self.register(
+                self.metals[index] - body, f"metal{index + 1}_terminals"
+            )
+            self.resistors.append((res, marker, body, index))
+        for cap in deck.passive_capacitors:
+            index = self._metal_index(deck, cap.metal)
+            marker = self.polygons(cap.marker, f"{cap.name}_marker")
+            self.capacitors.append((cap, marker, index))
+
+    def polygons(self, ld: tuple[int, int], name: str) -> kdb.Region:
+        return self._l2n.make_polygon_layer(self._layout.layer(*ld), name)
+
+    def texts(self, ld: tuple[int, int], name: str) -> kdb.Texts:
+        return self._l2n.make_text_layer(self._layout.layer(*ld), name)
+
+    def register(self, region: kdb.Region, name: str) -> kdb.Region:
+        self._l2n.register(region, name)
+        return region
+
+
+def _layer_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
+    channel = layers.channel
+    checks = [
+        (
+            channel & layers.nselect & layers.pselect,
+            "gate over active covered by both Nselect and Pselect",
+        ),
+        (
+            channel - layers.nselect - layers.pselect,
+            "gate over active covered by neither Nselect nor Pselect",
+        ),
+        (layers.pchannel.not_inside(layers.well), "PMOS channel not inside the well"),
+        (layers.nchannel & layers.well, "NMOS channel inside the well"),
+    ]
+    for index, (flavour, marker) in enumerate(layers.markers):
+        for other, other_marker in layers.markers[index + 1 :]:
+            checks.append(
+                (
+                    channel.interacting(marker).interacting(other_marker),
+                    f"channel touches two VT markers ({flavour.name}, {other.name})",
+                )
+            )
+    findings: list[dict[str, Any]] = []
+    for region, problem in checks:
+        findings.extend(_region_findings(region, problem, dbu))
+    findings.extend(_passive_findings(layers, dbu))
+    return findings
+
+
+def _passive_findings(layers: _Layers, dbu: float) -> list[dict[str, Any]]:
+    """Markers the extractor cannot turn into a two-terminal device are
+    named findings, never a silent short or a silent drop (issue #4469)."""
+    import klayout.db as kdb
+
+    findings: list[dict[str, Any]] = []
+
+    def straddles(marker: kdb.Region, own: int) -> kdb.Region:
+        other = kdb.Region()
+        for i, metal in enumerate(layers.raw_metals):
+            if i != own:
+                other += marker.interacting(metal)
+        return other
+
+    for res, marker, body, index in layers.resistors:
+        name = res.name
+        findings.extend(
+            _region_findings(
+                marker.not_interacting(layers.raw_metals[index]),
+                f"{name} marker is not over its metal",
+                dbu,
+            )
+        )
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        terminals = layers.metals[index].merged()
+        for polygon in body.each():
+            count = terminals.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": f"{name} body has {count} terminal(s) (expected 2)",
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
+    for cap, marker, index in layers.capacitors:
+        metal = layers.metals[index].merged()
+        findings.extend(
+            _region_findings(
+                straddles(marker, index),
+                f"{cap.name} marker straddles more than one metal level",
+                dbu,
+            )
+        )
+        for polygon in marker.merged().each():
+            count = metal.interacting(kdb.Region(polygon)).count()
+            if count != 2:
+                findings.append(
+                    {
+                        "problem": (
+                            f"{cap.name} marker has {count} port(s) (expected 2)"
+                        ),
+                        "bbox_um": _bbox_um(polygon.bbox(), dbu),
+                    }
+                )
+    return findings
+
+
+# --------------------------------------------------------------------------- #
+# Devices + connectivity
+# --------------------------------------------------------------------------- #
+
+
+def _vt_parts(
+    channel: kdb.Region, layers: _Layers, deck: FinFETExtractionDeck
+) -> list[tuple[str, tuple[str, str], kdb.Region]]:
+    """``[(flavour tag, (nfet, pfet) class names, channel subset)]`` -- a
+    channel belongs to the one VT flavour whose marker it touches (two
+    markers were already refused), else to the deck default."""
+    parts = []
+    remaining = channel
+    for flavour, marker in layers.markers:
+        parts.append(
+            (
+                flavour.name,
+                (flavour.nfet_class, flavour.pfet_class),
+                channel.interacting(marker),
+            )
+        )
+        remaining = remaining.not_interacting(marker)
+    parts.append(("default", (deck.nfet_class, deck.pfet_class), remaining))
+    return parts
+
+
+def _extract_devices(
+    l2n: kdb.LayoutToNetlist,
+    layers: _Layers,
+    deck: FinFETExtractionDeck,
+    findings: list[dict[str, Any]],
+) -> None:
+    sides = (
+        (0, layers.nchannel, layers.nsd, layers.nbody),
+        (1, layers.pchannel, layers.psd, layers.well),
+    )
+    for polarity, channel, sd, body in sides:
+        for tag, classes, part in _vt_parts(channel, layers, deck):
+            if part.is_empty():
+                continue
+            layers.register(part, f"channel_{polarity}_{tag}")
+            l2n.extract_devices(
+                _make_extractor(classes[polarity], deck, findings),
+                {"SD": sd, "G": part, "P": layers.gate, "W": body, "FIN": layers.fin},
+            )
+
+
+def _make_capacitor_extractor(name: str, coefficient_f_um2: float) -> Any:
+    import klayout.db as kdb
+
+    class _PassiveCapacitorExtractor(kdb.GenericDeviceExtractor):
+        """Layers: marker (0), the metal carrying both ports (1)."""
+
+        def __init__(self) -> None:
+            self.name = name
+
+        def setup(self) -> None:
+            self.define_layer("K", "Capacitor marker")
+            self.define_layer("M", "Port metal")
+            device_class = kdb.DeviceClassCapacitor()
+            device_class.name = name
+            self.register_device_class(device_class)
+
+        def get_connectivity(self, _layout: kdb.Layout, layers: list[int]) -> Any:
+            conn = kdb.Connectivity()
+            conn.connect(layers[0], layers[1])
+            return conn
+
+        def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
+            marker, metal = layer_geometry
+            dbu = self.dbu()
+            merged = metal.merged()
+            for polygon in marker.merged().each():
+                ports = list(merged.interacting(kdb.Region(polygon)).each())
+                if len(ports) != 2:
+                    continue  # already a named finding
+                first, second = sorted(
+                    ports,
+                    key=lambda p: (
+                        p.bbox().left,
+                        p.bbox().bottom,
+                        p.bbox().right,
+                        p.bbox().top,
+                    ),
+                )
+                device = self.create_device()
+                cls = device.device_class()
+                device.set_parameter(
+                    "C", coefficient_f_um2 * polygon.area() * dbu * dbu
+                )
+                self.define_terminal(device, cls.terminal_id("A"), 1, first)
+                self.define_terminal(device, cls.terminal_id("B"), 1, second)
+
+    return _PassiveCapacitorExtractor()
+
+
+def _extract_passives(l2n: kdb.LayoutToNetlist, layers: _Layers) -> None:
+    import klayout.db as kdb
+
+    for res, _marker, body, index in layers.resistors:
+        if body.is_empty():
+            continue
+        extractor = kdb.DeviceExtractorResistor(res.name, res.sheet_rho_ohm_sq)
+        l2n.extract_devices(extractor, {"R": body, "C": layers.metals[index]})
+    for cap, marker, index in layers.capacitors:
+        if marker.is_empty():
+            continue
+        extractor = _make_capacitor_extractor(cap.name, cap.area_cap_f_um2)
+        l2n.extract_devices(extractor, {"K": marker, "M": layers.metals[index]})
+
+
+def _connect_feol(
+    l2n: kdb.LayoutToNetlist, layers: _Layers, deck: FinFETExtractionDeck
+) -> None:
+    for layer in (layers.gate, layers.nsd, layers.psd, layers.well, layers.lisd):
+        l2n.connect(layer)
+    l2n.connect(layers.lig)
+    l2n.connect(layers.v0)
+    # Diffusion reaches LISD through the S/D contact layer when the deck
+    # declares one (see FinFETExtractionDeck.sd_contact), else directly.
+    contact = layers.lisd
+    if deck.sd_contact is not None:
+        contact = layers.polygons(deck.sd_contact, "sd_contact")
+        l2n.connect(contact)
+        l2n.connect(contact, layers.lisd)
+    l2n.connect(layers.nsd, contact)
+    l2n.connect(layers.psd, contact)
+    l2n.connect(layers.gate, layers.lig)
+    l2n.connect(layers.lisd, layers.v0)
+    l2n.connect(layers.lig, layers.v0)
+    if deck.lig_lisd_connected:
+        l2n.connect(layers.lig, layers.lisd)
+    l2n.connect_global(layers.nbody, deck.substrate_net)
+
+
+def _connect_beol(
+    l2n: kdb.LayoutToNetlist, layers: _Layers, deck: FinFETExtractionDeck
+) -> None:
+    metals, vias = layers.metals, layers.vias
+    for layer in (*metals, *vias):
+        l2n.connect(layer)
+    if metals:
+        l2n.connect(layers.v0, metals[0])
+    for index, via in enumerate(vias[: max(len(metals) - 1, 0)]):
+        l2n.connect(metals[index], via)
+        l2n.connect(via, metals[index + 1])
+    labels = [
+        (metals[index], label_ld, f"metal{index + 1}_label")
+        for index, label_ld in enumerate(deck.metal_labels[: len(metals)])
+    ]
+    labels.append((layers.well, deck.well_label, "well_label"))
+    labels.append((layers.gate, deck.poly_label, "gate_label"))
+    for conductor, label_ld, name in labels:
+        if label_ld is not None:
+            l2n.connect(conductor, layers.texts(label_ld, name))
+
+
+def extract_finfet_netlist(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    deck_name: str = "asap7",
+) -> tuple[kdb.Netlist, list[str]]:
+    """Extract ``top_cell`` (flattened) with ``deck``; return
+    ``(netlist, warnings)``. Raises :class:`FinFETGeometryError` for refused
+    geometry (see module docstring)."""
+    netlist, warnings, _parasitic_nets = _extract_with_parasitics(
+        layout, top_cell, deck, deck_name, None
+    )
+    return netlist, warnings
+
+
+#: ``(ground_nets, coupled_pairs)`` as ``_compute_parasitics`` returns them.
+_ParasiticNets = tuple[list[dict[str, Any]], list[dict[str, Any]]]
+
+
+def _parasitics_for(
+    l2n: kdb.LayoutToNetlist,
+    netlist: kdb.Netlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    layers: _Layers,
+    parasitics_deck: Any,
+    **options: Any,
+) -> _ParasiticNets:
+    """Run the shared ``_compute_parasitics`` pass over the deck's metal stack
+    while ``l2n`` still owns the per-net shapes (issue #4558). The roles it
+    reads are the registered metal/via/contact layers; ASAP7 curates no
+    diffusion or poly coefficient, so nothing planar-only is consulted."""
+    from .extract_parasitics import _compute_parasitics
+
+    return _compute_parasitics(
+        l2n,
+        netlist.circuit_by_name(top_cell.name),
+        layout.dbu,
+        deck,
+        parasitics_deck,
+        {"contact": l2n.layer_of(layers.v0)},
+        [l2n.layer_of(region) for region in layers.metals],
+        layout=layout,
+        top_cell=top_cell,
+        via_index=[l2n.layer_of(region) for region in layers.vias],
+        capacitor_top_regions={
+            cap.name: marker for cap, marker, _ in layers.capacitors
+        },
+        **options,
+    )
+
+
+def _def_net_name_warnings(
+    l2n: kdb.LayoutToNetlist,
+    metals: list[kdb.Region],
+    probes: dict[str, Any],
+    top_name: str,
+) -> list[str]:
+    """Apply ``--def-net-names`` (issue #951) to the FinFET netlist and return
+    the same loud warnings the planar path emits."""
+    from .extract import _DEF_NET_NAME_PROPERTY_ID, _apply_def_net_name_overrides
+
+    renamed, unresolved = _apply_def_net_name_overrides(l2n, metals, probes)
+    if not probes:
+        return [
+            "--def-net-names found no DEF net-name shape property "
+            f"({_DEF_NET_NAME_PROPERTY_ID}) on any routed-metal shape in "
+            f"'{top_name}' -- net names are unchanged (this flag expects a "
+            "layout produced by a LEF/DEF -> GDS merge, e.g. `klt "
+            "place-and-route`'s routed GDS)"
+        ]
+    if unresolved:
+        joined = ", ".join(unresolved[:10])
+        more = len(unresolved) - 10
+        return [
+            f"--def-net-names: renamed {renamed} net(s), but {len(unresolved)} "
+            f"DEF net name(s) resolved to no extracted net ({joined}"
+            + (f", +{more} more" if more > 0 else "")
+            + ") -- those nets keep their default names"
+        ]
+    return []
+
+
+def _extract_with_parasitics(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    deck_name: str,
+    parasitics_deck: Any,
+    *,
+    def_net_names: bool = False,
+    declared_pins: frozenset[str] | None = None,
+    **parasitics_options: Any,
+) -> tuple[
+    kdb.Netlist, list[str], tuple[list[dict[str, Any]], list[dict[str, Any]]] | None
+]:
+    """:func:`extract_finfet_netlist` plus, when ``parasitics_deck`` is given,
+    the ``(ground_nets, coupled_pairs)`` pair ``_compute_parasitics`` returns."""
+    import klayout.db as kdb
+
+    from .extract import (
+        _apply_declared_pins,
+        _def_net_name_probes,
+        _promote_orphan_named_nets,
+        _purge_preserving_named_nets,
+    )
+
+    check_dbu(layout, deck, deck_name)
+    l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top_cell, []))
+    l2n.threads = 1
+    layers = _Layers(l2n, layout, deck)
+
+    findings = _layer_findings(layers, layout.dbu)
+    _raise_findings(findings, deck_name)
+    _extract_devices(l2n, layers, deck, findings)
+    _raise_findings(findings, deck_name)
+    _extract_passives(l2n, layers)
+
+    _connect_feol(l2n, layers, deck)
+    _connect_beol(l2n, layers, deck)
+    def_net_name_probes = (
+        _def_net_name_probes(layout, top_cell, deck.metals) if def_net_names else {}
+    )
+    l2n.extract_netlist()
+    netlist = l2n.netlist()
+    pin_warnings: list[str] = []
+    if def_net_names:
+        # Planar-path ordering: after `extract_netlist`, before pins/purge.
+        pin_warnings = _def_net_name_warnings(
+            l2n, layers.metals, def_net_name_probes, top_cell.name
+        )
+    netlist.combine_devices()
+    netlist.make_top_level_pins()
+    # As the planar path (#539): keep a labelled net with no device terminal.
+    _promote_orphan_named_nets(netlist)
+    if declared_pins is not None:
+        _apply_declared_pins(netlist, top_cell.name, declared_pins, pin_warnings)
+    _purge_preserving_named_nets(netlist)
+
+    has_devices = any(
+        True for circuit in netlist.each_circuit() for _ in circuit.each_device()
+    )
+    warnings = pin_warnings + (
+        [
+            f"deck '{deck_name}': NMOS bulk terminals are tied to the synthesized "
+            f"'{deck.substrate_net}' net and PMOS bulk terminals to the drawn well "
+            "net; neither is joined to a metal supply net of the same name"
+        ]
+        if has_devices
+        else []
+    )
+    parasitic_nets = (
+        None
+        if parasitics_deck is None
+        else _parasitics_for(
+            l2n,
+            netlist,
+            layout,
+            top_cell,
+            deck,
+            layers,
+            parasitics_deck,
+            **parasitics_options,
+        )
+    )
+    # `l2n` owns the netlist; detach a copy before it is collected.
+    return netlist.dup(), warnings, parasitic_nets
+
+
+# --- Integration points used by extract.py / klt lvs ----------------------- #
+
+
+def _deck_or_none(deck_name: str) -> object:
+    from .decks import UnknownExtractionDeckError, get_extraction_deck
+
+    try:
+        return get_extraction_deck(deck_name)
+    except UnknownExtractionDeckError:
+        return None
+
+
+def is_finfet_deck_name(deck_name: object) -> bool:
+    """Whether ``deck_name`` names a registered FinFET extraction deck."""
+    return isinstance(deck_name, str) and is_finfet_deck(_deck_or_none(deck_name))
+
+
+def refuse_run_options(
+    deck_name: str,
+    *,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+) -> None:
+    """``run_extract``'s early guard: name ``--pdk`` as unsupported for a
+    FinFET deck before any PDK lookup reports a less precise error.
+    ``--parasitics`` is supported (issue #4558) and not refused."""
+    if is_finfet_deck_name(deck_name):
+        reject_unsupported_options(
+            deck_name,
+            **{"--pdk": pdk_variant is not None or pdk_root is not None},
+        )
+
+
+def refuse_layout_options(deck: object, deck_name: str, **options: Any) -> None:
+    """``extract_netlist_from_layout``'s guard: :func:`reject_unsupported_options`
+    for a FinFET ``deck``, a no-op for any other deck."""
+    if is_finfet_deck(deck):
+        reject_unsupported_options(deck_name, **options)
+
+
+def extract_netlist_tuple(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: FinFETExtractionDeck,
+    parasitics_deck: Any = None,
+    **options: Any,
+) -> tuple[Any, ...]:
+    """Drop-in for ``extract._extract_netlist``'s 14-tuple contract. Every
+    planar-only option was already refused by :func:`refuse_layout_options`;
+    the planar-only result slots are their documented empty values. Only the
+    ``--parasitics`` pass (issue #4558) and the DEF-driven net naming
+    (``--def-net-names``, ``--pins``; issue #4559) are honoured."""
+    from .extract import _extraction_deck_name
+
+    parasitics_options = {
+        key: options[key]
+        for key in (
+            "parasitics_top_cell_only",
+            "resistance_graph",
+            "resistance_graph_r_cut_ohm",
+        )
+        if key in options
+    }
+    netlist, warnings, parasitic_nets = _extract_with_parasitics(
+        layout,
+        top_cell,
+        deck,
+        _extraction_deck_name(deck) or "finfet",
+        parasitics_deck,
+        def_net_names=bool(options.get("def_net_names", False)),
+        declared_pins=options.get("declared_pins"),
+        **parasitics_options,
+    )
+    return (
+        netlist,
+        warnings,
+        parasitic_nets,
+        [],
+        0,
+        [],
+        [],
+        [],
+        None,
+        {},
+        {},
+        None,
+        None,
+        None,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SPICE card
+# --------------------------------------------------------------------------- #
+
+
+def finfet_card(device: kdb.Device, format_name: Any, net_to_string: Any) -> str | None:
+    """``M<name> d g s b <model> L=..U W=..U NFIN=<n>`` for a FinFET device,
+    else ``None``.
+
+    The parameter set is exactly the one the PDK's own reference CDL uses
+    (ASAP7: ``w=.. l=.. nfin=..``). KLayout's default writer would also emit
+    the unmeasured ``AS``/``AD``/``PS``/``PD`` as zeros and the merged-finger
+    count as ``FINGERS=``; the latter is dangerous for BSIM-CMG, whose own
+    ``NF`` multiplies ``NFIN`` (``NFIN`` here is already the total).
+    """
+    import klayout.db as kdb
+
+    from .pdk_models import _format_um
+
+    device_class = device.device_class()
+    if not isinstance(device_class, kdb.DeviceClassMOS4Transistor):
+        return None
+    if not device_class.has_parameter(NFIN_PARAM):
+        return None
+    nets = [
+        device.net_for_terminal(device_class.terminal_id(t))
+        for t in ("D", "G", "S", "B")
+    ]
+    if any(net is None for net in nets):
+        return None
+    return (
+        f"M{format_name(device.expanded_name())} "
+        f"{' '.join(net_to_string(net) for net in nets)} {device_class.name} "
+        f"L={_format_um(device.parameter('L'))} "
+        f"W={_format_um(device.parameter('W'))} "
+        f"NFIN={int(round(device.parameter(NFIN_PARAM)))}"
+    )
+
+
+def spice_writer_delegate_for(deck_name: str, fallback: Any) -> Any:
+    """The SPICE writer delegate for ``deck_name``: a FinFET-card writer for
+    a FinFET deck (no ``--pdk`` binding or parasitics can apply to one), else
+    ``fallback()`` -- the planar model-binding delegate, unchanged."""
+    if not is_finfet_deck_name(deck_name):
+        return fallback()
+    import klayout.db as kdb
+
+    class _FinFETSpiceWriterDelegate(kdb.NetlistSpiceWriterDelegate):
+        def write_device(self, device: kdb.Device) -> None:
+            card = finfet_card(device, self.format_name, self.net_to_string)
+            if card is None:
+                super().write_device(device)
+            else:
+                self.emit_line(card)
+
+    return _FinFETSpiceWriterDelegate()

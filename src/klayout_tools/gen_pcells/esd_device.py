@@ -11,10 +11,109 @@ submodule only imports it, never the reverse).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import klayout.db as kdb
+
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_mos_stack_params,
+    declare_ring_implant_params,
+)
+
+
+def _declare_flavor_and_width_params(pcell: Any) -> None:
+    """Declare the user-facing ``voltage_flavor`` / ``total_width_um`` params
+    (issue #4299). ``pcell`` is untyped so the dynamic ``param`` attributes
+    don't add ``attr-defined`` diagnostics to ``type-baseline.json``."""
+    pcell.param(
+        "voltage_flavor",
+        pcell.TypeString,
+        "Optional thick-oxide/medium-voltage device-class marker: "
+        "'' (default, no marker drawn) or a name the resolved PDK "
+        "family's role-layer table recognises (e.g. 'hvi' on sky130, "
+        "'medium_voltage' on gf180mcu) -- see mos_array's equivalent "
+        "param. A name the family doesn't recognise draws nothing and "
+        "is reported via drc_hints.notes",
+        default="",
+    )
+    pcell.param(
+        "total_width_um",
+        pcell.TypeDouble,
+        "Optional total device width (um); 0.0 (default) means unset. "
+        "When given, fingers/finger_width_um are derived: the "
+        "smallest finger count whose equal split stays within the "
+        "per-finger cap. Cannot be combined with an explicit fingers "
+        "or finger_width_um",
+        default=0.0,
+    )
+
+
+def _declare_flavor_mark_params(pcell: Any, kdb: Any, default_margin_um: float) -> None:
+    """Declare the harness-resolved ``voltage_flavor`` marker layer params."""
+    pcell.param(
+        "voltage_flavor_mark_layer",
+        pcell.TypeLayer,
+        "Thick-oxide/medium-voltage device-class marker drawing "
+        "layer, sized to enclose the finger array (only used when "
+        "voltage_flavor_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+        hidden=True,
+    )
+    pcell.param(
+        "voltage_flavor_mark_present",
+        pcell.TypeBoolean,
+        "Whether voltage_flavor_mark_layer is a real layer resolved "
+        "for params.voltage_flavor on this PDK family",
+        default=False,
+        hidden=True,
+    )
+    pcell.param(
+        "voltage_flavor_extra_mark_layer",
+        pcell.TypeLayer,
+        "Second voltage_flavor marker layer drawn over the same box "
+        "(only used when voltage_flavor_extra_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+        hidden=True,
+    )
+    pcell.param(
+        "voltage_flavor_extra_mark_present",
+        pcell.TypeBoolean,
+        "Whether voltage_flavor_extra_mark_layer is a real layer "
+        "resolved for params.voltage_flavor on this PDK family",
+        default=False,
+        hidden=True,
+    )
+    pcell.param(
+        "voltage_flavor_mark_margin_um",
+        pcell.TypeDouble,
+        "Harness-resolved margin the voltage_flavor marker box grows "
+        "beyond the finger array's active footprint",
+        default=default_margin_um,
+        hidden=True,
+    )
+
+
+def _voltage_flavor_margin(pcell: Any) -> float:
+    return float(pcell.voltage_flavor_mark_margin_um)
+
+
+def _insert_voltage_flavor_marks(
+    pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
+) -> None:
+    """Draw the optional ``voltage_flavor`` marker (issue #4299): one box
+    enclosing the finger array, plus the second marker layer some flavours
+    need over the same box. Mirrors ``mos_array``."""
+    from klayout_tools.gen import _insert_boxes
+
+    if not pcell.voltage_flavor_mark_present:
+        return
+    layers = [pcell.voltage_flavor_mark_layer]
+    if pcell.voltage_flavor_extra_mark_present:
+        layers.append(pcell.voltage_flavor_extra_mark_layer)
+    for layer in layers:
+        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
 
 
 def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
@@ -33,13 +132,13 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         GATE_LENGTH_SAFE_MIN_UM,
         GUARD_RING_DEFAULT_PADDING_UM,
+        WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _esd_device_layout,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
-        _shift_box,
     )
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _EsdDevicePCell(kdb.PCellDeclarationHelper):
         """Grounded-gate multi-finger ESD protection MOS (issue #569): one
@@ -72,6 +171,10 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         fidelity, not a process-exact cross-section" approximation
         `_bjt_unit_layout` already documents for its own device).
         """
+
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -138,35 +241,15 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "role comments in _PDK_ROLE_LAYERS)",
                 default=False,
             )
-            self.param(
-                "active_layer",
-                self.TypeLayer,
-                "Active/diffusion drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "poly_layer",
-                self.TypeLayer,
-                "Poly gate drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            _declare_flavor_and_width_params(self)
+            declare_mos_stack_params(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "tap_layer",
                 self.TypeLayer,
                 "Tap ring drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "esd_mark_layer",
@@ -174,12 +257,14 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ESD device-class marker drawing layer (only used when "
                 "esd_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "esd_mark_present",
                 self.TypeBoolean,
                 "Whether esd_mark_layer is a real layer this PDK family cites",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "salicide_block_layer",
@@ -187,40 +272,23 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Salicide-block drawing layer (only used when "
                 "salicide_block_present and params.salicide_block)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "salicide_block_present",
                 self.TypeBoolean,
                 "Whether salicide_block_layer is a real layer this PDK family cites",
                 default=False,
+                hidden=True,
             )
-            self.param(
-                "contact_gate_offset_um",
-                self.TypeDouble,
-                "Harness-resolved extra S/D-contact-to-gate offset floor "
-                "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
-                default=0.0,
-            )
-            self.param(
-                "bottom_endcap_um",
-                self.TypeDouble,
-                "Harness-resolved gate-stripe bottom-edge endcap extension "
-                "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
-                default=0.0,
-            )
-            self.param(
-                "sd_implant_layer",
-                self.TypeLayer,
-                "Source/drain implant drawing layer (only used when "
-                "sd_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            _declare_flavor_mark_params(self, kdb, WELL_ENCLOSURE_MARGIN_UM)
             self.param(
                 "sd_implant_present",
                 self.TypeBoolean,
                 "Whether sd_implant_layer is a real layer this PDK family "
                 "needs over the unit device's own active body",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "sd_implant_margin_um",
@@ -229,43 +297,9 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the unit device's own active box (only used when "
                 "sd_implant_present)",
                 default=0.0,
+                hidden=True,
             )
-            self.param(
-                "ring_implant_layer",
-                self.TypeLayer,
-                "Tap-ring implant drawing layer, tracking the tap ring's "
-                "own band with ring_implant_margin_um of extension beyond "
-                "every edge of it (only used when add_guard_ring and "
-                "ring_implant_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "ring_implant_present",
-                self.TypeBoolean,
-                "Whether the resolved PDK needs an implant mask to recognise "
-                "the tap ring's own shape (see _ring_tap_implant_layer)",
-                default=False,
-            )
-            self.param(
-                "ring_implant_margin_um",
-                self.TypeDouble,
-                "Harness-resolved margin the ring implant extends beyond the "
-                "ring's own band on every edge (only used when "
-                "ring_implant_present)",
-                default=0.0,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
-            )
+            declare_ring_implant_params(self, kdb)
 
         def display_text_impl(self) -> str:
             return (
@@ -292,6 +326,8 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.contact_gate_offset_um,
                 self.bottom_endcap_um,
                 self.sd_implant_margin_um if self.sd_implant_present else 0.0,
+                top_endcap_um=self.top_endcap_um,
+                voltage_flavor_mark_margin_um=_voltage_flavor_margin(self),
             )
             unit_boxes = info["unit"]["boxes_um"]
             for role, li in (
@@ -317,65 +353,39 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 li_mark = self.layout.layer(self.esd_mark_layer)
                 _insert_boxes(self.cell, li_mark, dbu, unit_boxes["active"])
 
+            # Optional `voltage_flavor` marker (issue #4299): mirrors
+            # mos_array -- one box enclosing the finger array, plus the
+            # second marker layer some flavours need over the same box.
+            _insert_voltage_flavor_marks(self, dbu, info["voltage_flavor_mark_box_um"])
+
             if self.salicide_block and self.salicide_block_present:
                 li_block = self.layout.layer(self.salicide_block_layer)
                 _insert_boxes(self.cell, li_block, dbu, unit_boxes["active"])
 
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
                 # Deliberately no well tie drawn around the ring here (unlike
                 # `_GuardRingPCell`'s own `add_well` default, and unlike
                 # `diff_pair`'s `flavor="pfet"` case) -- see this class's own
                 # docstring and `_esd_device_layer_params`'s for why: it
                 # would enclose this always-NMOS device in an Nwell and
                 # misclassify it as `pfet` under `klt extract`.
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- always the substrate-tie doping
-                    # (never the well-tie one), since this ring never
-                    # encloses a well (see the no-well-tie note directly
-                    # above).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                    )
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
+            _clamp_cut_boxes(
+                self.cell,
+                li_contact,
+                dbu,
+                self.contact_fixed_size_um,
+                self.mfg_grid_um,
+            )
 
     return {"esd_device": _EsdDevicePCell}

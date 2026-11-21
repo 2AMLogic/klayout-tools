@@ -1,0 +1,16 @@
+Write a GDSII/OASIS stream verbatim from a JSON description of polygons and
+labels on explicit (layer, datatype) pairs. The deliberately-dumb write-side
+counterpart to the read-side verbs: no PDK awareness and no rule checking --
+so a DRC flow's negative case (a known-bad fixture that must come back
+flagged) can be produced with klt alone, along with minimal deck-bug
+reproducers and layer-map sanity checks. Unlike `klt gen`, it will happily
+emit rule-violating geometry; every response is stamped with a loud not-
+design-legal warning. See docs/cli/draw.md for the request/response contract.
+Runs fully headless via klayout.db -- no GUI, no Qt.
+
+options:
+  -h, --help show this help message and exit
+  --params PARAMS shape/label description as a path to a JSON file, or an inline JSON object (e.g. '{"shapes": [{"layer": [66, 20], "rect_um": [0, 0, 1, 0.15]}]}'); required
+  --cell-name CELL_NAME name for the written top cell (default: TOP)
+  -o, --output OUTPUT output GDS/OASIS path (default: <cell_name>.gds)
+  --format {text,json} output format (default: text)

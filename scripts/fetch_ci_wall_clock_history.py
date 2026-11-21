@@ -33,7 +33,10 @@ The trade-off accepted: the check now depends on the Actions API being
 reachable. That is why **this script never fails**. Any error -- missing `gh`,
 a 403, a rate limit, a timeout -- produces a valid, empty history payload and
 exit 0, and the check then falls back to the committed ceilings, which is the
-pre-#2615 behaviour rather than a broken build.
+pre-#2615 behaviour rather than a broken build. Transient failures -- an HTTP
+5xx, a timeout, a dropped connection -- are retried a bounded number of times
+first (#6214, in `ci_wall_clock_gh`); only a failure that survives its
+retries falls back.
 
 Output payload (`schema_version` 1):
 
@@ -91,10 +94,10 @@ later of:
 
 A run without a parseable `created_at` is dropped rather than trusted.
 
-Job durations here exclude `actions/cache`-miss rebuild time exactly as the
-check excludes it from the run being judged (issue #2617, via the check's own
-`measure_cache_miss`), so a cache outage in the window can neither inflate a
-baseline nor fake a busy pool.
+Job durations here exclude the same non-compute time the check excludes from
+the run being judged -- `actions/cache`-miss rebuilds (#2617) and
+`actions/checkout` (#5964), via the shared `ci_wall_clock_steps` module -- so
+neither can inflate a baseline nor fake a busy pool.
 
 Standard library only, like the check it feeds.
 """
@@ -103,16 +106,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-# The cache-miss convention (#2617) has exactly one definition: the check's.
-# Importing it keeps the history and the judged run on the same compute figure.
+# The step-measurement conventions (#2617 cache miss, #5964 checkout) have
+# exactly one definition: ci_wall_clock_steps's, which both importers share.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_ci_wall_clock import measure_cache_miss  # noqa: E402
+from ci_wall_clock_gh import FetchError, GhClient
+from ci_wall_clock_steps import measure_cache_miss, measure_checkout
 
 HISTORY_SCHEMA_VERSION = 1
 DEFAULT_BUDGET_FILE = (
@@ -140,47 +143,8 @@ DEFAULTS = {
 }
 
 
-class FetchError(Exception):
-    """Any reason the history could not be collected (never fatal)."""
-
-
 def _parse_iso(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-
-
-class GhClient:
-    """A counted, timeout-bounded `gh api` caller."""
-
-    def __init__(self, gh: str, timeout: int, max_calls: int) -> None:
-        self.gh = gh
-        self.timeout = timeout
-        self.max_calls = max_calls
-        self.calls = 0
-
-    def get(self, path: str) -> object:
-        if self.calls >= self.max_calls:
-            raise FetchError(f"API call budget of {self.max_calls} exhausted")
-        self.calls += 1
-        try:
-            proc = subprocess.run(
-                [self.gh, "api", "-H", "Accept: application/vnd.github+json", path],
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise FetchError(f"`{self.gh} api {path}` failed: {exc}") from exc
-        if proc.returncode != 0:
-            raise FetchError(
-                f"`{self.gh} api {path}` exited {proc.returncode}: "
-                f"{proc.stderr.strip()[:200]}"
-            )
-        try:
-            return json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise FetchError(
-                f"`{self.gh} api {path}` returned non-JSON: {exc}"
-            ) from exc
 
 
 def job_durations(
@@ -213,9 +177,9 @@ def job_durations(
             continue
         if seconds < 0:
             continue
-        # Cache-miss recovery is cache-service time, not compute (#2617).
-        cache_seconds, _ = measure_cache_miss(job)
-        seconds -= min(cache_seconds, seconds)
+        # Cache-miss (#2617) and checkout (#5964) time is not compute.
+        excluded = measure_cache_miss(job)[0] + measure_checkout(job)[0]
+        seconds -= min(excluded, seconds)
         # A matrix leg can appear twice across re-run attempts; keep the last.
         durations[name] = seconds
         if is_partial:
@@ -369,6 +333,54 @@ def select_runs(
     return selection.items()
 
 
+def _runs_of(payload: object) -> list:
+    if isinstance(payload, dict) and isinstance(payload.get("workflow_runs"), list):
+        return payload["workflow_runs"]
+    return []
+
+
+def _extend_with_usable_runs(
+    client: GhClient,
+    repo: str,
+    workflow: str,
+    branch: str,
+    created: str,
+    opts: dict,
+    baseline_runs: list,
+) -> list:
+    """Merge the usable-conclusion listings into ``baseline_runs``, newest first.
+
+    The `completed` listing is newest-first and mostly `cancelled` on a busy
+    `main` (merge bursts cancel superseded runs), so its fixed-size page can
+    hold fewer than `min_samples` usable runs (#3575). Ask the server for the
+    usable conclusions directly; a failed extra listing only costs the extra
+    samples, never the whole fetch.
+    """
+    seen = {r.get("id") for r in baseline_runs if isinstance(r, dict)}
+    for conclusion in sorted(_USABLE_RUN_CONCLUSIONS):
+        try:
+            extra = client.get(
+                f"repos/{repo}/actions/workflows/{workflow}/runs"
+                f"?branch={branch}&status={conclusion}"
+                f"&per_page={opts['baseline_runs'] + 5}{created}"
+            )
+        except FetchError:
+            continue
+        for run in _runs_of(extra):
+            if isinstance(run, dict) and run.get("id") not in seen:
+                seen.add(run.get("id"))
+                baseline_runs.append(run)
+    # Newest first, so the `baseline_runs` limit keeps the most recent usable ones.
+    baseline_runs.sort(
+        key=lambda r: (
+            (_created_at(r) if isinstance(r, dict) else None)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+        reverse=True,
+    )
+    return baseline_runs
+
+
 def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
     now = datetime.now(timezone.utc)
     current = client.get(f"repos/{repo}/actions/runs/{run_id}")
@@ -394,15 +406,14 @@ def collect(client: GhClient, repo: str, run_id: str, opts: dict) -> dict:
         f"?per_page={opts['peer_window_runs']}{created}"
     )
 
-    def runs_of(payload: object) -> list:
-        if isinstance(payload, dict) and isinstance(payload.get("workflow_runs"), list):
-            return payload["workflow_runs"]
-        return []
+    baseline_runs = _extend_with_usable_runs(
+        client, repo, workflow, branch, created, opts, _runs_of(baseline_payload)
+    )
 
     # Server-side `created` is the first filter, not the only one: the list is
     # re-checked here so a listing that ignores it cannot leak a stale pool in.
-    baseline_list, stale_baselines = drop_stale(runs_of(baseline_payload), cutoff)
-    peer_list, stale_peers = drop_stale(runs_of(peer_payload), cutoff)
+    baseline_list, stale_baselines = drop_stale(baseline_runs, cutoff)
+    peer_list, stale_peers = drop_stale(_runs_of(peer_payload), cutoff)
     selected = select_runs(current, baseline_list, peer_list, opts, now=now)
 
     entries = []
@@ -494,6 +505,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gh", default="gh", help="the gh executable to call")
     parser.add_argument("--timeout", type=int, default=30, help="seconds per API call")
     parser.add_argument("--max-api-calls", type=int, default=40)
+    parser.add_argument(
+        "--retry-sleep",
+        type=float,
+        default=2.0,
+        help="seconds before the first transient-failure retry, growing "
+        "geometrically (2 s then 5 s by default; 0 waits no time between "
+        "retries but still makes them)",
+    )
     args = parser.parse_args(argv)
 
     opts = budget_options(args.budget)
@@ -509,7 +528,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.history_not_before is not None:
         opts["history_not_before"] = args.history_not_before
 
-    client = GhClient(args.gh, args.timeout, args.max_api_calls)
+    client = GhClient(
+        args.gh, args.timeout, args.max_api_calls, retry_sleep=args.retry_sleep
+    )
     try:
         payload = collect(client, args.repo, args.run_id, opts)
     except FetchError as exc:

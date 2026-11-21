@@ -1,0 +1,9 @@
+{
+  "engine": "icarus",
+  "sources": ["cell_models.v", "netlist.v"],
+  "hdl_toplevel": "top",
+  "testbench": {"module": "test_power_up"},
+  "options": {
+    "initial_state": {"mode": "random", "seeds": [1, 2, 3], "netlist": "netlist.v"}
+  }
+}

@@ -102,6 +102,17 @@
         "to `ng-spice-rework/old-releases/<version>/` -- adjust `url_template`."
       ]
     },
+    "iverilog": {
+      "apt_package": "iverilog",
+      "min_major": 11,
+      "_comment": [
+        "Icarus Verilog (iverilog + vvp) for `klt sim` command-list requests",
+        "(issue #4443): a digital RTL testbench is carried to the batch fleet as",
+        "an operator-approved `iverilog`/`vvp` step. Installed from apt -- the",
+        "distro package is current enough -- and `min_major` is the floor the",
+        "image asserts at build time and smoke.sh re-asserts at run time."
+      ]
+    },
     "xschem": {
       "tag": "3.4.7",
       "commit": "92dd8fe5f4d5c1057489710d8a22f18fdc9d7ed0",
@@ -121,11 +132,11 @@
       ]
     },
     "klayout_tools": {
-      "version": "0.4.0",
+      "version": "0.9.0",
       "_comment": [
         "This repo's own CLI (`klt`), installed from PyPI. It brings the KLayout",
-        "Python module headless -- no GUI, no Qt, no apt package. 0.4.0 is the",
-        "latest published release as of 2026-09-09."
+        "Python module headless -- no GUI, no Qt, no apt package. 0.9.0 is the",
+        "latest published release as of 2026-11-05; it includes `klt sim --command-approvals`."
       ]
     }
   },

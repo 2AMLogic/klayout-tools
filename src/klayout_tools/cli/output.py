@@ -33,9 +33,13 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import contextlib
+import gzip
+import io
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -44,6 +48,29 @@ ERROR_EXIT_CODE = 1
 #: Pass it to :func:`emit_error` as ``exit_code`` when a command detects a
 #: usage error itself, inside ``run()``, after argparse has accepted the argv.
 EXIT_USAGE_ERROR = 2
+
+
+@contextlib.contextmanager
+def _printable_stdout() -> Iterator[None]:
+    """Let a text render survive characters stdout cannot encode (issue #5573).
+
+    A strict legacy stdout (``PYTHONIOENCODING=cp1252``, a Windows console)
+    raises ``UnicodeEncodeError`` on a claimant's free text such as the
+    ``--attest`` ``description`` -- after the envelope was written, turning a
+    passing result into a traceback and exit 1 with a partial report. For the
+    render, an unencodable character prints as a ``\\uXXXX`` escape instead
+    (the JSON, ASCII-escaped, keeps the original string). A handler the caller
+    or runtime already chose (``replace``, ``surrogateescape``) is left alone,
+    and the stream's own handler is restored afterwards."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None or getattr(sys.stdout, "errors", None) != "strict":
+        yield
+        return
+    reconfigure(errors="backslashreplace")
+    try:
+        yield
+    finally:
+        reconfigure(errors="strict")
 
 
 def emit_success(
@@ -56,13 +83,37 @@ def emit_success(
     ``format == "json"`` writes ``payload`` as indented JSON to stdout (plus a
     trailing newline). ``format == "text"`` delegates to ``text_renderer``,
     which is responsible for printing whatever human-readable rendering the
-    command defines; ``text_renderer`` is not part of the JSON contract.
+    command defines; ``text_renderer`` is not part of the JSON contract. A
+    character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
+    aborting the render (:func:`_printable_stdout`).
     """
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
     else:
-        text_renderer(payload)
+        with _printable_stdout():
+            text_renderer(payload)
+
+
+def write_json_file(payload: dict, path: str) -> None:
+    """Write ``payload`` to ``path`` byte-identical to what
+    :func:`emit_success` puts on stdout under ``--format json``.
+
+    A ``.gz`` ``path`` is gzip-compressed with ``mtime=0`` and no embedded
+    filename, so identical payloads give byte-identical files. Streams via
+    ``json.dump`` rather than building a second in-memory copy. Raises
+    :class:`OSError` if ``path`` cannot be written.
+    """
+    if path.endswith(".gz"):
+        with open(path, "wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+                with io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
+                    json.dump(payload, text, indent=2)
+                    text.write("\n")
+    else:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
 
 
 def render_table(
@@ -105,6 +156,35 @@ def render_table(
         print(fmt(row))
 
 
+def _drift_check_label(entry: dict) -> str:
+    """``"  [role identity...]"`` naming the attestation check a ``drift[]``
+    entry is about, or ``""`` when the entry carries no ``check`` (issue
+    #5460).
+
+    ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
+    that points at one ``attestation.checks[<i>]`` entry with an additive
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``corner``/``metric`` the check kind carries (see
+    ``signoff_attest_drift.check_identity``, which owns both the key set and
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
+    import -- stays free of a dependency on the signoff stack, and the
+    producer stays the single place that decides what identifies a check.
+
+    Every other ``drift[]`` entry has no ``check`` key -- a whole-list
+    ``attestation.checks`` entry, a ``status`` entry, and all of
+    ``drc``/``extract``/``lvs``/``signoff --check``'s drift -- and renders
+    byte-identically to what it did before this existed.
+    """
+    check = entry.get("check")
+    if not isinstance(check, dict) or not check:
+        return ""
+    return "  [" + " ".join(str(value) for value in check.values()) + "]"
+
+
 def render_rerun_drift(result: dict) -> None:
     """Print the ``--format text`` rendering of a ``--rerun`` drift report.
 
@@ -118,11 +198,28 @@ def render_rerun_drift(result: dict) -> None:
     ``klt signoff --check`` additionally carries ``doc_drift``/
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
-    still told the checklist's wording moved. Rendered only when present, so
-    every other verb's output is byte-identical to what it was, and rendered
-    as field *names* only: the values are whole paragraphs of checklist
-    prose, which is precisely what a consumer asked not to have dumped into
-    its gate output.
+    still told the checklist's wording moved. It also carries ``build_skew``
+    (issues #5868, #5852): one line when the excluded ``build`` block
+    differs -- or when its identity cannot be verified at all -- rendered
+    only when present, so every other verb's output is byte-identical to
+    what it was, and rendered as field *names* only: the values are whole
+    paragraphs of checklist prose, which is precisely what a consumer asked
+    not to have dumped into its gate output.
+
+    ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
+    entry that points at one ``attestation.checks[<i>]`` entry with an
+    additive ``check`` identity object (issue #5460), rendered as a bracketed
+    label after the pointer so the drifted file is named without a second
+    lookup -- the same "print it only when present" pattern as ``doc_drift``
+    above. See :func:`_drift_check_label`.
+
+    Every verb's payload may additionally carry a ``not_compared`` list
+    (issue #5866): provenance fields present in the committed report and
+    absent from the fresh one -- not comparable, so excluded from the
+    verdict. Rendered as field *names* only (the committed value is
+    provenance chatter a gate does not need), so a non-zero exit always
+    means "something that could be compared did not match". Absent key ->
+    byte-identical output, as with ``doc_drift``.
     """
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
@@ -133,9 +230,16 @@ def render_rerun_drift(result: dict) -> None:
         print()
         print("drift:")
         for entry in drift:
-            print(f"  {entry['field']}:")
+            print(f"  {entry['field']}{_drift_check_label(entry)}:")
             print(f"      committed: {entry['committed']!r}")
             print(f"      fresh:     {entry['fresh']!r}")
+    not_compared = result.get("not_compared") or []
+    if not_compared:
+        print()
+        print("not compared (provenance fields absent from the fresh report):")
+        for entry in not_compared:
+            print(f"  {entry['field']}")
+    _print_build_skew(result.get("build_skew"))
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
@@ -144,12 +248,98 @@ def render_rerun_drift(result: dict) -> None:
             print(f"  {entry['field']}")
 
 
+def _print_build_skew(skew: dict | None) -> None:
+    """The one ``build_skew:`` line of a signoff ``--check`` text render
+    (issues #5868, #5852), only when the excluded ``build`` block actually
+    differs -- or its identity cannot be verified at all."""
+    if not isinstance(skew, dict) or skew.get("state") not in (
+        "build_only",
+        "ruleset",
+        "unverifiable",
+    ):
+        return
+    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+    if skew["state"] == "ruleset":
+        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+    elif skew["state"] == "build_only":
+        what = "rendered by a different klt build (grading ruleset unchanged)"
+    else:
+        what = "build identity unverifiable (a +unknown install records no git facts)"
+    if names:
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    else:
+        print(f"build_skew: {what} -- excluded from the verdict")
+
+
+def render_check_text(result: dict) -> None:
+    """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
+
+    Shared across the ``klt`` verbs that verify a stored report (issue #4139);
+    the ``input_not_found`` and ``advisories`` branches only fire when those
+    keys are present, so verbs without them print the plain hash-check list.
+    """
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            # Issue #2595: an echoed `layout`/`reference` that resolves to no
+            # existing file re-hashes to `null`, which on its own reads as
+            # "the recorded hash moved". Say what actually happened, and --
+            # for the common cause, a committed request/report pair whose
+            # relative paths were written against the report's own directory
+            # -- where the input really is.
+            missing = check.get("input_not_found")
+            deck_missing = check.get("deck_not_found")
+            if deck_missing is not None:
+                # A --deck-file miss has no packaged name to name; the
+                # entry's hint says the override was the thing looked for.
+                detail = f"deck not found: {deck_missing['resolved']}"
+                if deck_missing["name"] is not None:
+                    detail += (
+                        f"; packaged name {deck_missing['name']!r} not in "
+                        f"{deck_missing['packaged_dir']}"
+                    )
+                print(f"      actual:   None ({detail})")
+                print(f"      note:     {deck_missing['hint']}")
+            elif missing is None:
+                print(f"      actual:   {check['actual']}")
+            else:
+                print(f"      actual:   None (input not found: {missing['resolved']})")
+                if missing["found_relative_to_report"] is not None:
+                    print(
+                        "      note:     it exists relative to the report's own "
+                        f"directory ({missing['found_relative_to_report']}); "
+                        "--check resolves relative paths against the current "
+                        "working directory -- re-run from there"
+                    )
+                # Issue #5845: a repo-scoped echo names the repo root --check
+                # anchored its recorded path on (absent for a cwd-anchored or
+                # absolute echo, so every other output is unchanged).
+                if missing.get("resolved_repo_root") is not None:
+                    print(f"      repo root: {missing['resolved_repo_root']}")
+    for skipped in result.get("skipped", ()):
+        print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
+    # Issue #1373: engine-version drift is a non-fatal advisory, never folded
+    # into the `[OK]`/`[DRIFTED]` hash-integrity list above -- it does not
+    # affect `status`/exit code, so a scripted gate parsing that list alone
+    # never sees it.
+    for advisory in result.get("advisories", ()):
+        print(
+            f"  [DRIFT] {advisory['field']}: {advisory['report']} (report) "
+            f"vs {advisory['current']} (current)"
+        )
+
+
 def emit_error(
     command: str,
     message: str,
     format: str,
     exit_code: int = ERROR_EXIT_CODE,
     code: str | None = None,
+    details: dict[str, Any] | None = None,
 ) -> int:
     """Emit an error envelope and return the exit code to use.
 
@@ -170,14 +360,40 @@ def emit_error(
     emitted as ``error.code`` **only when set** -- the envelope of every
     error without one is byte-for-byte unchanged. It does not appear in the
     ``--format text`` line, which stays the plain message.
+
+    ``details`` is an optional mapping of extra structured fields merged into
+    ``error`` (after the standard keys, which it cannot override); like
+    ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
-        error: dict[str, str] = {"command": command, "message": message}
+        error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
+        for key, value in (details or {}).items():
+            error.setdefault(key, value)
         error_payload = {"schema_version": 1, "error": error}
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)
     else:
         print(f"klt {command}: {message}", file=sys.stderr)
     return exit_code
+
+
+def fail_on_unmodelled_exit(report: dict[str, Any], args: Any) -> int | None:
+    """``klt extract --fail-on-unmodelled`` (issue #5388).
+
+    Returns the error exit code when the flag is set and the report's
+    structured ``unmodelled_poly[]`` (the single source of truth for both
+    ``unmarked`` and ``marked_unrecognised`` shapes) is non-empty; ``None``
+    otherwise, so the caller proceeds with the normal success path.
+    """
+    unmodelled = report.get("unmodelled_poly") or []
+    if not (getattr(args, "fail_on_unmodelled", False) and unmodelled):
+        return None
+    return emit_error(
+        "extract",
+        f"{len(unmodelled)} unmodelled poly shape(s) extracted as no "
+        "device; see unmodelled_poly[] (--fail-on-unmodelled)",
+        args.format,
+        details={"unmodelled_poly_count": len(unmodelled)},
+    )

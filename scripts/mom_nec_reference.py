@@ -96,12 +96,48 @@ prints a JSON object with `z_oc_real_ohm`/`z_oc_imag_ohm`,
 `s11_real`/`s11_imag`/`s12_real`/`s12_imag`/`s21_real`/`s21_imag`/
 `s22_real`/`s22_imag` (S-parameters at `reference_impedance_ohm`, both
 ports).
+
+## Bent-path mode: driving-point impedance (issue #3037, child of #2730)
+
+A request carrying `"mode": "bent_path_driving_point"` selects a second,
+separate contract. The open/short reduction above is only valid for a
+*uniform* line, so it is **not** applied here; the script instead reports the
+complex near-terminal driving-point impedance of one explicitly-returned
+closed loop (`docs/design/mom-cross-validation.md`, "Bent-path
+driving-point mode"):
+
+```json
+{
+  "mode": "bent_path_driving_point",
+  "signal_path_um": [[0, 0, 0], [200, 0, 0], [200, 100, 0]],
+  "return_path_um": [[200, 120, 0], [180, 120, 0], [180, 20, 0], [0, 20, 0]],
+  "radius_um": 1.1283791670955126,
+  "frequency_hz": 1.0e9,
+  "segment_size_um": 10.0
+}
+```
+
+`signal_path_um` runs from the near signal terminal to the far signal
+terminal; `return_path_um` runs from the far return terminal back to the near
+return terminal. Each consecutive point pair is one NEC wire leg (tags
+1..N in traversal order: signal legs, then the far connector, then return
+legs, then the near feed stub). The far connector joins the signal path's
+last point to the return path's first point; the near feed stub joins the
+return path's last point to the signal path's first point and carries the
+1 V source (one segment, polarity along the stub direction, i.e. the signal
+terminal is driven positive with respect to the return terminal). Each leg
+gets an odd segment count derived from `segment_size_um` (or taken from the
+optional `segments_per_leg`, validated to be odd and no coarser than
+`segment_size_um`). The output is `z_in_real_ohm`/`z_in_imag_ohm` plus the
+realized `wires`/`source`/`tool` audit data; no `Z0`, `gamma` or
+S-parameters are produced.
 """
 
 from __future__ import annotations
 
 import cmath
 import json
+import math
 import sys
 
 
@@ -215,7 +251,186 @@ def _abcd_to_s(
     }
 
 
+BENT_PATH_MODE = "bent_path_driving_point"
+
+
+class SpecError(ValueError):
+    """A malformed bent-path request; the message names the offending field."""
+
+
+def _parse_path(spec: dict, field: str) -> list[tuple[float, float, float]]:
+    raw = spec.get(field)
+    if not isinstance(raw, list) or len(raw) < 2:
+        raise SpecError(f"{field}: expected a list of at least 2 [x, y, z] points")
+    points = []
+    for i, p in enumerate(raw):
+        if (
+            not isinstance(p, (list, tuple))
+            or len(p) != 3
+            or any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in p)
+        ):
+            raise SpecError(f"{field}[{i}]: expected three numeric coordinates")
+        if not all(math.isfinite(c) for c in p):
+            raise SpecError(f"{field}[{i}]: non-finite coordinate {list(p)}")
+        points.append((float(p[0]), float(p[1]), float(p[2])))
+    return points
+
+
+def _positive(spec: dict, field: str) -> float:
+    v = spec.get(field)
+    if (
+        isinstance(v, bool)
+        or not isinstance(v, (int, float))
+        or not math.isfinite(v)
+        or v <= 0
+    ):
+        raise SpecError(f"{field}: expected a finite number > 0, got {v!r}")
+    return float(v)
+
+
+def _leg_segments(
+    spec: dict, name: str, index: int, length_um: float, segment_size_um: float
+) -> int:
+    """Odd NEC segment count for one leg: validated against the request's
+    `segments_per_leg` (int, or list in leg order) when given, else derived
+    from `segment_size_um`."""
+    given = spec.get("segments_per_leg")
+    if given is None:
+        n = max(1, math.ceil(length_um / segment_size_um - 1e-9))
+        return n if n % 2 == 1 else n + 1
+    if isinstance(given, list):
+        if index >= len(given):
+            raise SpecError(f"segments_per_leg: no entry for leg '{name}'")
+        n = given[index]
+    else:
+        n = given
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1 or n % 2 == 0:
+        raise SpecError(
+            f"segments_per_leg for leg '{name}': expected an odd integer >= 1, "
+            f"got {n!r}"
+        )
+    if length_um / n > segment_size_um * (1 + 1e-9):
+        raise SpecError(
+            f"segments_per_leg for leg '{name}': {n} segments of "
+            f"{length_um / n:.6g} um exceed segment_size_um {segment_size_um:.6g}"
+        )
+    return n
+
+
+def build_bent_path_wires(spec: dict) -> tuple[list[dict], dict, float, float]:
+    """Validate a bent-path request and translate it to ordered NEC wires.
+
+    Returns (wires, source, radius_um, frequency_hz); each wire is a dict
+    with `tag`, `role`, `segments`, `start_um`, `end_um`."""
+    signal = _parse_path(spec, "signal_path_um")
+    ret = _parse_path(spec, "return_path_um")
+    radius_um = _positive(spec, "radius_um")
+    frequency_hz = _positive(spec, "frequency_hz")
+    segment_size_um = _positive(spec, "segment_size_um")
+
+    legs: list[tuple[str, tuple, tuple]] = []
+    legs += [
+        (f"signal_path_um[{i}]", signal[i], signal[i + 1])
+        for i in range(len(signal) - 1)
+    ]
+    legs.append(("far_connector", signal[-1], ret[0]))
+    legs += [(f"return_path_um[{i}]", ret[i], ret[i + 1]) for i in range(len(ret) - 1)]
+    legs.append(("near_feed_stub", ret[-1], signal[0]))
+
+    for name, a, b in legs:
+        if a == b:
+            raise SpecError(f"{name}: zero-length leg at {list(a)}")
+    shared = set(signal) & set(ret)
+    if shared:
+        raise SpecError(
+            "signal_path_um/return_path_um: coincident geometry at "
+            f"{list(sorted(shared)[0])}"
+        )
+
+    wires = []
+    for index, (name, a, b) in enumerate(legs):
+        # The connector and the source-carrying stub are single-segment wires.
+        if name in ("far_connector", "near_feed_stub"):
+            segments = 1
+        else:
+            segments = _leg_segments(
+                spec, name, index, math.dist(a, b), segment_size_um
+            )
+        wires.append(
+            {
+                "tag": index + 1,
+                "role": name,
+                "segments": segments,
+                "start_um": list(a),
+                "end_um": list(b),
+            }
+        )
+    source = {"tag": wires[-1]["tag"], "segment": 1, "voltage_v": 1.0}
+    return wires, source, radius_um, frequency_hz
+
+
+def _pynec_version() -> str | None:
+    try:
+        from importlib.metadata import version
+
+        return version("PyNEC")
+    except Exception:
+        return None
+
+
+def solve_bent_path(spec: dict) -> dict:
+    """One NEC solve of the explicitly-returned bent loop; reports the
+    near-terminal driving-point impedance only (no Z0/gamma/S-parameters)."""
+    wires, source, radius_um, frequency_hz = build_bent_path_wires(spec)
+
+    from PyNEC import nec_context  # imported here -- see module docs
+
+    um = 1e-6
+    ctx = nec_context()
+    geo = ctx.get_geometry()
+    for w in wires:
+        x1, y1, z1 = (c * um for c in w["start_um"])
+        x2, y2, z2 = (c * um for c in w["end_um"])
+        geo.wire(
+            w["tag"], w["segments"], x1, y1, z1, x2, y2, z2, radius_um * um, 1.0, 1.0
+        )
+    ctx.geometry_complete(0)
+    ctx.gn_card(-1, 0, 0, 0, 0, 0, 0, 0)  # free space, no ground plane
+    ctx.fr_card(0, 1, frequency_hz / 1.0e6, 0)  # NEC's FR card wants MHz
+    ctx.ex_card(
+        0,
+        source["tag"],
+        source["segment"],
+        0,
+        source["voltage_v"],
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    ctx.xq_card(0)
+    z_in = complex(ctx.get_impedance_real(0), ctx.get_impedance_imag(0))
+
+    return {
+        "mode": BENT_PATH_MODE,
+        "z_in_real_ohm": z_in.real,
+        "z_in_imag_ohm": z_in.imag,
+        "frequency_hz": frequency_hz,
+        "radius_um": radius_um,
+        "segment_size_um": float(spec["segment_size_um"]),
+        "tool": {"name": "nec2++", "binding": "PyNEC", "version": _pynec_version()},
+        "wires": wires,
+        "source": source,
+    }
+
+
 def solve(spec: dict) -> dict:
+    mode = spec.get("mode")
+    if mode == BENT_PATH_MODE:
+        return solve_bent_path(spec)
+    if mode is not None:
+        raise SpecError(f"mode: unknown mode {mode!r}")
     length_m = spec["length_um"] * 1e-6
     separation_m = spec["separation_um"] * 1e-6
     radius_m = spec["radius_um"] * 1e-6
@@ -253,7 +468,11 @@ def solve(spec: dict) -> dict:
 
 def main() -> int:
     spec = json.loads(sys.stdin.read())
-    result = solve(spec)
+    try:
+        result = solve(spec)
+    except SpecError as exc:
+        print(f"mom_nec_reference: invalid request: {exc}", file=sys.stderr)
+        return 2
     json.dump(result, sys.stdout)
     sys.stdout.write("\n")
     return 0

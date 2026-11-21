@@ -54,8 +54,13 @@ in CI.
   Every coordinate below is given in microns and converted to integer database
   units by rounding to the nearest `dbu_um`.
 - `shapes` (array, **required, non-empty**) — an empty or missing `shapes` is an
-  error; `klt draw` will not write an empty layout.
+  error; `klt draw` will not write an empty layout. Exception: with `base_gds`
+  set, `shapes` may be empty if `erase_um` is non-empty (see
+  ["Refining an existing layout"](#refining-an-existing-layout)).
 - `labels` (array, optional) — text labels.
+- `base_gds`, `base_cell`, `keep_hierarchy`, `erase_um` (optional) — start
+  from an existing stream. See
+  ["Refining an existing layout"](#refining-an-existing-layout).
 
 Unrecognised keys are **rejected**, with one reserved escape hatch for
 annotations — see ["Unrecognised keys"](#unrecognised-keys) below.
@@ -106,6 +111,67 @@ annotations — see ["Unrecognised keys"](#unrecognised-keys) below.
 - `text` (string, **required**) — the label string.
 - `at_um` (**required**) — an `[x, y]` anchor point in microns.
 
+## Refining an existing layout
+
+Use `base_gds` to patch an existing layout. For example, this request trims a
+window out of the seed and draws a replacement rectangle.
+
+```json
+{
+  "base_gds": "seed.gds",
+  "base_cell": "TOP",
+  "erase_um": [
+    { "rect_um": [1.0, -1.0, 3.0, 2.0], "layer": [66, 20] }
+  ],
+  "shapes": [
+    { "layer": [66, 20], "rect_um": [1.0, 0.0, 3.0, 0.15] }
+  ]
+}
+```
+
+- `base_gds` (string) — path to the GDS/OASIS to start from. A missing or
+  unreadable file is an application error (exit 1). To rewrite the file in
+  place, set `-o` to the same path as `base_gds`. The output contains the
+  selected cell tree and the requested edits.
+- `base_cell` (string, optional) — the cell of the base to use. Default: the
+  base's sole top cell (an error if there are several). It is the *input* cell;
+  `--cell-name` still names the *output* top cell.
+- `keep_hierarchy` (boolean, optional, default `false`) — by default the
+  selected cell tree is flattened into the output top cell. Set this to
+  `true` to preserve child cells and their instances. New `shapes` and
+  `labels` go directly into the output top cell. With `true`, omit
+  `erase_um` or pass `[]`. A non-empty erase list is an application error
+  (exit 1, with `error.command` and `error.message` on stderr in JSON mode).
+- `erase_um` (array, optional) — windows removed from the base **before**
+  `shapes`/`labels` are added. Each entry takes only `rect_um` (`[x0, y0, x1,
+  y1]` in microns, corners normalised like a shape's `rect_um`) and an optional
+  `layer` (`[layer, datatype]`); without `layer` the window applies to every
+  layer. Unknown keys inside an entry are rejected like everywhere else.
+
+Semantics:
+
+- Erase windows operate on the flattened base, including geometry copied
+  from child instances.
+- **Polygons are clipped, not dropped.** A shape only partly inside a window is
+  replaced by its boolean difference with the window; a shape that merely
+  touches the window edge is left untouched. Shapes outside every window are
+  copied unchanged.
+- **Labels** whose anchor lies inside (or on the edge of) a window on an erased
+  layer are removed.
+- **dbu.** The base's database unit is used. `dbu_um`, if also given, must
+  equal it, otherwise it is an error.
+- **Empty `shapes`.** Erase-only is valid when `base_gds` is set and `erase_um`
+  is non-empty; with neither `shapes` nor `erase_um`, or without `base_gds`,
+  an empty request is still an error.
+- `base_cell`, `erase_um`, and `keep_hierarchy` require `base_gds`.
+- A stream stores no layer names, so layers read from the base report
+  `"name": null` unless a later `shapes[]` entry names them.
+
+To place a regular fill pattern relative to an existing polygon, compute the
+sub-grid that fits inside its boundary and keep-out regions, then emit a
+`shapes[].array` entry for each rectangular run of grid positions. See
+[Shape entry](#shape-entry) for the pitch and count syntax.
+
 ## Unrecognised keys
 
 **A key that is not documented above is an application error (exit 1) naming the
@@ -114,7 +180,7 @@ reserved for caller annotations and is always accepted and ignored.**
 
 This is a promise in both directions, at *every* level of the request — the
 top-level request object, `params`, `options`, each `shapes[]` entry, each
-`labels[]` entry, and a shape's `array` object all enforce their own key list:
+`labels[]` entry, each `erase_um[]` entry, and a shape's `array` object all enforce their own key list:
 
 | Key | Behavior |
 | --- | -------- |
@@ -191,16 +257,20 @@ this one.
   field and otherwise reads only `cell_name`/`gds_path`/`bbox_um` (already
   present here) and `ports[]` (absent from `draw`'s output, which
   `gen-compose` already defaults to `[]`).
-- `shape_count` — the total number of shapes actually written, i.e. every
-  `array`-expanded instance counted individually, not the number of entries in
-  `params.shapes` (a single entry with `array.count: [71, 71]` contributes
-  5041, matching what the same command with no `array` key would have needed
-  5041 entries to produce).
-- `layers` — one entry per `(layer, datatype)` pair written, in first-seen
-  order, with the resolved `name` (or `null`) and the count of **shapes** placed
-  on it, likewise expanded per-instance (labels are not counted here).
-- `bbox_um` — the top cell's bounding box in microns, or `null` if nothing was
-  drawn (impossible in practice, since `shapes` must be non-empty).
+- `shape_count` counts non-text shapes in the output top cell, including base
+  shapes and every expanded `shapes[].array` element. For example,
+  `array.count: [71, 71]` contributes 5041. With the default flattening, the
+  count includes shapes copied from child instances. With `keep_hierarchy:
+  true`, shapes inside child cells are excluded.
+- `layers` gives the same top-cell shape counts per `(layer, datatype)` pair,
+  in first-seen order, with the resolved `name` (or `null`). A layer used
+  only by child cells is omitted when the hierarchy is preserved.
+- `bbox_um` is the top cell's bounding box in microns, including its child
+  instances, or `null` for an empty bounding box.
+- `base_gds`, `base_cell`, `erased_shape_count`, `erased_label_count` — present
+  **only** when `params.base_gds` was given: the base path, the base cell
+  actually used, and how many shapes were clipped/removed and labels removed
+  by `erase_um` windows. Additive; `schema_version` is unchanged.
 - `warnings` — always carries the loud not-design-legal marker, so a caller can
   never mistake a `draw` output for a rule-checked, PDK-legal cell.
 
@@ -209,7 +279,7 @@ this one.
 | Code | Meaning |
 | ---- | ------- |
 | `0`  | The stream was written; the success payload is on stdout. |
-| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
+| `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, an unreadable `base_gds`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
 | `2`  | Usage error (bad `--format` value) — from argparse. |
 
 Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
@@ -243,3 +313,12 @@ klt draw --params '{"shapes": [{"layer": [41, 0], "rect_um": [7.0, 1.5, 7.26, 1.
 See [issue #553](https://github.com/2AMLogic/klayout-tools/issues/553) for the
 motivating real-world fixture (17134 shape entries / 1.4 MB of JSON for a small
 cell of via/contact arrays) that `array` was added to compress.
+
+## Example: erase a window, then add a patch
+
+Trim poly out of a window of a generated cell and bridge it with a thin bar:
+
+```bash
+klt draw --params '{"base_gds": "seed.gds", "erase_um": [{"rect_um": [1, -1, 3, 2], "layer": [66, 20]}], "shapes": [{"layer": [66, 20], "rect_um": [1, 0, 3, 0.15]}]}' -o refined.gds --format json
+# -> "erased_shape_count": <shapes clipped or removed in the window>
+```

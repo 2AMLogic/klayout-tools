@@ -103,7 +103,7 @@ export interface SignalsCorner {
    *  `corner_id` convention. Stable identifier used for corner selection. */
   corner_id: string;
   process: string | null;
-  /** Supply values for this corner, keyed by source/`.param` name. */
+  /** Supply values for this corner, keyed by voltage-source name. */
   supply_v: Record<string, number>;
   temperature_c: number;
   status: SignalsStatus;

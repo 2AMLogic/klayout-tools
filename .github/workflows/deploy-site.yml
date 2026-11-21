@@ -47,13 +47,13 @@ jobs:
     name: Build and deploy to Cloudflare Pages
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node
         uses: actions/setup-node@v7
         with:
           # Node 22+ per scripts/deploy-site.sh / site @types/node.
-          node-version: "22"
+          node-version: "24"
 
       - name: Build and deploy
         # scripts/deploy-site.sh builds site/dist/ then runs

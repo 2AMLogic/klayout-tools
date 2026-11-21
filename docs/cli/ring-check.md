@@ -6,12 +6,12 @@ does not. Purely geometric: the shapes on the given layers are merged and the
 result must be exactly one polygon with exactly one hole.
 
 ```
-klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--ignore-enclosed] [--format text|json]
+klt ring-check <file> (--layers <json> | --pdk <pdk>) [--region <json>] [--top <cell>] [--ignore-enclosed] [--cells <name>]... [--format text|json]
 ```
 
 - `<file>` -- path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
-- `--layers` -- **required**. The ring's layer set, as a path to a JSON file
+- `--layers` -- **required unless `--pdk` is given** (the two are mutually exclusive; giving neither exits `1`). The ring's layer set, as a path to a JSON file
   or an inline JSON array of `[layer, datatype]` pairs (e.g.
   `'[[22, 0], [34, 0]]'`) -- the same "path-or-inline-JSON array of
   `[layer, datatype]` pairs" convention `klt precheck --allowed-layers` uses.
@@ -31,7 +31,36 @@ klt ring-check <file> --layers <json> [--region <json>] [--top <cell>] [--ignore
   below; without it, a ring that encloses same-layer geometry (the normal
   case for a ring drawn around a real device) reports `"broken"` even though
   the ring itself is unbroken.
+- `--cells` -- optional, repeatable. An **exact** cell name; restricts the
+  ring geometry to the selected cells' subtrees. See ["Scoping the ring to
+  named cells"](#scoping-the-ring-to-named-cells---cells). Omit for no scope
+  (existing behaviour, unchanged). An empty/whitespace name or a name absent
+  from the stream exits `1`.
 - `--format` -- `text` (default, a human-readable summary) or `json`.
+
+## PDK seal-ring mode -- `--pdk <sg13g2|sky130|gf180mcu>`
+
+`--pdk` checks a drawn **seal ring** against the PDK's own seal-ring rules
+instead of a caller-given layer set (issue #4000). `--top` still applies;
+`--region`, `--cells` and `--ignore-enclosed` are `--layers`-mode only and exit
+`1` with `--pdk`. Each rule in `rules[]` carries `status` (`pass` | `fail` |
+`not_checked`) and a `source` (`file` kit-relative, `tag`, `kind`). Failures
+are in `violations[]` with `rule` = the rule id and `bbox` in database units.
+The tool never draws or fixes a seal ring.
+
+| PDK | Checked | Not checked |
+| --- | --- | --- |
+| `sg13g2` (IHP) | `Seal.n` (EdgeSeal enclosed by unbroken Passiv ring), `Seal.b` (Activ space to EdgeSeal-metal1..5/topmetal1..2/activ/psd, 4.9 um), `Seal.k` (45-degree EdgeSeal edge >= 21 um), `Seal.m` (one ring per top cell), plus `Seal.continuity` (EdgeSeal 39/0 is one closed annulus -- a klayout-tools assertion, `source.kind: klayout_tools_derived`, not a kit rule). Source: `libs.tech/klayout/tech/drc/rule_decks/beol/6_10_sealring.drc`. | `Seal.l` (no structures outside EdgeSeal.boundary): listed as `not_checked`. `Seal.m` is approximated per top cell; the kit decks use the CHIP marker. |
+| `sky130` | nothing | The kit ships only a Magic reference generator (`libs.tech/magic/seal_ring_generator`), no rule table or stream cell: `status: "not_checked"`. |
+| `gf180mcu` | nothing | The kit ships a seal-ring pycell generator (`libs.tech/klayout/tech/pymacros/sealring_cells`) but no published rule table: `status: "not_checked"`. |
+
+Top-level `status` in this mode: `broken` (exit `3`) if any rule fails;
+`not_checked` (exit `4`) when no rule could be evaluated -- never reported as a
+pass; otherwise `continuous` (exit `0`), with any unevaluated rules named in
+`not_checked_rules`. Additive fields: `mode: "pdk"`, `pdk`, `reason`, `rules`,
+`not_checked_rules`; the `--layers` output is unchanged. The kit's own
+`drc/testing/testcases/unit/sealring.gds` is a 12-case file with deliberately
+bad rings, so it is expected to report `broken`.
 
 ## A guard/tap ring usually encloses geometry -- `--ignore-enclosed`
 
@@ -49,7 +78,9 @@ Pass `--ignore-enclosed` to fix this: after merging, any polygon that lies
 strictly inside another polygon's hole is classified as enclosed content, not
 a ring fragment, and excluded from the pass/fail gate. A guard/tap ring
 checked this way reports `"continuous"` regardless of what circuit it
-protects. A genuine break in the ring's own perimeter -- a fragment that is
+protects, **provided the ring's own union is what forms the annulus** (see
+[the shared-layer caveat](#shared-layers-a-continuous-verdict-is-not-evidence-of-the-intended-ring)
+below). A genuine break in the ring's own perimeter -- a fragment that is
 *not* inside a hole -- still fails with `--ignore-enclosed` set; the flag only
 changes how enclosed content is classified, never what counts as a break.
 
@@ -60,6 +91,63 @@ holds *exclusively* (e.g. the ring-only implant layer of a substrate tap ring)
 -- still works, but depends on the enclosed circuit happening not to share
 that layer, which is a property of the design, not of the ring;
 `--ignore-enclosed` works for any layer set.
+
+## Shared layers: a `continuous` verdict is not evidence of the intended ring
+
+Without `--cells`, every shape on the layer set inside the checked root (and
+clip window) is merged, whatever cell drew it. On a layer the ring **shares
+with other geometry** -- e.g. a Metal1 tap ring around a block whose core
+routing is also Metal1 -- the core geometry can complete an annulus of its own,
+so the merged region is one polygon with one hole even when the ring's own
+perimeter is open. That is a **false pass**: `continuous` then says nothing
+about the intended ring. `--ignore-enclosed` does not change this; it only
+drops polygons lying inside another polygon's hole, not geometry that merges
+into the ring's own union. (It also does not make a shared-layer result
+trustworthy by itself.)
+
+Two mitigations: scope the check with `--cells` (below), and give every
+ring-check claim a **negative control** -- the same stream with one ring
+segment deleted must come back `broken`. A `continuous` verdict is only
+evidence on a layer where that control discriminates.
+
+## Scoping the ring to named cells -- `--cells`
+
+`--cells NAME` (repeatable; library: `cells=["NAME", ...]`) restricts the
+geometry to the **subtrees of the named cells** before the clip window and the
+annulus assertion are applied. Semantics, deliberately coarse:
+
+- Names are **exact** (no globbing, no case folding). Duplicates are collapsed.
+- **Every occurrence** of each selected cell reachable from each checked root
+  participates, with its placement transform (nesting, rotation, reflection,
+  arrays) applied, in the **root's coordinates** -- so `bbox`/`polygon` stay in
+  the checked root's database units.
+- **All descendants** of a selected cell participate. Selecting both an
+  ancestor and one of its descendants never duplicates geometry.
+- Shapes owned by unselected ancestors (including the root) and unselected
+  sibling subtrees are excluded. A selected root contributes everything.
+- The selected geometry is combined first; `--region` clipping,
+  `--ignore-enclosed` and the annulus assertion then run as usual.
+- Unknown or empty names exit `1`. A known cell with no reachable geometry in
+  a particular root (or none on the layer set / in the clip) gives an `empty`
+  violation for that root -- never a vacuous pass.
+- Selection is **not** electrical: it does not establish connectivity or
+  identify the intended ring automatically; it only filters which cells'
+  shapes are merged.
+- A caller needing a single occurrence of a repeated cell must isolate it with
+  a suitable root (`--top`), a clip window, or a separate layout. Instance-path
+  selectors, exclusion selectors and frame-shaped windows are not supported.
+
+Example: a ring of four tap-bar instances, drawn next to core routing on the
+same layer:
+
+```
+klt ring-check block.gds --layers '[[8, 0]]' --ignore-enclosed --cells ptap1 --cells ptap_v
+```
+
+**Existing workaround:** `--top` accepts any cell, not only stream tops, so a
+complete ring stored in a child cell can be checked by `--top RING_CELL`, in
+that cell's local coordinates. `--cells` adds the missing case: combining
+several sibling cells in their placement coordinates under one root.
 
 ## Why this is a check `klt drc` and `klt lvs` cannot make
 
@@ -164,10 +252,11 @@ both.
 
 ```json
 {
-  "schema_version": 1,
-  "file": "guard_ring.gds",
+  "schema_version": 2,
+  "file": { "path": "guard_ring.gds", "scope": "repo" },
   "layers": [[22, 0], [34, 0]],
   "region_um": null,
+  "cells": null,
   "dbu_um": 0.005,
   "status": "broken",
   "violation_count": 1,
@@ -184,7 +273,14 @@ both.
       "bbox": { "left": 16000, "bottom": 8000, "right": 20000, "top": 12000 },
       "polygon": [[16000, 8000], [16000, 12000], [20000, 12000], [20000, 8000]]
     }
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.8.0",
+    "klayout_version": "0.30.13",
+    "pdk": null,
+    "deck": null,
+    "input": { "content_hash": "sha256:…", "role": "layout" }
+  }
 }
 ```
 
@@ -192,10 +288,12 @@ both.
 
 | Field             | Type                          | Description                                                                 |
 | ----------------- | ----------------------------- | --------------------------------------------------------------------------- |
-| `schema_version`  | integer                       | Version of this command's JSON shape (starts at `1`).                       |
-| `file`            | string                        | The input layout path exactly as provided on the command line.              |
+| `schema_version`  | integer                       | Version of this command's JSON shape (`2` since issue #5650, when `file` became an anchored object; `1` emitted a raw string). |
+| `file`            | object                        | The input layout as `{path, scope}`: `{"path": "<repo-relative POSIX path>", "scope": "repo"}` in-repo, `{"path": null, "scope": "external"}` outside (no absolute path is emitted). Same shape as `klt drc`'s `file`. |
+| `provenance`      | object                        | Additive. The shared `provenance` block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input.content_hash`/`input.role`). In `--pdk` mode `provenance.pdk` is `{"name": "<name>", "source": "built-in", "version": null}`; in `--layers` mode it is `null`. |
 | `layers`          | array\<[int, int]\>           | The `--layers` set, as `[layer, datatype]` pairs, in the order given.       |
 | `region_um`       | array\<number\> \| null       | The `--region` clip window `[left, bottom, right, top]` in micrometres, or `null` when omitted. |
+| `cells`           | array\<string\> \| null    | Additive. The effective `--cells` scope (de-duplicated, in the order given), or `null` when no scope was requested. |
 | `dbu_um`          | number (float)                | The input layout's database unit in micrometres, same semantics as `klt layers`. |
 | `status`          | `"continuous"` \| `"broken"`  | `"continuous"` iff every checked top cell's merged region is exactly one polygon with one hole. |
 | `violation_count` | integer                       | `len(violations)`.                                                          |
@@ -221,9 +319,10 @@ both.
 | Code | Meaning                                                              |
 | ---- | -------------------------------------------------------------------- |
 | `0`  | Ran successfully -- the ring is continuous.                          |
-| `1`  | Failed to run -- bad layout file, empty/invalid `--layers`, unknown `--top` cell, or malformed `--region`. |
+| `1`  | Failed to run -- bad layout file, empty/invalid `--layers`, unknown `--top` cell, empty/malformed/unknown `--cells` name, or malformed `--region`. |
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse. |
 | `3`  | Ran successfully, the ring is broken.                               |
+| `4`  | `--pdk` only: nothing could be checked (`status: "not_checked"`).   |
 
 **Gate on `status`, not the exit code.** These codes are additive — a
 future release may add a new one above `3` — and the exit code is only a

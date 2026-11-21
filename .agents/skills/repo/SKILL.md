@@ -37,7 +37,7 @@ costs.
 | [[browser]] | Check the environment's browser-automation stack — Browser Use CLI, official agent skill, auth, cloud credit/concurrency health — and offer confirm-gated installs; report-first, provisions only (never drives a browser) |
 | [[sudo]] | Opt-in passwordless-sudo setup for a dev machine — install a `visudo`-validated `/etc/sudoers.d` drop-in (blanket `ALL` or a scoped command list) so an agent over SSH isn't blocked on password prompts; always confirmed first, validated with rollback on failure |
 | [[update-tools]] | Check installed tool packages (Loom, Anvil, …) against their sources and offer updates |
-| [[deps]] | Third-party dependency currency — reconcile organization policy, Renovate or Dependabot setup, and bot PRs; report-only under `--check` |
+| [[deps]] | Third-party dependency currency — reconcile organization policy, Dependabot-first setup with cooldown (Renovate opt-in), and bot PRs; report-only under `--check` |
 | [[optimize-ci]] | Audit GitHub Actions for wasted CI minutes — change-relevance path filtering (required-check safe), cache keys, superseded runs; ranked by measured savings, report-only unless `--apply`. Its deterministic half is `scripts/repo/repo-optimize-ci.py` (installed to `.claude/skills/repo/scripts/`) |
 | [[org-policy]] | Preview or deploy canonical rjwalters/repo preferences to the client's GitHub owner/.github repository through a policy PR |
 | [[decide]] | Put operator decisions to the operator as ranked options — best to worst, each with why — so they can answer with a number |
@@ -197,6 +197,7 @@ All toggles resolve: `REPO_*` env var (wins) → legacy `LOOM_*` env var →
 | Cloud CLI (mutating-verb asks + `az`/`gcloud` delete denies) | `REPO_GUARD_CLOUD` | `LOOM_GUARD_CLOUD` | `guards.cloudCli` | on |
 | Reversible-GitHub asks (`gh pr/issue close`, `gh label delete`) | `REPO_GUARD_REVERSIBLE_GH` | `LOOM_GUARD_REVERSIBLE_GH` | `guards.reversibleGh` | **off** (opt-in) |
 | rm scope (`repo` denies outside-repo/temp targets; `off`/`permissive` restores legacy) | `REPO_RM_SCOPE` | `LOOM_RM_SCOPE` | `guards.rmScope` | `repo` |
+| rm allowed dirs outside the repo (extra directories where `rm` stays allowed under `rmScope=repo`; absolute, lexical match, no symlink resolution; `/`, `$HOME`, single-segment, `..`/`$` entries ignored) | — (config-only) | — | `guards.rmAllowDirs` (array) | `[]` |
 | Force-op branch scope (`all` / `protected` / `off`) | `REPO_FORCE_SCOPE` | `LOOM_FORCE_SCOPE` | `guards.forceScope` | `all` |
 | tmpfs build/scratch dir (deny a build dir that resolves onto a RAM-backed mount) | `REPO_GUARD_TMPFS_SCRATCH` | `LOOM_GUARD_TMPFS_SCRATCH` | `guards.tmpfsScratch` | on |
 | Decision telemetry log | `REPO_GUARD_DECISION_LOG` (path: `REPO_GUARD_DECISION_LOG_FILE`) | `LOOM_GUARD_DECISION_LOG` (`…_FILE`) | `guards.decisionLog` | **off** (opt-in) |
@@ -391,7 +392,7 @@ repo-owned by listing it — one target-relative path per line — in
 ```
 # keep our allowlist-drift wiring in /repo:scrub
 .claude/commands/repo/scrub.md
-.agents/skills/repo/references/scrub.md
+.agents/skills/repo-scrub/SKILL.md
 # a whole subtree of local helper forks (trailing slash)
 .claude/skills/repo/scripts/
 ```
@@ -410,34 +411,34 @@ the same contract; it exists because one consumer lost the same `/repo:scrub`
 customization four times to reinstalls before there was any way to say "this
 file is ours".
 
-## Command procedures
+## Command skills
 
-Every `[[verb]]` in the Commands table above has its full procedure in a
-file next to this one, under `references/`. Read the one the task needs —
-these are the same files Claude Code registers as `/repo:<verb>` slash
-commands, copied here unchanged, so the two runtimes run one procedure.
+This skill is a router. Every `[[verb]]` in the Commands table above is its own
+Codex skill, named `$repo-<verb>`, sitting beside this one under `.agents/skills/`.
+Invoke the one the task needs; it carries the full procedure, the same one Claude
+Code registers as the `/repo:<verb>` slash command.
 
-- `references/all.md`
-- `references/audit.md`
-- `references/branches.md`
-- `references/browser.md`
-- `references/decide.md`
-- `references/deps.md`
-- `references/docs.md`
-- `references/followups.md`
-- `references/gitignore.md`
-- `references/handoff.md`
-- `references/help.md`
-- `references/host-optimize.md`
-- `references/links.md`
-- `references/optimize-ci.md`
-- `references/org-policy.md`
-- `references/orphans.md`
-- `references/readme.md`
-- `references/release.md`
-- `references/remote.md`
-- `references/reset.md`
-- `references/scrub.md`
-- `references/sudo.md`
-- `references/tidy.md`
-- `references/update-tools.md`
+- `$repo-all`
+- `$repo-audit`
+- `$repo-branches`
+- `$repo-browser`
+- `$repo-decide`
+- `$repo-deps`
+- `$repo-docs`
+- `$repo-followups`
+- `$repo-gitignore`
+- `$repo-handoff`
+- `$repo-help`
+- `$repo-host-optimize`
+- `$repo-links`
+- `$repo-optimize-ci`
+- `$repo-org-policy`
+- `$repo-orphans`
+- `$repo-readme`
+- `$repo-release`
+- `$repo-remote`
+- `$repo-reset`
+- `$repo-scrub`
+- `$repo-sudo`
+- `$repo-tidy`
+- `$repo-update-tools`

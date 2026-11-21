@@ -20,8 +20,11 @@ requires actually running `scripts/aws/build-remote-sim-ami.sh` against a
 real AWS account (billable — it launches a build instance, bakes ngspice +
 the PDK decks, and calls `create-image`) — that is an operator action
 against a real account, not something this repo's CI or a checked-in
-fixture can produce. The checked-in copy currently carries one such entry
-(sky130A / us-west-2, built 2026-08-03).
+fixture can produce. The checked-in copy carries real operator-built
+entries accrued from such runs. The `batch` fleet's image is separate: it
+is baked by 2am's `infra/aws/batch-image-provision.sh` (its identity lives
+on-image in `/etc/eda-batch-image.json`) and is not published into this
+manifest.
 An operator who wants to use the `remote` backend runs that script once per
 `(pdk, region)` combination they need and commits the resulting manifest
 entries (or keeps a private copy — nothing requires publishing your own
@@ -30,6 +33,15 @@ account's AMI ids upstream). `resolve_ami()` fails loudly
 or a stale build when the manifest has no matching entry — see
 `src/klayout_tools/remote_launcher.py`'s "no silent defaults for
 cost-relevant fields" discipline.
+
+**Runner `klt` identity (issue #2851):** entries the build script writes now
+also carry `klt_version` (what the image's `klt --version` reports) and
+`klt_ref` (the pinned `--klt-ref` it was installed from). The `batch`
+backend compares `klt_version` with the submitting client before any submit
+or launch (`docs/cli/sim.md`, "Pre-launch check from the AMI manifest").
+The checked-in entries predate the fields and are left without them on
+purpose, because their runner identity was never recorded. Absent means
+unknown, and those requests fall back to the runner-side preflight.
 
 **Pointing at a private/operator-built manifest (issue #370):** this repo's
 copy is only ever the *final fallback* of a 4-step "first hit wins"

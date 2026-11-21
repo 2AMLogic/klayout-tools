@@ -1,0 +1,340 @@
+"""Tests for the generic ``klt mcp serve`` bridge (issue #2830).
+
+The derivation/execution half (``klayout_tools.mcp_tools``) needs no MCP SDK,
+so those tests always run. The stdio round-trip needs the optional ``[mcp]``
+extra and is skipped without it, keeping the base-install suite green.
+
+The schema resources the same server exposes (``klayout_tools.mcp_resources``,
+issue #5420) are covered in ``tests/test_mcp_resources.py`` -- a separate file
+so neither exceeds the 500-line per-file ratchet ceiling.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from klayout_tools.cli._doc_paths import _DOC_POINTER
+from klayout_tools.mcp_doc_links import DOCS_BASE_URL
+from klayout_tools.mcp_tools import (
+    HIDDEN_BY_DEFAULT,
+    BridgePolicy,
+    build_argv,
+    derive_tools,
+    execute,
+    registered_verbs,
+    visible_tools,
+)
+
+REPO = Path(__file__).resolve().parent.parent
+GDS = "blocks/sky130_fd_sc_hd__inv_1/output/sky130_fd_sc_hd__inv_1.gds"
+
+
+@pytest.fixture(scope="module")
+def tools():
+    return derive_tools()
+
+
+@pytest.fixture
+def policy():
+    return BridgePolicy(workspace_root=REPO)
+
+
+def _tool(tools, name):
+    return next(t for t in tools if t.name == name)
+
+
+def test_every_registered_verb_yields_a_valid_tool(tools):
+    names = [t.name for t in tools]
+    assert len(names) == len(set(names)), "tool names must be unique"
+    for verb in registered_verbs():
+        assert any(t.top_verb == verb for t in tools), f"no tool for verb {verb}"
+    for t in tools:
+        assert t.name.startswith("klt_") and t.name.replace("_", "").isalnum()
+        assert t.description.startswith("klt ")
+        schema = t.input_schema
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        for dest in schema.get("required", []):
+            assert dest in schema["properties"]
+        for prop in schema["properties"].values():
+            assert prop["type"] in {"string", "integer", "number", "boolean", "array"}
+        # Bridge-owned flags never leak into the schema.
+        assert "format" not in schema["properties"]
+        # json round-trips (an MCP client serialises it).
+        json.dumps(schema)
+
+
+def test_tool_and_argument_descriptions_link_to_cli_docs(tools):
+    for tool in tools:
+        descriptions = [tool.description]
+        descriptions.extend(
+            prop.get("description", "")
+            for prop in tool.input_schema["properties"].values()
+        )
+        for text in descriptions:
+            assert _DOC_POINTER.search(text) is None, (tool.name, text)
+
+
+def test_doc_links_preserve_existing_urls_and_punctuation(monkeypatch):
+    root = argparse.ArgumentParser()
+    url = f"{DOCS_BASE_URL}/layers.md"
+    text = f"See (docs/cli/layers.md), {url}, or docs/cli/layers.md."
+    verb = root.add_subparsers().add_parser("layers", description=text)
+    verb.add_argument("--example", help=text)
+    monkeypatch.setattr("klayout_tools.cli.parser.create_parser", lambda: root)
+
+    (tool,) = derive_tools()
+    expected = f"See ({url}), {url}, or {url}."
+    assert tool.description == f"klt layers: {expected} (CLI docs: {url})"
+    assert tool.input_schema["properties"]["example"]["description"] == expected
+
+
+def test_bridge_does_not_expose_itself(tools):
+    assert not any(t.top_verb == "mcp" for t in tools)
+
+
+DOCS_URL = "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/"
+
+
+def _cli_docs_url(tool):
+    match = re.search(r"\(CLI docs: (\S+)\)$", tool.description)
+    assert match, f"{tool.name}: description carries no trailing CLI docs URL"
+    return match.group(1)
+
+
+def _heading_slugs(page: Path) -> set[str]:
+    """GitHub's anchor for each ATX heading: rendered text, lowercased, with
+    punctuation dropped and spaces turned into hyphens."""
+    slugs = set()
+    for line in page.read_text(encoding="utf-8").splitlines():
+        heading = re.match(r"#{1,6}\s+(.*)", line)
+        if heading:
+            text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", heading.group(1))
+            text = re.sub(r"[^\w\s-]", "", text.replace("`", "").lower())
+            slugs.add(re.sub(r"\s", "-", text.strip()))
+    return slugs
+
+
+def test_sim_merge_and_plan_link_to_their_manual_sections(tools):
+    # Neither verb has its own page: both are sections of docs/cli/sim.md. Exact
+    # fragments, because a swapped pair would still reach the same file.
+    merge = "sim.md#merging-per-request-reports-klt-sim-merge-3045"
+    plan = "sim.md#planning-shards-klt-sim-plan-3423"
+    assert _cli_docs_url(_tool(tools, "klt_sim_merge")) == DOCS_URL + merge
+    assert _cli_docs_url(_tool(tools, "klt_sim_plan")) == DOCS_URL + plan
+    # The verbs that do own a page, and `klt sim` itself, stay unanchored.
+    assert _cli_docs_url(_tool(tools, "klt_sim")) == DOCS_URL + "sim.md"
+    assert _cli_docs_url(_tool(tools, "klt_layers")) == DOCS_URL + "layers.md"
+
+
+def test_every_catalog_cli_docs_link_resolves_in_the_checkout(tools):
+    for tool in tools:
+        url = _cli_docs_url(tool)
+        assert url.startswith(DOCS_URL), tool.name
+        page, _, fragment = url[len(DOCS_URL) :].partition("#")
+        path = REPO / "docs" / "cli" / page
+        assert path.is_file(), f"{tool.name}: {url} has no page in the checkout"
+        if fragment:
+            assert fragment in _heading_slugs(path), f"{tool.name}: no #{fragment}"
+
+
+def test_fleet_verbs_hidden_unless_opted_in(tools, policy):
+    shown = {t.top_verb for t in visible_tools(tools, policy)}
+    assert not (shown & HIDDEN_BY_DEFAULT)
+    opted = BridgePolicy(
+        workspace_root=REPO, enabled_verbs=frozenset(HIDDEN_BY_DEFAULT)
+    )
+    assert HIDDEN_BY_DEFAULT <= {t.top_verb for t in visible_tools(tools, opted)}
+    fleet = BridgePolicy(workspace_root=REPO, allow_fleet=True)
+    assert len(visible_tools(tools, fleet)) == len(tools)
+
+
+def test_build_argv_translates_arguments(tools, policy):
+    argv = build_argv(
+        _tool(tools, "klt_layers"),
+        {"file": GDS, "top": "x", "flattened": True, "include_text": False},
+        policy,
+    )
+    assert argv == ["layers", GDS, "--top", "x", "--flattened", "--format", "json"]
+
+
+def test_build_argv_rejects_bad_calls(tools, policy):
+    layers = _tool(tools, "klt_layers")
+    from klayout_tools.mcp_tools import ToolCallRefused
+
+    with pytest.raises(ToolCallRefused, match="missing required"):
+        build_argv(layers, {}, policy)
+    with pytest.raises(ToolCallRefused, match="unknown argument"):
+        build_argv(layers, {"file": GDS, "bogus": 1}, policy)
+    with pytest.raises(ToolCallRefused, match="outside the workspace"):
+        build_argv(layers, {"file": "../../etc/passwd"}, policy)
+    with pytest.raises(ToolCallRefused, match="outside the workspace"):
+        build_argv(layers, {"file": "/etc/passwd"}, policy)
+    loose = BridgePolicy(workspace_root=REPO, allow_outside_workspace=True)
+    build_argv(layers, {"file": "/etc/passwd"}, loose)
+
+
+def test_fleet_backend_refused_by_default(tools, policy):
+    from klayout_tools.mcp_tools import ToolCallRefused
+
+    sim = _tool(tools, "klt_sim")
+    assert "backend" in sim.input_schema["properties"]
+    request = {"request": "req.json", "backend": "batch"}
+    with pytest.raises(ToolCallRefused, match="--allow-fleet"):
+        build_argv(sim, request, policy)
+    build_argv(sim, request, BridgePolicy(workspace_root=REPO, allow_fleet=True))
+
+
+def test_backend_forced_local_without_allow_fleet(tools, policy):
+    backend_tools = [t for t in tools if "backend" in t.input_schema["properties"]]
+    assert {t.name for t in backend_tools} >= {"klt_sim", "klt_netlist"}
+    fleet = BridgePolicy(workspace_root=REPO, allow_fleet=True)
+    for tool in backend_tools:
+        args = {
+            d: "x.json" for d in tool.input_schema.get("required", []) if d != "backend"
+        }
+        argv = build_argv(tool, args, policy)
+        assert argv[argv.index("--backend") + 1] == "local", tool.name
+        assert "--backend" not in build_argv(tool, args, fleet), tool.name
+        local = build_argv(tool, {**args, "backend": "local"}, policy)
+        assert local.count("--backend") == 1
+
+
+def test_option_injection_refused(tools, policy):
+    from klayout_tools.mcp_tools import ToolCallRefused
+
+    sim = _tool(tools, "klt_sim")
+    with pytest.raises(ToolCallRefused):
+        build_argv(sim, {"request": ["req.json", "--backend", "batch"]}, policy)
+    with pytest.raises(ToolCallRefused, match="option"):
+        build_argv(sim, {"request": "--backend"}, policy)
+    with pytest.raises(ToolCallRefused):
+        build_argv(sim, {"request": "req.json", "backend": ["local", "x"]}, policy)
+    array_tool = next(
+        t
+        for t in tools
+        if any(
+            p.get("type") == "array" and d in t.path_dests
+            for d, p in t.input_schema["properties"].items()
+        )
+    )
+    dest = next(
+        d
+        for d, p in array_tool.input_schema["properties"].items()
+        if p.get("type") == "array" and d in array_tool.path_dests
+    )
+    # Satisfy the tool's other required arguments so the refusal under test is
+    # the option check, not "missing required argument(s)".
+    props = array_tool.input_schema["properties"]
+    others = {
+        d: ["x"] if props[d].get("type") == "array" else "x"
+        for d in array_tool.input_schema.get("required", [])
+        if d != dest
+    }
+    with pytest.raises(ToolCallRefused, match="option"):
+        build_argv(array_tool, {**others, dest: ["a", "-x"]}, policy)
+
+
+def test_injection_refused_before_subprocess(tools, policy, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("subprocess launched")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    outcome = execute(
+        _tool(tools, "klt_sim"),
+        {"request": ["req.json", "--backend", "batch"]},
+        policy,
+    )
+    assert outcome.is_error and outcome.exit_code == 2
+    assert outcome.payload["schema_version"] == 1
+
+
+def test_execute_matches_cli_json(tools, policy):
+    outcome = execute(_tool(tools, "klt_layers"), {"file": GDS}, policy)
+    assert not outcome.is_error
+    cli = subprocess.run(
+        [sys.executable, "-m", "klayout_tools.cli", "layers", GDS, "--format", "json"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert outcome.payload == json.loads(cli.stdout)
+
+
+def test_execute_failure_returns_error_envelope(tools, policy):
+    outcome = execute(_tool(tools, "klt_layers"), {"file": "no-such.gds"}, policy)
+    assert outcome.is_error
+    assert outcome.exit_code == 1
+    assert outcome.payload["schema_version"] == 1
+    assert {"command", "message"} <= set(outcome.payload["error"])
+
+
+def test_workspace_root_is_cwd(tools, tmp_path):
+    outcome = execute(
+        _tool(tools, "klt_layers"),
+        {"file": "missing.gds"},
+        BridgePolicy(workspace_root=tmp_path),
+    )
+    assert outcome.is_error and "missing.gds" in outcome.payload["error"]["message"]
+
+
+def test_mcp_serve_without_sdk_gives_install_hint(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake(name, *a, **kw):
+        if name == "mcp" or name.startswith("mcp."):
+            raise ImportError("blocked")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    from klayout_tools.mcp_server import McpUnavailableError, build_server
+
+    with pytest.raises(McpUnavailableError, match=r"klayout-tools\[mcp\]"):
+        build_server(BridgePolicy(workspace_root=REPO))
+
+
+def test_stdio_round_trip():
+    pytest.importorskip("mcp")
+    import anyio
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "klayout_tools.cli", "mcp", "serve", "--workspace-root", str(REPO)],
+    )
+
+    async def scenario():
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                listed = (await session.list_tools()).tools
+                names = {t.name for t in listed}
+                assert "klt_layers" in names and "klt_stats" in names
+                assert "klt_yield_campaign" not in names
+                good = await session.call_tool("klt_layers", {"file": GDS})
+                bad = await session.call_tool("klt_layers", {"file": "nope.gds"})
+                return good, bad
+
+    good, bad = anyio.run(scenario)
+    cli = subprocess.run(
+        [sys.executable, "-m", "klayout_tools.cli", "layers", GDS, "--format", "json"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert not good.is_error
+    assert good.structured_content == json.loads(cli.stdout)
+    assert bad.is_error
+    assert bad.structured_content["error"]["command"] == "layers"

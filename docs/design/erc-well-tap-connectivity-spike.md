@@ -1,5 +1,10 @@
 # Design spike: well/substrate-tap net continuity in `klt erc`
 
+> **Partly superseded (2026-11-11, #5335/#5334).** The decision below not to
+> merge well/substrate material is reopened **for `erc.supply_short` only**; see
+> [`erc-substrate-continuity.md`](erc-substrate-continuity.md). The spike text
+> is kept unchanged for history.
+
 **Status:** design decision only. This note resolves issue
 [#2192](https://github.com/2AMLogic/klayout-tools/issues/2192). No runtime
 behavior, spec key, or JSON field changes ship with it. Any implementation
@@ -489,6 +494,12 @@ island, without taking a position on whether the well path is acceptable.
 
 ## 8. Alternatives compared and the recommendation
 
+> **Superseded for `erc.supply_short` (#5335).** Option C's rejection is revisited in
+> [`erc-substrate-continuity.md`](erc-substrate-continuity.md) §§3 and 7: a derived,
+> monotone post-pass over the `ties[]` graph answers P4 and P6 without a third
+> extraction. The recommendation stands for `erc.unconnected_net`.
+
+
 | | A. Retain present model + LVS cross-check | B. Narrow primary-graph extension | C. Separate net-findings graph | **D. A + reporting-only well-bridge annotation (recommended)** |
 |---|---|---|---|---|
 | Fixes E1 (same well) `unconnected_net` | No | Yes (P2) | Yes (P2) | No, by design. Annotates it as one bridge group. |
@@ -594,6 +605,11 @@ key, no change to `nets[]` report entries (a passing net with declared
 consumer asks), and no resistance estimate.
 
 ## 10. When to reopen the net-merging question
+
+> **Superseded (#5335).** The second reopen condition below was met on 2026-11-11 for
+> `erc.supply_short` only (operator ruling, #5334). See
+> [`erc-substrate-continuity.md`](erc-substrate-continuity.md) §1.
+
 
 Reopen §6.1 (option C, never B) only if one of these appears with a
 reproducible artifact:

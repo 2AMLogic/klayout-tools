@@ -80,6 +80,7 @@ WANT_NGSPICE="$(jq -r '.tools.ngspice.version' "$MANIFEST")"
 WANT_XSCHEM="$(jq -r '.tools.xschem.tag' "$MANIFEST")"
 WANT_CIEL="$(jq -r '.tools.ciel.version' "$MANIFEST")"
 WANT_KLT="$(jq -r '.tools.klayout_tools.version' "$MANIFEST")"
+IVERILOG_MIN_MAJOR="$(jq -r '.tools.iverilog.min_major' "$MANIFEST")"
 
 # ---------------------------------------------------------------------------
 step "baked toolchain answers at its pinned version"
@@ -191,6 +192,59 @@ if divider_out="$(ngspice -b "${WORKDIR}/divider.sp" 2>&1)"; then
 else
     fail "ngspice -b exited non-zero on the divider deck"
     printf '%s\n' "$divider_out" | sed 's/^/      /' >&2
+fi
+
+# ---------------------------------------------------------------------------
+step "iverilog/vvp run a digital testbench through klt sim's command-list kind"
+# ---------------------------------------------------------------------------
+# Issue #4443: the fleet's non-SPICE path. A trivial testbench is carried by a
+# `commands` request (compile then run, one unit), gated by an operator
+# approvals file that binds the testbench's content hash.
+iverilog_major="$(iverilog -V 2>&1 | sed -n 's/.*version \([0-9][0-9]*\)\..*/\1/p' | head -n 1)"
+if [[ -n "$iverilog_major" && "$iverilog_major" -ge "$IVERILOG_MIN_MAJOR" ]] && command -v vvp >/dev/null 2>&1; then
+    pass "iverilog ${iverilog_major} and vvp present (floor ${IVERILOG_MIN_MAJOR})"
+else
+    fail "iverilog >= ${IVERILOG_MIN_MAJOR} and vvp required, got '${iverilog_major:-unparseable}'"
+fi
+
+mkdir -p "${WORKDIR}/rtl"
+cat > "${WORKDIR}/rtl/tb.v" <<'TB'
+module tb;
+  initial begin
+    $display("klt-iverilog-smoke %0d", 6 * 7);
+    $finish;
+  end
+endmodule
+TB
+tb_hash="sha256:$(sha256sum "${WORKDIR}/rtl/tb.v" | cut -d' ' -f1)"
+cat > "${WORKDIR}/rtl/approvals.json" <<APPROVALS
+{"schema_version": 1, "approvals": [
+  {"id": "iverilog-tb", "interpreter": "iverilog",
+   "allowed_arguments": [["-o", "sim.vvp", "tb.v"]],
+   "bound_inputs": {"tb.v": "${tb_hash}"}},
+  {"id": "vvp-tb", "interpreter": "vvp",
+   "allowed_arguments": [["sim.vvp"]],
+   "bound_inputs": {"tb.v": "${tb_hash}"}}
+]}
+APPROVALS
+cat > "${WORKDIR}/rtl/request.json" <<'REQ'
+{"commands": [{"id": "tb", "inputs": ["tb.v"],
+  "steps": [["iverilog", "-o", "sim.vvp", "tb.v"], ["vvp", "sim.vvp"]],
+  "outputs": ["sim.vvp"], "timeout_s": 60}]}
+REQ
+# The image installs klayout-tools at the pdk-versions.json pin, which predates
+# `--command-approvals` until a release containing it is published and the pin
+# is bumped. Skip loudly rather than fail, so the skip can never read as a pass.
+if ! klt sim --help 2>&1 | grep -q -- '--command-approvals'; then
+    printf '  SKIP  klt sim commands request: klayout-tools %s has no --command-approvals;\n' "$WANT_KLT"
+    printf '        NOT VERIFIED until the pin in pdk-versions.json is bumped to a release with it\n'
+elif cmd_out="$(klt sim "${WORKDIR}/rtl/request.json" --backend local \
+        --command-approvals "${WORKDIR}/rtl/approvals.json" --format json 2>&1)" \
+    && printf '%s' "$cmd_out" | jq -e '.status == "pass" and (.units[0].stdout_tail | contains("klt-iverilog-smoke 42"))' >/dev/null 2>&1; then
+    pass "klt sim ran the approved iverilog/vvp unit: klt-iverilog-smoke 42"
+else
+    fail "klt sim commands request did not pass"
+    printf '%s\n' "$cmd_out" | tail -n 30 | sed 's/^/      /' >&2
 fi
 
 # ---------------------------------------------------------------------------

@@ -70,12 +70,15 @@ from typing import TYPE_CHECKING, Any
 from ._layout import write_layout
 from .gen import _PARAM_TYPE_NAMES, GenError, _coerce_param
 from .pdk import (
+    _PCELL_SHIM_ROOTS,
     PdkNotFoundError,
     _pcell_lib_dir_for_assets,
     _pcell_packages_in,
+    _pcell_search_dirs,
     find_pdk,
     resolve_pdk_dbu,
 )
+from .pdk_pcell_checks import check_pcell_variant
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import klayout.db as kdb
@@ -98,7 +101,7 @@ _SETTABLE_PARAM_TYPES = frozenset({0, 1, 2, 3, 4, 6})
 
 #: ``TypeLayer``. Held as its own constant because it is the one settable type
 #: :func:`klayout_tools.gen._coerce_param` does not handle (no built-in
-#: generator exposes a layer parameter -- they are all in ``_HIDDEN_PARAMS``).
+#: generator exposes a request-facing layer parameter -- all hidden, #6757).
 _TYPE_LAYER = 4
 
 
@@ -139,6 +142,11 @@ class _VendorCompatShim:
     #: around immediately before instantiating any PCell from the package.
     needs_tkinter_workaround: bool
 
+    #: Where to obtain the shim when the install lacks it (issue #4236): named
+    #: in the unavailable reason. Release tarballs omit git submodules, so the
+    #: fix is to populate ``shim_root`` from the PDK's own pinned submodule.
+    source_hint: str = ""
+
 
 #: Packages (by name, as returned by :func:`klayout_tools.pdk._pcell_packages_in`)
 #: known to need a PDK-bundled compat shim beyond what :func:`_load_libraries`
@@ -146,9 +154,15 @@ class _VendorCompatShim:
 _VENDOR_COMPAT_SHIMS: dict[str, _VendorCompatShim] = {
     "sg13g2_pycell_lib": _VendorCompatShim(
         sys_path_hint=("pycell4klayout-api", "source", "python"),
-        shim_root=("pycell4klayout-api",),
+        shim_root=_PCELL_SHIM_ROOTS["sg13g2_pycell_lib"],
         provides_module="cni",
         needs_tkinter_workaround=True,
+        source_hint=(
+            "https://github.com/IHP-GmbH/pycell4klayout-api, at the revision "
+            "the PDK release pins (clone IHP-Open-PDK at the same tag with "
+            "`git clone --recurse-submodules`, or run `git submodule update "
+            "--init` for that path)"
+        ),
     ),
 }
 
@@ -201,6 +215,7 @@ def list_pdk_pcells(
             "schema_version": 1,
             "pdk": {"name": str, "variant": str, "version": str | None},
             "pcell_lib_dir": str | None,
+            "searched_dirs": [str],  # candidate dirs probed, in order
             "libraries": [
                 {
                     "library": str,      # registered pya.Library name
@@ -236,7 +251,7 @@ def list_pdk_pcells(
             ],
         }
 
-    A PDK that ships no ``libs.tech/klayout/python/`` at all (a real
+    A PDK that ships no PyCell directory at all (a real
     gf180mcuD install) resolves ``pcell_lib_dir`` to ``None`` with both lists
     empty -- a **successful** result, not an error.
 
@@ -259,7 +274,7 @@ def list_pdk_pcells(
     unavailable: list[dict[str, Any]] = []
     if lib_dir is not None:
         loaded, unavailable = _load_libraries(lib_dir)
-        libraries = [_describe_library(entry) for entry in loaded]
+        libraries = _describe_loaded(loaded, unavailable)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -269,6 +284,7 @@ def list_pdk_pcells(
             "version": pdk_info["version"],
         },
         "pcell_lib_dir": lib_dir,
+        "searched_dirs": _pcell_search_dirs(pdk_info["assets"]),
         "libraries": libraries,
         "unavailable": unavailable,
     }
@@ -414,7 +430,8 @@ def _resolve_library(pdk_info: dict[str, Any], library_name: str) -> dict[str, A
     if lib_dir is None:
         raise PdkPCellError(
             f"PDK '{pdk_info['variant']}' ships no KLayout PCell library "
-            "(no libs.tech/klayout/python/ directory)"
+            "(no libs.tech/klayout/python/ or "
+            "libs.tech/klayout/tech/pymacros/ directory)"
         )
 
     loaded, unavailable = _load_libraries(lib_dir)
@@ -489,18 +506,29 @@ def _load_libraries(
 
     loaded: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
-    for package in _pcell_packages_in(memo_key):
+    packages = _pcell_packages_in(memo_key)
+    #: Sibling packages whose import was run by an earlier package's import
+    #: *and* registered a library: the vendor's own ``register()`` already ran
+    #: then, so constructing its library class again would replace the
+    #: registered library and destroy the handle taken for it (issue #2944).
+    registered_by_sibling: set[str] = set()
+    for package in packages:
         package_dir = os.path.join(memo_key, package)
         _apply_sys_path_hint(memo_key, package)
         before = set(kdb.Library.library_names())
+        modules_before = set(sys.modules)
         try:
             module = importlib.import_module(package)
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             unavailable.append(_unavailable_entry(package, exc, package_dir, memo_key))
             continue
 
         new_names = set(kdb.Library.library_names()) - before
-        if not new_names:
+        if new_names:
+            registered_by_sibling.update(
+                _siblings_imported_by(packages, package, modules_before)
+            )
+        elif package not in registered_by_sibling:
             failure = _instantiate_library_classes(module, package, kdb)
             new_names = set(kdb.Library.library_names()) - before
             if not new_names and failure is not None:
@@ -514,9 +542,39 @@ def _load_libraries(
             if handle is not None:
                 loaded.append({"library": name, "package": package, "handle": handle})
 
+    # A later package's registration may have replaced an earlier library of
+    # the same name; re-resolve so no destroyed handle is handed out.
+    loaded = _reresolve_handles(loaded, kdb)
+
     loaded.sort(key=lambda entry: entry["library"])
     _LOAD_MEMO[memo_key] = (loaded, unavailable)
     return loaded, unavailable
+
+
+def _siblings_imported_by(
+    packages: list[str], package: str, modules_before: set[str]
+) -> set[str]:
+    """Return the other ``packages`` first imported as a side effect of
+    importing ``package`` (``modules_before`` is ``sys.modules`` beforehand)."""
+    return {
+        other
+        for other in packages
+        if other != package and other in sys.modules and other not in modules_before
+    }
+
+
+def _reresolve_handles(loaded: list[dict[str, Any]], kdb: Any) -> list[dict[str, Any]]:
+    """Re-fetch each library's live handle, dropping any no longer registered.
+
+    A later package's registration may have replaced an earlier library of the
+    same name, destroying the handle taken for it.
+    """
+    live: list[dict[str, Any]] = []
+    for entry in loaded:
+        handle = kdb.Library.library_by_name(entry["library"])
+        if handle is not None:
+            live.append({**entry, "handle": handle})
+    return live
 
 
 def _apply_sys_path_hint(lib_dir: str, package: str) -> None:
@@ -572,7 +630,7 @@ def _instantiate_library_classes(
             continue
         try:
             value()
-        except Exception as exc:  # noqa: BLE001 - reported, never re-raised
+        except Exception as exc:  # - reported, never re-raised
             failure = failure or exc
     return failure
 
@@ -661,7 +719,7 @@ def _classify_missing_compat_shim(
             "but that directory is missing or appears empty in this install -- "
             "likely an uninitialized git submodule. This is a compat shim the "
             "PDK itself vendors, not a third-party PyPI dependency klt would "
-            "need to add."
+            "need to add." + _shim_remedy(shim, shim_root_display)
         )
 
     hint_display = "/".join(shim.sys_path_hint)
@@ -670,6 +728,16 @@ def _classify_missing_compat_shim(
         f"own bundled compat shim directory ('{hint_display}') to sys.path, "
         "but the module still failed to import; this looks like a bug in the "
         "vendor shim itself, not a missing third-party dependency."
+    )
+
+
+def _shim_remedy(shim: _VendorCompatShim, shim_root_display: str) -> str:
+    """The "where to get it" sentence appended to a missing-shim reason."""
+    if not shim.source_hint:
+        return ""
+    return (
+        " The PDK release tarball omits git submodules; populate "
+        f"'{shim_root_display}' from {shim.source_hint}."
     )
 
 
@@ -740,6 +808,30 @@ def _describe_library(entry: dict[str, Any]) -> dict[str, Any]:
         "description": handle.description or "",
         "cells": cells,
     }
+
+
+def _describe_loaded(
+    loaded: list[dict[str, Any]], unavailable: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Describe every loaded library; a vendor failure while doing so (e.g. a
+    handle destroyed by a re-registration) lands in ``unavailable`` rather
+    than escaping as a traceback (issue #2944)."""
+    libraries: list[dict[str, Any]] = []
+    for entry in loaded:
+        try:
+            libraries.append(_describe_library(entry))
+        except Exception as exc:  # - vendor code, never a traceback
+            unavailable.append(
+                {
+                    "package": entry["package"],
+                    "missing_dependency": None,
+                    "reason": (
+                        f"PDK PCell library '{entry['library']}' failed while "
+                        f"being described: {type(exc).__name__}: {exc}"
+                    ),
+                }
+            )
+    return libraries
 
 
 def _describe_params(declaration: Any) -> list[dict[str, Any]]:
@@ -824,21 +916,25 @@ def _produce_pdk_pcell(
     raw_params: dict[str, Any],
     pdk_info: dict[str, Any],
 ) -> tuple[kdb.Layout, kdb.Cell]:
-    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout.
-
-    Identical in shape to :func:`klayout_tools.gen._produce` -- resolve the
-    declaration, ``add_pcell_variant``, insert into a fresh top cell -- except
-    the declaration comes from the *vendor's* library rather than klt's own.
-    The output dbu is resolved from the PDK's tech LEF the same way, so a
-    ``--pdk-pcell`` block and a built-in-generator block resolved against one
-    PDK agree by construction (a `klt gen-compose` precondition).
+    """Instantiate ``entry``'s ``pcell_name`` into a fresh layout, then
+    validate the variant -- KLayout swallows a vendor ``produce`` failure
+    and leaves an unnamed cell (issue #5936). Otherwise identical in shape
+    to klt's own ``_produce``: resolve the declaration, ``add_pcell_variant``,
+    insert into a fresh top cell; the dbu comes from the PDK's tech LEF (a
+    `klt gen-compose` precondition). See :mod:`klayout_tools.pdk_pcell_checks`.
     """
     import klayout.db as kdb
 
     handle = entry["handle"]
-    declaration = handle.layout().pcell_declaration(pcell_name)
-    if declaration is None:
+    try:
+        declaration = handle.layout().pcell_declaration(pcell_name)
         available = sorted(handle.layout().pcell_names())
+    except Exception as exc:  # - vendor code, never a traceback
+        raise PdkPCellError(
+            f"PDK PCell library '{entry['library']}' is unusable: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if declaration is None:
         raise PdkPCellError(
             f"unknown PCell '{pcell_name}' in PDK PCell library "
             f"'{entry['library']}' -- available: "
@@ -855,11 +951,12 @@ def _produce_pdk_pcell(
     _apply_tkinter_workaround(entry["package"])
     try:
         variant = layout.add_pcell_variant(handle, declaration.id(), values)
+        check_pcell_variant(layout, variant, entry["library"], pcell_name)
         top = layout.create_cell(cell_name)
         top.insert(kdb.CellInstArray(variant, kdb.Trans()))
     except PdkPCellError:
         raise
-    except Exception as exc:  # noqa: BLE001 - vendor code, never a traceback
+    except Exception as exc:  # - vendor code, never a traceback
         raise PdkPCellError(
             f"PDK PCell '{entry['library']}/{pcell_name}' failed while "
             f"producing geometry: {type(exc).__name__}: {exc}"
@@ -921,7 +1018,7 @@ def _coerce_layer_param(ref: str, name: str, value: Any) -> Any:
     if isinstance(value, str):
         try:
             return kdb.LayerInfo.from_string(value)
-        except Exception as exc:  # noqa: BLE001 - reported as a param error
+        except Exception as exc:  # - reported as a param error
             raise PdkPCellError(
                 f"PDK PCell '{ref}': params.{name} is not a valid layer "
                 f"specification: {value!r}"

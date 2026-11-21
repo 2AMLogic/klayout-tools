@@ -74,6 +74,34 @@
 //! frequency) retardation correction; see
 //! `tests::low_frequency_limit_matches_the_static_neumann_formula`.
 //!
+//! ## Series windings (issue #2730)
+//!
+//! A conductor that classifies as a series winding
+//! (`geometry::oriented_path`, #2728) is meshed leg by leg instead of as one
+//! equivalent straight wire: each electrical leg (centreline vertex to
+//! centreline vertex) is subdivided into its own cells, each cell carrying
+//! its leg's signed unit direction, cell length and equivalent radius
+//! `sqrt(leg_area / pi)`. The double integral above is then summed over cell
+//! pairs with the `u_p . u_q` factor and the two lengths evaluated *per cell
+//! pair*: perpendicular legs (including the two legs meeting at a turn)
+//! couple by exactly zero, antiparallel legs subtract, and the series
+//! current is the same unit terminal current in every leg, so
+//! `Z[w][w]` is the winding's terminal-to-terminal partial self impedance and
+//! `Z[w][b]` its partial mutual impedance to another conductor, both signed
+//! by the canonical traversal direction -- the retarded counterpart of the
+//! static series-path `L = sum_ij w_i w_j M_ij` (`peec.rs`, #2729), to which
+//! it reduces as `omega -> 0`. Corner treatment is the static solver's
+//! (volume-conserving centreline legs). The thin-wire reduced kernel
+//! regularises only cell pairs inside one leg; cells of different legs use
+//! their true centre-to-centre distance, like the static inter-leg mutuals.
+//!
+//! The shunt capacitance stays the static Maxwell matrix of the drawn boxes
+//! (`solver.rs`); it is reported but never folded into the winding's `Z`, so
+//! the winding result is the *series* impedance only and is meaningful below
+//! its first self-resonance. A winding has no uniform-line `Z0`/`gamma`
+//! (`shared_axial_span` is `None`), and ports/S-parameters are rejected
+//! outright -- see `solve_full_wave_sweep`.
+//!
 //! ## The canonical structure: a two-conductor transmission-line segment
 //!
 //! When exactly two conductors are present **and they share one current-flow
@@ -212,16 +240,76 @@ fn distance_um(a: [f64; 3], b: [f64; 3]) -> f64 {
     acc.sqrt()
 }
 
-/// One conductor's axial segment centers -- as 3-D points on its own
-/// centreline, since issue #1842 lets conductors run along different axes and
-/// over different spans -- plus its current-flow direction (a unit vector,
-/// for the retarded kernel's `dl . dl'` factor), its own segment length, and
-/// its effective thin-wire radius (um).
-struct ConductorMesh {
-    centers_um: Vec<[f64; 3]>,
+/// One axial cell of a conductor's mesh: its center (a 3-D point on the
+/// conductor's centreline), the unit current-flow direction of the straight
+/// run it belongs to (signed along the path's traversal, for the retarded
+/// kernel's `dl . dl'` factor), its length, and the effective thin-wire
+/// radius of that run's cross-section (um).
+///
+/// Cell-local direction/length/radius are what let a series winding (issue
+/// #2730) -- whose legs differ in direction, length and cross-section -- share
+/// one fill with the straight bars: a straight bar is simply every cell
+/// carrying the same values.
+struct Cell {
+    /// Which straight run of its conductor the cell belongs to (always 0 for
+    /// a straight bar, the leg's traversal index for a winding): the
+    /// thin-wire reduced kernel regularises only pairs inside one run.
+    run: usize,
+    center_um: [f64; 3],
     direction: [f64; 3],
     delta_um: f64,
     a_eff_um: f64,
+}
+
+/// One conductor's mesh: a straight equivalent wire (one run), or a series
+/// winding's legs in traversal order (one run per leg).
+struct ConductorMesh {
+    cells: Vec<Cell>,
+}
+
+/// Append the cells of one straight run from `start_um` to `end_um`
+/// (equivalent-wire radius from `area_um2`) to `cells`.
+fn mesh_run(
+    run: usize,
+    start_um: [f64; 3],
+    end_um: [f64; 3],
+    area_um2: f64,
+    segment_size_um: f64,
+    cells: &mut Vec<Cell>,
+) -> Result<(), String> {
+    let mut length_um = 0.0;
+    for k in 0..3 {
+        let d = end_um[k] - start_um[k];
+        length_um += d * d;
+    }
+    let length_um = length_um.sqrt();
+    if length_um <= 0.0 {
+        return Err(
+            "the full-wave solve needs a conductor of non-zero axial length -- check for \
+             degenerate conductor geometry"
+                .to_string(),
+        );
+    }
+    let direction = [
+        (end_um[0] - start_um[0]) / length_um,
+        (end_um[1] - start_um[1]) / length_um,
+        (end_um[2] - start_um[2]) / length_um,
+    ];
+    let axial = geometry::subdivide_1d(0.0, length_um, segment_size_um);
+    let delta_um = length_um / axial.len() as f64;
+    let a_eff_um = (area_um2 / std::f64::consts::PI).sqrt();
+    cells.extend(axial.into_iter().map(|(offset, _len)| Cell {
+        run,
+        center_um: [
+            start_um[0] + direction[0] * offset,
+            start_um[1] + direction[1] * offset,
+            start_um[2] + direction[2] * offset,
+        ],
+        direction,
+        delta_um,
+        a_eff_um,
+    }));
+    Ok(())
 }
 
 fn build_mesh(
@@ -236,33 +324,33 @@ fn build_mesh(
 
     let mut meshes: Vec<ConductorMesh> = Vec::with_capacity(layout.conductors.len());
     let mut total_segments: usize = 0;
-    for c in &layout.conductors {
-        let length_um = c.length_um();
-        if length_um <= 0.0 {
-            return Err(
-                "the full-wave solve needs a conductor of non-zero axial length -- check for \
-                 degenerate conductor geometry"
-                    .to_string(),
-            );
+    for (c, winding) in layout.conductors.iter().zip(&layout.windings) {
+        let mut cells = Vec::new();
+        match winding {
+            // A series winding: every electrical leg is its own straight run,
+            // centreline vertex to centreline vertex, in traversal order.
+            Some(path) => {
+                for leg in &path.segments {
+                    mesh_run(
+                        leg.segment_index,
+                        leg.start_um,
+                        leg.end_um,
+                        leg.area_um2(),
+                        segment_size_um,
+                        &mut cells,
+                    )?;
+                }
+            }
+            None => mesh_run(
+                0,
+                c.start_um,
+                c.end_um,
+                c.area_um2,
+                segment_size_um,
+                &mut cells,
+            )?,
         }
-        let direction = [
-            (c.end_um[0] - c.start_um[0]) / length_um,
-            (c.end_um[1] - c.start_um[1]) / length_um,
-            (c.end_um[2] - c.start_um[2]) / length_um,
-        ];
-        let axial = geometry::subdivide_1d(0.0, length_um, segment_size_um);
-        let delta_um = length_um / axial.len() as f64;
-        let centers_um: Vec<[f64; 3]> = axial
-            .into_iter()
-            .map(|(offset, _len)| {
-                [
-                    c.start_um[0] + direction[0] * offset,
-                    c.start_um[1] + direction[1] * offset,
-                    c.start_um[2] + direction[2] * offset,
-                ]
-            })
-            .collect();
-        total_segments = total_segments.saturating_add(centers_um.len());
+        total_segments = total_segments.saturating_add(cells.len());
         if total_segments > MAX_TOTAL_SEGMENTS {
             return Err(format!(
                 "the full-wave solve's axial mesh would produce more than \
@@ -271,12 +359,7 @@ fn build_mesh(
                  length and segment_size_um"
             ));
         }
-        meshes.push(ConductorMesh {
-            centers_um,
-            direction,
-            delta_um,
-            a_eff_um: (c.area_um2 / std::f64::consts::PI).sqrt(),
-        });
+        meshes.push(ConductorMesh { cells });
     }
 
     Ok(meshes)
@@ -285,6 +368,12 @@ fn build_mesh(
 /// Retarded partial-impedance matrix (complex, ohms) between every conductor
 /// pair at one frequency, via the point-collocation Riemann sum described in
 /// this module's docs.
+///
+/// The `dl . dl'` factor is evaluated per cell pair, so antiparallel legs of
+/// a winding subtract, perpendicular legs (including the two legs meeting at
+/// a turn) contribute exactly nothing, and a straight bar -- every cell
+/// sharing one direction -- reproduces the single conductor-pair dot product
+/// the pre-#2730 fill applied outside the loops.
 fn impedance_matrix(
     meshes: &[ConductorMesh],
     k_per_um: f64,
@@ -298,26 +387,28 @@ fn impedance_matrix(
                 continue;
             }
             let same_conductor = p == q;
-            // The `dl . dl'` factor of the vector-potential double integral,
-            // constant over a straight-wire pair (issue #1842: before this,
-            // every conductor shared one axis, so it was identically 1 and
-            // never appeared). Exactly zero for perpendicular conductors --
-            // no arithmetic, and no singularity to guard against.
-            let dot = mesh_p.direction[0] * mesh_q.direction[0]
-                + mesh_p.direction[1] * mesh_q.direction[1]
-                + mesh_p.direction[2] * mesh_q.direction[2];
-            if dot == 0.0 {
-                z[p][q] = Complex64::new(0.0, 0.0);
-                continue;
-            }
             let mut sum = Complex64::new(0.0, 0.0);
-            for &ci in &mesh_p.centers_um {
-                for &cj in &mesh_q.centers_um {
-                    let r_um = if same_conductor {
-                        let dz = distance_um(ci, cj);
-                        (mesh_p.a_eff_um * mesh_p.a_eff_um + dz * dz).sqrt()
+            for ci in &mesh_p.cells {
+                for cj in &mesh_q.cells {
+                    // Exactly zero for perpendicular cells -- no arithmetic,
+                    // and no singularity to guard against.
+                    let dot = ci.direction[0] * cj.direction[0]
+                        + ci.direction[1] * cj.direction[1]
+                        + ci.direction[2] * cj.direction[2];
+                    if dot == 0.0 {
+                        continue;
+                    }
+                    let r_um = if same_conductor && ci.run == cj.run {
+                        let dz = distance_um(ci.center_um, cj.center_um);
+                        // Thin-wire reduced kernel inside one straight run
+                        // (avoiding the `R = 0` self-singularity); the cells'
+                        // radii are equal within a run.
+                        (ci.a_eff_um * ci.a_eff_um + dz * dz).sqrt()
                     } else {
-                        let r = distance_um(ci, cj);
+                        // Different conductors, or different legs of one
+                        // winding: the true centre-to-centre distance, as the
+                        // static solver's inter-leg mutual terms use.
+                        let r = distance_um(ci.center_um, cj.center_um);
                         if r < 1e-9 {
                             return Err(format!(
                                 "full-wave conductors {p} and {q} coincide (zero separation \
@@ -327,10 +418,11 @@ fn impedance_matrix(
                         }
                         r
                     };
-                    sum += retarded_phase(k_per_um * r_um) / r_um;
+                    sum +=
+                        retarded_phase(k_per_um * r_um) * (dot * ci.delta_um * cj.delta_um / r_um);
                 }
             }
-            z[p][q] = sum * (dot * mesh_p.delta_um * mesh_q.delta_um);
+            z[p][q] = sum;
         }
     }
     Ok(z)
@@ -568,7 +660,7 @@ pub fn solve_full_wave_sweep(
 ) -> Result<(Vec<FullWavePoint>, usize), String> {
     let layout = geometry::classify_full_wave_bars(conductors)?;
     let meshes = build_mesh(&layout, segment_size_um)?;
-    let total_segments: usize = meshes.iter().map(|m| m.centers_um.len()).sum();
+    let total_segments: usize = meshes.iter().map(|m| m.cells.len()).sum();
 
     // The retarded impedance fill itself no longer needs a shared axial span
     // (issue #1842), but every *derived transmission-line* quantity below
@@ -586,6 +678,19 @@ pub fn solve_full_wave_sweep(
     let resolved_ports = if ports.is_empty() {
         None
     } else {
+        // A port position is an offset along one straight axial span, and the
+        // de-embedding cascades uniform-line ABCD sections; neither has a
+        // validated meaning on a bent path (issue #2730).
+        if layout.windings.iter().any(Option::is_some) {
+            return Err(
+                "ports/S-parameter extraction and de-embedding are not supported for a series \
+                 winding conductor -- a port position is an offset along one straight axial \
+                 span, and there is no validated path-port contract; request the winding's \
+                 frequency sweep without ports (see docs/cli/mom.md's \"Series windings in the \
+                 frequency sweep\")"
+                    .to_string(),
+            );
+        }
         if !two_conductor {
             return Err(format!(
                 "ports/S-parameter extraction requires exactly two conductors (got {}) -- the \
@@ -1071,6 +1176,241 @@ mod tests {
         assert_eq!(points[0].impedance_matrix_real_ohm.len(), 2);
         assert_eq!(points[0].impedance_matrix_real_ohm[0].len(), 2);
         assert!(points[0].characteristic_impedance_real_ohm.is_some());
+    }
+
+    // --- series windings (issue #2730) ----------------------------------------
+
+    fn flat_box(x0: f64, y0: f64, x1: f64, y1: f64) -> BoxRequest {
+        BoxRequest {
+            x0_um: x0,
+            y0_um: y0,
+            x1_um: x1,
+            y1_um: y1,
+            z0_um: 0.0,
+            z1_um: 2.0,
+        }
+    }
+
+    /// Open U, 2 um legs (centrelines (0,100) -> (0,0) -> (120,0) -> (120,100)).
+    fn u_winding() -> ConductorRequest {
+        ConductorRequest {
+            name: "u".to_string(),
+            boxes: vec![
+                flat_box(-1.0, 1.0, 1.0, 100.0),
+                flat_box(-1.0, -1.0, 121.0, 1.0),
+                flat_box(119.0, 1.0, 121.0, 100.0),
+            ],
+            conductivity_s_per_m: Some(5.8e7),
+        }
+    }
+
+    /// Frequency-domain partial impedance matrix (ohms) for `conductors`.
+    fn z_ohm(
+        conductors: &[ConductorRequest],
+        segment_size_um: f64,
+        frequency_hz: f64,
+    ) -> Vec<Vec<Complex64>> {
+        let layout = geometry::classify_full_wave_bars(conductors).unwrap();
+        let meshes = build_mesh(&layout, segment_size_um).unwrap();
+        let omega = 2.0 * std::f64::consts::PI * frequency_hz;
+        let k_per_um = omega / C0_M_PER_S * 1e-6;
+        let prefactor = Complex64::new(
+            0.0,
+            omega * MU0_H_PER_M / (4.0 * std::f64::consts::PI) * 1e-6,
+        );
+        impedance_matrix(&meshes, k_per_um)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.into_iter().map(|v| v * prefactor).collect())
+            .collect()
+    }
+
+    #[test]
+    fn winding_is_classified_as_a_path_not_a_straight_wire() {
+        let layout = geometry::classify_full_wave_bars(&[u_winding()]).unwrap();
+        assert_eq!(layout.windings[0].as_ref().unwrap().segments.len(), 3);
+        assert!(layout.shared_axial_span.is_none());
+        let meshes = build_mesh(&layout, 10.0).unwrap();
+        // 100 + 120 + 100 um of centreline at 10 um cells.
+        assert_eq!(meshes[0].cells.len(), 10 + 12 + 10);
+        let runs: Vec<usize> = meshes[0].cells.iter().map(|c| c.run).collect();
+        assert_eq!(runs.first(), Some(&0));
+        assert_eq!(runs.last(), Some(&2));
+    }
+
+    #[test]
+    fn l_winding_equals_the_sum_of_its_perpendicular_legs() {
+        // Perpendicular legs couple by exactly zero, so the L path's impedance
+        // is the sum of its two legs' self impedances.
+        let l = ConductorRequest {
+            name: "l".to_string(),
+            boxes: vec![
+                flat_box(0.0, -1.0, 301.0, 1.0),
+                flat_box(299.0, 1.0, 301.0, 200.0),
+            ],
+            conductivity_s_per_m: None,
+        };
+        let legs = [
+            bar_conductor("a", flat_box(0.0, -1.0, 300.0, 1.0)),
+            bar_conductor("b", flat_box(299.0, 0.0, 301.0, 200.0)),
+        ];
+        let f = 1.0e9;
+        let zw = z_ohm(&[l], 25.0, f)[0][0];
+        let zs = z_ohm(&legs, 25.0, f);
+        assert_eq!(zs[0][1], Complex64::new(0.0, 0.0));
+        let sum = zs[0][0] + zs[1][1];
+        assert!((zw - sum).norm() < 1e-9 * sum.norm(), "{zw:?} vs {sum:?}");
+    }
+
+    #[test]
+    fn u_winding_matches_the_signed_leg_reduction() {
+        // The antiparallel vertical legs must subtract: the winding's Z is
+        // sum_ij s_ij Z_ij over its three straight legs with the traversal
+        // signs (-y, +x, +y) of the canonical orientation.
+        let legs = [
+            bar_conductor("l1", flat_box(-1.0, 0.0, 1.0, 100.0)),
+            bar_conductor("l2", flat_box(0.0, -1.0, 120.0, 1.0)),
+            bar_conductor("l3", flat_box(119.0, 0.0, 121.0, 100.0)),
+        ];
+        let signs = [-1.0, 1.0, 1.0];
+        let f = 3.0e9;
+        let zs = z_ohm(&legs, 5.0, f);
+        let mut reduced = Complex64::new(0.0, 0.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                reduced += zs[i][j] * (signs[i] * signs[j]);
+            }
+        }
+        let zw = z_ohm(&[u_winding()], 5.0, f)[0][0];
+        assert!(
+            (zw - reduced).norm() < 1e-9 * reduced.norm(),
+            "{zw:?} vs {reduced:?}"
+        );
+        // Antiparallel coupling is genuinely in the sum.
+        let uncoupled = zs[0][0] + zs[1][1] + zs[2][2];
+        assert!((zw - uncoupled).norm() > 1e-3 * uncoupled.norm());
+    }
+
+    #[test]
+    fn winding_low_frequency_limit_matches_the_static_series_inductance() {
+        use crate::geometry::discretize_bars;
+        use crate::peec::solve_inductance_matrix_nh;
+
+        let u = u_winding();
+        let layout = discretize_bars(std::slice::from_ref(&u), 0.5).unwrap();
+        let l_static_h = solve_inductance_matrix_nh(&layout, 1).unwrap()[0][0] * 1e-9;
+
+        // 1 kHz: k * length ~ 1e-8, deeply quasi-static. Cells of 0.5 um
+        // (< the 1.13 um equivalent radius) put the Riemann sum in its
+        // converged regime (see the refinement test).
+        let f = 1.0e3;
+        let omega = 2.0 * std::f64::consts::PI * f;
+        let l_dyn_h = z_ohm(std::slice::from_ref(&u), 0.5, f)[0][0].im / omega;
+        let rel = (l_dyn_h - l_static_h).abs() / l_static_h;
+
+        // The two kernels differ by a known, analytic convention: the
+        // retarded fill's reduced thin-wire kernel is a *surface-current*
+        // wire of the equal-area radius `a` (self term `ln(2l/a) - 1`), while
+        // PEEC's filament bundle is the *uniform-volume-current* square bar
+        // (`ln(2l/GMD) - 1`, `GMD = 0.44704916 * w` for a `w`-wide square --
+        // see `peec::tests::self_gmd_of_a_square_matches_its_published_value`).
+        // Inter-leg mutuals agree. Per leg the static value is therefore
+        // larger by `mu0/(2*pi) * l * ln(a / GMD)`.
+        let a_um = 2.0 / std::f64::consts::PI.sqrt();
+        let gmd_um = 0.447_049_16 * 2.0;
+        let total_length_um = 100.0 + 120.0 + 100.0;
+        let convention_h = 2.0e-13 * total_length_um * (a_um / gmd_um).ln();
+        let rel_corrected = (l_dyn_h + convention_h - l_static_h).abs() / l_static_h;
+        println!(
+            "U winding low-frequency L: static {l_static_h:e} H, full-wave {l_dyn_h:e} H \
+             (rel {rel:e}); corrected for the self-term convention (+{convention_h:e} H): \
+             rel {rel_corrected:e}"
+        );
+        assert!(
+            rel < 0.07,
+            "static {l_static_h:e} vs full-wave {l_dyn_h:e}, rel {rel:e}"
+        );
+        assert!(
+            rel_corrected < 0.01,
+            "convention-corrected rel {rel_corrected:e} (static {l_static_h:e}, full-wave \
+             {l_dyn_h:e}, offset {convention_h:e})"
+        );
+    }
+
+    #[test]
+    fn winding_impedance_converges_under_segment_refinement() {
+        let f = 5.0e9;
+        let u = [u_winding()];
+        // Cell sizes straddling the 1.13 um equivalent radius: the
+        // point-collocation self term converges only once cells are no
+        // coarser than a few radii.
+        let v: Vec<Complex64> = [4.0, 2.0, 1.0, 0.5]
+            .iter()
+            .map(|&d| z_ohm(&u, d, f)[0][0])
+            .collect();
+        let steps: Vec<f64> = v.windows(2).map(|w| (w[1] - w[0]).norm()).collect();
+        println!("U winding Z(5 GHz) by cell size 4/2/1/0.5 um: {v:?}; steps {steps:?}");
+        assert!(
+            steps[1] < steps[0] && steps[2] < steps[1],
+            "successive refinements should move the answer less each time: {steps:?}"
+        );
+        assert!(
+            steps[2] / v[3].norm() < 0.005,
+            "finest step {:e} of |Z|",
+            steps[2] / v[3].norm()
+        );
+    }
+
+    #[test]
+    fn winding_mutual_to_a_bar_follows_the_traversal_sign() {
+        // A +y bar beside the U's third leg (also +y in the canonical
+        // traversal): the coupling equals the signed-leg sum.
+        let make_bar = || bar_conductor("bar", flat_box(150.0, 0.0, 152.0, 100.0));
+        let legs = [
+            bar_conductor("l1", flat_box(-1.0, 0.0, 1.0, 100.0)),
+            bar_conductor("l2", flat_box(0.0, -1.0, 120.0, 1.0)),
+            bar_conductor("l3", flat_box(119.0, 0.0, 121.0, 100.0)),
+            make_bar(),
+        ];
+        let signs = [-1.0, 1.0, 1.0];
+        let f = 1.0e9;
+        let zs = z_ohm(&legs, 25.0, f);
+        let reduced: Complex64 = (0..3).map(|i| zs[i][3] * signs[i]).sum();
+        let zw = z_ohm(&[u_winding(), make_bar()], 25.0, f);
+        assert!((zw[0][1] - reduced).norm() < 1e-9 * reduced.norm());
+        assert!((zw[1][0] - zw[0][1]).norm() < 1e-12 * reduced.norm());
+    }
+
+    #[test]
+    fn winding_sweep_reports_the_matrix_but_no_line_quantities() {
+        let conductors = [u_winding()];
+        let (points, segments) =
+            solve_full_wave_sweep(&conductors, 1.0, &[1.0e9, 2.0e9], 25.0, &[vec![1.0]], &[])
+                .unwrap();
+        assert!(segments > 0);
+        assert_eq!(points.len(), 2);
+        assert!(points[0].impedance_matrix_imag_ohm[0][0] > 0.0);
+        assert!(points[0].characteristic_impedance_real_ohm.is_none());
+        assert!(points[0].s_parameters.is_none());
+    }
+
+    #[test]
+    fn winding_with_ports_is_rejected_with_a_clear_error() {
+        let ret = bar_conductor("ret", flat_box(0.0, 150.0, 120.0, 152.0));
+        let cap = vec![vec![1.0, -0.5], vec![-0.5, 1.0]];
+        let err = solve_full_wave_sweep(
+            &[u_winding(), ret],
+            1.0,
+            &[1.0e9],
+            25.0,
+            &cap,
+            &[port(0.0, 50.0), port(120.0, 50.0)],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("series winding") && err.contains("not supported"),
+            "{err}"
+        );
     }
 
     // --- ports and de-embedding (issue #894) --------------------------------

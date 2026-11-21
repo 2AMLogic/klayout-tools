@@ -81,6 +81,8 @@ XSCHEM_COMMIT="$(m '.tools.xschem.commit')"
 XSCHEM_REPO="$(m '.tools.xschem.repo')"
 CIEL_VERSION="$(m '.tools.ciel.version')"
 KLAYOUT_TOOLS_VERSION="$(m '.tools.klayout_tools.version')"
+IVERILOG_APT_PACKAGE="$(m '.tools.iverilog.apt_package')"
+IVERILOG_MIN_MAJOR="$(m '.tools.iverilog.min_major')"
 
 BUILD_ARGS=(
     "LOOM_WORKER_IMAGE=${BASE_IMAGE}"
@@ -96,6 +98,8 @@ BUILD_ARGS=(
     "XSCHEM_REPO=${XSCHEM_REPO}"
     "CIEL_VERSION=${CIEL_VERSION}"
     "KLAYOUT_TOOLS_VERSION=${KLAYOUT_TOOLS_VERSION}"
+    "IVERILOG_APT_PACKAGE=${IVERILOG_APT_PACKAGE}"
+    "IVERILOG_MIN_MAJOR=${IVERILOG_MIN_MAJOR}"
 )
 
 if [[ "$PRINT_ARGS" == true ]]; then

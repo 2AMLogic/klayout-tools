@@ -1,0 +1,293 @@
+* Device-level sky130A charge-pump PLL (issue #2744, part of #2736 and
+* epic #1779).
+*
+* NOT the benchmark's reference solution and NOT scored. The scored
+* reference for benchmarks/design-agent/tasks/charge-pump-pll.json stays
+* the behavioral ../pll.spice (PDK-free, ../models.lib). This file is an
+* unscored, separately runnable closed-loop variant shipped alongside it
+* (same precedent as ../../relaxation-vco/device-vco/ and this
+* directory's own charge_pump_device.spice). See README.md here for the
+* contract, the measured per-corner results and the behavioral boundary.
+*
+* -------------------------------------------------------------------
+* What is real and what is behavioral
+* -------------------------------------------------------------------
+* Real sky130 devices (no behavioral substitute anywhere on these paths):
+*   - VCO: vco_dev from ../../relaxation-vco/device-vco/vco_device.spice
+*   - Pump: cp_dev from ./charge_pump_device.spice
+*   - the pump's and VCO's external diode-connected bias devices
+* Passive: the loop filter (C2 || (R1 + C1)), ideal R/C elements.
+* Behavioral (XSPICE, documented in README.md "Behavioral boundary"):
+*   - the tri-state PFD (two d_dff + d_and reset) and the /4 divider
+*     (two toggle d_dff), plus their adc_bridge/dac_bridge interfaces;
+*   - the UP/DN drivers Bup*/Bdn*: ideal voltage sources that scale the
+*     PFD's 0/1 outputs by v(vdd), so the pump's logic-high level is the
+*     ACTUAL swept supply (cp_dev contract) -- they stand in for the
+*     PFD's output buffers;
+*   - the ideal reference clock Vref and the ideal bias currents
+*     Ibn/Ibp (VCO, 5 uA) and Icpn/Icpp (pump, icp = 20 uA).
+* The analog tuning path (cp_dev out -> loop filter -> vco_dev vctrl) and
+* the pump-current path (Icp* -> real diodes -> cp_dev mirrors) contain no
+* behavioral element.
+*
+* -------------------------------------------------------------------
+* Reuse of the delivered blocks (verbatim, not re-derived)
+* -------------------------------------------------------------------
+* The vco_cmp_n / vco_cmp_p / vco_dev and cp_dev subcircuits below are
+* byte-identical copies of the delivered files' reusable regions (the
+* delivered files cannot be .include'd whole: each carries its own
+* standalone testbench with top-level sources named Vdd/Iref). The copy is
+* guarded by tests/test_device_pll_reference.py, which fails if either
+* delivered block or one of the parameters it reads drifts from the copy
+* here. Their pin contracts are unchanged:
+*   vco_dev vctrl out vdd vss nbias pbias   (vctrl gate-only, 0.3-0.9 V)
+*   cp_dev  up dn out vdd vss nbias pbias   (active-high, 0.3-0.9 V out)
+*
+* Circuit body only: no .tran/.meas/.control/.end cards (klt sim generates
+* those -- see docs/cli/sim.md). Real sky130 devices via $PDK_ROOT.
+* corners.supply_v.vdd alters the source named Vdd; every logic level that
+* reaches a real device is derived from v(vdd), never from {vdd}.
+
+.param vdd=1.8
+
+* --- vco_dev parameters: identical to vco_device.spice's .param block ---
+.param ib=5u
+.param cosc=10p
+.param r1_l=18
+.param r1n_l=308
+.param r2_l=42.4
+.param r2n_l=726
+.param cref=0.5p
+.param rv_l=14.5
+.param rvn_l=255
+
+* --- cp_dev bias: nominal icp, the only characterized value ---
+.param icp=20u
+
+* --- PLL parameters ---
+* fref = 150 kHz and N = 4, the behavioral task's own plan: the VCO locks
+* at 600 kHz, inside vco_dev's measured 0.6-0.9 V segment at every corner.
+.param fref=150k
+* First reference edge. The loop runs from t = 0: no wait for vco_dev's
+* V-to-I settling (up to ~10 us), the loop simply acquires through it.
+.param tref0=0.1u
+* Passive loop filter: C2 || (R1 + C1)
+.param c2=0.1n
+.param c1=1n
+.param r1=30k
+* Startup control voltages (inside the validated 0.3-0.9 V range):
+* one loop below lock, one above.
+.param vinit_lo=0.5
+.param vinit_hi=0.8
+
+* ===================================================================
+* BEGIN verbatim copy: ../../relaxation-vco/device-vco/vco_device.spice
+* (vco_cmp_n, vco_cmp_p, vco_dev). Do not edit here; see header.
+* ===================================================================
+.subckt vco_cmp_n in vref out vdd vss nbias
+XM5  tail nbias vss vss sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+XM1  n1   in   tail vss sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM2  pout vref tail vss sky130_fd_pr__nfet_01v8 L=0.5 W=8 nf=1 mult=1
+XM3  n1   n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM4  pout n1   vdd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XMN6 nb  pout vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  pout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out vss 0.02p
+.ends vco_cmp_n
+
+.subckt vco_cmp_p in vref out vdd vss pbias
+XM5  tailp pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XM1  n1   in    tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM2  nout vref  tailp vdd sky130_fd_pr__pfet_01v8 L=0.5 W=40 nf=2 mult=1
+XM3  n1   n1    vss vss sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XM4  nout n1    vss vss sky130_fd_pr__nfet_01v8 L=0.5 W=10 nf=1 mult=1
+XMN6 nb  nout vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMP6 nb  nout vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMN7 out nb   vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+CLo out vss 0.02p
+.ends vco_cmp_p
+
+* ===================================================================
+* Reusable VCO block
+*   pins: vctrl out vdd vss nbias pbias
+*   out   : buffered clock, rising edge when the timing node reaches vth_hi
+*   nbias/pbias : 5 uA bias gate rails (NMOS / PMOS diode-connected
+*                 references live outside the block, see testbench)
+* ===================================================================
+.subckt vco_dev vctrl out vdd vss nbias pbias
+
+* --- threshold reference: fixed bias, independent of vctrl ---
+XMref vth_hi pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+XRdiv2  vth_hi rmid2  vss sky130_fd_pr__res_xhigh_po   W=1 L={r2_l}  mult=1 m=1
+XRdiv2n rmid2  vth_lo vss sky130_fd_pr__res_generic_nd w=1 l={r2n_l}
+XRdiv1  vth_lo rmid1  vss sky130_fd_pr__res_xhigh_po   W=1 L={r1_l}  mult=1 m=1
+XRdiv1n rmid1  vss    vss sky130_fd_pr__res_generic_nd w=1 l={r1n_l}
+Crefh vth_hi vss {cref}
+Crefl vth_lo vss {cref}
+
+* --- voltage-to-current converter: ictrl = vctrl / Rv ---
+XAT tl  pbias vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=40 nf=2 mult=1
+XA1 a1  vctrl tl  vdd sky130_fd_pr__pfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XA2 ga  vs    tl  vdd sky130_fd_pr__pfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XA3 a1  a1    vss vss sky130_fd_pr__nfet_01v8     L=1 W=4  nf=1 mult=1
+XA4 ga  a1    vss vss sky130_fd_pr__nfet_01v8     L=1 W=4  nf=1 mult=1
+Cc  ga  vss 2p
+XMg pg  ga    vss vss sky130_fd_pr__nfet_01v8_lvt L=1 W=20 nf=2 mult=1
+XPd pg  pg    vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=80 nf=4 mult=1
+XMp vs  pg    vdd vdd sky130_fd_pr__pfet_01v8     L=1 W=80 nf=4 mult=1
+XRv  vs  rvm  vss sky130_fd_pr__res_xhigh_po   W=1 L={rv_l} mult=1 m=1
+XRvn rvm vss  vss sky130_fd_pr__res_generic_nd w=1 l={rvn_l}
+Cpg pg vdd 1p
+
+* --- discharge-current reference: PMOS copy into an NMOS diode ---
+XPn nctl pg   vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=80 nf=4 mult=1
+XNd nctl nctl vss vss sky130_fd_pr__nfet_01v8 L=1 W=20 nf=2 mult=1
+Cnc nctl vss 1p
+
+* --- comparators ---
+Xhi vo vth_hi ohi vdd vss nbias vco_cmp_n
+Xlo vo vth_lo olo vdd vss pbias vco_cmp_p
+
+* --- NOT(olo) + cross-coupled NOR SR latch (device oscillator's) ---
+XINVp olo_b olo vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XINVn olo_b olo vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Colo olo_b vss 0.005p
+XP1a na1  olo_b vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP1b q    qb    na1  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN1a q    olo_b vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN1b q    qb    vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cq q vss 0.005p
+XP2a na2  ohi   vdd  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XP2b qb   q     na2  vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XN2a qb   ohi   vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XN2b qb   q     vss  vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+Cqb qb vss 0.005p
+
+* --- charge/discharge path + timing capacitor ---
+XMchg  chgd pg   vdd vdd sky130_fd_pr__pfet_01v8 L=1   W=80 nf=4 mult=1
+XSWchg vo   q    chgd vdd sky130_fd_pr__pfet_01v8 L=0.5 W=8  nf=1 mult=1
+XMdis  disd nctl vss vss sky130_fd_pr__nfet_01v8 L=1   W=20 nf=2 mult=1
+XSWdis vo   q    disd vss sky130_fd_pr__nfet_01v8 L=0.5 W=8  nf=1 mult=1
+Ccap vo vss {cosc}
+Rleak vo vss 1G
+
+* --- output buffer (q -> out, non-inverting) ---
+XB1p ob q  vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XB1n ob q  vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XB2p out ob vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
+XB2n out ob vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=2 nf=1 mult=1
+.ends vco_dev
+* END verbatim copy: vco_device.spice
+
+* ===================================================================
+* BEGIN verbatim copy: ./charge_pump_device.spice (cp_dev).
+* Do not edit here; see header.
+* ===================================================================
+.subckt cp_dev up dn out vdd vss nbias pbias
+XIp upb up vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1
+XIn upb up vss vss sky130_fd_pr__nfet_01v8 L=0.15 W=1 nf=1 mult=1
+XMUP nup pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XSUP out upb nup vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+XMDN ndn nbias vss vss sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+XSDN out dn ndn vss sky130_fd_pr__nfet_01v8 L=1 W=4 nf=1 mult=1
+.ends cp_dev
+* END verbatim copy: charge_pump_device.spice
+
+* ===================================================================
+* Behavioral digital models (XSPICE). dac outputs are normalized 0/1;
+* the analog level that reaches a real device is v(vdd) * that value.
+* ===================================================================
+.model pll_adc_ref adc_bridge(in_low=0.9 in_high=0.9)
+.model pll_adc_vco adc_bridge(in_low=0.8 in_high=0.8)
+.model pll_dac dac_bridge(out_low=0 out_high=1 out_undef=0.5 t_rise=1n t_fall=1n)
+.model pll_dff d_dff(clk_delay=0.2n set_delay=0.2n reset_delay=0.2n ic=0)
+.model pll_and d_and(rise_delay=0.2n fall_delay=0.2n)
+
+* ===================================================================
+* One closed loop: PFD -> cp_dev -> loop filter -> vco_dev -> /4 -> PFD
+*   refclk : ideal reference clock (analog, 0/1.8 V)
+*   vctrl  : loop-filter / VCO control node (exported for measurement
+*            and for the startup .ic)
+*   vout   : VCO output (rail-to-rail)
+*   divn, upn, dnn : normalized 0/1 observation copies of the divided
+*            clock and the PFD UP/DN outputs
+*   nbias/pbias   : VCO 5 uA bias rails;  cpn/cpp : pump icp bias rails
+* ===================================================================
+.subckt pll_loop refclk vctrl vout divn upn dnn vdd vss nbias pbias cpn cpp en
+a_ref  [refclk] [ref_d] pll_adc_ref
+* VCO -> divider sample, gated by `en` (see the drivers below): during the
+* OP the divider sees 0, so a vout sitting near the 0.8 V threshold cannot
+* make the event-driven solution chatter.
+Bvg vg vss V='v(vout,vss)*v(en,vss)'
+a_vco  [vg]     [vco_d] pll_adc_vco
+a_hi   [hi_a]   [hi_d]  pll_adc_ref
+Vhi hi_a vss DC 1.8
+
+* /4 feedback divider: two cascaded toggle flip-flops (D = QBAR)
+adiv1 qb1_d vco_d NULL NULL q1_d qb1_d pll_dff
+adiv2 qb2_d q1_d NULL NULL div_d qb2_d pll_dff
+
+* Tri-state PFD: UP on refclk, DN on divclk, AND-gate reset
+apfd_up hi_d ref_d NULL rst_d up_d upb_d pll_dff
+apfd_dn hi_d div_d NULL rst_d dn_d dnb_d pll_dff
+aand [up_d dn_d] rst_d pll_and
+
+a_dup  [up_d]  [upn]  pll_dac
+a_ddn  [dn_d]  [dnn]  pll_dac
+a_ddiv [div_d] [divn] pll_dac
+
+* UP/DN drivers: logic high = actual supply (cp_dev contract). `en` (0
+* during the operating point, 1 from 20 ns) keeps both pump switches open
+* while ngspice solves the OP, so the analog OP does not depend on the
+* event-driven PFD/divider state (without the two `en` gates the OP failed
+* with "too many analog/event-driven solution alternations" at
+* ff/1.62V/-40C).
+Bup up vss V='v(vdd,vss)*v(upn,vss)*v(en,vss)'
+Bdn dn vss V='v(vdd,vss)*v(dnn,vss)*v(en,vss)'
+
+* Real pump and real VCO (delivered blocks, unchanged contracts)
+Xcp  up dn vctrl vdd vss cpn cpp cp_dev
+Xvco vctrl vout vdd vss nbias pbias vco_dev
+Cl vout vss 0.02p
+
+* Passive 2nd-order loop filter
+C2 vctrl vss {c2}
+R1 vctrl lf {r1}
+C1 lf vss {c1}
+.ends pll_loop
+
+* ===================================================================
+* Testbench (not part of any reusable block)
+* ===================================================================
+* Ideal elements, all testbench-only:
+*   Vdd          - supply (swept by corners.supply_v.vdd via `alter vdd`)
+*   Ibn / Ibp    - 5 uA VCO bias references -> real XMbn / XMbp diodes
+*                  (vco_dev contract: NMOS W=10 L=1, PMOS W=40 nf=2 L=1)
+*   Icpn / Icpp  - icp = 20 uA pump bias references -> real XMcn / XMcp
+*                  diodes (cp_dev contract: W=8 L=1 nf=1 each)
+*   Vref         - ideal reference clock, fref (first edge at tref0)
+*   Ven          - pump-driver enable, 0 during the OP, 1 from 20 ns
+*   .ic          - startup control voltages of the two loops
+* Two identical loops share the reference and the bias rails: Xpll_lo
+* acquires from below lock (UP-dominated), Xpll_hi from above (DOWN-
+* dominated), so both pump directions do real acquisition work.
+Vdd vdd 0 DC {vdd}
+Ibn  vdd nbias DC {ib}
+XMbn nbias nbias 0 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1
+Ibp  pbias 0 DC {ib}
+XMbp pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
+Icpn vdd cpn DC {icp}
+XMcn cpn cpn 0 0 sky130_fd_pr__nfet_01v8 L=1 W=8 nf=1 mult=1
+Icpp cpp 0 DC {icp}
+XMcp cpp cpp vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=8 nf=1 mult=1
+
+Vref refclk 0 PULSE(0 1.8 {tref0} 2n 2n {0.5/fref-2n} {1/fref})
+Ven  en 0 PWL(0 0 20n 0 21n 1)
+
+Xpll_lo refclk vctrl_lo vout_lo div_lo up_lo dn_lo vdd 0 nbias pbias cpn cpp en pll_loop
+Xpll_hi refclk vctrl_hi vout_hi div_hi up_hi dn_hi vdd 0 nbias pbias cpn cpp en pll_loop
+
+.ic v(vctrl_lo)={vinit_lo} v(vctrl_hi)={vinit_hi}

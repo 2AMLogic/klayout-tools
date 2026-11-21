@@ -7,8 +7,9 @@ or by `(name, version)`, against klayout-tools' own generated release
 history, issue #623), report this install's own deck content hash,
 structural device-class coverage, and release status directly, with no
 input layout needed (`info`, issue #1209), list the rule values a deck
-enforces (`rules`, issue #2308), or list the drawn-layer predicate set each
-of a deck's device classes is recognised by (`devices`, issue #2365).
+enforces (`rules`, issue #2308), list the drawn-layer predicate set each
+of a deck's device classes is recognised by (`devices`, issue #2365), or
+compare two deck revisions rule by rule (`diff`, issue #5680).
 
 ```
 klt deck hash    --deck <name>                              [--format text|json]
@@ -17,16 +18,21 @@ klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 klt deck info    [--deck <name>]                             [--format text|json]
 klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
 klt deck devices --deck <name> [--class <name>]              [--format text|json]
+klt deck path    --deck asap7                                [--format text|json]
+klt deck diff    --from <a.json|installed> --to <b.json|installed>
+                                                 [--deck <name>] [--format text|json]
 ```
 
-The five are complements: `hash` answers "which deck revision will this
+The verbs are complements: `hash` answers "which deck revision will this
 build use?" (issue #1202), `resolve` answers "which release shipped that
 revision?" (issue #623), `info` answers "what does this install
 actually recognise, right now, with no input layout at all?" (issue #1209),
 `rules` answers "what numbers does this deck actually enforce?" (issue
 #2308) — the pre-layout question `klt drc`, which needs a stream, cannot
-answer — and `devices` answers "what must a layout **draw** for one of those
-device classes to be recognised?" (issue #2365).
+answer — `devices` answers "what must a layout **draw** for one of those
+device classes to be recognised?" (issue #2365), and `diff` answers "which
+rules changed between two revisions, and in which direction?" (issue
+#5680).
 
 ## `klt deck hash`
 
@@ -49,22 +55,35 @@ The value is computed by the same code path a real run records
 `klt drc --deck sky130 <layout>` would report in its
 `provenance.deck.content_hash`.
 
+The named pin covers the primary module and the sibling sources declared in
+its literal `DRC_RULE_SOURCES` tuple. Add a sibling there when moving curated
+rules out of the primary module. The contract describes the digest and the
+`sg13g2` and `sky130` pin migration. [Deck provenance](../json-contract.md)
+
+The pin identifies the *checked* rule set. An `unmodeled_rules` or
+`unchecked_rules` disclosure list that a deck sources from a sibling not named
+in `DRC_RULE_SOURCES` is not guaranteed to be covered, so it can change while
+`content_hash` stays the same (the contract's "Coverage disclosures" note).
+
+This excerpt from `klt deck hash --deck sky130 --format json` uses
+`sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
-  "released": false
+  "content_hash": "sha256:..."
 }
 ```
 
 - `deck` / `content_hash` — the deck name and its `sha256:`-prefixed content
   hash, named exactly as `provenance.deck` names them so a consumer comparing
   against a committed report compares like with like.
-- `released` — the same tri-state signal `provenance.deck.released` carries
-  (`true`/`false`/`null`; see [`../json-contract.md`](../json-contract.md)),
-  from the generated release-history table. The *hash* never depends on that
-  table: a missing or malformed table yields `released: null`, not an error.
+- `released` — the full response includes the same tri-state signal as
+  `provenance.deck.released`. It is `true` when the generated release-history
+  table records the hash, `false` when the table has no matching entry, and
+  `null` when the table is missing or malformed. The hash is computed
+  independently of the table. See [`../json-contract.md`](../json-contract.md).
 
 An unknown deck name is a clean error (exit 1) through the standard envelope,
 and names what is available:
@@ -155,6 +174,39 @@ already have (or fetch) the full klayout-tools git history — which
 reintroduces, just automated, the exact friction this command exists to
 remove for a PyPI/wheel install that has no such history available at all.
 
+## Reproducing a run under a pinned deck
+
+**A deck `content_hash` is stable only for a fixed `klayout-tools` package
+version.** Any release may change a built-in deck's bytes (rules are added or
+adjusted), and therefore its hash; there is no cross-release stability
+guarantee, and `klt drc` has no option to select a previous deck revision
+(that was rejected in #623 — see above). To re-run an old flow with the deck
+held constant, pin the **version**, not just the hash:
+
+1. Resolve the pinned hash to the release that shipped it:
+
+   ```bash
+   klt deck resolve --content-hash sha256:<pinned> --format json
+   # -> "package_version": "X.Y.Z"
+   ```
+
+2. Run the verb from that release in a throwaway environment (works without a
+   writable tool environment):
+
+   ```bash
+   uvx --from "klayout-tools==X.Y.Z" klt drc layout.gds --engine curated --deck sky130 --format json
+   ```
+
+3. Confirm `provenance.deck.content_hash` in that report equals the pinned
+   hash (or compare against `uvx --from "klayout-tools==X.Y.Z" klt deck hash
+   --deck sky130`).
+
+If `klt deck resolve` exits 1 (the hash is unreleased, a dev-edited deck, or
+predates the table), no release can reproduce it — re-review and re-pin the
+coverage disclosure against the new deck rather than guessing a version.
+Releases note every change to a built-in deck's hash in `CHANGELOG.md` with
+the literal phrase `deck hash changes` (search for it).
+
 ## `klt deck resolve` output
 
 ```json
@@ -208,12 +260,42 @@ A hash that predates the table's start, was never released, or a
 }
 ```
 
+## `klt deck path`
+
+Print the absolute path of a deck's **standalone KLayout DRC-DSL script**
+(issue #3789), so an installed `klt` (wheel / `uv tool`) can pass it to
+`klt drc --engine klayout --deck-file` without a source checkout:
+
+```
+klt drc layout.gds --engine klayout \
+    --deck-file "$(klt deck path --deck asap7)"
+```
+
+Text output is the bare path. JSON:
+
+```json
+{
+  "schema_version": 1,
+  "deck": "asap7",
+  "path": "/abs/.../klayout_tools/decks/asap7.drc",
+  "content_hash": "sha256:..."
+}
+```
+
+`content_hash` is the hash of the `.drc` script itself (not the extraction
+module `klt deck hash` / `info` report), so a consumer can pin what it
+passes to `--deck-file`. Only `asap7` ships such a script today; a
+registered Python rule-table deck (e.g. `sky130`) and an unknown name each
+exit 1 with an error.
+
 ## `klt deck info`
 
 ```
-klt deck info                 # every registered deck (sky130, gf180mcu, sg13g2)
+klt deck info                # every registered deck
 klt deck info --deck gf180mcu # one deck only
 ```
+
+The example uses a placeholder hash and shows selected device classes.
 
 ```json
 {
@@ -221,20 +303,23 @@ klt deck info --deck gf180mcu # one deck only
   "decks": [
     {
       "deck": "gf180mcu",
-      "content_hash": "sha256:79e71a1e7d84be3cfc82e4c70afbdf7b743ac1f361fb8e981f57831014d2e8b0",
+      "content_hash": "sha256:...",
       "device_classes": [
-        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor",
-        "diode_nd2ps_06v0", "diode_pd2nw_06v0"
+        "nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield",
+        "cap_nmos_03v3", "cap_pmos_03v3", "resistor", "diode_nd2ps_06v0",
+        "diode_pd2nw_06v0"
       ],
+      "provides": ["curated_drc", "extraction"],
       "released": false,
-      "release": null
+      "release": null,
+      "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
     }
   ]
 }
 ```
 
 - `deck` — the deck name.
-- `content_hash` — this install's own `sha256:`-prefixed deck module hash
+- `content_hash` — this install's own `sha256:`-prefixed deck source hash
   (the same computation and shape as `provenance.deck.content_hash`).
 - `device_classes` — the device-class roles this deck is *structurally
   capable* of recognising (`ExtractionDeck.device_classes`) — independent of
@@ -245,10 +330,39 @@ klt deck info --deck gf180mcu # one deck only
   predates diode support entirely. It says what the deck **can find**; it
   does not say what a layout must **draw** for one to be found — that is
   [`klt deck devices`](#klt-deck-devices) below.
+- `provides` — which capabilities the deck supplies (issue #3783), any of
+  `curated_drc` (runnable by `klt drc --deck` and `klt deck rules`),
+  `klayout_drc` (a shipped KLayout DRC script, run with `klt drc --engine
+  klayout --deck-file`) and `extraction`. `asap7` reports
+  `["extraction", "klayout_drc"]`: it has no curated DRC rule table, so
+  `klt drc --deck asap7` and `klt deck rules --deck asap7` exit 1 (never a
+  false `clean`) and point at the KLayout-script route. The field is
+  additive; `schema_version` stays 1.
 - `released` / `release` — the same tri-state signal as
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
   shipped this exact hash (the same shape `klt deck resolve` returns).
+
+- `unmodeled_rules` — official foundry rule ids the deck knowingly does **not**
+  transcribe (issue #3796), the same static list `klt drc` reports as
+  `coverage.unmodeled_rules`; `[]` for a deck that declares none. For gf180mcu
+  this is the thick-MetalTop `MT30.*`, `MT.2b`/`MT.3`/`MT.4` and `MSLOT.*`
+  families, plus the Metal1–5 wide-metal `M1.2b`–`M5.2b` and the narrow-line
+  end-of-line `CO.6a`/`CO.6b`/`Vn.3c`/`Vn.3d`/`Vn.4b`/`Vn.4c` ids (issue #3968) (the example above is abbreviated). A clean `klt drc` result covers only the
+  modeled rules, not full native-runset coverage. Additive and optional for
+  consumers.
+
+- `drc_deck` — present only for a deck that ships a standalone KLayout DRC
+  deck file (today `asap7`, `asap7.drc`); omitted, never `null`, for the
+  others (issue #3826). It is a different artifact from the deck module that
+  `content_hash` hashes, so it carries its own identity:
+  `{path_kind, content_hash, released, release}` with the same meaning as the
+  top-level fields of those names. `path_kind` is `"packaged"` (the file
+  inside this install). `content_hash` is the value
+  `provenance.deck.content_hash` reports for a DRC run of that deck, so
+  `klt deck resolve --content-hash` resolves it. Additive: `schema_version`
+  stays `1`. In text output the two artifacts print on separate lines
+  labelled `extraction deck` / `drc deck`.
 
 Omitting `--deck` reports every registered deck in one call — useful for a
 "what does this install actually ship" sanity check right after `pip
@@ -277,11 +391,14 @@ comment by hand, producing a copy that silently stops tracking the deck the
 moment the deck moves, and a citation ("0.15 µm, `poly.1a`") that no reviewer
 could re-check mechanically.
 
+This excerpt from `klt deck rules --deck sky130 --rule poly.width.1 --format json`
+uses `sha256:...` for this build's deck hash.
+
 ```json
 {
   "schema_version": 1,
   "deck": "sky130",
-  "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+  "content_hash": "sha256:...",
   "nominal_dbu_um": 0.001,
   "rules": [
     {
@@ -297,14 +414,14 @@ could re-check mechanically.
         "source_repo": "fossi-foundation/open-pdks",
         "source_path": "sky130/klayout/sky130.lydrc",
         "rule_id": "poly.1a",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]
 }
 ```
 
-- `content_hash` — this install's own deck module hash, the same value
+- `content_hash` — this install's own deck source hash, the same value
   `klt deck info`/`provenance.deck.content_hash` report. Cite it alongside a
   constant and the citation becomes re-checkable: the next PDK bump changes
   the hash, so a stale transcription is detectable instead of invisible.
@@ -330,9 +447,36 @@ could re-check mechanically.
   `grid_um` is already a physical micrometre distance on the rule (a
   manufacturing grid, not a deck-nominal-dbu count), so unlike every other
   entry here it is reported unconverted.
+- **Rules a deck never transcribed are not listed here.** gf180mcu's `ESD.*` /
+  `GR.*` / `EF.*` rules (scopes `ESD`, `GR`, `EF`; issues #3792, #4316) appear
+  when transcribed; the
+  upstream ids it does not transcribe (`ESD.3a`, `GR.1`, ...) are reported by
+  `klt drc` in `coverage.unmodeled_rules`, which is informational and does not
+  change `status` (see [`drc.md`](drc.md)).
 - `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
   order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
   publishes no name for it).
+- `layer_refs` — parallel to `layers` (same length and order): one
+  `{"name": str | null, "layer": int, "datatype": int}` per entry, so a rule's
+  layers map to stream layer/datatype pairs from CLI JSON alone. `name` is
+  `null` when the deck publishes none (the `layers` entry is then the raw
+  `"<layer>/<datatype>"` string). Additive: `layers` is unchanged, so no
+  `schema_version` bump.
+- `marker_blind_layers` (top-level) — `["<layer>/<datatype>", ...]` area-marker
+  layers (sky130: `81/2`, `areaid.ce`) the deck accepts but does **not** model
+  rule-switching for (issue #3815), so a result identical with and without the
+  marker is not mistaken for marker-aware behaviour. Deck-static (not narrowed
+  by `--rule`); `[]` for a deck that declares none. `klt drc` reports the subset
+  present in a stream as `coverage.marker_blind_layers_in_stream`. Additive: no
+  `schema_version` bump.
+- `layer_table` (top-level) — every `{"name", "layer", "datatype"}` the deck
+  names, sorted by `(layer, datatype)`; pinned by the report's `content_hash`.
+- `ambiguous_names` (top-level) — `[{"name", "pairs": [{"layer", "datatype"}]}]`
+  for each name the deck gives to more than one pair (those pairs also appear
+  individually in `layer_table`); `[]` when every name is unique.
+- `unresolved` (top-level) — `[{"layer", "datatype", "rules": [id, ...]}]` for
+  each pair the reported rules read that has no deck name (their `layer_refs`
+  entries carry `name: null`), so nothing is silently dropped.
 - `scope` — the DRM section or rule-id family this rule implements
   (`coverage.deck_scope`'s per-rule source), or `null` when unscoped.
 - `provenance` — the rule's structured upstream citation, or `null` when the
@@ -364,6 +508,13 @@ executable deck — coverage is the set of rules klt implements, not the full
 DRM. `provenance` is what ties each value back to the upstream source it came
 from; `klt drc`'s `coverage.deck_scope` answers the complementary "what
 sections does this deck claim" question.
+
+`klt deck rules` also carries a top-level `unmodeled_rules` array (issue #3796):
+the official foundry rule ids the deck does not enforce, kept apart from the
+enforced `rules` list and not narrowed by `--rule`. Text output ends with a
+`NOT ENFORCED by this deck` line when it is non-empty. This disclosure list
+can change while the report's top-level `content_hash` stays the same (see
+the note under `klt deck hash`).
 
 ## `klt deck devices`
 
@@ -398,6 +549,7 @@ field by field, which two separate passes on a real design had to do
       "name": "diode_pd2nw_06v0",
       "kind": "diode",
       "marker": { "layer": 115, "datatype": 5, "name": "diode_mk" },
+      "marker_expression": null,
       "marker_gated": true,
       "predicate_gated": true,
       "terminals": [
@@ -408,13 +560,15 @@ field by field, which two separate passes on a real design had to do
             { "layer": 31, "datatype": 0, "name": "Pplus" },
             { "layer": 55, "datatype": 0, "name": "Dualgate" }
           ],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         },
         {
           "name": "cathode",
           "layer": { "layer": 21, "datatype": 0, "name": "Nwell" },
           "requires": [],
-          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ],
+          "relation": null
         }
       ],
       "required_layers": [ … ],
@@ -423,7 +577,7 @@ field by field, which two separate passes on a real design had to do
         "source_repo": "google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
         "source_path": "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
         "rule_id": "gf180mcu_fd_pr__diode_pd2nw_06v0",
-        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+        "commit": "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
       }
     }
   ]
@@ -431,15 +585,23 @@ field by field, which two separate passes on a real design had to do
 ```
 
 - `deck` / `content_hash` — the deck name as given, and this install's own
-  deck module hash (the same value `klt deck info`/`klt deck rules`/
+  deck source hash (the same value `klt deck info`/`klt deck rules`/
   `provenance.deck.content_hash` report). Cite it alongside a transcribed
   layer number and the citation stays re-checkable on the next PDK bump.
 - `name` — the `devices[].class` label this class extracts as (the same
   strings `klt deck info`'s `device_classes` lists).
 - `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
-  `mom_capacitor`, `resistor`, `diode`.
+  `mom_capacitor`, `mos_capacitor`, `resistor`, `diode`.
 - `marker` — the class's device-recognition marker layer, or `null` for a
-  markerless (drawn-geometry-only) class.
+  markerless (drawn-geometry-only) class or one whose marker is derived.
+- `marker_expression` — `null` unless the marker is a derived `LayerExpr`
+  (issue #2860; today only `BipolarDevice.marker` accepts one, and no
+  built-in deck uses it). Then it is `{op, name, operands}`: `op` is `"and"`
+  or `"not"` (first operand minus the rest), `name` is the derived layer's
+  label or `null`, and each operand is a layer object or another node of the
+  same shape. Its leaves are folded into `required_layers` (leaves under an
+  even number of `"not"` subtractions) and `excluded_layers` (an odd
+  number), and `marker_gated` is `true`.
 - `marker_gated` / `predicate_gated` — booleans, so "which classes need
   something beyond their own conductor/diffusion geometry" is answerable by
   filtering rather than by reading prose. **Marker- and predicate-gated
@@ -450,15 +612,38 @@ field by field, which two separate passes on a real design had to do
   non-empty `requires` — note this is honestly `true` for `pfet` (a PMOS is
   not recognised outside `nwell`) and `false` for `nfet`.
 - `terminals` — one entry per recognised terminal:
-  `{name, layer, requires, excludes}`. `layer` is `null` for a terminal
-  formed by the substrate rather than by a drawn mask (gf180mcu's
+  `{name, layer, requires, excludes, relation}`. `layer` is `null` for a
+  terminal formed by the substrate rather than by a drawn mask (gf180mcu's
   `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
-  the region; every layer in `excludes` is subtracted from it.
+  the region; every layer in `excludes` is subtracted from it. A bipolar
+  entry that declares the optional four-terminal `substrate` layer (issue
+  #2862) reports a fourth `substrate` terminal after `collector`; entries
+  that leave it `None` — every deck shipped today — report the
+  three-terminal shape only. `relation` (issue #2863) is `null` for a
+  terminal defined by those static layer sets alone — every terminal of
+  every shipped class today — and otherwise
+  `{"source": <terminal>, "op": "interacting", "extents": <bool>}`: the
+  terminal is only the part of its layer that interacts with the same
+  device's already-resolved `source` terminal (with `extents: true`, the
+  part whose own bounding box does — how a base ring surrounding its
+  emitter is attributed to that one device). Bipolar classes only; see
+  `TerminalRelation` in `decks/extraction.py`.
 - `required_layers` / `excluded_layers` — the flattened union in
   first-mention order (marker first, then each terminal's own layer and its
   `requires`). `required_layers` is the "what am I missing?" list — every
   one of these has to be drawn over the same geometry, and missing any one
   of them fails identically and silently.
+- `topology` — `resistor` entries only (issue #2679): how the `body`
+  terminal's layer relates to the `marker`. `"overlap"` (the default, and
+  every resistor class except the sg13g2/sg13cmos5l poly resistors) means the marker is drawn *on* the
+  body conductor and the resistor is their overlap, narrowed by `requires`/
+  `excludes`. `"abutting_heads"` (sg13g2's and sg13cmos5l's `rsil`/`rppd`/`rhigh`) means the
+  marker layer *is* the resistive body — `requires`/`excludes` narrow the
+  marker region — and the `body` layer is only the contact heads: it must
+  touch that body in two separate head regions (abutting with zero overlap,
+  as IHP's own PCells draw it, or the two ends of a continuous bar the
+  marker covers). A body with a missing head, or a gap to one, is not a
+  resistor.
 - `provenance` — the entry's structured upstream PDK-LVS citation, or `null`
   when it carries none yet (the same shape `klt deck rules` reports).
 - Every layer is `{"layer": <int>, "datatype": <int>, "name": <str|null>}` —
@@ -489,15 +674,122 @@ class this deck does not declare":
 }
 ```
 
+## `klt deck diff`
+
+Compare two saved `klt deck rules --format json` reports rule by rule —
+the offline answer to the question every pin bump of
+`provenance.deck.content_hash` raises: **which rules changed, and in which
+direction — added, removed, or re-thresholded?** (issue #5680). That
+direction decides whether a new DRC violation means "the layout was always
+wrong and the old deck did not check it" or "the deck changed its mind" —
+two findings with opposite responses, which a bare hash mismatch cannot
+distinguish.
+
+```
+klt deck diff --from <a.json> --to <b.json>            [--deck <name>] [--format text|json]
+klt deck diff --from <a.json> --to installed           [--format text|json]
+```
+
+Each side is a **path to a saved report**, or the literal `installed` for
+this build's own rule table — so the common check needs one install, not
+two:
+
+```bash
+# save the old release's rule table, then diff it against this build
+uvx --from "klayout-tools==0.6.0" klt deck rules --deck gf180mcu --format json > a.json
+klt deck diff --from a.json --to installed --format json
+echo $?   # 0 = identical, 3 = different: a CI pin-bump gate is a bare exit-code check
+```
+
+Like every deck verb this is resolve-only: it never fetches, checks out or
+installs the other revision (see
+[Resolve-only, not fetch-or-build](#resolve-only-not-fetch-or-build)) —
+save the other side's report with `uvx` yourself. No network access and no
+git history are required at runtime; the comparison is a pure function of
+the two reports.
+
+Rules are matched by `id`, never by array position: the rule table is in
+deck declaration order (not sorted), so reordering a deck module is not a
+change, and a textual `diff` of two reports is order-sensitive noise.
+
+### Report categories
+
+| Category | Meaning |
+|----------|---------|
+| `added` | rule ids present only on the `--to` side, in either `rules` or `unmodeled_rules` |
+| `removed` | ids present only on the `--from` side |
+| `changed` | ids enforced on both sides; per id, **only the fields that actually moved**, each with its `from`/`to` value. Every per-rule field `deck rules` emits is compared: `description`, `check`, `layers`, `layer_refs`, `scope`, `value_um`, `value_dbu`, `limits`, `provenance` |
+| `enforcement_changed` | ids that moved between `rules` and `unmodeled_rules` in either direction (`from`/`to`: `enforced`/`unmodeled`). This is its own category deliberately: a rule the deck *stopped* enforcing must not read as `removed` — that would be indistinguishable from a deletion — and a rule it *started* enforcing must not read as `added`. It is the coverage-change signal: "the deck changed its mind" vs "was never checked" |
+| `deck_level_changed` | envelope-level fields that moved: `nominal_dbu_um` (it rescales every `value_dbu`), `marker_blind_layers`, `layer_table`, `ambiguous_names`, `unresolved` |
+| `not_comparable` | fields present on only one side — the expected hazard for a cross-revision tool, since a newer release may carry envelope or per-rule fields an older report predates. Listed (envelope fields, and per-rule `{id, field}` entries), **never** read as a rule change |
+
+Every category key is always present (an empty list/dict when empty), so
+"no differences" can be told apart from "never compared". `identity`
+records each side's `deck`, `content_hash` and `schema_version`; when both
+sides carry the same `content_hash`, `identity.same_revision` is `true` —
+reported explicitly rather than left to be inferred from an empty diff.
+`summary` carries the per-category counts plus the enforced and unmodeled
+rule counts on each side (the coverage denominator's meaning follows
+`klt deck info`/`klt drc` coverage: enforced rules of the deck).
+
+```json
+{
+  "schema_version": 1,
+  "status": "different",
+  "identity": {
+    "from": {"deck": "sky130", "content_hash": "sha256:…", "schema_version": 1},
+    "to": {"deck": "sky130", "content_hash": "sha256:…", "schema_version": 1},
+    "same_revision": false
+  },
+  "summary": {
+    "added": 1, "removed": 0, "changed": 2, "enforcement_changed": 1,
+    "deck_level_changed": 0, "not_comparable": 0,
+    "rules_enforced": {"from": 153, "to": 154},
+    "unmodeled_rules": {"from": 347, "to": 346},
+    "identical": false
+  },
+  "added": ["poly.width.2"],
+  "removed": [],
+  "changed": [
+    {"id": "poly.width.1", "fields": {"value_um": {"from": 0.15, "to": 0.3}}}
+  ],
+  "enforcement_changed": [
+    {"id": "poly.space.1", "from": "enforced", "to": "unmodeled"}
+  ],
+  "deck_level_changed": {},
+  "not_comparable": {"envelope_fields": [], "rule_fields": []}
+}
+```
+
+### Identity guards and exit codes
+
+- The two sides' `deck` fields must match: comparing `sky130` to `gf180mcu`
+  is a clean error (exit 1, standard envelope), not a diff reporting every
+  rule as changed.
+- An unreadable path, invalid JSON, or an input that is not a `deck rules`
+  report is exit 1 with the offending side named in `error.message`.
+- An `installed` side takes its deck name from `--deck` when given, else
+  from the other side's own `deck` field — so the one-install recipe above
+  needs no flag. Only `--from installed --to installed` (a trivially empty
+  diff) needs `--deck` to say which deck.
+
+| Exit | Meaning |
+|------|---------|
+| `0` | identical — every category empty |
+| `3` | different — any category non-empty, `not_comparable` included; the report is still on stdout (the `klt drc` verdict-exit precedent, [docs/json-contract.md](../json-contract.md#exit-codes)) |
+| `1` | application error — deck mismatch, unreadable/invalid input, unknown deck for an `installed` side |
+
+`status` is the verdict of record (`"identical"`/`"different"`); the exit
+code is the shortcut.
+
 ## The generated history table
 
 `src/klayout_tools/decks/_history.json` is a lookup table — one entry per
 `(deck, release)` pair, covering every `v*` git tag — mapping
 `{deck, content_hash, git_tag, git_commit, package_version}`. It is
 **generated, never hand-maintained**: `scripts/generate_deck_history.py`
-walks this repo's own git tag history and rebuilds it from scratch, hashing
-each `decks/*.py` module exactly the way
-`klayout_tools._provenance.sha256_file` hashes it at runtime. Recording one
+walks this repo's git tags and hashes the sources declared at each tag.
+Releases through v0.9.2 used the primary module alone. Recording one
 entry per release (not only when a deck's hash changes) is what makes both
 query shapes exact:
 
@@ -518,8 +810,18 @@ git add src/klayout_tools/decks/_history.json
 git commit -m "chore(decks): regenerate deck history table for vX.Y.Z"
 ```
 
+`python scripts/generate_deck_history.py --as-release vX.Y.Z` records `HEAD`
+as the not-yet-tagged release `vX.Y.Z`; the automated release PR uses it so no
+follow-up push is needed (issue #4920).
+
 Idempotent — re-running it against unchanged tag history reproduces
-byte-identical output, so it is safe to run speculatively.
+byte-identical output, so it is safe to run speculatively. A standalone
+`<name>.drc` deck file at a tag gets its own entry marked
+`"artifact": "drc_deck"` (issue #3826), so a DRC run's
+`provenance.deck.released` is `true` for a released `.drc` hash; the
+`--deck`/`--version` lookup still returns the deck module's entry. The
+already-published `0.7.0` wheel's own history table predates this, so its
+`.drc` hash reports `released: false` there.
 
 Coverage is **released** revisions only: an unreleased dev checkout's deck
 hash will not resolve until it has shipped in a tagged release — expected,

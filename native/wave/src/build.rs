@@ -203,7 +203,13 @@ fn sha256_file(path: &Path) -> Result<String, BuildError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    // sha2 0.11's digest output no longer implements `LowerHex`.
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(format!("sha256:{hex}"))
 }
 
 fn cycle_of(tick: u64, anchor: Option<u64>, period: Option<u64>) -> Option<u64> {

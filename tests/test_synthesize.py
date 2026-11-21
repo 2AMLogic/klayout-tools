@@ -37,18 +37,20 @@ Three tiers:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
+import uuid
 import warnings
 from pathlib import Path
 
 import pytest
 
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
 from klayout_tools import env_provenance, synthesize
 from klayout_tools import pdk as pdk_module
 from klayout_tools.cli import main
@@ -226,10 +228,12 @@ def _make_pdk_install(
             else:
                 operating_conditions = corner_name
             content = (
+                "library (fabricated) {\n"
                 f'    default_operating_conditions : "{operating_conditions}";\n'
                 f"    nom_process : {process};\n"
                 f"    nom_temperature : {temperature};\n"
                 f"    nom_voltage : {voltage};\n"
+                "}\n"
             )
             (lib_views_dir / f"{cell_library}{separator}{corner_name}.lib").write_text(
                 content, encoding="utf-8"
@@ -537,6 +541,8 @@ def test_run_synthesize_corner_not_shipped_ihp_stdcell_shape(tmp_path, monkeypat
 _TEE_RE = re.compile(r"^tee -q -o (\S+) stat ")
 _ABC_TEE_RE = re.compile(r"^tee -q -o (\S+) abc ")
 _WRITE_VERILOG_RE = re.compile(r"^write_verilog -noattr (\S+)$")
+#: Issue #2745: the memory-evidence script's blackbox-listing `tee`.
+_BLACKBOX_TEE_RE = re.compile(r"^tee -q -o (\S+) select -list ")
 
 #: A real `abc -constr` run's own `stime -p` summary line as it reaches the
 #: Yosys log -- captured verbatim from a live Yosys 0.68+48 run of the GCD
@@ -652,6 +658,45 @@ def _script_stat_path(script_path: str, *, cwd: str | None = None) -> str:
     raise AssertionError("generated .ys script has no `tee -q -o ... stat` line")
 
 
+def _write_memory_evidence_stats(
+    script_path: str,
+    hdl_toplevel: str,
+    memory_evidence: tuple[dict, dict] | None,
+    *,
+    blackbox_listing: str = "",
+    cwd: str | None = None,
+) -> None:
+    """Write the two `tee -q -o <path> stat -json` outputs of a generated
+    memory-evidence script (issue #2745), in script order, plus its
+    `select -list` blackbox listing."""
+    stats_paths = []
+    blackbox_path = None
+    select_paths = []
+    with open(script_path, encoding="utf-8") as handle:
+        for line in handle:
+            match = _TEE_RE.match(line.rstrip("\n"))
+            if match:
+                stats_paths.append(_resolve_against(match.group(1), cwd))
+            match = _BLACKBOX_TEE_RE.match(line.rstrip("\n"))
+            if match:
+                blackbox_path = _resolve_against(match.group(1), cwd)
+                select_paths.append(blackbox_path)
+    assert len(stats_paths) == 2, stats_paths
+    if memory_evidence is None:
+        empty = {f"\\{hdl_toplevel}": {"num_memories": 0, "num_cells_by_type": {}}}
+        memory_evidence = (empty, empty)
+    for path, modules in zip(stats_paths, memory_evidence, strict=True):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"modules": modules}, handle)
+    # Issue #4205: a leading library-cell listing (empty here) precedes the
+    # blackbox listing; the last `select -list` tee is the blackbox one.
+    for path in select_paths[:-1]:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("")
+    with open(blackbox_path, "w", encoding="utf-8") as handle:
+        handle.write(blackbox_listing)
+
+
 def _stub_yosys_success(
     monkeypatch,
     *,
@@ -663,8 +708,16 @@ def _stub_yosys_success(
     yosys_log: str = "",
     baseline_module_stats: dict | None = None,
     netlist_body: str | None = None,
+    memory_evidence: tuple[dict, dict] | None = None,
+    blackbox_listing: str = "",
 ) -> None:
     """Stub `synthesize.subprocess.run` for a successful `run_synthesize`.
+
+    ``memory_evidence`` (issue #2745) is ``(elaborated_modules,
+    pre_lowering_modules)`` -- the `stat -json` ``modules`` dicts the side
+    `<top>_memory_evidence.ys` invocation writes; ``None`` writes a
+    memory-free top module at both stages. ``blackbox_listing`` is that
+    invocation's `select -list =A:blackbox =A:whitebox` output.
 
     ``yosys_log`` (issue #1588) is returned as the main script invocation's
     own `stdout` -- `_run_yosys` now returns this text for
@@ -712,6 +765,18 @@ def _stub_yosys_success(
         # or this stub would silently fall back to resolving against the
         # *test runner's own* cwd instead and open the wrong file.
         cwd = kwargs.get("cwd")
+        if os.path.basename(script_path).endswith("_memory_evidence.ys"):
+            # Issue #2745: the side memory-evidence invocation. Writes the
+            # two stage stats files it `tee`s, from `memory_evidence`
+            # (default: no memories at either stage).
+            _write_memory_evidence_stats(
+                script_path,
+                hdl_toplevel,
+                memory_evidence,
+                blackbox_listing=blackbox_listing,
+                cwd=cwd,
+            )
+            return fake_completed(returncode=0)
         if os.path.basename(script_path).endswith("_baseline.ys"):
             stats_path = _script_stat_path(script_path, cwd=cwd)
             baseline_stats = (
@@ -731,24 +796,24 @@ def _stub_yosys_success(
                 handle.write(abc_log + "\n")
         return fake_completed(returncode=0, stdout=yosys_log)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _record_yosys_scripts(monkeypatch) -> list[str]:
-    """Wrap whatever `synthesize.subprocess.run` stub is already installed so
-    every `yosys -s <script>` invocation's script path is appended to the
-    returned list (issue #1870: which of the two generated scripts Yosys is
-    actually handed is the behaviour under test, not an implementation
-    detail). Call *after* `_stub_yosys_success`."""
+    """Wrap whatever `synthesize.run_in_group` stub is already installed so
+    every `yosys -s <script>` script path is appended to the returned list
+    (issue #1870: which of the two generated scripts Yosys is handed is the
+    behaviour under test, not an implementation detail). Call *after*
+    `_stub_yosys_success`; install-time capture chains through the stub."""
     scripts: list[str] = []
-    inner = synthesize.subprocess.run
+    inner = synthesize.run_in_group
 
-    def recording_run(cmd, **kwargs):
+    def recording_spawn(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             scripts.append(cmd[2])
         return inner(cmd, **kwargs)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", recording_run)
+    monkeypatch.setattr(synthesize, "run_in_group", recording_spawn)
     return scripts
 
 
@@ -783,14 +848,14 @@ def test_run_synthesize_stubbed_success(tmp_path, monkeypatch):
     # The fabricated `_make_pdk_install` liberty carries no
     # `cell_leakage_power` entries at all (issue #1626) -- `_compute_leakage`
     # must degrade to `None`/`None`, never a fabricated/partial number.
-    assert report["leakage_power_nw"] is None
-    assert report["leakage_by_type_nw"] is None
+    assert report["leakage_power_nw"] is report["leakage_by_type_nw"] is None
 
     assert report["timing"] == {
         "source": "abc_stime",
         "wire_load": None,
         "critical_path_ps": 2485.93,
         "delay_target_ps": None,
+        "regions": [{"module": None, "critical_path_ps": 2485.93}],
     }
 
     # The `sta` field (issue #925) always exists in the response shape, but
@@ -885,6 +950,62 @@ def test_repo_relative_paths_resolve_absent_outside_any_repo(
     assert report["run_script_path"] == {"path": None, "scope": "external"}
 
 
+def test_external_scope_still_writes_artifacts_under_request_dir_run_id(
+    tmp_path_factory, monkeypatch
+):
+    """Issue #4550: `external` only redacts the reported path. The netlist
+    still lands in `<request dir>/.klt/synthesize/<run_id>/`, which a caller
+    can reconstruct from the response's `run_id`."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo-artifacts")
+    assert env_provenance.find_repo_root(str(no_repo_dir)) is None
+
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    run_dir = no_repo_dir / ".klt" / "synthesize" / report["run_id"]
+    assert run_dir.is_dir()
+    netlist = run_dir / "gcd_synth.v"
+    assert netlist.is_file() and netlist.stat().st_size > 0
+    digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    assert report["netlist_sha256"] == digest
+
+
+@pytest.mark.parametrize("marker", ["dir", "file"])
+def test_git_marker_in_request_dir_gives_repo_scope(
+    tmp_path_factory, monkeypatch, marker
+):
+    """Issue #4550: a `.git` directory or a `.git` file (git worktree) in the
+    request's directory makes the reported paths `scope: "repo"`."""
+    repo_dir = tmp_path_factory.mktemp("marked-repo")
+    if marker == "dir":
+        (repo_dir / ".git").mkdir()
+    else:
+        (repo_dir / ".git").write_text("gitdir: /elsewhere\n", encoding="utf-8")
+
+    _isolate_pdk(monkeypatch, repo_dir)
+    install_root = repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"]["scope"] == "repo"
+    assert report["netlist_path"]["path"] == (
+        f".klt/synthesize/{report['run_id']}/gcd_synth.v"
+    )
+
+
 def test_json_response_and_generated_script_are_leak_free_inside_a_repo(
     tmp_path, monkeypatch
 ):
@@ -967,8 +1088,8 @@ def test_home_rooted_liberty_makes_the_generated_script_scan_dirty_without_the_t
     """The oracle this issue is graded against is live: with the liberty left
     absolute (the pre-#1870 behaviour, reproduced here by withholding
     `pdk_root`), a `.ys` generated against a home-rooted PDK install really
-    does trip `env_provenance`'s `home-path` kind -- three times, once per
-    `-liberty` occurrence, exactly as the issue's repro reports.
+    does trip `env_provenance`'s `home-path` kind -- four times, once per
+    liberty occurrence, exactly as the issue's repro reports.
 
     Without this, the "scan is clean" assertions below could pass for the
     trivial reason that the scanner never looks at those lines."""
@@ -977,7 +1098,7 @@ def test_home_rooted_liberty_makes_the_generated_script_scan_dirty_without_the_t
     scan = env_provenance.scan_files([script_path])
 
     assert scan["status"] == "leaked"
-    assert scan["leak_count"] == 3
+    assert scan["leak_count"] == 4
     assert {leak["kind"] for leak in scan["files"][0]["leaks"]} == {"home-path"}
 
 
@@ -998,6 +1119,10 @@ def test_home_rooted_liberty_is_written_as_a_pdk_root_token_and_scans_clean(tmp_
         "$PDK_ROOT/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/"
         "gf180mcu_fd_sc_mcu7t5v0__tt_025C_1v80.lib"
     )
+    # Issue #4205: the liberty is loaded as cell definitions before any RTL.
+    lines = script_text.splitlines()
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith("read_"))
+    assert lines[first_read] == f"read_liberty -lib {token_path}"
     assert f"dfflibmap -liberty {token_path}" in script_text
     assert f"abc -liberty {token_path}" in script_text
     assert f"stat -liberty {token_path}" in script_text
@@ -1127,7 +1252,12 @@ def test_run_synthesize_reports_run_script_path_and_runs_that_script(
     assert script_path.endswith("synth_gcd.ys")
     assert run_path == synthesize.run_script_path(script_path)
     assert os.path.isfile(run_path)
-    assert scripts_run == [run_path]
+    # Issue #2745: the only other script run is the side memory-evidence
+    # invocation, after the production run.
+    assert scripts_run == [
+        run_path,
+        os.path.join(os.path.dirname(script_path), "gcd_memory_evidence.ys"),
+    ]
 
     # Both artifacts survive as debuggable files; only the committed one is
     # required to be scan-clean.
@@ -1176,7 +1306,7 @@ def test_arithmetic_trial_scripts_keep_the_absolute_liberty(tmp_path, monkeypatc
     def fail_to_launch(cmd, **kwargs):
         raise OSError("no yosys here")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fail_to_launch)
+    _patch_yosys_run(monkeypatch, fail_to_launch)
     trial_dir = tmp_path / ".klt" / "synthesize" / "arith" / "brent_kung"
 
     measured = synthesize._measure_candidate(
@@ -1241,6 +1371,16 @@ _GCD_LEAKAGE_NW = {
 }
 
 
+def _append_to_library(liberty_path: Path, body: str) -> None:
+    """Insert ``body`` inside the fabricated ``.lib``'s ``library (...) { }``
+    group (reopening it if it is already closed), so the file stays
+    well-formed liberty after every append."""
+    text = liberty_path.read_text(encoding="utf-8").rstrip()
+    if text.endswith("}"):
+        text = text[:-1]
+    liberty_path.write_text(text + body + "}\n", encoding="utf-8")
+
+
 def _append_leakage_cells(
     liberty_path: Path, leakage_by_cell: dict[str, float], unit: str = '"1nW"'
 ) -> None:
@@ -1253,9 +1393,7 @@ def _append_leakage_cells(
         lines.append(f"    cell ({cell_name}) {{\n")
         lines.append(f"        cell_leakage_power : {value_nw:.10f};\n")
         lines.append("    }\n")
-    liberty_path.write_text(
-        liberty_path.read_text(encoding="utf-8") + "".join(lines), encoding="utf-8"
-    )
+    _append_to_library(liberty_path, "".join(lines))
 
 
 def test_run_synthesize_reports_leakage_power_nw(tmp_path, monkeypatch):
@@ -1356,24 +1494,24 @@ def test_run_synthesize_leakage_power_nw_partial_coverage(tmp_path, monkeypatch)
 # --------------------------------------------------------------------------- #
 
 
+def _in_library(body: str) -> str:
+    return "library (t) {\n" + body + "}\n"
+
+
 def test_leakage_unit_scale_to_nw_quoted():
-    assert synthesize._leakage_unit_scale_to_nw(
-        '    leakage_power_unit : "1nW";\n'
-    ) == pytest.approx(1.0)
+    assert synthesize._leakage_unit_scale_to_nw("1nW") == pytest.approx(1.0)
 
 
 def test_leakage_unit_scale_to_nw_unquoted_microwatt():
-    assert synthesize._leakage_unit_scale_to_nw(
-        "  leakage_power_unit : 1uW ;\n"
-    ) == pytest.approx(1000.0)
+    assert synthesize._leakage_unit_scale_to_nw("1uW") == pytest.approx(1000.0)
 
 
 def test_leakage_unit_scale_to_nw_defaults_to_one_when_absent():
-    assert synthesize._leakage_unit_scale_to_nw("library(x) {}\n") == 1.0
+    assert synthesize._leakage_unit_scale_to_nw(None) == 1.0
 
 
 def test_leakage_unit_scale_to_nw_defaults_to_one_when_unrecognised():
-    assert synthesize._leakage_unit_scale_to_nw('leakage_power_unit : "1Zw";\n') == 1.0
+    assert synthesize._leakage_unit_scale_to_nw("1Zw") == 1.0
 
 
 def test_parse_liberty_leakage_nw_multiple_cells():
@@ -1386,7 +1524,7 @@ def test_parse_liberty_leakage_nw_multiple_cells():
         "        cell_leakage_power : 0.002;\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {
         "buf_1": pytest.approx(0.001),
         "buf_2": pytest.approx(0.002),
@@ -1409,7 +1547,7 @@ def test_parse_liberty_leakage_nw_cell_without_scalar_is_absent():
         "        }\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {"buf_1": pytest.approx(0.001)}
     assert "buf_2" not in leakage_by_cell
 
@@ -1424,8 +1562,80 @@ def test_parse_liberty_leakage_nw_last_definition_wins():
         "        cell_leakage_power : 0.005;\n"
         "    }\n"
     )
-    leakage_by_cell = synthesize._parse_liberty_leakage_nw(liberty_text)
+    leakage_by_cell = synthesize._parse_liberty_leakage_nw(_in_library(liberty_text))
     assert leakage_by_cell == {"buf_1": pytest.approx(0.005)}
+
+
+def test_parse_liberty_leakage_nw_reads_unit_from_library_attribute():
+    """The unit comes from the library's own `leakage_power_unit` (quoted or
+    bare), converted to nW -- not from some later nested occurrence."""
+    liberty_text = _in_library(
+        "    leakage_power_unit : 1uW ;\n"
+        "    cell (buf_1) {\n"
+        "        cell_leakage_power : 0.5;\n"
+        "    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "buf_1": pytest.approx(500.0)
+    }
+
+
+def test_parse_liberty_leakage_nw_quoted_cell_names():
+    """A real volare sky130 liberty quotes cell names."""
+    liberty_text = _in_library(
+        '    leakage_power_unit : "1nW";\n'
+        '    cell ("sky130_fd_sc_hd__buf_1") {\n'
+        "        cell_leakage_power : 0.001;\n"
+        "    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "sky130_fd_sc_hd__buf_1": pytest.approx(0.001)
+    }
+
+
+def test_parse_liberty_leakage_nw_later_cell_without_scalar_keeps_earlier_value():
+    liberty_text = _in_library(
+        "    cell (buf_1) {\n        cell_leakage_power : 0.001;\n    }\n"
+        "    cell (buf_1) {\n        area : 1.0;\n    }\n"
+    )
+    assert synthesize._parse_liberty_leakage_nw(liberty_text) == {
+        "buf_1": pytest.approx(0.001)
+    }
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "",
+        "cell (buf_1) { cell_leakage_power : 0.001; }\n",  # no library()
+        "library (t) {\n cell (buf_1) {\n cell_leakage_power : 0.001;\n }\n",
+    ],
+)
+def test_parse_liberty_leakage_nw_malformed_is_empty_not_zero(malformed):
+    """Unparseable liberty yields no entries (so `_compute_leakage` reports
+    `None`), never a fabricated zero."""
+    assert synthesize._parse_liberty_leakage_nw(malformed) == {}
+
+
+def test_liberty_cell_names_quoted_and_malformed(tmp_path):
+    quoted = _write(
+        tmp_path / "q.lib",
+        'library (x) {\n cell ("a__b_1") {\n }\n cell (c) {\n }\n}\n',
+    )
+    assert synthesize._liberty_cell_names(quoted) == frozenset({"a__b_1", "c"})
+    # Unclosed library: cannot establish the cell list -> None, not a guess.
+    unclosed = _write(tmp_path / "u.lib", "library (x) {\n cell (a) {\n }\n")
+    assert synthesize._liberty_cell_names(unclosed) is None
+
+
+def test_liberty_cell_names_survives_missing_semicolon_before_group(tmp_path):
+    lib = _write(
+        tmp_path / "m.lib",
+        "library (x) {\n cell (A) {\n area : 0.23\n"
+        " pg_pin (VDD) { pg_type : primary_power ; }\n }\n"
+        " cell (B) {\n }\n cell (C) {\n }\n}\n",
+    )
+    assert synthesize._liberty_cell_names(lib) == frozenset({"A", "B", "C"})
 
 
 def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
@@ -1437,7 +1647,9 @@ def test_compute_leakage_unreadable_liberty_degrades_to_none(tmp_path):
 
 def test_compute_leakage_no_entries_at_all_degrades_to_none(tmp_path):
     liberty_path = tmp_path / "empty.lib"
-    liberty_path.write_text('leakage_power_unit : "1nW";\n', encoding="utf-8")
+    liberty_path.write_text(
+        _in_library('    leakage_power_unit : "1nW";\n'), encoding="utf-8"
+    )
     total, by_type = synthesize._compute_leakage(str(liberty_path), {"buf_1": 3})
     assert (total, by_type) == (None, None)
 
@@ -1449,10 +1661,12 @@ def test_compute_leakage_empty_instance_counts_is_zero_not_none(tmp_path):
     data available for an instantiated type", not "nothing to sum"."""
     liberty_path = tmp_path / "lib.lib"
     liberty_path.write_text(
-        '    leakage_power_unit : "1nW";\n'
-        "    cell (buf_1) {\n"
-        "        cell_leakage_power : 0.001;\n"
-        "    }\n",
+        _in_library(
+            '    leakage_power_unit : "1nW";\n'
+            "    cell (buf_1) {\n"
+            "        cell_leakage_power : 0.001;\n"
+            "    }\n"
+        ),
         encoding="utf-8",
     )
     total, by_type = synthesize._compute_leakage(str(liberty_path), {})
@@ -1516,7 +1730,7 @@ def test_run_synthesize_stubbed_elaboration_error(tmp_path, monkeypatch):
             returncode=1, stderr="ERROR: Module `not_a_module' not found!\n"
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match=r"yosys synthesis failed:.*not_a_module"):
         run_synthesize(request_path)
@@ -1544,7 +1758,7 @@ def test_run_synthesize_stubbed_wasi_sandbox_script_not_found_hint(
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1575,7 +1789,7 @@ def test_run_synthesize_stubbed_missing_script_no_hint(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError) as exc_info:
         run_synthesize(request_path)
@@ -1588,6 +1802,157 @@ def test_run_synthesize_stubbed_missing_script_no_hint(tmp_path, monkeypatch):
     assert "WASI" not in message
 
 
+# Issue #2453: the WASI hint branches on whether the unreadable script lies
+# inside the host temp dir (likely shadowed by the sandbox's private /tmp
+# mount -> "relocate the request" advice) or outside it (generic advice).
+# ``tmp_path`` itself lives under the real temp dir, so these cases patch
+# ``tempfile.gettempdir()`` to a dedicated child of ``tmp_path`` and stage
+# the "outside" scripts in sibling directories.
+_WASI_TEMPDIR_CASES = [
+    # case ids; see _stage_wasi_script for layout and expected branch
+    "inside",
+    "outside_sibling",
+    "prefix_sharing_sibling",
+    "symlink_into_temp",
+]
+
+
+def _stage_wasi_script(tmp_path, monkeypatch, case, name):
+    """Create the fake host temp root and the script for ``case``; return
+    ``(script_path, fake_tempdir, expect_tempdir_hint)``."""
+    fake_tempdir = tmp_path / "hosttmp"
+    fake_tempdir.mkdir()
+    monkeypatch.setattr(
+        "klayout_tools._provenance.tempfile.gettempdir", lambda: str(fake_tempdir)
+    )
+    if case == "inside":
+        script = fake_tempdir / "run" / name
+        expect = True
+    elif case == "outside_sibling":
+        script = tmp_path / "checkout" / name
+        expect = False
+    elif case == "prefix_sharing_sibling":
+        # Shares the string prefix "<tmp_path>/hosttmp" but is a sibling.
+        script = tmp_path / "hosttmp-foo" / name
+        expect = False
+    elif case == "symlink_into_temp":
+        real = fake_tempdir / "real" / name
+        real.parent.mkdir(parents=True)
+        real.write_text("read_verilog x.v\n", encoding="utf-8")
+        link_dir = tmp_path / "checkout"
+        link_dir.mkdir()
+        script = link_dir / name
+        script.symlink_to(real)
+        return script, fake_tempdir, True
+    else:  # pragma: no cover
+        raise AssertionError(case)
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("read_verilog x.v\n", encoding="utf-8")
+    return script, fake_tempdir, expect
+
+
+def _assert_wasi_hint(message, fake_tempdir, expect_tempdir_hint):
+    assert "WASI-sandboxed build" in message
+    assert "yowasp-yosys" in message
+    if expect_tempdir_hint:
+        assert "under the host temp directory" in message
+        assert str(fake_tempdir) in message
+        assert "private scratch directory over /tmp" in message
+        assert "likely" in message
+        # Relocation is the headline; native yosys only the fallback.
+        relocate = message.index("Move the request file outside the host temp")
+        fallback = message.index("prepend a native yosys build")
+        assert relocate < fallback
+        assert "only as a fallback" in message
+        assert "keep your pinned engine" in message
+        assert "does not preopen this path" not in message
+    else:
+        assert "does not preopen this path" in message
+        assert "host temp directory" not in message
+        assert "Try prepending a native yosys build's directory to $PATH." in message
+
+
+@pytest.mark.parametrize("case", _WASI_TEMPDIR_CASES)
+def test_run_synthesize_stubbed_wasi_hint_tempdir_branch(tmp_path, monkeypatch, case):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    script, fake_tempdir, expect = _stage_wasi_script(
+        tmp_path, monkeypatch, case, "synth_gcd.ys"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        assert cmd[:2] == ["yosys", "-s"]
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    _patch_yosys_run(monkeypatch, fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    message = str(exc_info.value)
+    assert message.startswith("yosys synthesis failed: ERROR: Can't open script")
+    _assert_wasi_hint(message, fake_tempdir, expect)
+
+
+def test_run_synthesize_stubbed_missing_script_inside_tempdir_no_hint(
+    tmp_path, monkeypatch
+):
+    """A missing script under the host temp dir is an unrelated failure: the
+    file-exists guard still suppresses every WASI hint (issue #2453)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    fake_tempdir = tmp_path / "hosttmp"
+    fake_tempdir.mkdir()
+    monkeypatch.setattr(
+        "klayout_tools._provenance.tempfile.gettempdir", lambda: str(fake_tempdir)
+    )
+    missing_script = fake_tempdir / "does-not-exist" / "synth_gcd.ys"
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                f"ERROR: Can't open script file `{missing_script}' for "
+                "reading: No such file or directory\n"
+            ),
+        )
+
+    _patch_yosys_run(monkeypatch, fake_run)
+
+    with pytest.raises(SynthesizeError) as exc_info:
+        run_synthesize(request_path)
+
+    assert "WASI" not in str(exc_info.value)
+    assert "temp directory" not in str(exc_info.value)
+
+
+def test_wasi_hint_consistent_between_synthesize_and_equiv(tmp_path, monkeypatch):
+    """Both verbs append the identical temp-dir hint (issue #1755/#2453)."""
+    from klayout_tools import equiv as equiv_module
+
+    script, _, _ = _stage_wasi_script(tmp_path, monkeypatch, "inside", "x.ys")
+    error = (
+        f"ERROR: Can't open script file `{script}' for reading: "
+        "No such file or directory"
+    )
+    equiv_msg = equiv_module._yosys_error_message("", error + "\n", 1)
+    synth_msg = synthesize._synthesis_error_message(
+        fake_completed(returncode=1, stderr=error + "\n")
+    )
+    assert equiv_msg.removeprefix("yosys equivalence check failed: ") == (
+        synth_msg.removeprefix("yosys synthesis failed: ")
+    )
+    assert "Move the request file outside the host temp" in synth_msg
+
+
 def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
     request_path = _setup_success_env(tmp_path, monkeypatch)
 
@@ -1597,7 +1962,7 @@ def test_run_synthesize_stubbed_generic_engine_failure(tmp_path, monkeypatch):
         assert cmd[:2] == ["yosys", "-s"]
         return fake_completed(returncode=2, stdout="something went wrong\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="yosys exited with code 2"):
         run_synthesize(request_path)
@@ -1609,7 +1974,7 @@ def test_run_synthesize_stubbed_missing_binary(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise FileNotFoundError("no such file: yosys")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="could not launch yosys"):
         run_synthesize(request_path)
@@ -1627,7 +1992,7 @@ def test_run_synthesize_stubbed_yosys_timeout(tmp_path, monkeypatch):
         assert kwargs.get("timeout") == synthesize.DEFAULT_YOSYS_TIMEOUT_S
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not complete within"):
         run_synthesize(request_path)
@@ -1644,7 +2009,7 @@ def test_run_synthesize_stubbed_missing_netlist_output(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not produce"):
         run_synthesize(request_path)
@@ -1662,7 +2027,7 @@ def test_run_synthesize_stubbed_missing_stats_output(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="did not produce the expected stats"):
         run_synthesize(request_path)
@@ -1674,6 +2039,8 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
+            if script_path.endswith("_memory_evidence.ys"):
+                return fake_completed(returncode=0)  # Issue #2745 side run.
             stats_path, netlist_path = _script_output_paths(
                 script_path, cwd=kwargs.get("cwd")
             )
@@ -1686,7 +2053,7 @@ def test_run_synthesize_stubbed_stats_missing_top_module(tmp_path, monkeypatch):
             return fake_completed(returncode=0)
         return fake_completed(stdout="Yosys 0.67+post\n")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     with pytest.raises(SynthesizeError, match="could not find synthesis statistics"):
         run_synthesize(request_path)
@@ -1701,6 +2068,8 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-s"]:
             script_path = cmd[2]
+            if script_path.endswith("_memory_evidence.ys"):
+                return fake_completed(returncode=0)  # Issue #2745 side run.
             stats_path, netlist_path = _script_output_paths(
                 script_path, cwd=kwargs.get("cwd")
             )
@@ -1714,7 +2083,7 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
             return fake_completed(returncode=0)
         raise FileNotFoundError("no yosys")
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
     report = run_synthesize(request_path)
     assert report["engine_version"] is None
@@ -1801,6 +2170,8 @@ def _stub_hierarchical_yosys(
             return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
         assert cmd[:2] == ["yosys", "-s"]
         script_path = cmd[2]
+        if script_path.endswith("_memory_evidence.ys"):
+            return fake_completed(returncode=0)  # Issue #2745 side run.
         cwd = kwargs.get("cwd")
         stats_path, netlist_path = _script_output_paths(script_path, cwd=cwd)
         payload: dict = {"modules": modules}
@@ -1816,7 +2187,7 @@ def _stub_hierarchical_yosys(
                 handle.write(_ABC_STIME_LINE + "\n")
         return fake_completed(returncode=0)
 
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _setup_hierarchical_env(tmp_path, monkeypatch, hdl_toplevel: str) -> str:
@@ -2201,6 +2572,152 @@ def test_read_stats_cyclic_modules_graph_terminates(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_generated_script_reads_sv_sources_with_sv_front_end(tmp_path, monkeypatch):
+    """Issue #3797: `.sv` sources get `read_verilog -sv`; `.v` stay plain."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    _write_request(Path(request_path), request)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "read_verilog gcd.v" in script_text
+    assert "read_verilog -sv c.sv" in script_text
+
+
+def _install_stub_sv2v(tmp_path, monkeypatch, *, exit_code=0):
+    """A stub `sv2v` on PATH that logs each invocation and writes `-w` output."""
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    log = tmp_path / "sv2v.log"
+    stub = bindir / "sv2v"
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "sv2v v9.9.9-stub"; exit 0; fi\n'
+        f'echo "$@" >> "{log}"\n'
+        f"[ {exit_code} -ne 0 ] && {{ echo 'stub failure' >&2; exit {exit_code}; }}\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "-w" ] && { out="$2"; break; }; shift; done\n'
+        'echo "module converted(); endmodule" > "$out"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return log
+
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+
+
+def _route_sv2v_to_real_subprocess(monkeypatch):
+    """Let the stub `sv2v` really execute while Yosys stays stubbed: call after
+    `_stub_yosys_success`, which replaces the shared `subprocess.run`."""
+    yosys_stub = synthesize.subprocess.run
+    real_run = _REAL_SUBPROCESS_RUN
+
+    def run(cmd, *args, **kwargs):
+        if os.path.basename(str(cmd[0])) == "sv2v":
+            return real_run(cmd, *args, **kwargs)
+        return yosys_stub(cmd, *args, **kwargs)
+
+    _patch_yosys_run(monkeypatch, run)
+
+
+def _sv2v_request(tmp_path, request_path):
+    _write(tmp_path / "c.sv", "module c(input logic clk); endmodule\n")
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sources"] = ["gcd.v", "c.sv"]
+    request["sv_frontend"] = "sv2v"
+    _write_request(Path(request_path), request)
+
+
+def test_sv2v_frontend_converts_once_and_records_provenance(tmp_path, monkeypatch):
+    """Issue #4198: one sv2v call; the script reads the converted file; the
+    record names the route and sv2v version."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    script_text = Path(_abs_path(report["script_path"], tmp_path)).read_text(
+        encoding="utf-8"
+    )
+    assert "_sv2v.v" in script_text
+    assert "read_verilog -sv" not in script_text
+    assert "c.sv" not in script_text
+    assert report["provenance"]["sv_frontend"] == {
+        "route": "sv2v",
+        "sv2v_version": "sv2v v9.9.9-stub",
+    }
+
+
+def test_sv2v_frontend_passes_defines_to_sv2v(tmp_path, monkeypatch):
+    """Review fix: sv2v preprocesses, so request defines must reach it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["defines"] = {"B": "2", "A": None}
+    _write_request(Path(request_path), request)
+    log = _install_stub_sv2v(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    run_synthesize(request_path)
+
+    args = log.read_text(encoding="utf-8").split()
+    assert args.index("--define=A") < args.index("--define=B=2")
+
+
+def test_default_frontend_has_no_sv_frontend_provenance(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert "sv_frontend" not in report["provenance"]
+
+
+def test_sv2v_frontend_missing_tool_is_structured_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    empty = tmp_path / "emptybin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v.*not found on PATH"):
+        run_synthesize(request_path)
+
+
+def test_sv2v_frontend_conversion_failure_is_error(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _sv2v_request(tmp_path, request_path)
+    _install_stub_sv2v(tmp_path, monkeypatch, exit_code=3)
+    _stub_yosys_success(monkeypatch)
+    _route_sv2v_to_real_subprocess(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match="sv2v conversion failed.*stub failure"):
+        run_synthesize(request_path)
+
+
+def test_sv_frontend_rejects_unknown_value(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["sv_frontend"] = "slang"
+    _write_request(Path(request_path), request)
+
+    with pytest.raises(SynthesizeError, match="sv_frontend"):
+        run_synthesize(request_path)
+
+
 def test_generated_script_passes_constr_and_dont_use(tmp_path, monkeypatch):
     """The default (no `clock_period_ns`) run passes `-constr` -- which is
     what unlocks ABC's `buffer`/`upsize`/`dnsize` sizing steps and its
@@ -2275,6 +2792,108 @@ def test_clock_period_ns_must_be_positive(tmp_path, monkeypatch, clock_period_ns
         _base_request(constraints={"clock_period_ns": clock_period_ns}),
     )
     with pytest.raises(SynthesizeError, match="greater than zero"):
+        run_synthesize(request_path)
+
+
+def _clocks_request(tmp_path, monkeypatch, constraints):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    return _write_request(
+        tmp_path / "request.json", _base_request(constraints=constraints)
+    )
+
+
+def test_clocks_list_uses_tightest_period_and_is_echoed(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {
+            "clocks": [
+                {"port": "clk_a", "period_ns": 5},
+                {"port": "clk_b", "period_ns": 2.5},
+            ]
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 2500
+    assert report["clock_targets"] == {
+        "clocks": [
+            {"port": "clk_a", "period_ns": 5},
+            {"port": "clk_b", "period_ns": 2.5},
+        ],
+        "delay_target_ps": 2500,
+        "delay_target_basis": "min_clocks_period_ns",
+        "per_clock_enforced": False,
+    }
+
+
+def test_clock_period_ns_alone_reports_single_global_basis(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {"clock_period_ns": 4})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["delay_target_ps"] == 4000
+    assert report["clock_targets"]["clocks"] == []
+
+
+def test_explicit_clock_period_ns_wins_over_clocks(tmp_path, monkeypatch):
+    request_path = _clocks_request(
+        tmp_path,
+        monkeypatch,
+        {"clock_period_ns": 3, "clocks": [{"port": "clk", "period_ns": 2}]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["timing"]["delay_target_ps"] == 3000
+    assert report["clock_targets"]["delay_target_basis"] == "clock_period_ns"
+    assert report["clock_targets"]["clocks"] == [{"port": "clk", "period_ns": 2}]
+
+
+def test_no_constraints_reports_basis_none(tmp_path, monkeypatch):
+    request_path = _clocks_request(tmp_path, monkeypatch, {})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["clock_targets"]["delay_target_basis"] == "none"
+    assert report["clock_targets"]["delay_target_ps"] is None
+
+
+@pytest.mark.parametrize(
+    ("clocks", "message"),
+    [
+        ("clk", "non-empty array"),
+        ([], "non-empty array"),
+        (["clk"], r"clocks\[0\] must be a"),
+        ([{"port": "", "period_ns": 1}], "port must be a non-empty string"),
+        ([{"port": "c", "period_ns": "x"}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": True}], "period_ns must be a positive number"),
+        ([{"port": "c", "period_ns": 0}], "greater than zero"),
+        ([{"port": "c", "period_ns": 1, "extra": 1}], "unknown key"),
+        (
+            [{"port": "c", "period_ns": 1}, {"port": "c", "period_ns": 2}],
+            "more than once",
+        ),
+    ],
+)
+def test_clocks_validation_errors(tmp_path, monkeypatch, clocks, message):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"clocks": clocks}),
+    )
+    with pytest.raises(SynthesizeError, match=message):
         run_synthesize(request_path)
 
 
@@ -2374,10 +2993,8 @@ def _append_liberty_cells(
     actually be matched against it (issue #2382). Deliberately bare: the
     zero-match check reads only the group *names*, never a pin or timing
     model."""
-    liberty_path.write_text(
-        liberty_path.read_text(encoding="utf-8")
-        + "".join(f"    cell ({name}) {{\n    }}\n" for name in cell_names),
-        encoding="utf-8",
+    _append_to_library(
+        liberty_path, "".join(f"    cell ({name}) {{\n    }}\n" for name in cell_names)
     )
 
 
@@ -2935,6 +3552,39 @@ def test_generated_script_maps_constants_to_tie_cells_sg13g2_stdcell(
     )
 
 
+@pytest.mark.parametrize("cell_library", ["asap7sc7p5t_rvt", "asap7sc7p5t_28_R"])
+def test_generated_script_maps_constants_to_tie_cells_asap7(
+    tmp_path, monkeypatch, cell_library
+):
+    """ASAP7 RVT (issue #4273) gets its own verified tie cells
+    (`TIEHIx1_ASAP7_75t_R` port `H` / `TIELOx1_ASAP7_75t_R` port `L`) under
+    both names the library resolves by, so P&R never sees bare constants."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "asap7A",
+        cell_library=cell_library,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": cell_library, "corner": "tt_025C_1v80"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_hilomap_line(_abs_path(report["script_path"], tmp_path)) == (
+        "hilomap -hicell TIEHIx1_ASAP7_75t_R H -locell TIELOx1_ASAP7_75t_R L"
+    )
+    assert not any(
+        "hilomap" in w for w in report.get("warnings", []) if isinstance(w, str)
+    )
+
+
 def test_cell_library_without_tie_cell_entry_emits_no_hilomap(tmp_path, monkeypatch):
     """A `cell_library` with no `_TIE_CELLS` entry is never given a guessed
     tie cell: the `hilomap` pass is omitted entirely rather than the run
@@ -2977,7 +3627,11 @@ def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
         (hi_cell, hi_port), (lo_cell, lo_port) = entry
         family_prefix = f"{cell_library.split('_')[0]}_"
         for cell in (hi_cell, lo_cell):
-            assert cell.startswith(family_prefix), cell
+            if cell_library.startswith("asap7"):
+                # ASAP7 names cells `<FUNC>x<drive>_ASAP7_75t_<flavor>`.
+                assert cell.endswith("_ASAP7_75t_R"), cell
+            else:
+                assert cell.startswith(family_prefix), cell
         assert hi_port and lo_port
         assert (hi_cell, hi_port) != (lo_cell, lo_port)
 
@@ -3115,6 +3769,75 @@ def test_run_synthesize_strips_signed_from_emitted_netlist(tmp_path, monkeypatch
         netlist_text = handle.read()
     assert "signed" not in netlist_text
     assert "output [15:0] sample;" in netlist_text
+
+
+def _sha256_bytes(path) -> str:
+    import hashlib
+
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
+
+
+def test_netlist_sha256_matches_repo_scoped_netlist_bytes(tmp_path, monkeypatch):
+    """Issue #2452: `netlist_sha256` is the independently computed SHA-256 of
+    the file `netlist_path` refers to."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    actual = _abs_path(report["netlist_path"], tmp_path)
+    digest = report["netlist_sha256"]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert digest == _sha256_bytes(actual)
+
+
+def test_netlist_sha256_covers_stripped_signed_qualifiers(tmp_path, monkeypatch):
+    """The digest describes the final written file, not Yosys's raw output."""
+    import hashlib
+
+    raw = (
+        "module gcd(clk, sample);\n"
+        "  input clk;\n"
+        "  output signed [15:0] sample;\n"
+        "endmodule\n"
+    )
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, netlist_body=raw)
+
+    report = run_synthesize(request_path)
+
+    actual = _abs_path(report["netlist_path"], tmp_path)
+    assert "signed" not in open(actual, encoding="utf-8").read()
+    assert report["netlist_sha256"] == _sha256_bytes(actual)
+    assert report["netlist_sha256"] != hashlib.sha256(raw.encode()).hexdigest()
+
+
+def test_netlist_sha256_present_for_external_redacted_path(
+    tmp_path_factory, monkeypatch
+):
+    """An outside-any-repo netlist reports a redacted path but still carries
+    the digest of the real file."""
+    no_repo_dir = tmp_path_factory.mktemp("no-repo-digest")
+    _isolate_pdk(monkeypatch, no_repo_dir)
+    install_root = no_repo_dir / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(no_repo_dir / "gcd.v", _GCD_RTL)
+    request_path = _write_request(no_repo_dir / "request.json", _base_request())
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["netlist_path"] == {"path": None, "scope": "external"}
+    actual = [
+        os.path.join(os.path.dirname(s), "gcd_synth.v")
+        for s in scripts
+        if not s.endswith("_baseline.ys")
+    ]
+    assert actual and os.path.isfile(actual[0])
+    assert report["netlist_sha256"] == _sha256_bytes(actual[0])
 
 
 def test_run_synthesize_leaves_netlist_untouched_when_no_signed(tmp_path, monkeypatch):
@@ -4264,6 +4987,10 @@ def test_integration_real_yosys_gcd_worked_example(tmp_path, monkeypatch):
     assert report["engine"] == "yosys"
     assert report["instance_count"] > 0
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__dfrtp_1"] == 50
+    # Issue #2745: GCD infers no memory and instantiates no blackbox.
+    assert report["memory_mapping"]["status"] == "none_detected"
+    assert report["memory_mapping"]["modules"] == []
+    assert report["blackbox_modules"] == []
 
     # Issue #807: no power-domain isolation or test-probe cell survives the
     # `-dont_use` list (the pre-#807 flow mapped 19 of them into this exact
@@ -5080,8 +5807,10 @@ def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
     assert result["mode"] == "check"
     assert result["report"] == report_path
     assert result["status"] == "match"
-    assert len(result["checks"]) == 2
+    assert len(result["checks"]) == 5
     assert all(check["match"] for check in result["checks"])
+    defines = [c for c in result["checks"] if c["field"] == "defines"]
+    assert len(defines) == 1 and defines[0]["match"] is True
 
 
 def test_check_synthesize_report_detects_moved_source_hash(tmp_path, monkeypatch):
@@ -5135,6 +5864,220 @@ def test_check_synthesize_report_missing_hash_is_never_a_false_pass(
     by_field = {check["field"]: check for check in result["checks"]}
     assert by_field["provenance.input.content_hash"]["expected"] is None
     assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def _committed_netlist_report(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", report)
+    return request_path, report, report_path
+
+
+def test_check_synthesize_report_detects_edited_netlist(tmp_path, monkeypatch):
+    """Issue #4313: one gate flipped in a copy of the committed netlist is
+    `drifted` on `netlist_sha256`; the unmodified copy matches."""
+    request_path, report, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    good = tmp_path / "good.v"
+    good.write_bytes(Path(_abs_path(report["netlist_path"], tmp_path)).read_bytes())
+    bad = tmp_path / "bad.v"
+    bad.write_text(good.read_text(encoding="utf-8") + "// one gate flipped\n")
+
+    ok = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(good)
+    )
+    assert ok["status"] == "match"
+
+    drifted = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(bad)
+    )
+    assert drifted["status"] == "drifted"
+    by_field = {c["field"]: c for c in drifted["checks"]}
+    assert by_field["netlist_sha256"]["match"] is False
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def _no_pdk(monkeypatch):
+    """Make any liberty resolution fail loudly -- the PDK-less host."""
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    monkeypatch.delenv("PDK", raising=False)
+    monkeypatch.setattr(
+        synthesize,
+        "_resolve_liberty",
+        lambda *a, **k: pytest.fail("--skip-deck must not resolve the liberty"),
+    )
+
+
+def test_check_synthesize_report_skip_deck_matches_without_a_pdk(tmp_path, monkeypatch):
+    """Issue #4315: `skip_deck` runs with no resolvable PDK; the deck entry is
+    absent from `checks[]` and named in `skipped[]`."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "match"
+    fields = [c["field"] for c in result["checks"]]
+    assert "provenance.deck.content_hash" not in fields
+    assert len(fields) == 4 and all(c["match"] for c in result["checks"])
+    assert result["skipped"] == [
+        {
+            "field": "provenance.deck.content_hash",
+            "reason": "--skip-deck: liberty not resolved",
+        }
+    ]
+
+
+def test_check_synthesize_report_without_skip_deck_has_no_skipped_key(
+    tmp_path, monkeypatch
+):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    assert "skipped" not in result
+    assert len(result["checks"]) == 5
+
+
+def test_check_synthesize_report_skip_deck_detects_rtl_edit(tmp_path, monkeypatch):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// an edit after the fact\n")
+
+    result = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+
+    assert result["status"] == "drifted"
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def test_check_synthesize_report_skip_deck_does_not_see_a_changed_deck(
+    tmp_path, monkeypatch
+):
+    """A changed liberty is `drifted` without the flag and invisible with it
+    -- exactly why the response must say what was skipped."""
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    for lib in (tmp_path / "install").rglob("*.lib"):
+        lib.write_text(lib.read_text(encoding="utf-8") + "\n/* changed */\n")
+
+    full = synthesize.check_synthesize_report(report_path, request_path)
+    assert full["status"] == "drifted"
+    assert {c["field"] for c in full["checks"] if not c["match"]} == {
+        "provenance.deck.content_hash"
+    }
+
+    cheap = synthesize.check_synthesize_report(
+        report_path, request_path, skip_deck=True
+    )
+    assert cheap["status"] == "match"
+    assert cheap["skipped"][0]["field"] == "provenance.deck.content_hash"
+
+
+def test_cli_synthesize_skip_deck_exit_codes_and_text(tmp_path, monkeypatch, capsys):
+    request_path, _report, report_path = _committed_netlist_report(
+        tmp_path, monkeypatch
+    )
+    _no_pdk(monkeypatch)
+    argv = ["synthesize", request_path, "--check", report_path, "--skip-deck"]
+
+    assert main([*argv, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"]
+
+    assert main([*argv, "--format", "text"]) == 0
+    assert "[SKIPPED] provenance.deck.content_hash" in capsys.readouterr().out
+
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// edit\n")
+    assert main([*argv, "--format", "json"]) == 3
+
+
+def test_cli_synthesize_skip_deck_usage_errors(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert main(["synthesize", request_path, "--skip-deck", "--format", "json"]) == 1
+    assert "requires --check" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+    assert (
+        main(
+            [
+                "synthesize",
+                request_path,
+                "--check",
+                str(tmp_path / "r.json"),
+                "--rerun",
+                "--skip-deck",
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    assert "cheap-mode only" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_check_synthesize_report_netlist_sha256_missing_baseline(tmp_path, monkeypatch):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    del report["netlist_sha256"]
+    report_path = _write_report(tmp_path / "old.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["expected"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+    assert result["status"] == "drifted"
+
+
+def test_check_synthesize_report_netlist_unlocatable_is_not_skipped(
+    tmp_path, monkeypatch
+):
+    request_path, report, _ = _committed_netlist_report(tmp_path, monkeypatch)
+    report["netlist_path"] = {"path": None, "scope": "external"}
+    report_path = _write_report(tmp_path / "ext.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+    by_field = {c["field"]: c for c in result["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+    missing = synthesize.check_synthesize_report(
+        report_path, request_path, netlist_override=str(tmp_path / "nope.v")
+    )
+    by_field = {c["field"]: c for c in missing["checks"]}
+    assert by_field["netlist_sha256"]["actual"] is None
+    assert by_field["netlist_sha256"]["match"] is False
+
+
+def test_cli_synthesize_check_netlist_flag_exits_three_on_edit(
+    tmp_path, monkeypatch, capsys
+):
+    request_path, _, report_path = _committed_netlist_report(tmp_path, monkeypatch)
+    bad = tmp_path / "bad.v"
+    bad.write_text("module gcd(); endmodule\n", encoding="utf-8")
+
+    code = main(
+        [
+            "synthesize",
+            request_path,
+            "--check",
+            report_path,
+            "--netlist",
+            str(bad),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert code == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
 
 
 def test_check_synthesize_report_missing_file_raises(tmp_path, monkeypatch):
@@ -5304,3 +6247,1197 @@ def test_synthesize_report_survives_the_envelope_lint(tmp_path, monkeypatch):
     report = run_synthesize(request_path)
 
     assert env_provenance.find_absolute_path_fields(report) == []
+
+
+# --------------------------------------------------------------------------- #
+# `request.macros` -- the shared hard-macro declaration (issue #2635)
+# --------------------------------------------------------------------------- #
+
+
+_MACRO_LEF = (
+    "VERSION 5.7 ;\n"
+    "MACRO sram_8x8\n"
+    "  CLASS BLOCK ;\n"
+    "  SIZE 20.0 BY 10.0 ;\n"
+    "  PIN D\n"
+    "    DIRECTION INPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 1.0 1.0 1.5 1.5 ;\n"
+    "    END\n"
+    "  END D\n"
+    "  PIN Q\n"
+    "    DIRECTION OUTPUT ;\n"
+    "    USE SIGNAL ;\n"
+    "    PORT\n"
+    "      LAYER met2 ;\n"
+    "        RECT 2.0 1.0 2.5 1.5 ;\n"
+    "    END\n"
+    "  END Q\n"
+    "END sram_8x8\n"
+    "END LIBRARY\n"
+)
+
+_MACRO_LIB = (
+    "library (sram_8x8) {\n"
+    "  cell (sram_8x8) {\n"
+    "    area : 400.0 ;\n"
+    "    pin (D) { direction : input; }\n"
+    "    pin (Q) { direction : output; }\n"
+    "  }\n"
+    "}\n"
+)
+
+#: `_GCD_MODULE_STATS` plus one instance of the declared macro -- what
+#: Yosys's own `stat -json` reports once the macro survives as a blackbox
+#: (live-verified against Yosys 0.69: a blackboxed macro appears in
+#: `num_cells_by_type` and contributes nothing to `area`).
+_MACRO_MODULE_STATS = {
+    **_GCD_MODULE_STATS,
+    "num_cells": _GCD_MODULE_STATS["num_cells"] + 1,
+    "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "sram_8x8": 1},
+}
+
+
+def _macro_success_env(tmp_path, monkeypatch, *, macros, liberty_cells=None) -> str:
+    """`_setup_success_env`, plus a macro LEF/liberty on disk and a
+    `request.macros` array. ``liberty_cells`` (a ``{cell: area or None}``
+    map) appends real `cell (...)` groups to the fabricated standard-cell
+    liberty, which `_cells_without_area` needs to say anything at all."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    _write(tmp_path / "sram_8x8.lef", _MACRO_LEF)
+    _write(tmp_path / "sram_8x8_tt.lib", _MACRO_LIB)
+    if liberty_cells is not None:
+        liberty_path = (
+            install_root
+            / "sky130A"
+            / "libs.ref"
+            / "sky130_fd_sc_hd"
+            / "lib"
+            / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+        )
+        blocks = "".join(
+            f"  cell ({cell}) {{\n"
+            + (f"    area : {area} ;\n" if area is not None else "")
+            + "  }\n"
+            for cell, area in liberty_cells.items()
+        )
+        _append_to_library(liberty_path, blocks)
+    return _write_request(tmp_path / "request.json", _base_request(macros=macros))
+
+
+def _main_script_path(request_path: str, hdl_toplevel: str = "gcd") -> str:
+    """The retained `synth_<top>.ys` artifact for the one run under
+    `.klt/synthesize/` -- the run directory name is a random `run_id`."""
+    runs_dir = os.path.join(os.path.dirname(request_path), ".klt", "synthesize")
+    (run_dir,) = [
+        os.path.join(runs_dir, name)
+        for name in os.listdir(runs_dir)
+        if os.path.isdir(os.path.join(runs_dir, name))
+    ]
+    return os.path.join(run_dir, f"synth_{hdl_toplevel}.ys")
+
+
+def test_macro_with_liberty_emits_read_liberty_lib_before_hierarchy(
+    tmp_path, monkeypatch
+):
+    """Issue #2635 AC1: the macro's liberty is loaded with `read_liberty
+    -lib` *before* `hierarchy`, which is the pass that would otherwise
+    abort with "is not part of the design"."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "cell": "sram_8x8",
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    lines = _script_lines(_main_script_path(request_path))
+    macro_line = next(
+        line
+        for line in lines
+        if line.startswith("read_liberty -lib ") and line.endswith("sram_8x8_tt.lib")
+    )
+    hierarchy_index = next(
+        i for i, line in enumerate(lines) if line.startswith("hierarchy ")
+    )
+    assert lines.index(macro_line) < hierarchy_index
+    # Issue #4205: the standard-cell liberty is also read with `-lib` (as
+    # cell definitions), so the script carries exactly two `read_liberty`
+    # lines -- the std-cell one first, then the macro's.
+    read_liberty_lines = [line for line in lines if line.startswith("read_liberty")]
+    assert len(read_liberty_lines) == 2
+    assert read_liberty_lines[-1] == macro_line
+
+    assert report["macros"][0]["cell"] == "sram_8x8"
+    assert report["macros"][0]["blackbox_source"] == "liberty"
+
+
+def test_macro_without_liberty_generates_a_blackbox_from_its_lef(tmp_path, monkeypatch):
+    """Issue #2635 AC1's "or synthesizes a blackbox from the LEF" half: a
+    caller with only a LEF never has to hand-write (or hand-maintain) a
+    stub. The generated file is a retained run artifact."""
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"][0]["blackbox_source"] == "lef"
+    generated = os.path.join(
+        os.path.dirname(_main_script_path(request_path)), "sram_8x8_blackbox.v"
+    )
+    assert os.path.isfile(generated)
+    with open(generated, encoding="utf-8") as handle:
+        text = handle.read()
+    assert "(* blackbox *)" in text
+    assert "module sram_8x8 (D, Q);" in text
+
+    lines = _script_lines(_main_script_path(request_path))
+    macro_line = next(line for line in lines if line.startswith("read_verilog -lib "))
+    assert macro_line.endswith("sram_8x8_blackbox.v")
+    hierarchy_index = next(
+        i for i, line in enumerate(lines) if line.startswith("hierarchy ")
+    )
+    assert lines.index(macro_line) < hierarchy_index
+
+
+def test_macro_with_a_caller_supplied_verilog_blackbox_is_read_as_lib(
+    tmp_path, monkeypatch
+):
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "verilog_blackbox": "sram_bb.v"}],
+    )
+    _write(
+        tmp_path / "sram_bb.v",
+        "(* blackbox *)\nmodule sram_8x8 (D, Q);\ninput D;\noutput Q;\nendmodule\n",
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"][0]["blackbox_source"] == "verilog_blackbox"
+    lines = _script_lines(_main_script_path(request_path))
+    assert any(line.endswith("sram_bb.v") for line in lines)
+    # No stub was generated: the caller supplied one.
+    assert not os.path.isfile(
+        os.path.join(
+            os.path.dirname(_main_script_path(request_path)), "sram_8x8_blackbox.v"
+        )
+    )
+
+
+def test_no_macros_field_emits_no_macro_lines(tmp_path, monkeypatch):
+    """Purely additive: a request written before this field existed produces
+    the same script it always did."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["macros"] == []
+    assert report["macro_instance_count"] == 0
+    assert report["macro_instance_counts_by_type"] == {}
+    lines = _script_lines(_main_script_path(request_path))
+    # Only the single std-cell `read_liberty -lib` (issue #4205) is present.
+    assert not any(line.startswith("read_verilog -lib") for line in lines)
+    assert [line for line in lines if "-lib " in line] == [
+        line for line in lines if line.startswith("read_liberty -lib ")
+    ]
+    assert len([line for line in lines if "-lib " in line]) == 1
+
+
+def test_macro_rejected_when_its_lef_is_missing(tmp_path, monkeypatch):
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "nope.lef"}]
+    )
+    with pytest.raises(SynthesizeError, match=r"macros\[0\]\.lef not found"):
+        run_synthesize(request_path)
+
+
+def test_macro_rejected_when_the_field_is_malformed(tmp_path, monkeypatch):
+    request_path = _macro_success_env(tmp_path, monkeypatch, macros="not a list")
+    with pytest.raises(SynthesizeError, match="request.macros must be a list"):
+        run_synthesize(request_path)
+
+
+def test_duplicate_macro_cells_rejected(tmp_path, monkeypatch):
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}, {"lef": "sram_8x8.lef"}],
+    )
+    with pytest.raises(SynthesizeError, match="cell values must be unique"):
+        run_synthesize(request_path)
+
+
+def test_macro_liberty_with_no_entry_for_the_resolved_corner_is_rejected(
+    tmp_path, monkeypatch
+):
+    """Issue #2635's edge case, on the synthesize side: a macro that
+    declared a liberty map must never be silently synthesized against
+    another corner's timing."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef", "lib": {"ss_100C_1v60": "sram_8x8_tt.lib"}}],
+    )
+    with pytest.raises(SynthesizeError) as excinfo:
+        run_synthesize(request_path)
+    message = str(excinfo.value)
+    assert "sram_8x8" in message
+    assert "tt_025C_1v80" in message
+
+
+def test_response_splits_macro_instances_from_standard_cells(tmp_path, monkeypatch):
+    """Issue #2635 AC2: macro instances are reported separately.
+    `instance_counts_by_type` deliberately still counts every type --
+    removing the macro from it would be a breaking change."""
+    request_path = _macro_success_env(
+        tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}]
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["instance_count"] == 336
+    assert report["instance_counts_by_type"]["sram_8x8"] == 1
+    assert report["macro_instance_counts_by_type"] == {"sram_8x8": 1}
+    assert report["macro_instance_count"] == 1
+
+
+def test_response_flags_a_macro_whose_area_is_not_in_area_um2(tmp_path, monkeypatch):
+    """The other half of AC2. A blackboxed macro contributes exactly `0` to
+    `area_um2` -- that used to be silent, so a caller comparing `area_um2`
+    against an area budget was wrong by the macro's whole footprint."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}],
+        liberty_cells={
+            "sky130_fd_sc_hd__xor2_1": 7.5,
+            "sky130_fd_sc_hd__a211o_1": 8.75,
+            "sky130_fd_sc_hd__dfrtp_1": 25.0,
+        },
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert report["cells_without_area"] == ["sram_8x8"]
+    assert report["warnings"]["by_category"]["macro_area_excluded"] == 1
+    representative = next(
+        entry
+        for entry in report["warnings"]["representatives"]
+        if entry["category"] == "macro_area_excluded"
+    )
+    assert "sram_8x8" in representative["text"]
+
+
+def test_response_flags_a_non_macro_cell_with_no_liberty_area(tmp_path, monkeypatch):
+    """The same disclosure covers a `-dont_use`d/unmapped standard cell --
+    which is why the response field is a *cell* list, not a macro list --
+    under its own warning category, since the disposition differs."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[],
+        liberty_cells={
+            "sky130_fd_sc_hd__xor2_1": 7.5,
+            "sky130_fd_sc_hd__a211o_1": 8.75,
+            "sky130_fd_sc_hd__dfrtp_1": None,
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["cells_without_area"] == ["sky130_fd_sc_hd__dfrtp_1"]
+    assert "cells_without_liberty_area" in report["warnings"]["by_category"]
+    assert "macro_area_excluded" not in report["warnings"]["by_category"]
+
+
+def test_cells_without_area_reports_types_when_every_parsed_cell_lacks_area(
+    tmp_path,
+):
+    """A liberty with parseable `cell (...)` groups but no `area` on any of
+    them is not "unparseable": every instantiated type is unaccounted for and
+    must be named, and the AC2 warning must fire."""
+    liberty = tmp_path / "noarea.lib"
+    liberty.write_text(
+        "library(test) { cell(BUF) { pin(A) { direction : input; } } }\n",
+        encoding="utf-8",
+    )
+    missing = synthesize._cells_without_area(str(liberty), {"BUF": 1, "sram": 1})
+
+    assert missing == ["BUF", "sram"]
+    warning = synthesize._macro_area_warning(missing, frozenset({"sram"}))
+    assert "macro_area_excluded" in warning
+
+
+def test_macro_area_warning_does_not_point_a_lef_only_macro_at_its_lib():
+    """Issue #4368: `response.macros[].lib` is null for a LEF-only macro, so
+    the text must not tell the caller to add its area from there."""
+    warning = synthesize._macro_area_warning(
+        ["lef_only", "with_lib"],
+        frozenset({"lef_only", "with_lib"}),
+        macros_with_lib=frozenset({"with_lib"}),
+    )["macro_area_excluded"]
+    assert "Add the area of with_lib from its macro liberty" in warning
+    assert "lef_only has no macro liberty" in warning
+    assert "Add the area of lef_only" not in warning
+
+    only_lef = synthesize._macro_area_warning(
+        ["lef_only"], frozenset({"lef_only"}), macros_with_lib=frozenset()
+    )["macro_area_excluded"]
+    assert "Add" not in only_lef
+    assert "no area is available" in only_lef
+
+
+def test_cells_without_area_is_null_when_the_liberty_declares_no_cells(
+    tmp_path, monkeypatch
+):
+    """ "Not establishable", never a fabricated empty list -- the fabricated
+    test liberty has no `cell (...)` group at all, exactly the case
+    `_liberty_cell_names` already takes the same posture on."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    assert run_synthesize(request_path)["cells_without_area"] is None
+
+
+def test_instance_counts_for_a_netlist_that_is_only_macros(tmp_path, monkeypatch):
+    """Issue #2635's third edge case: a design whose every instance is a
+    hard macro. `area_um2` is a real `0.0` and every instantiated type is
+    disclosed as unaccounted-for, rather than `0.0` passing for an answer."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[{"lef": "sram_8x8.lef"}],
+        liberty_cells={"sky130_fd_sc_hd__xor2_1": 7.5},
+    )
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats={
+            "num_wires": 4,
+            "num_cells": 2,
+            "area": 0.0,
+            "sequential_area": 0.0,
+            "num_cells_by_type": {"sram_8x8": 2},
+        },
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["instance_count"] == 2
+    assert report["area_um2"] == 0.0
+    assert report["instance_counts_by_type"] == {"sram_8x8": 2}
+    assert report["macro_instance_counts_by_type"] == {"sram_8x8": 2}
+    assert report["macro_instance_count"] == 2
+    assert report["cells_without_area"] == ["sram_8x8"]
+
+
+def test_macro_bearing_report_carries_no_absolute_paths(tmp_path, monkeypatch):
+    """`macros[]`'s own paths follow this verb's `{path, scope}` convention
+    (issue #1844) like every other path in its response -- a committed
+    report is evidence and must survive the envelope lint."""
+    request_path = _macro_success_env(
+        tmp_path,
+        monkeypatch,
+        macros=[
+            {
+                "lef": "sram_8x8.lef",
+                "lib": {"tt_025C_1v80": "sram_8x8_tt.lib"},
+            }
+        ],
+    )
+    _stub_yosys_success(monkeypatch, module_stats=_MACRO_MODULE_STATS)
+
+    report = run_synthesize(request_path)
+
+    assert env_provenance.find_absolute_path_fields(report) == []
+    assert report["macros"][0]["lef"]["path"].endswith("sram_8x8.lef")
+
+
+def test_undeclared_module_error_points_at_request_macros(tmp_path, monkeypatch):
+    """A macro instantiated by the RTL but absent from `request.macros`
+    must produce a clear, named error -- not a bare Yosys crash line that
+    says nothing about which request field fixes it."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-V"]:
+            return fake_completed(stdout="Yosys 0.69 (git sha1 deadbeef, Release)\n")
+        if cmd[:3] == ["yosys", "-p", "help abc"]:
+            return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
+        return fake_completed(
+            returncode=1,
+            stderr=(
+                "ERROR: Module `\\sram_8x8' referenced in module `\\gcd' in "
+                "cell `\\u_sram' is not part of the design.\n"
+            ),
+        )
+
+    _patch_yosys_run(monkeypatch, fake_run)
+
+    with pytest.raises(SynthesizeError) as excinfo:
+        run_synthesize(request_path)
+    message = str(excinfo.value)
+    assert "is not part of the design" in message
+    assert "request.macros" in message
+    assert "sram_8x8" in message
+
+
+# ---------------------------------------------------------------------------
+# Issue #2745: `memory_mapping` / `blackbox_modules` (stubbed Yosys). The
+# pure classification rules are covered in `test_synthesize_memory.py`;
+# these exercise the wiring through `run_synthesize`.
+# ---------------------------------------------------------------------------
+
+
+def _ram_evidence(pre_lowering: int = 1) -> tuple[dict, dict]:
+    elaborated = {
+        "\\gcd": {
+            "num_memories": 1,
+            "num_memory_bits": 128,
+            "num_cells_by_type": {"$memrd": 1, "$memwr_v2": 1},
+        }
+    }
+    pre = {"\\gcd": {"num_memories": 0, "num_cells_by_type": {"$mem_v2": pre_lowering}}}
+    return elaborated, pre
+
+
+def test_memory_mapping_default_is_none_detected_and_metrics_unchanged(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"] == {
+        "status": "none_detected",
+        "reason": None,
+        "modules": [],
+        "script_path": report["memory_mapping"]["script_path"],
+    }
+    evidence_script = _abs_path(report["memory_mapping"]["script_path"], tmp_path)
+    assert evidence_script.endswith("gcd_memory_evidence.ys")
+    assert os.path.dirname(evidence_script) == os.path.dirname(
+        _abs_path(report["script_path"], tmp_path)
+    )
+    assert report["blackbox_modules"] == []
+    # Existing metrics come from the production stats only.
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_mapping_production_script_has_no_evidence_passes(tmp_path, monkeypatch):
+    """The production script stays the pre-#2745 pass sequence: the
+    evidence passes live only in the side script."""
+    # Pin the run directory to a UUID whose hex contains "abc": the evidence
+    # script embeds absolute output paths under ``run-<uuid4 hex>``, so a
+    # raw substring check flaked whenever the random hex spelled "abc"
+    # (klayout-tools#3279). Pinning it keeps that case exercised every run.
+    pinned = uuid.UUID("854c2957aabc47319f036781e1b0a79e")
+    monkeypatch.setattr(synthesize.uuid, "uuid4", lambda: pinned)
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    production = Path(_abs_path(report["run_script_path"], tmp_path)).read_text()
+    assert "-run :fine" not in production
+    assert "select -list" not in production
+    assert production.count(" stat ") == 1
+    evidence = Path(_abs_path(report["memory_mapping"]["script_path"], tmp_path))
+    evidence_text = evidence.read_text()
+    assert "synth -top gcd -run :fine" in evidence_text
+    # Compare pass names as command words, not substrings: the script's
+    # ``tee -o <path>`` arguments carry a random run directory.
+    words = set(re.split(r"[\s;]+", evidence_text))
+    assert "run-854c2957aabc47319f036781e1b0a79e" in evidence_text
+    # abc9 is an ABC mapping pass too; the whole-word match must still catch it.
+    assert not any(re.fullmatch(r"abc9?", w) for w in words)
+    assert "dfflibmap" not in words
+    assert "write_verilog" not in words
+
+
+def test_memory_mapping_reports_lowered_ram(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, memory_evidence=_ram_evidence())
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "lowered_to_logic"
+    assert mapping["modules"] == [
+        {
+            "module": "gcd",
+            "status": "lowered_to_logic",
+            "elaborated_memories": 1,
+            "elaborated_memory_bits": 128,
+            "pre_lowering_memories": 1,
+            "final_memories": 0,
+        }
+    ]
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_mapping_reports_optimized_away(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, memory_evidence=_ram_evidence(pre_lowering=0))
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"]["status"] == "optimized_away"
+
+
+def test_memory_mapping_reports_surviving_memory(tmp_path, monkeypatch):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "$mem_v2": 1},
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch, module_stats=stats, memory_evidence=_ram_evidence()
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["memory_mapping"]["status"] == "surviving"
+    assert report["memory_mapping"]["modules"][0]["final_memories"] == 1
+
+
+def test_unrelated_blackbox_reported_separately_not_as_memory(tmp_path, monkeypatch):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {
+            **_GCD_MODULE_STATS["num_cells_by_type"],
+            "sram_like_macro": 1,
+        },
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats=stats,
+        blackbox_listing="sram_like_macro\nsram_like_macro/a\nunused_bb\n",
+    )
+
+    report = run_synthesize(request_path)
+
+    # A memory-like *name* is not memory evidence; a declared blackbox with
+    # no surviving instance (`unused_bb`) is not reported as surviving.
+    assert report["memory_mapping"]["status"] == "none_detected"
+    assert report["blackbox_modules"] == ["sram_like_macro"]
+
+
+def test_memory_evidence_failure_is_indeterminate_and_never_fails_run(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+
+    def failing_evidence(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"] and cmd[2].endswith("_memory_evidence.ys"):
+            return fake_completed(
+                returncode=1, stderr=f"ERROR: evidence boom in {cmd[2]}\n"
+            )
+        return inner(cmd, **kwargs)
+
+    _patch_yosys_run(monkeypatch, failing_evidence)
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "indeterminate"
+    assert "evidence boom in .klt/synthesize/" in mapping["reason"]
+    # The engine's absolute path is reported repo-relative, never leaked.
+    assert str(tmp_path) not in mapping["reason"]
+    assert mapping["modules"] == []
+    assert report["blackbox_modules"] is None
+    assert report["instance_count"] == _GCD_MODULE_STATS["num_cells"]
+    assert report["area_um2"] == _GCD_MODULE_STATS["area"]
+
+
+def test_memory_evidence_missing_stage_is_indeterminate(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+
+    def silent_evidence(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"] and cmd[2].endswith("_memory_evidence.ys"):
+            return fake_completed(returncode=0)  # exits 0, writes nothing
+        return inner(cmd, **kwargs)
+
+    _patch_yosys_run(monkeypatch, silent_evidence)
+
+    report = run_synthesize(request_path)
+
+    mapping = report["memory_mapping"]
+    assert mapping["status"] == "indeterminate"
+    assert "elaborated" in mapping["reason"]
+    assert "pre_lowering" in mapping["reason"]
+    assert report["blackbox_modules"] is None
+
+
+def test_unsupported_design_error_preserved_without_evidence_run(tmp_path, monkeypatch):
+    """A production failure (e.g. an undefined, non-blackbox module) is still
+    the same hard error; the evidence invocation never runs."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    inner = synthesize.subprocess.run
+    scripts: list[str] = []
+
+    def failing_production(cmd, **kwargs):
+        if cmd[:2] == ["yosys", "-s"]:
+            scripts.append(cmd[2])
+            return fake_completed(
+                returncode=1,
+                stderr="ERROR: Module `\\hard_macro' referenced in module `\\gcd' "
+                "in cell `\\u0' is not part of the design.\n",
+            )
+        return inner(cmd, **kwargs)
+
+    _patch_yosys_run(monkeypatch, failing_production)
+
+    with pytest.raises(SynthesizeError, match="is not part of the design"):
+        run_synthesize(request_path)
+    assert len(scripts) == 1
+    assert not scripts[0].endswith("_memory_evidence.ys")
+
+
+def test_cli_text_format_renders_memory_mapping_and_blackboxes(
+    tmp_path, monkeypatch, capsys
+):
+    stats = {
+        **_GCD_MODULE_STATS,
+        "num_cells_by_type": {**_GCD_MODULE_STATS["num_cells_by_type"], "hm": 1},
+    }
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        module_stats=stats,
+        memory_evidence=_ram_evidence(),
+        blackbox_listing="hm\n",
+    )
+
+    exit_code = main(["synthesize", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "memory_mapping: lowered_to_logic" in out
+    assert "gcd: lowered_to_logic (elaborated=1, pre_lowering=1, final=0)" in out
+    assert "blackbox_modules (area not included): hm" in out
+
+
+# --------------------------------------------------------------------------- #
+# Issue #3466: `parameters` override + unknown top-level request keys
+# --------------------------------------------------------------------------- #
+
+
+def test_load_request_rejects_unknown_top_level_key(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json", _base_request(paramters={"LAGS": 8})
+    )
+    with pytest.raises(SynthesizeError, match="unknown field 'paramters'"):
+        load_request(path)
+
+
+def test_load_request_tolerates_comment_and_schema(tmp_path):
+    path = _write_request(
+        tmp_path / "request.json",
+        _base_request(_comment="note", schema="klt.synthesize.request/1"),
+    )
+    assert load_request(path)["hdl_toplevel"] == "gcd"
+
+
+@pytest.mark.parametrize(
+    "parameters, match",
+    [
+        ([1], "must be a JSON object"),
+        ({"": 1}, "Verilog identifiers"),
+        ({"1BAD": 1}, "Verilog identifiers"),
+        ({"W": True}, "integer or a string"),
+        ({"W": 1.5}, "integer or a string"),
+        ({"W": [1]}, "integer or a string"),
+        ({"MODE": 'a"; shell rm'}, "outside the supported set"),
+        ({"MODE": "a\nb"}, "outside the supported set"),
+    ],
+)
+def test_run_synthesize_rejects_malformed_parameters(tmp_path, parameters, match):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    path = _write_request(
+        tmp_path / "request.json", _base_request(parameters=parameters)
+    )
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(path)
+
+
+def test_run_synthesize_applies_and_echoes_parameters(tmp_path, monkeypatch):
+    _setup_success_env(tmp_path, monkeypatch)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(parameters={"LAGS": 8, "MODE": "fast"}),
+    )
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    assert report["provenance"]["parameters"] == {"LAGS": 8, "MODE": "fast"}
+    lines = Path(scripts[0]).read_text(encoding="utf-8").splitlines()
+    chparam = 'chparam -set LAGS 8 -set MODE "fast" gcd'
+    assert chparam in lines
+    assert lines.index(chparam) < lines.index("hierarchy -check -top gcd")
+    first_read = next(i for i, ln in enumerate(lines) if ln.startswith("read_verilog"))
+    assert first_read < lines.index(chparam)
+
+
+def test_run_synthesize_without_parameters_emits_no_chparam(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["parameters"] == {}
+    assert report["provenance"]["parameters"] == {}
+    assert "chparam" not in Path(scripts[0]).read_text(encoding="utf-8")
+
+
+def test_check_synthesize_report_detects_parameter_drift(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    _write_request(tmp_path / "request.json", _base_request(parameters={"LAGS": 8}))
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["parameters"]["match"] is False
+    assert by_field["parameters"]["expected"] == {}
+    assert by_field["parameters"]["actual"] == {"LAGS": 8}
+    assert by_field["provenance.input.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_treats_missing_parameters_as_empty(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    del committed["parameters"]  # a report predating the field
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+
+
+def test_equivalence_gate_forwards_parameters_to_gold_side(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_equiv(request_path, timeout_s=None):
+        captured.update(json.loads(Path(request_path).read_text(encoding="utf-8")))
+        return {
+            "status": "equivalent",
+            "engine": "yosys",
+            "engine_version": "0",
+            "timeout_s": 1,
+            "elapsed_s": 0.1,
+            "artifacts": {},
+        }
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    kwargs = dict(
+        synthesize_output_dir=str(tmp_path),
+        resolved_sources=["a.v"],
+        hdl_toplevel="gcd",
+        netlist_path="n.v",
+        liberty_path="l.lib",
+        timeout_s=None,
+    )
+    synthesize._verify_synthesis_equivalence(**kwargs, parameters={"W": 8})
+    assert captured["gold"]["parameters"] == {"W": 8}
+    assert "parameters" not in captured["gate"]
+
+    synthesize._verify_synthesis_equivalence(**kwargs)
+    assert "parameters" not in captured["gold"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #4196: `defines` (preprocessor -D) request key
+# --------------------------------------------------------------------------- #
+
+
+def test_read_verilog_line_defines_sorted_and_sv():
+    from klayout_tools._verilog_params import read_verilog_line
+
+    assert read_verilog_line("a.v") == "read_verilog a.v"
+    assert read_verilog_line("a.v", {}) == "read_verilog a.v"
+    assert (
+        read_verilog_line("a.v", {"B": "1", "A": None})
+        == "read_verilog -D A -D B=1 a.v"
+    )
+    assert read_verilog_line("a.sv", {"A": None}) == "read_verilog -sv -D A a.sv"
+
+
+@pytest.mark.parametrize(
+    "defines, match",
+    [
+        ([1], "must be a JSON object"),
+        ({"": None}, "Verilog identifiers"),
+        ({"1BAD": None}, "Verilog identifiers"),
+        ({"A": 1}, "string or null"),
+        ({"A": True}, "string or null"),
+        ({"A": 'x"y'}, "outside the supported set"),
+        ({"A": "x;y"}, "outside the supported set"),
+        ({"A": "x#y"}, "outside the supported set"),
+        ({"A": "x\\y"}, "outside the supported set"),
+        ({"A": "a\nb"}, "outside the supported set"),
+    ],
+)
+def test_run_synthesize_rejects_malformed_defines(tmp_path, defines, match):
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    path = _write_request(tmp_path / "request.json", _base_request(defines=defines))
+    with pytest.raises(SynthesizeError, match=match):
+        run_synthesize(path)
+
+
+def test_run_synthesize_applies_and_echoes_defines(tmp_path, monkeypatch):
+    _setup_success_env(tmp_path, monkeypatch)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(defines={"VARIANT_B": None, "WIDTH": "8"}),
+    )
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["defines"] == {"VARIANT_B": None, "WIDTH": "8"}
+    assert report["provenance"]["defines"] == {"VARIANT_B": None, "WIDTH": "8"}
+    text = Path(scripts[0]).read_text(encoding="utf-8")
+    assert "read_verilog -D VARIANT_B -D WIDTH=8 " in text
+
+
+def test_run_synthesize_without_defines_emits_no_flag(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    scripts = _record_yosys_scripts(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert report["defines"] == {}
+    assert report["provenance"]["defines"] == {}
+    assert " -D " not in Path(scripts[0]).read_text(encoding="utf-8")
+
+
+def test_check_synthesize_report_defines_match_and_drift(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+    assert synthesize.check_synthesize_report(report_path, request_path)["status"] == (
+        "match"
+    )
+
+    _write_request(
+        tmp_path / "request.json", _base_request(defines={"VARIANT_B": None})
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["defines"]["match"] is False
+    assert by_field["defines"]["expected"] == {}
+    assert by_field["defines"]["actual"] == {"VARIANT_B": None}
+
+
+def test_check_synthesize_report_treats_missing_defines_as_empty(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    del committed["defines"]  # a report predating the field
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+
+
+def test_equivalence_gate_forwards_defines_to_gold_side(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_run_equiv(request_path, timeout_s=None):
+        captured.update(json.loads(Path(request_path).read_text(encoding="utf-8")))
+        return {
+            "status": "equivalent",
+            "engine": "yosys",
+            "engine_version": "0",
+            "timeout_s": 1,
+            "elapsed_s": 0.1,
+            "artifacts": {},
+        }
+
+    monkeypatch.setattr(synthesize, "run_equiv", fake_run_equiv)
+    kwargs = dict(
+        synthesize_output_dir=str(tmp_path),
+        resolved_sources=["a.v"],
+        hdl_toplevel="gcd",
+        netlist_path="n.v",
+        liberty_path="l.lib",
+        timeout_s=None,
+    )
+    synthesize._verify_synthesis_equivalence(**kwargs, defines={"V": None})
+    assert captured["gold"]["defines"] == {"V": None}
+    assert "defines" not in captured["gate"]
+
+    synthesize._verify_synthesis_equivalence(**kwargs)
+    assert "defines" not in captured["gold"]
+
+
+_SV_PORT_ERROR = (
+    "t.sv:1: ERROR: syntax error, unexpected '[', expecting ')' or ',' or '='"
+)
+
+
+def test_synthesis_error_sv_unpacked_array_port_gets_hint():
+    msg = synthesize._synthesis_error_message(
+        fake_completed(stdout=_SV_PORT_ERROR, returncode=1)
+    )
+    assert _SV_PORT_ERROR in msg
+    assert "unpacked-array port" in msg
+    assert "-sv` front end does not support" in msg
+
+
+def test_synthesis_error_plain_v_gets_no_sv_hint():
+    line = _SV_PORT_ERROR.replace("t.sv", "t.v")
+    msg = synthesize._synthesis_error_message(fake_completed(stdout=line, returncode=1))
+    assert msg == f"yosys synthesis failed: {line}"
+
+
+def test_synthesis_error_unrelated_sv_error_unchanged():
+    line = "t.sv:3: ERROR: Module `foo' referenced but not defined"
+    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    assert msg == f"yosys synthesis failed: {line}"
+
+
+def test_synthesis_error_svh_mixed_sources_path_gets_hint():
+    line = "/tmp/a b/inc.svh:7: ERROR: syntax error, unexpected '[', expecting ')'"
+    msg = synthesize._synthesis_error_message(fake_completed(stderr=line, returncode=1))
+    assert "unpacked-array port" in msg
+
+
+_LIB_CELL_RTL = """\
+module libcell_inst(input a, output y);
+  sky130_fd_sc_hd__dlygate4sd3_1 u (.A(a), .X(y));
+endmodule
+"""
+
+_LIB_CELL_STUB = (
+    "(* blackbox *) module sky130_fd_sc_hd__dlygate4sd3_1(input A, output X);\n"
+    "endmodule\n"
+)
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+@pytest.mark.parametrize("with_stub", [False, True])
+def test_integration_real_yosys_library_cell_instance_needs_no_stub(
+    tmp_path, monkeypatch, with_stub
+):
+    """Issue #4205: RTL instantiating a cell of the request's own cell
+    library synthesizes with no hand-written blackbox stub; the instance
+    survives, its liberty area is counted, it is not reported as a blackbox,
+    and a legacy stub for the same cell still works."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "libcell_inst.v", _LIB_CELL_RTL)
+    sources = ["libcell_inst.v"]
+    if with_stub:
+        _write(tmp_path / "stub.v", _LIB_CELL_STUB)
+        sources = ["stub.v", "libcell_inst.v"]
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=sources, hdl_toplevel="libcell_inst"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    assert report["instance_counts_by_type"] == {"sky130_fd_sc_hd__dlygate4sd3_1": 1}
+    assert report["instance_count"] == 1
+    assert report["area_um2"] > 0
+    assert report["blackbox_modules"] == []
+
+
+# --- constraints.abc_constr (issue #4662) ------------------------------------
+
+
+def _abc_constr_text(report: dict, tmp_path: Path) -> str:
+    script = _abs_path(report["script_path"], tmp_path)
+    return (Path(script).parent / "gcd_abc.constr").read_text(encoding="utf-8")
+
+
+def test_request_abc_constr_enables_constr_on_a_library_without_one(
+    tmp_path, monkeypatch
+):
+    """`constraints.abc_constr` gives a library with no built-in entry
+    `-constr`, and the capability warning no longer claims it was skipped."""
+    cell_library = "asap7sc7p5t_rvt"
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(
+        install_root,
+        "asap7A",
+        cell_library=cell_library,
+        corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
+    )
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": cell_library, "corner": "tt_025C_1v80"},
+            constraints={
+                "abc_constr": {"driving_cell": "BUFx2_ASAP7_75t_R", "load_ff": 3.5}
+            },
+        ),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    assert cell_library not in synthesize._ABC_CONSTR_INPUTS
+    report = run_synthesize(request_path)
+
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+    assert "-constr " in abc_line
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell BUFx2_ASAP7_75t_R\nset_load 3.5\n"
+    )
+    assert report["abc_constr"] == {
+        "source": "request",
+        "driving_cell": "BUFx2_ASAP7_75t_R",
+        "load_ff": 3.5,
+    }
+    assert "ABC -constr" not in json.dumps(report["warnings"])
+
+
+def test_request_abc_constr_overrides_the_builtin_entry(tmp_path, monkeypatch):
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {
+            "abc_constr": {
+                "driving_cell": "sky130_fd_sc_hd__o21a_2",
+                "load_ff": 12,
+            }
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _abc_constr_text(report, tmp_path) == (
+        "set_driving_cell sky130_fd_sc_hd__o21a_2\nset_load 12\n"
+    )
+    assert report["abc_constr"]["source"] == "request"
+
+
+def test_abc_constr_absent_reports_builtin_source(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    driving_cell, load_ff = synthesize._ABC_CONSTR_INPUTS["sky130_fd_sc_hd"]
+    assert report["abc_constr"] == {
+        "source": "builtin",
+        "driving_cell": driving_cell,
+        "load_ff": load_ff,
+    }
+    assert _abc_constr_text(report, tmp_path) == (
+        f"set_driving_cell {driving_cell}\nset_load {load_ff:g}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("abc_constr", "message"),
+    [
+        ("BUFx2", r"abc_constr must be a JSON object"),
+        ({"load_ff": 3}, r"abc_constr\.driving_cell is required"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2"},
+            r"abc_constr\.load_ff is required",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 1, "x": 1},
+            r"abc_constr has unknown key",
+        ),
+        (
+            {"driving_cell": "no_such_cell", "load_ff": 1},
+            r"abc_constr\.driving_cell 'no_such_cell' is not a cell",
+        ),
+        ({"driving_cell": "", "load_ff": 1}, r"abc_constr\.driving_cell must be"),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": 0},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": -2},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("nan")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": float("inf")},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": True},
+            r"abc_constr\.load_ff must be",
+        ),
+        (
+            {"driving_cell": "sky130_fd_sc_hd__o21a_2", "load_ff": "3"},
+            r"abc_constr\.load_ff must be",
+        ),
+    ],
+)
+def test_request_abc_constr_rejects_invalid_values(
+    tmp_path, monkeypatch, abc_constr, message
+):
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"abc_constr": abc_constr}
+    )
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match=message):
+        run_synthesize(request_path)

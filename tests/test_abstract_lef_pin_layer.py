@@ -50,7 +50,7 @@ _PAD_PITCH_UM = 2.0
 _PAD_Y0_UM = 1.0
 
 #: Enough of a real open_pdks KLayout LEF/DEF map file for
-#: `_resolve_layer_map`/`_load_gds_to_lef_layer_map` to translate the LEF
+#: `resolve_klayout_layer_map`/`load_gds_to_lef_layer_map` to translate the LEF
 #: layer names this fixture's macro declares. Copied in shape (not content)
 #: from the real `sky130A.map`, including the `NAME` pseudo-entry the parser
 #: must skip and the several-purposes-per-layer convention.

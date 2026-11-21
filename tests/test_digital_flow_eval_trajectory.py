@@ -46,7 +46,7 @@ import klayout.db as kdb
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
-from helpers.subprocess_fakes import fake_completed
+from helpers.subprocess_fakes import _patch_yosys_run, fake_completed
 from klayout_tools import functional_verification as fv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route, synthesize
@@ -281,6 +281,8 @@ def _fake_yosys_run(cmd, **kwargs) -> subprocess.CompletedProcess:
     if cmd[:3] == ["yosys", "-p", "help abc"]:
         return fake_completed(stdout=_ABC_HELP_WITH_DONT_USE)
     assert cmd[:2] == ["yosys", "-s"]
+    if cmd[2].endswith("_memory_evidence.ys"):
+        return fake_completed(returncode=0)  # Issue #2745 side run.
     stats_path, netlist_path = _script_output_paths(cmd[2])
     with open(stats_path, "w", encoding="utf-8") as handle:
         json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)
@@ -369,7 +371,7 @@ def _stub_engines(monkeypatch, *, engines: tuple[str, ...]) -> None:
         raise AssertionError(f"unexpected subprocess invocation: {cmd!r}")
 
     assert synthesize.subprocess is place_and_route.subprocess
-    monkeypatch.setattr(synthesize.subprocess, "run", fake_run)
+    _patch_yosys_run(monkeypatch, fake_run)
 
 
 def _make_layout(clean: bool) -> kdb.Layout:
@@ -393,6 +395,7 @@ def _stub_merge_def_to_gds(
         layout.write(kwargs["out_path"])
         layout.write(str(block_layout_path))
         return {
+            "output_dbu_um": 0.001,
             "path": None,
             "resolution": "none",
             "def_net_names": {

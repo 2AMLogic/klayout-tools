@@ -67,6 +67,37 @@ license that covers the rest of this repository (`klayout-tools`' own
 source code); only these specific upstream files carry the Apache-2.0
 license.
 
+## Pinned Tiny Tapeout DRC sample
+
+[`tt_gf0p2_drc_sample.json`](tt_gf0p2_drc_sample.json) records the shuttle
+and project commits, original authors and repositories for the two designs
+selected for issue #5084. PAL is 1×2 in the live index; Dog Battle is 1×1.
+The layouts and Apache-2.0 source archives are fetched at those commits,
+with license provenance recorded in the cache manifests; they are not
+vendored here. Fetches use the corpus fetcher's identifying User-Agent and
+one-second request pacing.
+
+Run the same check as the PR workflow:
+
+```bash
+uv run --frozen python scripts/tt_corpus_sample.py
+```
+
+Live measurement on 2026-11-17, checkout `d87e226ba`, KLayout 0.30.12:
+PAL passed in 118.798 seconds and Dog Battle in 67.967 seconds, both with
+`status: clean` and zero violations (about 3.1 minutes DRC total on the
+shared worker; CI timing may differ).
+
+The adapter runs only `tt_corpus_run.py --stages drc`, prints per-design
+wall time, and requires exactly the sample's records, exit zero, and clean
+DRC envelopes with zero violations. Missing inputs, skipped designs,
+timeouts, findings and partial coverage fail the check. This tests the
+curated gf180mcu deck, not the foundry's full signoff runset. The workflow
+allows 15 minutes total and bounds each design to 300 seconds, saving
+manifests and JSON reports as artifacts even on failure. Extract/LVS await
+the extract-timeout defect (#5893); the full Spot corpus run remains a
+separate increment of #5084.
+
 ## Golden fixtures — `tests/corpus/golden/`
 
 `tests/corpus/golden/<pdk>/<cell>.layers.json` holds the expected
@@ -399,6 +430,18 @@ see [`statime/README.md`](statime/README.md) for what they are and
 `native/statime/README.md` for the go/no-go result they back (**Go**,
 documented there).
 
+## Observability-spike fixtures — `tests/corpus/synth_observability/`
+
+A small original RTL state/probe design (`obs_core.v`, MIT, this repo), its
+explicit observation-free wrapper (`obs_core_func.v`), and the reproduction
+driver (`run_experiments.py`) backing issue #2746's synthesis
+observability negative-control design spike — see
+[`synth_observability/README.md`](synth_observability/README.md) for how to
+rerun it and
+[`docs/design/synthesize-observability-spike.md`](../../docs/design/synthesize-observability-spike.md)
+for the recorded results and recommendation. No test collects these files;
+the driver writes only to a caller-supplied scratch directory.
+
 ## Adding a new corpus file
 
 1. Download the file into `tests/corpus/<pdk>/`, verifying the upstream
@@ -418,3 +461,46 @@ net (device counts, cell/instance counts, DRC violation counts, ...) — the
 right bar for a metric drifting slightly without the underlying geometry
 becoming byte-different — see [`tests/golden_metrics/README.md`](../golden_metrics/README.md)
 (issue #248).
+
+## Tiny Tapeout corpus fetch cache (Epic #520 Phase 1.A, #5081)
+
+`scripts/tt_corpus_fetch.py` walks a Tiny Tapeout shuttle index, filters by
+PDK, and fetches each design's source archive (and GDS, when the index or a
+`--gds-url-template` names one) at its pinned commit into a content-addressed
+cache with a per-design provenance manifest (repo, commit, shuttle, PDK,
+license, fetch time). Designs with no readable license are marked `excluded`.
+A second run makes zero network requests (`--refresh-index` re-downloads the
+mutable shuttle index). The real index has no `pdk` field, so the PDK is
+derived from the shuttle id (`tt06` -> sky130A, `ttgf*` -> gf180mcuD); a
+`--pdk` that matches no project exits 3 instead of reporting an empty success.
+The seeds in `synth_e2e_validation/` and `place_and_route_tt_validation/`
+already draw their designs from the same `tt06.json` index; they are
+referenced, not migrated, and this tool does not rewrite their records.
+Offline tests: `tests/test_tt_corpus_fetch.py`, against
+`tests/fixtures/tt_corpus/tt06_index_captured.json` (a captured slice of the
+real index; hand-written cases are marked `"_synthetic": true`).
+
+## Tiny Tapeout corpus regression runner (Epic #520 Phase 1.B, #5082)
+
+`scripts/tt_corpus_run.py --shuttle <id> --cache-dir <dir>` runs `klt drc`,
+`klt lvs` and `klt extract` over the designs `tt_corpus_fetch.py` cached and
+writes one JSON record per (design, stage) at
+`<cache-dir>/runs/<shuttle>/<macro>/<stage>.json`: `outcome`
+(`pass`/`findings`/`error`/`timeout`/`crash`/`skipped`), `exit_code`,
+`duration_s`, `stderr_tail`, `tool_version`. A crash or timeout in one design
+never stops the run, and nothing is dropped: excluded designs, designs with no
+GDS, and LVS without a reference netlist (`--reference-dir`, `<macro>.spice`)
+get `skipped` records with a `reason`. A rerun skips pairs that already have a
+record (`--retry` redoes errors/timeouts/crashes, `--force` redoes all).
+Offline tests: `tests/test_tt_corpus_run.py` (injected runner, 6-design fixture).
+
+## Tiny Tapeout corpus defect triage (Epic #520 Phase 1.C, #5083)
+
+`scripts/tt_corpus_triage.py --shuttle <id> --cache-dir <dir> [--markdown]`
+clusters the non-passing records from `tt_corpus_run.py` by signature
+(`stage|outcome|normalized error`; for `findings`, the sorted DRC rule ids or
+LVS mismatch categories, not counts). Each cluster carries a count, up to 3
+cheapest-to-reproduce exemplars with attribution (repo, pinned commit, SPDX
+license from the 1.A manifest), the exact `klt` reproducer, and a drafted issue
+body. It never files issues: drafts are for human/Curator confirmation.
+Offline tests: `tests/test_tt_corpus_triage.py`.

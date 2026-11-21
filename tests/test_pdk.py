@@ -12,167 +12,25 @@ from pathlib import Path
 
 import pytest
 
+from helpers.pdk_install_fixtures import (
+    isolate_pdk_search_space,
+)
+from helpers.pdk_install_fixtures import (
+    make_cell_library as _make_cell_library,
+)
+from helpers.pdk_install_fixtures import (
+    make_ihp_stdcell_library as _make_ihp_stdcell_library,
+)
+from helpers.pdk_install_fixtures import (
+    make_install as _make_install,
+)
 from klayout_tools import pdk, pdk_cells
 from klayout_tools.cli import main
 
 
-def _make_install(root, variant, *, sources=None, assets=("ngspice",)):
-    """Fabricate an open_pdks-layout variant under ``root``.
-
-    Creates ``root/<variant>/libs.tech`` (the layout probe) plus a ``libs.tech``
-    subdir per requested asset (or ``libs.ref`` for ``libs_ref``), and an
-    optional ``SOURCES`` version stamp. Returns the variant directory.
-    """
-    variant_dir = root / variant
-    (variant_dir / "libs.tech").mkdir(parents=True)
-    for asset in assets:
-        if asset == "libs_ref":
-            (variant_dir / "libs.ref").mkdir(parents=True, exist_ok=True)
-        else:
-            (variant_dir / "libs.tech" / asset).mkdir(parents=True, exist_ok=True)
-    if sources is not None:
-        (variant_dir / "SOURCES").write_text(sources, encoding="utf-8")
-    return variant_dir
-
-
-def _make_cell_library(
-    variant_dir,
-    name,
-    *,
-    devices=("nfet_01v8", "pfet_01v8_hvt"),
-    family="sky130",
-    corners=(("tt_025C_1v80", 1.0, 25.0, 1.8),),
-    with_spice=True,
-    with_lib=True,
-    bare_device_names=False,
-    prefixed_operating_conditions=False,
-):
-    """Fabricate a `libs.ref/<name>` entry with `spice/`/`lib/` views.
-
-    ``devices`` are nfet/pfet flavor suffixes embedded in one synthetic SPICE
-    instance line each, matching real ``X<n> ... <model> w=... l=...``
-    instance lines. By default (``bare_device_names=False``) the model is
-    prefixed ``<family>_fd_pr__`` -- sky130's shape (`sky130_fd_pr__nfet_01v8`).
-    ``bare_device_names=True`` omits the prefix entirely -- gf180mcu's shape
-    (`nfet_06v0`), see issue #537. ``corners`` is an iterable of
-    ``(corner_name, nom_process, nom_temperature, nom_voltage)`` tuples, one
-    `.lib` file per entry. ``with_spice``/``with_lib`` let a test omit either
-    view to exercise the missing-view fallback.
-
-    ``prefixed_operating_conditions=True`` writes the `.lib` file's
-    `default_operating_conditions` attribute as `f"{name}__{corner_name}"`
-    instead of the bare ``corner_name`` -- gf180mcu_fd_sc_mcu9t5v0's real
-    shape (issue #820), where the vendor's own Liberty attribute already
-    carries the `<cell_library>__` prefix that sky130's files omit. The
-    on-disk filename is unaffected (still `<name>__<corner_name>.lib`).
-    """
-    lib_dir = variant_dir / "libs.ref" / name
-    if with_spice:
-        spice_dir = lib_dir / "spice"
-        spice_dir.mkdir(parents=True)
-        if bare_device_names:
-            lines = [
-                f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)
-            ]
-        else:
-            lines = [
-                f"X{i} a b c d {family}_fd_pr__{device} w=1u l=1u"
-                for i, device in enumerate(devices)
-            ]
-        (spice_dir / f"{name}.spice").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-    if with_lib:
-        lib_views_dir = lib_dir / "lib"
-        lib_views_dir.mkdir(parents=True)
-        for corner_name, process, temperature, voltage in corners:
-            operating_conditions = (
-                f"{name}__{corner_name}"
-                if prefixed_operating_conditions
-                else corner_name
-            )
-            content = (
-                f'    default_operating_conditions : "{operating_conditions}";\n'
-                f"    nom_process : {process};\n"
-                f"    nom_temperature : {temperature};\n"
-                f"    nom_voltage : {voltage};\n"
-            )
-            (lib_views_dir / f"{name}__{corner_name}.lib").write_text(
-                content, encoding="utf-8"
-            )
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    return lib_dir
-
-
-def _make_ihp_stdcell_library(
-    variant_dir,
-    name="sg13g2_stdcell",
-    *,
-    devices=("nfet",),
-    corners=(("typ_1p20V_25C", 1.0, 25.0, 1.2),),
-    with_spice=True,
-    with_lib=True,
-    with_lef=True,
-    tech_lef_filename="sg13g2_tech.lef",
-):
-    """Fabricate a `libs.ref/<name>` entry mirroring IHP-Open-PDK's real
-    `sg13g2_stdcell` shape (issue #1790, verified live against a real
-    fetched v0.3.0 install):
-
-    - Single-underscore `lib/` naming (`f"{name}_{corner}.lib"`), with
-      `default_operating_conditions` written as the full stem too -- IHP's
-      own `.lib` files embed the library name in that attribute, unlike
-      sky130's bare form.
-    - A `lef/` directory with **no** `techlef/` subdirectory at all -- just
-      the merged cell LEF (`f"{name}.lef"`) alongside a single,
-      corner-invariant tech LEF named after the *process*, not the library
-      (``tech_lef_filename``, default `sg13g2_tech.lef`, matching IHP's real
-      mismatch between the tech LEF's filename and `cell_library`'s name).
-    """
-    lib_dir = variant_dir / "libs.ref" / name
-    if with_spice:
-        spice_dir = lib_dir / "spice"
-        spice_dir.mkdir(parents=True)
-        lines = [f"X{i} a b c d {device} w=1u l=1u" for i, device in enumerate(devices)]
-        (spice_dir / f"{name}.spice").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-    if with_lib:
-        lib_views_dir = lib_dir / "lib"
-        lib_views_dir.mkdir(parents=True, exist_ok=True)
-        for corner_name, process, temperature, voltage in corners:
-            operating_conditions = f"{name}_{corner_name}"
-            content = (
-                f'    default_operating_conditions : "{operating_conditions}";\n'
-                f"    nom_process : {process};\n"
-                f"    nom_temperature : {temperature};\n"
-                f"    nom_voltage : {voltage};\n"
-            )
-            (lib_views_dir / f"{name}_{corner_name}.lib").write_text(
-                content, encoding="utf-8"
-            )
-    if with_lef:
-        lef_dir = lib_dir / "lef"
-        lef_dir.mkdir(parents=True, exist_ok=True)
-        (lef_dir / f"{name}.lef").write_text("# merged cell lef\n")
-        (lef_dir / tech_lef_filename).write_text("# tech lef\n")
-    lib_dir.mkdir(parents=True, exist_ok=True)
-    return lib_dir
-
-
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch, tmp_path):
-    """Scrub PDK env vars, redirect HOME, and empty the host search space.
-
-    Individual tests opt back into stores/prefixes by setting the module
-    constants (or ``$PDK_ROOT``) to controlled ``tmp_path`` locations.
-    """
-    monkeypatch.delenv("PDK_ROOT", raising=False)
-    monkeypatch.delenv("PDK", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    monkeypatch.setattr(pdk, "STORE_DIRS", [])
-    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [])
+    isolate_pdk_search_space(monkeypatch, tmp_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -377,6 +235,67 @@ def test_ambiguity_warning_is_none_when_unambiguous(tmp_path, monkeypatch):
     _make_install(tmp_path / "home" / ".ciel", "sky130A")
 
     assert pdk.ambiguity_warning(pdk.find_pdk(variant="sky130A")) is None
+
+
+def _make_gf180_root(tmp_path):
+    root = tmp_path / "gf"
+    for name in ("gf180mcuA", "gf180mcuB", "gf180mcuC", "gf180mcuD"):
+        _make_install(root, name)
+    return root
+
+
+def test_find_lists_alternative_variants_when_unselected(tmp_path):
+    root = _make_gf180_root(tmp_path)
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["variant"] == "gf180mcuA"
+    assert report["alternative_variants"] == ["gf180mcuB", "gf180mcuC", "gf180mcuD"]
+    warning = pdk.alternative_variants_warning(report)
+    assert warning is not None
+    assert "gf180mcuA" in warning and "gf180mcuB" in warning
+    assert "$PDK" in warning and "--pdk" in warning
+
+
+def test_find_alternative_variants_empty_when_pinned(tmp_path, monkeypatch):
+    root = _make_gf180_root(tmp_path)
+
+    explicit = pdk.find_pdk(root=str(root), variant="gf180mcuB")
+    assert explicit["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(explicit) is None
+
+    monkeypatch.setenv("PDK", "gf180mcuC")
+    via_env = pdk.find_pdk(root=str(root))
+    assert via_env["variant"] == "gf180mcuC"
+    assert via_env["alternative_variants"] == []
+
+
+def test_find_alternative_variants_empty_for_single_variant(tmp_path):
+    root = tmp_path / "one"
+    _make_install(root, "sky130A")
+
+    report = pdk.find_pdk(root=str(root))
+
+    assert report["alternative_variants"] == []
+    assert pdk.alternative_variants_warning(report) is None
+
+
+def test_cli_find_warns_on_stderr_for_alternative_variants(tmp_path, capsys):
+    root = _make_gf180_root(tmp_path)
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root)])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "klt: warning: no PDK variant selected" in captured.err
+
+    exit_code = main(["pdk", "find", "--pdk-root", str(root), "--format", "json"])
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["alternative_variants"] == [
+        "gf180mcuB",
+        "gf180mcuC",
+        "gf180mcuD",
+    ]
 
 
 def test_pdk_root_nonexistent_falls_through(tmp_path, monkeypatch):
@@ -656,6 +575,42 @@ def test_cli_find_text_surfaces_broken_symlink_count(tmp_path, capsys):
     assert "broken_symlinks: 1" in out
 
 
+def test_cli_find_text_names_shadowed_same_variant_roots(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    exit_code = main(["pdk", "find", "--pdk", "sky130A", "--format", "text"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    warnings = [line for line in out.splitlines() if line.startswith("warning:")]
+    assert warnings == [
+        f"warning: shadowed same-variant install: {home / '.volare'} "
+        "(search root: ~/.volare)"
+    ]
+
+
+def test_cli_find_text_unchanged_for_single_install_or_pinned_root(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(pdk, "STORE_DIRS", ["~/.ciel", "~/.volare"])
+    monkeypatch.delenv("PDK_ROOT", raising=False)
+    home = tmp_path / "home"
+    _make_install(home / ".ciel", "sky130A")
+    _make_install(home / ".volare", "sky130A")
+
+    main(["pdk", "find", "--pdk-root", str(home / ".ciel"), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+    single = tmp_path / "single"
+    _make_install(single, "sky130A")
+    main(["pdk", "find", "--pdk-root", str(single), "--format", "text"])
+    assert "warning:" not in capsys.readouterr().out
+
+
 # --------------------------------------------------------------------------- #
 # Flat single-PDK layout (issue #522 -- IHP-Open-PDK's SG13G2)
 #
@@ -766,7 +721,12 @@ def test_flat_layout_list_reports_single_variant(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13g2", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13g2",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
@@ -844,7 +804,12 @@ def test_flat_layout_list_reports_ihp_sg13cmos5l(tmp_path):
     install = report["installs"][0]
     assert install["root"] == str(root)
     assert install["variants"] == [
-        {"name": "ihp-sg13cmos5l", "version": None, "has_pcell_library": False}
+        {
+            "name": "ihp-sg13cmos5l",
+            "version": None,
+            "has_pcell_library": False,
+            "pcell_shim": "not_required",
+        }
     ]
 
 
@@ -1743,6 +1708,55 @@ def test_macros_excludes_std_cell_and_other_libraries(tmp_path):
     report = pdk.list_hard_macro_libraries(root=str(root))
 
     assert [macro["name"] for macro in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_macros_reports_structural_lef_lib_library_without_fd_ip(tmp_path):
+    """IHP's `sg13g2_sram` has no `_fd_ip_` in its name but ships lef+lib."""
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "ihp-sg13g2", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sg13g2_sram", views=("cdl", "gds", "lef", "lib"))
+    _make_macro_library(variant_dir, "sg13g2_stdcell")
+    _make_macro_library(variant_dir, "sg13g2_io")
+    (variant_dir / "libs.ref" / "sg13g2_pr").mkdir(parents=True)
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sg13g2_sram"]
+
+
+def test_macros_fd_ip_library_without_lib_view_still_reported(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("libs_ref",))
+    _make_macro_library(variant_dir, "sky130_fd_ip_sram_1k", views=("gds",))
+
+    report = pdk.list_hard_macro_libraries(root=str(root))
+
+    assert [m["name"] for m in report["macros"]] == ["sky130_fd_ip_sram_1k"]
+
+
+def test_variant_family_alias_resolves_ihp_install(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+
+    info = pdk.find_pdk(variant="sg13g2", root=str(root))
+
+    assert info["variant"] == "ihp-sg13g2"
+
+
+def test_variant_family_alias_exact_name_wins(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "ihp-sg13g2")
+    _make_install(root, "sg13g2")
+
+    assert pdk.find_pdk(variant="sg13g2", root=str(root))["variant"] == "sg13g2"
+
+
+def test_variant_family_alias_does_not_guess_sky130(tmp_path):
+    root = tmp_path / "install"
+    _make_install(root, "sky130A")
+
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="sky130", root=str(root))
 
 
 def test_macros_only_hard_macro_ip_present_no_std_cell(tmp_path):
@@ -2655,3 +2669,492 @@ def test_real_ihp_sg13g2_stdcell_resolves_lef_and_cell_library():
     )
     assert library["nominal_corner"] == "typ_1p20V_25C"
     assert library["nominal_supply_v"] == pytest.approx(1.2)
+
+
+# --------------------------------------------------------------------------- #
+# Shared root (~/pdks), ASAP7 layout, package compatibility (issue #2759)
+# --------------------------------------------------------------------------- #
+
+
+def _make_asap7(parent, name="asap7", *, libs=True, apr=True, klayout=True):
+    """Fabricate the supported lambdapdk-shaped ASAP7 tree under ``parent``."""
+    tree = parent / name
+    tree.mkdir(parents=True, exist_ok=True)
+    if klayout:
+        (tree / "base" / "setup" / "klayout").mkdir(parents=True)
+    if apr:
+        (tree / "base" / "apr").mkdir(parents=True)
+    if libs:
+        (tree / "libs").mkdir(parents=True)
+    return tree
+
+
+@pytest.fixture
+def shared_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "SHARED_ROOTS", ["~/pdks"])
+    shared = tmp_path / "home" / "pdks"
+    shared.mkdir()
+    return shared
+
+
+def test_asap7_resolved_from_shared_root(shared_home):
+    tree = _make_asap7(shared_home)
+    report = pdk.find_pdk(variant="asap7")
+    assert report["root"] == str(shared_home)
+    assert report["variant"] == "asap7"
+    assert report["resolved_via"] == "search root: ~/pdks"
+    assert report["assets"]["klayout"] == str(tree / "base" / "setup" / "klayout")
+    assert report["assets"]["libs_ref"] == str(tree / "libs")
+    for key in ("ngspice", "xschem", "magic", "netgen"):
+        assert report["assets"][key] is None
+    assert report["has_pcell_library"] is False
+    installs = pdk.list_pdks()["installs"]
+    assert [v["name"] for v in installs[0]["variants"]] == ["asap7"]
+
+
+def test_asap7_cli_find_json(shared_home, capsys):
+    _make_asap7(shared_home)
+    assert main(["pdk", "find", "--pdk", "asap7", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resolved_via"] == "search root: ~/pdks"
+    assert payload["compatibility"]["status"] == "unknown"
+
+
+def test_unrelated_asap7_directory_rejected(shared_home):
+    (shared_home / "asap7").mkdir()
+    (shared_home / "asap7" / "README").write_text("x")
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="asap7")
+    _make_asap7(shared_home, "asap7", libs=False)  # missing a marker
+    with pytest.raises(pdk.PdkNotFoundError):
+        pdk.find_pdk(variant="asap7")
+
+
+def test_asap7_flat_explicit_root(tmp_path):
+    tree = _make_asap7(tmp_path / "x")
+    report = pdk.find_pdk(root=str(tree))
+    assert report["variant"] == "asap7"
+    assert report["resolved_via"] == "--pdk-root flag"
+    assert report["ambiguous_roots"] == []
+
+
+def test_mixed_open_pdks_and_asap7_shared_root(shared_home):
+    _make_install(shared_home, "sky130A", sources="open_pdks abc")
+    _make_asap7(shared_home)
+    names = [v["name"] for v in pdk.list_pdks()["installs"][0]["variants"]]
+    assert names == ["asap7", "sky130A"]
+    assert pdk.find_pdk(variant="sky130A")["compatibility"]["status"] == "mismatch"
+
+
+def test_shared_root_precedence(tmp_path, monkeypatch, shared_home):
+    store = tmp_path / "store"
+    monkeypatch.setattr(pdk, "STORE_DIRS", [str(store)])
+    _make_install(store, "sky130A")
+    _make_install(shared_home, "sky130A")
+    report = pdk.find_pdk(variant="sky130A")
+    assert report["root"] == str(store)
+    assert [a["resolved_via"] for a in report["ambiguous_roots"]] == [
+        "search root: ~/pdks"
+    ]
+    env_root = tmp_path / "envroot"
+    _make_install(env_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(env_root))
+    assert pdk.find_pdk(variant="sky130A")["root"] == str(env_root)
+    explicit = tmp_path / "explicit"
+    _make_install(explicit, "sky130A")
+    report = pdk.find_pdk(variant="sky130A", root=str(explicit))
+    assert report["root"] == str(explicit)
+    assert report["ambiguous_roots"] == []
+
+
+def test_shared_root_missing_preserves_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(pdk, "SHARED_ROOTS", ["~/pdks"])  # does not exist
+    root = tmp_path / "prefix"
+    _make_install(root, "sky130A")
+    monkeypatch.setattr(pdk, "CONVENTIONAL_PREFIXES", [str(root)])
+    assert pdk.find_pdk()["root"] == str(root)
+
+
+def test_duplicate_shared_root_not_ambiguous(tmp_path, monkeypatch, shared_home):
+    _make_install(shared_home, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(shared_home))
+    report = pdk.find_pdk(variant="sky130A")
+    assert report["resolved_via"] == "PDK_ROOT environment variable"
+    assert report["ambiguous_roots"] == []
+
+
+def test_symlinked_shared_root_not_crash(tmp_path, monkeypatch, shared_home):
+    _make_asap7(shared_home)
+    link = tmp_path / "link"
+    link.symlink_to(shared_home)
+    monkeypatch.setenv("PDK_ROOT", str(link))
+    report = pdk.find_pdk(variant="asap7")
+    assert report["variant"] == "asap7"
+
+
+def _lambdapdk_asap7(shared_home, stamp):
+    tree = _make_asap7(shared_home)
+    if stamp is not None:
+        (shared_home / ".fetched-version").write_text(stamp, encoding="utf-8")
+    return tree
+
+
+@pytest.mark.parametrize(
+    ("stamp", "status"),
+    [
+        ("0.2.17\n", "match"),
+        ("0.2.16", "mismatch"),
+        (None, "unknown"),
+        ("  \n", "unknown"),
+    ],
+)
+def test_compatibility_states(shared_home, stamp, status):
+    _lambdapdk_asap7(shared_home, stamp)
+    compat = pdk.find_pdk(variant="asap7")["compatibility"]
+    assert compat["status"] == status
+    assert compat["package"] == "lambdapdk-asap7"
+    assert compat["expected"] == {"namespace": "lambdapdk-release", "value": "0.2.17"}
+    assert compat["source"] == "scripts/fetch-pdks.sh LAMBDAPDK_VERSION"
+    if status in ("match", "mismatch"):
+        assert compat["installed"]["namespace"] == "lambdapdk-release"
+        assert compat["installed_source"] == ".fetched-version"
+    else:
+        assert compat["installed"] is None
+
+
+def test_compatibility_not_declared_and_namespace_isolation(tmp_path):
+    from klayout_tools import pdk_compat
+
+    root = tmp_path / "r"
+    _make_install(root, "sky130B", sources="open_pdks 0.2.17")
+    compat = pdk.find_pdk(root=str(root))["compatibility"]
+    assert compat["status"] == "not_declared"
+    assert compat["package"] is None and compat["expected"] is None
+    assert (
+        pdk_compat.compare_identities(
+            {"namespace": "lambdapdk-release", "value": "0.2.17"},
+            {"namespace": "open_pdks-sources", "value": "0.2.17"},
+        )
+        == "unknown"
+    )
+    assert pdk_compat.compare_identities(None, None) == "unknown"
+
+
+def test_sources_formatting_preserved(tmp_path):
+    root = tmp_path / "r"
+    _make_install(root, "sky130A", sources="open_pdks abc\n\n  sky130 def  \n")
+    assert pdk.find_pdk(root=str(root))["version"] == "open_pdks abc; sky130 def"
+
+
+def test_cli_text_warning_and_exit_codes(shared_home, capsys):
+    _lambdapdk_asap7(shared_home, "0.0.1")
+    assert main(["pdk", "check", "--pdk", "asap7"]) == 0
+    captured = capsys.readouterr()
+    assert "compatibility: mismatch" in captured.out
+    assert "warning" in captured.err
+    assert main(["pdk", "env", "--pdk", "asap7"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out == [f"export PDK_ROOT={shared_home}", "export PDK=asap7"]
+
+
+def test_check_broken_symlink_exit_unchanged_with_asap7(shared_home):
+    tree = _make_asap7(shared_home)
+    (tree / "libs" / "dangling").symlink_to(tree / "nope")
+    assert main(["pdk", "check", "--pdk", "asap7"]) == 4
+
+
+# ---------------------------------------------------------------------------
+# ASAP7 technology package (issue #2758)
+#
+# The ASAP7 KLayout technology (.lyt/.lyp), LEF layer map and standard-cell
+# GDS all come from the checksum-pinned lambdapdk archive fetched by
+# scripts/fetch-pdks.sh. These tests use explicit repository-relative paths
+# on purpose: `klt pdk` does not resolve the lambdapdk tree (resolver work is
+# #2759). Nothing is written inside the repo; outputs go to tmp_path.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_ASAP7_ROOT = _REPO_ROOT / "pdks" / "lambdapdk" / "lambdapdk" / "asap7"
+_ASAP7_LYT = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyt"
+_ASAP7_LYP = _ASAP7_ROOT / "base" / "setup" / "klayout" / "asap7.lyp"
+_ASAP7_LAYERMAP = _ASAP7_ROOT / "base" / "apr" / "asap7.layermap"
+_ASAP7_LICENSE = _ASAP7_ROOT / "base" / "LICENSE"
+_ASAP7_STDCELL_GDS = (
+    _ASAP7_ROOT / "libs" / "asap7sc7p5t_rvt" / "gds" / "asap7sc7p5t_28_R.gds.gz"
+)
+
+_needs_asap7 = pytest.mark.skipif(
+    not all(
+        p.is_file()
+        for p in (_ASAP7_LYT, _ASAP7_LYP, _ASAP7_LAYERMAP, _ASAP7_STDCELL_GDS)
+    ),
+    reason=(
+        "pinned lambdapdk ASAP7 assets not found under pdks/lambdapdk -- "
+        "run scripts/fetch-pdks.sh to enable this test"
+    ),
+)
+
+# (layer, datatype) -> (stack, name prefix in the .lyp); one or more per
+# FEOL / MOL / BEOL group, including the fin layer.
+_ASAP7_EXPECTED = {
+    (1, 0): ("FEOL", "well drawing"),
+    (2, 0): ("FEOL", "fin drawing"),
+    (7, 0): ("FEOL", "Gate drawing"),
+    (11, 0): ("FEOL", "Active drawing"),
+    (16, 0): ("MOL", "LIG drawing"),
+    (17, 0): ("MOL", "LISD drawing"),
+    (18, 0): ("MOL", "V0 drawing"),
+    (19, 0): ("BEOL", "M1 drawing"),
+    (20, 0): ("BEOL", "M2 drawing"),
+    (21, 0): ("BEOL", "V1 drawing"),
+}
+
+
+def _asap7_lyp_names():
+    """Map (layer, datatype) -> list of layer names from the pinned .lyp."""
+    import xml.etree.ElementTree as ET
+
+    out = {}
+    for node in ET.parse(_ASAP7_LYP).getroot().iter("properties"):
+        source = node.findtext("source", "")
+        name = node.findtext("name", "")
+        if not source or "/" not in source:
+            continue
+        ld = source.split("@")[0]
+        layer, datatype = (int(x) for x in ld.split("/"))
+        out.setdefault((layer, datatype), []).append(name)
+    return out
+
+
+def _assert_view_applies_asap7_lyp(klay, layout, layer_datatypes):
+    """Show ``layout`` in a headless view, apply the .lyp, assert name + colour.
+
+    Colours are compared against the ``fill-color`` written in the pinned .lyp
+    itself, so the check follows the file rather than hard-coded values.
+    """
+    import xml.etree.ElementTree as ET
+
+    expected = {}
+    for node in ET.parse(_ASAP7_LYP).getroot().iter("properties"):
+        source = node.findtext("source", "")
+        if "/" in source:
+            ld = tuple(int(x) for x in source.split("@")[0].split("/"))
+            expected.setdefault(
+                ld, (node.findtext("name", ""), node.findtext("fill-color", ""))
+            )
+
+    view = klay.LayoutView()  # needs no display in batch mode
+    view.show_layout(layout, False)
+    view.load_layer_props(str(_ASAP7_LYP))
+    assert view.active_cellview().layout().cells() == layout.cells()
+    nodes = {
+        (n.source_layer, n.source_datatype): n
+        for n in view.each_layer()
+        if n.source_layer >= 0
+    }
+    for ld in layer_datatypes:
+        name, fill = expected[ld]
+        node = nodes[ld]
+        assert node.name == name, f"{ld}: view name {node.name!r} != .lyp {name!r}"
+        assert fill.startswith("#"), f"{ld}: .lyp has no fill-color"
+        assert node.fill_color & 0xFFFFFF == int(fill[1:], 16), (
+            f"{ld}: view fill colour {node.fill_color:#x} != .lyp {fill}"
+        )
+
+
+@_needs_asap7
+def test_asap7_asset_paths_and_license_exist():
+    for path in (_ASAP7_LYT, _ASAP7_LYP, _ASAP7_LAYERMAP, _ASAP7_STDCELL_GDS):
+        assert path.is_file(), f"missing pinned ASAP7 asset: {path}"
+    assert "BSD 3-Clause" in _ASAP7_LICENSE.read_text(), (
+        f"{_ASAP7_LICENSE} no longer states BSD-3-Clause; re-check provenance"
+    )
+
+
+@_needs_asap7
+def test_asap7_lyt_declares_technology_and_dbu():
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(_ASAP7_LYT).getroot()
+    assert root.findtext("name") == "ASAP7"
+    assert float(root.findtext("dbu")) == pytest.approx(0.00025)
+
+
+@_needs_asap7
+def test_asap7_lyp_maps_representative_feol_mol_beol_layers():
+    names = _asap7_lyp_names()
+    for ld, (stack, prefix) in _ASAP7_EXPECTED.items():
+        assert ld in names, (
+            f"{stack} layer {ld[0]}/{ld[1]} ({prefix}) missing from {_ASAP7_LYP}"
+        )
+        assert any(n.startswith(prefix) for n in names[ld]), (
+            f"{stack} layer {ld[0]}/{ld[1]}: expected name starting {prefix!r}, "
+            f"got {names[ld]}"
+        )
+
+
+@_needs_asap7
+def test_asap7_layermap_vias_agree_with_lyp():
+    mapping = {}
+    for line in _ASAP7_LAYERMAP.read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 4 and not line.lstrip().startswith("#") and parts[1] == "VIA":
+            mapping[parts[0]] = (int(parts[2]), int(parts[3]))
+    names = _asap7_lyp_names()
+    assert mapping["V0"] == (18, 0)
+    for layer, ld in mapping.items():
+        assert ld in names, f"layermap {layer} -> {ld} has no .lyp entry"
+
+
+def _klayout_db():
+    return pytest.importorskip(
+        "klayout.db", reason="klayout Python module not installed"
+    )
+
+
+def _read_with_asap7_tech(kdb, gds_path):
+    tech = kdb.Technology()
+    tech.load(str(_ASAP7_LYT))
+    assert tech.name == "ASAP7"
+    layout = kdb.Layout()
+    layout.read(str(gds_path), tech.load_layout_options)
+    return tech, layout
+
+
+@_needs_asap7
+def test_asap7_stdcell_gds_opens_with_tech_and_lyp():
+    kdb = _klayout_db()
+    klay = pytest.importorskip("klayout.lay", reason="klayout.lay unavailable")
+    _tech, layout = _read_with_asap7_tech(kdb, _ASAP7_STDCELL_GDS)
+    assert layout.dbu == pytest.approx(0.00025)
+    assert layout.cells() > 100
+    present = {(li.layer, li.datatype) for li in layout.layer_infos()}
+    for ld in ((2, 0), (7, 0), (19, 0)):
+        assert ld in present, f"std-cell GDS has no {ld[0]}/{ld[1]} shapes"
+
+    # Apply the .lyp to a view of this very layout and check names + colours.
+    _assert_view_applies_asap7_lyp(klay, layout, [(2, 0), (7, 0), (19, 0)])
+
+
+@_needs_asap7
+def test_asap7_generated_example_reopens_with_same_layer_mapping(tmp_path):
+    kdb = _klayout_db()
+    klay = pytest.importorskip("klayout.lay", reason="klayout.lay unavailable")
+    layout = kdb.Layout()
+    layout.dbu = 0.00025
+    top = layout.create_cell("ASAP7_EXAMPLE")
+    for layer, datatype in _ASAP7_EXPECTED:
+        li = layout.layer(layer, datatype)
+        top.shapes(li).insert(kdb.Box(0, 0, 1000, 1000))
+    out = tmp_path / "asap7_example.gds"
+    layout.write(str(out))
+
+    _tech, reread = _read_with_asap7_tech(kdb, out)
+    present = {(li.layer, li.datatype) for li in reread.layer_infos()}
+    assert present == set(_ASAP7_EXPECTED)
+    names = _asap7_lyp_names()
+    for ld, (_stack, prefix) in _ASAP7_EXPECTED.items():
+        assert any(n.startswith(prefix) for n in names[ld])
+    _assert_view_applies_asap7_lyp(klay, reread, list(_ASAP7_EXPECTED))
+
+
+@_needs_asap7
+def test_asap7_stdcell_gds_opens_with_klayout_binary_headless(tmp_path):
+    """The exact headless command documented in pdks/README.md."""
+    import shutil
+    import subprocess
+
+    klayout = shutil.which("klayout")
+    if klayout is None:
+        pytest.skip("klayout binary not on PATH")
+    script = tmp_path / "check.py"
+    script.write_text(
+        "import pya\n"
+        "tech = pya.Technology(); tech.load(lyt)\n"
+        "lay = pya.Layout(); lay.read(gds, tech.load_layout_options)\n"
+        "view = pya.LayoutView(); view.show_layout(lay, False)\n"
+        "view.load_layer_props(lyp)\n"
+        "names = {(n.source_layer, n.source_datatype): n.name"
+        " for n in view.each_layer() if n.source_layer >= 0}\n"
+        "assert names[(2, 0)].startswith('fin'), names.get((2, 0))\n"
+        "assert names[(19, 0)].startswith('M1'), names.get((19, 0))\n"
+        "print('OK', tech.name, lay.cells(), lay.dbu, names[(2, 0)])\n"
+    )
+    proc = subprocess.run(
+        [
+            klayout,
+            "-zz",
+            "-nc",
+            "-rd",
+            f"lyt={_ASAP7_LYT}",
+            "-rd",
+            f"gds={_ASAP7_STDCELL_GDS}",
+            "-rd",
+            f"lyp={_ASAP7_LYP}",
+            "-r",
+            str(script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "OK ASAP7" in proc.stdout
+
+
+_GF180MCU_FLAVOUR_DECK = """\
+.LIB typical
+ .lib 'sm141064.ngspice' nfet_03v3_t
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB ss
+ .lib 'sm141064.ngspice' nfet_03v3_s
+ .lib 'sm141064.ngspice' nfet_06v0_t
+ .lib 'sm141064.ngspice' nfet_06v0_nvt_t
+.ENDL
+*
+.LIB fs
+ .lib 'sm141064.ngspice' nfet_03v3_fs
+.ENDL
+"""
+
+
+def test_corners_gf180mcu_reports_per_flavour_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "gf180mcuD", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sm141064.ngspice", _GF180MCU_FLAVOUR_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="gf180mcuD")
+    by_corner = {c["corner"]: c for c in report["corners"]}
+
+    def devices(corner):
+        mos = next(s for s in by_corner[corner]["sections"] if s["family"] == "mos")
+        return {d["flavour"]: d["skew"] for d in mos["devices"]}
+
+    assert devices("typical") == {
+        "03v3": "typical",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    assert devices("ss") == {
+        "03v3": "skewed",
+        "06v0": "typical",
+        "06v0_nvt": "typical",
+    }
+    # Flavours the deck omits at a corner are unlisted, not guessed.
+    assert devices("fs") == {"03v3": "skewed", "06v0": None, "06v0_nvt": None}
+    # Family-level skew keeps its meaning; non-mos sections carry no devices.
+    ss_sections = {s["family"]: s for s in by_corner["ss"]["sections"]}
+    assert ss_sections["mos"]["skew"] == "skewed"
+    assert all("devices" not in s for f, s in ss_sections.items() if f != "mos")
+
+
+def test_corners_sky130_has_no_devices(tmp_path):
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "sky130A", assets=("ngspice",))
+    _make_corner_deck(variant_dir, "sky130.lib.spice", _SKY130_FIXTURE_DECK)
+
+    report = pdk.list_corners(root=str(root), variant="sky130A")
+    assert all("devices" not in s for c in report["corners"] for s in c["sections"])

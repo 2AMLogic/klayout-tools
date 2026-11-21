@@ -1,0 +1,34 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN top ;
+UNITS DISTANCE MICRONS 1000 ;
+COMPONENTS 6 ;
+    - b1 sky130_fd_sc_hd__clkbuf_4 ;
+    - b2 sky130_fd_sc_hd__clkbuf_4 ;
+    - b3 sky130_fd_sc_hd__clkbuf_8 ;
+    - b4 sky130_fd_sc_hd__clkbuf_4 ;
+    - ff1 sky130_fd_sc_hd__dfrtp_1 ;
+    - ff2 sky130_fd_sc_hd__dfrtp_1 ;
+END COMPONENTS
+PINS 6 ;
+    - clk + NET clk + DIRECTION INPUT + USE SIGNAL ;
+    - d1 + NET d1 + DIRECTION INPUT + USE SIGNAL ;
+    - d2 + NET d2 + DIRECTION INPUT + USE SIGNAL ;
+    - q1 + NET q1 + DIRECTION OUTPUT + USE SIGNAL ;
+    - q2 + NET q2 + DIRECTION OUTPUT + USE SIGNAL ;
+    - rst_n + NET rst_n + DIRECTION INPUT + USE SIGNAL ;
+END PINS
+NETS 10 ;
+    - c1 ( b4 A ) ( b2 A ) ( b1 X ) + USE SIGNAL ;
+    - c2 ( b3 A ) ( b2 X ) + USE SIGNAL ;
+    - c3 ( ff1 CLK ) ( b3 X ) + USE SIGNAL ;
+    - c4 ( ff2 CLK ) ( b4 X ) + USE SIGNAL ;
+    - clk ( PIN clk ) ( b1 A ) + USE SIGNAL ;
+    - d1 ( PIN d1 ) ( ff1 D ) + USE SIGNAL ;
+    - d2 ( PIN d2 ) ( ff2 D ) + USE SIGNAL ;
+    - q1 ( PIN q1 ) ( ff1 Q ) + USE SIGNAL ;
+    - q2 ( PIN q2 ) ( ff2 Q ) + USE SIGNAL ;
+    - rst_n ( PIN rst_n ) ( ff2 RESET_B ) ( ff1 RESET_B ) + USE SIGNAL ;
+END NETS
+END DESIGN

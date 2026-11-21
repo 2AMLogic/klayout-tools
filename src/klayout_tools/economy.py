@@ -74,6 +74,10 @@ from typing import Any
 from ._annotation import is_reserved_annotation_layer
 from ._layout import bbox_um_dict, cells_in_hierarchy, load_layout, resolve_top_cell
 from ._provenance import build_provenance
+from .economy_bands import leaf_bands
+from .economy_leaves import collect_leaf_placements, gap_position
+from .economy_pnr import attach_pnr, check_pnr_args
+from .economy_whatif import what_if_block_or_none
 
 SCHEMA_VERSION = 1
 
@@ -485,6 +489,94 @@ def _row_utilization(kdb: Any, top_cell: Any, dbu: float) -> dict[str, Any] | No
     }
 
 
+def _attribution_block(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    bbox: Any,
+    dbu: float,
+    annotation_pairs: set[tuple[int, int]],
+    flatten_wrappers: bool = False,
+) -> dict[str, Any]:
+    """Partition the top bbox into direct-child instance bboxes and the gap
+    components between them (issue #4660).
+
+    All sums are taken in integer dbu^2 so ``sums_to_total`` is exact:
+    ``sum(child bbox) - instance_overlap + sum(gap components) +
+    unattributed == bbox area``. Overlapping instance bboxes are counted
+    once (the double-counted area is reported as ``instance_overlap_um2``).
+    Array instances contribute one child per element. With
+    ``flatten_wrappers`` a child holding two or more direct instances is
+    recursively expanded into leaf placements named by hierarchical path
+    (``COMP[0]/OTA[0]``).
+    """
+    drawn_cache: dict[int, float] = {}
+
+    def drawn_area(child: Any) -> float:
+        if child.cell_index() not in drawn_cache:
+            drawn_cache[child.cell_index()] = _merged_region(
+                kdb, layout, child, annotation_pairs, recursive=True
+            ).area()
+        return drawn_cache[child.cell_index()]
+
+    leaves = collect_leaf_placements(kdb, top_cell, drawn_area, flatten_wrappers)
+
+    placed: list[tuple[str, Any]] = []
+    children: list[dict[str, Any]] = []
+    for name, cell_name, ibox, drawn_dbu2 in leaves:
+        placed.append((name, ibox))
+        ibox_area = ibox.area()
+        children.append(
+            {
+                "name": name,
+                "cell": cell_name,
+                "bbox_um": bbox_um_dict(ibox, dbu),
+                "bbox_area_um2": ibox_area * dbu * dbu,
+                "own_whitespace_um2": (ibox_area - drawn_dbu2) * dbu * dbu,
+            }
+        )
+    children.sort(key=lambda c: (-c["bbox_area_um2"], c["name"]))
+
+    union = kdb.Region()
+    for _, ibox in placed:
+        union.insert(ibox)
+    union = union.merged()
+    sum_children = sum(ibox.area() for _, ibox in placed)
+    overlap = sum_children - union.area()
+
+    remainder = (kdb.Region(bbox) - union).merged()
+    gaps: list[dict[str, Any]] = []
+    gap_total = 0
+    for polygon in remainder.each():
+        area = polygon.area()
+        if area <= 0:
+            continue
+        gap_total += area
+        gb = polygon.bbox()
+        gaps.append(
+            {
+                "position": gap_position(gb, bbox, placed),
+                "bbox_um": bbox_um_dict(gb, dbu),
+                "area_um2": area * dbu * dbu,
+            }
+        )
+    gaps.sort(key=lambda g: (-g["area_um2"], g["position"], g["bbox_um"]["left"]))
+
+    unattributed = bbox.area() - (sum_children - overlap) - gap_total
+    top_local = _merged_region(kdb, layout, top_cell, annotation_pairs, recursive=False)
+    block: dict[str, Any] = {
+        "children": children,
+        "gap_components": gaps,
+        "unattributed_um2": unattributed * dbu * dbu,
+        "instance_overlap_um2": overlap * dbu * dbu,
+        "top_level_drawn_area_um2": top_local.area() * dbu * dbu,
+        "sums_to_total": unattributed == 0,
+    }
+    if top_cell.child_instances() == 0:
+        block["bands"] = leaf_bands(kdb, layout, top_cell, bbox, dbu, annotation_pairs)
+    return block
+
+
 def _area_eff_block(
     *,
     dead_margins_um: dict[str, float],
@@ -587,6 +679,10 @@ def economy_report(
     area_eff_min_utilization: float | None = None,
     area_eff_max_empty_region_fraction: float | None = None,
     area_eff_require_bbox_tightness: bool = False,
+    what_if: str | None = None,
+    attribute: bool = False,
+    flatten_wrappers: bool = False,
+    pnr_report: str | None = None,
 ) -> dict[str, Any]:
     """Compute the layout-economy report for one top cell of a GDSII/OASIS
     stream.
@@ -612,7 +708,22 @@ def economy_report(
     ``False`` is simply not checked; the ``area_eff`` block is omitted
     entirely when none of them are given (same optional-block convention as
     ``budget``/``reference``).
+
+    ``what_if`` is the path to a ``moves.json`` (issue #4661; schema in
+    :mod:`klayout_tools.economy_whatif`): its instance translations and cell
+    reshapes are applied to the in-memory copy of the layout before
+    measuring, and the report gains an additive ``what_if`` block. It is an
+    area/overlap estimate only -- no file is written, no DRC runs, and the
+    block's ``legality`` is always ``"not_checked"``.
+
+    ``attribute`` (issue #4660) adds an ``attribution`` block partitioning
+    the top bbox into direct-child instance bboxes and gap components; see
+    :func:`_attribution_block`. Omitted when false. ``flatten_wrappers``
+    (issue #5179, requires ``attribute``) expands wrapper children into
+    leaf placements. ``pnr_report`` (issue #5181; needs ``attribute``) adds
+    ``attribution.pnr_decomposition``, see :mod:`klayout_tools.economy_pnr`.
     """
+    check_pnr_args(pnr_report, attribute)
     if grid_cols <= 0 or grid_rows <= 0:
         raise EconomyError(f"grid must be positive, got {grid_cols}x{grid_rows}")
     if max_empty_regions <= 0:
@@ -628,6 +739,8 @@ def economy_report(
 
     top_cell = resolve_top_cell(layout, top, EconomyError)
     dbu = layout.dbu
+
+    what_if_block = what_if_block_or_none(kdb, layout, top_cell, what_if, EconomyError)
 
     bbox = top_cell.bbox()
     if bbox.empty():
@@ -729,6 +842,14 @@ def economy_report(
     )
     if area_eff is not None:
         report["area_eff"] = area_eff
+
+    if what_if_block is not None:
+        report["what_if"] = what_if_block
+    if attribute:
+        report["attribution"] = _attribution_block(
+            kdb, layout, top_cell, bbox, dbu, annotation_pairs, flatten_wrappers
+        )
+        attach_pnr(report, kdb, top_cell, bbox, dbu, pnr_report)
 
     report["provenance"] = build_provenance(input_path=path)
 

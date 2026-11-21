@@ -57,16 +57,18 @@ OUTPUT_LOAD_PF = 0.03
 
 
 def _ensure_binary(crate_dir: str, name: str) -> str:
-    binary = os.path.join(crate_dir, "target", "release", name)
-    if not os.path.isfile(binary):
-        print(f"Building {name} (cargo build --release)...", file=sys.stderr)
-        subprocess.run(["cargo", "build", "--release"], cwd=crate_dir, check=True)
-    return binary
+    """Build (release, incremental) and return the path cargo reports for
+    ``name`` -- wherever the target directory is (issue #3189)."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+    from klayout_tools._native import build_cargo_binary
+
+    print(f"Building {name} (cargo build --release)...", file=sys.stderr)
+    return build_cargo_binary(crate_dir, name, release=True)
 
 
 def _resolve_liberty() -> str:
     sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
-    from klayout_tools.pdk import find_pdk  # noqa: E402
+    from klayout_tools.pdk import find_pdk
 
     pdk = find_pdk(variant="sky130A")
     libs_ref = pdk["assets"]["libs_ref"]

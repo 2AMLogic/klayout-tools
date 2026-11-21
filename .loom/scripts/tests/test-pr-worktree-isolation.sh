@@ -4,18 +4,26 @@
 # Verifies that:
 #   1. pr-worktree.sh creates a worktree at .loom/worktrees/pr-<N>/ with the
 #      .loom-managed sentinel (PR-mode entry).
-#   2. The orchestrator's main worktree HEAD is unchanged after a simulated
-#      doctor pass that targets an external-fork-style PR branch (`fix/foo-bar`).
-#   3. merge-pr.sh's regex tightening correctly classifies branch shapes:
-#      - `feature/issue-42` -> issue-style (clean up issue-42 worktree)
-#      - `release-1`        -> PR-style (clean up pr-<N> worktree)
-#      - `fix/foo-bar`      -> PR-style
-#      - `feature/issue-42-fix` (extra suffix) -> PR-style (strict regex)
-#   4. doctor.md (defaults/) documents the branch-isolation requirement.
+#   2. doctor.md (defaults/) documents the branch-isolation requirement,
+#      including the #9401 occupied-worktree yield (live process, no lease).
+#   3. pr-worktree.sh surfaces a clear diagnostic when the PR branch is already
+#      checked out elsewhere, and cleans up the partial pr-<N> worktree (#6264,
+#      #6594).
+#   4. pr-worktree.sh catches that collision up front — before any pr-<N>
+#      worktree is created at all — when `gh pr view` resolves the head branch
+#      (#6594).
+#   5. pr-worktree.sh on a non-colliding PR runs `gh pr checkout` inside the new
+#      pr-<N> worktree, never in the orchestrator checkout (#3358): a mock `gh`
+#      does a real `git checkout`, so a mis-directed `cd` visibly moves the
+#      orchestrator's branch/HEAD. The helper (not the test) writes the sentinel.
+#   6. judge.md and `pr-worktree.sh --help` agree on the Judge fallback (#11194).
 #
-# This is a static / simulation test — we do not exercise the real `gh pr
-# checkout` round-trip because that would require a live forge. The
-# correctness of the regex and worktree-path selection is what we care about.
+# Tests 3-5 run the real pr-worktree.sh against a throwaway git repo with a
+# mocked `gh`, since there is no live forge in CI. Branch-shape classification
+# is deliberately NOT asserted here: it is no longer shell logic. It lives in
+# `issue_number_of` (loom-daemon/src/merge_pr/cleanup_paths.rs, ported out of
+# merge-pr.sh in #8191) and the #3358 strict-regex regression cases are covered
+# by that module's own unit tests (loom-daemon/src/merge_pr/cleanup_paths/tests.rs).
 
 set -euo pipefail
 
@@ -24,7 +32,6 @@ SCRIPTS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 
 PR_WORKTREE_SH="$SCRIPTS_DIR/pr-worktree.sh"
-MERGE_PR_SH="$SCRIPTS_DIR/merge-pr.sh"
 # doctor.md is shipped (installed at .claude/commands/loom/doctor.md), so
 # resolve it the way each layout actually lays it out: the installed path
 # first (consumer repos, and Loom's own dogfooded checkout), falling back
@@ -36,21 +43,7 @@ else
     DOCTOR_MD="$REPO_ROOT/defaults/.claude/commands/loom/doctor.md"
 fi
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_PASSED=$((TESTS_PASSED + 1)); echo -e "  ${GREEN}PASS${NC}: $1"; }
-fail() { TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1)); echo -e "  ${RED}FAIL${NC}: $1"; }
-
-assert_grep() {
-    local pattern="$1" file="$2" msg="$3"
-    if grep -qE "$pattern" "$file"; then pass "$msg"; else fail "$msg (pattern: $pattern)"; fi
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 if [[ ! -f "$DOCTOR_MD" ]]; then
     echo -e "${RED}FATAL${NC}: doctor.md not found at $DOCTOR_MD"
@@ -71,23 +64,9 @@ assert_grep "# PR: " "$PR_WORKTREE_SH" \
 assert_grep "worktrees/pr-" "$PR_WORKTREE_SH" \
     "pr-worktree.sh uses .loom/worktrees/pr-<N>/ convention"
 
-# --- Test 2: merge-pr.sh uses strict regex and recognizes pr-<N> path ---
+# --- Test 2: doctor.md documents PR Branch Isolation ---
 echo ""
-echo "Test 2: merge-pr.sh uses strict branch regex + pr-<N> cleanup"
-assert_grep '\^feature/issue-\(\[0-9\]\+\)\$' "$MERGE_PR_SH" \
-    "merge-pr.sh uses strict ^feature/issue-([0-9]+)$ regex (tightened from trailing-digit heuristic)"
-assert_grep "worktrees/pr-" "$MERGE_PR_SH" \
-    "merge-pr.sh cleans up .loom/worktrees/pr-<N>/ path"
-# Confirm the loose trailing-digit heuristic is gone
-if grep -q "grep -oE '\[0-9\]+\$'" "$MERGE_PR_SH"; then
-    fail "merge-pr.sh still uses the loose trailing-digit regex (should be tightened)"
-else
-    pass "loose trailing-digit regex no longer present in merge-pr.sh"
-fi
-
-# --- Test 3: doctor.md documents PR Branch Isolation ---
-echo ""
-echo "Test 3: doctor.md documents the worktree-isolation rule"
+echo "Test 2: doctor.md documents the worktree-isolation rule"
 assert_grep "PR Branch Isolation" "$DOCTOR_MD" \
     "doctor.md has a 'PR Branch Isolation' section"
 assert_grep "pr-worktree\.sh" "$DOCTOR_MD" \
@@ -95,49 +74,79 @@ assert_grep "pr-worktree\.sh" "$DOCTOR_MD" \
 assert_grep "\^feature/issue-" "$DOCTOR_MD" \
     "doctor.md documents the feature/issue-<N> regex heuristic"
 
-# --- Test 4: branch-to-worktree classification (in-script regex simulation) ---
-echo ""
-echo "Test 4: branch classification regex (simulated)"
+# #9401: a live process in the PR worktree with no PR lease = yield, not reset.
+assert_grep "^### Occupied worktree: yield, never reset \(#9401\)" "$DOCTOR_MD" \
+    "doctor.md has the 'Occupied worktree' yield section (#9401)"
+assert_grep "After \`lease pr claim\` succeeds and \*\*before\*\* \`worktree\.sh\`" "$DOCTOR_MD" \
+    "occupied-worktree check runs after the lease claim, before worktree setup"
+assert_grep "readlink \"/proc/\\\$p/cwd\".*\|\| lsof -a -p" "$DOCTOR_MD" \
+    "occupied-worktree probe reads /proc cwd with an lsof fallback"
+assert_grep "\[ \"\\\$q\" = \"\\\$S\" \] \|\|" "$DOCTOR_MD" \
+    "occupied-worktree probe excludes the Doctor's own session"
+assert_grep "^post \`Doctor yielding: live process in <WT> \(pid <pid>: <command>\) with no PR$" "$DOCTOR_MD" \
+    "yield comment names the worktree, pid and command"
+assert_grep "lease; worktree left untouched\.\` and stop — no snapshot, reset or checkout\." "$DOCTOR_MD" \
+    "yield stops without touching the worktree"
+assert_grep "\*\*Occupied → yield\*\*: \`lease pr release\`, drop any \`loom:treating\` you added" "$DOCTOR_MD" \
+    "yield releases the lease and the doctor's own loom:treating"
+assert_grep "\*\*Cannot probe\*\* \(no \`pgrep\`, or neither \`/proc\` nor \`lsof\`\): treat a dirty" "$DOCTOR_MD" \
+    "documents the no-pgrep/no-lsof fallback (dirty = occupied)"
+occ_line=$(grep -n "^### Occupied worktree" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+pick_line=$(grep -n "^Pick the worktree by branch shape" "$DOCTOR_MD" | head -1 | cut -d: -f1)
+if [[ -n "$occ_line" && -n "$pick_line" && "$occ_line" -lt "$pick_line" ]]; then
+    pass "occupied-worktree check precedes worktree selection/checkout"
+else
+    fail "occupied-worktree check precedes worktree selection/checkout (occ=$occ_line pick=$pick_line)"
+fi
 
-classify_branch() {
-    local branch="$1"
-    if [[ "$branch" =~ ^feature/issue-([0-9]+)$ ]]; then
-        echo "issue:${BASH_REMATCH[1]}"
+# Behavioral: run the documented probe verbatim. A missing worktree must print
+# nothing (not every process); a reparented process inside one must be reported.
+probe_dir=$(mktemp -d)
+awk -v h="### Occupied worktree" 'index($0,h)==1{f=1} f&&/^```bash$/{g=1;next} g&&/^```$/{exit} g' "$DOCTOR_MD" > "$probe_dir/probe.txt"
+if [[ -s "$probe_dir/probe.txt" ]]; then
+    run_probe() { (cd "$probe_dir" && mkdir -p .loom/worktrees && sed "s#\.loom/worktrees/<issue-N|pr-N>#.loom/worktrees/$1#" probe.txt | bash 2>/dev/null); }
+    if [[ -z "$(run_probe nonexistent-1)" ]]; then
+        pass "occupied-worktree probe prints nothing for a nonexistent worktree"
     else
-        echo "pr"
+        fail "occupied-worktree probe prints processes for a nonexistent worktree"
     fi
-}
-
-assert_classify() {
-    local branch="$1" expected="$2"
-    local got
-    got=$(classify_branch "$branch")
-    if [[ "$got" == "$expected" ]]; then
-        pass "branch '$branch' -> $expected"
+    mkdir -p "$probe_dir/.loom/worktrees/pr-1"
+    # `setsid` is util-linux; macOS does not ship it (#12045). The subshell
+    # exiting right after the `&` already reparents the sleeper, which is the
+    # property the probe needs, so fall back to that rather than starting
+    # nothing. The sleeper outlives the probe by a wide margin: the probe runs
+    # `lsof` once per user process on macOS, which on a busy host took >30s
+    # and let the old `sleep 30` exit before the probe reached its pid.
+    sleeper_cmd="sleep 600"
+    launcher=()
+    command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+    (cd "$probe_dir/.loom/worktrees/pr-1" && {
+        ${launcher[@]+"${launcher[@]}"} $sleeper_cmd >/dev/null 2>&1 &
+        echo $! >"$probe_dir/sleeper.pid"
+    })
+    sleep 0.3
+    if run_probe pr-1 | grep -q "$sleeper_cmd"; then
+        pass "occupied-worktree probe reports a live process inside an existing worktree"
     else
-        fail "branch '$branch' expected '$expected', got '$got'"
+        fail "occupied-worktree probe misses a live process inside an existing worktree"
     fi
-}
+    kill "$(cat "$probe_dir/sleeper.pid" 2>/dev/null)" 2>/dev/null || true
+    pkill -u "$(id -u)" -f "^$sleeper_cmd\$" 2>/dev/null || true
+else
+    fail "could not extract the occupied-worktree probe snippet from doctor.md"
+fi
+rm -rf "$probe_dir"
 
-assert_classify "feature/issue-42"      "issue:42"
-assert_classify "feature/issue-3358"    "issue:3358"
-assert_classify "fix/foo-bar"           "pr"
-assert_classify "release-1"             "pr"            # tightening fix: no longer matches issue style
-assert_classify "fix-bug-42"            "pr"            # tightening fix: no longer matches issue style
-assert_classify "feature/issue-42-fix"  "pr"            # extra suffix -> not strict match
-assert_classify "jperla/fix-thing"      "pr"
-assert_classify "main"                  "pr"
-
-# --- Test 5: simulated doctor pass leaves orchestrator HEAD unchanged ---
+# --- Test 3: detached-HEAD collision is diagnosed clearly, not silent (#6264) ---
 echo ""
-echo "Test 5: doctor pass on 'fix/foo-bar' does not move orchestrator HEAD"
+echo "Test 3: pr-worktree.sh surfaces a clear diagnostic on the branch-collision failure (#6264), and cleans up after itself (#6594)"
 
+# Throwaway repo fixture shared by Tests 3, 4 and 5: a tiny origin + clone so the
+# real pr-worktree.sh runs real git commands without touching the real
+# workspace.
 TMP=$(mktemp -d /tmp/loom-pr-iso-test.XXXXXX)
 trap 'rm -rf "$TMP"; cd "$REPO_ROOT" 2>/dev/null || true' EXIT
 
-# Build a tiny throwaway repo so we exercise real git commands without
-# touching the real workspace. We simulate the doctor's worktree-creation
-# step only — we don't call `gh pr checkout` since there is no live forge.
 git init -q -b main "$TMP/origin.git" --bare
 git init -q -b main "$TMP/repo"
 cd "$TMP/repo"
@@ -146,62 +155,6 @@ git config user.name t
 git commit --allow-empty -q -m init
 git remote add origin "$TMP/origin.git"
 git push -q origin main
-
-ORCH_HEAD_BEFORE=$(git rev-parse HEAD)
-ORCH_BRANCH_BEFORE=$(git rev-parse --abbrev-ref HEAD)
-
-# Simulate what the corrected doctor flow does for an external-fork PR
-# whose branch is `fix/foo-bar`: create a `pr-<N>` worktree from origin/main
-# and "check out" a synthetic PR branch INSIDE that worktree. We don't have a
-# real PR, so we substitute a fake branch ref pointing at origin/main and
-# check it out inside the dedicated worktree.
-PR_NUM=999
-PR_BRANCH="fix/foo-bar"
-git update-ref "refs/heads/$PR_BRANCH" HEAD
-git worktree add --detach ".loom/worktrees/pr-$PR_NUM" origin/main >/dev/null 2>&1
-
-# Write a sentinel mirroring pr-worktree.sh
-mkdir -p ".loom/worktrees/pr-$PR_NUM"
-cat > ".loom/worktrees/pr-$PR_NUM/.loom-managed" <<EOF
-# Loom-managed worktree marker
-# PR: $PR_NUM
-EOF
-
-# Now "check out" the PR branch from INSIDE the worktree.
-(cd ".loom/worktrees/pr-$PR_NUM" && git checkout "$PR_BRANCH" >/dev/null 2>&1)
-
-ORCH_HEAD_AFTER=$(git rev-parse HEAD)
-ORCH_BRANCH_AFTER=$(git rev-parse --abbrev-ref HEAD)
-
-if [[ "$ORCH_HEAD_BEFORE" == "$ORCH_HEAD_AFTER" ]]; then
-    pass "orchestrator HEAD SHA unchanged after PR-worktree checkout"
-else
-    fail "orchestrator HEAD moved: $ORCH_HEAD_BEFORE -> $ORCH_HEAD_AFTER"
-fi
-if [[ "$ORCH_BRANCH_BEFORE" == "$ORCH_BRANCH_AFTER" ]]; then
-    pass "orchestrator branch unchanged ($ORCH_BRANCH_BEFORE)"
-else
-    fail "orchestrator branch moved: $ORCH_BRANCH_BEFORE -> $ORCH_BRANCH_AFTER"
-fi
-
-# Verify the worktree got the fork branch checked out
-WT_BRANCH=$(git -C ".loom/worktrees/pr-$PR_NUM" rev-parse --abbrev-ref HEAD)
-if [[ "$WT_BRANCH" == "$PR_BRANCH" ]]; then
-    pass "PR worktree HEAD is on '$PR_BRANCH'"
-else
-    fail "PR worktree HEAD expected '$PR_BRANCH', got '$WT_BRANCH'"
-fi
-
-# Verify sentinel exists in the pr-<N> worktree
-if [[ -f ".loom/worktrees/pr-$PR_NUM/.loom-managed" ]]; then
-    pass "pr-$PR_NUM worktree has .loom-managed sentinel"
-else
-    fail "pr-$PR_NUM worktree missing .loom-managed sentinel"
-fi
-
-# --- Test 6: detached-HEAD collision is diagnosed clearly, not silent (#6264) ---
-echo ""
-echo "Test 6: pr-worktree.sh surfaces a clear diagnostic on the branch-collision failure (#6264), and cleans up after itself (#6594)"
 
 # Reproduces (with a mocked `gh`, since this test has no live forge) the exact
 # mechanism confirmed by hand against a real PR while curating/building #6264:
@@ -215,9 +168,7 @@ echo "Test 6: pr-worktree.sh surfaces a clear diagnostic on the branch-collision
 # discovered via the `gh pr checkout` failure, and the partially-created
 # pr-<N> worktree must be removed rather than left behind.
 #
-# Still inside "$TMP/repo" from Test 5, with the same origin remote. Use a
-# different PR/branch pair (998 / feature/issue-998) to avoid colliding with
-# Test 5's pr-999 fixture.
+# Runs inside the throwaway "$TMP/repo" built above, against its origin remote.
 COLLIDE_BRANCH="feature/issue-998"
 git update-ref "refs/heads/$COLLIDE_BRANCH" HEAD
 # Simulate an existing builder worktree already holding the branch — the
@@ -246,12 +197,12 @@ MOCKEOF
 chmod +x "$MOCKBIN/gh"
 
 COLLIDING_WT_ABS="$(cd ".loom/worktrees/issue-998" && pwd)"
+
 set +e
 PR_OUT=$(PATH="$MOCKBIN:$PATH" LOOM_DEFAULT_BRANCH=main LOOM_TEST_COLLIDING_WT="$COLLIDING_WT_ABS" \
     "$PR_WORKTREE_SH" 998 2>&1)
 PR_RC=$?
 set -e
-
 if [[ "$PR_RC" -ne 0 ]]; then
     pass "pr-worktree.sh exits non-zero on the branch-collision failure"
 else
@@ -288,13 +239,13 @@ else
     pass "no dangling 'git worktree list' entry for pr-998 after cleanup"
 fi
 
-# --- Test 7: branch collision is caught up front, before any worktree is
+# --- Test 4: branch collision is caught up front, before any worktree is
 #     created at all, when 'gh pr view' can resolve the PR's head branch (#6594) ---
 echo ""
-echo "Test 7: pr-worktree.sh catches the collision up front and never creates a pr-<N> worktree (#6594)"
+echo "Test 4: pr-worktree.sh catches the collision up front and never creates a pr-<N> worktree (#6594)"
 
 # Still inside "$TMP/repo". Use PR 997 / feature/issue-997 to avoid colliding
-# with the pr-998/pr-999 fixtures above.
+# with Test 3's 998 fixture above.
 COLLIDE_BRANCH2="feature/issue-997"
 git update-ref "refs/heads/$COLLIDE_BRANCH2" HEAD
 git worktree add -q ".loom/worktrees/issue-997" "$COLLIDE_BRANCH2"
@@ -356,7 +307,99 @@ else
     pass "'gh pr checkout' was never called — up-front detection short-circuited before it"
 fi
 
+# --- Test 5: success path never moves the orchestrator checkout (#3358) ---
+echo ""
+echo "Test 5: pr-worktree.sh checks the PR branch out in pr-<N>, leaving the orchestrator checkout untouched (#3358)"
+
+# Still inside "$TMP/repo", on main. PR 999 / fix/foo-bar collides with nothing.
+# The PR branch must be a real commit AHEAD of main: with `update-ref ... HEAD`
+# a mis-directed checkout would move the branch name but not the SHA, which
+# would leave the SHA assertion below unable to fail.
+OK_BRANCH="fix/foo-bar"
+git checkout -q -b "$OK_BRANCH"
+git commit --allow-empty -q -m "pr 999 change"
+git checkout -q main
+ORCH_BRANCH_BEFORE="$(git rev-parse --abbrev-ref HEAD)"
+ORCH_SHA_BEFORE="$(git rev-parse HEAD)"
+
+MOCKBIN3=$(mktemp -d /tmp/loom-pr-iso-mockbin3.XXXXXX)
+trap 'rm -rf "$TMP" "$MOCKBIN" "$MOCKBIN2" "$MOCKBIN3"; cd "$REPO_ROOT" 2>/dev/null || true' EXIT
+cat > "$MOCKBIN3/gh" <<'MOCKEOF'
+#!/usr/bin/env bash
+# `gh pr view` resolves the head branch; `gh pr checkout` performs a REAL
+# `git checkout` in its cwd, so wherever pr-worktree.sh runs it is where HEAD
+# moves. (Unlike the Test 3 mock, which only prints a canned failure.)
+if [[ "$1" == "pr" && "$2" == "view" ]]; then
+    echo "$LOOM_TEST_HEAD_BRANCH"
+    exit 0
+fi
+if [[ "$1" == "pr" && "$2" == "checkout" ]]; then
+    git checkout -q "$LOOM_TEST_HEAD_BRANCH"
+    exit $?
+fi
+exit 0
+MOCKEOF
+chmod +x "$MOCKBIN3/gh"
+
+set +e
+PR_OUT3=$(PATH="$MOCKBIN3:$PATH" LOOM_DEFAULT_BRANCH=main LOOM_TEST_HEAD_BRANCH="$OK_BRANCH" \
+    "$PR_WORKTREE_SH" 999 2>&1)
+PR_RC3=$?
+set -e
+
+if [[ "$PR_RC3" -eq 0 ]]; then
+    pass "pr-worktree.sh exits 0 for a non-colliding PR"
+else
+    fail "pr-worktree.sh failed for a non-colliding PR (rc=$PR_RC3): $PR_OUT3"
+fi
+ORCH_BRANCH_AFTER="$(git rev-parse --abbrev-ref HEAD)"
+ORCH_SHA_AFTER="$(git rev-parse HEAD)"
+if [[ "$ORCH_BRANCH_AFTER" == "$ORCH_BRANCH_BEFORE" ]]; then
+    pass "orchestrator checkout stays on '$ORCH_BRANCH_BEFORE' (#3358)"
+else
+    fail "orchestrator checkout moved from '$ORCH_BRANCH_BEFORE' to '$ORCH_BRANCH_AFTER' (#3358 regression)"
+fi
+if [[ "$ORCH_SHA_AFTER" == "$ORCH_SHA_BEFORE" ]]; then
+    pass "orchestrator HEAD SHA is unchanged"
+else
+    fail "orchestrator HEAD moved from $ORCH_SHA_BEFORE to $ORCH_SHA_AFTER (#3358 regression)"
+fi
+PR999_BRANCH="$(git -C ".loom/worktrees/pr-999" rev-parse --abbrev-ref HEAD 2>/dev/null || echo MISSING)"
+if [[ "$PR999_BRANCH" == "$OK_BRANCH" ]]; then
+    pass "pr-999 worktree is on the PR branch ($OK_BRANCH)"
+else
+    fail "pr-999 worktree is on '$PR999_BRANCH', expected '$OK_BRANCH'"
+fi
+if grep -qx "# PR: 999" ".loom/worktrees/pr-999/.loom-managed" 2>/dev/null; then
+    pass "pr-999 worktree has the .loom-managed sentinel written by the helper"
+else
+    fail "pr-999 worktree is missing the helper-written .loom-managed sentinel with '# PR: 999'"
+fi
+
 cd "$REPO_ROOT"
+
+# --- Test 6: Judge guidance and helper --help agree on the fallback (#11194) ---
+echo ""
+echo "Test 6: judge.md and pr-worktree.sh --help agree (no fabricated judge-* checkout)"
+JUDGE_MD="$REPO_ROOT/defaults/.claude/commands/loom/judge.md"
+[[ -f "$REPO_ROOT/.claude/commands/loom/judge.md" ]] && JUDGE_MD="$REPO_ROOT/.claude/commands/loom/judge.md"
+HELP_OUT=$("$PR_WORKTREE_SH" --help 2>&1)
+assert_grep "pr-worktree\.sh <PR_NUMBER>" "$JUDGE_MD" \
+    "judge.md routes the no-builder-checkout case through pr-worktree.sh"
+assert_grep "Never.*invent a .judge-\*" "$JUDGE_MD" \
+    "judge.md forbids inventing a judge-* checkout after a helper failure"
+if grep -qE "Judge's supported review checkout" <<<"$HELP_OUT" \
+    && grep -qE "names the holder" <<<"$HELP_OUT" \
+    && grep -qE "invent a judge-\* directory" <<<"$HELP_OUT"; then
+    pass "pr-worktree.sh --help states the Judge fallback and its collision failure behavior"
+else
+    fail "pr-worktree.sh --help does not match the Judge fallback guidance"
+fi
+if grep -qE "use worktree\.sh instead" <<<"$HELP_OUT"; then
+    fail "pr-worktree.sh --help still redirects issue PRs to worktree.sh"
+else
+    pass "pr-worktree.sh --help no longer contradicts judge.md"
+fi
 
 # --- Summary ---
 echo ""

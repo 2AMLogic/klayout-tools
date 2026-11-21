@@ -48,7 +48,13 @@ from ..synthesize import (
     rerun_synthesize_report,
     run_synthesize,
 )
-from .output import emit_error, emit_success, render_rerun_drift, render_table
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    render_table,
+)
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
@@ -72,6 +78,10 @@ def run(args: argparse.Namespace) -> int:
         return emit_error(
             "synthesize", "--rerun requires --check <report>", args.format
         )
+    if args.skip_deck:
+        return emit_error(
+            "synthesize", "--skip-deck requires --check <report>", args.format
+        )
 
     try:
         report = run_synthesize(
@@ -80,6 +90,7 @@ def run(args: argparse.Namespace) -> int:
             pdk_root=args.pdk_root,
             verify_equivalence=args.verify_equivalence,
             equiv_timeout_s=args.equiv_timeout_s,
+            equiv_engine=args.equiv_engine,
             restructure_timing=args.restructure_timing,
             restructure_max_iterations=args.restructure_max_iterations,
         )
@@ -102,6 +113,12 @@ def _run_check(args: argparse.Namespace) -> int:
     hashes but never the request that produced it, so there is nothing to
     reconstruct the inputs from. See `_report_verify.py`'s module docstring.
     """
+    if args.skip_deck and args.rerun:
+        return emit_error(
+            "synthesize",
+            "--skip-deck is cheap-mode only; --rerun runs Yosys and needs the liberty",
+            args.format,
+        )
     try:
         if args.rerun:
             result = rerun_synthesize_report(
@@ -111,6 +128,7 @@ def _run_check(args: argparse.Namespace) -> int:
                 pdk_root=args.pdk_root,
                 verify_equivalence=args.verify_equivalence,
                 equiv_timeout_s=args.equiv_timeout_s,
+                equiv_engine=args.equiv_engine,
                 restructure_timing=args.restructure_timing,
                 restructure_max_iterations=args.restructure_max_iterations,
             )
@@ -120,27 +138,16 @@ def _run_check(args: argparse.Namespace) -> int:
                 args.request,
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
+                netlist_override=args.netlist,
+                skip_deck=args.skip_deck,
             )
     except SynthesizeError as exc:
         return emit_error("synthesize", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
-
-
-def _print_check_text(result: dict) -> None:
-    """`--format text` rendering of a cheap-mode `--check` result -- the same
-    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
 
 
 def _print_sta(report: dict) -> None:
@@ -174,6 +181,27 @@ def _print_sta(report: dict) -> None:
             f"sta.worst_reg_to_reg_path: {r2r['delay_ns']:.4f} ns "
             f"({r2r['startpoint']} -> {r2r['endpoint']})"
         )
+
+
+def _print_memory_mapping(report: dict) -> None:
+    """Render `memory_mapping` / `blackbox_modules` (issue #2745). `.get` so a
+    pre-#2745 report (e.g. `--check` input) still renders."""
+    memory_mapping = report.get("memory_mapping")
+    if memory_mapping is not None:
+        line = f"memory_mapping: {memory_mapping['status']}"
+        if memory_mapping.get("reason"):
+            line += f" ({memory_mapping['reason']})"
+        print(line)
+        for row in memory_mapping.get("modules") or []:
+            print(
+                f"  {row['module']}: {row['status']} "
+                f"(elaborated={row['elaborated_memories']}, "
+                f"pre_lowering={row['pre_lowering_memories']}, "
+                f"final={row['final_memories']})"
+            )
+    blackboxes = report.get("blackbox_modules")
+    if blackboxes:
+        print(f"blackbox_modules (area not included): {', '.join(blackboxes)}")
 
 
 def _print_text(report: dict) -> None:
@@ -228,6 +256,8 @@ def _print_text(report: dict) -> None:
     print(f"warnings: total={warnings['total']}")
     for category in sorted(warnings["by_category"]):
         print(f"  {category}: {warnings['by_category'][category]}")
+
+    _print_memory_mapping(report)
 
     print()
     # Issue #1844: `netlist_path`/`script_path` are the `{path, scope}`

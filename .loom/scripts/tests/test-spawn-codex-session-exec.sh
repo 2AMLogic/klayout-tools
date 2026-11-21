@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-spawn-codex-session-exec.sh — the session-exec invocation's shape
-# (issue #8518), split out of test-spawn-codex.sh (over the file-size ratchet
-# threshold; new assertions go in a sibling, per file-size-policy.md).
+# (issue #8518), split out of test-spawn-codex.sh.
 #
 # What #8518 fixed: `docker exec` inherits neither the caller's cwd nor its
 # environment, so the released invocation started Codex in the image's WORKDIR
@@ -18,6 +17,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SPAWN_CODEX="$(cd "$SCRIPT_DIR/.." && pwd)/spawn-codex.sh"
+# THIS checkout's build, up front, or nothing (#10662): the boundary below is
+# the real `loom-daemon session-exec posture`, and spawn-codex.sh execs it.
+# shellcheck source=lib/require-daemon-bin.sh
+source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
+loom_test_require_daemon_bin --self-only --path "$(cd "$SCRIPT_DIR/.." && pwd)" session-exec
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -55,7 +59,7 @@ assert_not_contains() {
 }
 
 TMPROOT="$(mktemp -d)"
-trap 'rm -rf "$TMPROOT"' EXIT
+source "$SCRIPT_DIR/lib/session-lock-sandbox.sh" "$TMPROOT"
 
 # A profile adopted by a prior `loom-daemon accounts session start` — marked
 # with the exact sentinel session_lifecycle::mark_session_managed writes.
@@ -96,12 +100,56 @@ out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
     LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
     LOOM_CODEX_HOME="$PROFILE" \
     LOOM_ROLE=curator LOOM_SWEEP_ID=sweep-1 ANTHROPIC_API_KEY=never-forward-me \
+    CARGO_PROFILE_DEV_DEBUG=line-tables-only \
     bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
 line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
 assert_contains "--env LOOM_ROLE=curator" "$line" "LOOM_ROLE is forwarded into the container"
 assert_contains "--env LOOM_SWEEP_ID=sweep-1" "$line" "LOOM_SWEEP_ID is forwarded into the container"
+assert_contains "--env CARGO_PROFILE_DEV_DEBUG=line-tables-only" "$line" "the #11190 debuginfo cap is forwarded into the container"
 assert_not_contains "never-forward-me" "$line" \
     "an ambient provider credential in the host env is never forwarded"
+
+# The dispatcher's lease context crosses with its claim marker, so the session
+# reads the lease its dispatcher published as its own; and the commit identity
+# git resolves on the host crosses as GIT_AUTHOR_*/GIT_COMMITTER_* (the session
+# image has no global git config).
+IDENT_HOME="$TMPROOT/ident-home"
+mkdir -p "$IDENT_HOME"
+printf '[user]\n\tname = fleet-bot[bot]\n\temail = 1+fleet-bot[bot]@users.noreply.example.invalid\n' > "$IDENT_HOME/.gitconfig"
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$IDENT_HOME" GIT_CONFIG_NOSYSTEM=1 \
+    LOOM_SWEEP_CLAIM_OWNED=20 LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20 LOOM_LEASE_HOST_ID=fleet-host-7 \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains "--env LOOM_SWEEP_CLAIM_OWNED=20" "$line" "the claim marker is forwarded into the container"
+assert_contains "--env LOOM_SWEEP_LEASE_RENEW_DISPATCHED=20" "$line" "the dispatch's lease-renewal marker is forwarded with it"
+assert_contains "--env LOOM_LEASE_HOST_ID=fleet-host-7" "$line" "the dispatcher's lease host id is forwarded with it"
+assert_contains "--env GIT_AUTHOR_NAME=fleet-bot[bot]" "$line" "the host's git user.name is forwarded as the author name"
+assert_contains "--env GIT_COMMITTER_NAME=fleet-bot[bot]" "$line" "…and as the committer name"
+assert_contains "--env GIT_AUTHOR_EMAIL=1+fleet-bot[bot]@users.noreply.example.invalid" "$line" "the host's git user.email is forwarded as the author email"
+assert_contains "--env GIT_COMMITTER_EMAIL=1+fleet-bot[bot]@users.noreply.example.invalid" "$line" "…and as the committer email"
+
+# An identity already exported wins over the host config; with neither, none is invented.
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$IDENT_HOME" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_AUTHOR_NAME=explicit-author \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains "--env GIT_AUTHOR_NAME=explicit-author" "$line" "an exported GIT_AUTHOR_NAME wins over the host config"
+assert_contains "--env GIT_COMMITTER_NAME=fleet-bot[bot]" "$line" "…while the unset committer name still comes from it"
+out="$(cd "$WS" && env -u CODEX_HOME -u LOOM_CODEX_PROFILE \
+    -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    LOOM_SWEEP_NICE=0 LOOM_CODEX_NO_EXEC=1 LOOM_WORKSPACE="$WS" \
+    LOOM_CODEX_HOME="$PROFILE" HOME="$TMPROOT/no-ident-home" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    bash "$SPAWN_CODEX" -p "hi" 2>&1 || true)"
+line="$(printf '%s\n' "$out" | grep '^spawn-codex would-exec:' || true)"
+assert_contains " -- codex exec " "$line" "a host with no git identity still dispatches"
+assert_not_contains "GIT_AUTHOR" "$line" "…and no identity is invented for the container"
+assert_not_contains "GIT_COMMITTER" "$line" "…for author or committer"
 
 # A non-adopted profile is untouched: bare-metal, no docker, no --workdir.
 GOOD="$TMPROOT/profiles/bare"
@@ -122,8 +170,6 @@ assert_not_contains "--workdir" "$out" "bare-metal dispatch has no docker --work
 # with JSON; the full property matrix is pinned in session_exec/posture_tests.rs.
 echo ""
 echo "Testing the session container boundary (#9979)..."
-source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
-loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" session-exec
 FAKE_DOCKER="$TMPROOT/fake-docker"
 cat > "$FAKE_DOCKER" <<'FAKE'
 #!/usr/bin/env bash
@@ -250,6 +296,34 @@ assert_contains "posture not verified (not-running)" "$out" "a missing container
 assert_not_contains "danger-full-access" "$out" "…and the sandbox is not dropped for it"
 out="$(session_run "$(state false "$HOST_LABEL")" bash "$SPAWN_CODEX" -p "hi" --dangerously-skip-permissions)"
 assert_not_contains "danger-full-access" "$out" "a stopped container is not treated as hardened either"
+
+# #10455: the REAL `session-exec host` names why it refuses. It announces
+# SESSION_DOWN when docker answered that the container cannot take a dispatch
+# (not running, restarting, or no such container), and only then: a probe it
+# had to abandon says nothing about the container, so that refusal stays
+# generic. Exit 78 in every case. `host` runs the `docker` on PATH.
+REFUSAL='# LOOM_SESSION_REFUSAL v=1 category=SESSION_DOWN'
+HOST_DOCKER_DIR="$TMPROOT/host-docker"
+mkdir -p "$HOST_DOCKER_DIR"
+host_refusal() {
+    # $1 = body of the fake docker; prints host's stderr then "rc=<code>"
+    printf '#!/usr/bin/env bash\n%s\n' "$1" > "$HOST_DOCKER_DIR/docker"
+    chmod +x "$HOST_DOCKER_DIR/docker"
+    ( { PATH="$HOST_DOCKER_DIR:$PATH" "$LOOM_DAEMON_SELF_BIN" session-exec host \
+          --container loom-codex-session-acct --workdir "$WS" -- true >/dev/null; } 2>&1; echo "rc=$?")
+}
+out="$(host_refusal 'echo false')"
+assert_contains "$REFUSAL" "$out" "session-exec host announces SESSION_DOWN for a container that is not running"
+# It took the dispatch lock before its inspect, in the sandbox, not under the
+# real ~/.loom (lib/session-lock-sandbox.sh, #10661).
+lss_expect_lock loom-codex-session-acct
+assert_contains "rc=78" "$out" "…and still refuses with 78"
+out="$(host_refusal 'echo "Error: No such object" >&2; exit 1')"
+assert_contains "$REFUSAL" "$out" "…and for a container docker does not have"
+out="$(host_refusal 'exec sleep 30')"
+assert_contains "probe abandoned (trigger=probe-deadline" "$out" "a wedged docker makes host abandon the probe"
+assert_not_contains "LOOM_SESSION_REFUSAL" "$out" "…which is NOT announced as SESSION_DOWN: the container may be running"
+assert_contains "rc=78" "$out" "…and refuses with 78 as it always did"
 
 # Escape hatch: keep the requested Codex sandbox (needs a userns-capable profile).
 out="$(session_run "$(state true "$HOST_LABEL")" env LOOM_CODEX_CONTAINER_SANDBOX=codex bash "$SPAWN_CODEX" -p "hi" --dangerously-skip-permissions)"

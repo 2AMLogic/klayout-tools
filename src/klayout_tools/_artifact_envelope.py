@@ -1,0 +1,43 @@
+"""Committable artifact envelope with a content digest (issue #4931)."""
+
+from __future__ import annotations
+
+import enum
+import os
+from typing import Any, Final
+
+from ._provenance import content_hash
+from .env_provenance import find_repo_root, repo_relative_path
+
+
+class _Anchor(enum.Enum):
+    CWD = "cwd"
+
+
+#: ``repo_root`` default: the repo containing the process's cwd, the historical
+#: anchor. A sentinel because ``None`` is already taken -- it means "no repo".
+ANCHOR_CWD: Final = _Anchor.CWD
+
+RepoRoot = str | os.PathLike[str] | None | _Anchor
+
+
+def hashed_path_envelope(
+    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
+) -> dict[str, Any]:
+    """``path`` as the committable ``{path, scope}`` envelope (relative to
+    ``repo_root``, never the absolute host path) plus ``sha256``: the
+    ``sha256:``-prefixed digest of the file as it stands now, or ``None`` when
+    it was not produced. Call after the producing process closed the file.
+
+    ``repo_root`` is the repo the ``"repo"`` scope is relative to; ``None``
+    means there is none (everything is ``external``). The default is the
+    invoking cwd's repo, which varies per invocation: a verb that reads a
+    request document passes the request's own repo root instead, so one run
+    yields one committed report from any directory (issue #6762)."""
+    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
+    if path is not None and root is None:
+        envelope: dict[str, Any] = {"path": None, "scope": "external"}
+    else:
+        envelope = repo_relative_path(path, repo_root=root)
+    envelope["sha256"] = content_hash(path)
+    return envelope

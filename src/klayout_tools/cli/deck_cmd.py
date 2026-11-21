@@ -27,11 +27,25 @@ to the release that shipped it.
   for one to be recognised, so a near-miss layout does not have to be
   diagnosed by reading the deck module's Python source.
 
-All five verbs emit through the shared envelope helpers in :mod:`.output` -- see
-``docs/json-contract.md``.
+- ``path`` (issue #3789) -- print the absolute path of a deck's standalone
+  KLayout DRC-DSL script (today only ``asap7``), usable as
+  ``klt drc --engine klayout --deck-file <path>`` from an installed package
+  where the repo-relative ``src/...`` path does not exist.
+
+- ``diff`` (issue #5680) -- compare two saved ``klt deck rules`` reports
+  (or one against this build's own table, the literal ``installed``) rule
+  by rule: added / removed / changed rules, rules that moved between
+  ``rules`` and ``unmodeled_rules``, and deck-level changes. The offline
+  answer to "which rules changed, and in which direction?" on every pin
+  bump of ``provenance.deck.content_hash``.
+
+All seven verbs emit through the shared envelope helpers in
+:mod:`.output` -- see ``docs/json-contract.md``.
 
 Exit codes:
-    0 - the query succeeded
+    0 - the query succeeded (for ``diff``: the two sides are identical)
+    3 - ``diff`` only: the two sides differ -- the report is still on
+        stdout, following the ``klt drc`` verdict-exit precedent
     1 - failed to run (invalid query, a query that matched no known release,
         or an unknown deck name) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
@@ -42,8 +56,11 @@ subcommand.)
 from __future__ import annotations
 
 import argparse
+import json
 
-from .._provenance import UnknownProvenanceDeckError, deck_identity
+from .._provenance import UnknownProvenanceDeckError, deck_identity, sha256_file
+from ..deck_diff import INSTALLED, DeckDiffError, compare_deck_rules
+from ..decks import deck_names
 from ..decks.history import (
     DeckHistoryError,
     deck_devices,
@@ -52,6 +69,11 @@ from ..decks.history import (
     resolve_deck,
 )
 from .output import emit_error, emit_success
+
+#: ``deck diff``'s verdict exit: the comparison ran and the two sides
+#: differ. The report is still on stdout -- the same 0/3 split ``klt drc``
+#: uses for clean/violations (docs/json-contract.md, "Exit codes").
+EXIT_DIFFERENT = 3
 
 
 def run_resolve(args: argparse.Namespace) -> int:
@@ -92,6 +114,51 @@ def run_hash(args: argparse.Namespace) -> int:
     }
     emit_success(payload, args.format, _print_hash_text)
     return 0
+
+
+def run_path(args: argparse.Namespace) -> int:
+    # Only decks that ship a standalone DRC-DSL script have a path to report;
+    # the Python rule-table decks (sky130, ...) are not files `--deck-file`
+    # can consume. Lazy import: asap7_rules is cheap but only this verb needs it.
+    from ..decks.asap7_rules import DECK_PATH
+
+    standalone = {"asap7": DECK_PATH}
+    if args.deck not in standalone:
+        if args.deck in deck_names():
+            return emit_error(
+                "deck path",
+                f"deck '{args.deck}' is a Python rule table, not a standalone "
+                "deck file; no path to report "
+                f"(decks with a standalone script: {', '.join(sorted(standalone))})",
+                args.format,
+            )
+        return emit_error(
+            "deck path",
+            f"unknown deck '{args.deck}' (known decks: {', '.join(deck_names())})",
+            args.format,
+        )
+
+    path = standalone[args.deck]
+    digest = sha256_file(str(path))
+    if digest is None:
+        return emit_error(
+            "deck path",
+            f"deck '{args.deck}' script is missing from this install: {path}",
+            args.format,
+        )
+    payload = {
+        "schema_version": 1,
+        "deck": args.deck,
+        "path": str(path.resolve()),
+        "content_hash": f"sha256:{digest}",
+    }
+    emit_success(payload, args.format, _print_path_text)
+    return 0
+
+
+def _print_path_text(report: dict) -> None:
+    # Bare path on stdout so `$(klt deck path --deck asap7)` just works.
+    print(report["path"])
 
 
 def _print_hash_text(report: dict) -> None:
@@ -146,6 +213,141 @@ def run_devices(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_diff(args: argparse.Namespace) -> int:
+    try:
+        # An `installed` side needs a deck name: --deck when given, else the
+        # other side's own deck field, so the common one-install check
+        # (`--from saved.json --to installed`) needs no flag at all.
+        deck = args.deck
+        if deck is None and INSTALLED in (args.from_side, args.to_side):
+            file_spec = args.to_side if args.from_side == INSTALLED else args.from_side
+            if file_spec != INSTALLED:
+                deck = _deck_name_of_file(file_spec)
+        from_report = _load_diff_side(args.from_side, deck, "--from")
+        to_report = _load_diff_side(args.to_side, deck, "--to")
+        report = compare_deck_rules(from_report, to_report)
+    except (DeckDiffError, DeckHistoryError) as exc:
+        return emit_error("deck diff", str(exc), args.format)
+
+    emit_success(report, args.format, _print_diff_text)
+    return 0 if report["status"] == "identical" else EXIT_DIFFERENT
+
+
+def _deck_name_of_file(spec: str) -> str:
+    """The deck name a saved report carries, so an ``installed`` side can
+    be resolved without a ``--deck`` flag."""
+    try:
+        with open(spec, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except OSError as exc:
+        raise DeckDiffError(f"cannot read saved report {spec!r}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise DeckDiffError(f"saved report {spec!r} is not valid JSON: {exc}") from exc
+    deck = report.get("deck") if isinstance(report, dict) else None
+    if not isinstance(deck, str) or not deck:
+        raise DeckDiffError(
+            f"saved report {spec!r} carries no deck name, so the "
+            f"'{INSTALLED}' side cannot be resolved; pass --deck <name>"
+        )
+    return deck
+
+
+def _load_diff_side(spec: str, deck: str | None, side: str) -> dict:
+    """Resolve one ``--from``/``--to`` side: the literal ``installed``
+    resolves to this build's own ``deck_rules()`` table (named by ``deck``,
+    falling back to the other side's deck name so the common one-install
+    check needs no flag); anything else is a path to a saved
+    ``klt deck rules`` report. Raises :class:`DeckDiffError` for an
+    unreadable/invalid path or an unresolvable ``installed`` side."""
+    if spec == INSTALLED:
+        if deck is None:
+            raise DeckDiffError(
+                f"{side} is '{INSTALLED}' but no deck name is known: pass "
+                "--deck <name> (the other side is not a saved report to "
+                "take the deck name from)"
+            )
+        return deck_rules(name=deck)
+    try:
+        with open(spec, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except OSError as exc:
+        raise DeckDiffError(f"cannot read {side} report {spec!r}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise DeckDiffError(f"{side} report {spec!r} is not valid JSON: {exc}") from exc
+    return report
+
+
+def _print_diff_text(report: dict) -> None:
+    ident = report["identity"]
+    from_side, to_side = ident["from"], ident["to"]
+    print(f"deck: {from_side['deck']}")
+    print(f"from: {from_side['content_hash']} (schema {from_side['schema_version']})")
+    print(f"to:   {to_side['content_hash']} (schema {to_side['schema_version']})")
+    if ident["same_revision"]:
+        print("same revision: content_hash is identical on both sides")
+    summary = report["summary"]
+    if summary["identical"]:
+        print("no differences")
+        return
+    print(
+        f"different: {summary['added']} added, {summary['removed']} removed, "
+        f"{summary['changed']} changed, {summary['enforcement_changed']} "
+        f"enforcement, {summary['deck_level_changed']} deck-level, "
+        f"{summary['not_comparable']} not comparable "
+        f"(enforced: {summary['rules_enforced']['from']} -> "
+        f"{summary['rules_enforced']['to']})"
+    )
+    if report["added"]:
+        print(f"added ({len(report['added'])}): {', '.join(report['added'])}")
+    if report["removed"]:
+        print(f"removed ({len(report['removed'])}): {', '.join(report['removed'])}")
+    _print_changed_rules(report["changed"])
+    _print_enforcement_and_deck_level(report)
+    _print_not_comparable(report)
+
+
+def _print_changed_rules(changed: list) -> None:
+    """The ``changed`` section: one line per rule, then one indented line
+    per moved field."""
+    for entry in changed:
+        print(f"changed: {entry['id']}")
+        for field, move in entry["fields"].items():
+            print(
+                f"  {field}: {_diff_value(move['from'])} -> {_diff_value(move['to'])}"
+            )
+
+
+def _print_enforcement_and_deck_level(report: dict) -> None:
+    """The enforcement-move section (rules that moved between ``rules`` and
+    ``unmodeled_rules``) and the deck-level field moves."""
+    for entry in report["enforcement_changed"]:
+        print(f"enforcement changed: {entry['id']} {entry['from']} -> {entry['to']}")
+    for field, move in report["deck_level_changed"].items():
+        print(
+            f"deck-level: {field}: {_diff_value(move['from'])}"
+            f" -> {_diff_value(move['to'])}"
+        )
+
+
+def _print_not_comparable(report: dict) -> None:
+    """The not-comparable section: envelope fields the other side's schema
+    predates, then per-rule fields."""
+    not_comparable = report["not_comparable"]
+    if not_comparable["envelope_fields"]:
+        print(
+            f"not comparable (envelope): {', '.join(not_comparable['envelope_fields'])}"
+        )
+    for entry in not_comparable["rule_fields"]:
+        print(f"not comparable: {entry['id']} field {entry['field']}")
+
+
+def _diff_value(value) -> str:
+    """One side of a from/to rendering: scalars inline, containers as JSON."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return repr(value)
+    return json.dumps(value, sort_keys=True)
+
+
 def _layer_text(entry: dict | None) -> str:
     """One layer as ``"Pplus (31/0)"`` -- the deck's published name plus the
     raw GDS pair, or just the pair when the deck publishes no name for it.
@@ -155,6 +357,19 @@ def _layer_text(entry: dict | None) -> str:
     pair = f"{entry['layer']}/{entry['datatype']}"
     name = entry.get("name")
     return f"{name} ({pair})" if name else pair
+
+
+def _expression_text(node: dict) -> str:
+    """A derived ``marker_expression`` (issue #2860) as infix text, each
+    named node prefixed by its name, e.g. ``npn_mk = (1/0 & pwell = (2/0 -
+    3/0))``."""
+    joiner = " & " if node["op"] == "and" else " - "
+    parts = [
+        _expression_text(operand) if "op" in operand else _layer_text(operand)
+        for operand in node["operands"]
+    ]
+    body = f"({joiner.join(parts)})"
+    return f"{node['name']} = {body}" if node.get("name") else body
 
 
 def _layers_text(entries: list) -> str:
@@ -174,12 +389,19 @@ def _print_devices_text(report: dict) -> None:
         print()
         print(f"{entry['name']} ({entry['kind']})")
         print(f"  gating: {', '.join(gating) if gating else 'drawn geometry only'}")
-        print(f"  marker: {_layer_text(entry['marker'])}")
+        if entry.get("marker_expression") is not None:
+            print(f"  marker: {_expression_text(entry['marker_expression'])}")
+        else:
+            print(f"  marker: {_layer_text(entry['marker'])}")
         for terminal in entry["terminals"]:
             print(f"  terminal {terminal['name']}:")
             print(f"    layer: {_layer_text(terminal['layer'])}")
             print(f"    requires: {_layers_text(terminal['requires'])}")
             print(f"    excludes: {_layers_text(terminal['excludes'])}")
+            relation = terminal.get("relation")
+            if relation is not None:
+                via = " (via extents)" if relation["extents"] else ""
+                print(f"    relation: {relation['op']} {relation['source']}{via}")
         for flavour in entry.get("flavours", []):
             print(f"  flavour {flavour['flavour']}: {_layer_text(flavour['marker'])}")
         print(f"  required_layers: {_layers_text(entry['required_layers'])}")
@@ -204,6 +426,16 @@ def _print_rules_text(report: dict) -> None:
         if rule["scope"]:
             print(f"  scope: {rule['scope']}")
         print(f"  provenance: {_provenance_text(rule['provenance'])}")
+    _print_unmodeled(report["unmodeled_rules"], indent="")
+
+
+def _print_unmodeled(unmodeled: list, indent: str) -> None:
+    if unmodeled:
+        print()
+        print(
+            f"{indent}NOT ENFORCED by this deck: {len(unmodeled)} rule(s) -- "
+            f"{', '.join(unmodeled)}"
+        )
 
 
 def _provenance_text(provenance: dict | None) -> str:
@@ -224,12 +456,26 @@ def _provenance_text(provenance: dict | None) -> str:
 def _print_info_text(report: dict) -> None:
     for entry in report["decks"]:
         print(f"deck: {entry['deck']}")
-        print(f"  content_hash: {entry['content_hash']}")
+        print(f"  extraction deck content_hash: {entry['content_hash']}")
         print(f"  device_classes: {', '.join(entry['device_classes'])}")
-        print(f"  released: {entry['released']}")
-        release = entry["release"]
-        if release is not None:
+        _print_info_artifact(entry, indent="  ")
+        unmodeled = entry.get("unmodeled_rules") or []
+        if unmodeled:
             print(
-                f"  release: {release['package_version']} "
-                f"({release['git_tag']}, {release['git_commit']})"
+                f"  NOT ENFORCED by this deck: {len(unmodeled)} rule(s) -- "
+                f"{', '.join(unmodeled)}"
             )
+        drc_deck = entry.get("drc_deck")
+        if drc_deck is not None:
+            print(f"  drc deck content_hash: {drc_deck['content_hash']}")
+            _print_info_artifact(drc_deck, indent="  drc deck ")
+
+
+def _print_info_artifact(artifact: dict, *, indent: str) -> None:
+    print(f"{indent}released: {artifact['released']}")
+    release = artifact["release"]
+    if release is not None:
+        print(
+            f"{indent}release: {release['package_version']} "
+            f"({release['git_tag']}, {release['git_commit']})"
+        )

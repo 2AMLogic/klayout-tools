@@ -11,19 +11,25 @@ scripts/
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
-  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of IHP ihp-sg13cmos5l into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
+  fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
   fetch-sg13g2-sim-toolchain.sh  # provision the ngspice/OSDI half of an SG13G2 sim flow that fetch-ihp-sg13g2.sh does not (#1628)
+  fetch-asap7-sim-toolchain.sh   # compile the pinned CMC BSIM-CMG Verilog-A source to an OSDI module + load-verify it in ngspice, for ASAP7 FinFET simulation (#2814)
   fetch-cell-netlists.sh         # pinned, checksum-verified fetch of real gallery-cell SPICE netlists/models
   fetch-sky130-liberty.sh        # pinned, checksum-verified fetch of the real sky130_fd_sc_hd liberty klt synthesize needs
   install-yosys.sh               # build + install a pinned, checksum-verified Yosys from source (CI provisioning)
+  install-sv2v.sh                # install the pinned, checksum-verified sv2v release binary `klt synthesize`'s sv2v front end shells out to (CI provisioning, #5956)
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
   install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
   install-magic.sh               # build + install a pinned, checksum-verified magic from source for the DRC/extract cross-validation oracle (#2014)
   fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
-  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
+  _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh and fetch-*.sh scripts (#687, #5635)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
+  bootstrap-auditor-python.sh    # pinned, checksum-verified uv + managed CPython + host-local .venv + `klt` startup smoke for a Python-less Linux audit host (#2829)
+  release_prep.py                # mechanical release edits for release.yml (#4920)
+  release_notes.py               # build the GitHub Release notes from a CHANGELOG section for publish.yml (#5861)
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
+  check_file_size_baseline.py    # per-file line-size ratchet vs the merge-base, with file-size-baseline.json (#2766)
   native_source_fingerprint.py   # content fingerprint of a native crate's Rust sources; CI gates native-engine legs on it (#1889)
   install-openroad-docker.sh     # install an `openroad` Docker-wrapper onto $PATH (CI provisioning, #1328)
   place-and-route-smoke.sh       # synth -> place-and-route -> GDS -> `klt lvs` -> `klt drc` smoke pipeline (#1328)
@@ -120,6 +126,25 @@ lambdapdk payload.
 scripts/install-yosys.sh
 scripts/fetch-sky130-liberty.sh
 PDK_ROOT="$PWD/pdks/sky130-liberty" PDK=sky130A uv run pytest tests/test_synthesize.py -k integration
+```
+
+## `install-sv2v.sh`
+
+CI provisioning for `klt synthesize`'s `sv_frontend: "sv2v"` route (issue
+#5956): `.github/workflows/ci.yml`'s `test` job runs it so
+[`tests/test_synthesize_netlist_normalize.py`](../tests/test_synthesize_netlist_normalize.py)'s
+two real-sv2v reproducibility tests (issue #5594's AC2/AC4) — previously
+host-only, silently skipping on every CI leg — run there; the job also
+asserts that file reports zero skips. Unlike the source-building installers
+above, sv2v is a Haskell/Stack application, so this installs the pinned
+upstream release's prebuilt, checksum-verified `sv2v-Linux.zip` binary
+(Linux/CI only; macOS dev hosts: `brew install sv2v`) — same
+`--force`/idempotent/`$SV2V_INSTALL_PREFIX` conventions as
+`install-yosys.sh`.
+
+```
+scripts/install-sv2v.sh
+uv run pytest tests/test_synthesize_netlist_normalize.py -rs
 ```
 
 ## `install-icarus-verilog.sh` / `install-verilator.sh`
@@ -249,6 +274,86 @@ evidence; [`tests/test_ci_apt_install.py`](../tests/test_ci_apt_install.py)
 exercises every retry/timeout/fatal path against a fake `apt-get` and pins
 the workflow wiring.
 
+## `bootstrap-auditor-python.sh`
+
+Gives a Linux audit host that has a POSIX shell, `curl`, `tar` and
+`sha256sum`/`shasum` -- but **no Python and no `uv`** -- a working, host-local
+`klt` for the current checkout, then runs the startup smoke an Auditor needs
+(issue #2829). One command, no `sudo`:
+
+```
+scripts/bootstrap-auditor-python.sh
+```
+
+What it does, in order:
+
+1. Refuses a foreign `.venv` (see below) before downloading anything.
+2. Downloads the pinned `uv` release artifact for this CPU (`x86_64` or
+   `aarch64`, glibc Linux) from `github.com/astral-sh/uv/releases` and checks
+   it against the SHA-256 pinned in the script; a mismatch installs nothing.
+3. Installs a uv-managed CPython (default `3.12`; `--python X.Y` to choose,
+   refused if below `pyproject.toml`'s `requires-python` floor) into the
+   prefix. uv runs with `UV_PYTHON_PREFERENCE=only-managed`, so no system
+   interpreter is ever picked up, and with `--no-bin`, so nothing is written
+   to `~/.local/bin`.
+4. Runs `uv sync --locked --extra dev` into the checkout's `.venv`. `uv.lock`
+   is consumed, never rewritten -- a stale lock fails the run.
+5. Runs `klt --help`, `klt version --format json` and
+   `klt kb validate --format json` from that `.venv` (`--no-smoke` to skip).
+6. Prints a `KEY=value` summary on stdout -- `uv_version`, `uv_sha256`,
+   `python_version`, `python_path`, `environment`, `source_revision` (the
+   checkout's `HEAD`, `-dirty` if tracked files are modified), `smoke` -- for
+   the Auditor to record. Progress and command output go to stderr.
+
+**Ownership.** Everything except the `.venv` lives under one prefix, default
+`${XDG_CACHE_HOME:-$HOME/.cache}/klayout-tools-auditor` (`--prefix DIR` or
+`$KLT_AUDITOR_PREFIX` to choose; paths with spaces are fine):
+`uv-<version>-<target>/` (the verified `uv`), `python/` (managed CPython),
+`cache/` (uv's download/wheel cache). Delete the prefix to start over. Any
+`uv`/Python already on `PATH` is left alone and never used.
+
+**Idempotent.** Re-running with the same prefix reuses the verified `uv` (no
+download), lets `uv python install`/`uv sync --locked` no-op, and prints the
+same summary (`uv_action=reused`, `environment_action=synced`).
+
+**Foreign `.venv`.** An existing `.venv` is reused only if its `bin/python`
+resolves inside the prefix's `python/` directory. A dangling symlink (e.g. a
+`.venv` created on macOS pointing at `/Users/.../cpython-3.12.11-macos-aarch64-none/...`),
+an interpreter anywhere else on the host, a Windows-layout or non-venv
+directory is refused **without being executed** (exit 16). To recover,
+re-run with `--replace-venv`: the old directory is moved aside to
+`.venv.foreign-<UTC timestamp>` (gitignored, never deleted) and a fresh
+host-local `.venv` is built. Note this also applies to a `.venv` a developer
+made with their own `uv`; that is deliberate -- the bootstrap only vouches
+for environments it built.
+
+**Failures** exit non-zero with a distinct code and an actionable message:
+
+| Exit | Cause | Recovery |
+|------|-------|----------|
+| 2  | bad arguments | see `--help` |
+| 10 | not Linux, or CPU not `x86_64`/`aarch64` | run on a supported host |
+| 11 | `curl`, `tar` or a SHA-256 tool missing | provide the tool |
+| 12 | prefix cannot be created or written | pass a user-writable `--prefix` |
+| 13 | `uv` download failed / interrupted | check connectivity, re-run (nothing was installed) |
+| 14 | checksum mismatch, or unpacked `uv` is not the pinned version | do not override; investigate the mirror/proxy |
+| 15 | managed CPython install failed, or below the `requires-python` floor | check connectivity / `--python` |
+| 16 | `.venv` provenance mismatch | `--replace-venv` |
+| 17 | `uv sync --locked` failed (e.g. stale `uv.lock`) | fix the lock in the repo |
+| 18 | a `klt` smoke command failed | the message names the command and source revision |
+| 19 | no `pyproject.toml`/`uv.lock`, or uninterpretable `requires-python` | run from a full checkout |
+
+**Scope.** Repository-scoped only: no fleet image changes, no system
+packages, no credentials, no Rust toolchain (the default sync builds none of
+the `native/` crates), no change to the Python floor. A passing exact-commit
+CI run is not a substitute for this local startup check.
+
+**Re-pinning `uv`.** Update `UV_VERSION` and both `UV_SHA256_*` constants
+together from the release's own `uv-<target>.tar.gz.sha256` files (the
+script's header has the commands), and the matching constants in
+[`tests/test_bootstrap_auditor_python.py`](../tests/test_bootstrap_auditor_python.py),
+which exercises every path above offline against fake `curl`/`sha256sum`/`uv`.
+
 ## `install-openroad-docker.sh` / `place-and-route-smoke.sh`
 
 CI provisioning + pipeline for
@@ -266,7 +371,21 @@ mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
 the container too — falling back to `klt pdk find`'s own resolved root when
 `$PDK_ROOT` is unset, so the mount always matches what `klt
 place-and-route` will actually reference (issue #1868) — see the script's
-own header comment for why that matters.
+own header comment for why that matters. It also mounts `$TMPDIR` and the
+klt cache root (`$KLT_CACHE_DIR` itself when set, else
+`${XDG_CACHE_HOME:-$HOME/.cache}/klt`, `mkdir -p`'d as the caller and
+mounted `:ro`, skipped if it duplicates an already-mounted path) so the
+merged `.lib` a list-form `liberty` descriptor produces is readable inside
+the container (issue #5626). The container runs as the caller's
+uid:gid (`--user "$(id -u):$(id -g)"`, with `HOME` set to `$TMPDIR`) so files it
+writes into the mounted `$PWD`/`$TMPDIR` are not root-owned on Linux (issue
+#3151); re-run the installer to upgrade an older wrapper. It also forwards
+`PLATFORM_DIR` (when set, even if empty) and every `OPENROAD_*` variable from
+the caller into the container by name (`-e NAME`, issue #3821) so ORFS-style Tcl
+reading `$::env(PLATFORM_DIR)` works; the rest of the environment is not
+forwarded. Values pass verbatim, so a host-path `PLATFORM_DIR` only resolves if
+it lies under a mounted path (`$PWD`, `$PDK_ROOT`, `$TMPDIR`, plus `/tmp` when
+`$TMPDIR` differs from it, or the klt cache root).
 
 The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
 script), not by the moving `:latest` tag: both the `docker pull` and the
@@ -274,8 +393,8 @@ generated wrapper's `docker run` reference `openroad/orfs@sha256:…`, so every
 host and CI run executes the same OpenROAD build. Upstream publishes only a
 moving `:latest` tag, and before this pin two identically-provisioned fleet
 workers held different images under it (issue #2465). Bump the digest
-deliberately — with a `CHANGELOG.md` line, as with the pinned
-version + checksum in `install-yosys.sh`/`install-verilator.sh`/
+deliberately — with a [changelog fragment](../changelog.d/README.md), as with
+the pinned version + checksum in `install-yosys.sh`/`install-verilator.sh`/
 `install-magic.sh`/`install-icarus-verilog.sh`/`install-xyce.sh` — and record
 the new `openroad -version` string alongside it; the script's header comment
 carries the exact re-pin commands.
@@ -332,3 +451,135 @@ python scripts/ingest-canary.py --repo 2AMLogic/some-block --pdk sg13g2
 slug doesn't follow the `<pdk>-<name>` convention the script otherwise
 guesses from; an unknown name exits `1`, and an unguessable slug with no
 `--pdk` simply omits the field.
+
+## `check_file_size_baseline.py`
+
+CI's `lint` job enforces the per-file line-size ratchet (issue #2766).
+The checker reads the **trusted** baseline and measures file sizes at
+the **comparison revision**. The trusted
+`file-size-baseline.json` (repo root) authorizes existing oversized paths
+and vendor pins. The measured comparison size caps each oversized file's
+growth, even when the trusted entry records a larger or smaller value.
+
+**Scope.** Tracked first-party Python (`.py`), Rust (`.rs`), and shell
+(`.sh`) source — including tests, scripts, and examples. The vendored
+agent-tooling trees `.loom/`, `.claude/`, `.agents/` are not governed
+(same exclusion rationale as `pyproject.toml`'s `[tool.ruff]` exclude);
+neither are docs, binary fixtures, or generated reports (not source
+extensions). Counting is physical lines: blank and comment lines count,
+a final line without a trailing newline counts, an empty file is 0 lines.
+The hard limit is 500 lines. Files at or under it carry no baseline entry.
+An existing oversized file can carry forward its trusted entry if
+that value still covers the file, so concurrent shrinks can merge without
+ledger edits. You can also record the exact candidate size, including
+when re-seeding a lagging entry. A permitted rename must be proven by
+`git diff -M`, stay within the source's measured comparison size, and
+record the exact destination size.
+
+**What fails** (exit 1). Oversized files fail if they lack trusted
+permission, exceed their measured comparison size, or lack a proposed
+entry. An edited entry must match the current size. Entries for deleted
+files and files that are now at or below the hard limit must be removed.
+Vendor pins must match the candidate bytes and pass the policy below.
+Missing or malformed input, an unresolvable comparison revision, or a
+required comparison size that cannot be measured produces exit 2.
+
+**Vendored code is identified by content hash, never by directory name.**
+A hash pin in the trusted baseline exempts a file only while its actual
+bytes hash to the pinned value: moving first-party code under a directory
+named `vendor/` exempts nothing, renaming a pinned file drops the pin,
+and changing a pinned file's bytes drops it into ordinary checking (a
+routine PR cannot add or replace pins). Reviewed upstream vendor updates
+land through the narrow **vendor-refresh exception**: when the candidate's
+entire diff against the comparison revision touches only the baseline
+file and paths the trusted baseline already pins, replacing a pin's hash
+(same path, new upstream bytes) is permitted — a PR that touches any
+first-party file alongside the refresh keeps the strict rule. The scoping
+is mechanical, so the exception cannot authorize first-party growth or
+mint a pin for a file the trusted baseline never pinned.
+
+**Bootstrap.** When the comparison revision predates this checker (true
+of this gate's own landing PR), there is no baseline file to trust; the
+trusted baseline is then derived from that tree's actual measured content
+(every governed file over the limit gets a ceiling equal to its measured
+size there) and the vendor inventory starts empty — a bootstrap grants no
+hash exemptions. Brand-new oversized files that exist only in the
+candidate (the landing PR's own implementation, say) may enter the
+baseline at exactly their measured landing size — the landing diff is the
+review, and the must-equal rule pins the ceiling to reality. The
+proposed initial baseline therefore cannot simply authorize its own
+entries: it passes only by exactly recording actual content — no
+pre-existing file's ceiling may rise above its comparison-tree size, and
+no vendor pin may be minted.
+
+**Local workflow.** Normal check mode is read-only:
+
+```
+git fetch origin main
+python scripts/check_file_size_baseline.py --comparison-rev "$(git merge-base HEAD origin/main)"
+```
+
+To explicitly regenerate the proposed baseline, use `--update-baseline`.
+It records exact candidate sizes and carries forward vendor pins whose
+bytes still match. Run check mode afterward to validate the result.
+
+```
+python scripts/check_file_size_baseline.py --update-baseline
+```
+
+CI (`.github/workflows/ci.yml`, `lint` job) compares PRs against the
+merge-base with their actual target branch (the checkout is GitHub's
+merge result, so concurrent main changes are represented; the job's
+checkout uses `fetch-depth: 0` for the history) and pushes to main
+against the push's before SHA (covering multi-commit pushes). A missing
+comparison ref fails with fetch instructions instead of silently
+comparing against nothing. Pushes to `main` additionally get a dedicated
+per-commit verdict from `.github/workflows/file-size-ratchet-main.yml`
+(issue #6285): a merge commit can grow a file past the size either
+parent-side run measured, and the shared `ci.yml` main-run can be
+superseded while pending, so this sibling workflow keys its concurrency
+group on `github.sha` and runs only this checker against the push's
+before SHA.
+
+## `check_import_boundaries.py`
+
+Static CI gate (issue #2767) for `docs/ARCHITECTURE.md`'s "verb modules stay
+self-contained, except PDK resolution" rule. Pure stdlib AST analysis of
+`src/klayout_tools/**/*.py` -- it never imports the package, so it needs no
+KLayout or EDA tooling, and runs as a non-`continue-on-error` step of the
+`lint` job. Policy lives in [`import-boundaries.json`](../import-boundaries.json).
+
+```
+python scripts/check_import_boundaries.py                # check (read-only)
+python scripts/check_import_boundaries.py --strict-stale # also fail on unused entries
+python scripts/check_import_boundaries.py --inventory    # list internal imports as JSON
+```
+
+Exit `0` clean, `1` boundary violations, `2` invalid policy or unparseable
+source. Diagnostics are `path:line: [rule] message`, sorted deterministically.
+
+**Policy sections.** `groups` classify every module (a new, unclassified
+module fails with instructions); a `verb` group is a verb's core modules plus
+its `cli/*_cmd.py` adapter, so same-verb helper imports are free. Name
+mismatches are explicit (`sta` -> `post_route_sta`, `yield` ->
+`yield_analysis`, `gen` vs `gen_compose`, `sta`/`stats`). `shared` groups
+(`shared-core`, `pdk`) may be imported publicly by anyone. Cross-group public
+imports need `allowed_group_edges`. Importing a *private* (leading underscore)
+symbol across groups needs an exact `(consumer, exporter, symbol)` entry in
+`shared_private_permissions` (intended) or `legacy_exceptions.private_symbols`
+(grandfathered debt); `legacy_exceptions.module_edges` is the equivalent for
+module-edge debt. Privacy follows the original name, never the alias.
+Line numbers are not part of an exception's identity.
+
+**Maintenance.** Edit the JSON by hand and review it; CI never regenerates
+it. When a legacy import is cleaned up, delete its entry (`--strict-stale`
+lists entries that no longer match anything). Adding a new exception is a
+policy change that needs explicit review.
+
+**Limits.** Static and best-effort, not a sandbox or runtime dependency
+proof: `importlib`/`__import__`/`getattr`, values copied through variables
+(`m = alias; m._x`), re-export chains, and string annotations are not
+followed; a name bound more than once in a scope is not resolved for
+`alias._x` access; internal `from x import *` is rejected outright.
+`import-linter` 2.15 was evaluated and rejected: it models module-to-module
+edges only and cannot allow `_a` but forbid `_b` from the same module.

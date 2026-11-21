@@ -48,20 +48,17 @@ from ._layout import load_layout
 from ._layout import region as _region
 from ._layout import select_top_cells as _select_top_cells_shared
 from ._layout import texts as _texts
+from .components_errors import ComponentsError
+from .components_probe import probe_entry, probe_hits, validate_probes
+from .components_specs import (
+    validate_conductors,
+    validate_label_layers,
+    validate_vias,
+)
 
 #: Floating-point-noise cleanup applied to every micrometre value this module
 #: reports -- same precision ``extract.py``'s ``black_box_regions`` uses.
 _PRECISION_UM = 6
-
-
-class ComponentsError(Exception):
-    """Raised when a components report cannot even be attempted: a
-    missing/unreadable layout file, a malformed conductor/via/label-layer
-    spec, or a named ``top`` cell that is not present in the stream.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback.
-    """
 
 
 def run_components_report(
@@ -71,6 +68,7 @@ def run_components_report(
     label_layers: list[dict[str, Any]] | None = None,
     region_um: tuple[float, float, float, float] | None = None,
     top: str | None = None,
+    probes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Report every geometric connected component across ``conductors`` +
     ``vias``, joined only where an explicit via lands, per top cell.
@@ -121,6 +119,19 @@ def run_components_report(
     (required only to disambiguate a multi-top stream); omitted, every top
     cell in the stream is reported.
 
+    ``probes`` (optional, issue #5552) is a list of ``{"name": str, "layer":
+    str, "x": float, "y": float}`` point lookups -- the same spec shape ``klt
+    extract --probe`` takes (``cli/_parsing.parse_probes`` parses the flag
+    into it). ``layer`` is the ``name`` of one ``conductors`` entry;
+    ``x``/``y`` are micrometres in the top cell's frame. Each entry is
+    answered against the very ``LayoutToNetlist`` graph this report is built
+    from, so a hit's ``component_id`` is always one of the reported
+    ``components[].id``. ``name`` must be unique. A point on empty space, on
+    a different conductor only, or outside ``region_um`` reports ``found:
+    false`` -- never an error. Because ``component_id`` is scoped to one
+    cell's component numbering, ``probes`` requires exactly one top cell in
+    scope: pass ``top`` for a multi-top stream.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/components.md``)::
 
@@ -156,6 +167,11 @@ def run_components_report(
                 },
                 ...
             ],
+            "probes": [
+                {"name": str, "layer": str, "x_um": float, "y_um": float,
+                 "found": bool, "component_id": str | None},
+                ...
+            ],
         }
 
     ``components`` is sorted deterministically (by cell name, then bounding
@@ -175,11 +191,14 @@ def run_components_report(
 
     Raises :class:`ComponentsError` if the file is missing/unreadable, the
     conductor/via/label-layer specs are malformed or reference an unknown
-    conductor name, or a named ``top`` cell is absent from the stream.
+    conductor name, a named ``top`` cell is absent from the stream, a probe
+    spec is malformed or names a conductor that was not declared, or
+    ``probes`` is given with more than one top cell in scope.
     """
-    conductor_specs = _validate_conductors(conductors)
-    via_specs = _validate_vias(vias or [], conductor_specs)
-    label_specs = _validate_label_layers(label_layers or [], conductor_specs)
+    conductor_specs = validate_conductors(conductors)
+    via_specs = validate_vias(vias or [], conductor_specs)
+    label_specs = validate_label_layers(label_layers or [], conductor_specs)
+    probe_specs = validate_probes(probes or [], conductor_specs, ComponentsError)
 
     layout = load_layout(layout_path, ComponentsError)
 
@@ -191,20 +210,32 @@ def run_components_report(
     dbu = layout.dbu
     clip_box = _clip_box(kdb, region_um, dbu) if region_um is not None else None
 
-    components: list[dict[str, Any]] = []
-    for cell in top_cells:
-        components.extend(
-            _components_for_cell(
-                kdb,
-                layout,
-                cell,
-                conductor_specs,
-                via_specs,
-                label_specs,
-                clip_box,
-                dbu,
-            )
+    if probe_specs and len(top_cells) > 1:
+        names = ", ".join(cell.name for cell in top_cells)
+        raise ComponentsError(
+            f"probes need a single top cell in scope, but {len(top_cells)} "
+            f"are ({names}) -- pass --top to pick one"
         )
+
+    components: list[dict[str, Any]] = []
+    # Probe name -> the (cell name, cluster id) the point landed on, or None.
+    # Resolved to a `component_id` below, once the deterministic sort has
+    # assigned ids.
+    probe_clusters: dict[str, tuple[str, int] | None] = {}
+    for cell in top_cells:
+        cell_components, cell_probes = _components_for_cell(
+            kdb,
+            layout,
+            cell,
+            conductor_specs,
+            via_specs,
+            label_specs,
+            clip_box,
+            dbu,
+            probe_specs,
+        )
+        components.extend(cell_components)
+        probe_clusters.update(cell_probes)
 
     # Deterministic, diff-clean ordering (mirrors ring_check.py/drc.py): the
     # engine's own cluster-enumeration order is not guaranteed stable across
@@ -221,21 +252,22 @@ def run_components_report(
     for index, component in enumerate(components):
         component["id"] = f"{component['cell']}:{index}"
 
+    # `_cluster_id` is carried privately from `_describe_net` only so a probe
+    # hit can be named by the id the sort above assigns; it is never part of
+    # the reported schema.
+    component_ids = {
+        component.pop("_cluster_id"): component["id"] for component in components
+    }
+    probes_report = [
+        probe_entry(spec, probe_clusters.get(spec["name"]), component_ids)
+        for spec in probe_specs
+    ]
+
     return {
         "schema_version": 1,
         "file": layout_path,
-        "conductors": [
-            {"name": spec["name"], "layer": list(spec["layer"])}
-            for spec in conductor_specs
-        ],
-        "vias": [
-            {
-                "name": spec["name"],
-                "layer": list(spec["layer"]),
-                "between": list(spec["between"]),
-            }
-            for spec in via_specs
-        ],
+        "conductors": [_echo_spec(spec) for spec in conductor_specs],
+        "vias": [_echo_spec(spec, between=list(spec["between"])) for spec in via_specs],
         "label_layers": [
             {
                 "name": spec["name"],
@@ -249,7 +281,39 @@ def run_components_report(
         "dbu_um": dbu,
         "component_count": len(components),
         "components": components,
+        "probes": probes_report,
     }
+
+
+def _echo_spec(spec: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """Envelope form of a conductor/via spec; ``and``/``not`` only if set."""
+    echoed: dict[str, Any] = {"name": spec["name"], "layer": list(spec["layer"])}
+    echoed.update(extra)
+    for key in ("and", "not"):
+        if spec.get(key) is not None:
+            echoed[key] = [list(layer) for layer in spec[key]]
+    return echoed
+
+
+def _qualified_region(layout: Any, cell: Any, spec: dict[str, Any]) -> Any:
+    """The spec's layer region after its optional ``and`` then ``not`` booleans.
+
+    Plain boolean (not ``interacting``): a shape straddling a qualifier
+    layer's edge is split, so only the overlapping/non-overlapping part
+    survives. A qualifier layer absent from the layout is an empty region
+    (``and`` then empties the entry, ``not`` is a no-op).
+    """
+    region = _region(layout, cell, spec["layer"])
+    for key in ("and", "not"):
+        layers = spec.get(key)
+        if layers is None:
+            continue
+        mask = _region(layout, cell, layers[0])
+        for layer in layers[1:]:
+            mask = mask + _region(layout, cell, layer)
+        mask = mask.merged()
+        region = region & mask if key == "and" else region - mask
+    return region
 
 
 def _components_for_cell(
@@ -261,18 +325,29 @@ def _components_for_cell(
     label_specs: list[dict[str, Any]],
     clip_box: Any | None,
     dbu: float,
-) -> list[dict[str, Any]]:
-    """Compute every connected component for one top ``cell``."""
+    probe_specs: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, tuple[str, int] | None]]:
+    """Compute every connected component for one top ``cell``, plus each
+    probe's hit as ``{probe name: (cell name, cluster id) | None}``.
+
+    The probes are answered on this very ``LayoutToNetlist`` -- the same
+    post-qualifier, post-clip region objects that were ``register()``ed and
+    ``connect()``ed, which is what ``probe_net`` requires -- so a hit's
+    cluster id is one of the clusters the components below are built from.
+    Every region here is flattened (``_layout.region`` uses
+    ``begin_shapes_rec``), so the graph is a single circuit named after
+    ``cell`` and a point inside an instanced child cell resolves in the top
+    cell's frame like any other."""
     conductor_regions: dict[str, Any] = {}
     for spec in conductor_specs:
-        region = _region(layout, cell, spec["layer"])
+        region = _qualified_region(layout, cell, spec)
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         conductor_regions[spec["name"]] = region
 
     via_regions: dict[str, Any] = {}
     for spec in via_specs:
-        region = _region(layout, cell, spec["layer"])
+        region = _qualified_region(layout, cell, spec)
         if clip_box is not None:
             region &= kdb.Region(clip_box)
         via_regions[spec["name"]] = region
@@ -314,8 +389,17 @@ def _components_for_cell(
     l2n.extract_netlist()
     netlist = l2n.netlist()
     circuit = netlist.circuit_by_name(cell.name)
+    hits = probe_hits(
+        kdb,
+        l2n,
+        conductor_regions,
+        probe_specs,
+        cell.name,
+        dbu,
+        graph_empty=circuit is None,
+    )
     if circuit is None:
-        return []
+        return [], hits
 
     components: list[dict[str, Any]] = []
     for net in circuit.each_net():
@@ -335,7 +419,7 @@ def _components_for_cell(
         )
         if component is not None:
             components.append(component)
-    return components
+    return components, hits
 
 
 def _describe_net(
@@ -432,6 +516,9 @@ def _describe_net(
         "vias": vias_present,
         "labels": sorted(labels),
         "touches_crop_boundary": touches_crop_boundary,
+        # Private, stripped by the caller once `id` exists: the only handle a
+        # `--probe` hit has on this component before the deterministic sort.
+        "_cluster_id": (cell_name, net.cluster_id),
     }
 
 
@@ -443,114 +530,3 @@ def _select_top_cells(layout: Any, top: str | None) -> list[Any]:
     ``ring_check.py``/``drc.py``/``precheck.py`` already share.
     """
     return _select_top_cells_shared(layout, top, ComponentsError)
-
-
-def _validate_conductors(conductors: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not conductors:
-        raise ComponentsError("conductors must contain at least one entry")
-
-    specs: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for entry in conductors:
-        name = _require_name(entry, "conductors")
-        if name in seen_names:
-            raise ComponentsError(f"duplicate conductor name: {name!r}")
-        seen_names.add(name)
-        layer = _require_layer(entry, "conductors", name)
-        specs.append({"name": name, "layer": layer})
-    return specs
-
-
-def _validate_vias(
-    vias: list[dict[str, Any]], conductor_specs: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    conductor_names = {spec["name"] for spec in conductor_specs}
-
-    specs: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for entry in vias:
-        name = _require_name(entry, "vias")
-        if name in seen_names:
-            raise ComponentsError(f"duplicate via name: {name!r}")
-        seen_names.add(name)
-        layer = _require_layer(entry, "vias", name)
-
-        between = entry.get("between")
-        if (
-            not isinstance(between, list)
-            or len(between) != 2
-            or not all(isinstance(v, str) for v in between)
-        ):
-            raise ComponentsError(
-                f"via {name!r} 'between' must be a two-element list of "
-                f"conductor names, got {between!r}"
-            )
-        conductor_a, conductor_b = between
-        if conductor_a == conductor_b:
-            raise ComponentsError(
-                f"via {name!r} 'between' must name two different conductors, "
-                f"got {between!r}"
-            )
-        for conductor_name in (conductor_a, conductor_b):
-            if conductor_name not in conductor_names:
-                raise ComponentsError(
-                    f"via {name!r} 'between' references unknown conductor "
-                    f"{conductor_name!r}"
-                )
-        specs.append(
-            {"name": name, "layer": layer, "between": (conductor_a, conductor_b)}
-        )
-    return specs
-
-
-def _validate_label_layers(
-    label_layers: list[dict[str, Any]], conductor_specs: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    conductor_names = {spec["name"] for spec in conductor_specs}
-
-    specs: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    for entry in label_layers:
-        name = _require_name(entry, "label_layers")
-        if name in seen_names:
-            raise ComponentsError(f"duplicate label layer name: {name!r}")
-        seen_names.add(name)
-        layer = _require_layer(entry, "label_layers", name)
-
-        conductor = entry.get("conductor")
-        if conductor is not None:
-            if not isinstance(conductor, str) or not conductor:
-                raise ComponentsError(
-                    f"label_layers entry {name!r} 'conductor' must be a "
-                    f"non-empty string, got {conductor!r}"
-                )
-            if conductor not in conductor_names:
-                raise ComponentsError(
-                    f"label_layers entry {name!r} 'conductor' references "
-                    f"unknown conductor {conductor!r}"
-                )
-        specs.append({"name": name, "layer": layer, "conductor": conductor})
-    return specs
-
-
-def _require_name(entry: Any, field: str) -> str:
-    if not isinstance(entry, dict):
-        raise ComponentsError(f"each {field} entry must be an object, got {entry!r}")
-    name = entry.get("name")
-    if not isinstance(name, str) or not name:
-        raise ComponentsError(f"each {field} entry requires a non-empty 'name' string")
-    return name
-
-
-def _require_layer(entry: dict[str, Any], field: str, name: str) -> tuple[int, int]:
-    layer = entry.get("layer")
-    if (
-        not isinstance(layer, list)
-        or len(layer) != 2
-        or not all(isinstance(v, int) and not isinstance(v, bool) for v in layer)
-    ):
-        raise ComponentsError(
-            f"{field} entry {name!r} 'layer' must be a [layer, datatype] pair "
-            f"of integers, got {layer!r}"
-        )
-    return (layer[0], layer[1])

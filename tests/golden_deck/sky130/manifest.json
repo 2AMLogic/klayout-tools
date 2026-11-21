@@ -211,6 +211,71 @@
       ]
     }
   },
+  "diff.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      20
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "diff.width.1": {
     "check": "width",
     "clean": {
@@ -373,6 +438,18 @@
             66,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2225,
+            6000
+          ],
+          "layer": [
+            67,
+            20
+          ]
         }
       ]
     },
@@ -394,6 +471,18 @@
           "layer": [
             66,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2115,
+            6000
+          ],
+          "layer": [
+            67,
+            20
           ]
         }
       ]
@@ -425,6 +514,18 @@
           "layer": [
             67,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            6250,
+            6000
+          ],
+          "layer": [
+            68,
+            20
           ]
         }
       ]
@@ -460,6 +561,18 @@
             67,
             44
           ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            6130,
+            6000
+          ],
+          "layer": [
+            68,
+            20
+          ]
         }
       ]
     }
@@ -478,6 +591,18 @@
           "layer": [
             67,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2225,
+            6000
+          ],
+          "layer": [
+            68,
+            20
           ]
         }
       ]
@@ -500,6 +625,18 @@
           "layer": [
             67,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2115,
+            6000
+          ],
+          "layer": [
+            68,
+            20
           ]
         }
       ]
@@ -1035,6 +1172,88 @@
       ]
     }
   },
+  "npc.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            360,
+            4000
+          ],
+          "layer": [
+            95,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`npc.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      95,
+      20
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            180,
+            4000
+          ],
+          "layer": [
+            95,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "nsdm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            480,
+            4000
+          ],
+          "layer": [
+            93,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`nsdm.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      93,
+      44
+    ],
+    "threshold_dbu": 380,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            280,
+            4000
+          ],
+          "layer": [
+            93,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "nwell.width.1": {
     "check": "width",
     "clean": {
@@ -1070,6 +1289,71 @@
           ],
           "layer": [
             64,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "poly.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2280,
+            0,
+            4280,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      66,
+      20
+    ],
+    "threshold_dbu": 210,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            66,
+            20
+          ]
+        },
+        {
+          "box": [
+            2140,
+            0,
+            4140,
+            4000
+          ],
+          "layer": [
+            66,
             20
           ]
         }
@@ -1117,6 +1401,153 @@
       ]
     }
   },
+  "psdm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            480,
+            4000
+          ],
+          "layer": [
+            94,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real ciel-fetched install) with no `-rd`-settable override this engine's invocation can flip -- this rule's source (`psdm.1`) lives inside the script's top-level `if FEOL ... end` block, so the native engine never evaluates it and reports clean on the violate fixture (issue #2934).",
+    "layer": [
+      94,
+      20
+    ],
+    "threshold_dbu": 380,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            280,
+            4000
+          ],
+          "layer": [
+            94,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "rpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1370,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      86,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1170,
+            4000
+          ],
+          "layer": [
+            86,
+            20
+          ]
+        }
+      ]
+    }
+  },
+  "tap.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2360,
+            0,
+            4360,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "The real sky130A.lydrc (the native deck this cross-check drives) defines no difftap.3/poly.2 spacing rule at all -- the gap issue #4282 reports (klt drc --engine klayout --pdk sky130A is coverage_unknown on these). The foundry spacing rule lives only in sky130A_mr.drc's FEOL block, which this engine's invocation cannot enable. A violate fixture correctly trips the curated engine but is always reported \"clean\" by sky130.lydrc.",
+    "layer": [
+      65,
+      44
+    ],
+    "threshold_dbu": 270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        },
+        {
+          "box": [
+            2180,
+            0,
+            4180,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "tap.width.1": {
     "check": "width",
     "clean": {
@@ -1158,6 +1589,47 @@
       ]
     }
   },
+  "urpm.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1370,
+            4000
+          ],
+          "layer": [
+            79,
+            20
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": "sky130A_mr.drc's rpm/urpm rules (\"rpm.1a\"/\"urpm.1a\") live inside the script's top-level `if FEOL ... end` block, and `FEOL = false` is hard-coded at the top of the file with its own \"do not change\" comment and no `-rd`-settable override this engine's invocation can flip -- the same root cause already documented for capm.width.1/diff.width.1/poly.width.1 above. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck, since it never evaluates this rule at all regardless of the input layout. See docs/cli/drc.md's \"klayout\" engine limitations.",
+    "layer": [
+      79,
+      20
+    ],
+    "threshold_dbu": 1270,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1170,
+            4000
+          ],
+          "layer": [
+            79,
+            20
+          ]
+        }
+      ]
+    }
+  },
   "via.space.1": {
     "check": "space",
     "clean": {
@@ -1166,8 +1638,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            150,
+            150
           ],
           "layer": [
             68,
@@ -1176,14 +1648,38 @@
         },
         {
           "box": [
-            2225,
+            375,
             0,
-            4225,
-            4000
+            525,
+            150
           ],
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2525,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2525,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1200,8 +1696,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            150,
+            150
           ],
           "layer": [
             68,
@@ -1210,14 +1706,38 @@
         },
         {
           "box": [
-            2115,
+            265,
             0,
-            4115,
-            4000
+            415,
+            150
           ],
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2415,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2415,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1231,12 +1751,36 @@
           "box": [
             0,
             0,
-            200,
-            4000
+            150,
+            150
           ],
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2150,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2150,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1254,11 +1798,35 @@
             0,
             0,
             100,
-            4000
+            150
           ],
           "layer": [
             68,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2100,
+            2150
+          ],
+          "layer": [
+            68,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2100,
+            2150
+          ],
+          "layer": [
+            69,
+            20
           ]
         }
       ]
@@ -1272,8 +1840,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            200,
+            200
           ],
           "layer": [
             69,
@@ -1282,14 +1850,38 @@
         },
         {
           "box": [
-            2265,
+            465,
             0,
-            4265,
-            4000
+            665,
+            200
           ],
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1306,8 +1898,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            200,
+            200
           ],
           "layer": [
             69,
@@ -1316,14 +1908,38 @@
         },
         {
           "box": [
-            2135,
+            335,
             0,
-            4135,
-            4000
+            535,
+            200
           ],
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1337,12 +1953,36 @@
           "box": [
             0,
             0,
-            265,
-            4000
+            200,
+            200
           ],
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1360,11 +2000,35 @@
             0,
             0,
             135,
-            4000
+            200
           ],
           "layer": [
             69,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            69,
+            20
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            70,
+            20
           ]
         }
       ]
@@ -1378,8 +2042,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            200,
+            200
           ],
           "layer": [
             70,
@@ -1388,14 +2052,26 @@
         },
         {
           "box": [
-            2265,
+            465,
             0,
-            4265,
-            4000
+            665,
+            200
           ],
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2665,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1412,8 +2088,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            200,
+            200
           ],
           "layer": [
             70,
@@ -1422,14 +2098,26 @@
         },
         {
           "box": [
-            2135,
+            335,
             0,
-            4135,
-            4000
+            535,
+            200
           ],
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2535,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1443,12 +2131,24 @@
           "box": [
             0,
             0,
-            265,
-            4000
+            200,
+            200
           ],
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2200,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1466,11 +2166,23 @@
             0,
             0,
             135,
-            4000
+            200
           ],
           "layer": [
             70,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2135,
+            2200
+          ],
+          "layer": [
+            71,
+            20
           ]
         }
       ]
@@ -1484,8 +2196,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            800,
+            800
           ],
           "layer": [
             71,
@@ -1494,14 +2206,26 @@
         },
         {
           "box": [
-            2900,
+            1700,
             0,
-            4900,
-            4000
+            2500,
+            800
           ],
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            4500,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]
@@ -1518,8 +2242,8 @@
           "box": [
             0,
             0,
-            2000,
-            4000
+            800,
+            800
           ],
           "layer": [
             71,
@@ -1528,14 +2252,26 @@
         },
         {
           "box": [
-            2700,
+            1500,
             0,
-            4700,
-            4000
+            2300,
+            800
           ],
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            4300,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]
@@ -1549,12 +2285,24 @@
           "box": [
             0,
             0,
-            900,
-            4000
+            800,
+            800
           ],
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2800,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]
@@ -1572,11 +2320,23 @@
             0,
             0,
             700,
-            4000
+            800
           ],
           "layer": [
             71,
             44
+          ]
+        },
+        {
+          "box": [
+            -2000,
+            -2000,
+            2700,
+            2800
+          ],
+          "layer": [
+            72,
+            20
           ]
         }
       ]

@@ -102,25 +102,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPERS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SCRIPT="$HELPERS_DIR/resync-installed.sh"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-pass() {
-    TESTS_RUN=$((TESTS_RUN + 1))
-    TESTS_PASSED=$((TESTS_PASSED + 1))
-    echo -e "  ${GREEN}PASS${NC}: $1"
-}
-
-fail() {
-    TESTS_RUN=$((TESTS_RUN + 1))
-    TESTS_FAILED=$((TESTS_FAILED + 1))
-    echo -e "  ${RED}FAIL${NC}: $1"
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Not counted toward pass/fail: used when a test's precondition (e.g. a
 # `update-gitignore`-capable loom-daemon binary) is unavailable in this
@@ -1107,7 +1089,7 @@ echo "Test group 12y: suggest_commit_if_resync_only_dirt() excludes retired-but-
 printf 'ORPHAN\n' > "$REPO/.loom/scripts/some-retired-tool.sh"   # untracked, unignored, no defaults/ counterpart
 printf 'NEW-TEST\n' > "$REPO/.loom/scripts/check-defaults-version-bump.sh"   # untracked, unignored, pure-copy surface
 printf 'NEW-TEST\n' > "$REPO/defaults/scripts/check-defaults-version-bump.sh"   # still shipped today (#6613)
-git -C "$REPO" add defaults/scripts/check-defaults-version-bump.sh >/dev/null 2>&1
+printf '{\n  "version": "9.9.10"\n}\n' > "$REPO/package.json"; git -C "$REPO" add package.json defaults/scripts/check-defaults-version-bump.sh >/dev/null 2>&1
 git -C "$REPO" commit -qm "add new shipped defaults/ file" >/dev/null 2>&1
 OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
 # #6646: the actionable recommendation is now land-resync-commit.sh (which
@@ -1116,8 +1098,8 @@ OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
 # resync_paths list ("would be: git add <paths>") so this test can keep
 # verifying suggest_commit_if_resync_only_dirt()'s CLASSIFICATION logic
 # (retired-vs-shipped, #7336) independently of how the commit is landed. The
-# precondition below asserts both halves (this file is frozen by the
-# file-size ratchet, #7711, so the #6646 check shares the existing assertion).
+# precondition below asserts both halves (the #6646 check shares the existing
+# assertion, #7711).
 commit_line="$(grep -m1 'would be: git add ' <<<"$OUT")"
 if [[ -n "$commit_line" ]] && grep -q './.loom/scripts/land-resync-commit\.sh' <<<"$OUT"; then
     pass "(#7336/#6646) fixture precondition: the dirty-tree commit hint fired and recommends land-resync-commit.sh"
@@ -1134,10 +1116,12 @@ if grep -q 'check-defaults-version-bump\.sh' <<<"$commit_line"; then
 else
     fail "(#7336) still-shipped pure-copy-surface path was unexpectedly dropped from the 'git add' commit suggestion"
 fi
-# Every real apply re-stamps .loom/install-metadata.json (one of the
-# function's OTHER hardcoded single-file case-block paths, unrelated to the
-# pure-copy-surface pattern this fix touches) -- confirming it is still
+# An apply that bumps the version re-stamps .loom/install-metadata.json (one
+# of the function's OTHER hardcoded single-file case-block paths, unrelated to
+# the pure-copy-surface pattern this fix touches) -- confirming it is still
 # present guards against the fix accidentally narrowing that unrelated case.
+# (#11680: an apply that changes nothing no longer re-stamps, hence the
+# package.json bump in the fixture above.)
 if grep -q 'install-metadata\.json' <<<"$commit_line"; then
     pass "(#7336) other hardcoded single-file case (install-metadata.json) remains in the commit suggestion"
 else
@@ -1196,6 +1180,17 @@ FAKE_DAEMON_EOF
     chmod +x "$dest"
 }
 
+# run_with_stale_bin <repo> <pattern>... -- resync <repo> with the only PATH
+# loom-daemon a fake emitting <pattern>...; sets $OUT and $RC.
+run_with_stale_bin() {
+    local repo="$1" stale home; shift
+    stale="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"; home="$(mktemp -d)"
+    make_fake_daemon_bin "$stale/loom-daemon" "$@"
+    OUT="$(cd "$repo" && env -u LOOM_DAEMON_BIN PATH="$stale:/usr/bin:/bin" HOME="$home" \
+        LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
+    RC=$?; rm -rf "$home" "$stale"
+}
+
 # A synthetic post_init.rs declaring an "old" pattern (present in every fake
 # binary below) plus a "just-added" pattern (present ONLY in the fresh
 # repo-local build) -- mirrors #5280 adding `.claude/worktrees/` to source
@@ -1215,13 +1210,7 @@ echo "Test group 12h: gitignore refresh prefers a repo-local build over a stale 
 REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
 make_fake_daemon_bin "$REPO/loom-daemon/target/release/loom-daemon" ".loom-in-use" ".fake-newly-added-pattern/"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5294) apply exits 0 with a stale PATH binary and a fresh repo-local build present"
 else
@@ -1244,13 +1233,7 @@ REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
 # No repo-local build this time: resolution falls through to the stale PATH
 # binary (the pre-#5294-fix behavior this whole issue is about).
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5294) apply still exits 0 when only a stale binary resolves"
 else
@@ -1271,13 +1254,7 @@ fi
 echo "Test group 12o: gitignore refresh RESTORES a pattern dropped by a stale binary, not just warns about it (#5991)"
 REPO="$(make_fixture)"
 write_fake_post_init "$REPO"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-OUT="$(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT" 2>&1)"
-RC=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"
 if [[ $RC -eq 0 ]]; then
     pass "(#5991) apply still exits 0 when the stale-binary guard has to restore a pattern"
 else
@@ -1305,17 +1282,35 @@ fi
 # byte-identical, fully-restored .gitignore (the stale binary itself never
 # self-heals -- only rebuilding it does; see the warning's own guidance).
 cp "$REPO/.gitignore" "$WORKDIR/gi-before-2nd-5991"
-STALE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fake-path.XXXXXX")"
-make_fake_daemon_bin "$STALE_DIR/loom-daemon" ".loom-in-use"
-NO_BIN_HOME="$(mktemp -d)"
-(cd "$REPO" && env -u LOOM_DAEMON_BIN PATH="$STALE_DIR:/usr/bin:/bin" HOME="$NO_BIN_HOME" \
-    LOOM_DAEMON_BIN_DIR="/nonexistent" bash "$SCRIPT") >/dev/null 2>&1
-RC2=$?
-rm -rf "$NO_BIN_HOME" "$STALE_DIR"
+run_with_stale_bin "$REPO" ".loom-in-use"; RC2=$RC
 if [[ $RC2 -eq 0 ]] && diff -q "$WORKDIR/gi-before-2nd-5991" "$REPO/.gitignore" >/dev/null 2>&1; then
     pass "(#5991) a second run with the same stale binary leaves .gitignore byte-identical (still fully restored)"
 else
     fail "(#5991) second run with the same stale binary left .gitignore in a different (still-regressed?) state (rc=$RC2)"
+fi
+
+# #11323: the mirror image of #5991 -- a binary built BEFORE a pattern was
+# REMOVED from source still emits it (febfc4335 re-added `.loom/concierge/`).
+# The guard must drop it so the result is byte-identical to a fresh binary's.
+echo "Test group 12p: gitignore refresh DROPS an extra pattern a stale binary re-adds after source removed it (#11323)"
+REPO="$(make_fixture)"; write_fake_post_init "$REPO"
+run_with_stale_bin "$REPO" ".loom-in-use" ".loom/concierge/" ".fake-newly-added-pattern/"
+cp "$REPO/.gitignore" "$WORKDIR/gi-stale-11323"; STALE_OUT="$OUT"; STALE_RC=$RC
+REPO="$(make_fixture)"; write_fake_post_init "$REPO"
+run_with_stale_bin "$REPO" ".loom-in-use" ".fake-newly-added-pattern/"
+if [[ $STALE_RC -eq 0 ]] && cmp -s "$WORKDIR/gi-stale-11323" "$REPO/.gitignore" && \
+      grep -qi "WITH 1 extra pattern" <<<"$STALE_OUT" && grep -qF "    .loom/concierge/" <<<"$STALE_OUT"; then
+    pass "(#11323) the extra pattern was named in a warning and dropped: .gitignore is byte-identical to the source-generated one"
+else
+    fail "(#11323) a stale binary's re-added pattern was not warned about and dropped (rc=$STALE_RC)"
+fi
+# No source pattern list (stripped install source) = cannot verify: hands off.
+REPO="$(make_fixture)"
+run_with_stale_bin "$REPO" ".loom-in-use" ".loom/concierge/"
+if grep -qxF ".loom/concierge/" "$REPO/.gitignore"; then
+    pass "(#11323) without a source post_init.rs the managed block is left untouched"
+else
+    fail "(#11323) the guard rewrote the block although no source pattern list was available"
 fi
 
 # --- (#4285) targeted loom-workspace package.json version field edit --------
@@ -1692,6 +1687,56 @@ if grep -q "removed.*hooks/guard-destructive-generic.sh" <<<"$OUT"; then
     pass "(#4403) removal reported as before"
 else
     fail "(#4403) removal not reported"
+fi
+
+# --- (#13680) a pin on the generic guard is not a dead pin ---------------------
+echo "Test group 15d: pin on hooks/guard-destructive-generic.sh is not reported dead (#13680)"
+_mk_canonical() {
+    mkdir -p "$1/.claude/skills/repo/hooks"
+    printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\n# implements worktree-write-confinement\n# masks --comment|--search and --arg|--argjson\n# denies gh-comment-body-literal-at\necho canonical\n' \
+        > "$1/.claude/skills/repo/hooks/guard-destructive.sh"
+}
+for FORM in "hooks/guard-destructive-generic.sh" ".loom/hooks/guard-destructive-generic.sh"; do
+    REPO="$(make_fixture)"
+    _mk_canonical "$REPO"
+    printf '#!/usr/bin/env bash\necho vendored\n' > "$REPO/defaults/hooks/guard-destructive-generic.sh"
+    printf '#!/usr/bin/env bash\necho vendored\n' > "$REPO/.loom/hooks/guard-destructive-generic.sh"
+    printf '%s  # keep\nhooks/gaurd-typo.sh  # dead\n' "$FORM" > "$REPO/.loom/resync-ignore"
+    for FLAGS in "" "--dry-run"; do
+        OUT="$(cd "$REPO" && bash "$SCRIPT" $FLAGS 2>&1)"
+        if ! grep -q "pin had no effect: '$FORM'" <<<"$OUT"; then
+            pass "(#13680) canonical present, pin '$FORM' ${FLAGS:-apply}: not reported dead"
+        else
+            fail "(#13680) canonical present, pin '$FORM' ${FLAGS:-apply}: wrongly reported dead"
+        fi
+        if grep -q "pin had no effect: 'hooks/gaurd-typo.sh'" <<<"$OUT"; then
+            pass "(#13680) mistyped pin still reported dead (${FLAGS:-apply})"
+        else
+            fail "(#13680) mistyped pin no longer reported dead (${FLAGS:-apply})"
+        fi
+    done
+done
+
+echo "Test group 15e: canonical guard absent + pin on generic guard is honoured, not dead (#13680)"
+REPO="$(make_fixture)"
+printf '#!/usr/bin/env bash\necho vendored-new\n' > "$REPO/defaults/hooks/guard-destructive-generic.sh"
+printf 'LOCAL-GUARD\n' > "$REPO/.loom/hooks/guard-destructive-generic.sh"
+printf 'hooks/guard-destructive-generic.sh  # keep\nhooks/gaurd-typo.sh  # dead\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if [[ "$(cat "$REPO/.loom/hooks/guard-destructive-generic.sh")" == "LOCAL-GUARD" ]]; then
+    pass "(#13680) pinned local guard left unsynced"
+else
+    fail "(#13680) pinned local guard was overwritten"
+fi
+if ! grep -q "pin had no effect: 'hooks/guard-destructive-generic.sh'" <<<"$OUT"; then
+    pass "(#13680) valid pin not reported dead (canonical absent)"
+else
+    fail "(#13680) valid pin reported dead (canonical absent)"
+fi
+if grep -q "pin had no effect: 'hooks/gaurd-typo.sh'" <<<"$OUT"; then
+    pass "(#13680) mistyped pin still reported dead (canonical absent)"
+else
+    fail "(#13680) mistyped pin not reported dead (canonical absent)"
 fi
 
 # --- (#4894) capability-gap canonical guard: vendored guard must be KEPT ----
@@ -2731,7 +2776,7 @@ echo "Test group 28b: forge label check -- drift found, real run fixes it (#6716
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28b.log"; : > "$STUB_LOG"
-OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" --sync-labels 2>&1)"
 RC=$?
 if [[ $RC -eq 0 ]] && grep -qi "drift detected" <<<"$OUT" && grep -qi "updated.*forge labels" <<<"$OUT"; then
     pass "(#6716) drift is reported and then fixed on a real run"
@@ -2744,18 +2789,48 @@ else
     fail "(#6716) unexpected sync-labels.sh invocation shape for drift-then-fix: $(cat "$STUB_LOG")"
 fi
 
+echo "Test group 28b2: forge label write is opt-in -- no --sync-labels -> check only, no forge write (#10770)"
+REPO="$(make_fixture)"
+add_labels_stub "$REPO"
+STUB_LOG="$WORKDIR/stub28b2.log"; : > "$STUB_LOG"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+RC=$?
+if [[ $RC -eq 0 ]] && grep -qi "drift detected" <<<"$OUT" && grep -q "sync-labels.sh" <<<"$OUT" && ! grep -qi "updated.*forge labels" <<<"$OUT"; then
+    pass "(#10770) drift without opt-in is reported with the apply command, not applied"
+else
+    fail "(#10770) no-opt-in drift output wrong (rc=$RC); out=$OUT"
+fi
+if [[ "$(wc -l < "$STUB_LOG")" -eq 1 ]] && grep -q -- '--check' "$STUB_LOG"; then
+    pass "(#10770) no opt-in -> mutating sync-labels.sh never invoked"
+else
+    fail "(#10770) mutating sync-labels.sh ran without opt-in: $(cat "$STUB_LOG")"
+fi
+: > "$STUB_LOG"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_RESYNC_SYNC_LABELS=1 LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=0 bash "$SCRIPT" 2>&1)"
+if [[ "$(wc -l < "$STUB_LOG")" -eq 2 ]] && grep -qi "updated.*forge labels" <<<"$OUT"; then
+    pass "(#10770) LOOM_RESYNC_SYNC_LABELS=1 opts in like --sync-labels"
+else
+    fail "(#10770) env opt-in did not apply labels: $(cat "$STUB_LOG"); out=$OUT"
+fi
+
 echo "Test group 28c: forge label check -- drift found, --dry-run previews without fixing (#6716)"
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28c.log"; : > "$STUB_LOG"
 OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 bash "$SCRIPT" --dry-run 2>&1)"
-if grep -qi "drift detected" <<<"$OUT" && grep -qi "would run.*sync-labels.sh" <<<"$OUT"; then
-    pass "(#6716) --dry-run previews the label fix instead of applying it"
+if grep -qi "drift detected" <<<"$OUT" && grep -qi "would NOT write to the forge without.*--sync-labels" <<<"$OUT"; then
+    pass "(#6716, #10770) --dry-run previews the label fix and says the forge write is opt-in"
 else
     fail "(#6716) --dry-run did not preview the label fix as expected; out=$OUT"
 fi
 if [[ "$(wc -l < "$STUB_LOG")" -eq 1 ]] && grep -q -- '--check' "$STUB_LOG"; then
     pass "(#6716) --dry-run calls sync-labels.sh only once (--check), never the mutating path"
+    OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 bash "$SCRIPT" --dry-run --sync-labels 2>&1)"
+    if grep -qi "would run.*sync-labels.sh" <<<"$OUT" && grep -qi "forge" <<<"$OUT"; then
+        pass "(#10770) --dry-run --sync-labels names the forge write it would perform"
+    else
+        fail "(#10770) --dry-run --sync-labels did not flag a forge write: $OUT"
+    fi
 else
     fail "(#6716) --dry-run made an unexpected sync-labels.sh call: $(cat "$STUB_LOG")"
 fi
@@ -2764,7 +2839,7 @@ echo "Test group 28d: forge label check -- the fix itself fails -> loud warning,
 REPO="$(make_fixture)"
 add_labels_stub "$REPO"
 STUB_LOG="$WORKDIR/stub28d.log"; : > "$STUB_LOG"
-OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=1 bash "$SCRIPT" 2>&1)"
+OUT="$(cd "$REPO" && STUB_LOG="$STUB_LOG" LOOM_TEST_LABELS_CHECK_RC=3 LOOM_TEST_LABELS_SYNC_RC=1 bash "$SCRIPT" --sync-labels 2>&1)"
 RC=$?
 if [[ $RC -eq 0 ]] && grep -qi "could not fully apply" <<<"$OUT"; then
     pass "(#6716) a failed label fix is a loud warning, not a resync-wide failure"
@@ -2819,8 +2894,7 @@ else
 fi
 
 # The guard-hook install check's wiring (#7761) is covered by the sibling
-# test-resync-installed-guard-check.sh, split out to respect this file's
-# file-size ratchet (.loom/docs/file-size-policy.md).
+# test-resync-installed-guard-check.sh.
 
 # --- summary -----------------------------------------------------------------
 echo ""

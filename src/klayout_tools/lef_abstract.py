@@ -43,7 +43,7 @@ Translation from socket descriptor to LEF ``MACRO``
   ``(34, 10)``), which on some PDKs is a different datatype than the one
   the actual metal is drawn on (e.g. gf180mcu's ``(34, 0)``) -- both
   resolve to the same LEF layer (e.g. ``Metal1``), so searching every
-  sibling datatype (mirroring :func:`_resolve_obs`'s existing per-LEF-layer
+  sibling datatype (mirroring the OBS pipeline's existing per-LEF-layer
   union across datatypes) finds the real geometry a single-datatype search
   would silently miss (issue #1614). Falls back to a **synthesized** box
   (``width_um``/``height_um`` if declared, else the resolved tech LEF
@@ -81,28 +81,42 @@ mapping.
 
 from __future__ import annotations
 
-import os
-import re
 from typing import Any
 
+from . import env_provenance
 from ._layout import load_layout, resolve_top_cell
-from ._provenance import build_provenance
-from .lef_header import read_lef_header
-from .pdk import PdkNotFoundError, find_pdk, lef_files
-from .socket_check import SocketCheckError, _load_descriptor
+from ._provenance import INPUT_ROLE_LAYOUT, INPUT_ROLE_SOURCE, build_provenance
+from .lef_abstract_no_layout import (
+    resolve_dbu_um,
+    resolve_tech_context,
+)
+from .lef_abstract_resource import resolve_obs_regions, routing_resource
+from .socket_check import (
+    GROUND_NAME_TOKENS,
+    POWER_NAME_TOKENS,
+    SocketCheckError,
+    _load_descriptor,
+    classify_pin_by_name,
+)
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+#:
+#: Bumped 1 -> 2 (issue #2703): ``file`` changed from a raw (usually
+#: absolute) path string to the ``{path, scope}`` shape
+#: ``env_provenance.repo_relative_path`` defines (as `klt drc`/`klt extract`/
+#: `klt lvs` did in issue #2659), so a committed report's
+#: ``provenance.input`` layout can be re-verified by `klt signoff` from any
+#: checkout. ``socket`` and ``output`` stay plain strings.
+SCHEMA_VERSION = 2
 
-#: Name substrings (checked case-insensitively as whole ``_``-delimited
-#: tokens, e.g. ``AVDD33`` matches ``VDD``, ``VD`` does not) that classify a
-#: pin as a supply when the descriptor does not declare an explicit
-#: ``use``/``direction`` -- this repo's own documented heuristic (there is
-#: no mechanical way to derive this from geometry alone), not an
-#: open_pdks/LEF-spec convention. See :func:`_classify_pin`.
-_GROUND_TOKENS = ("VSS", "VGND", "GND", "VNB")
-_POWER_TOKENS = ("VDD", "VPWR", "VCC", "VPB")
+#: The supply-pin name heuristic (``_GROUND_TOKENS``/``_POWER_TOKENS``) and
+#: :func:`_classify_pin` live in :mod:`klayout_tools.socket_check` since
+#: issue #2839 (as :func:`~klayout_tools.socket_check.classify_pin_by_name`),
+#: so `klt socket-check`'s ``power_ports`` check and this command's emitted
+#: ``PIN USE`` share one classification and can never disagree.
+_GROUND_TOKENS = GROUND_NAME_TOKENS
+_POWER_TOKENS = POWER_NAME_TOKENS
 
 #: Fallback synthesized-pin square size (micrometres) when neither the
 #: descriptor's ``width_um``/``height_um`` nor a resolved tech-LEF routing
@@ -111,7 +125,8 @@ _POWER_TOKENS = ("VDD", "VPWR", "VCC", "VPB")
 #: last-resort so pin emission never raises for missing geometry data.
 _DEFAULT_SYNTHESIZED_PIN_UM = 0.1
 
-_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+#: Accepted ``obs_mode`` values (issue #4283); the first is the default.
+OBS_MODES = ("detailed", "coarse")
 
 
 class LefAbstractError(Exception):
@@ -125,7 +140,7 @@ class LefAbstractError(Exception):
 
 
 def run_lef_abstract(
-    layout_path: str,
+    layout_path: str | None,
     socket_path: str,
     *,
     macro_name: str,
@@ -136,61 +151,34 @@ def run_lef_abstract(
     symmetry: list[str] | None = None,
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
+    obs_mode: str = "detailed",
 ) -> dict[str, Any]:
-    """Emit a LEF abstract for the block at ``layout_path`` per its socket
-    descriptor at ``socket_path``, writing it to ``output_path``.
+    """Write a LEF abstract to ``output_path`` and return a report dictionary.
 
-    Returns a dict matching the documented JSON schema (see
-    ``docs/cli/socket-check.md``'s LEF translation section)::
+    Use the layout at ``layout_path`` and the socket descriptor at ``socket_path``.
+    For a descriptor-only black box, pass ``layout_path=None`` and omit ``top``.
 
-        {
-            "schema_version": 1,
-            "file": <layout_path>,
-            "socket": <socket_path>,
-            "output": <output_path>,
-            "macro_name": <macro_name>,
-            "class": <macro_class>,
-            "site": None,
-            "symmetry": [...],
-            "size_um": {"width": <float>, "height": <float>},
-            "cell_library": <cell_library>,
-            "tech_lef": <resolved tech LEF path>,
-            "pins": [
-                {"name", "direction", "use", "layer", "geometry_source",
-                 "rects_um": [[x0, y0, x1, y1], ...]},
-                ...
-            ],
-            "pin_count": <int>,
-            "unroutable_pins": [
-                {"name": <str>, "layer": [<gds_layer>, <gds_datatype>]}, ...
-            ],
-            "obs": [{"layer": str, "shape_count": int}, ...],
-            "obs_shape_count": <int>,
-            "warnings": [...],
-            "provenance": {...},
-        }
+    The structural self-check reads the written LEF back from disk. Check
+    ``report["self_check"]["status"] == "pass"`` before using the file. On
+    structural failure, the function returns the report and leaves the LEF
+    on disk for diagnosis. See the Response section of
+    ``docs/cli/lef-abstract.md#response`` for the report fields and an example.
 
-    ``unroutable_pins`` (issue #464) is a programmatically-checkable echo of
-    every ``pins[]`` entry emitted with ``geometry_source: "none"`` -- a pin
-    whose declared ``layer`` did not resolve to a ``TYPE ROUTING`` tech-LEF
-    layer, so no ``PORT`` at all was written for it (see the "Pins" section
-    of this module's own docstring). ``[]`` on a run with no such pins. This
-    is purely a *promotion* of information already present per-pin in
-    ``pins[].geometry_source``/``warnings[]`` -- a caller composing this
-    command's output into ``klt place-and-route``'s own ``request.macros``
-    field can check this array directly instead of grepping ``warnings[]``
-    strings, or rely on ``klt place-and-route`` itself, which independently
-    cross-checks the emitted LEF's own ``PIN`` blocks against the netlist's
-    actual wiring before invoking OpenROAD (see that command's "Hard-macro
-    placement" docs section) -- either signal reflects the same underlying
-    condition.
-
-    Raises :class:`LefAbstractError` for a missing/unreadable layout or
-    socket descriptor, an ambiguous/missing top cell, an unresolvable PDK or
-    tech LEF for ``cell_library``, or a write failure.
+    Raises ``LefAbstractError`` if the layout or socket descriptor cannot be
+    read, the descriptor or an option such as ``obs_mode`` is invalid, the
+    top cell is missing or ambiguous, the PDK or tech LEF cannot be
+    resolved, or the output file cannot be written or read back.
     """
-    layout = load_layout(layout_path, LefAbstractError)
-    top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
+    # Issue #5714: ``layout_path=None`` is the layout-free (``--no-layout``)
+    # mode -- a black-box abstract emitted from the socket descriptor alone.
+    layout: Any = None
+    top_cell: Any = None
+    if layout_path is None:
+        if top is not None:
+            raise LefAbstractError("top has no meaning without a layout")
+    else:
+        layout = load_layout(layout_path, LefAbstractError)
+        top_cell = resolve_top_cell(layout, top, LefAbstractError, path=layout_path)
 
     try:
         descriptor = _load_descriptor(socket_path)
@@ -199,39 +187,17 @@ def run_lef_abstract(
 
     if not macro_name:
         raise LefAbstractError("macro_name must be a non-empty string")
+    if obs_mode not in OBS_MODES:
+        raise LefAbstractError(
+            f"obs_mode must be one of {', '.join(OBS_MODES)}; got {obs_mode!r}"
+        )
     if symmetry is not None and not all(isinstance(s, str) and s for s in symmetry):
         raise LefAbstractError("symmetry must be a list of non-empty strings")
 
-    try:
-        pdk_info = find_pdk(variant=pdk_variant, root=pdk_root)
-    except PdkNotFoundError as exc:
-        raise LefAbstractError(str(exc)) from exc
-
-    lefs = lef_files(cell_library, variant=pdk_info["variant"], root=pdk_info["root"])
-    tech_lef = lefs["tech_lef"]
-    if tech_lef is None:
-        raise LefAbstractError(
-            f"tech LEF not found for standard-cell library '{cell_library}' "
-            f"under resolved PDK install '{pdk_info['variant']}' at "
-            f"'{pdk_info['root']}'"
-        )
-    tech_header = read_lef_header(tech_lef)
-    routing_layers = {
-        layer["name"]: layer
-        for layer in tech_header["layers"]
-        if layer["type"] == "ROUTING"
-    }
-
-    layer_map_path, _layer_map_resolution = _resolve_layer_map(pdk_info)
-    if layer_map_path is None:
-        raise LefAbstractError(
-            f"no KLayout GDS<->LEF layer map found for resolved PDK install "
-            f"'{pdk_info['variant']}' -- cannot translate socket descriptor "
-            "layers into LEF layer names"
-        )
-    gds_to_lef = _load_gds_to_lef_layer_map(layer_map_path)
-
-    dbu_um = layout.dbu
+    pdk_info, tech_lef, tech_header, routing_layers, gds_to_lef = resolve_tech_context(
+        cell_library, pdk_variant, pdk_root, LefAbstractError
+    )
+    dbu_um = resolve_dbu_um(layout, tech_header, tech_lef, LefAbstractError)
     outline = descriptor["outline"]
     origin_x_dbu = round(outline["x0"] / dbu_um)
     origin_y_dbu = round(outline["y0"] / dbu_um)
@@ -251,7 +217,7 @@ def run_lef_abstract(
         warnings=warnings,
     )
 
-    obs_report = _resolve_obs(
+    obs_regions = resolve_obs_regions(
         layout=layout,
         top_cell=top_cell,
         gds_to_lef=gds_to_lef,
@@ -262,7 +228,12 @@ def run_lef_abstract(
         width_dbu=round(width_um / dbu_um),
         height_dbu=round(height_um / dbu_um),
         dbu_um=dbu_um,
+        obs_mode=obs_mode,
     )
+    obs_report = [
+        (name, [_polygon_to_um_shape(poly, dbu_um) for poly in region.each_merged()])
+        for name, region in sorted(obs_regions.items())
+    ]
 
     _write_lef(
         output_path=output_path,
@@ -275,16 +246,30 @@ def run_lef_abstract(
         obs=obs_report,
     )
 
+    # Issue #2769: validate the bytes actually written, not `pins_report`.
+    # Expected pins come from the original descriptor, so a pin the writer
+    # dropped (or put in the wrong macro) cannot pass by construction.
+    lef_text = _read_back_lef(output_path)
+    self_check = check_lef_structure(
+        lef_text,
+        {macro_name: [pin["name"] for pin in descriptor["pins"]]},
+    )
+    # Issue #2839: the supply-pin verdict, also graded on the bytes on disk.
+    power_pins = check_power_pins(pins_report, lef_text)
+
     provenance = build_provenance(
         deck_name=cell_library,
         deck_path=tech_lef,
         pdk=pdk_info,
-        input_path=layout_path,
+        input_path=layout_path if layout_path is not None else socket_path,
+        # Layout-free mode pins the descriptor (role "source") instead.
+        input_role=INPUT_ROLE_SOURCE if layout_path is None else INPUT_ROLE_LAYOUT,
     )
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "file": layout_path,
+        # `{path, scope}` (issue #2703): the layout `provenance.input` hashes.
+        "file": env_provenance.repo_relative_path(layout_path),  # None -> absent
         "socket": socket_path,
         "output": output_path,
         "macro_name": macro_name,
@@ -300,6 +285,10 @@ def run_lef_abstract(
                 "direction": pin["direction"],
                 "use": pin["use"],
                 "layer": pin["lef_layer"],
+                # Issue #2839: the descriptor's declared GDS (layer,
+                # datatype), so a consumer can match this PIN against the
+                # same pin's `klt socket-check` port facts.
+                "gds_layer": pin["gds_layer"],
                 "geometry_source": pin["geometry_source"],
                 "rects_um": pin["rects_um"],
             }
@@ -307,12 +296,25 @@ def run_lef_abstract(
         ],
         "pin_count": len(pins_report),
         "unroutable_pins": _unroutable_pins(pins_report, descriptor["pins"]),
+        "obs_mode": obs_mode,
         "obs": [
             {"layer": layer_name, "shape_count": len(shapes)}
             for layer_name, shapes in obs_report
         ],
         "obs_shape_count": sum(len(shapes) for _layer_name, shapes in obs_report),
+        # Issue #5677: per-routing-layer feedthrough figure computed from
+        # the same final OBS regions written above -- additive, no bump.
+        "routing_resource": routing_resource(
+            regions_by_layer=obs_regions,
+            routing_layers=routing_layers,
+            width_dbu=round(width_um / dbu_um),
+            height_dbu=round(height_um / dbu_um),
+            dbu_um=dbu_um,
+            warnings=warnings,
+        ),
         "warnings": warnings,
+        "self_check": self_check,
+        "power_pins": power_pins,
         "provenance": provenance,
     }
 
@@ -324,97 +326,14 @@ def run_lef_abstract(
 
 def _classify_pin(name: str) -> tuple[str, str]:
     """``(direction, use)`` heuristic for a pin the descriptor does not
-    explicitly classify (see module docstring's "Translation from socket
-    descriptor to LEF MACRO" section). Name tokens are matched
-    case-insensitively as whole alphanumeric runs (``AVDD33`` matches
-    ``VDD`` via its ``AVDD`` token containing it; ``VD`` alone does not
-    match anything) against :data:`_GROUND_TOKENS`/:data:`_POWER_TOKENS`.
-    Falls back to ``("INOUT", "ANALOG")`` -- LEF has no way to derive true
-    signal direction from geometry alone, and ``ANALOG`` is the LEF-spec
-    ``USE`` value for exactly this class of pin (this module's macros are
-    analog blocks, per Epic #393's own scope).
-    """
-    tokens = [tok.upper() for tok in _NAME_TOKEN_RE.findall(name)]
-    for token in tokens:
-        if any(marker in token for marker in _GROUND_TOKENS):
-            return "INOUT", "GROUND"
-        if any(marker in token for marker in _POWER_TOKENS):
-            return "INOUT", "POWER"
-    return "INOUT", "ANALOG"
+    explicitly classify -- :func:`~klayout_tools.socket_check.classify_pin_by_name`
+    (moved there by issue #2839; see that function for the rule)."""
+    return classify_pin_by_name(name)
 
 
 # --------------------------------------------------------------------------- #
 # GDS (layer, datatype) -> LEF layer name (open_pdks KLayout map file)
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_layer_map(pdk_info: dict[str, Any]) -> tuple[str | None, str]:
-    """The same open_pdks KLayout LEF/DEF layer-map file
-    ``place_and_route.py``'s own DEF->GDS merge resolves
-    (``libs.tech/klayout/tech/<variant>.map``) -- this module's own copy of
-    that resolution (each verb module in this repo is self-contained,
-    matching the existing precedent noted in ``place_and_route.py``).
-
-    Prefers the variant-named file (``<variant>.map``, ``resolution=
-    "exact"``); falls back to a family-level file (``<family>.map``,
-    ``resolution="family"``) when the variant-named file is absent -- some
-    open_pdks families (gf180mcu, unlike sky130) ship a single
-    ``klayout.tech`` map file shared across every variant rather than one
-    per variant (issue #1029). Returns ``(None, "none")`` when neither
-    exists (or the variant ships no ``klayout`` asset at all)."""
-    klayout_dir = pdk_info["assets"].get("klayout")
-    if klayout_dir is None:
-        return None, "none"
-    tech_dir = os.path.join(klayout_dir, "tech")
-    variant = pdk_info["variant"]
-    exact = os.path.join(tech_dir, f"{variant}.map")
-    if os.path.isfile(exact):
-        return exact, "exact"
-
-    family = variant
-    if len(family) > 1 and family[-1].isupper():
-        family = family[:-1]
-    if family != variant:
-        family_candidate = os.path.join(tech_dir, f"{family}.map")
-        if os.path.isfile(family_candidate):
-            return family_candidate, "family"
-
-    return None, "none"
-
-
-def _load_gds_to_lef_layer_map(map_path: str) -> dict[tuple[int, int], str]:
-    """Parse an open_pdks KLayout ``.map`` file into a ``{(gds_layer,
-    gds_datatype): lef_layer_name}`` dict.
-
-    File shape (whitespace-delimited, one entry per line):
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``.
-    ``NAME``/``DIEAREA`` pseudo-entries (annotation purposes, not a real
-    drawn layer) are skipped. A ``(layer, datatype)`` pair with more than
-    one purpose entry for the same LEF layer name (e.g. sky130's ``met1``
-    ``NET``/``LEFPIN`` purposes at different datatypes) simply contributes
-    multiple dict entries mapping to the same name -- never a conflict,
-    since distinct purposes always use distinct datatypes in a real
-    open_pdks map file.
-    """
-    mapping: dict[tuple[int, int], str] = {}
-    with open(map_path, encoding="utf-8") as handle:
-        for line in handle:
-            stripped = line.split("#", 1)[0].strip()
-            if not stripped:
-                continue
-            parts = stripped.split()
-            if len(parts) < 4:
-                continue
-            lef_name = parts[0]
-            if lef_name in ("NAME", "DIEAREA"):
-                continue
-            try:
-                gds_layer = int(parts[-2])
-                gds_datatype = int(parts[-1])
-            except ValueError:
-                continue
-            mapping[(gds_layer, gds_datatype)] = lef_name
-    return mapping
 
 
 def _invert_gds_to_lef(
@@ -426,8 +345,8 @@ def _invert_gds_to_lef(
     Used by :func:`_resolve_pins` to search every GDS datatype that shares a
     pin's resolved LEF layer *name* for drawn geometry -- not just the
     single ``(layer, datatype)`` the socket descriptor's ``pins[].layer``
-    happens to declare -- mirroring :func:`_resolve_obs`'s existing
-    per-LEF-layer union across every GDS datatype. Necessary because a PDK
+    happens to declare -- mirroring the OBS pipeline's own per-LEF-layer
+    union across every GDS datatype. Necessary because a PDK
     can (and open_pdks' own gf180mcu convention does) put a routing layer's
     drawn metal and its pin/net text label on two different datatypes of
     the same LEF layer; see issue #1614.
@@ -445,6 +364,36 @@ def _invert_gds_to_lef(
 # --------------------------------------------------------------------------- #
 
 
+def _match_drawn_boxes(
+    layout: Any,
+    top_cell: Any,
+    search_layers: list[tuple[int, int]],
+    point: Any,
+) -> list[tuple[int, int, int, int]]:
+    """Return the placed bboxes of every polygon on ``search_layers`` that
+    contains ``point``.
+
+    Issue #4283: tests the polygon itself (edges inclusive), not its bbox --
+    a notched/holed polygon whose bbox merely covers the pin must not become
+    the pin's PORT.
+    """
+    boxes: list[tuple[int, int, int, int]] = []
+    for search_layer in search_layers:
+        layer_index = layout.find_layer(*search_layer)
+        if layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(layer_index)
+        while not iterator.at_end():
+            polygon = iterator.shape().polygon
+            if polygon is not None:
+                placed = polygon.transformed(iterator.trans())
+                bbox = placed.bbox()
+                if bbox.contains(point) and placed.inside(point):
+                    boxes.append((bbox.left, bbox.bottom, bbox.right, bbox.top))
+            iterator.next()
+    return boxes
+
+
 def _resolve_pins(
     *,
     layout: Any,
@@ -460,8 +409,8 @@ def _resolve_pins(
     """Resolve each descriptor pin's LEF layer, direction/use, and port
     geometry. Returns ``(pins_report, pin_boxes_by_lef_layer_dbu)`` -- the
     second value (macro-local dbu boxes, keyed by LEF layer name) is reused
-    by :func:`_resolve_obs` to subtract declared pin geometry back out of
-    the obstruction region.
+    by :func:`~klayout_tools.lef_abstract_resource.resolve_obs_regions` to
+    subtract declared pin geometry back out of the obstruction region.
     """
     import klayout.db as kdb
 
@@ -472,6 +421,8 @@ def _resolve_pins(
     for pin in pins:
         layer_tuple = pin["layer"]
         lef_layer = gds_to_lef.get(layer_tuple)
+        if lef_layer is None:
+            lef_layer = _sibling_lef_layer(gds_to_lef, layer_tuple, routing_layers)
         if lef_layer is None or lef_layer not in routing_layers:
             warnings.append(
                 f"pin '{pin['name']}': layer {layer_tuple[0]}/{layer_tuple[1]} does "
@@ -485,6 +436,7 @@ def _resolve_pins(
                     "direction": direction,
                     "use": use,
                     "lef_layer": None,
+                    "gds_layer": [layer_tuple[0], layer_tuple[1]],
                     "geometry_source": "none",
                     "rects_um": [],
                     "rects_dbu": [],
@@ -508,26 +460,16 @@ def _resolve_pins(
         y_dbu = round(pin["y"] / dbu_um)
         point = kdb.Point(x_dbu, y_dbu)
 
-        drawn_boxes: list[tuple[int, int, int, int]] = []
-        for search_layer in search_layers:
-            layer_index = layout.find_layer(*search_layer)
-            if layer_index is None:
-                continue
-            iterator = top_cell.begin_shapes_rec(layer_index)
-            while not iterator.at_end():
-                shape = iterator.shape()
-                polygon = shape.polygon
-                if polygon is not None:
-                    bbox = polygon.transformed(iterator.trans()).bbox()
-                    if bbox.contains(point):
-                        drawn_boxes.append(
-                            (bbox.left, bbox.bottom, bbox.right, bbox.top)
-                        )
-                iterator.next()
+        drawn_boxes = (
+            _match_drawn_boxes(layout, top_cell, search_layers, point)
+            if layout is not None
+            else []
+        )
 
         if drawn_boxes:
             geometry_source = "drawn"
             boxes_dbu = drawn_boxes
+            _warn_oversize_pin_rects(pin, drawn_boxes, dbu_um, warnings)
         else:
             geometry_source = "synthesized"
             boxes_dbu = [
@@ -535,7 +477,9 @@ def _resolve_pins(
                     pin, lef_layer, routing_layers, x_dbu, y_dbu, dbu_um
                 )
             ]
-            if len(search_layers) > 1:
+            if layout is None:
+                searched_desc = "no layout (declaration-only abstract)"
+            elif len(search_layers) > 1:
                 sibling_desc = ", ".join(
                     f"{layer}/{datatype}" for layer, datatype in search_layers[1:]
                 )
@@ -570,6 +514,7 @@ def _resolve_pins(
                 "direction": direction,
                 "use": use,
                 "lef_layer": lef_layer,
+                "gds_layer": [layer_tuple[0], layer_tuple[1]],
                 "geometry_source": geometry_source,
                 "rects_um": [
                     [round(v * dbu_um, 6) for v in box] for box in local_boxes
@@ -580,6 +525,54 @@ def _resolve_pins(
 
     pins_report.sort(key=lambda p: p["name"])
     return pins_report, pin_boxes_by_layer
+
+
+def _sibling_lef_layer(
+    gds_to_lef: dict[tuple[int, int], str],
+    layer_tuple: tuple[int, int],
+    routing_layers: dict[str, dict[str, Any]],
+) -> str | None:
+    """Resolve a declared ``(layer, datatype)`` absent from the layer map
+    through other datatypes of the same GDS layer number that map to a
+    routing LEF layer (issue #4283): a pin labelled on a non-drawing purpose
+    (sky130 ``met3.label`` 70/5) still belongs to that metal. The drawing
+    datatype (20) is preferred, then the lowest datatype."""
+    candidates = sorted(
+        (datatype, lef_layer)
+        for (layer, datatype), lef_layer in gds_to_lef.items()
+        if layer == layer_tuple[0] and lef_layer in routing_layers
+    )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0] != 20, item[0]))
+    return candidates[0][1]
+
+
+def _warn_oversize_pin_rects(
+    pin: dict[str, Any],
+    boxes_dbu: list[tuple[int, int, int, int]],
+    dbu_um: float,
+    warnings: list[str],
+) -> None:
+    """Warn (never drop) when a matched drawn rect exceeds the pin's
+    declared ``width_um``/``height_um`` (issue #4283)."""
+    width_um = pin.get("width_um")
+    height_um = pin.get("height_um")
+    if width_um is None and height_um is None:
+        return
+    tol_um = dbu_um
+    for x0, y0, x1, y1 in boxes_dbu:
+        w_um = (x1 - x0) * dbu_um
+        h_um = (y1 - y0) * dbu_um
+        if (width_um is not None and w_um > width_um + tol_um) or (
+            height_um is not None and h_um > height_um + tol_um
+        ):
+            warnings.append(
+                f"pin '{pin['name']}': PORT rectangle "
+                f"({round(x0 * dbu_um, 6)}, {round(y0 * dbu_um, 6)}, "
+                f"{round(x1 * dbu_um, 6)}, {round(y1 * dbu_um, 6)}) um is larger "
+                f"than the declared {width_um} x {height_um} um pin size"
+            )
 
 
 def _unroutable_pins(
@@ -637,73 +630,6 @@ def _synthesized_pin_box(
 # --------------------------------------------------------------------------- #
 # OBS
 # --------------------------------------------------------------------------- #
-
-
-def _resolve_obs(
-    *,
-    layout: Any,
-    top_cell: Any,
-    gds_to_lef: dict[tuple[int, int], str],
-    routing_layers: dict[str, dict[str, Any]],
-    pin_boxes_by_layer: dict[str, list[tuple[int, int, int, int]]],
-    origin_x_dbu: int,
-    origin_y_dbu: int,
-    width_dbu: int,
-    height_dbu: int,
-    dbu_um: float,
-) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Build the obstruction geometry: every shape drawn on a GDS layer that
-    maps to a routing-type LEF layer, unioned per LEF layer, shifted into
-    macro-local coordinates, clipped to the outline, and with the declared
-    pin ports subtracted back out.
-
-    Returns ``[(lef_layer_name, [shape, ...]), ...]``, sorted by layer name,
-    skipping layers with no resulting geometry. Each ``shape`` is already
-    converted to **micrometres** (macro-local) so :func:`_write_lef` never
-    touches ``kdb`` objects: ``{"kind": "rect", "rect_um": [x0, y0, x1, y1]}``
-    for an axis-aligned box (the common case), or ``{"kind": "polygon",
-    "points_um": [[x, y], ...]}`` for anything else (e.g. an L-shaped region
-    left after subtracting a pin's port) -- LEF's ``OBS``/``PORT`` sections
-    accept both a ``RECT`` and a ``POLYGON`` statement.
-    """
-    import klayout.db as kdb
-
-    regions_by_layer: dict[str, Any] = {}
-    for layer_index in layout.layer_indexes():
-        info = layout.get_info(layer_index)
-        lef_layer = gds_to_lef.get((info.layer, info.datatype))
-        if lef_layer is None or lef_layer not in routing_layers:
-            continue
-        region = kdb.Region(top_cell.begin_shapes_rec(layer_index))
-        if region.is_empty():
-            continue
-        regions_by_layer.setdefault(lef_layer, kdb.Region()).__iadd__(region)
-
-    outline_box_dbu = kdb.Box(
-        origin_x_dbu, origin_y_dbu, origin_x_dbu + width_dbu, origin_y_dbu + height_dbu
-    )
-    local_outline_box = kdb.Box(0, 0, width_dbu, height_dbu)
-    translation = kdb.Trans(kdb.Vector(-origin_x_dbu, -origin_y_dbu))
-
-    result: list[tuple[str, list[dict[str, Any]]]] = []
-    for lef_layer in sorted(regions_by_layer):
-        region = regions_by_layer[lef_layer]
-        region.merge()
-        region = region & kdb.Region(outline_box_dbu)
-        region = region.transformed(translation)
-
-        pin_boxes = pin_boxes_by_layer.get(lef_layer)
-        if pin_boxes:
-            pin_region = kdb.Region([kdb.Box(*box) for box in pin_boxes])
-            region = region - pin_region
-        region.merge()
-        region &= kdb.Region(local_outline_box)
-
-        shapes = [_polygon_to_um_shape(poly, dbu_um) for poly in region.each_merged()]
-        if shapes:
-            result.append((lef_layer, shapes))
-
-    return result
 
 
 def _polygon_to_um_shape(polygon: Any, dbu_um: float) -> dict[str, Any]:
@@ -821,8 +747,593 @@ def _write_lef(
         ) from exc
 
 
+# --------------------------------------------------------------------------- #
+# structural self-check of the emitted LEF (issue #2769)
+# --------------------------------------------------------------------------- #
+#
+# A deliberately small validator for exactly the LEF subset `_write_lef`
+# emits -- library-level statements (`VERSION`, `BUSBITCHARS`, ...), `MACRO
+# <name>` ... `END <name>`, `PIN <name>` ... `END <name>`, anonymous `PORT`
+# ... `END` / `OBS` ... `END`, `;`-terminated statements inside them, and a
+# final `END LIBRARY`. It is NOT a general LEF parser and validates no
+# geometry: a structural pass says the file is well-nested and names exactly
+# the expected macros/pins, not that a router or P&R tool will accept it.
+#
+# Conventions it relies on (all true of `_write_lef`'s own output): `#`
+# starts a comment running to end of line; tokens are whitespace-separated
+# (a `;` glued to the end of a token is split off); the name after `MACRO`,
+# `PIN` or a named `END` sits on the same line as the keyword; keywords are
+# matched upper-case, identifiers are compared exactly (case preserved).
+
+
+def _read_back_lef(output_path: str) -> str:
+    """Read the just-written LEF back from disk for :func:`check_lef_structure`.
+
+    The self-check deliberately validates the bytes actually on disk, not the
+    in-memory data the writer was handed. A read/decode failure is an
+    application error (:class:`LefAbstractError`, CLI exit 1), not a
+    structural finding."""
+    try:
+        with open(output_path, encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LefAbstractError(
+            f"could not read back LEF abstract '{output_path}' for its "
+            f"structural self-check: {exc}"
+        ) from exc
+
+
+#: Keywords that open or close a block in the emitter's subset. Only
+#: recognised in statement-initial position.
+_LEF_BLOCK_KEYWORDS = frozenset({"MACRO", "PIN", "PORT", "OBS", "END"})
+
+
+def _lef_tokens(text: str) -> list[tuple[str, int, bool]]:
+    """Tokenise LEF text into ``(token, line_number, first_on_line)``
+    triples, dropping ``#`` comments and splitting a trailing ``;`` off any
+    token it is glued to."""
+    tokens: list[tuple[str, int, bool]] = []
+    for line_number, raw in enumerate(text.splitlines(), start=1):
+        first = True
+        for word in raw.split("#", 1)[0].split():
+            pieces = (
+                [word[:-1], ";"] if len(word) > 1 and word.endswith(";") else [word]
+            )
+            for piece in pieces:
+                tokens.append((piece, line_number, first))
+                first = False
+    return tokens
+
+
+def _finding(
+    code: str,
+    message: str,
+    *,
+    line: int | None = None,
+    macro: str | None = None,
+    pin: str | None = None,
+) -> dict[str, Any]:
+    return {"code": code, "message": message, "line": line, "macro": macro, "pin": pin}
+
+
+class _LefStructureParser:
+    """Single-pass nesting/naming walk over :func:`_lef_tokens` output.
+
+    Records findings rather than stopping at the first one, and recovers
+    from each defect conservatively so later checks still run (one fault
+    must not conceal another)."""
+
+    def __init__(self, tokens: list[tuple[str, int, bool]]) -> None:
+        self.tokens = tokens
+        self.pos = 0
+        # Each open block: {"kind", "name", "line", "decl"}.
+        self.stack: list[dict[str, Any]] = []
+        # Each MACRO declaration: {"name", "line", "pins": {name: line}}.
+        self.macros: list[dict[str, Any]] = []
+        self.findings: list[dict[str, Any]] = []
+        self.version_seen = False
+        self.end_library_line: int | None = None
+
+    # -- token helpers ------------------------------------------------------
+
+    def _take_name(self, line: int) -> str | None:
+        """Consume and return the token after a keyword when it is on the
+        same line and is not a ``;``; else ``None`` (consumes nothing)."""
+        if self.pos < len(self.tokens):
+            token, token_line, _first = self.tokens[self.pos]
+            if token_line == line and token != ";":
+                self.pos += 1
+                return token
+        return None
+
+    def _block_label(self, block: dict[str, Any]) -> str:
+        if block["name"] is None:
+            return block["kind"]
+        return f"{block['kind']} {block['name']}"
+
+    def _enclosing_macro(self) -> str | None:
+        for block in reversed(self.stack):
+            if block["kind"] == "MACRO":
+                return block["name"]
+        return None
+
+    def _report_unclosed(self, block: dict[str, Any], reason: str) -> None:
+        self.findings.append(
+            _finding(
+                "unclosed_block",
+                f"{self._block_label(block)} opened on line {block['line']} "
+                f"is never closed ({reason})",
+                line=block["line"],
+                macro=block["name"]
+                if block["kind"] == "MACRO"
+                else self._macro_of(block),
+                pin=block["name"] if block["kind"] == "PIN" else None,
+            )
+        )
+
+    def _macro_of(self, block: dict[str, Any]) -> str | None:
+        decl = block.get("decl")
+        return decl["name"] if decl is not None else None
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self) -> None:
+        handlers = {
+            "MACRO": self._open_macro,
+            "PIN": self._open_pin,
+            "PORT": self._open_anonymous,
+            "OBS": self._open_anonymous,
+            "END": self._close,
+            "VERSION": self._version,
+        }
+        while self.pos < len(self.tokens):
+            token, line, _first = self.tokens[self.pos]
+            if self.end_library_line is not None:
+                self.findings.append(
+                    _finding(
+                        "content_after_end_library",
+                        f"unexpected content '{token}' after END LIBRARY "
+                        f"(line {self.end_library_line})",
+                        line=line,
+                    )
+                )
+                break
+            handler = handlers.get(token)
+            if handler is None:
+                self._skip_statement(line)
+            else:
+                handler(token, line)
+        self._finish()
+
+    def _skip_statement(self, line: int) -> None:
+        """Consume a ``;``-terminated statement. Stops early -- reporting
+        ``unterminated_statement`` -- at EOF or at a block keyword that
+        starts a new line, so a missing ``;`` cannot swallow an ``END``."""
+        start = self.pos
+        while self.pos < len(self.tokens):
+            token, _line, first = self.tokens[self.pos]
+            if self.pos > start and first and token in _LEF_BLOCK_KEYWORDS:
+                break
+            self.pos += 1
+            if token == ";":
+                return
+        self.findings.append(
+            _finding(
+                "unterminated_statement",
+                f"statement '{self.tokens[start][0]}' starting on line {line} "
+                "has no terminating ';'",
+                line=line,
+                macro=self._enclosing_macro(),
+            )
+        )
+
+    def _version(self, _token: str, line: int) -> None:
+        value_pos = self.pos + 1
+        if not self.stack and value_pos < len(self.tokens):
+            value, value_line, _first = self.tokens[value_pos]
+            if value != ";" and value_line == line:
+                self.version_seen = True
+        self._skip_statement(line)
+
+    # -- block openers ------------------------------------------------------
+
+    def _open_macro(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        if name is None:
+            self.findings.append(
+                _finding("missing_name", f"MACRO on line {line} has no name", line=line)
+            )
+        if self.stack:
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"MACRO {name} on line {line} is nested inside "
+                    f"{self._block_label(self.stack[-1])}",
+                    line=line,
+                    macro=name,
+                )
+            )
+        decl = None
+        if name is not None:
+            decl = {"name": name, "line": line, "pins": {}}
+            self.macros.append(decl)
+        self.stack.append({"kind": "MACRO", "name": name, "line": line, "decl": decl})
+
+    def _open_pin(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        parent = self.stack[-1] if self.stack else None
+        decl = parent["decl"] if parent and parent["kind"] == "MACRO" else None
+        macro = self._enclosing_macro()
+        if name is None:
+            self.findings.append(
+                _finding(
+                    "missing_name",
+                    f"PIN on line {line} has no name",
+                    line=line,
+                    macro=macro,
+                )
+            )
+        if parent is None or parent["kind"] != "MACRO":
+            where = "library level" if parent is None else self._block_label(parent)
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"PIN {name} on line {line} is not directly inside a MACRO "
+                    f"(found at {where})",
+                    line=line,
+                    macro=macro,
+                    pin=name,
+                )
+            )
+        elif decl is not None and name is not None:
+            self._record_pin(decl, name, line)
+        self.stack.append({"kind": "PIN", "name": name, "line": line, "decl": decl})
+
+    def _record_pin(self, decl: dict[str, Any], name: str, line: int) -> None:
+        if name in decl["pins"]:
+            self.findings.append(
+                _finding(
+                    "duplicate_pin",
+                    f"PIN {name} declared again in MACRO {decl['name']} on line "
+                    f"{line} (first on line {decl['pins'][name]})",
+                    line=line,
+                    macro=decl["name"],
+                    pin=name,
+                )
+            )
+            return
+        decl["pins"][name] = line
+
+    def _open_anonymous(self, token: str, line: int) -> None:
+        self.pos += 1
+        required_parent = "PIN" if token == "PORT" else "MACRO"
+        parent = self.stack[-1] if self.stack else None
+        if parent is None or parent["kind"] != required_parent:
+            where = "library level" if parent is None else self._block_label(parent)
+            self.findings.append(
+                _finding(
+                    "misplaced_block",
+                    f"{token} on line {line} must be directly inside a "
+                    f"{required_parent} (found at {where})",
+                    line=line,
+                    macro=self._enclosing_macro(),
+                )
+            )
+        decl = parent.get("decl") if parent else None
+        self.stack.append({"kind": token, "name": None, "line": line, "decl": decl})
+
+    # -- END ----------------------------------------------------------------
+
+    def _close(self, _token: str, line: int) -> None:
+        self.pos += 1
+        name = self._take_name(line)
+        if name == "LIBRARY" and not (
+            self.stack and self.stack[-1]["name"] == "LIBRARY"
+        ):
+            for block in reversed(self.stack):
+                self._report_unclosed(block, f"END LIBRARY reached on line {line}")
+            self.stack.clear()
+            self.end_library_line = line
+            return
+        if not self.stack:
+            label = f"END {name}" if name else "END"
+            self.findings.append(
+                _finding(
+                    "orphan_end",
+                    f"{label} on line {line} closes nothing",
+                    line=line,
+                    macro=name,
+                )
+            )
+            return
+        top = self.stack[-1]
+        if top["name"] == name:
+            self.stack.pop()
+            return
+        if name is None:
+            self._unnamed_end(top, line)
+            return
+        self._mismatched_end(top, name, line)
+
+    def _unnamed_end(self, top: dict[str, Any], line: int) -> None:
+        self.findings.append(
+            _finding(
+                "unnamed_end",
+                f"anonymous END on line {line} where 'END {top['name']}' is "
+                f"required to close {self._block_label(top)} (line {top['line']})",
+                line=line,
+                macro=top["name"] if top["kind"] == "MACRO" else self._macro_of(top),
+                pin=top["name"] if top["kind"] == "PIN" else None,
+            )
+        )
+        self.stack.pop()
+
+    def _mismatched_end(self, top: dict[str, Any], name: str, line: int) -> None:
+        for index in range(len(self.stack) - 2, -1, -1):
+            if self.stack[index]["name"] == name:
+                # A deeper block's name: the blocks above it were never closed.
+                for block in reversed(self.stack[index + 1 :]):
+                    self._report_unclosed(block, f"END {name} reached on line {line}")
+                del self.stack[index:]
+                return
+        expected = f"END {top['name']}" if top["name"] else "END"
+        self.findings.append(
+            _finding(
+                "end_name_mismatch",
+                f"END {name} on line {line} does not match {self._block_label(top)} "
+                f"(line {top['line']}); expected '{expected}'",
+                line=line,
+                macro=top["name"] if top["kind"] == "MACRO" else self._macro_of(top),
+                pin=top["name"] if top["kind"] == "PIN" else None,
+            )
+        )
+        self.stack.pop()
+
+    # -- EOF ----------------------------------------------------------------
+
+    def _finish(self) -> None:
+        for block in reversed(self.stack):
+            self._report_unclosed(block, "end of file reached -- truncated output?")
+        self.stack.clear()
+        if self.end_library_line is None:
+            self.findings.append(
+                _finding("missing_end_library", "no END LIBRARY statement")
+            )
+        if not self.version_seen:
+            self.findings.append(
+                _finding("missing_version", "no library-level VERSION statement")
+            )
+
+
+def _macro_identity_findings(
+    macros: list[dict[str, Any]], expected: dict[str, list[str]]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Compare declared MACRO names against the expected set: duplicates,
+    missing and unexpected names (exact, case-sensitive)."""
+    findings: list[dict[str, Any]] = []
+    first_line: dict[str, int] = {}
+    for decl in macros:
+        if decl["name"] in first_line:
+            findings.append(
+                _finding(
+                    "duplicate_macro",
+                    f"MACRO {decl['name']} declared again on line {decl['line']} "
+                    f"(first on line {first_line[decl['name']]})",
+                    line=decl["line"],
+                    macro=decl["name"],
+                )
+            )
+        else:
+            first_line[decl["name"]] = decl["line"]
+    missing = sorted(set(expected) - set(first_line))
+    unexpected = sorted(set(first_line) - set(expected))
+    for name in missing:
+        findings.append(
+            _finding(
+                "missing_macro", f"expected MACRO {name} is not declared", macro=name
+            )
+        )
+    for name in unexpected:
+        findings.append(
+            _finding(
+                "unexpected_macro",
+                f"MACRO {name} (line {first_line[name]}) is not an expected macro",
+                line=first_line[name],
+                macro=name,
+            )
+        )
+    return findings, missing, unexpected
+
+
+def _pin_identity_findings(
+    macros: list[dict[str, Any]], expected: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    """For each expected macro that is declared, every expected pin must be
+    declared inside it and no other pin may be. Pins are unioned across
+    duplicate declarations of the same macro (the duplicate itself is
+    already a finding)."""
+    findings: list[dict[str, Any]] = []
+    declared: dict[str, dict[str, int]] = {}
+    macro_line: dict[str, int] = {}
+    for decl in macros:
+        macro_line.setdefault(decl["name"], decl["line"])
+        pins = declared.setdefault(decl["name"], {})
+        for pin, line in decl["pins"].items():
+            pins.setdefault(pin, line)
+    for macro in sorted(set(expected) & set(declared)):
+        wanted = set(expected[macro])
+        have = declared[macro]
+        for pin in sorted(wanted - set(have)):
+            findings.append(
+                _finding(
+                    "missing_pin",
+                    f"declared pin {pin} is missing from MACRO {macro}",
+                    line=macro_line[macro],
+                    macro=macro,
+                    pin=pin,
+                )
+            )
+        for pin in sorted(set(have) - wanted):
+            findings.append(
+                _finding(
+                    "unexpected_pin",
+                    f"PIN {pin} (line {have[pin]}) is not a declared pin of "
+                    f"MACRO {macro}",
+                    line=have[pin],
+                    macro=macro,
+                    pin=pin,
+                )
+            )
+    return findings
+
+
+def check_lef_structure(
+    text: str, expected_pins: dict[str, list[str]]
+) -> dict[str, Any]:
+    """Structurally check LEF ``text`` (the subset ``klt lef-abstract``
+    emits) against ``expected_pins`` -- a ``{macro_name: [pin_name, ...]}``
+    mapping of exactly the macros the file must declare, each with exactly
+    the pins it must contain.
+
+    Returns the additive ``self_check`` report block::
+
+        {
+            "status": "pass" | "fail",
+            "findings": [
+                {"code", "message", "line", "macro", "pin"}, ...
+            ],
+            "missing_macros": [<sorted names>],
+            "unexpected_macros": [<sorted names>],
+        }
+
+    ``line``/``macro``/``pin`` are ``null`` when not applicable. Every check
+    runs regardless of earlier findings. ``status`` is ``"pass"`` iff
+    ``findings`` is empty. Checks: a library-level ``VERSION``; MACRO/PIN/
+    PORT/OBS nesting with named ``END <name>`` for MACRO/PIN, anonymous
+    ``END`` for PORT/OBS and a final ``END LIBRARY`` (orphan, mismatched,
+    unnamed and unclosed ENDs, truncation, unterminated statements, content
+    after ``END LIBRARY``); duplicate MACRO/PIN declarations; exact macro
+    name set; every expected pin inside its own macro and no unexpected pin.
+    Geometry and non-structural LEF semantics are not checked.
+    """
+    parser = _LefStructureParser(_lef_tokens(text))
+    parser.run()
+    macro_findings, missing, unexpected = _macro_identity_findings(
+        parser.macros, expected_pins
+    )
+    findings = (
+        parser.findings
+        + macro_findings
+        + _pin_identity_findings(parser.macros, expected_pins)
+    )
+    return {
+        "status": "fail" if findings else "pass",
+        "findings": findings,
+        "missing_macros": missing,
+        "unexpected_macros": unexpected,
+    }
+
+
+def _read_back_pin_uses(text: str) -> dict[str, str]:
+    """``{pin_name: USE value}`` as actually written in LEF ``text`` (issue
+    #2839) -- the ``USE`` statement inside each ``PIN <name>`` ... ``END
+    <name>`` block. A pin with no ``USE`` statement is absent."""
+    uses: dict[str, str] = {}
+    tokens = _lef_tokens(text)
+    current: str | None = None
+    for index, (token, line, first) in enumerate(tokens):
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token == "PIN" and first and following and following[1] == line:
+            current = following[0]
+        elif token == "END" and current is not None and following:
+            if following[1] == line and following[0] == current:
+                current = None
+        elif token == "USE" and first and current is not None and following:
+            uses.setdefault(current, following[0])
+    return uses
+
+
+def check_power_pins(pins: list[dict[str, Any]], lef_text: str) -> dict[str, Any]:
+    """The LEF abstract's supply-pin verdict (issue #2839, T1 item 11 port
+    accessibility -- provisional until 2AMLogic/product#134 ratifies the
+    amendment). ``pins`` are this command's own resolved pins (``use``,
+    ``geometry_source``, ``lef_layer``); ``lef_text`` is the file read back
+    from disk, whose ``USE`` statements are what is checked.
+
+    Returns::
+
+        {
+            "status": "pass" | "fail",
+            "findings": [{"code", "pin", "message"}, ...],
+            "pins": [{"name", "use", "use_read_back", "layer",
+                      "geometry_source"}, ...],   # supply pins only
+        }
+
+    Finding codes: ``no_power_pin``/``no_ground_pin`` (no pin is ``USE
+    POWER``/``USE GROUND``; ``pin`` is ``null``), ``use_not_written`` (the
+    file's own ``USE`` for a supply pin is absent or differs), and
+    ``port_not_drawn`` (a supply pin's ``PORT`` is a synthesized placeholder
+    or missing, not drawn layout geometry). ``status`` is ``"pass"`` iff
+    there are no findings.
+    """
+    read_back = _read_back_pin_uses(lef_text)
+    supply = [pin for pin in pins if pin["use"] in ("POWER", "GROUND")]
+    findings: list[dict[str, Any]] = []
+    uses = {pin["use"] for pin in supply}
+    for use, code in (("POWER", "no_power_pin"), ("GROUND", "no_ground_pin")):
+        if use not in uses:
+            findings.append(
+                {
+                    "code": code,
+                    "pin": None,
+                    "message": f"no PIN with USE {use} in the abstract",
+                }
+            )
+    for pin in supply:
+        if read_back.get(pin["name"]) != pin["use"]:
+            findings.append(
+                {
+                    "code": "use_not_written",
+                    "pin": pin["name"],
+                    "message": (
+                        f"PIN {pin['name']}: expected USE {pin['use']} in the "
+                        f"written file, found {read_back.get(pin['name'])!r}"
+                    ),
+                }
+            )
+        if pin["geometry_source"] != "drawn":
+            findings.append(
+                {
+                    "code": "port_not_drawn",
+                    "pin": pin["name"],
+                    "message": (
+                        f"PIN {pin['name']}: PORT geometry is "
+                        f"{pin['geometry_source']!r}, not drawn layout geometry"
+                    ),
+                }
+            )
+    return {
+        "status": "fail" if findings else "pass",
+        "findings": findings,
+        "pins": [
+            {
+                "name": pin["name"],
+                "use": pin["use"],
+                "use_read_back": read_back.get(pin["name"]),
+                "layer": pin["lef_layer"],
+                "geometry_source": pin["geometry_source"],
+            }
+            for pin in supply
+        ],
+    }
+
+
 __all__ = [
     "SCHEMA_VERSION",
     "LefAbstractError",
+    "check_lef_structure",
+    "check_power_pins",
     "run_lef_abstract",
 ]

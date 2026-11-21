@@ -60,6 +60,10 @@
 #     .github/workflows/place-and-route-smoke.yml's `volare enable` step
 #     for how CI provisions this.
 #
+# Optional: SMOKE_PORTABLE_PATHS=1 additionally re-runs the route with
+# `"portable_paths": true` and runs `klt env-provenance lint-envelope` on that
+# report (issue #3874). Unset (default) changes nothing.
+#
 # Usage: scripts/place-and-route-smoke.sh [DESIGN...]
 #   With no arguments, runs both `gcd` and `mult8`.
 #
@@ -170,6 +174,21 @@ JSON
     echo "--> klt place-and-route $DESIGN (target_stage: route)"
     PAR_JSON="$SCRATCH/par_report.json"
     run_klt "$SCRATCH" place-and-route par_request.json --format json >"$PAR_JSON"
+
+    # Opt-in (issue #3874): re-run the same request with `portable_paths: true`
+    # and lint the committable response. A SECOND run, not a rewrite of the
+    # request above, because the stages below chain on the real absolute
+    # `gds_path` / `verilog_path`, which `portable_paths` deliberately replaces.
+    # Unset leaves the request and every later stage exactly as before.
+    if [[ "${SMOKE_PORTABLE_PATHS:-0}" == "1" ]]; then
+        jq '. + {portable_paths: true}' "$SCRATCH/par_request.json" >"$SCRATCH/par_request_portable.json"
+        echo "--> klt place-and-route $DESIGN (portable_paths: true) + env-provenance lint-envelope"
+        PORTABLE_JSON="$SCRATCH/par_report_portable.json"
+        run_klt "$SCRATCH" place-and-route par_request_portable.json --format json >"$PORTABLE_JSON"
+        if ! run_klt "$SCRATCH" env-provenance lint-envelope "$PORTABLE_JSON"; then
+            die "$DESIGN: portable_paths report still carries absolute host paths (see $PORTABLE_JSON)"
+        fi
+    fi
 
     STAGE_REACHED="$(jq -r '.stage_reached' "$PAR_JSON")"
     [[ "$STAGE_REACHED" == "route" ]] || die "$DESIGN: place-and-route stage_reached='$STAGE_REACHED', expected 'route' (see $PAR_JSON)"

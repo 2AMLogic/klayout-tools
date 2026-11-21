@@ -6,13 +6,13 @@
 # replaces the endless-retry rejection on a genuine critical-file match
 # (#6879).
 #
-# Champion's criterion #3 (`champion-pr-merge.md` "Critical File Exclusion
+# Champion's critical-files criterion (`champion-pr-merge.md` "Critical File Exclusion
 # Check") is prose an LLM instance reads and executes, not a standalone
 # script (same situation as test-dependency-parse.sh) — so this file mirrors
-# the documented check-loop (and, since #6147, the `version_only_diff()`
-# carve-out, and since #6879, the durable-hold labeling) in local functions
-# and pins the shipped markdown's exact commands with `assert_doc_contains`,
-# catching drift between the two.
+# the documented check-loop (since #9611 the shipped `version_only_diff()` is
+# extracted and run, not mirrored; since #6879, the durable-hold labeling) in
+# local functions and pins the shipped markdown's exact commands with
+# `assert_doc_contains`, catching drift between the two.
 #
 # Incident recap: on PR #4611 (117 changed files), a concurrent Champion
 # evaluation posted "no critical-file changes" despite the PR removing
@@ -22,7 +22,7 @@
 # 100 files with no error, while the paginated REST endpoint
 # (`gh api repos/{owner}/{repo}/pulls/<n>/files --paginate`) returns the full
 # set. The fix (#4613):
-#   1. Switches criterion #3's FILES command (and the criterion #2 evidence-
+#   1. Switches the critical-files criterion's FILES command (and the merge-risk criterion evidence-
 #      gathering command) from `gh pr view --json files` to the paginated
 #      REST endpoint.
 #   2. Makes explicit that "no critical-file changes" / "No critical files
@@ -34,9 +34,9 @@
 # label-check/size-check/ci-status, even though nothing about a diff's
 # critical-file-ness clears on its own. A fleet PR was re-evaluated and
 # re-rejected ~59 times over 36 hours this way (200-300s/tick), invisible to
-# the operator queue the whole time (no loom:operator* label). The fix routes
-# criterion #3's FAIL through its own durable hold instead — `loom:operator`
-# + a `<!-- champion:critical-file-hold -->` marker, mirroring criterion #2's
+# the operator queue the whole time (no loom:blocked* label). The fix routes
+# the critical-files criterion's FAIL through its own durable hold instead — `loom:blocked`
+# + a `<!-- champion:critical-file-hold -->` marker, mirroring the merge-risk criterion's
 # merge-risk hold — released only when a later push narrows the diff so it no
 # longer matches any critical-file pattern.
 #
@@ -47,9 +47,9 @@
 #   2. The mirrored loop correctly PASSes on a large all-clean file list.
 #   3. The shipped markdown no longer contains the truncating
 #      `gh pr view <number> --json files` invocation for either the
-#      criterion #3 FILES command or the criterion #2 evidence-gathering
+#      the critical-files criterion FILES command or the merge-risk criterion evidence-gathering
 #      command, and does contain the paginated replacement.
-#   4. (#6879) A fresh critical-file FAIL applies the loom:operator label and
+#   4. (#6879) A fresh critical-file FAIL applies the loom:blocked label and
 #      posts the champion:critical-file-hold marker comment exactly once; a
 #      repeated FAIL against an unchanged file set is idempotent (no
 #      duplicate label/comment); and a later PASS (diff no longer touches a
@@ -84,58 +84,17 @@ CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 # pointer); its commands are pinned against this file.
 CRITICAL_HOLD_MD="$PROMPT_DIR/champion-critical-file-hold.md"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-NC='\033[0m'
-
-TESTS_RUN=0
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-assert_eq() {
-    local expected="$1" actual="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$expected" == "$actual" ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Expected: '$expected'"
-        echo "    Actual:   '$actual'"
-    fi
-}
+# shellcheck source=lib/assert.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Pin a literal snippet as present verbatim in a doc file — catches drift
 # between this test's mirrored function and the shipped markdown.
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (missing literal in $file: $needle)"
-    fi
-}
 
 # Pin a literal snippet's ABSENCE from a doc file — catches a regression back
 # to the truncating command.
-assert_doc_lacks() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (found stale/truncating literal in $file: $needle)"
-    else
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    fi
-}
 
 # =====================================================================
-# champion-pr-merge.md criterion #3's critical-file check-loop, mirrored
+# champion-pr-merge.md the critical-files criterion's critical-file check-loop, mirrored
 # verbatim (pattern list + matching loop) from defaults/.claude/commands/
 # loom/champion-pr-merge.md.
 # =====================================================================
@@ -169,45 +128,35 @@ champion_critical_file_check() {
 }
 
 # =====================================================================
-# Version-only diff carve-out (#6147), mirrored verbatim from criterion #3's
-# `version_only_diff()` in champion-pr-merge.md. The doc's version reads the
-# diff via `gh api .../pulls/<n>/files --jq '... | .patch'`; this mirror
-# takes the patch text directly (stdin) so it can be exercised against fixed
-# fixtures without a live PR.
+# Version-only diff carve-out (#6147, #9611). The decision lives in `loom-daemon
+# forge version-only-diff` (its Rust unit tests own the PR #6118 patch
+# fixtures). The old mirror here re-implemented only the grep half on stdin, so
+# it passed while the shipped `gh api --jq --arg` fetch failed open on every
+# call. Now the SHIPPED `version_only_diff()` is extracted from the doc and run
+# against a stub `loom-daemon` that exits with the code `STUB_RCS` assigns to a
+# file ("file=rc ..."; unlisted files exit 1).
 # =====================================================================
-version_only_diff_from_patch() {
-    local file="$1"
-    local pattern
-    case "$file" in
-        package.json|mcp-loom/package.json|mcp-loom/package-lock.json)
-            pattern='^[+-][[:space:]]*"version":[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+",?[[:space:]]*$'
-            ;;
-        loom-daemon/Cargo.toml|loom-api/Cargo.toml|Cargo.lock)
-            pattern='^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+STUB_DIR="$(mktemp -d)" && trap 'rm -rf "$STUB_DIR"' EXIT
+mkdir -p "$STUB_DIR/bin" "$STUB_DIR/noexec" "$STUB_DIR/empty"
+printf '%s\n' "#!$(command -v bash)" \
+    '[ "$1 $2" = "forge suspect-critical-diff" ] && { [ -n "${STUB_SUSPECT_ERR:-}" ] && echo "$STUB_SUSPECT_ERR" >&2; printf "%b" "${STUB_SUSPECT_OUT:-}"; exit "${STUB_SUSPECT_RC:-1}"; }' \
+    '[ "$1 $2" = "forge version-only-diff" ] || exit 64' \
+    'for kv in $STUB_RCS; do [ "${kv%=*}" = "$4" ] && exit "${kv##*=}"; done; exit 1' \
+    >"$STUB_DIR/bin/loom-daemon"
+chmod +x "$STUB_DIR/bin/loom-daemon"
+: >"$STUB_DIR/noexec/loom-daemon"
+eval "$(sed -n '/^version_only_diff() {$/,/^}$/p' "$CHAMPION_MD")"
+export STUB_RCS=""
+vod() { PATH="$1" version_only_diff "$2" 42 2>/dev/null && echo 0 || echo 1; }
 
-    local bad_lines
-    bad_lines=$(grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -vE "$pattern")
-    [ -z "$bad_lines" ]
-}
-
-# champion_critical_file_check, extended to apply the version-only carve-out.
-# $2 (optional, per-invocation) supplies a patch-lookup function name; when a
-# critical-pattern match is one of the 6 version-bearing files, that function
-# is called as `"$patch_lookup_fn" "$file"` and piped into
-# version_only_diff_from_patch to decide PASS vs FAIL for that file alone.
+# The critical-files criterion check-loop as shipped, calling the shipped version_only_diff.
 champion_critical_file_check_with_carveout() {
-    local patch_lookup_fn="$1"
     local file
     while IFS= read -r file; do
         [ -z "$file" ] && continue
         for pattern in "${CRITICAL_PATTERNS[@]}"; do
             if [[ "$file" == *"$pattern"* ]]; then
-                if "$patch_lookup_fn" "$file" | version_only_diff_from_patch "$file"; then
+                if PATH="$STUB_DIR/bin:$PATH" version_only_diff "$file" 42 2>/dev/null; then
                     echo "PASS (version-only carve-out): $file"
                 else
                     echo "FAIL: $file"
@@ -360,145 +309,86 @@ assert_eq "PASS" "$out" \
     "paths with 'sql'/'.sql' inside a directory or identifier name (no schema file) pass"
 
 echo
-echo "--- version_only_diff_from_patch: real PR #6118 version-bump diff shapes carve out cleanly (#6147) ---"
+echo "--- version_only_diff (shipped): only a daemon exit 0 is eligible; every other exit fails closed (#9611) ---"
 
-# Fixture patch bodies copied verbatim (patch-line shape) from PR #6118's
-# actual diff for each of the 6 version-bearing files.
-pr6118_patch_loom_api_cargo_toml=$'@@ -1,6 +1,6 @@\n [package]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n description = "External REST API for Loom analytics data access"\n '
-pr6118_patch_loom_daemon_cargo_toml=$'@@ -1,6 +1,6 @@\n [package]\n name = "loom-daemon"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n \n [dependencies]'
-pr6118_patch_cargo_lock=$'@@ -1247,7 +1247,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"\n \n [[package]]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n dependencies = [\n "anyhow",\n "axum",\n@@ -1265,7 +1265,7 @@ dependencies = [\n \n [[package]]\n name = "loom-daemon"\n-version = "0.18.38"\n+version = "0.18.39"\n dependencies = [\n "anyhow",'
-pr6118_patch_package_json=$'@@ -1,6 +1,6 @@\n {\n   "name": "loom",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "description": "AI-powered development orchestration...",\n   "type": "module",'
-pr6118_patch_mcp_package_json=$'@@ -1,6 +1,6 @@\n {\n   "name": "@loom/mcp",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "description": "Unified MCP server for Loom",\n   "type": "module",'
-pr6118_patch_mcp_package_lock_json=$'@@ -1,12 +1,12 @@\n {\n   "name": "@loom/mcp",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n   "lockfileVersion": 3,\n   "requires": true,\n   "packages": {\n     "": {\n       "name": "@loom/mcp",\n-      "version": "0.18.38",\n+      "version": "0.18.39",\n       "dependencies": {'
-
-if printf '%s\n' "$pr6118_patch_loom_api_cargo_toml" | version_only_diff_from_patch "loom-api/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's loom-api/Cargo.toml diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" | version_only_diff_from_patch "loom-daemon/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's loom-daemon/Cargo.toml diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_cargo_lock" | version_only_diff_from_patch "Cargo.lock"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's Cargo.lock diff (two [[package]] version bumps) is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_package_json" | version_only_diff_from_patch "package.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's package.json diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_mcp_package_json" | version_only_diff_from_patch "mcp-loom/package.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's mcp-loom/package.json diff is recognized as version-only"
-
-if printf '%s\n' "$pr6118_patch_mcp_package_lock_json" | version_only_diff_from_patch "mcp-loom/package-lock.json"; then
-    r=0; else r=1; fi
-assert_eq "0" "$r" "PR #6118's mcp-loom/package-lock.json diff (two version lines) is recognized as version-only"
+STUB_RCS="package.json=0 loom-api/Cargo.toml=1 Cargo.lock=2 loom-daemon/Cargo.toml=70"
+assert_eq "0" "$(vod "$STUB_DIR/bin" package.json)" "daemon exit 0 (version-only) is eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" loom-api/Cargo.toml)" "daemon exit 1 (not eligible / forge error) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" Cargo.lock)" "daemon exit 2 (a daemon predating the verb: clap error) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/bin" loom-daemon/Cargo.toml)" "any other non-zero daemon exit is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/noexec" package.json)" "a non-executable loom-daemon (exit 126) is not eligible"
+assert_eq "1" "$(vod "$STUB_DIR/empty" package.json)" "a missing loom-daemon binary (exit 127) is not eligible"
 
 echo
-echo "--- version_only_diff_from_patch: a real (non-version) change to a critical file still fails (#6147) ---"
-
-# A genuine dependency bump alongside the version line — the carve-out must
-# NOT apply; this file still fails criterion #3 as before.
-real_dep_change_cargo_toml=$'@@ -1,7 +1,7 @@\n [package]\n name = "loom-api"\n-version = "0.18.38"\n+version = "0.18.39"\n edition = "2021"\n \n [dependencies]\n-anyhow = "1.0"\n+anyhow = "1.1"'
-if printf '%s\n' "$real_dep_change_cargo_toml" | version_only_diff_from_patch "loom-api/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a Cargo.toml diff with a real dependency-version change (not just the package version) still fails the carve-out"
-
-# A new field added alongside the version bump in package.json.
-real_new_field_package_json=$'@@ -1,7 +1,8 @@\n {\n   "name": "loom",\n-  "version": "0.18.38",\n+  "version": "0.18.39",\n+  "private": true,\n   "description": "...",\n   "type": "module",'
-if printf '%s\n' "$real_new_field_package_json" | version_only_diff_from_patch "package.json"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a package.json diff with a new field alongside the version bump still fails the carve-out"
-
-# A critical file NOT in the 6-file allowlist is never eligible for the
-# carve-out, even with a version-only-shaped diff — e.g. a hypothetical
-# some-crate/Cargo.toml.
-version_only_shaped_other_toml=$'@@ -1,3 +1,3 @@\n [package]\n-version = "1.2.3"\n+version = "1.2.4"'
-if printf '%s\n' "$version_only_shaped_other_toml" | version_only_diff_from_patch "some-crate/Cargo.toml"; then
-    r=0; else r=1; fi
-assert_eq "1" "$r" \
-    "a critical Cargo.toml outside the 6-file allowlist is never eligible for the carve-out, even with a version-only-shaped diff"
+echo "--- suspect_critical_diff (shipped): only exit 0 with a literal SUSPECT=0 clears; every other answer holds (#12999) ---"
+eval "$(sed -n '/^suspect_critical_diff() {$/,/^}$/p' "$CHAMPION_MD")"
+scd() { # <rc> <stdout> <file>; echoes rc, then the captured line
+    STUB_SUSPECT_RC="$1" STUB_SUSPECT_OUT="$2" PATH="$STUB_DIR/bin:$PATH" suspect_critical_diff "$3" 42 && printf '0|%s' "$CRITERION3_SUSPECT_LINE" || printf '1|%s' "$CRITERION3_SUSPECT_LINE"
+}
+CRITERION3_SUSPECT_LINE=""
+assert_eq "0|" "$(scd 0 'SUSPECT=0\n' loom-daemon/Cargo.toml)" "exit 0 with SUSPECT=0 (e.g. #12976's [[bin]] entries) clears"
+assert_eq "1|" "$(scd 0 '' loom-daemon/Cargo.toml)" "exit 0 without the SUSPECT=0 line is not a pass"
+assert_eq "1|" "$(scd 0 'SUSPECT=1\n' loom-daemon/Cargo.toml)" "exit 0 with any other body is not a pass"
+assert_eq '1|+postinstall = "x"' "$(scd 1 'SUSPECT_LINE=+postinstall = "x"\nSUSPECT_SECTION=scripts.postinstall\n' package.json)" \
+    "a suspect line holds and its text is captured for the FAIL line and hold comment"
+assert_eq "1|" "$(scd 2 '' Cargo.toml)" "exit 2 (a daemon predating the verb) holds"
+assert_eq "1|" "$(scd 70 '' Cargo.toml)" "any other non-zero exit holds"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' migrations/0001_initial.py)" "a migrations hit never reaches the daemon verb: holds on any change"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' .github/workflows/ci.yml)" "a workflow hit never clears through the manifest verb"
+assert_eq "1|" "$(scd 0 'SUSPECT=0\n' Cargo.lock)" "Cargo.lock is not a manifest-family hit"
+# #13296: a forge read failure keeps its HTTP status for the hold comment.
+STUB_SUSPECT_ERR="could not read the PR's file list: \`gh api repos/a/b/pulls/42/files\` failed (exit 1): HTTP 403" \
+    STUB_SUSPECT_RC=1 PATH="$STUB_DIR/bin:$PATH" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a forge read failure holds"
+case "$CRITERION3_SUSPECT_ERROR" in *"HTTP 403"*) r=ok ;; *) r=missing ;; esac
+assert_eq "ok" "$r" "the read error's HTTP status is captured for the hold comment (#13296)"
+PATH="$STUB_DIR/noexec:$PATH" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a non-executable loom-daemon (126) holds"
+PATH="$STUB_DIR/empty" suspect_critical_diff Cargo.toml 42 && r=0 || r=1
+assert_eq "1" "$r" "a missing loom-daemon (127) holds"
 
 echo
 echo "--- champion_critical_file_check_with_carveout: full check-loop integration (#6147) ---"
 
-# Patch-lookup stub used by the integration tests below: dispatches by
-# filename to the fixtures already defined.
-patch_lookup_pr6118_clean() {
-    case "$1" in
-        loom-api/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_api_cargo_toml" ;;
-        loom-daemon/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" ;;
-        Cargo.lock) printf '%s\n' "$pr6118_patch_cargo_lock" ;;
-        package.json) printf '%s\n' "$pr6118_patch_package_json" ;;
-        mcp-loom/package.json) printf '%s\n' "$pr6118_patch_mcp_package_json" ;;
-        mcp-loom/package-lock.json) printf '%s\n' "$pr6118_patch_mcp_package_lock_json" ;;
-        *) printf '' ;;
-    esac
-}
-
+STUB_RCS="loom-api/Cargo.toml=0 loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
 fixture=$'defaults/scripts/merge-pr.sh\nloom-api/Cargo.toml\nloom-daemon/Cargo.toml\nCargo.lock\npackage.json\nmcp-loom/package.json\nmcp-loom/package-lock.json'
-out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout patch_lookup_pr6118_clean)"
-# The loop only calls version_only_diff on files that match a CRITICAL_PATTERNS
-# entry in the first place; per the current pattern list that is
-# loom-api/Cargo.toml, loom-daemon/Cargo.toml, package.json, and
-# mcp-loom/package.json (Cargo.lock and mcp-loom/package-lock.json don't match
-# any pattern substring today, so they never even reach version_only_diff —
-# harmless, and version_only_diff still recognizes them defensively in case
-# CRITICAL_PATTERNS is ever extended to cover lockfiles). The overall result
-# must have no FAIL line and end on the loop's final "PASS".
-last_line="$(printf '%s' "$out" | tail -1)"
-fail_count="$(printf '%s\n' "$out" | grep -c '^FAIL:' || true)"
-assert_eq "PASS" "$last_line" \
-    "a PR #6118-shaped file list (6 version-only critical files + one non-critical substantive file) ends on overall PASS"
-assert_eq "0" "$fail_count" \
-    "a PR #6118-shaped file list (6 version-only critical files + one non-critical substantive file) produces zero FAIL lines"
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
+# Only files matching a CRITICAL_PATTERNS entry reach version_only_diff
+# (Cargo.lock and mcp-loom/package-lock.json match none today).
 assert_eq "PASS (version-only carve-out): loom-api/Cargo.toml
 PASS (version-only carve-out): loom-daemon/Cargo.toml
 PASS (version-only carve-out): package.json
 PASS (version-only carve-out): mcp-loom/package.json
 PASS" "$out" \
-    "the 4 files that match a CRITICAL_PATTERNS entry (loom-api/Cargo.toml, loom-daemon/Cargo.toml, package.json, mcp-loom/package.json) each pass via the version-only carve-out"
+    "a PR #6118-shaped file list passes via the carve-out on the 4 critical-pattern files, ending on PASS"
 
-# Same file list, but loom-api/Cargo.toml now carries a real dependency
-# change too — the whole check must fail again, on that file.
-patch_lookup_pr6118_dirty() {
-    case "$1" in
-        loom-api/Cargo.toml) printf '%s\n' "$real_dep_change_cargo_toml" ;;
-        loom-daemon/Cargo.toml) printf '%s\n' "$pr6118_patch_loom_daemon_cargo_toml" ;;
-        Cargo.lock) printf '%s\n' "$pr6118_patch_cargo_lock" ;;
-        package.json) printf '%s\n' "$pr6118_patch_package_json" ;;
-        mcp-loom/package.json) printf '%s\n' "$pr6118_patch_mcp_package_json" ;;
-        mcp-loom/package-lock.json) printf '%s\n' "$pr6118_patch_mcp_package_lock_json" ;;
-        *) printf '' ;;
-    esac
-}
-
-fixture=$'defaults/scripts/merge-pr.sh\nloom-api/Cargo.toml\nloom-daemon/Cargo.toml\nCargo.lock\npackage.json\nmcp-loom/package.json\nmcp-loom/package-lock.json'
-out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout patch_lookup_pr6118_dirty)"
+STUB_RCS="loom-daemon/Cargo.toml=0 package.json=0 mcp-loom/package.json=0"
+out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
 assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
-    "the same file list still fails criterion #3 when one version-bearing file also carries a real dependency change"
+    "the same list fails the critical-files criterion when the daemon finds one file not version-only"
+
+STUB_RCS="" out="$(printf '%s\n' "$fixture" | champion_critical_file_check_with_carveout)"
+assert_eq "FAIL: loom-api/Cargo.toml" "$out" \
+    "with every daemon answer non-zero (forge down, old daemon) the critical-files criterion FAILS rather than PASSes"
 
 echo
 echo "--- Doc pins: shipped markdown uses the paginated REST endpoint, not the truncating gh pr view field ---"
 
 assert_doc_contains "$CHAMPION_MD" \
     'FILES=$(gh api "repos/{owner}/{repo}/pulls/<number>/files" --paginate --jq '"'"'.[].filename'"'"')' \
-    "criterion #3 FILES command ships the paginated REST endpoint"
+    "the critical-files criterion FILES command ships the paginated REST endpoint"
 
 assert_doc_contains "$CHAMPION_MD" \
     'gh api "repos/{owner}/{repo}/pulls/$PR_NUMBER/files" --paginate --jq' \
-    "criterion #2 evidence-gathering command ships the paginated REST endpoint"
+    "the merge-risk criterion evidence-gathering command ships the paginated REST endpoint"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'FILES=$(gh pr view <number> --json files --jq -r' \
-    "criterion #3 FILES command no longer uses the truncating gh pr view --json files field"
+    "the critical-files criterion FILES command no longer uses the truncating gh pr view --json files field"
 
 assert_doc_lacks "$CHAMPION_MD" \
     'gh pr view "$PR_NUMBER" --json files --jq'"'"'.files[] | "\(.additions)+/\(.deletions)- \(.path)"'"'" \
-    "criterion #2 evidence-gathering command no longer uses the truncating gh pr view --json files field"
+    "the merge-risk criterion evidence-gathering command no longer uses the truncating gh pr view --json files field"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#4613" \
@@ -554,31 +444,43 @@ echo "--- Doc pins: shipped markdown ships the version-only diff carve-out (#614
 
 assert_doc_contains "$CHAMPION_MD" \
     'version_only_diff() {' \
-    "criterion #3 defines the version_only_diff() carve-out function"
+    "the critical-files criterion defines the version_only_diff() carve-out function"
 
 assert_doc_contains "$CHAMPION_MD" \
-    'package.json|mcp-loom/package.json|mcp-loom/package-lock.json)' \
-    "version_only_diff() case-matches the 3 JSON version-bearing files exactly (not by substring)"
+    'loom-daemon forge version-only-diff "$number" "$file" >/dev/null || return 1' \
+    "version_only_diff() delegates to the fail-closed daemon verb (#9611)"
 
-assert_doc_contains "$CHAMPION_MD" \
-    'loom-daemon/Cargo.toml|loom-api/Cargo.toml|Cargo.lock)' \
-    "version_only_diff() case-matches the 3 TOML-style version-bearing files exactly (not by substring)"
-
-assert_doc_contains "$CHAMPION_MD" \
-    'pattern='"'"'^[+-][[:space:]]*"version":[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+",?[[:space:]]*$'"'" \
-    "version_only_diff() ships the JSON version-line pattern"
-
-assert_doc_contains "$CHAMPION_MD" \
-    'pattern='"'"'^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$'"'" \
-    "version_only_diff() ships the TOML version-line pattern"
+assert_doc_lacks "$CHAMPION_MD" \
+    '--jq --arg' \
+    "no gh api --jq --arg pipeline (gh's --jq takes no --arg; it errored and failed open, #9611)"
 
 assert_doc_contains "$CHAMPION_MD" \
     'if version_only_diff "$file" <number>; then' \
-    "criterion #3's check-loop calls version_only_diff before failing on a critical-pattern match"
+    "the critical-files criterion's check-loop calls version_only_diff before failing on a critical-pattern match"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'elif suspect_critical_diff "$file" <number>; then' \
+    "criterion #3's check-loop tries the suspect-line carve-out after the version-only one (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'elif [[ "$file" == *".github/workflows/"* ]] && wf_blast_green; then' \
+    "criterion #3 clears a workflow hit only on WF_BLAST=green (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    "loom-daemon forge suspect-critical-diff" \
+    "criterion #3 delegates the suspect-line decision to the fail-closed daemon verb (#12999)"
+
+assert_doc_contains "$CHAMPION_MD" \
+    'FAIL: Critical file modified: $file${CRITERION3_SUSPECT_LINE:+' \
+    "the FAIL line names the matched suspect line (#12999)"
+
+assert_doc_contains "$PROMPT_DIR/champion-critical-file-hold.md" \
+    "Matched suspect line" \
+    "the hold comment shows the matched suspect line (#12999)"
 
 assert_doc_contains "$CHAMPION_MD" \
     "PASS (version-only carve-out)" \
-    "criterion #3's check-loop emits the carve-out PASS line so it can be reused verbatim in a Champion comment"
+    "the critical-files criterion's check-loop emits the carve-out PASS line so it can be reused verbatim in a Champion comment"
 
 assert_doc_contains "$CHAMPION_MD" \
     "#6147" \
@@ -591,33 +493,19 @@ assert_doc_contains "$CHAMPION_MD" \
 # =====================================================================
 # Durable critical-file hold (#6879): a critical-file FAIL is a one-way
 # terminal state (nothing about a diff's critical-file-ness changes without a
-# human decision or a later push that narrows the diff), so criterion #3 now
-# applies its own durable hold (`loom:operator` + `<!-- champion:critical-
+# human decision or a later push that narrows the diff), so the critical-files criterion now
+# applies its own durable hold (`loom:blocked` + `<!-- champion:critical-
 # file-hold -->`) instead of routing through the shared "Transient failures"
 # template. Mirrored here (same rationale as the mirrors above: the criterion
 # is prose an LLM instance executes, not a standalone script) from
-# `champion-pr-merge.md`'s "Safety Criteria → 3. Critical File Exclusion
+# `champion-pr-merge.md`'s "Safety Criteria → critical-files: Critical File Exclusion
 # Check → Durable hold on FAIL" subsection.
 #
-# Unlike criterion #2's merge-risk hold, this one needs no sticky-hold
+# Unlike the merge-risk criterion's merge-risk hold, this one needs no sticky-hold
 # precheck machinery: the check-loop above is a deterministic file-pattern
 # match, not a judgment call, so the FAIL/PASS verdict recomputed fresh every
 # tick IS the release signal — "last marker wins" is enough state to track.
 # =====================================================================
-
-assert_contains() {
-    local haystack="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" <<<"$haystack"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Missing '$needle' in:"
-        sed 's/^/      /' <<<"$haystack"
-    fi
-}
 
 assert_lacks() {
     local haystack="$1" needle="$2" msg="$3"
@@ -639,9 +527,9 @@ assert_lacks() {
 # recorded in its own `<!-- champion:hold-state head=<sha> -->` line. This
 # mirrors the doc's "last comment matching any marker prefix" lookup without
 # needing real timestamps (a deterministic check-loop makes this sufficient —
-# see the doc's own rationale for skipping criterion #2's sticky-hold
+# see the doc's own rationale for skipping the merge-risk criterion's sticky-hold
 # machinery). `released` is #9016's state: the operator hand-removed
-# loom:operator at the head the hold was written against.
+# loom:blocked at the head the hold was written against.
 hold_state_get() {
     local f="$1"
     [[ -f "$f" ]] && awk '{print $1}' "$f" || echo "none"
@@ -654,7 +542,7 @@ hold_state_set() {
     printf '%s %s' "$2" "${3:-}" >"$1"
 }
 
-# LABEL_FILE tracks whether loom:operator is currently applied ("1"/"0").
+# LABEL_FILE tracks whether loom:blocked is currently applied ("1"/"0").
 label_get() {
     local f="$1"
     [[ -f "$f" ]] && cat "$f" || echo "0"
@@ -716,13 +604,13 @@ champion_critical_file_hold_tick() {
                 ;;
             stands)
                 echo "HOLD:stands"
-                echo "LABEL_ADD:loom:operator"
+                echo "LABEL_ADD:loom:blocked"
                 label_set "$label_file" "1"
                 ;;
             hold|rearm)
                 [[ "$action" == "rearm" ]] && echo "REARM:${state_head:-<none>}->$head_sha"
                 echo "COMMENT:champion:critical-file-hold"
-                echo "LABEL_ADD:loom:operator"
+                echo "LABEL_ADD:loom:blocked"
                 hold_state_set "$hold_state_file" "held" "$head_sha"
                 label_set "$label_file" "1"
                 ;;
@@ -735,7 +623,7 @@ champion_critical_file_hold_tick() {
         esac
     elif [[ "$state" == "held" || "$state" == "released" ]]; then
         echo "COMMENT:champion:critical-file-hold-cleared"
-        echo "LABEL_REMOVE:loom:operator"
+        echo "LABEL_REMOVE:loom:blocked"
         hold_state_set "$hold_state_file" "cleared" ""
         label_set "$label_file" "0"
     else
@@ -754,12 +642,12 @@ critical_fixture=$'src/lib.rs\n.github/workflows/new-ci-job.yml'
 out="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_contains "$out" "COMMENT:champion:critical-file-hold" \
     "a fresh critical-file FAIL posts the champion:critical-file-hold marker comment"
-assert_contains "$out" "LABEL_ADD:loom:operator" \
-    "a fresh critical-file FAIL adds the loom:operator label"
+assert_contains "$out" "LABEL_ADD:loom:blocked" \
+    "a fresh critical-file FAIL adds the loom:blocked label"
 assert_eq "held" "$(hold_state_get "$HS")" \
     "hold state is recorded as held after the first rejection"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator is applied after the first rejection"
+    "loom:blocked is applied after the first rejection"
 
 echo
 echo "--- critical-file hold: no duplicate label/comment on a repeated rejection with an unchanged file set (idempotency, #6879) ---"
@@ -773,7 +661,7 @@ assert_eq "0" "$comment_count" \
 assert_eq "held" "$(hold_state_get "$HS")" \
     "hold state remains held (unchanged) across the repeated rejection"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator remains applied (label add is idempotent) across the repeated rejection"
+    "loom:blocked remains applied (label add is idempotent) across the repeated rejection"
 
 echo
 echo "--- critical-file hold: label/marker cleared when a later push no longer touches a critical file (#6879) ---"
@@ -782,12 +670,12 @@ clean_fixture=$'src/lib.rs\nsrc/other.rs'
 out3="$(printf '%s\n' "$clean_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_contains "$out3" "COMMENT:champion:critical-file-hold-cleared" \
     "a PASS after a prior hold posts the champion:critical-file-hold-cleared marker comment"
-assert_contains "$out3" "LABEL_REMOVE:loom:operator" \
-    "a PASS after a prior hold removes the loom:operator label"
+assert_contains "$out3" "LABEL_REMOVE:loom:blocked" \
+    "a PASS after a prior hold removes the loom:blocked label"
 assert_eq "cleared" "$(hold_state_get "$HS")" \
     "hold state is recorded as cleared once the diff no longer matches a critical pattern"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator is removed once the diff no longer matches a critical pattern"
+    "loom:blocked is removed once the diff no longer matches a critical pattern"
 
 out4="$(printf '%s\n' "$clean_fixture" | champion_critical_file_hold_tick "$HS" "$LF")"
 assert_eq "PASS:no-hold" "$out4" \
@@ -805,22 +693,22 @@ echo
 echo "--- critical-file hold: an operator's label removal at the held head is a durable release (#9016) ---"
 
 # Merge train #8996's exact shape: the hold stands, the operator removes
-# loom:operator by hand (the documented release), and the NEXT Champion tick
+# loom:blocked by hand (the documented release), and the NEXT Champion tick
 # must not put it back — that re-add is what made the documented
 # `merge-pr.sh <N>` path unusable, because the #8112 verdict-contradiction
-# guard refuses `loom:pr` + `loom:operator` and has no override flag.
+# guard refuses `loom:pr` + `loom:blocked` and has no override flag.
 HS="$(mktemp)"
 LF="$(mktemp)"
 rm -f "$HS" "$LF"
 
 printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-A" >/dev/null
 assert_eq "1" "$(label_get "$LF")" \
-    "precondition: the hold is standing with loom:operator applied at sha-A"
+    "precondition: the hold is standing with loom:blocked applied at sha-A"
 
-label_set "$LF" "0"   # operator: gh pr edit --remove-label "loom:operator"
+label_set "$LF" "0"   # operator: gh pr edit --remove-label "loom:blocked"
 rel="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-A")"
-assert_lacks "$rel" "LABEL_ADD:loom:operator" \
-    "the tick after a hand-removal at the held head does NOT re-apply loom:operator (#9016)"
+assert_lacks "$rel" "LABEL_ADD:loom:blocked" \
+    "the tick after a hand-removal at the held head does NOT re-apply loom:blocked (#9016)"
 assert_contains "$rel" "COMMENT:champion:critical-file-release-respected" \
     "the tick records the release durably, behind its own marker"
 assert_eq "released" "$(hold_state_get "$HS")" \
@@ -828,7 +716,7 @@ assert_eq "released" "$(hold_state_get "$HS")" \
 assert_eq "sha-A" "$(hold_head_get "$HS")" \
     "the release is recorded against the head it was made at"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator stays OFF, so merge-pr.sh sees no loom:pr/loom:operator contradiction (#8112)"
+    "loom:blocked stays OFF, so merge-pr.sh sees no loom:pr/loom:blocked contradiction (#8112)"
 
 # ...and it stays released across further ticks, with no comment spam: this is
 # the "non-racy" half of the acceptance criterion. An operator can release,
@@ -837,7 +725,7 @@ rel2="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$H
 assert_eq "RELEASED:no-rehold:sha-A" "$rel2" \
     "a later tick at the same head is a complete no-op — no label, no comment (idempotent ack)"
 assert_eq "0" "$(label_get "$LF")" \
-    "loom:operator is still OFF after repeated ticks at the released head"
+    "loom:blocked is still OFF after repeated ticks at the released head"
 
 echo
 echo "--- critical-file hold: the release survives an EQUIVALENT head move (#9416) ---"
@@ -850,7 +738,7 @@ for kind in tree clean-merge rebase-patch-identical; do
     hold_state_set "$HS" "released" "sha-A"
     label_set "$LF" "0"
     eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "$kind")"
-    assert_lacks "$eq" "LABEL_ADD:loom:operator" \
+    assert_lacks "$eq" "LABEL_ADD:loom:blocked" \
         "an equivalent head move ($kind) does NOT re-arm the hold (#9416)"
     assert_lacks "$eq" "COMMENT:champion:critical-file-hold" \
         "an equivalent head move ($kind) posts no new hold notice"
@@ -859,7 +747,7 @@ for kind in tree clean-merge rebase-patch-identical; do
     assert_eq "sha-B" "$(hold_head_get "$HS")" \
         "the release is re-anchored at the new head, so the next tick needs no comparison ($kind)"
     assert_eq "0" "$(label_get "$LF")" \
-        "loom:operator stays OFF across an equivalent head move ($kind)"
+        "loom:blocked stays OFF across an equivalent head move ($kind)"
 done
 
 # ...and the re-anchored release is then honored at the new head with no
@@ -876,18 +764,18 @@ label_set "$LF" "0"
 noans="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "")"
 assert_contains "$noans" "REARM:sha-A->sha-B" \
     "no equivalence answer re-arms the hold — fail closed, the pre-#9416 behavior (#9416)"
-assert_contains "$noans" "LABEL_ADD:loom:operator" \
-    "the fail-closed arm re-applies loom:operator, so nothing merges unlooked-at"
+assert_contains "$noans" "LABEL_ADD:loom:blocked" \
+    "the fail-closed arm re-applies loom:blocked, so nothing merges unlooked-at"
 
 # A legacy hold (no recorded head) is never carried by equivalence either: there
 # is no recorded head to compare against, so there is nothing to prove.
 hold_state_set "$HS" "held" ""
 label_set "$LF" "0"
 legacy_eq="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
-assert_contains "$legacy_eq" "LABEL_ADD:loom:operator" \
+assert_contains "$legacy_eq" "LABEL_ADD:loom:blocked" \
     "a legacy hold with no recorded head re-arms even when an equivalence kind is offered (#9416)"
 
-# THE RESISTING CASE for #9416: a released episode whose `loom:operator` is BACK
+# THE RESISTING CASE for #9416: a released episode whose `loom:blocked` is BACK
 # ON. Proven equivalence must NOT be read as a live release — somebody put the
 # label back, which is a re-assertion of the hold, and the operator-release
 # inference (#9016) only ever meant "the label is absent". The hold stands.
@@ -895,11 +783,11 @@ hold_state_set "$HS" "released" "sha-A"
 label_set "$LF" "1"
 relabeled="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B" "tree")"
 assert_contains "$relabeled" "HOLD:stands" \
-    "a re-added loom:operator overrides a proven equivalence — the hold stands (#9416)"
+    "a re-added loom:blocked overrides a proven equivalence — the hold stands (#9416)"
 assert_lacks "$relabeled" "champion:critical-file-release-respected" \
-    "no release is acknowledged while loom:operator is applied"
+    "no release is acknowledged while loom:blocked is applied"
 assert_eq "1" "$(label_get "$LF")" \
-    "loom:operator stays ON when a human re-asserted the hold"
+    "loom:blocked stays ON when a human re-asserted the hold"
 
 echo
 echo "--- critical-file hold: a new push re-arms the hold after a release (#9016) ---"
@@ -913,8 +801,8 @@ assert_contains "$rearm" "REARM:sha-A->sha-B" \
     "a FAIL at a new head after a release re-arms the hold"
 assert_contains "$rearm" "COMMENT:champion:critical-file-hold" \
     "the re-arm is a NEW hold notice, not an edit of the old one"
-assert_contains "$rearm" "LABEL_ADD:loom:operator" \
-    "the re-arm re-applies loom:operator at the new head"
+assert_contains "$rearm" "LABEL_ADD:loom:blocked" \
+    "the re-arm re-applies loom:blocked at the new head"
 assert_eq "sha-B" "$(hold_head_get "$HS")" \
     "the new episode records the new head"
 
@@ -922,7 +810,7 @@ assert_eq "sha-B" "$(hold_head_get "$HS")" \
 # has to race a tick, whatever the history.
 label_set "$LF" "0"
 rel3="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
-assert_lacks "$rel3" "LABEL_ADD:loom:operator" \
+assert_lacks "$rel3" "LABEL_ADD:loom:blocked" \
     "a release at the re-armed head is honored too (no re-add), not read as the older release"
 assert_eq "released" "$(hold_state_get "$HS")" \
     "the second release is recorded like the first"
@@ -932,7 +820,7 @@ assert_eq "released" "$(hold_state_get "$HS")" \
 hold_state_set "$HS" "held" ""
 label_set "$LF" "0"
 legacy="$(printf '%s\n' "$critical_fixture" | champion_critical_file_hold_tick "$HS" "$LF" "sha-B")"
-assert_contains "$legacy" "LABEL_ADD:loom:operator" \
+assert_contains "$legacy" "LABEL_ADD:loom:blocked" \
     "a legacy hold with no recorded head re-arms instead of silently releasing (fail-safe)"
 
 # And a released episode still closes normally once the diff narrows.
@@ -951,19 +839,19 @@ echo "--- Doc pins: shipped markdown ships the durable critical-file hold (#6879
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'HOLD_MARKER="<!-- champion:critical-file-hold -->"' \
-    "the hold prompt defines its own durable-hold marker, distinct from criterion #2's champion:merge-risk-hold"
+    "the hold prompt defines its own durable-hold marker, distinct from the merge-risk criterion's champion:merge-risk-hold"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CLEARED_MARKER="<!-- champion:critical-file-hold-cleared -->"' \
     "the hold prompt defines a distinct cleared-marker for the diff-narrowed release path"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit "$PR_NUMBER" --add-label "loom:operator"' \
-    "the durable-hold path applies loom:operator (#5502) on FAIL"
+    'loom-daemon park-record apply --pr "$PR_NUMBER" --reason "champion critical-file hold" --by champion' \
+    "the durable-hold path applies loom:blocked + a reason-only park record on FAIL (#11861)"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit "$PR_NUMBER" --remove-label "loom:operator"' \
-    "the release path removes loom:operator once the diff no longer touches a critical file"
+    'gh pr edit "$PR_NUMBER" --remove-label "loom:blocked"' \
+    "the release path removes loom:blocked once the diff no longer touches a critical file"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     "#6879" \
@@ -975,7 +863,7 @@ assert_doc_contains "$CHAMPION_MD" \
 
 assert_doc_contains "$CHAMPION_MD" \
     '[`champion-critical-file-hold.md`](champion-critical-file-hold.md)' \
-    "criterion #3 points at the sibling prompt that owns the hold state machine (#9016)"
+    "the critical-files criterion points at the sibling prompt that owns the hold state machine (#9016)"
 
 echo
 echo "--- Doc pins: the operator's release is durable and head-scoped (#9016) ---"
@@ -989,8 +877,8 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
     "both the hold and the release notice record the head they were written against (reused by merge-pr.sh's #7419 staleness warning)"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'OPERATOR_LABEL_NOW=$(jq -r ' \
-    "the tick reads whether loom:operator is currently applied — the signal a hand-removal produces"
+    'HOLD_LABEL_NOW=$(jq -r ' \
+    "the tick reads whether loom:blocked is currently applied — the signal a hand-removal produces"
 
 assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CF_ACTION=respect' \
@@ -1000,22 +888,23 @@ assert_doc_contains "$CRITICAL_HOLD_MD" \
     'CF_ACTION=rearm' \
     "the tick re-arms the hold when the head moved past the released one"
 
-# The operator-facing procedure has to be the one that actually works: remove
-# the label, then run merge-pr.sh, with an explicit promise that Champion will
-# not put the label back at this head. The pre-#9016 wording promised a
-# `merge-pr.sh` run the #8112 guard refused.
+# The operator-facing procedure has to be the one that actually works: since
+# #13517 it is one audited command, `merge-pr.sh <N> --release-hold`, which
+# verifies the hold and Judge-approved heads and removes loom:blocked itself
+# (the pre-#13517 hand `gh pr edit --remove-label` recorded nothing), with an
+# explicit promise that Champion will not put the label back at this head.
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'gh pr edit $PR_NUMBER --remove-label \"loom:operator\"' \
-    "the hold notice's Next steps tell the operator to remove loom:operator first"
+    './.loom/scripts/merge-pr.sh $PR_NUMBER --release-hold' \
+    "the hold notice's Next steps name the one audited release-and-merge command (#13517)"
 
-assert_doc_contains "$CRITICAL_HOLD_MD" \
-    './.loom/scripts/merge-pr.sh $PR_NUMBER' \
-    "the hold notice's Next steps name the merge command that follows the removal"
+assert_doc_lacks "$CRITICAL_HOLD_MD" \
+    'gh pr edit $PR_NUMBER --remove-label \"loom:blocked\"' \
+    "the hold notice no longer tells the operator to hand-remove loom:blocked (#13517)"
 
 # One line, not a two-line needle: `grep -F` splits a needle on newlines and
 # ORs the parts, so a multi-line pin silently degrades to "either line".
 assert_doc_contains "$CRITICAL_HOLD_MD" \
-    'no need to beat a Champion tick to it.' \
+    "put it back while this PR's change is the one this notice" \
     "the hold notice states that the release is durable, i.e. the procedure is not a race (#9016)"
 
 assert_doc_lacks "$CRITICAL_HOLD_MD" \
@@ -1066,6 +955,119 @@ assert_doc_lacks "$CHAMPION_MD" \
 assert_doc_lacks "$CHAMPION_MD" \
     'label-check | size-check | critical-file |' \
     "the shared CRITERION_KEY slug comment no longer lists critical-file among the transient-failure criteria (#6879)"
+
+# ---------------------------------------------------------------------
+# (#13031) A criterion-#3 standing-authorization waiver leaves a truthful,
+# greppable record in the pre-merge comment; the no-waiver text is unchanged.
+# The shipped bullet-building block is extracted from the markdown and run,
+# not mirrored, so the test cannot drift from the prompt.
+# ---------------------------------------------------------------------
+echo
+echo "Criterion #3 waiver record (#13031):"
+BULLET_BLOCK=$(awk '/^if \[ -n "\$\{CRITERION3_WAIVER_ID:-\}" \]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$CHAMPION_MD")
+render_bullet() {
+    # shellcheck disable=SC2034 # consumed by the eval'd BULLET_BLOCK
+    ( CRITERION3_WAIVER_ID="$1" CRITERION3_WAIVER_SCOPE="$2" CRITERION3_WAIVED_FILES="$3"
+      eval "$BULLET_BLOCK"; printf '%s' "$CRITICAL_BULLET" )
+}
+assert_contains "$BULLET_BLOCK" "CRITICAL_BULLET" "the shipped markdown carries the waiver bullet block"
+
+OUT=$(render_bullet "workflow-critical-only" "critical" ".github/workflows/ci.yml")
+assert_contains "$OUT" "workflow-critical-only" "waiver bullet names the class id"
+assert_contains "$OUT" "scope: critical" "waiver bullet names the scope"
+assert_contains "$OUT" ".github/workflows/ci.yml" "waiver bullet lists the waived files"
+assert_contains "$OUT" "<!-- champion:critical-file-waiver class=workflow-critical-only -->" "waiver bullet carries the machine-readable marker"
+assert_not_contains "$OUT" "No critical files modified" "waiver bullet never claims no critical files"
+
+OUT=$(render_bullet "all-class" "all" "a.yml b.yml")
+assert_contains "$OUT" "scope: all" "coversCriticalFiles (scope all) waiver names its scope"
+
+OUT=$(render_bullet "" "" "")
+assert_eq "No critical files modified" "$OUT" "no waiver keeps the unchanged text"
+assert_not_contains "$OUT" "champion:critical-file-waiver" "no waiver emits no marker"
+
+assert_doc_contains "$CHAMPION_MD" '- $CRITICAL_BULLET' "the pre-merge comment template renders the bullet from CRITERION3_WAIVER_*"
+assert_doc_lacks "$CHAMPION_MD" '- No critical files modified' "the pre-merge comment no longer hardcodes the no-critical-files bullet"
+
+# ---------------------------------------------------------------------
+# (#13542) Repo-declared extra critical paths (champion.extraCriticalPaths).
+# The shipped loader and matcher are extracted from the markdown and run, not
+# mirrored. A stub loom-daemon answers `config get` from $STUB_CONFIG_OUT.
+# ---------------------------------------------------------------------
+echo
+echo "Declared critical paths (#13542):"
+CFG_STUB="$STUB_DIR/cfg"; mkdir -p "$CFG_STUB"
+printf '%s\n' "#!$(command -v bash)" \
+    '[ "$1 $2" = "config get" ] || exit 64' \
+    '[ -n "${STUB_CONFIG_RC:-}" ] || exit 1' \
+    'printf "%s" "${STUB_CONFIG_OUT:-}"; exit "$STUB_CONFIG_RC"' >"$CFG_STUB/loom-daemon"
+chmod +x "$CFG_STUB/loom-daemon"
+eval "$(sed -n '/^extra_critical_paths_load() {$/,/^}$/p' "$CHAMPION_MD")"
+eval "$(sed -n '/^extra_critical_hit() {$/,/^}$/p' "$CHAMPION_MD")"
+assert_contains "$(type -t extra_critical_hit)$(type -t extra_critical_paths_load)" "functionfunction" "the shipped loader and matcher extract from the markdown"
+
+# run_declared <config-json-for-verb|-> <file-json-or-empty> <names...>: prints loader output, then HIT/MISS.
+run_declared() {
+    local verb_out="$1" file_cfg="$2"; shift 2
+    local d; d=$(mktemp -d); mkdir -p "$d/.loom"
+    [ -n "$file_cfg" ] && printf '%s' "$file_cfg" >"$d/.loom/config.json"
+    (
+        cd "$d" || exit 1
+        EXTRA_CRITICAL_PATHS=(); CRITERION3_DECLARED_PATH=""; CRITERION3_DECLARED_FILE=""
+        if [ "$verb_out" = "-" ]; then PATH="$STUB_DIR/empty:$PATH"; else export STUB_CONFIG_RC=0 STUB_CONFIG_OUT="$verb_out"; PATH="$CFG_STUB:$PATH"; fi
+        extra_critical_paths_load
+        if extra_critical_hit <<<"$(printf '%s\n' "$@")"; then echo "HIT $CRITERION3_DECLARED_FILE via $CRITERION3_DECLARED_PATH"; else echo "MISS"; fi
+    )
+    rm -rf "$d"
+}
+
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**","policy/*-policy.json"]}' "" "src/a.rs" "infra/bot/charter/allow.json")
+assert_contains "$OUT" "HIT infra/bot/charter/allow.json via infra/bot/**" "a declared path holds and the hit names the glob"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**","policy/*-policy.json"]}' "" "policy/x-policy.json")
+assert_contains "$OUT" "via policy/*-policy.json" "a declared single-level glob holds"
+OUT=$(run_declared '{"found":true,"value":["bot"]}' "" "robot/x.txt")
+assert_eq "MISS" "$OUT" "globs are anchored: a declared 'bot' does not match 'robot/x.txt'"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**"]}' "" "docs/x.md" "infra/other/y")
+assert_eq "MISS" "$OUT" "a file outside every declared glob does not hold"
+OUT=$(run_declared '{"found":true,"value":["infra/bot/**"]}' "" "archive/charter.json" "infra/bot/charter.json")
+assert_contains "$OUT" "HIT infra/bot/charter.json" "a rename out of a declared path holds (previous_filename is in the list)"
+
+OUT=$(run_declared '{"found":true,"value":"oops"}' "" "infra/bot/a")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths is not an array; ignored" "a non-array value is ignored with a warning"
+assert_contains "$OUT" "MISS" "a non-array value adds nothing"
+OUT=$(run_declared '{"found":true,"value":["", 7, null, "infra/bot/**"]}' "" "infra/bot/a" "other")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths entry \"\" is not a non-empty string; skipped" "an empty entry is skipped with a warning"
+assert_contains "$OUT" "entry 7 is not" "a non-string entry is skipped with a warning"
+assert_contains "$OUT" "HIT infra/bot/a" "valid entries beside bad ones still apply"
+OUT=$(run_declared '{"found":true,"value":["",5]}' "" "anything" "x/y")
+assert_contains "$OUT" "MISS" "only bad entries: nothing is added, nothing widened"
+
+OUT=$(run_declared '{"found":false}' "" "infra/bot/a")
+assert_eq "MISS" "$OUT" "no key (verb says not found): no output, no hold"
+OUT=$(run_declared "-" "" "infra/bot/a")
+assert_eq "MISS" "$OUT" "no key and no committed file: no output, no hold (unchanged behavior)"
+OUT=$(run_declared "-" '{"champion":{"extraCriticalPaths":["infra/bot/**"]}}' "infra/bot/a")
+assert_contains "$OUT" "HIT infra/bot/a via infra/bot/**" "no verb: the committed .loom/config.json is the fallback"
+OUT=$(run_declared "-" '{"champion":{"extraCriticalPaths":"oops"}}' "x")
+assert_contains "$OUT" "WARN: champion.extraCriticalPaths is not an array" "malformed key in the committed file is ignored with a warning"
+
+# Built-ins are untouched by the key: the shipped CRITICAL_PATTERNS array has no declared entries
+# and the declared check never writes to it or to the kept set.
+EXTRA_CRITICAL_PATHS=("infra/bot/**")
+assert_eq "FAIL: .github/workflows/ci.yml" "$(printf '.github/workflows/ci.yml\n' | champion_critical_file_check)" "a built-in path still holds with the key set"
+assert_eq "PASS" "$(printf 'infra/bot/a\n' | champion_critical_file_check)" "declared paths are not in CRITICAL_PATTERNS (a criticalFilesOnly class never sees them)"
+# shellcheck disable=SC2034 # read by champion_critical_file_check
+EXTRA_CRITICAL_PATHS=()
+
+# Ordering and wiring pinned against the shipped block.
+DECL_LINE=$(grep -n '^extra_critical_paths_load$' "$CHAMPION_MD" | head -1 | cut -d: -f1)
+EVAL_LINE=$(grep -n '^standing_auth_eval critical "\$FILES"$' "$CHAMPION_MD" | head -1 | cut -d: -f1)
+assert_eq "yes" "$([ -n "$DECL_LINE" ] && [ -n "$EVAL_LINE" ] && [ "$DECL_LINE" -lt "$EVAL_LINE" ] && echo yes || echo no)" "the declared-path check runs before standing_auth_eval, so a class cannot waive it"
+assert_doc_contains "$CHAMPION_MD" 'FAIL: Declared critical path modified: $CRITERION3_DECLARED_FILE (champion.extraCriticalPaths' "the FAIL line names the declared glob"
+assert_doc_contains "$CHAMPION_MD" 'previous_filename // empty' "the declared check reads previous_filename too"
+assert_doc_contains "$CRITICAL_HOLD_MD" '${CRITERION3_DECLARED_PATH}' "the hold comment names the declared glob"
+assert_doc_contains "$PROMPT_DIR/champion-reference.md" 'champion.extraCriticalPaths' "the champion config reference documents the key"
+assert_doc_lacks "$CHAMPION_MD" 'CRITICAL_PATTERNS+=' "declared paths are never appended to CRITICAL_PATTERNS"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

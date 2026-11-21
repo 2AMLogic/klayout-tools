@@ -47,6 +47,11 @@ Scope (phase 2, this module's current state):
   uniformly to every tile (no *per-tile* override), and leaves per-tile
   ``connectivity[]``/``pins[]`` routing as a follow-on question this module
   does not answer -- see :func:`_parse_array_placement`'s docstring.
+  Each ``blocks[]`` entry may also carry an optional non-empty
+  ``placed_cell_name`` (#4246) that sets the name of the sub-cell the block
+  is instantiated under in place of the default ``"<id>__<cell_name>"``; a
+  real name collision gets KLayout's ``$n`` suffix plus a ``warnings[]``
+  entry, and the response ``blocks[]`` entry echoes the name actually used.
 * **Routing** (new this phase): for every 2-pin ``connectivity[]`` net, draw
   a Manhattan metal path (backbone -> corner bends -> straight fill; see
   :func:`manhattan_backbone`) between the two named ports on the resolved
@@ -175,14 +180,15 @@ still never read from its stream.
 
 from __future__ import annotations
 
-import json
 import math
 import os
 from collections.abc import Callable
 from typing import Any
 
+from . import gen_compose_port_request as _pr
+from ._jsonnum import is_finite_number, is_int
 from ._layout import write_layout
-from ._paths import _resolve_relative
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
 from .decks import (
     ExtractionDeck,
@@ -196,17 +202,36 @@ from .gen import (
     ENCLOSURE_MARGIN_UM,
     GenError,
     _cut_fixed_size_um,
-    _fixed_cut_side_um,
     _pdk_family,
 )
+from .gen import (
+    _fixed_cut_side_um as _fixed_cut_side_um,
+)
+from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_derived_frame import add_composed_frames as _framed
+from .gen_compose_draw import (
+    _draw_routed_entry as _draw_routed_entry,
+)
+from .gen_compose_draw import (
+    _insert_via_cuts as _insert_via_cuts,
+)
+from .gen_compose_ladder_floors import (
+    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
+)
+from .gen_compose_landing_pads import (
+    _landing_and_widen_pad_boxes,
+    _leg_conflict_message,
+    _make_landing_pad_side_um,
+    _parse_landing_pad_override,
+)
+from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
 # purely so `klayout_tools.gen_compose.<name>` keeps working (the test suite
 # imports/monkeypatches several of them by that path from before this split,
 # issue #1708). The redundant `X as X` aliases mark them as intentional
 # re-exports (mirrors `extract.py`'s `_sanitize_instance_name`/`ExtractError`/
-# `def_net_instance_pins` re-exports from `extract_abstract.py`/
-# `extract_spef.py`).
+# `def_net_instance_pins` re-exports from `extract_abstract.py`/`extract_spef.py`).
 from .gen_compose_routing import (
     _MAX_SAME_BLOCK_CROSS_LAYER_LANES as _MAX_SAME_BLOCK_CROSS_LAYER_LANES,
 )
@@ -218,7 +243,6 @@ from .gen_compose_routing import (
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
-    _polyline_midpoint_um,
     _port_own_layer,
     _resolve_cross_block_route_layer,
     _resolve_label_layer,
@@ -231,6 +255,9 @@ from .gen_compose_routing import (
 from .gen_compose_routing import _cleanup_points as _cleanup_points
 from .gen_compose_routing import _endpoint_stub_widen_um as _endpoint_stub_widen_um
 from .gen_compose_routing import _pin_ref as _pin_ref
+from .gen_compose_routing import (
+    _polyline_midpoint_um as _polyline_midpoint_um,
+)
 from .gen_compose_routing import _resolve_via_drop_layer as _resolve_via_drop_layer
 from .gen_compose_routing import (
     _segment_bbox_interior_overlap_um as _segment_bbox_interior_overlap_um,
@@ -243,6 +270,11 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
+from .gen_compose_via_cuts import (
+    own_via_cut_clearance_reason,
+    via_drop_cut_side_um,
+)
+from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
 #: Contract identifier for the request envelope (spike section 2).
@@ -381,7 +413,22 @@ class GenComposeError(Exception):
     unsupported ``placement.strategy``, and a GDS read/write failure -- the
     CLI turns this into a clean stderr message + exit code 1, never a
     traceback (see ``docs/cli/gen-compose.md``'s exit code table).
+
+    ``code`` / ``details`` are an optional machine-readable classification
+    (``error.code`` and extra ``error`` fields in the JSON envelope); only the
+    ``pins[].request`` failures (#3971) set them today.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
 
 
 def load_generator_report_arg(
@@ -417,17 +464,7 @@ def load_generator_report_arg(
     if not os.path.isfile(resolved):
         raise GenComposeError(f"generator_report file not found: '{resolved}'")
 
-    try:
-        with open(resolved, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except OSError as exc:
-        raise GenComposeError(
-            f"could not read generator_report '{resolved}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise GenComposeError(
-            f"generator_report '{resolved}' is not valid JSON: {exc}"
-        ) from exc
+    data = _load_request_json(resolved, GenComposeError)
 
     if not isinstance(data, dict):
         raise GenComposeError(
@@ -1050,17 +1087,12 @@ def _orient_port(port: dict[str, Any], orientation: str) -> dict[str, Any]:
     """
     oriented = dict(port)
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if (
-        not isinstance(x_um, bool)
-        and isinstance(x_um, (int, float))
-        and not isinstance(y_um, bool)
-        and isinstance(y_um, (int, float))
-    ):
+    if is_finite_number(x_um) and is_finite_number(y_um):
         oriented["x_um"], oriented["y_um"] = _apply_orientation_um(
             float(x_um), float(y_um), orientation
         )
     direction_deg = port.get("direction_deg")
-    if not isinstance(direction_deg, bool) and isinstance(direction_deg, int):
+    if is_int(direction_deg):
         oriented["direction_deg"] = _ORIENTATION_DIRECTION_MAP[orientation].get(
             direction_deg, direction_deg
         )
@@ -1171,8 +1203,8 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         port = dict(raw_port)
         x_um, y_um = raw_port.get("x_um"), raw_port.get("y_um")
-        has_x = not isinstance(x_um, bool) and isinstance(x_um, (int, float))
-        has_y = not isinstance(y_um, bool) and isinstance(y_um, (int, float))
+        has_x = is_finite_number(x_um)
+        has_y = is_finite_number(y_um)
         if (x_um is not None or y_um is not None) and not (has_x and has_y):
             raise GenComposeError(
                 f"{at} (name '{name}') must declare both x_um and y_um as "
@@ -1183,11 +1215,7 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         width_um = raw_port.get("width_um")
         if width_um is not None:
-            if (
-                isinstance(width_um, bool)
-                or not isinstance(width_um, (int, float))
-                or width_um <= 0
-            ):
+            if not is_finite_number(width_um) or width_um <= 0:
                 raise GenComposeError(
                     f"{at} (name '{name}').width_um must be a number > 0"
                 )
@@ -1195,10 +1223,11 @@ def _parse_cell_ports(raw_ports: Any, where: str) -> list[dict[str, Any]]:
 
         direction_deg = raw_port.get("direction_deg")
         if direction_deg is not None:
-            if (
-                isinstance(direction_deg, bool)
-                or not isinstance(direction_deg, (int, float))
-                or float(direction_deg) not in (0.0, 90.0, 180.0, 270.0)
+            if not is_finite_number(direction_deg) or float(direction_deg) not in (
+                0.0,
+                90.0,
+                180.0,
+                270.0,
             ):
                 raise GenComposeError(
                     f"{at} (name '{name}').direction_deg must be one of 0, 90, "
@@ -1244,7 +1273,11 @@ def _parse_cell_block(
     ``navigable_regions`` (#1531/#1835) is likewise optional and defaults to
     ``[]`` -- see :func:`_require_navigable_regions`.
 
-    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions"}``.
+    ``ports_from_labels`` (#2927) is an opt-in option deriving ports from text
+    labels inside the cell (see :mod:`.gen_compose_port_access`).
+
+    Returns ``{"cell_name", "gds_path", "bbox_um", "ports", "navigable_regions",
+    "ports_from_labels"}``.
     """
     if not isinstance(raw_cell, dict):
         raise GenComposeError(f"{where} must be a JSON object")
@@ -1255,6 +1288,9 @@ def _parse_cell_block(
     gds_path = raw_cell.get("gds_path")
     if not isinstance(gds_path, str) or not gds_path:
         raise GenComposeError(f"{where}.gds_path is required")
+    # #2935: keep the spelling the request used for the response's
+    # `source_path` echo -- the resolved (absolute) value is internal only.
+    spelled_gds_path = gds_path
     gds_path = _resolve_relative(gds_path, request_dir or os.getcwd())
 
     ports = _parse_cell_ports(raw_cell.get("ports"), where)
@@ -1272,14 +1308,48 @@ def _parse_cell_block(
     return {
         "cell_name": cell_name,
         "gds_path": gds_path,
+        "spelled_gds_path": spelled_gds_path,
         "bbox_um": bbox_um,
         "ports": ports,
         "navigable_regions": navigable_regions,
+        "ports_from_labels": parse_ports_from_labels(
+            raw_cell.get("ports_from_labels"), where
+        ),
     }
 
 
+def _merge_label_ports(
+    block_id: str,
+    parsed_cell: dict[str, Any],
+    pdk_variant: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """``(ports, derived_port_reports, warnings)`` for a ``cell`` block:
+    its hand-declared ``ports[]`` plus any ``ports_from_labels`` (#2927)
+    derived ports. A name in both is rejected as ambiguous."""
+    spec = parsed_cell["ports_from_labels"]
+    declared = parsed_cell["ports"]
+    if spec is None:
+        return declared, [], []
+    if pdk_variant is None:
+        raise GenComposeError(
+            f"block '{block_id}': ports_from_labels needs a resolved PDK"
+        )
+    ambiguous = {p["name"] for p in declared} & {n["name"] for n in spec["names"]}
+    if ambiguous:
+        raise GenComposeError(
+            f"block '{block_id}': port name(s) {', '.join(sorted(ambiguous))} "
+            "declared in both ports[] and ports_from_labels -- ambiguous"
+        )
+    derived, reports, warnings = derive_label_ports(
+        block_id, parsed_cell["gds_path"], parsed_cell["cell_name"], spec, pdk_variant
+    )
+    return declared + derived, reports, warnings
+
+
 def _parse_blocks(
-    raw_blocks: Any, request_dir: str | None = None
+    raw_blocks: Any,
+    request_dir: str | None = None,
+    pdk_variant: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(raw_blocks, list) or not raw_blocks:
         raise GenComposeError("request.blocks must be a non-empty array")
@@ -1328,8 +1398,11 @@ def _parse_blocks(
             )
             cell_name = parsed_cell["cell_name"]
             gds_path = parsed_cell["gds_path"]
+            spelled_gds_path = parsed_cell["spelled_gds_path"]
             bbox_um = parsed_cell["bbox_um"]
-            ports = parsed_cell["ports"]
+            ports, derived_reports, derived_warnings = _merge_label_ports(
+                block_id, parsed_cell, pdk_variant
+            )
             navigable_regions = parsed_cell["navigable_regions"]
             report: dict[str, Any] = {}
         else:
@@ -1338,6 +1411,8 @@ def _parse_blocks(
             raw_generator = report.get("generator")
             cell_name = report.get("cell_name")
             gds_path = report.get("gds_path")
+            # A report's gds_path is never resolved, so it is already "as spelled".
+            spelled_gds_path = gds_path
             if not isinstance(raw_generator, str) or not raw_generator:
                 raise GenComposeError(
                     f"blocks[{index}] (id '{block_id}'): generator_report.generator "
@@ -1363,6 +1438,7 @@ def _parse_blocks(
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
             )
             ports = report.get("ports") or []
+            derived_reports, derived_warnings = [], []
             navigable_regions = _require_navigable_regions(
                 report.get("navigable_regions"),
                 where=f"blocks[{index}] (id '{block_id}').generator_report",
@@ -1403,6 +1479,19 @@ def _parse_blocks(
                 _orient_bbox_um(region, orientation) for region in navigable_regions
             ]
 
+        # blocks[].placed_cell_name (#4246) -- the name of the sub-cell this
+        # block is instantiated under in the composed GDS. Like orientation,
+        # a placement decision that lives on the request-level blocks[]
+        # entry. Absent -> the "<id>__<cell>" convention, unchanged.
+        placed_cell_name = raw_block.get("placed_cell_name")
+        if placed_cell_name is not None and (
+            not isinstance(placed_cell_name, str) or not placed_cell_name
+        ):
+            raise GenComposeError(
+                f"blocks[{index}] (id '{block_id}').placed_cell_name "
+                f"{placed_cell_name!r} must be a non-empty string"
+            )
+
         matched_group_id, min_spacing_um, foreign_clearance_um = _parse_drc_hints(
             report.get("drc_hints")
         )
@@ -1413,6 +1502,7 @@ def _parse_blocks(
             "generator": generator,
             "cell_name": cell_name,
             "gds_path": gds_path,
+            "spelled_gds_path": spelled_gds_path,
             "bbox_um": bbox_um,
             "port_names": set(ports_by_name),
             "ports": ports_by_name,
@@ -1420,9 +1510,12 @@ def _parse_blocks(
             "min_spacing_um": min_spacing_um,
             "foreign_clearance_um": foreign_clearance_um,
             "orientation": orientation,
+            "placed_cell_name": placed_cell_name,
             "navigable_regions": navigable_regions,
             # blocks[].abuts (#2638) -- parsed below, once every id is known.
             "abuts": _parse_abuts(raw_block, index, block_id),
+            "derived_ports": derived_reports,
+            "derived_port_warnings": derived_warnings,
         }
 
     _validate_abuts(blocks)
@@ -1461,10 +1554,10 @@ def _parse_drc_hints(drc_hints: Any) -> tuple[str | None, float, float | None]:
     if isinstance(candidate, str) and candidate:
         matched_group_id = candidate
     spacing = drc_hints.get("min_spacing_um")
-    if not isinstance(spacing, bool) and isinstance(spacing, (int, float)):
+    if is_finite_number(spacing):
         min_spacing_um = max(0.0, float(spacing))
     clearance = drc_hints.get("foreign_clearance_um")
-    if not isinstance(clearance, bool) and isinstance(clearance, (int, float)):
+    if is_finite_number(clearance):
         foreign_clearance_um = max(0.0, float(clearance))
     return matched_group_id, min_spacing_um, foreign_clearance_um
 
@@ -1596,12 +1689,7 @@ def _parse_explicit_xy_map(
             )
         x = raw_pair.get("x")
         y = raw_pair.get("y")
-        if (
-            isinstance(x, bool)
-            or isinstance(y, bool)
-            or not isinstance(x, (int, float))
-            or not isinstance(y, (int, float))
-        ):
+        if not is_finite_number(x) or not is_finite_number(y):
             raise GenComposeError(
                 f"request.placement.{field}['{block_id}'] must have numeric x/y fields"
             )
@@ -1636,7 +1724,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
     """
 
     def _positive_int(value: Any, field: str) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        if not is_int(value) or value < 1:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive integer when "
                 "strategy is 'array'"
@@ -1644,7 +1732,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         return value
 
     def _positive_number(value: Any, field: str) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if not is_finite_number(value) or value <= 0:
             raise GenComposeError(
                 f"request.placement.{field} must be a positive number when "
                 "strategy is 'array'"
@@ -1663,12 +1751,7 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
         )
     x = raw_origin.get("x", 0.0)
     y = raw_origin.get("y", 0.0)
-    if (
-        isinstance(x, bool)
-        or isinstance(y, bool)
-        or not isinstance(x, (int, float))
-        or not isinstance(y, (int, float))
-    ):
+    if not is_finite_number(x) or not is_finite_number(y):
         raise GenComposeError(
             "request.placement.origin_um must have numeric x/y fields"
         )
@@ -1793,7 +1876,7 @@ def _parse_placement(
         return strategy, order, 0.0, None, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
-    if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
+    if not is_finite_number(spacing_um):
         raise GenComposeError("request.placement.spacing_um must be a number")
     spacing_um = float(spacing_um)
     if spacing_um < 0:
@@ -1842,8 +1925,13 @@ def _validate_block_port(
     return block
 
 
-def _parse_waypoints_um(
-    raw_waypoints: Any, *, net: str, index: int, field: str = "waypoints_um"
+def parse_waypoints_um(
+    raw_waypoints: Any,
+    *,
+    net: str,
+    index: int,
+    field: str = "waypoints_um",
+    roles_out: list[str | None] | None = None,
 ) -> list[tuple[float, float]] | None:
     """Parse the optional ``connectivity[<index>].waypoints_um`` field (#634).
 
@@ -1853,8 +1941,16 @@ def _parse_waypoints_um(
     two ports' own stubs. Malformed input is an application error (exit 1),
     the same treatment every other ``connectivity[]`` field gets.
 
+    A waypoint may also be the plane-bearing triple ``[x_um, y_um,
+    "layer_role"]`` (#2930): the leg changes routing plane at that point (the
+    role names the plane it continues on). The returned list is still bare
+    ``(x, y)`` pairs; the roles are appended -- one entry per waypoint,
+    ``None`` for a plain pair -- to ``roles_out`` when the caller supplies it.
+    A caller that does not pass ``roles_out`` cannot honour a plane change, so
+    a triple is then an application error rather than a silently ignored role.
+
     ``field`` (#1529) overrides the field name in error messages -- used by
-    :func:`_parse_legs` so a malformed per-leg waypoint path is reported as
+    :func:`parse_legs` so a malformed per-leg waypoint path is reported as
     ``legs[<i>].waypoints_um``, not the bare top-level field name shared by
     every leg.
     """
@@ -1867,18 +1963,35 @@ def _parse_waypoints_um(
         )
 
     parsed: list[tuple[float, float]] = []
+    roles: list[str | None] = []
     for wp_index, waypoint in enumerate(raw_waypoints):
         if (
             not isinstance(waypoint, list)
-            or len(waypoint) != 2
-            or any(
-                isinstance(v, bool) or not isinstance(v, (int, float)) for v in waypoint
-            )
+            or len(waypoint) not in (2, 3)
+            or any(not is_finite_number(v) for v in waypoint[:2])
         ):
             raise GenComposeError(
-                f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers"
+                f"{where}[{wp_index}] must be a [x_um, y_um] pair of numbers "
+                '(or [x_um, y_um, "layer_role"] to change routing plane there)'
             )
+        role: str | None = None
+        if len(waypoint) == 3:
+            role = waypoint[2]
+            if not isinstance(role, str) or not role:
+                raise GenComposeError(
+                    f"{where}[{wp_index}][2] must be a non-empty layer role "
+                    "string (such as 'metal3') naming the plane the route "
+                    "continues on after this point"
+                )
+            if roles_out is None:
+                raise GenComposeError(
+                    f"{where}[{wp_index}] changes routing plane, which is not "
+                    "supported here"
+                )
         parsed.append((float(waypoint[0]), float(waypoint[1])))
+        roles.append(role)
+    if roles_out is not None and any(role is not None for role in roles):
+        roles_out.extend(roles)
     return parsed
 
 
@@ -1915,11 +2028,7 @@ def _parse_width_override(raw_width: Any, where: str) -> float | None:
     """
     if raw_width is None:
         return None
-    if (
-        isinstance(raw_width, bool)
-        or not isinstance(raw_width, (int, float))
-        or raw_width <= 0
-    ):
+    if not is_finite_number(raw_width) or raw_width <= 0:
         raise GenComposeError(f"{where} must be a positive number when given")
     return float(raw_width)
 
@@ -1937,7 +2046,7 @@ _LEG_ENTRY_KEYS = {"from_pin", "to_pin", "waypoints_um", "layer_role", "width_um
 _ENDPOINT_KEYS = {"block", "port"}
 
 
-def _parse_legs(
+def parse_legs(
     raw_legs: Any,
     *,
     net: str,
@@ -1974,7 +2083,9 @@ def _parse_legs(
       nearest-first search would otherwise have picked for them) while
       leaving the path itself to :func:`route_two_pin`'s default backbone;
       supplying it steers that leg's path exactly as the top-level
-      ``waypoints_um`` field steers a 2-pin net's only leg.
+      ``waypoints_um`` field steers a 2-pin net's only leg. A waypoint may be
+      the triple ``[x_um, y_um, "layer_role"]`` (#2930): the leg changes
+      routing plane there (see ``docs/design/gen-compose-plane-bearing-waypoints.md``).
     - ``layer_role``/``width_um`` are optional *per leg* (issue #1655): the
       leg-level tier of the per-net routing-plane override (see
       :func:`_parse_connectivity` for the net-level field and
@@ -2040,17 +2151,22 @@ def _parse_legs(
             raise GenComposeError(
                 f"{where}[{leg_index}].from_pin and .to_pin must name different pins"
             )
-        leg_waypoints = _parse_waypoints_um(
+        leg_waypoint_roles: list[str | None] = []
+        leg_waypoints = parse_waypoints_um(
             raw_leg.get("waypoints_um"),
             net=net,
             index=index,
             field=f"legs[{leg_index}].waypoints_um",
+            roles_out=leg_waypoint_roles,
         )
         legs.append(
             {
                 "from_pin": from_pin,
                 "to_pin": to_pin,
                 "waypoints_um": leg_waypoints,
+                # Plane-bearing waypoints (#2930): one role (or None) per
+                # waypoint, or None when no waypoint changes plane.
+                "waypoint_roles": leg_waypoint_roles or None,
                 "layer_role": _parse_layer_role_override(
                     raw_leg.get("layer_role"), f"{where}[{leg_index}].layer_role"
                 ),
@@ -2078,6 +2194,84 @@ _CONNECTIVITY_ENTRY_KEYS = {
     "layer_role",
     "width_um",
 }
+
+
+def _resolve_waypoint_layers(
+    resolved_leg: dict[str, Any],
+    leg: dict[str, Any],
+    leg_where: str,
+    net_width_um: float,
+    leg_layer_widths: dict[tuple[int, int], float],
+    *,
+    resolve_layer: Any,
+    effective_width: Any,
+    label_layer: Any,
+) -> None:
+    """Attach ``waypoint_layers`` to a resolved leg that changes plane (#2930).
+
+    Each waypoint role resolves through the same path a leg's own
+    ``layer_role`` does, and carries the width the route draws at on that
+    plane (the leg's own ``width_um``, else the net's, floored against *that
+    plane's* deck minimum). ``route_bundle()`` splits the leg at these points
+    into one segment per plane, joined by a via ladder. A no-op for a leg with
+    no plane-bearing waypoint. ``leg_layer_widths`` is updated in place.
+    """
+    if not leg.get("waypoint_roles"):
+        return
+    waypoint_layers: list[dict[str, Any] | None] = []
+    for wp_index, wp_role in enumerate(leg["waypoint_roles"]):
+        if wp_role is None:
+            waypoint_layers.append(None)
+            continue
+        wp_layer = resolve_layer(wp_role, f"{leg_where}.waypoints_um[{wp_index}]")
+        wp_width_um = effective_width(
+            wp_layer, leg.get("width_um"), net_width_um, f"{leg_where}.width_um"
+        )
+        label_layer(wp_layer, wp_role)
+        leg_layer_widths[wp_layer] = max(
+            leg_layer_widths.get(wp_layer, 0.0), wp_width_um
+        )
+        waypoint_layers.append({"layer": wp_layer, "width_um": wp_width_um})
+    resolved_leg["waypoint_layers"] = waypoint_layers
+
+
+def _drawn_leg_parts(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drawing payloads of a net's routed legs, one per plane drawn (#2930).
+
+    A leg that changes plane at a plane-bearing waypoint carries one payload
+    per plane in ``segments``; each is drawn, recorded for the route-vs-route
+    comparison and labelled exactly as an ordinary leg is.
+    """
+    return [
+        part for leg in legs if leg["routed"] for part in (leg.get("segments") or [leg])
+    ]
+
+
+def _fold_plane_waypoints_into_leg(
+    legs: list[dict[str, Any]] | None,
+    parsed_pins: list[dict[str, str]],
+    waypoints_um: list[tuple[float, float]] | None,
+    waypoint_roles: list[str | None],
+) -> tuple[list[dict[str, Any]] | None, list[tuple[float, float]] | None]:
+    """Express a plane-changing net-level ``waypoints_um`` as one named leg (#2930).
+
+    A 2-pin net whose waypoint path changes plane is its own single named leg:
+    the plane split is a per-leg construct (the leg is pinned to its planes,
+    never retried elsewhere), so the net-level path becomes exactly that one
+    leg. Returns ``(legs, waypoints_um)`` unchanged when no waypoint carries a
+    role.
+    """
+    if not waypoint_roles:
+        return legs, waypoints_um
+    leg = {
+        "from_pin": dict(parsed_pins[0]),
+        "to_pin": dict(parsed_pins[1]),
+        "waypoints_um": waypoints_um,
+        "waypoint_roles": waypoint_roles,
+        "layer_role": None,
+        "width_um": None,
+    }
+    return [leg], None
 
 
 def _parse_connectivity(
@@ -2135,8 +2329,12 @@ def _parse_connectivity(
             )
             parsed_pins.append({"block": block_id, "port": port})
 
-        waypoints_um = _parse_waypoints_um(
-            entry.get("waypoints_um"), net=net, index=index
+        net_waypoint_roles: list[str | None] = []
+        waypoints_um = parse_waypoints_um(
+            entry.get("waypoints_um"),
+            net=net,
+            index=index,
+            roles_out=net_waypoint_roles,
         )
         # A bundle net (>2 pins, #1073) is routed as a spanning tree of legs
         # (see route_bundle) -- a single caller-supplied path has no
@@ -2154,7 +2352,7 @@ def _parse_connectivity(
                 "legs by name instead"
             )
 
-        legs = _parse_legs(
+        legs = parse_legs(
             entry.get("legs"), net=net, index=index, parsed_pins=parsed_pins
         )
         if legs is not None and waypoints_um is not None:
@@ -2166,6 +2364,10 @@ def _parse_connectivity(
                 "instead of 'waypoints_um' if a 2-pin net also needs a named "
                 "from_pin/to_pin leg"
             )
+
+        legs, waypoints_um = _fold_plane_waypoints_into_leg(
+            legs, parsed_pins, waypoints_um, net_waypoint_roles
+        )
 
         connectivity.append(
             {
@@ -2193,7 +2395,7 @@ def _parse_pins(
     raw_pins: Any,
     blocks: dict[str, dict[str, Any]],
     connectivity: list[dict[str, Any]],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Parse and validate the ``pins[]`` request field (#210).
 
     Each entry -- ``{"net": <string>, "block": <string>, "port": <string>}``
@@ -2204,12 +2406,16 @@ def _parse_pins(
     ``connectivity[]`` is (:func:`_validate_block_port`): an unknown
     ``block``/``port`` is an application error (exit 1).
 
-    A ``(block, port)`` pair that also appears in any ``connectivity[]`` entry
-    is rejected: that shape is already labelled by the router, so a second,
-    possibly inconsistent ``pins[]`` label on it is ambiguous rather than
-    additive.
+    A ``(block, port)`` pair that also appears in a ``connectivity[]`` entry is
+    accepted only when the pin's ``net`` equals that entry's ``net`` (#2881):
+    that is a *promotion* of the internally wired net to a reported composed
+    port, not a second label. Such an entry is returned with
+    ``router_labelled: True`` so the label loop writes no duplicate
+    ``kdb.Text`` (the router already labels the net). A different ``net`` is
+    an ambiguous, conflicting label and is rejected (exit 1), naming both nets.
 
-    Returns a list of ``{net, block, port}`` dicts. ``None``/absent yields an
+    Returns a list of ``{net, block, port}`` dicts (plus ``router_labelled``
+    for agreeing connectivity pins). ``None``/absent yields an
     empty list (omitting ``pins[]`` entirely must not change any behavior).
     """
     if raw_pins is None:
@@ -2217,11 +2423,14 @@ def _parse_pins(
     if not isinstance(raw_pins, list):
         raise GenComposeError("request.pins must be an array")
 
-    connectivity_pairs = {
-        (pin["block"], pin["port"]) for entry in connectivity for pin in entry["pins"]
-    }
+    connectivity_pairs: dict[tuple[str, str], list[str]] = {}
+    for conn_entry in connectivity:
+        for conn_pin in conn_entry["pins"]:
+            connectivity_pairs.setdefault(
+                (conn_pin["block"], conn_pin["port"]), []
+            ).append(conn_entry["net"])
 
-    pins: list[dict[str, str]] = []
+    pins: list[dict[str, Any]] = []
     for index, entry in enumerate(raw_pins):
         if not isinstance(entry, dict):
             raise GenComposeError(f"request.pins[{index}] must be a JSON object")
@@ -2242,17 +2451,66 @@ def _parse_pins(
             blocks, block_id, port, f"request.pins[{index}] (net '{net}')"
         )
 
-        if (block_id, port) in connectivity_pairs:
-            raise GenComposeError(
-                f"request.pins[{index}] (net '{net}') names port '{port}' on block "
-                f"'{block_id}', which is already labelled by a connectivity[] net "
-                "-- a port may be promoted by pins[] or wired by connectivity[], "
-                "not both"
-            )
-
-        pins.append({"net": net, "block": block_id, "port": port})
+        pin_entry: dict[str, Any] = {"net": net, "block": block_id, "port": port}
+        if _check_pin_vs_connectivity(index, net, block_id, port, connectivity_pairs):
+            pin_entry["router_labelled"] = True
+        _attach_port_request(pin_entry, entry, index)
+        pins.append(pin_entry)
 
     return pins
+
+
+def _attach_port_request(
+    pin_entry: dict[str, Any], entry: dict[str, Any], index: int
+) -> None:
+    """Parse ``entry["request"]`` (#3971) onto ``pin_entry`` when present.
+
+    A request on a port ``connectivity[]`` already routes is rejected: the
+    router owns that port's position, so a coordinate request cannot move it.
+    """
+    if "request" not in entry:
+        return
+    where = f"request.pins[{index}] (net '{entry['net']}')"
+    if pin_entry.get("router_labelled"):
+        raise GenComposeError(
+            f"{where} names port '{entry['port']}' on block '{entry['block']}', "
+            "which is wired by connectivity[]; a coordinate request cannot move "
+            "a routed port",
+            code=_pr.CODE_ON_CONNECTIVITY_PORT,
+        )
+    pin_entry["request"] = _pr.parse_port_request(entry["request"], where)
+
+
+def _check_pin_vs_connectivity(
+    index: int,
+    net: str,
+    block_id: str,
+    port: str,
+    connectivity_pairs: dict[tuple[str, str], list[str]],
+) -> bool:
+    """Reconcile one ``pins[]`` entry with ``connectivity[]`` (#2881).
+
+    Returns ``True`` when ``(block_id, port)`` is wired by a ``connectivity[]``
+    net of the same name (the router labels it, so the pin is a promotion, not
+    a second label), ``False`` when the port is not wired by ``connectivity[]``
+    at all. Raises :class:`GenComposeError` when the port is wired by
+    ``connectivity[]`` under a different net name, naming every such net.
+    """
+    conn_nets = connectivity_pairs.get((block_id, port))
+    if conn_nets is None:
+        return False
+    if net not in conn_nets:
+        unique_nets = list(dict.fromkeys(conn_nets))
+        noun = "net" if len(unique_nets) == 1 else "nets"
+        named = ", ".join(f"'{name}'" for name in unique_nets)
+        raise GenComposeError(
+            f"request.pins[{index}] (net '{net}') names port '{port}' on block "
+            f"'{block_id}', which is already wired by connectivity[] {noun} "
+            f"{named} -- a pins[] entry on a connectivity[] port must "
+            "use the same net name (it promotes that net to a composed port); "
+            "a different name would be a conflicting label"
+        )
+    return True
 
 
 def _port_has_geometry(port: Any) -> bool:
@@ -2262,13 +2520,10 @@ def _port_has_geometry(port: Any) -> bool:
     note rather than crashing (#210)."""
     if not isinstance(port, dict):
         return False
-    if not isinstance(port.get("x_um"), (int, float)) or isinstance(
-        port.get("x_um"), bool
-    ):
-        return False
-    if not isinstance(port.get("y_um"), (int, float)) or isinstance(
-        port.get("y_um"), bool
-    ):
+    # is_finite_number also refuses NaN/+-inf and an int too large for a float
+    # (10**400), which every caller would otherwise hit as an uncaught
+    # OverflowError/ValueError in its position arithmetic (#6539).
+    if not (is_finite_number(port.get("x_um")) and is_finite_number(port.get("y_um"))):
         return False
     layer = port.get("layer")
     return (
@@ -2276,6 +2531,118 @@ def _port_has_geometry(port: Any) -> bool:
         and isinstance(layer.get("layer"), int)
         and isinstance(layer.get("datatype"), int)
     )
+
+
+def _plan_pin_label(
+    entry: dict[str, Any],
+    port: Any,
+    variant: Any,
+    offsets_um: dict[str, dict[str, float]],
+    notes: list[str],
+) -> tuple[bool, dict[str, Any] | None]:
+    """Decide how one promoted ``pins[]`` entry is labelled (#210, #2881).
+
+    Returns ``(labelled, placement)``: ``placement`` is the composed-frame
+    ``{net, x_um, y_um, layer}`` label to write as a ``kdb.Text``, or ``None``
+    when no label is written. Three cases write no label, each appending a
+    ``notes`` entry: a ``router_labelled`` pin (a connectivity[] net of the
+    same name -- the router already labels it, so ``labelled`` is ``True``), a
+    port with no reported geometry, and a port whose drawn layer has no PDK
+    label-layer convention (both ``labelled`` ``False``).
+    """
+    net_label = entry["net"]
+    where = f"pin '{net_label}' (block '{entry['block']}' port '{entry['port']}')"
+    if entry.get("router_labelled"):
+        # #2881: promotion of a connectivity[]-wired net -- the router
+        # already labels it; a second kdb.Text would be a duplicate.
+        notes.append(
+            f"{where} is also wired by a connectivity[] net of the same name -- "
+            "reported in ports[] only; its label is supplied by the router, no "
+            "duplicate label was written"
+        )
+        return True, None
+    if not _port_has_geometry(port):
+        notes.append(
+            f"{where} has no reported {{x_um, y_um, layer}} geometry -- it was "
+            "not labelled"
+        )
+        return False, None
+    draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
+    pin_label_layer = _resolve_label_layer(variant, draw_layer)
+    if pin_label_layer is None:
+        notes.append(
+            f"{where} is on layer {draw_layer[0]}/{draw_layer[1]}, which has no "
+            "PDK label-layer convention `klt extract` recognises -- the pin was "
+            "not labelled, so it will not survive as a named .SUBCKT pin "
+            "after extraction"
+        )
+        return False, None
+    offset = offsets_um[entry["block"]]
+    placement = {
+        "net": net_label,
+        "x_um": port["x_um"] + offset["x"],
+        "y_um": port["y_um"] + offset["y"],
+        "layer": pin_label_layer,
+    }
+    return True, placement
+
+
+def _label_promoted_pins(
+    promoted_pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    variant: Any,
+    port_request_plans: dict[int, dict[str, Any]],
+    routed_geometry: list[dict[str, Any]],
+    notes: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Label every ``pins[]`` entry (#210); returns ``(label placements,
+    response pins)``.
+
+    An entry with a planned ``request`` (#3971) is labelled at its achieved
+    coordinate, its stub is appended to ``routed_geometry`` (drawn by
+    :func:`_write_composed_gds` like any other path), and its response entry
+    reports ``requested`` / ``achieved``.
+    """
+    pin_placements: list[dict[str, Any]] = []
+    response_pins: list[dict[str, Any]] = []
+    for pin_index, entry in enumerate(promoted_pins):
+        block_id = entry["block"]
+        port = blocks[block_id]["ports"].get(entry["port"])
+        plan = port_request_plans.get(pin_index)
+        if plan is not None:
+            port = {
+                **port,
+                "x_um": plan["achieved"]["x_um"] - offsets_um[block_id]["x"],
+                "y_um": plan["achieved"]["y_um"] - offsets_um[block_id]["y"],
+            }
+        labelled, placement = _plan_pin_label(entry, port, variant, offsets_um, notes)
+        if placement is not None:
+            pin_placements.append(placement)
+        response_pin: dict[str, Any] = {
+            "net": entry["net"],
+            "block": block_id,
+            "port": entry["port"],
+            "labelled": labelled,
+        }
+        if plan is not None:
+            stub = plan["stub"]
+            routed_geometry.append(
+                {
+                    "net": entry["net"],
+                    "points_um": stub["points_um"],
+                    "width_um": stub["width_um"],
+                    "via_drops": [],
+                    "stub_widen": [],
+                    "route_layer": stub["layer"],
+                    "label_layer": None,
+                    "label": False,
+                }
+            )
+            response_pin["requested"] = plan["requested"]
+            response_pin["achieved"] = plan["achieved"]
+        response_pins.append(response_pin)
+    return pin_placements, response_pins
 
 
 #: Allowed keys in ``request.pdk`` (spike section 2). Any other key is an
@@ -2295,9 +2662,10 @@ COMPOSE_GENERATOR = "gen-compose"
 
 
 def promote_composed_ports(
-    promoted_pins: list[dict[str, str]],
+    promoted_pins: list[dict[str, Any]],
     blocks: dict[str, dict[str, Any]],
     offsets_um: dict[str, dict[str, float]],
+    port_request_plans: dict[int, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build the composed cell's own ``ports[]`` from the request's ``pins[]``
     (#1189), in the composed (post-placement) coordinate frame.
@@ -2330,7 +2698,7 @@ def promote_composed_ports(
     ports: list[dict[str, Any]] = []
     notes: list[str] = []
     seen: set[str] = set()
-    for entry in promoted_pins:
+    for pin_index, entry in enumerate(promoted_pins):
         net_label = entry["net"]
         block_id = entry["block"]
         port_name = entry["port"]
@@ -2359,6 +2727,12 @@ def promote_composed_ports(
                 "port": port_name,
             }
         )
+        plan = (port_request_plans or {}).get(pin_index)
+        if plan is not None:  # pins[].request (#3971): report the achieved spot
+            ports[-1]["x_um"] = plan["achieved"]["x_um"]
+            ports[-1]["y_um"] = plan["achieved"]["y_um"]
+            ports[-1]["requested"] = plan["requested"]
+            ports[-1]["achieved"] = plan["achieved"]
     return ports, notes
 
 
@@ -2406,15 +2780,181 @@ def promote_composed_ports(
 # own small functions instead of inflating an already-baselined one.
 
 
+def _snap_routed_ports_to_grid(
+    connectivity: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+    route_layer: tuple[int, int] | None,
+    notes: list[str],
+) -> None:
+    """Move every routed port's attach point onto the PDK manufacturing grid
+    (issue #2932).
+
+    Generators report a terminal port at the *midpoint* of its pad, which is
+    half a manufacturing-grid step off-grid whenever the pad's extent is an
+    odd multiple of the grid (e.g. ``w_um`` 3.015 on a 0.005um grid ->
+    1.5075). Every via-drop cut/landing pad and backbone vertex is centred on
+    that point, so the composed cell failed ``*.ongrid.1`` while each block
+    was clean alone. Any on-grid point inside the pad is electrically
+    equivalent, so the port is moved (in the *composed* frame, then translated
+    back) to the nearest grid line that stays inside the pad along the port
+    edge's tangential axis (``width_um``; unknown extent is treated as
+    unconstrained). Updates ``blocks[...]["ports"]`` in place (the parsed
+    copies, never the caller's report). A move, or a port that cannot be
+    snapped (pad narrower than one grid step), is recorded in ``notes``.
+    Already-on-grid ports are untouched and add no note.
+    """
+    if route_layer is None:
+        return
+    seen: set[tuple[str, str]] = set()
+    for entry in connectivity:
+        for pin in entry["pins"]:
+            key = (pin["block"], pin["port"])
+            if key in seen:
+                continue
+            seen.add(key)
+            block = blocks.get(pin["block"])
+            port = (block or {}).get("ports", {}).get(pin["port"])
+            if not _port_has_geometry(port):
+                continue
+            layer_info = port.get("layer")
+            port_layer = (layer_info["layer"], layer_info["datatype"])
+            grid = max(grid_for_layer(route_layer), grid_for_layer(port_layer))
+            if grid <= 0.0:
+                continue
+            block["ports"][pin["port"]] = _snap_port_to_grid(
+                port, pin, offsets_um[pin["block"]], grid, notes
+            )
+
+
+def _pdk_mfg_grid_um(pdk_info: dict[str, Any], layer: tuple[int, int] | None) -> float:
+    """The manufacturing grid (um) for ``layer`` in ``pdk_info``'s PDK family,
+    or ``0.0`` (no snap) when the family cannot be resolved (issue #2932)."""
+    try:
+        return mfg_grid_um(_pdk_family(pdk_info["variant"]), layer)
+    except GenError:
+        return 0.0
+
+
+def _net_backbone_grid_um(
+    pins: list[dict[str, Any]],
+    blocks: dict[str, dict[str, Any]],
+    route_layer: tuple[int, int] | None,
+    grid_for_layer: Callable[[tuple[int, int] | None], float],
+) -> float:
+    """The manufacturing grid a net's backbone jog snaps to (issue #3079): the
+    coarsest of the route layer's and every pin's port layer's grid, the same
+    max :func:`_snap_routed_ports_to_grid` takes. ``0.0`` (no snap) when the
+    route layer is unknown or the PDK family has no grid rule."""
+    if route_layer is None:
+        return 0.0
+    grid = grid_for_layer(route_layer)
+    for pin in pins:
+        port = blocks.get(pin["block"], {}).get("ports", {}).get(pin["port"])
+        layer_info = (port or {}).get("layer")
+        if isinstance(layer_info, dict):
+            grid = max(
+                grid, grid_for_layer((layer_info["layer"], layer_info["datatype"]))
+            )
+    return grid
+
+
+def _offgrid_leg_notes(
+    net_label: str, legs: list[dict[str, Any]], grid_um: float
+) -> list[str]:
+    """Compose-time notes naming each routed leg of ``net_label`` that still has
+    a backbone vertex off ``grid_um`` (issue #3079): a jog that could not be
+    snapped without crossing a stub end, or a user-supplied ``waypoints_um``
+    point (used verbatim). Surfaces what ``klt drc`` would otherwise report as
+    ``*.ongrid.1``. Empty when ``grid_um <= 0``."""
+    if grid_um <= 0.0:
+        return []
+    notes: list[str] = []
+    for leg in legs:
+        if not leg.get("routed") or not leg.get("points_um"):
+            continue
+        bad = [
+            (x, y)
+            for x, y in leg["points_um"]
+            if any(abs(v / grid_um - round(v / grid_um)) > 1e-6 for v in (x, y))
+        ]
+        if bad:
+            a, b = leg["pins"]
+            notes.append(
+                f"net '{net_label}' leg {a['block']}.{a['port']} -> "
+                f"{b['block']}.{b['port']} has {len(bad)} backbone vertex(es) "
+                f"off the {grid_um:g}um manufacturing grid (first at "
+                f"({bad[0][0]:.4f}, {bad[0][1]:.4f})); klt drc will report "
+                "ongrid violations -- adjust waypoints_um or the block origins"
+            )
+    return notes
+
+
+def _snap_port_to_grid(
+    port: dict[str, Any],
+    pin: dict[str, Any],
+    offset: dict[str, float],
+    grid: float,
+    notes: list[str],
+) -> dict[str, Any]:
+    """Return a copy of ``port`` with each off-grid axis of its attach point
+    moved onto ``grid`` (composed frame) while staying inside the pad along the
+    port edge's tangential axis; see :func:`_snap_routed_ports_to_grid`."""
+    direction = int(port.get("direction_deg", 0)) % 360
+    tangential = "y" if direction in (0, 180) else "x"
+    width = port.get("width_um")
+    half = float(width) / 2.0 if is_finite_number(width) else None
+    new_port = dict(port)
+    for axis in ("x", "y"):
+        composed = float(port[f"{axis}_um"]) + offset[axis]
+        steps = composed / grid
+        if abs(steps - round(steps)) < 1e-6:
+            continue
+        limit = half if axis == tangential else None
+        snapped = _nearest_grid_point_within(composed, grid, limit)
+        where = f"block '{pin['block']}' port '{pin['port']}' {axis}"
+        if snapped is None:
+            notes.append(
+                f"{where}: attach point {composed:.6g}um is off the "
+                f"{grid:g}um manufacturing grid and the pad "
+                f"(width {2 * limit:g}um) holds no on-grid point -- "
+                "drawn off-grid; expect *.ongrid.1 violations"
+            )
+            continue
+        new_port[f"{axis}_um"] = snapped - offset[axis]
+        notes.append(
+            f"{where}: attach point snapped from {composed:.6g}um to "
+            f"{snapped:.6g}um onto the {grid:g}um manufacturing grid "
+            f"(moved {abs(snapped - composed):.4g}um, inside the pad)"
+        )
+    return new_port
+
+
+def _nearest_grid_point_within(
+    composed: float, grid: float, limit: float | None
+) -> float | None:
+    """The grid point nearest ``composed`` that lies within ``limit`` of it
+    (``None`` limit = unconstrained), or ``None`` when no candidate fits."""
+    steps = composed / grid
+    base = math.floor(steps + 0.5 + 1e-9)
+    candidates = sorted((base, base - 1, base + 1), key=lambda c: abs(c - steps))
+    for cand in candidates:
+        value = cand * grid
+        if limit is None or abs(value - composed) <= limit + 1e-9:
+            return value
+    return None
+
+
 def _port_probe_position_um(port: dict[str, Any]) -> tuple[float, float] | None:
     """The port's own ``(x_um, y_um)``, or ``None`` when it declares no usable
     numeric position (the same "nothing to check" case the rest of the
     landing-connectivity path tolerates rather than fails). ``bool`` is
     rejected explicitly because it is a subclass of ``int``."""
     x_um, y_um = port.get("x_um"), port.get("y_um")
-    if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+    if not is_finite_number(x_um):
         return None
-    if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+    if not is_finite_number(y_um):
         return None
     return float(x_um), float(y_um)
 
@@ -2600,7 +3140,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     except PdkNotFoundError as exc:
         raise GenComposeError(str(exc)) from exc
 
-    blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
+    blocks = _parse_blocks(
+        request.get("blocks"), request_dir or os.getcwd(), pdk_info["variant"]
+    )
     strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
         _parse_placement(request.get("placement"), set(blocks))
     )
@@ -2616,6 +3158,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError("request.options must be a JSON object")
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
+    boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
 
     output_dir = os.path.dirname(os.path.abspath(output_path))
     if output_dir and not os.path.isdir(output_dir):
@@ -2650,6 +3193,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     warnings: list[str] = []
     notes: list[str] = []
+    for _block in blocks.values():
+        warnings.extend(_block["derived_port_warnings"])
 
     # #692: "explicit" placement performs no overlap validation of its own
     # (resolve_explicit_offsets's docstring) -- but a caller that places a
@@ -2713,6 +3258,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # width up to satisfy the cross layer's own (typically stricter) deck
     # minimum. None unless a cross layer is configured; resolved below.
     cross_block_width_um: float | None = None
+    # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
+    landing_pad_override_um = None
+    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
+    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
+    # sizes). The two fields select competing pad-sizing policies and are
+    # rejected together below.
+    minimal_ladder = False
+    side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
         if not isinstance(layer_role, str) or not layer_role:
@@ -2721,11 +3275,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 "'metal') when connectivity[] is non-empty"
             )
         raw_width = routing.get("width_um")
-        if (
-            isinstance(raw_width, bool)
-            or not isinstance(raw_width, (int, float))
-            or raw_width <= 0
-        ):
+        if not is_finite_number(raw_width) or raw_width <= 0:
             raise GenComposeError(
                 "request.routing.width_um is required and must be > 0 when "
                 "connectivity[] is non-empty"
@@ -2763,6 +3313,40 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # stack per net, never a second, private via table.
         extraction_deck = get_extraction_deck(_pdk_family(pdk_info["variant"]))
 
+        landing_pad_override_um = _parse_landing_pad_override(
+            routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
+        )
+        raw_minimal_ladder = routing.get("minimal_ladder")
+        if raw_minimal_ladder is not None:
+            if not isinstance(raw_minimal_ladder, bool):
+                raise GenComposeError(
+                    "request.routing.minimal_ladder must be a boolean when given"
+                )
+            minimal_ladder = raw_minimal_ladder
+        if minimal_ladder and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
+        if landing_pad_override_um is not None:  # baseline resolver when absent
+            side_for_pair = _make_landing_pad_side_um(
+                pdk_info["variant"], landing_pad_override_um
+            )
+        elif minimal_ladder:
+            side_for_pair = _make_landing_pad_side_um(
+                pdk_info["variant"], minimal_ladder=True
+            )
+
         cross_layer_role = routing.get("cross_block_layer_role")
         if cross_layer_role is not None:
             if not isinstance(cross_layer_role, str) or not cross_layer_role:
@@ -2790,11 +3374,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     cross_width_floor[0] if cross_width_floor is not None else width_um
                 )
             else:
-                if (
-                    isinstance(raw_cross_width, bool)
-                    or not isinstance(raw_cross_width, (int, float))
-                    or raw_cross_width <= 0
-                ):
+                if not is_finite_number(raw_cross_width) or raw_cross_width <= 0:
                     raise GenComposeError(
                         "request.routing.cross_block_width_um must be a "
                         "positive number when given"
@@ -3130,6 +3710,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _min_spacing_um_cache[layer] = best
         return _min_spacing_um_cache[layer]
 
+    _snap_routed_ports_to_grid(
+        connectivity,
+        blocks,
+        offsets_um,
+        lambda layer: _pdk_mfg_grid_um(pdk_info, layer),
+        route_layer,
+        notes,
+    )
+
     for net_index, entry in enumerate(connectivity):
         net_label = entry["net"]
         pins = entry["pins"]
@@ -3234,6 +3823,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 else:
                     resolved_leg["route_layer"] = None
                     resolved_leg["width_um"] = None
+                # Plane-bearing waypoints (#2930), resolved per waypoint.
+                _resolve_waypoint_layers(
+                    resolved_leg,
+                    leg,
+                    leg_where,
+                    net_width_um,
+                    leg_layer_widths,
+                    resolve_layer=_resolve_override_layer,
+                    effective_width=_effective_width_um,
+                    label_layer=_override_label_layer,
+                )
                 resolved_legs.append(resolved_leg)
 
         # Effective drawn width per layer, for the route-vs-route footprint
@@ -3367,6 +3967,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 stub_widen,
                 _route_dbu(),
                 layer,
+                side_for_pair,
             )
             # layer_checks (#1913): the primary (layer, region) entry (with
             # its own spacing check, exactly as before), plus one further
@@ -3384,7 +3985,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 layer_checks.extend(
                     (pad_layer, pad_region, False)
                     for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                        via_drops, _route_dbu(), layer
+                        via_drops, _route_dbu(), layer, side_for_pair
                     ).items()
                 )
             for (
@@ -3402,27 +4003,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         and cand_layer != other_layer
                     ):
                         continue  # different physical layers can't touch or short
-                    if not (cand_region & other_region).is_empty():
-                        return f"crosses already-routed net '{other_net}'"
-                    if not check_spacing:
-                        continue
-                    cand_spacing = _min_spacing_um_for_layer(cand_layer)
-                    if cand_spacing is None:
-                        continue
-                    cand_spacing_um, cand_rule_id = cand_spacing
-                    cand_spacing_dbu = int(round(cand_spacing_um / _route_dbu()))
-                    if cand_spacing_dbu <= 0:
-                        continue
-                    cand_inflated = cand_region.sized(cand_spacing_dbu)
-                    if not (cand_inflated & other_region).is_empty():
-                        return (
-                            f"comes within {cand_spacing_um:.4g}um of "
-                            f"already-routed net '{other_net}' -- closer "
-                            "than the resolved deck's own "
-                            f"'{cand_rule_id}' minimum same-layer spacing "
-                            "rule (no literal overlap, but still a real "
-                            "`klt drc` violation on the composed layout)"
-                        )
+
+                    # Issue #5803: the #1057/#1386 verdict, upgraded to
+                    # name a pad-vs-pitch conflict when it is a landing pad.
+                    message = _leg_conflict_message(
+                        pdk_info["variant"],
+                        via_drops,
+                        cand_layer,
+                        other_net,
+                        cand_region,
+                        other_region,
+                        _route_dbu(),
+                        side_for_pair,
+                        _min_spacing_um_for_layer,
+                        check_spacing=check_spacing,
+                    )
+                    if message is not None:
+                        return message
 
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
@@ -3447,46 +4044,14 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # which the overlap/inflate comparisons above cannot see -- the
             # pad and the wire it lands on merge into one polygon, so there
             # is no *other* shape here to intersect against.
-            pad_boxes: list[
-                tuple[tuple[int, int], str, tuple[float, float, float, float]]
-            ] = []
-            landing_half_um = _VIA_LANDING_SIZE_UM / 2.0
-            for drop in via_drops:
-                block_id = drop.get("block_id")
-                if block_id is None:
-                    continue  # pre-#1520 caller-built via_drops -- skip, not an error
-                cx, cy = drop["x_um"], drop["y_um"]
-                box = (
-                    cx - landing_half_um,
-                    cy - landing_half_um,
-                    cx + landing_half_um,
-                    cy + landing_half_um,
-                )
-                # Each hop's landing pad is drawn on *both* of its own
-                # ``landing_layers`` (see _write_composed_gds) -- issue
-                # #1567 generalized this from a single hop's fixed
-                # (port_layer, this leg's own route layer) pair to whatever
-                # pair *that hop* actually lands on, so a multi-level
-                # ladder's intermediate pads are checked here too, not just
-                # the one nearest the backbone or the one nearest the pin.
-                # dict.fromkeys dedupes the common case where both layers of
-                # a hop happen to be identical.
-                for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
-                    pad_boxes.append((pad_layer, block_id, box))
-            for widen in stub_widen:
-                block_id = widen.get("block_id")
-                if block_id is None or layer is None:
-                    continue  # pre-#1520 caller-built stub_widen -- skip
-                cx, cy = widen["x_um"], widen["y_um"]
-                half_um = widen["width_um"] / 2.0
-                length_um = widen["length_um"]
-                if widen["direction_deg"] == 90:
-                    box = (cx - half_um, cy, cx + half_um, cy + length_um)
-                else:  # 270
-                    box = (cx - half_um, cy - length_um, cx + half_um, cy)
-                pad_boxes.append((layer, block_id, box))
+            #
+            # The box collection lives in :func:`_landing_and_widen_pad_boxes`
+            # (issue #5803: shared with the pad-vs-pitch message path).
+            pad_boxes = _landing_and_widen_pad_boxes(
+                via_drops, stub_widen, layer, side_for_pair
+            )
 
-            for pad_layer, block_id, box in pad_boxes:
+            for pad_layer, block_id, box, _drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
@@ -3583,7 +4148,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                             "routing.cross_block_layer_role), or supply "
                             "waypoints_um that approach from a clear side"
                         )
-            return None
+            return own_via_cut_clearance_reason(
+                via_drops,
+                pdk_info["variant"],
+                _min_spacing_um_for_layer,
+                _own_block_layer_geometry,
+            )
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs
         # (#1073); a 2-pin net is the degenerate one-leg case of exactly the
@@ -3591,6 +4161,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # declare-only request (#1188: routing absent/{}), in which case no
         # metal is drawn for any net and _declare_only_bundle_result() reports
         # every net "unrouted"/"routing not requested" instead.
+        net_grid_um = _net_backbone_grid_um(
+            pins, blocks, net_route_layer, lambda lyr: _pdk_mfg_grid_um(pdk_info, lyr)
+        )
         if declare_only:
             result = _declare_only_bundle_result(pins)
         else:
@@ -3610,7 +4183,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 cross_block_width_um=net_cross_width_um,
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
+                grid_um=net_grid_um,
             )
+            notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
         # dict comprehension below, so the net-level aggregate and each leg's
         # own reported value come from the identical call. See
@@ -3679,7 +4254,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # route-vs-route collision check #1057 already passed), so they must
         # also feed `accepted_route_regions` the same as a fully-routed net's
         # legs do, or a later net's own collision check would miss them.
-        drawn_legs = [leg for leg in result["legs"] if leg["routed"]]
+        # A leg that changes plane at a plane-bearing waypoint (#2930) carries
+        # one drawing payload per plane in `segments`; each is drawn,
+        # recorded for the route-vs-route comparison and labelled exactly as
+        # an ordinary leg is (the net's single label lands on the very first).
+        drawn_legs = _drawn_leg_parts(result["legs"])
         for leg_index, leg in enumerate(drawn_legs):
             # route_layer (#1168): the effective layer this leg actually
             # drew on -- route_layer (the primary) unless the leg fell
@@ -3717,6 +4296,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         leg["stub_widen"],
                         _route_dbu(),
                         leg_route_layer,
+                        side_for_pair,
                     ),
                 )
             )
@@ -3733,7 +4313,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # `_leg_conflict`'s own docstring).
             if leg_route_layer is not None:
                 for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                    leg["via_drops"], _route_dbu(), leg_route_layer
+                    leg["via_drops"], _route_dbu(), leg_route_layer, side_for_pair
                 ).items():
                     accepted_route_regions.append(
                         (net_label, net_pin_set, pad_layer, pad_region)
@@ -3769,56 +4349,46 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # unlike connectivity[]'s single shared routing.layer_role). A port whose
     # layer has no ExtractionDeck label convention is a partial success: a
     # drc_hints note, pin not labelled -- never a hard failure.
-    pin_placements: list[dict[str, Any]] = []
-    response_pins: list[dict[str, Any]] = []
-    for entry in promoted_pins:
-        net_label = entry["net"]
-        block_id = entry["block"]
-        port_name = entry["port"]
-        port = blocks[block_id]["ports"].get(port_name)
-        labelled = False
-        if not _port_has_geometry(port):
-            notes.append(
-                f"pin '{net_label}' (block '{block_id}' port '{port_name}') has no "
-                "reported {x_um, y_um, layer} geometry -- it was not labelled"
-            )
-        else:
-            draw_layer = (port["layer"]["layer"], port["layer"]["datatype"])
-            pin_label_layer = _resolve_label_layer(pdk_info["variant"], draw_layer)
-            if pin_label_layer is None:
-                notes.append(
-                    f"pin '{net_label}' (block '{block_id}' port '{port_name}') is "
-                    f"on layer {draw_layer[0]}/{draw_layer[1]}, which has no PDK "
-                    "label-layer convention `klt extract` recognises -- the pin was "
-                    "not labelled, so it will not survive as a named .SUBCKT pin "
-                    "after extraction"
-                )
-            else:
-                offset = offsets_um[block_id]
-                pin_placements.append(
-                    {
-                        "net": net_label,
-                        "x_um": port["x_um"] + offset["x"],
-                        "y_um": port["y_um"] + offset["y"],
-                        "layer": pin_label_layer,
-                    }
-                )
-                labelled = True
-        response_pins.append(
-            {
-                "net": net_label,
-                "block": block_id,
-                "port": port_name,
-                "labelled": labelled,
-            }
+    # pins[].request (#3971): stubs to caller-selected coordinates, planned
+    # (and validated) only when some entry asks -- otherwise this block is a
+    # no-op and nothing above is read a second time.
+    port_request_plans: dict[int, dict[str, Any]] = {}
+    if any("request" in entry for entry in promoted_pins):
+        port_request_plans = _pr.plan_port_requests(
+            promoted_pins,
+            blocks=blocks,
+            offsets_um=offsets_um,
+            placed_bboxes_um=placed_bboxes_um,
+            resolve_layer=lambda role: _resolve_override_layer(
+                role, "request.pins[].request.layer_role"
+            ),
+            grid_for_layer=lambda layer: _pdk_mfg_grid_um(pdk_info, layer),
+            min_width_for_layer=lambda layer: (
+                _min_width_um_for_layer(pdk_info["variant"], layer) or (None,)
+            )[0],
+            min_spacing_for_layer=lambda layer: (
+                _min_spacing_um_for_layer(layer) or (None,)
+            )[0],
+            block_geometry=_own_block_layer_geometry,
+            routed_regions=accepted_route_regions,
+            dbu=_route_dbu(),
         )
+    pin_placements, response_pins = _label_promoted_pins(
+        promoted_pins,
+        blocks,
+        offsets_um,
+        pdk_info["variant"],
+        port_request_plans,
+        routed_geometry,
+        notes,
+    )
 
     # The composed cell's own ports[] (#1189) -- promoted from the pins[]
     # entries above, in the composed frame, so this whole response can be fed
     # straight back into another gen-compose run's blocks[].generator_report
     # and its top-level nets addressed by name from the level above.
     composed_ports, promote_notes = promote_composed_ports(
-        promoted_pins, blocks, offsets_um
+        promoted_pins, blocks, offsets_um, port_request_plans
     )
     notes.extend(promote_notes)
 
@@ -3846,16 +4416,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         for drop in route.get("via_drops", []):
             via_pair = drop["via_layer"]
             if via_pair not in via_drop_size_um:
-                floor = _min_width_um_for_layer(pdk_info["variant"], via_pair)
-                # Issue #2585: then clamp *down* to the layer's fixed size
-                # where the foundry rule is a maximum too (sky130's `via`,
-                # 0.15um; sg13g2's `Via1`-`Via4`, 0.19um) -- the generic
-                # 0.22um square is over that maximum. The landing pads
-                # below keep their own baseline/area/enclosure sizing, so
-                # the smaller via only gains enclosure.
-                via_drop_size_um[via_pair] = _fixed_cut_side_um(
-                    max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-                    _via_fixed_size_um(pdk_info["variant"], via_pair),
+                via_drop_size_um[via_pair] = via_drop_cut_side_um(
+                    pdk_info["variant"], via_pair
                 )
     # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
     # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
@@ -3875,7 +4437,24 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # ratchet baseline -- does not grow by drawing DRC-clean landing pads
     # (PR #2075 review).
     landing_pad_size_um = _resolve_landing_pad_sizes(
-        routed_geometry, pdk_info["variant"], via_drop_size_um
+        routed_geometry,
+        pdk_info["variant"],
+        via_drop_size_um,
+        override_um=landing_pad_override_um,
+    )
+    # routing.minimal_ladder (issue #6058): the intermediate hop pads of the
+    # drawn ladders, sized at their own per-pair enclosure/area floors
+    # without the contact-derived baseline -- the same per-pair distinction
+    # ``side_for_pair`` already applied to the collision-check footprints
+    # above, resolved once more here for drawing so the two cannot disagree
+    # (#1197). ``None`` with the mode off: drawing reads only
+    # ``landing_pad_size_um`` and is byte-for-byte the pre-#6058 output.
+    intermediate_landing_pad_size_um = (
+        _resolve_intermediate_landing_pad_sizes(
+            routed_geometry, pdk_info["variant"], via_drop_size_um
+        )
+        if minimal_ladder
+        else None
     )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
@@ -3890,6 +4469,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
+        intermediate_landing_pad_size_um=intermediate_landing_pad_size_um,
+        boundary_bbox_um=boundary_bbox_um,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -3924,16 +4505,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
             "cell_name": blocks[block_id]["cell_name"],
-            "source_path": blocks[block_id]["gds_path"],
+            "source_path": blocks[block_id]["spelled_gds_path"],
             "source_digest": source_digests[blocks[block_id]["gds_path"]],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
+            # #4246: the sub-cell name actually written to the composed GDS
+            # (after any "$n" collision suffix).
+            "placed_cell_name": blocks[block_id]["placed_cell_name_actual"],
             # #2638: echo of the request's own blocks[].abuts (sorted for a
             # stable report; empty when omitted) -- an accepted clearance
             # advisory must stay visible in the response, not only in the
             # request that declared it.
             "abuts": sorted(blocks[block_id]["abuts"]),
+            # #2927: additive -- only present for blocks that used
+            # `cell.ports_from_labels`.
+            **(
+                {"derived_ports": _framed(blocks[block_id], offsets_um[block_id])}
+                if blocks[block_id]["derived_ports"]
+                else {}
+            ),
         }
         for block_id in order
     ]
@@ -4066,6 +4657,32 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     return int(nearest)
 
 
+def _create_placed_sub_cell(
+    layout: Any,
+    block: dict[str, Any],
+    block_id: str,
+    src_cell_name: str,
+    warnings: list[str],
+) -> Any:
+    """Create the composed sub-cell for ``block`` and record its actual name.
+
+    blocks[].placed_cell_name (#4246) overrides the "<id>__<cell>" convention.
+    create_cell() applies KLayout's native "$n" suffix on a real collision
+    (another block, or the top cell); the name actually used is recorded on the
+    block for the response echo, and a collision adds a warning.
+    """
+    requested_name = block.get("placed_cell_name")
+    sub_cell = layout.create_cell(requested_name or f"{block_id}__{src_cell_name}")
+    block["placed_cell_name_actual"] = sub_cell.name
+    if requested_name and sub_cell.name != requested_name:
+        warnings.append(
+            f"block '{block_id}' requested placed_cell_name "
+            f"'{requested_name}' but it collides with an existing cell; "
+            f"placed as '{sub_cell.name}'"
+        )
+    return sub_cell
+
+
 def _write_composed_gds(
     blocks: dict[str, dict[str, Any]],
     order: list[str],
@@ -4080,6 +4697,8 @@ def _write_composed_gds(
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float]
     | None = None,
+    intermediate_landing_pad_size_um: dict[Any, float] | None = None,
+    boundary_bbox_um: dict[str, float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -4262,7 +4881,9 @@ def _write_composed_gds(
                 f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
 
-        sub_cell = layout.create_cell(f"{block_id}__{src_cell_name}")
+        sub_cell = _create_placed_sub_cell(
+            layout, block, block_id, src_cell_name, dbu_rescale_warnings
+        )
         sub_cell.copy_tree(src_cell)
 
         offset = offsets_um[block_id]
@@ -4302,7 +4923,12 @@ def _write_composed_gds(
                 kdb.CellInstArray(sub_cell.cell_index(), kdb.Trans(rot, mirrx, ox, oy))
             )
 
-    if routed_geometry and route_layer is not None:
+    # A pins[].request stub (#3971) carries its own `route_layer`, so a request
+    # with no routing plane at all still draws it.
+    if routed_geometry and (
+        route_layer is not None
+        or any(route.get("route_layer") for route in routed_geometry)
+    ):
         # Per-entry drawing layer (#1168): each `routed_geometry` entry may
         # carry its own "route_layer"/"label_layer" -- the *effective* layer
         # that particular leg drew on, which can differ from the request's
@@ -4316,165 +4942,20 @@ def _write_composed_gds(
         # `(layer, datatype)` pair, but resolving it once per distinct pair
         # here avoids a redundant lookup per entry on the common single-layer
         # path.
-        layer_indices: dict[tuple[int, int], int] = {}
-        label_layer_indices: dict[tuple[int, int], int] = {}
-
-        def _layer_index(pair: tuple[int, int]) -> int:
-            index = layer_indices.get(pair)
-            if index is None:
-                index = layout.layer(pair[0], pair[1])
-                layer_indices[pair] = index
-            return index
-
-        def _label_layer_index(pair: tuple[int, int]) -> int:
-            index = label_layer_indices.get(pair)
-            if index is None:
-                index = layout.layer(pair[0], pair[1])
-                label_layer_indices[pair] = index
-            return index
-
         for route in routed_geometry:
-            points = route["points_um"]
-            if not points or len(points) < 2:
-                continue
-            entry_route_layer = route.get("route_layer", route_layer) or route_layer
-            entry_label_layer = route.get("label_layer", label_layer)
-            layer_index = _layer_index(entry_route_layer)
-            path_points = [
-                kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points
-            ]
-            width_dbu = int(round(route["width_um"] / dbu))
-            top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
-
-            # `label` is False for every leg of a multi-leg (bundle) net after
-            # its first (#1073): the legs are one conductor, so one kdb.Text
-            # names it -- exactly as a two-pin net's single path gets exactly
-            # one label. Absent/True keeps the pre-#1073 one-label-per-entry
-            # behaviour for any other caller.
-            if entry_label_layer is not None and route.get("label", True):
-                lx_um, ly_um = _polyline_midpoint_um(points)
-                label_point = kdb.Point(
-                    int(round(lx_um / dbu)), int(round(ly_um / dbu))
-                )
-                top.shapes(_label_layer_index(entry_label_layer)).insert(
-                    kdb.Text(route["net"], kdb.Trans(label_point))
-                )
-
-            # Via-drops (#454; generalized to a multi-hop ladder by issue
-            # #1567): each entry drops one via hop at exactly the target
-            # pin's own position -- a via square on `via_layer`, plus a
-            # landing-pad square on *both* of that hop's own
-            # `landing_layers` (_VIA_LANDING_SIZE_UM, independent of the
-            # route's own trace width) so the via's enclosure requirement
-            # holds regardless of how thin routing.width_um is. A single-hop
-            # drop's two `landing_layers` are exactly (this leg's own
-            # effective layer, the pin's own layer) -- the pre-#1567 shape --
-            # and the backbone's own Path already terminates exactly at this
-            # same point (manhattan_backbone's endpoints are the raw pin
-            # positions), so the landing pad always overlaps -- and merges
-            # with -- the trace. A multi-hop ladder instead carries one
-            # `via_drops` entry per hop, all at the identical (x, y): drawing
-            # each one exactly the same way as the single-hop case builds
-            # the full stack -- the backbone's own landing pad from the first
-            # hop, the pin's own landing pad from the last hop, and one
-            # shared landing pad per intermediate level in between (drawn
-            # twice, once by each of its two neighbouring hops, at the same
-            # position with each hop's required side; the squares merge).
-            #
-            # The via square's own side (#1501) is looked up per `via_layer`
-            # in `via_drop_size_um` -- resolved by `compose()` against the
-            # same curated deck `klt drc` judges the drawn square with --
-            # falling back to the PDK-independent `_VIA_DROP_SIZE_UM`
-            # constant for any layer the caller didn't resolve a floor for
-            # (an unresolvable PDK family, or a pre-#1501 caller that never
-            # populates `via_drop_size_um` at all).
-            #
-            # Each landing pad's own side (#2072/#2074) is looked up per
-            # (landing layer, via layer) in `landing_pad_size_um`, resolved
-            # against the area floor and this hop's via-enclosure rule. Fall back
-            # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
-            # layer the caller didn't resolve a floor for. A hop's two
-            # `landing_layers` can therefore draw two *differently*-sized
-            # squares at the identical (x, y) -- e.g. a met2 pad at the
-            # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
-            # clear `met3.area.1` -- since each layer's own area minimum is
-            # independent of its neighbour's.
-            for drop in route.get("via_drops", []):
-                via_pair = drop["via_layer"]
-                via_layer_index = layout.layer(via_pair[0], via_pair[1])
-                cx = int(round(drop["x_um"] / dbu))
-                cy = int(round(drop["y_um"] / dbu))
-                via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
-                via_half_dbu = int(round((via_size_um / 2.0) / dbu))
-                top.shapes(via_layer_index).insert(
-                    kdb.Box(
-                        cx - via_half_dbu,
-                        cy - via_half_dbu,
-                        cx + via_half_dbu,
-                        cy + via_half_dbu,
-                    )
-                )
-                for landing_pair in drop.get("landing_layers", ()):
-                    landing_size_um = (landing_pad_size_um or {}).get(
-                        (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-                    )
-                    # Round minimum sizes outward, preserving the margin
-                    # against the *rounded* via too. The epsilon only removes
-                    # floating-point noise at an integer grid coordinate.
-                    landing_half_dbu = math.ceil(
-                        max(
-                            landing_size_um / (2.0 * dbu),
-                            via_half_dbu
-                            + (landing_size_um - via_size_um) / (2.0 * dbu),
-                        )
-                        - 1e-9
-                    )
-                    landing_box = kdb.Box(
-                        cx - landing_half_dbu,
-                        cy - landing_half_dbu,
-                        cx + landing_half_dbu,
-                        cy + landing_half_dbu,
-                    )
-                    top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
-                        landing_box
-                    )
-
-            # Stub-widen (#496): each entry (route_two_pin's own
-            # _endpoint_stub_widen_um) re-draws the backbone's own first
-            # segment out of one endpoint -- from that pin's exact position,
-            # `length_um` along its own `direction_deg`, exactly the same
-            # span the narrow backbone above already covers -- at the pin's
-            # own reported `width_um` instead of the route's. Drawn on this
-            # entry's own effective layer, the same layer/cell the
-            # backbone's own Path is already on, so it merges into one shape
-            # with both the backbone and (when the pin's own pad is also on
-            # that layer, which is the only case this fires for -- see the
-            # docstring) the block's own pad underneath.
-            for widen in route.get("stub_widen", []):
-                cx = int(round(widen["x_um"] / dbu))
-                cy = int(round(widen["y_um"] / dbu))
-                half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
-                length_dbu = int(round(widen["length_um"] / dbu))
-                if widen["direction_deg"] == 90:
-                    widen_box = kdb.Box(
-                        cx - half_dbu, cy, cx + half_dbu, cy + length_dbu
-                    )
-                else:  # 270
-                    widen_box = kdb.Box(
-                        cx - half_dbu, cy - length_dbu, cx + half_dbu, cy
-                    )
-                top.shapes(layer_index).insert(widen_box)
-
-    if pin_placements:
-        for pin in pin_placements:
-            layer = pin["layer"]
-            pin_layer_index = layout.layer(layer[0], layer[1])
-            pin_point = kdb.Point(
-                int(round(pin["x_um"] / dbu)), int(round(pin["y_um"] / dbu))
+            _draw_routed_entry(
+                layout,
+                top,
+                route,
+                dbu,
+                route_layer,
+                label_layer,
+                via_drop_size_um,
+                landing_pad_size_um,
+                intermediate_landing_pad_size_um,
             )
-            top.shapes(pin_layer_index).insert(
-                kdb.Text(pin["net"], kdb.Trans(pin_point))
-            )
+
+    draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)
 
     write_layout(layout, output_path, GenComposeError)
     return layout.dbu, dbu_rescale_warnings

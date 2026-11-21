@@ -84,7 +84,15 @@ fn build_from_vcd_with_clock_and_reset() {
     assert_eq!(response.time_range.to.cycle, Some(5));
 
     assert!(response.store.size_bytes > 0);
-    assert!(response.store.content_hash.starts_with("sha256:"));
+    let digest = response
+        .store
+        .content_hash
+        .strip_prefix("sha256:")
+        .expect("content_hash must start with sha256:");
+    assert_eq!(digest.len(), 64);
+    assert!(digest
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
 
     // Shared `provenance` block (docs/json-contract.md): `pdk`/`deck`/
     // `klayout_version` always null (`klt wave` resolves neither and never

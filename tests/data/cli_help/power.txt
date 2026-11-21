@@ -1,0 +1,18 @@
+Extract a routed layout's named power/ground nets into a graph of nodes +
+segment resistances and -- when the spec declares 'pads' and/or a
+'current_model' -- solve that network for its DC operating point, reporting an
+IR-drop map, the worst-case droop, and a per-net EM (electromigration)
+current-density verdict citing each 'stackup'/'vias' role's own declared limit
+(issues #844/#845/#846, Phases 1a/1b/1c of the power/IR-drop + EM signoff epic
+#712). See docs/cli/power.md for the spec-file schema and the JSON contract.
+
+positional arguments:
+  file path to a routed GDSII or OASIS layout file
+  spec path to a JSON spec file: a non-empty 'power_nets' array, a non-empty 'stackup' array mapping GDS layer/datatype pairs to metal roles + sheet resistance + an optional EM current-density limit (at least one entry with a 'label_layer'), an optional 'vias' array, and -- to ask for an IR-drop solve -- an optional 'pads' array (where each net's supply is delivered) and 'current_model' object (what each instance draws) -- see docs/cli/power.md's 'Spec file' section
+
+options:
+  -h, --help show this help message and exit
+  --top TOP top cell to analyse when the stream has more than one (required in that case -- klt power operates on exactly one top cell, unlike klt layers' default of summing across all)
+  --deck DECK parasitics deck (currently: asap7, gf180mcu, sg13cmos5l, sg13g2, sky130) that supplies 'vias[].resistance_ohm' for any via whose spec entry omits it (issue #3400); an explicit spec value always wins. Also populates provenance.deck
+  --resistance-corner {nominal,high,low} which of --deck's published interconnect-resistance corners defaults a via's resistance (default: nominal). Distinct from `klt stackup --corner`'s tech- LEF min/nom/max; requires --deck
+  --format {text,json} output format (default: text)

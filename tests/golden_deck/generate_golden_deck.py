@@ -71,10 +71,12 @@ from typing import Any
 GOLDEN_DECK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GOLDEN_DECK_DIR.parent.parent
 
-sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path[0:0] = [str(REPO_ROOT / "src"), str(GOLDEN_DECK_DIR)]
+
+from _allowed_checks import ALLOWED_CHECKS  # noqa: E402  (data table; see below)
 
 from klayout_tools.decks import (  # noqa: E402
-    DrcRule,  # noqa: E402
+    DrcRule,
     gf180mcu,
     sg13cmos5l,
     sg13g2,
@@ -88,27 +90,9 @@ DECKS: dict[str, list[DrcRule]] = {
     "sg13cmos5l": sg13cmos5l.DECK,
 }
 
-#: Per-deck set of `DrcRule.check` kinds this manifest covers -- see the
-#: module docstring's "deliberately per-deck" note above.
-ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
-    "sky130": ("width", "space"),
-    # `"enclosed"` joins the set with issue #2369's Nplus/Pplus implant
-    # rules -- the first rules in any deck to use it (the direction the PDK's
-    # own `ngate.enclosed(nplus, ...)`/`ncomp.edges.enclosed(nplus, ...)`
-    # statements are written in). All four are `DerivedLayer`-scoped, so all
-    # four are hand-authored in `_DERIVED_LAYER_FIXTURES` below.
-    "gf180mcu": ("width", "space", "enclosing", "separation", "enclosed"),
-    # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
-    # through this manifest mechanism (14 entries); its 5 enclosing/
-    # separation rules ship as hand-written violate/clean pairs directly in
-    # `tests/test_drc.py` instead -- see that deck's own module docstring.
-    "sg13g2": ("width", "space"),
-    # sg13cmos5l (issue #1400, width/space on Activ/GatPoly/Metal1; issue
-    # #1417 extends coverage to the Metal2-TopMetal1 stack's width/space
-    # rules plus every via level's width/space/enclosing rules) -- see that
-    # deck's own module docstring.
-    "sg13cmos5l": ("width", "space", "enclosing"),
-}
+# `ALLOWED_CHECKS` (per-deck manifest check-kind table, data only) lives in
+# :mod:`_allowed_checks` (per-file size ratchet); re-exported here.
+
 
 #: Fixed bar dimensions (database units), independent of any individual
 #: rule's own threshold -- chosen once, verified safe for every rule in the
@@ -191,7 +175,10 @@ def _capped(value: int, cap: int | None) -> int:
 
 
 def _width_pair(
-    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
+    layer: tuple[int, int],
+    threshold_dbu: int,
+    max_dbu: int | None = None,
+    square_only: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_w = max(threshold_dbu - margin, 1)
@@ -204,17 +191,30 @@ def _width_pair(
     clean_w = _capped(threshold_dbu + margin, max_dbu)
     bar_length = _capped(_WIDTH_BAR_LENGTH_DBU, max_dbu)
     layer_list = list(layer)
-    violate = {"shapes": [{"layer": layer_list, "box": [0, 0, violate_w, bar_length]}]}
+    # A `layer_selection="squares"` rule (issues #2943/#3139) only measures
+    # square merged polygons, so its violate fixture must itself be a square.
+    violate_length = violate_w if square_only else bar_length
+    violate = {
+        "shapes": [{"layer": layer_list, "box": [0, 0, violate_w, violate_length]}]
+    }
     clean = {"shapes": [{"layer": layer_list, "box": [0, 0, clean_w, bar_length]}]}
     return violate, clean
 
 
 def _space_pair(
-    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
+    layer: tuple[int, int],
+    threshold_dbu: int,
+    max_dbu: int | None = None,
+    net_space_dbu: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_gap = max(threshold_dbu - margin, 1)
     clean_gap = threshold_dbu + margin
+    # A stricter net-aware spacing rule on the same layer (`"net_space"`,
+    # issue #3572) flags an unconnected pair at the plain rule's clean gap,
+    # so widen the clean fixture past it to keep it clean under the deck.
+    if net_space_dbu > threshold_dbu:
+        clean_gap = net_space_dbu + _margin_dbu(net_space_dbu)
     # Same fixed-size clamp as `_width_pair`: on a cut layer the two bars
     # become two legally-sized cut squares, so the spacing fixture doesn't
     # also trip that layer's own size rule.
@@ -260,11 +260,36 @@ _ENCLOSED_SHAPE_SIZE_DBU = 2000
 _ENCLOSING_ESCAPE_WIDTH_DBU = 500
 
 
+def is_curated_topology_rule(rule: DrcRule) -> bool:
+    """A `require_containment` rule with no upstream `provenance` (issue
+    #2726's upper-landing via rules): a curated topology assertion with no
+    upstream rule to cite, so it has no golden pair (the golden manifest
+    requires per-rule upstream provenance); `tests/test_drc.py` covers it."""
+    return rule.require_containment and rule.provenance is None
+
+
+def _opposite_landings(
+    rule: DrcRule, deck_rules: list[DrcRule]
+) -> list[tuple[int, int]]:
+    """Conductors of the *other* `require_containment` rules sharing this
+    rule's cut layer (issue #2726): both fixtures must draw them, fully
+    covering the cut, so the unrelated landing's containment rule stays
+    quiet and only the rule under test can trip."""
+    return [
+        other.layer
+        for other in deck_rules
+        if other.require_containment
+        and other.other_layer == rule.other_layer
+        and other.layer != rule.layer
+    ]
+
+
 def _enclosing_pair(
     layer: tuple[int, int],
     other_layer: tuple[int, int],
     threshold_dbu: int,
     other_max_dbu: int | None = None,
+    extra_landings: list[tuple[int, int]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a violate/clean pair for an `"enclosing"` `DrcRule` (`layer`
     encloses `other_layer`, e.g. metal encloses a contact/via).
@@ -336,6 +361,19 @@ def _enclosing_pair(
             {"layer": layer_list, "box": clean_layer_box},
         ]
     }
+    for landing in extra_landings or []:
+        # Generous, rule-compliant landing fully covering the cut (#2726).
+        shape = {
+            "layer": list(landing),
+            "box": [
+                -_ENCLOSED_SHAPE_SIZE_DBU // 2,
+                -_ENCLOSED_SHAPE_SIZE_DBU // 2,
+                size + _ENCLOSED_SHAPE_SIZE_DBU // 2,
+                size + _ENCLOSED_SHAPE_SIZE_DBU // 2,
+            ],
+        }
+        violate["shapes"].append(shape)
+        clean["shapes"].append(dict(shape))
     return violate, clean
 
 
@@ -390,13 +428,9 @@ def _separation_pair(
 #: `"violate"`. Both Via4 boxes are exactly 260x260 dbu -- `Vn.1`'s fixed
 #: size, whose maximum half is enforced as of issue #2370, so the larger
 #: Via4 boxes this fixture used before that would now trip `via4.width.1`
-#: on their own. Verified (this
-#: issue) to not incidentally trip any other gf180mcu `DrcRule` -- neither
-#: fixture draws Via1/Via2/Via3/MetalTop/Pad/Nwell/Comp/Poly2/Contact, the
-#: only other layers any *other* rule in this deck reads, and every
-#: single-layer width/space rule on Metal4/FuseTop/Via4 clears its own
-#: threshold by construction (a lone polygon has no `space_check` neighbour;
-#: `_ENCLOSED_SHAPE_SIZE_DBU`-plus geometry clears every width threshold).
+#: on their own. Both fixtures also draw a Metal5 landing over the Via4
+#: (`metal5.enclosing.via4.1` is `require_containment`, issue #5915); no other
+#: gf180mcu `DrcRule` trips.
 #: gf180mcu's `mim.space.1` (issue #1033) scopes its "separation" check's
 #: `region` side the same way, but its `other_layer` is *also* `Metal4` --
 #: `run_drc()` additionally excludes any `Metal4` polygon that itself
@@ -417,6 +451,7 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
                 {"layer": [41, 0], "box": [6900, 0, 7160, 260]},  # Via4 (escapes)
+                {"layer": [81, 0], "box": [-3000, -3000, 9000, 9000]},  # M5
             ]
         },
         {  # clean: Via4 sits >= 500 dbu inside the derived region on every side
@@ -424,6 +459,27 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
                 {"layer": [41, 0], "box": [2870, 2870, 3130, 3130]},  # Via4
+                {"layer": [81, 0], "box": [-3000, -3000, 9000, 9000]},  # M5
+            ]
+        },
+    ),
+    # `sab.separation.contact.1` (SB.4, 150 dbu): the generic
+    # `_separation_pair` bar would be a Contact wider than `CO.1`'s fixed
+    # 220 dbu square and trip `contact.width.1`, so the Contact here is the
+    # legal 220x220 square (issue #3001).
+    "sab.separation.contact.1": (
+        {  # violate: contact 100 dbu (< 150) from the SAB's right edge
+            "shapes": [
+                {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
+                {"layer": [33, 0], "box": [1100, 400, 1320, 620]},  # Contact
+                {"layer": [34, 0], "box": [1050, 300, 1700, 720]},  # M1
+            ]
+        },
+        {  # clean: contact 250 dbu (> 150) from the SAB's right edge
+            "shapes": [
+                {"layer": [49, 0], "box": [0, 0, 1000, 1000]},  # SAB
+                {"layer": [33, 0], "box": [1250, 400, 1470, 620]},  # Contact
+                {"layer": [34, 0], "box": [1050, 300, 1700, 720]},  # M1
             ]
         },
     ),
@@ -472,6 +528,27 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     # 280 dbu `_LV` threshold, so -- as for the width pair above -- a clean
     # `comp.space.1` verdict on this fixture is itself part of what the
     # split is asserting.
+    # `comp.width.moscap.1` (DF.1c, 1000 dbu, issue #5719): the checked region
+    # is `Comp AND MOS_CAP_MK`, so generic `_width_pair` geometry (a bare
+    # `Comp` bar) would derive an empty region and never fire. The 900/1100
+    # dbu bars (both above the 220 `_LV`/300 `_MV` widths) sit under a
+    # covering `MOS_CAP_MK` (166/5) box, so the derived AND is exactly the
+    # bar; no `Dualgate` is drawn, so `comp.width.mv.1` is skipped: only
+    # this rule can fire.
+    "comp.width.moscap.1": (
+        {  # violate: 900 dbu wide (< 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 900, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 1900, 5000]},  # MOS_CAP_MK
+            ]
+        },
+        {  # clean: 1100 dbu wide (>= 1000) Comp fully under MOS_CAP_MK
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1100, 4000]},  # Comp
+                {"layer": [166, 5], "box": [-1000, -1000, 2100, 5000]},  # MOS_CAP_MK
+            ]
+        },
+    ),
     # The six `DerivedLayer`-scoped Nplus/Pplus implant rules (issue #2369).
     # None of them can use a generic builder: their checked region is a
     # boolean of two *other* drawn layers (PCOMP = `Comp AND Pplus`, NCOMP =
@@ -504,6 +581,10 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
                 {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
                 {"layer": [32, 0], "box": [1110, 0, 2110, 4000]},  # Nplus
+                {
+                    "layer": [21, 0],
+                    "box": [-500, -3000, 1500, -300],
+                },  # Nwell (<0.429um)
             ]
         },
         {  # clean: Nplus 210 dbu (> 160) away
@@ -511,6 +592,31 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
                 {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
                 {"layer": [32, 0], "box": [1210, 0, 2210, 4000]},  # Nplus
+                {
+                    "layer": [21, 0],
+                    "box": [-500, -3000, 1500, -300],
+                },  # Nwell (<0.429um)
+            ]
+        },
+    ),
+    # `nplus.space.pcomp.far.1` (NP.3cii, 80 dbu, issue #3484): the far-from-
+    # well half of the NP.3 split. Same island as above but no well is drawn,
+    # so the PCOMP is >= 0.429um from any Nwell/Dnwell and held to 0.08um:
+    # Nplus 50 dbu (violate) / 80 dbu (clean, exactly the threshold) away.
+    # The near-well sibling `nplus.space.pcomp.1` derives an empty region.
+    "nplus.space.pcomp.far.1": (
+        {  # violate: Nplus 50 dbu (< 80) from the PCOMP island's right edge
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1050, 0, 2050, 4000]},  # Nplus
+            ]
+        },
+        {  # clean: Nplus 80 dbu (>= 80) away
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1080, 0, 2080, 4000]},  # Nplus
             ]
         },
     ),
@@ -529,6 +635,104 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (NCOMP)
                 {"layer": [32, 0], "box": [-200, -200, 1200, 4200]},  # Nplus
                 {"layer": [31, 0], "box": [1210, 0, 2210, 4000]},  # Pplus
+            ]
+        },
+    ),
+    # `comp.coverage.1` (DF.12, issue #3587): hand-authored -- a coverage rule
+    # has no threshold to straddle. Violate: bare `Comp`, no implant. Clean:
+    # the same `Comp` fully covered by `Nplus` extended 210 dbu (> NP.5b's
+    # 160) beyond it, so `nplus.enclosing.comp.1` stays quiet too.
+    "comp.coverage.1": (
+        {  # violate: Comp with no implant drawn
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+            ]
+        },
+        {  # clean: Comp fully covered by Nplus
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [32, 0], "box": [-210, -210, 1210, 4210]},  # Nplus
+            ]
+        },
+    ),
+    # `comp.tap_distance.{nwell,psub}.lv.1` (DF.13_LV / DF.14_LV, issue #3607):
+    # hand-authored -- a reach rule has no dbu threshold to straddle. Violate:
+    # the ZERO-TAP case (active drawn, no tap at all; upstream flags it and the
+    # generic "absent secondary layer -> skip" engine behaviour would hide it).
+    # Clean: the same active 9 um from a tap, well inside the 20 um limit.
+    # Boundary/beyond-20 um/DBU cases live in `tests/test_gf180mcu_tap_distance.py`.
+    "comp.tap_distance.nwell.lv.1": (
+        {  # violate: PCOMP inside Nwell, no NCOMP tap anywhere
+            "shapes": [
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+        {  # clean: NCOMP tap 9 um from the PCOMP
+            "shapes": [
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (NCOMP tap)
+                {"layer": [32, 0], "box": [-300, -300, 1300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+    ),
+    "comp.tap_distance.psub.lv.1": (
+        {  # violate: NCOMP outside any well, no PCOMP substrate tap anywhere
+            "shapes": [
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+            ]
+        },
+        {  # clean: PCOMP substrate tap 9 um from the NCOMP
+            "shapes": [
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (PCOMP tap)
+                {"layer": [31, 0], "box": [-300, -300, 1300, 1300]},  # Pplus
+            ]
+        },
+    ),
+    # `comp.tap_distance.{nwell,psub}.mv.1` (DF.13_MV / DF.14_MV, issue #3793):
+    # the same cases as the LV pair with the active drawn inside `Dualgate`
+    # (the MV selector) and a 15 um reach; the clean tap is 9 um away.
+    "comp.tap_distance.nwell.mv.1": (
+        {  # violate: PCOMP inside Nwell, no NCOMP tap anywhere
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+        {  # clean: NCOMP tap 9 um from the PCOMP
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [21, 0], "box": [-1000, -1000, 31000, 4000]},  # Nwell
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (NCOMP tap)
+                {"layer": [32, 0], "box": [-300, -300, 1300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [9700, -300, 11300, 1300]},  # Pplus
+            ]
+        },
+    ),
+    "comp.tap_distance.psub.mv.1": (
+        {  # violate: NCOMP outside any well, no PCOMP substrate tap anywhere
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+            ]
+        },
+        {  # clean: PCOMP substrate tap 9 um from the NCOMP
+            "shapes": [
+                {"layer": [55, 0], "box": [-500, -500, 12000, 2000]},  # Dualgate
+                {"layer": [22, 0], "box": [10000, 0, 11000, 1000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [9700, -300, 11300, 1300]},  # Nplus
+                {"layer": [22, 0], "box": [0, 0, 1000, 1000]},  # Comp (PCOMP tap)
+                {"layer": [31, 0], "box": [-300, -300, 1300, 1300]},  # Pplus
             ]
         },
     ),
@@ -575,6 +779,24 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "shapes": [
                 {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
                 {"layer": [31, 0], "box": [-210, -210, 1210, 4210]},  # Pplus
+            ]
+        },
+    ),
+    # `pplus.enclosing.comp.far.1` (PP.5di, 20 dbu, issue #3484): the far-
+    # from-well half of the PP.5 split. No well is drawn, so the PCOMP is held
+    # to 0.02um instead of 0.16um: 10 dbu extension (violate) / 20 dbu (clean,
+    # exactly the threshold). `pplus.enclosing.comp.1` is skipped here.
+    "pplus.enclosing.comp.far.1": (
+        {  # violate: 10 dbu extension (< 20)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-10, -10, 1010, 4010]},  # Pplus
+            ]
+        },
+        {  # clean: 20 dbu extension (>= 20)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-20, -20, 1020, 4020]},  # Pplus
             ]
         },
     ),
@@ -638,6 +860,123 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
 }
 
 
+def _add_cut_landings(
+    rule: DrcRule,
+    deck_rules: list[DrcRule],
+    violate: dict[str, Any],
+    clean: dict[str, Any],
+) -> None:
+    """For a width/space rule on a cut layer that `require_containment`
+    rules constrain (issue #2726), draw both adjacent conductors around the
+    cut shapes in each fixture, so the "clean" case is not flagged for
+    drawing a cut with no landing."""
+    conductors = [
+        other.layer
+        for other in deck_rules
+        if other.require_containment and other.other_layer == rule.layer
+    ]
+    for fixture in (violate, clean):
+        cuts = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == rule.layer
+        ]
+        if not cuts:
+            continue
+        pad = _ENCLOSED_SHAPE_SIZE_DBU
+        box = [
+            min(c[0] for c in cuts) - pad,
+            min(c[1] for c in cuts) - pad,
+            max(c[2] for c in cuts) + pad,
+            max(c[3] for c in cuts) + pad,
+        ]
+        for conductor in conductors:
+            fixture["shapes"].append({"layer": list(conductor), "box": list(box)})
+
+
+#: gf180mcu's `comp.coverage.1` (DF.12, issue #3587) flags any `Comp` not under
+#: an implant, so every other rule's bare-`Comp` fixture would trip it and no
+#: longer be "clean for the whole deck". The Schottky-diode marker is DF.12's
+#: own whole-polygon exemption and is read by no other rule, so drawing it over
+#: such a fixture's `Comp` leaves that fixture's rule under test unaffected.
+_COMP_LAYER = (22, 0)
+_COMP_COVERAGE_RULE_ID = "comp.coverage.1"
+_SCHOTTKY_MARKER_LAYER = (241, 0)
+_SCHOTTKY_PAD_DBU = 100
+
+
+def _exempt_comp_from_df12(*fixtures: dict[str, Any]) -> None:
+    for fixture in fixtures:
+        comps = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == _COMP_LAYER
+        ]
+        already = any(
+            tuple(shape["layer"]) == _SCHOTTKY_MARKER_LAYER
+            for shape in fixture["shapes"]
+        )
+        if not comps or already:  # idempotent: hand-authored fixtures are shared
+            continue
+        pad = _SCHOTTKY_PAD_DBU
+        fixture["shapes"].append(
+            {
+                "layer": list(_SCHOTTKY_MARKER_LAYER),
+                "box": [
+                    min(c[0] for c in comps) - pad,
+                    min(c[1] for c in comps) - pad,
+                    max(c[2] for c in comps) + pad,
+                    max(c[3] for c in comps) + pad,
+                ],
+            }
+        )
+
+
+#: gf180mcu's `DF.13_LV`/`DF.14_LV` tap-distance rules (`check="tap_distance"`,
+#: issue #3607) flag any implanted `Comp` with no tap within reach, so an
+#: implanted-`Comp` fixture authored for another rule would trip them and stop
+#: being "clean for the whole deck". `v5_xtor` is the rules' own LV exclusion
+#: marker and is read by no other rule, so drawing it over such a fixture's
+#: `Comp` removes it from their LV active region without touching the rule
+#: under test.
+_V5_XTOR_MARKER_LAYER = (112, 1)
+_IMPLANT_LAYERS = ((32, 0), (31, 0))
+
+
+def _exempt_comp_from_tap_distance(
+    rule: DrcRule, deck_rules: list[DrcRule], *fixtures: dict[str, Any]
+) -> None:
+    if rule.check == "tap_distance" or not any(
+        r.check == "tap_distance" for r in deck_rules
+    ):
+        return
+    for fixture in fixtures:
+        layers = [tuple(shape["layer"]) for shape in fixture["shapes"]]
+        if _V5_XTOR_MARKER_LAYER in layers or not any(
+            layer in layers for layer in _IMPLANT_LAYERS
+        ):
+            continue  # idempotent; unimplanted Comp is never active
+        comps = [
+            shape["box"]
+            for shape in fixture["shapes"]
+            if tuple(shape["layer"]) == _COMP_LAYER
+        ]
+        if not comps:
+            continue
+        pad = _SCHOTTKY_PAD_DBU
+        fixture["shapes"].append(
+            {
+                "layer": list(_V5_XTOR_MARKER_LAYER),
+                "box": [
+                    min(c[0] for c in comps) - pad,
+                    min(c[1] for c in comps) - pad,
+                    max(c[2] for c in comps) + pad,
+                    max(c[3] for c in comps) + pad,
+                ],
+            }
+        )
+
+
 def build_manifest(
     deck_name: str,
     deck_rules: list[DrcRule],
@@ -650,17 +989,30 @@ def build_manifest(
     max_sizes = max_size_by_layer(deck_rules)
     manifest: dict[str, dict[str, Any]] = {}
     for rule in deck_rules:
-        if rule.check not in allowed_checks:
+        if rule.check not in allowed_checks or is_curated_topology_rule(rule):
             continue
         if rule.id in _DERIVED_LAYER_FIXTURES:
             violate, clean = _DERIVED_LAYER_FIXTURES[rule.id]
         elif rule.check == "width":
             violate, clean = _width_pair(
-                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+                rule.layer,
+                rule.threshold_dbu,
+                max_sizes.get(rule.layer),
+                square_only=rule.layer_selection == "squares",
             )
         elif rule.check == "space":
             violate, clean = _space_pair(
-                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+                rule.layer,
+                rule.threshold_dbu,
+                max_sizes.get(rule.layer),
+                max(
+                    (
+                        r.threshold_dbu
+                        for r in deck_rules
+                        if r.check == "net_space" and r.layer == rule.layer
+                    ),
+                    default=0,
+                ),
             )
         elif rule.check == "enclosing":
             assert rule.other_layer is not None, rule.id
@@ -669,6 +1021,7 @@ def build_manifest(
                 rule.other_layer,
                 rule.threshold_dbu,
                 max_sizes.get(rule.other_layer),
+                extra_landings=_opposite_landings(rule, deck_rules),
             )
         elif rule.check == "separation":
             assert rule.other_layer is not None, rule.id
@@ -687,6 +1040,13 @@ def build_manifest(
                 f"{deck_name}/{rule.id}: 'enclosed' rules must be "
                 "hand-authored in _DERIVED_LAYER_FIXTURES"
             )
+        if rule.check in ("width", "space"):
+            _add_cut_landings(rule, deck_rules, violate, clean)
+        if rule.id != _COMP_COVERAGE_RULE_ID and any(
+            r.id == _COMP_COVERAGE_RULE_ID for r in deck_rules
+        ):
+            _exempt_comp_from_df12(violate, clean)
+        _exempt_comp_from_tap_distance(rule, deck_rules, violate, clean)
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {
             "check": rule.check,

@@ -835,3 +835,202 @@ def test_drawn_violation_is_flagged_by_drc(tmp_path, capsys):
     assert drc_code == 3  # deck ran and found violations (docs/cli/drc.md)
     assert payload["status"] == "violations"
     assert "poly.width.1" in payload["rule_counts"]
+
+
+# --------------------------------------------------------------------------- #
+# base_gds / erase_um refinement (issue #3378)
+# --------------------------------------------------------------------------- #
+
+
+def _read(path):
+    layout = kdb.Layout()
+    layout.read(path)
+    return layout
+
+
+def _boxes(layout, cell, layer, datatype):
+    idx = layout.find_layer(layer, datatype)
+    if idx is None:
+        return []
+    return sorted(
+        (s.bbox().left, s.bbox().bottom, s.bbox().right, s.bbox().top)
+        for s in cell.shapes(idx).each()
+        if not s.is_text()
+    )
+
+
+@pytest.fixture
+def base_gds(tmp_path):
+    _, path = _draw(
+        tmp_path,
+        {
+            "shapes": [
+                {"layer": [66, 20], "rect_um": [0, 0, 4, 1]},
+                {"layer": [1, 0], "rect_um": [0, 0, 1, 1]},
+            ],
+            "labels": [{"layer": [66, 20], "text": "A", "at_um": [2, 0.5]}],
+        },
+        name="base.gds",
+    )
+    return path
+
+
+def test_erase_clips_straddling_polygon_and_adds_shapes(tmp_path, base_gds):
+    report, output = _draw(
+        tmp_path,
+        {
+            "base_gds": base_gds,
+            "erase_um": [{"rect_um": [3, -1, 1, 2], "layer": [66, 20]}],
+            "shapes": [{"layer": [1, 0], "rect_um": [5, 5, 6, 6]}],
+        },
+        cell_name="OUT",
+    )
+    layout = _read(output)
+    top = layout.top_cell()
+    assert top.name == "OUT"
+    assert _boxes(layout, top, 66, 20) == [(0, 0, 1000, 1000), (3000, 0, 4000, 1000)]
+    # Other layer untouched, plus the added patch.
+    assert _boxes(layout, top, 1, 0) == [(0, 0, 1000, 1000), (5000, 5000, 6000, 6000)]
+    assert report["erased_shape_count"] == 1
+    assert report["erased_label_count"] == 1  # label at x=2 inside the window
+    assert report["base_gds"] == base_gds
+    assert report["warnings"] == [NOT_DESIGN_LEGAL_WARNING]
+    assert report["shape_count"] == 4
+
+
+def test_erase_without_layer_applies_to_all_layers(tmp_path, base_gds):
+    _, output = _draw(
+        tmp_path,
+        {"base_gds": base_gds, "erase_um": [{"rect_um": [0, 0, 1, 1]}]},
+    )
+    layout = _read(output)
+    top = layout.top_cell()
+    assert _boxes(layout, top, 1, 0) == []
+    assert _boxes(layout, top, 66, 20) == [(1000, 0, 4000, 1000)]
+
+
+def test_erase_window_touching_nothing_leaves_base_unchanged(tmp_path, base_gds):
+    report, output = _draw(
+        tmp_path,
+        {"base_gds": base_gds, "erase_um": [{"rect_um": [10, 10, 11, 11]}]},
+    )
+    layout = _read(output)
+    top = layout.top_cell()
+    assert report["erased_shape_count"] == 0
+    assert report["erased_label_count"] == 0
+    assert report["shape_count"] == 2
+    assert top.bbox().right == 4000
+
+
+def test_erase_only_is_valid_with_base(tmp_path, base_gds):
+    report, _ = _draw(
+        tmp_path, {"base_gds": base_gds, "erase_um": [{"rect_um": [0, 0, 1, 1]}]}
+    )
+    assert report["shape_count"] == 1
+
+
+def test_base_with_neither_shapes_nor_erase_is_error(tmp_path, base_gds):
+    with pytest.raises(DrawError, match="must not both be empty"):
+        _draw(tmp_path, {"base_gds": base_gds})
+
+
+def test_empty_shapes_without_base_still_error(tmp_path):
+    with pytest.raises(DrawError, match="must not be empty"):
+        _draw(tmp_path, {"shapes": []})
+
+
+def test_erase_keys_require_base_gds(tmp_path):
+    shapes = [{"layer": [1, 0], "rect_um": [0, 0, 1, 1]}]
+    with pytest.raises(DrawError, match="erase_um requires params.base_gds"):
+        _draw(tmp_path, {"shapes": shapes, "erase_um": [{"rect_um": [0, 0, 1, 1]}]})
+    with pytest.raises(DrawError, match="base_cell requires params.base_gds"):
+        _draw(tmp_path, {"shapes": shapes, "base_cell": "X"})
+
+
+def test_missing_base_gds_file_is_error(tmp_path):
+    with pytest.raises(DrawError, match="file not found"):
+        _draw(
+            tmp_path,
+            {
+                "base_gds": str(tmp_path / "nope.gds"),
+                "erase_um": [{"rect_um": [0, 0, 1, 1]}],
+            },
+        )
+
+
+def test_unknown_key_in_erase_entry_rejected_annotation_allowed(tmp_path, base_gds):
+    with pytest.raises(DrawError, match="erase_um\\[0\\] has unknown key"):
+        _draw(
+            tmp_path,
+            {"base_gds": base_gds, "erase_um": [{"rect_nm": [0, 0, 1, 1]}]},
+        )
+    report, _ = _draw(
+        tmp_path,
+        {
+            "base_gds": base_gds,
+            "erase_um": [{"rect_um": [0, 0, 1, 1], "_why": "trim"}],
+        },
+    )
+    assert report["erased_shape_count"] == 2
+
+
+def test_erase_flattens_hierarchical_base(tmp_path):
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    child = layout.create_cell("CHILD")
+    idx = layout.layer(66, 20)
+    child.shapes(idx).insert(kdb.Box(0, 0, 1000, 1000))
+    top.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(kdb.Vector(2000, 0))))
+    base = str(tmp_path / "hier.gds")
+    layout.write(base)
+
+    report, output = _draw(
+        tmp_path,
+        {
+            "base_gds": base,
+            "erase_um": [{"rect_um": [2, 0, 2.5, 1], "layer": [66, 20]}],
+        },
+    )
+    out = _read(output)
+    assert out.cells() == 1  # flattened, no child cell
+    assert _boxes(out, out.top_cell(), 66, 20) == [(2500, 0, 3000, 1000)]
+    assert report["erased_shape_count"] == 1
+
+
+def test_base_cell_selects_named_cell(tmp_path):
+    layout = kdb.Layout()
+    idx = layout.layer(1, 0)
+    for name, x in (("A", 0), ("B", 5000)):
+        layout.create_cell(name).shapes(idx).insert(kdb.Box(x, 0, x + 1000, 1000))
+    base = str(tmp_path / "two.gds")
+    layout.write(base)
+
+    with pytest.raises(DrawError, match="top cells"):
+        _draw(tmp_path, {"base_gds": base, "erase_um": [{"rect_um": [9, 9, 10, 10]}]})
+    report, output = _draw(
+        tmp_path,
+        {"base_gds": base, "base_cell": "B", "erase_um": [{"rect_um": [9, 9, 10, 10]}]},
+    )
+    assert report["base_cell"] == "B"
+    out = _read(output)
+    assert _boxes(out, out.top_cell(), 1, 0) == [(5000, 0, 6000, 1000)]
+
+
+def test_dbu_mismatch_with_base_is_error(tmp_path, base_gds):
+    with pytest.raises(DrawError, match="differs from the base"):
+        _draw(
+            tmp_path,
+            {
+                "base_gds": base_gds,
+                "dbu_um": 0.005,
+                "erase_um": [{"rect_um": [0, 0, 1, 1]}],
+            },
+        )
+
+
+def test_default_path_response_has_no_base_fields(tmp_path):
+    params = {"shapes": [{"layer": [66, 20], "rect_um": [0, 0, 1, 1]}]}
+    report, _ = _draw(tmp_path, params)
+    assert "base_gds" not in report
+    assert "erased_shape_count" not in report

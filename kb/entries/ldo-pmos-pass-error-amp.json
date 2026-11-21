@@ -26,13 +26,13 @@
   },
   "measured": {
     "pdk": "sky130",
-    "corner": "vin_val=3.0V, 27C (request.json's 3.0V-3.6V x -40C/27C/125C sweep; vout is flat across it in this behavioral testbench, see notes)",
+    "corner": "vin=3.0V, 27C (request.json's 3.0V-3.6V x -40C/27C/125C sweep; vout is flat across it in this behavioral testbench, see notes)",
     "supply_v": 3.0,
     "notes": "testbench.spice models the pass device with a generic (non-PDK) PMOS model and the error amp as an ideal finite-gain block (see artifacts.netlist's own header), not sky130 device models -- this demonstrates the feedback-regulation relation this entry's sizing_approach describes, not silicon accuracy. Reproduce with `klt sim examples/kb/ldo-pmos-pass-error-amp/request.json`.",
     "figures": [
       {
         "name": "vout_v",
-        "value": 1.80324,
+        "value": 1.80264,
         "unit": "V",
         "analysis": "tran",
         "testbench": "examples/kb/ldo-pmos-pass-error-amp/request.json"

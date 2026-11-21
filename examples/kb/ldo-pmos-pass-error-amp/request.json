@@ -3,7 +3,7 @@
   "engine": "ngspice",
   "corners": {
     "supply_v": {
-      "vin_val": [3.0, 3.6]
+      "vin": [3.0, 3.6]
     },
     "temperature_c": [-40, 27, 125]
   },

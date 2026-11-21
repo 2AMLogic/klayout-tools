@@ -6,42 +6,37 @@
 # design note explicitly leaves to Phase 2 (issue #264): bakes ngspice + one
 # PDK's curated ngspice model decks onto a fresh Ubuntu build instance --
 # for SG13G2 (issue #2573) also a compiled OSDI toolchain output, since a
-# PDK-only install cannot simulate a single SG13G2 device -- plus
-# the idle-shutdown guard src/klayout_tools/remote_launcher.py's
-# `idle_guard_install_script()` generates (single source of truth — this
-# script calls that Python function via `python3 -c ...` rather than
-# maintaining a second copy of the guard script), snapshots the instance to
-# a new AMI, and appends/updates the published entry in BOTH
-# data/remote-sim-ami-manifest.json (the repo checkout's copy, `--manifest`
-# overridable) AND `~/.config/klt/remote-sim-ami-manifest.json` (the
-# user-scope copy `src/klayout_tools/remote_launcher.py`'s
-# `USER_MANIFEST_PATH` resolves -- issue #370: a tool-installed `klt` (`uv
-# tool`/pipx/pip) resolves the manifest from its own installed package-data
-# dir, never this checkout's `data/`, so without this second write an
-# operator-built AMI would be invisible to that installed `klt`) -- see
-# docs/schemas/remote-sim-ami-manifest.schema.json for the entry shape.
+# PDK-only install cannot simulate a single SG13G2 device -- plus the
+# idle-shutdown guard remote_launcher's `idle_guard_install_script()`
+# generates (single source of truth: called via `python3 -c ...`, not a
+# second copy here), snapshots the instance to a new AMI, and appends/updates
+# the published entry in BOTH data/remote-sim-ami-manifest.json (the repo
+# checkout's copy, `--manifest` overridable) AND
+# `~/.config/klt/remote-sim-ami-manifest.json` (the `USER_MANIFEST_PATH`
+# copy -- issue #370: a tool-installed `klt` resolves the manifest from its
+# own package-data dir, never this checkout's `data/`, so without the second
+# write an operator-built AMI is invisible to it). Entry shape:
+# docs/schemas/remote-sim-ami-manifest.schema.json.
 #
 # Also bakes `klt` itself (issue #265's SSH/SCP transport requirement): the
 # `remote` backend's corner fan-out invokes `klt sim ... --backend
-# local-parallel` directly on the provisioned box (the literal reuse of
-# #255's worker-pool code the design note's decision 5 requires), so the AMI
-# must ship the exact same `klayout-tools` code the launcher itself runs.
-# Installed from this repo's own git history, pinned to `--klt-ref` (default:
-# the commit this script is run from) rather than "whatever `main` is at
-# build time" — reproducible the same way decision 4 pins the PDK snapshot.
-# The PDK model library is installed under a fixed `$PDK_ROOT` (persisted to
-# `/etc/environment` so it is visible to a non-interactive SSH command, not
-# just an interactive login shell) so the remote host's own `klt sim`
-# invocation resolves `request.models.pdk` via `pdk.find_pdk`'s existing
-# `$PDK_ROOT` lookup -- the same code path a local run already uses, no
-# remote-specific model resolution logic.
+# local-parallel` directly on the provisioned box (decision 5's literal
+# reuse of #255's worker-pool code), so the AMI must ship the exact same
+# `klayout-tools` code the launcher runs -- installed from this repo's own
+# git history, pinned to `--klt-ref` (default: the commit this script runs
+# from), not "whatever `main` is at build time", reproducible the way
+# decision 4 pins the PDK snapshot. The model library lives under a fixed
+# `$PDK_ROOT` (persisted to `/etc/environment`, so a non-interactive SSH
+# command sees it) so the remote's own `klt sim` resolves
+# `request.models.pdk` via `pdk.find_pdk`'s existing `$PDK_ROOT` lookup --
+# the same code path a local run uses, no remote-specific resolution logic.
 #
 # This is an OPERATIONAL script, not exercised by this repo's test suite or
-# CI (see CLAUDE.md's "headless always" + this issue's own instruction: an
-# automated test must never spin up real EC2 instances). It requires:
-#   - Real, working AWS credentials for the target account (same
+# CI (see CLAUDE.md's "headless always": an automated test must never spin
+# up real EC2 instances). It requires:
+#   - Real, working AWS credentials for the target account (the same
 #     AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION discipline
-#     `.claude/skills/repo/scripts/repo-remote.sh` already uses).
+#     `.claude/skills/repo/scripts/repo-remote.sh` uses).
 #   - The `aws` CLI and `jq` on PATH.
 #   - Real cloud spend: a build instance runs for the duration of the
 #     ngspice/PDK-deck/`klt`-package install (minutes), then `create-image`
@@ -49,30 +44,42 @@
 #     maintaining the AMI, distinct from the per-job spend RemoteLauncher
 #     gates in src/klayout_tools/remote_launcher.py.
 #
-# Deferred/not run in this change: no AMI has actually been built by this
-# script yet (no AWS credentials/spend available while authoring #264/#265)
-# — see data/README.md. data/remote-sim-ami-manifest.json ships with an
-# empty `images` array; an operator runs this script once per (pdk, region)
-# they need and the manifest gains real entries from there.
+# Manifest status: the checked-in manifest's `images` array carries real
+# operator-built entries; operators run this script once per (pdk, region)
+# needed and further entries accrue from there (see data/README.md). The
+# batch fleet's image is baked separately by 2am infra, not this manifest.
 #
 # Usage:
 #   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
 #       [--instance-type c7i.xlarge] [--root-gb 60] \
 #       [--copy-to-region us-west-2 ...] \
-#       [--klt-ref <git-ref>] [--manifest <path>] [--yes]
+#       [--klt-ref <git-ref>] [--pdk-variants <v1,v2>] [--manifest <path>] [--yes]
+#   scripts/aws/build-remote-sim-ami.sh --pdk sky130A --region us-east-1 \
+#       [--klt-ref <git-ref>] --emit-manifest-entry <ami_id> <klt_version>
 #
 #   --pdk accepts sky130A, gf180mcu, or sg13g2 (remote_launcher.SUPPORTED_PDKS
 #   -- keep both lists in sync). sg13g2's recipe fetches via a `--klt-ref`
-#   pinned checkout of THIS repo rather than volare (see the PDK_FETCH_CMDS
-#   case below) -- IHP-Open-PDK is not on volare's feed, and the
-#   compiled-OSDI step has no volare equivalent at all.
+#   pinned checkout of THIS repo rather than volare (see PDK_FETCH_CMDS
+#   below) -- IHP-Open-PDK is not on volare's feed, and the compiled-OSDI
+#   step has no volare equivalent at all.
+#
+#   --pdk-variants <v1,v2>: record the PDK variant directories this image
+#   ships (e.g. gf180mcuD) as the entry's optional `pdk_variants` (issue
+#   #3251), so the batch backend can refuse an unshipped variant before any
+#   S3 write.
+#
+#   For sky130A/gf180mcu the entry also publishes `open_pdks_commit` (issue
+#   #6156): the pinned PDK_VERSION when 40-hex; sg13g2 leaves it unset.
+#
+#   --emit-manifest-entry <ami_id> <klt_version>: print, as JSON, the
+#   manifest entry this build would publish for <ami_id> in --region, from
+#   the resolved --pdk/--klt-ref, and exit -- no AWS call, no file written.
+#   The real build publishes through the same function (issue #2851).
 #
 #   Without --yes: prints the resolved build plan (PDK, region, base AMI,
 #   instance type, estimated one-time build cost) and exits — nothing is
-#   created. Mirrors repo-remote.sh's own "plan shown before money is spent"
-#   discipline (see /repo:remote).
-#   With --yes: actually launches the build instance, installs, snapshots,
-#   and updates the manifest.
+#   created ("plan shown before money is spent", as repo-remote.sh does).
+#   With --yes: actually launches, installs, snapshots, and updates the manifest.
 #
 # Exit codes: 0 success (including a dry-run plan), 2 usage/missing config,
 # 4 an AWS API call failed.
@@ -82,11 +89,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MANIFEST="${REPO_ROOT}/data/remote-sim-ami-manifest.json"
-#: Mirrors src/klayout_tools/remote_launcher.py's USER_MANIFEST_PATH -- an
-#: installed (uv tool/pipx/pip) `klt` resolves the AMI manifest from its own
-#: package-data dir, never this repo checkout's `data/`, so this build
-#: additionally writes here (issue #370) so a freshly built AMI is usable
-#: from any `klt` install on this machine immediately, no release required.
+#: Mirrors remote_launcher's USER_MANIFEST_PATH -- the second write target
+#: (issue #370): a freshly built AMI is usable by any `klt` install on this
+#: machine immediately, no release required.
 USER_MANIFEST="${HOME}/.config/klt/remote-sim-ami-manifest.json"
 
 PDK=""
@@ -136,12 +141,12 @@ KLT_REF="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo main)"
 PDK_ROOT="/opt/pdk"
 #: Pinned open_pdks build the AMI bakes -- the same snapshot the local
 #: ~/.volare installs and the canary block repos pin (decision 4:
-#: reproducible, never "whatever volare's latest is at build time").
+#: reproducible, never "whatever ciel's latest is at build time").
 #: Override with --pdk-version for a deliberate refresh. Used by the
 #: sky130A/gf180mcu branches of PDK_FETCH_CMDS only -- SG13G2 is not on
 #: volare's feed at all (see SG13G2_PDK_SNAPSHOT_PREFIX below), so it never
 #: reads this variable.
-PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+PDK_VERSION="f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 #: SG13G2 snapshot-pinning decision (issue #2573, acceptance criterion 4):
 #: unlike PDK_VERSION above, SG13G2 has no single upstream commit/tag this
 #: script pins directly. Its recipe (the sg13g2 PDK_FETCH_CMDS branch below)
@@ -159,12 +164,21 @@ PDK_VERSION="c6d73a35f524070e85faff4a6a9eef49553ebc2b"
 #: manifest's `pdk_snapshot` field does via SG13G2_PDK_SNAPSHOT_PREFIX
 #: below.
 SG13G2_PDK_SNAPSHOT_PREFIX="sg13g2-klt"
+#: Python used for the helpers this script shares with
+#: src/klayout_tools/remote_launcher.py (idle guard, manifest entry, console
+#: version parsing). Overridable so tests can run the offline paths without
+#: a `uv` project sync.
+read -r -a PYTHON_CMD <<< "${KLT_AMI_BUILD_PYTHON:-uv run python3}"
+PDK_VARIANTS=""
+EMIT_ENTRY=false
+EMIT_AMI=""
+EMIT_KLT_VERSION=""
 
 log() { echo "[build-remote-sim-ami] $*" >&2; }
 die() { local code="$1"; shift; log "error: $*"; exit "$code"; }
 
 usage() {
-  sed -n '2,78p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,92p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -176,8 +190,12 @@ while [[ $# -gt 0 ]]; do
     --copy-to-region) COPY_TO_REGIONS+=("$2"); shift 2 ;;
     --klt-ref) KLT_REF="$2"; shift 2 ;;
     --pdk-version) PDK_VERSION="$2"; shift 2 ;;
+    --pdk-variants) PDK_VARIANTS="$2"; shift 2 ;;
     --manifest) MANIFEST="$2"; shift 2 ;;
     --yes) YES=true; shift ;;
+    --emit-manifest-entry)
+      [[ $# -ge 3 ]] || die 2 "--emit-manifest-entry needs <ami_id> <klt_version>"
+      EMIT_ENTRY=true; EMIT_AMI="$2"; EMIT_KLT_VERSION="$3"; shift 3 ;;
     -h|--help) usage; exit 0 ;;
     *) die 2 "unknown argument: $1 (see --help)" ;;
   esac
@@ -193,9 +211,7 @@ case "$PDK" in
   *) die 2 "unsupported --pdk '$PDK' (must match remote_launcher.SUPPORTED_PDKS: sky130A, gf180mcu, sg13g2)" ;;
 esac
 [[ -n "$REGION" ]] || die 2 "--region (or AWS_REGION/AWS_DEFAULT_REGION) is required"
-command -v aws >/dev/null 2>&1 || die 2 "the 'aws' CLI is required on PATH"
-command -v jq  >/dev/null 2>&1 || die 2 "'jq' is required on PATH (manifest update)"
-command -v uv  >/dev/null 2>&1 || die 2 "'uv' is required on PATH (idle-guard script generation via 'uv run python3')"
+command -v "${PYTHON_CMD[0]}" >/dev/null 2>&1 || die 2 "'${PYTHON_CMD[0]}' is required on PATH (idle-guard script and manifest entry generation via '${PYTHON_CMD[*]}')"
 
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # sky130A/gf180mcu apt-install Ubuntu 22.04's packaged ngspice; sg13g2
@@ -207,6 +223,55 @@ case "$PDK" in
   sg13g2) NGSPICE_VERSION_HINT="47" ;;  # matches docker/eda-sim/pdk-versions.json's tools.ngspice pin
   *) NGSPICE_VERSION_HINT="46" ;;  # the version this repo's own test matrix pins against
 esac
+
+if [[ "$PDK" == "sg13g2" ]]; then
+  # Names the (KLT_REF, date) pair, not a bare date stamp: KLT_REF pins the
+  # actual IHP-Open-PDK/openvaf-r versions baked (SG13G2_PDK_SNAPSHOT_PREFIX
+  # decision above), so it belongs in the manifest's snapshot identity too.
+  PDK_SNAPSHOT="${SG13G2_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
+  OPEN_PDKS_COMMIT=""
+else
+  PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
+  # Only a full 40-hex PDK_VERSION is publishable (issue #6156); any other
+  # --pdk-version shape is left unpublished, never guessed at.
+  if [[ "$PDK_VERSION" =~ ^[0-9a-f]{40}$ ]]; then
+    OPEN_PDKS_COMMIT="$PDK_VERSION"
+  else
+    OPEN_PDKS_COMMIT=""
+    log "note: --pdk-version '${PDK_VERSION}' is not a 40-hex commit; the manifest entry will not publish open_pdks_commit"
+  fi
+fi
+
+# One manifest entry as JSON (issue #2851). Built by
+# remote_launcher.ami_manifest_entry -- the single definition of the entry
+# shape -- from the SAME $KLT_REF the user-data pip-installs below, plus the
+# klt version that install reported; fails (non-zero) on an unusable
+# version or ref, so a build never publishes an unknown runner identity.
+manifest_entry_json() {  # <ami_id> <region> <klt_version>
+  (cd "$REPO_ROOT" && "${PYTHON_CMD[@]}" -c '
+import json, sys
+from klayout_tools.remote_launcher import RemoteLaunchError, ami_manifest_entry
+keys = ("pdk", "region", "ami_id", "pdk_snapshot", "ngspice_version",
+        "built_at", "klt_version", "klt_ref")
+variants = [v for v in sys.argv[9].split(",") if v] if len(sys.argv) > 9 and sys.argv[9] else None
+commit = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else None
+try:
+    entry = ami_manifest_entry(**dict(zip(keys, sys.argv[1:9])), pdk_variants=variants,
+                               open_pdks_commit=commit)
+except RemoteLaunchError as exc:
+    sys.exit(f"manifest entry refused: {exc}")
+print(json.dumps(entry))
+' "$PDK" "$2" "$1" "$PDK_SNAPSHOT" "$NGSPICE_VERSION_HINT" "$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS" "$OPEN_PDKS_COMMIT")
+}
+
+if [[ "$EMIT_ENTRY" == true ]]; then
+  manifest_entry_json "$EMIT_AMI" "$REGION" "$EMIT_KLT_VERSION" \
+    || die 2 "could not build the manifest entry"
+  exit 0
+fi
+
+command -v aws >/dev/null 2>&1 || die 2 "the 'aws' CLI is required on PATH"
+command -v jq  >/dev/null 2>&1 || die 2 "'jq' is required on PATH (manifest update)"
 
 log "plan: build a ${PDK} AMI in ${REGION} (build instance type ${INSTANCE_TYPE}, root ${ROOT_GB}GB gp3, klt-ref ${KLT_REF}); copy-to: ${COPY_TO_REGIONS[*]:-<none>}"
 
@@ -237,7 +302,7 @@ ROOT_DEVICE="$(aws ec2 describe-images --region "$REGION" --image-ids "$BASE_AMI
 # ── idle-shutdown guard: generated by the same Python function
 # RemoteLauncher relies on being baked into every AMI (single source of
 # truth — see this script's header comment) ────────────────────────────────
-IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && uv run python3 -c \
+IDLE_GUARD_SCRIPT="$(cd "$REPO_ROOT" && "${PYTHON_CMD[@]}" -c \
   "from klayout_tools.remote_launcher import idle_guard_install_script as f; print(f())")"
 
 # ── ngspice install recipe. sky130A/gf180mcu apt-install Ubuntu 22.04's
@@ -287,10 +352,10 @@ esac
 # build instance's own user-data shell (BUILD_USERDATA below), not here.
 case "$PDK" in
   sky130A)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk sky130 '"${PDK_VERSION}"''
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install ciel==2.6.1 && PDK_ROOT="'"${PDK_ROOT}"'" ciel enable --pdk-family sky130 -l sky130_fd_pr -l sky130_fd_sc_hd '"${PDK_VERSION}"''
     ;;
   gf180mcu)
-    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install volare && PDK_ROOT="'"${PDK_ROOT}"'" volare enable --pdk gf180mcu '"${PDK_VERSION}"''
+    PDK_FETCH_CMDS='PIP_BREAK_SYSTEM_PACKAGES=1 pip install ciel==2.6.1 && PDK_ROOT="'"${PDK_ROOT}"'" ciel enable --pdk-family gf180mcu -l gf180mcu_fd_pr -l gf180mcu_fd_sc_mcu9t5v0 '"${PDK_VERSION}"''
     ;;
   sg13g2)
     # A second, independent `git clone` of this repo (distinct from the
@@ -309,6 +374,9 @@ esac
 # (#612). Cheap, and it is the first thing anyone asks after a failed build.
 PDK_FETCH_CMDS="df -h / && ${PDK_FETCH_CMDS} && df -h /"
 
+KLT_VERSION_MARKER="$(cd "$REPO_ROOT" && "${PYTHON_CMD[@]}" -c \
+  "from klayout_tools.remote_launcher import BUILD_KLT_VERSION_MARKER as m; print(m)")"
+
 BUILD_USERDATA="$(mktemp)"
 trap 'rm -f "$BUILD_USERDATA"' EXIT
 cat > "$BUILD_USERDATA" <<USERDATA
@@ -325,6 +393,10 @@ ${PDK_FETCH_CMDS}
 # it must ship the exact klayout-tools code the launcher itself runs,
 # pinned to the same commit (see this script's header comment).
 PIP_BREAK_SYSTEM_PACKAGES=1 pip install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@${KLT_REF}"
+# Report the klt version that ref installed (issue #2851): the manifest
+# publishes it as klt_version, which the batch backend compares before launch.
+KLT_BUILT_VERSION="\$(klt --version | head -n 1)"
+echo "${KLT_VERSION_MARKER}[\${KLT_BUILT_VERSION#klt }]"
 ${IDLE_GUARD_SCRIPT}
 touch /var/log/klt-remote-sim-ami-build-complete
 USERDATA
@@ -388,6 +460,18 @@ for _ in $(seq 1 40); do
 done
 [[ "$MARKER_SEEN" == "true" ]] || die 4 "user-data never reported build-complete (console output lacks the marker); refusing to snapshot a half-baked instance. Build instance ${BUILD_ID} left running for inspection."
 
+# The klt version the pinned --klt-ref actually installed (issue #2851),
+# printed by user-data just before the build-complete marker. An image whose
+# runner identity cannot be read is not published.
+KLT_VERSION="$(printf '%s' "$CONSOLE" | (cd "$REPO_ROOT" && "${PYTHON_CMD[@]}" -c \
+  "import sys; from klayout_tools.remote_launcher import parse_build_klt_version as f; print(f(sys.stdin.read()) or '')"))"
+if [[ -z "$KLT_VERSION" ]]; then
+  log "terminating build instance ${BUILD_ID} ..."
+  aws ec2 terminate-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/null 2>&1 || true
+  die 4 "the build console never reported the installed klt version (${KLT_VERSION_MARKER}[...]); refusing to publish an image with an unknown runner identity"
+fi
+log "build installed klt ${KLT_VERSION} from klt-ref ${KLT_REF}"
+
 log "stopping build instance before snapshot ..."
 aws ec2 stop-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/null
 aws ec2 wait instance-stopped --region "$REGION" --instance-ids "$BUILD_ID"
@@ -405,16 +489,6 @@ aws ec2 wait image-available --region "$REGION" --image-ids "$NEW_AMI"
 log "terminating build instance ${BUILD_ID} ..."
 aws ec2 terminate-instances --region "$REGION" --instance-ids "$BUILD_ID" >/dev/null
 
-if [[ "$PDK" == "sg13g2" ]]; then
-  # Names the (KLT_REF, date) pair rather than a bare date stamp -- per
-  # SG13G2_PDK_SNAPSHOT_PREFIX's decision above, KLT_REF is what pins the
-  # actual IHP-Open-PDK/openvaf-r versions this build baked, so it belongs
-  # in the manifest's own snapshot identity, not just this script's log.
-  PDK_SNAPSHOT="${SG13G2_PDK_SNAPSHOT_PREFIX}-${KLT_REF:0:12}-$(date -u +%Y.%m.%d)"
-else
-  PDK_SNAPSHOT="${PDK}-$(date -u +%Y.%m.%d)"
-fi
-
 # ── manifest update (append; resolve_ami() picks the latest built_at for a
 # (pdk, region) pair, so old entries are kept as an audit trail). Writes
 # BOTH $MANIFEST (the repo checkout's copy) and $USER_MANIFEST (the
@@ -422,18 +496,16 @@ fi
 # built AMI is usable from any `klt` install on this machine immediately,
 # no release required. ──────────────────────────────────────────────────
 write_manifest_entry() {  # <manifest-path> <ami_id> <region>
-  local target="$1" ami="$2" region="$3" tmp
+  local target="$1" ami="$2" region="$3" tmp entry
+  entry="$(manifest_entry_json "$ami" "$region" "$KLT_VERSION")" \
+    || die 4 "could not build the manifest entry for ${ami} (${region})"
   mkdir -p "$(dirname "$target")"
   # $USER_MANIFEST may not exist yet on a fresh machine -- $MANIFEST always
-  # does (checked into the repo with an empty "images" array), but seeding
+  # does (it is checked into the repo, entries or not), but seeding
   # unconditionally keeps this one code path correct for both.
   [[ -f "$target" ]] || printf '%s' '{"schema_version": 1, "images": []}' > "$target"
   tmp="$(mktemp)"
-  jq --arg pdk "$PDK" --arg region "$region" --arg ami "$ami" \
-     --arg snapshot "$PDK_SNAPSHOT" --arg ngspice "$NGSPICE_VERSION_HINT" \
-     --arg built_at "$BUILT_AT" \
-     '.images += [{"pdk": $pdk, "region": $region, "ami_id": $ami, "pdk_snapshot": $snapshot, "ngspice_version": $ngspice, "built_at": $built_at}]' \
-     "$target" > "$tmp"
+  jq --argjson entry "$entry" '.images += [$entry]' "$target" > "$tmp"
   mv "$tmp" "$target"
 }
 

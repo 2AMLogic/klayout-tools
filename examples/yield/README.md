@@ -9,6 +9,7 @@ worked example [`docs/cli/yield.md`](../../docs/cli/yield.md) quotes.
 | `sim-report.json` | The **same draw** as a trimmed `klt sim --format json` Monte Carlo report — the record format the canary MC harnesses already produce, which `klt yield` consumes with no intermediate format. |
 | `spec-limits.json` | The spec limits, with `target_yield: 0.99` on both measurements. |
 | `generate.py` | Regenerates all three, byte-identically (fixed seed). |
+| `trials.csv` | A small long-format per-draw CSV (40 draws of `vref`, two with `status=fail`) for `klt yield-csv`; hand-written, not produced by `generate.py`. |
 
 ```bash
 klt yield examples/yield/mc-samples.json --limits examples/yield/spec-limits.json
@@ -40,3 +41,16 @@ assert real numbers against them. A worked example only needs to exercise the
 contract shape (two-sided and one-sided limits, a declared `target_yield`,
 both input document shapes) — no PDK or simulator dependency required, the
 same reasoning `examples/sim/generate.py` uses for its synthetic testbench.
+
+## From a per-draw CSV
+
+```bash
+klt yield-csv examples/yield/trials.csv --group-by metric --value result \
+    --status-col status --pass-value ok --draw-col draw_index --unit V \
+    --min 1.15 --max 1.25 --format json > /tmp/trials-samples.json
+klt yield /tmp/trials-samples.json
+```
+
+The two failed draws land in `errored`; `derivation.csv.content_hash` is the
+`sha256:` of `trials.csv`. See
+[`docs/cli/yield.md`](../../docs/cli/yield.md#deriving-a-sample-set-from-a-per-draw-csv-klt-yield-csv).

@@ -137,7 +137,7 @@ deck's own rounded ``2e-15`` F/um² above to sky130's own **simulation**
 model's two-term law, ``czero = carea + cperim`` with ``carea =
 camimc*w*l`` / ``cperim = cpmimc*(w+l)*2``, transcribed from the same
 ``efabless/sky130_klayout_pdk``-adjacent, official ``sky130_fd_pr`` install
-(``volare enable sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b``):
+(``ciel enable --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7``):
 ``libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice`` (met3,
 ``sky130_fd_pr__model__cap_mim``) and ``..._cap_mim_m3_2.model.spice`` (met4,
 ``sky130_fd_pr__model__cap_mim_m4``) share this same formula; both defer the
@@ -150,23 +150,21 @@ exactly -- unlike gf180mcu, no area-term correction is needed here) and
 term). Both stacks share one corner file, so the same ``perim_cap_f_um``
 value applies to both curated entries below.
 
-Four rules below (``poly.width.1`` is not one of them) approximate an
-official rule defined on a *compound* layer expression (a union of two mask
-layers) or on a ``second_edges``-conditional refinement of a plain enclosure
-check, because our engine (native ``klayout.db.Region`` check primitives —
-see ``docs/cli/drc.md``) checks one
-layer, or one layer against one other layer, at a time; it does not evaluate
-arbitrary boolean layer expressions the way the DRC-DSL script runner does.
-``diff.width.1`` and ``tap.width.1`` are the two curated halves of one
-compound rule (``difftap.1``'s ``diff.or(tap)`` -- issue #2321 added the tap
-half); ``li1.enclosing.licon1.1`` (``li.5``) and ``tap.enclosing.licon.1``
-(``licon.7``, issue #2321) transcribe their source rules' unconditional
-zero-margin floor (see the #551 exception note above). Each such
-approximation is called out explicitly in its rule's docstring.
+Four rules below (``poly.width.1`` is not one of them) approximate an official
+rule defined on a *compound* layer expression (a union of two mask layers) or
+on a ``second_edges``-conditional refinement of a plain enclosure check,
+because our engine (native ``klayout.db.Region`` check primitives — see
+``docs/cli/drc.md``) checks one layer, or one layer against one other layer, at
+a time; it does not evaluate arbitrary boolean layer expressions the way the
+DRC-DSL script runner does. ``diff.width.1`` and ``tap.width.1`` are the two
+curated halves of one compound rule (``difftap.1``'s ``diff.or(tap)`` -- issue
+#2321 added the tap half); ``li1.enclosing.licon1.1`` (``li.5``) and
+``tap.enclosing.licon.1`` (``licon.7``, issue #2321) transcribe their source
+rules' unconditional zero-margin floor (see the #551 exception note above).
+Each such approximation is called out explicitly in its rule's docstring.
 
 Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
-``sky130.lydrc`` layer variable definitions, e.g. ``poly = polygons(66,
-20)``):
+``sky130.lydrc`` layer variable definitions, e.g. ``poly = polygons(66, 20)``):
 
     diff.drawing    65/20
     tap.drawing     65/44
@@ -179,75 +177,72 @@ Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
     met2.drawing    69/20
 
 met2/via rule coverage (issue #513, closing the gap #511 opened when it
-extended ``EXTRACTION_DECK`` to a third connectivity level -- see that
-field's own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
+extended ``EXTRACTION_DECK`` to a third connectivity level -- see that field's
+own comment below): ``m2.1``/``m2.2``/``m2.4``/``m2.5`` and
 ``via.1a``/``via.2``/``via.4a``/``via.5a`` below are transcribed from a real
-sky130A PDK install (volare), whose
-``libs.tech/klayout/drc/sky130A_mr.drc`` is the sky130A variant's current
-name for the same official, community-maintained KLayout DRC deck this
-module's other rules already cite as ``sky130.lydrc`` (confirmed by
-cross-checking: every rule id/value this module already cites --
+sky130A PDK install (volare), whose ``libs.tech/klayout/drc/sky130A_mr.drc`` is
+the sky130A variant's current name for the same official, community-maintained
+KLayout DRC deck this module's other rules already cite as ``sky130.lydrc``
+(confirmed by cross-checking: every rule id/value this module already cites --
 ``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``, ``m1.4``,
 ``licon.5``/``licon.8``, ``ct.2`` -- appears in ``sky130A_mr.drc`` with the
-identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676
-um^2) is a real rule in that same source; at the time this note was
-written no ``"area"`` check primitive existed anywhere in this engine's
-``DrcRule`` vocabulary, so it was left untranscribed pending one (tracked
-as #513's own candidate follow-on). That primitive now exists (issue #812,
-``drc.py``'s ``_AREA_CHECKS``/``_run_area_check``) and ``m2.6`` is
-transcribed below as ``met2.area.1`` -- see the "met1-met5 minimum-area
-rule coverage" note further down for the full closure (issue #1955), which
-does the same for the analogous ``m1.6``/``m3.6``/``m4.4a``/``m5.4`` rules.
+identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676 um^2) is
+a real rule in that same source; at the time this note was written no
+``"area"`` check primitive existed anywhere in this engine's ``DrcRule``
+vocabulary, so it was left untranscribed pending one (tracked as #513's own
+candidate follow-on). That primitive now exists (issue #812, ``drc.py``'s
+``_AREA_CHECKS``/``_run_area_check``) and ``m2.6`` is transcribed below as
+``met2.area.1`` -- see the "met1-met5 minimum-area rule coverage" note further
+down for the full closure (issue #1955), which does the same for the analogous
+``m1.6``/``m3.6``/``m4.4a``/``m5.4`` rules.
 
-met3/met4/met5 connectivity (issue #619, closing the gap ``place_and_route.py``'s
-``_ROUTING_LAYER_RANGE`` exposed: it already told OpenROAD signal routing
-could use met1-met5, while ``EXTRACTION_DECK.metals`` stopped at met2, so a
-net joined only through met3-or-higher silently split into two nets with no
-warning): ``metals``/``metal_labels``/``vias`` below now cover the full
-li1-through-met5 stack, following the exact met1->met2 extension pattern
-issue #508 established (see that field's own comment below). Layer numbers
-verified against the same real sky130A install (volare) cited by #508:
+met3/met4/met5 connectivity (issue #619, closing the gap
+``place_and_route.py``'s ``_ROUTING_LAYER_RANGE`` exposed: it already told
+OpenROAD signal routing could use met1-met5, while ``EXTRACTION_DECK.metals``
+stopped at met2, so a net joined only through met3-or-higher silently split
+into two nets with no warning): ``metals``/``metal_labels``/``vias`` below now
+cover the full li1-through-met5 stack, following the exact met1->met2 extension
+pattern issue #508 established (see that field's own comment below). Layer
+numbers verified against the same real sky130A install (volare) cited by #508:
 ``libs.tech/klayout/tech/sky130A.lyt``'s ``<connectivity>`` block names
-``met2,69/44,met3`` / ``met3,70/44,met4`` / ``met4,71/44,met5`` (matching
-this deck's existing "via connects layer N's own layer number, datatype 44,
-to layer N+1" pattern -- mcon at li1's 67/44, via at met1's 68/44), and its
+``met2,69/44,met3`` / ``met3,70/44,met4`` / ``met4,71/44,met5`` (matching this
+deck's existing "via connects layer N's own layer number, datatype 44, to layer
+N+1" pattern -- mcon at li1's 67/44, via at met1's 68/44), and its
 ``<symbols>`` block gives ``met3='70/20+70/5+70/16'`` /
-``met4='71/20+71/5+71/16'`` / ``met5='72/20-72/15+72/5+72/16'`` (drawing/
-label datatypes 20/5, the same convention every metal level already in this
-deck follows -- also matching this repo's own ``gen.py``'s
-``"top_metal": (72, 20)`` bond-pad role, cited there as ``met5.drawing``
-from the same source). met3/met4 (70/20, 71/20) were already named in this
-deck as ``capacitors[].bottom_plate`` (see the module docstring's provenance
-note above) -- a layer can legitimately serve both roles at once, and
-``ExtractionDeck.device_recognition_only_layers`` (issue #619) is exactly
-the mechanism that would have flagged this "read but not merged" ambiguity
-had it existed before this extension closed the gap.
+``met4='71/20+71/5+71/16'`` / ``met5='72/20-72/15+72/5+72/16'`` (drawing/ label
+datatypes 20/5, the same convention every metal level already in this deck
+follows -- also matching this repo's own ``gen.py``'s ``"top_metal": (72, 20)``
+bond-pad role, cited there as ``met5.drawing`` from the same source). met3/met4
+(70/20, 71/20) were already named in this deck as ``capacitors[].bottom_plate``
+(see the module docstring's provenance note above) -- a layer can legitimately
+serve both roles at once, and ``ExtractionDeck.device_recognition_only_layers``
+(issue #619) is exactly the mechanism that would have flagged this "read but
+not merged" ambiguity had it existed before this extension closed the gap.
 
 met3/met4/met5 + via2/via3/via4 + capm/capm2 DRC rule coverage (issue #776,
-closing the asymmetry #619's connectivity extension and #225's MiM-cap
-device recognition opened -- the same class of gap #513 closed one stack
-level earlier for met2/via): before this, ``DECK`` had no rule of any kind
-above met2/via -- ``EXTRACTION_DECK.metals``/``.vias`` already recognised
-met3/met4/met5 and via2/via3/via4 as real connectivity, and
-``EXTRACTION_DECK.capacitors`` already recognised ``capm``/``capm2`` as
-genuine MiM-cap device marks, but ``klt drc --deck sky130`` reported a bare
-``clean`` verdict on all of it -- a caller who routed on met3-or-higher, or
-drew a MiM cap, got "no rule looked at this" indistinguishable from "this is
-legal." The rules below close that gap, transcribed from the same real
-sky130A install (volare) cited by the met2/via #513 note above --
-``libs.tech/klayout/drc/sky130A_mr.drc``'s ``m3.*``/``via2.*``,
-``m4.*``/``via3.*``, ``m5.*``/``via4.*``, and ``capm.*``/``cap2m.*`` rule
-families -- mirroring the exact width/space/enclosure rule shapes the
-met1/mcon and met2/via sections above already establish: each new metal
-level gets a width + space rule; each new via level gets a width + space
-rule plus an enclosure rule from the metal on each side; each MiM-cap top
-plate (``capm`` 89/44, ``capm2``/``cap2m`` 97/44) gets a width + space rule,
-an enclosure-by-its-bottom-plate rule, an enclosure-of-its-landing-via rule,
-and a plate-to-landing-via *separation* rule (``capm.separation(via3, ...)``
-/ ``cap2m.separation(via4, ...)``) -- unlike the enclosing rules elsewhere
-in this deck, this is a plain, uncompounded two-layer check with no
-boolean-expression narrowing, so it transcribes to our engine's own
-``"separation"`` check kind exactly, with no approximation.
+closing the asymmetry #619's connectivity extension and #225's MiM-cap device
+recognition opened -- the same class of gap #513 closed one stack level earlier
+for met2/via): before this, ``DECK`` had no rule of any kind above met2/via --
+``EXTRACTION_DECK.metals``/``.vias`` already recognised met3/met4/met5 and
+via2/via3/via4 as real connectivity, and ``EXTRACTION_DECK.capacitors`` already
+recognised ``capm``/``capm2`` as genuine MiM-cap device marks, but ``klt drc
+--deck sky130`` reported a bare ``clean`` verdict on all of it -- a caller who
+routed on met3-or-higher, or drew a MiM cap, got "no rule looked at this"
+indistinguishable from "this is legal." The rules below close that gap,
+transcribed from the same real sky130A install (volare) cited by the met2/via
+#513 note above -- ``libs.tech/klayout/drc/sky130A_mr.drc``'s
+``m3.*``/``via2.*``, ``m4.*``/``via3.*``, ``m5.*``/``via4.*``, and
+``capm.*``/``cap2m.*`` rule families -- mirroring the exact
+width/space/enclosure rule shapes the met1/mcon and met2/via sections above
+already establish: each new metal level gets a width + space rule; each new via
+level gets a width + space rule plus an enclosure rule from the metal on each
+side; each MiM-cap top plate (``capm`` 89/44, ``capm2``/``cap2m`` 97/44) gets a
+width + space rule, an enclosure-by-its-bottom-plate rule, an
+enclosure-of-its-landing-via rule, and a plate-to-landing-via *separation* rule
+(``capm.separation(via3, ...)`` / ``cap2m.separation(via4, ...)``) -- unlike
+the enclosing rules elsewhere in this deck, this is a plain, uncompounded
+two-layer check with no boolean-expression narrowing, so it transcribes to our
+engine's own ``"separation"`` check kind exactly, with no approximation.
 
 Not modelled, for the same reasons the met1/met2 sections above already
 document: ``m3.3cd``/``m4.5ab`` (wide-metal spacing exceptions, the
@@ -307,6 +302,12 @@ negative-control case. Density (``"density"`` check kind) remains out of
 scope entirely, per ``docs/cli/drc.md``'s own floorplan-boundary limitation
 on this engine's windowed density implementation.
 
+Cross-check against the foundry deck on stock geometry (issue #4472): on the
+stock ``sky130_ef_io__analog_noesd_pad`` the curated ``met4.holes_area.1`` and
+``sky130A_mr.drc``'s ``m4.7`` both count 20 voids (formed by abutting drawn
+rectangles; merged semantics in both). ``sky130A_mr.drc`` only runs its
+``m*`` rules with ``-rd beol=true`` -- see ``docs/cli/drc.md``.
+
 nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
 *zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
 below has always used that exact layer to derive PMOS device recognition and
@@ -320,29 +321,20 @@ transcribed from ``sky130.lydrc``'s ``nwell.1a``/``nwell.2a`` (see
 kind, issue #1654).
 
 Two more ``sky130.lydrc`` well rules are deliberately **not** transcribed
-here: ``nwell.enclosing(diff.and(psdm), 0.18)`` and
-``nwell.enclosing(tap.and(nsdm), 0.18)`` (an nwell's minimum enclosure of,
-respectively, the p-select-implant diffusion inside it -- PMOS source/drain
--- and the n-select-implant tap inside it -- the well's own body/substrate
-tie). Both are scoped to a *compound* layer expression this engine's
-single-layer/two-layer ``Region`` check primitives cannot evaluate (the same
-class of gap ``difftap.1``/``poly.1a``'s compound-layer notes above already
-document), and unlike those other compound-layer approximations elsewhere in
-this deck, there is no honest plain-layer stand-in available: ``psdm``/
-``nsdm`` (the implant marker layers the compound expressions key off) are
-not drawn by any ``klt gen`` generator today (per issue #1420's own scoping
-note), so a rule scoped by well-*containment* instead of implant -- "nwell
-encloses whatever diff/tap already overlaps it" -- would silently pass on
-every generator-produced layout regardless of correctness, while risking new
-false positives against the real ``sky130_fd_sc_hd`` standard-cell corpus
-this repo already exercises (whose diff/tap-to-nwell margins are the
-implant-scoped rule's business, not this unscoped stand-in's). Rather than
-ship an untested widening with no generator coverage to exercise it, this
-gap is left explicitly open: ``EXTRACTION_DECK`` still has no ``psdm``/
-``nsdm`` fields, ``coverage.deck_scope`` will not include an enclosure-rule
-entry for the ``nwell.*`` family, and a future issue that also teaches
-``klt gen`` to draw implant layers is the natural place to revisit both
-rules together with real geometry to test them against.
+here: ``difftap.8`` (``nwell.enclosing(diff.and(psdm), 0.18)``) and
+``difftap.10`` (``nwell.enclosing(tap.and(nsdm), 0.18)``). Both are scoped to
+a *compound* layer expression this engine's single-layer/two-layer ``Region``
+check primitives cannot evaluate, and a well-containment stand-in ("nwell
+encloses whatever diff/tap overlaps it") would risk false positives against
+the ``sky130_fd_sc_hd`` corpus. Since issue #2934 ``klt gen`` draws
+``nsdm``/``psdm``/``npc``, and this deck checks their plain-layer rules
+(``npc.1``/``npc.2``, ``nsdm.1``/``psdm.1``, ``n/psdm.1`` spacing). The
+implant area rules (``n/psdm.10a``/``10b``) and the compound implant rules
+(``difftap.8``-``difftap.11``, ``n/psdm.5a``/``5b``/``6``/``7``/``8``,
+``npc.4``) are listed in
+``UNMODELED_RULES`` so ``coverage.unmodeled_rules`` discloses them instead of
+``clean`` implying they were checked. ``EXTRACTION_DECK`` still has no
+``psdm``/``nsdm`` fields.
 
 tap (tie-layer) rule coverage (issue #2321, closing the gap the
 ``difftap``-family notes above and ``_PDK_ROLE_LAYERS["sky130"]["tap"]``'s
@@ -374,7 +366,9 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    CutRC,
     DerivedLayer,
+    DiodeDevice,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -383,22 +377,31 @@ from . import (
     ResistorDevice,
     RuleProvenance,
 )
+from .sky130_lvt import lvt_mos_flavour
+from .sky130_offgrid import (  # noqa: F401
+    _OFFGRID_ROWS,
+    OFFGRID_GRID_UM,
+    OFFGRID_UNCHECKED_LAYERS,
+    offgrid_rules,
+)
+from .sky130_unmodeled import UNMODELED_RULES, native_output_id  # noqa: F401
+
+DRC_RULE_SOURCES = ("sky130_offgrid", "sky130_unmodeled")
 
 # `RuleProvenance.source_repo`/`.commit` shared by every sky130 width/space
 # rule's provenance below (issue #747, piloted on this deck's 11 width/space
 # rules only -- see the module docstring's own citation of this repo/commit
-# for the resistor/capacitor coefficients above, the same `volare enable
-# sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch this deck's DRC
+# for the resistor/capacitor coefficients above, the same `ciel enable
+# --pdk sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch this deck's DRC
 # rule values were themselves verified against, per the "met2/via rule
 # coverage" note above).
 _OPEN_PDKS_REPO = "fossi-foundation/open-pdks"
-_OPEN_PDKS_COMMIT = "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+_OPEN_PDKS_COMMIT = "f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7"
 
 
 def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
-    """Build a :class:`RuleProvenance` for a sky130 width/space rule (issue
-    #747) -- `source_repo`/`commit` shared across the whole deck (see the
-    module-level constants above), `source_path`/`rule_id` per call."""
+    """:class:`RuleProvenance` for a sky130 rule (issue #747); repo/commit are
+    deck-wide (module constants above), `source_path`/`rule_id` per call."""
     return RuleProvenance(
         source_repo=_OPEN_PDKS_REPO,
         source_path=source_path,
@@ -417,7 +420,7 @@ def _sky130_provenance(source_path: str, rule_id: str) -> RuleProvenance:
 # `source_path` below is that repo's own path to the file
 # (`libs.tech/klayout/lvs/sky130.lvs`, confirmed against the same real
 # sky130A install -- volare -- this module's other provenance notes cite).
-# `commit` reuses `_OPEN_PDKS_COMMIT`: that hash is the `volare enable sky130
+# `commit` reuses `_OPEN_PDKS_COMMIT`: that hash is the `ciel enable --pdk sky130
 # <hash>` fetch pinning the *whole* PDK install (including `sky130.lvs`,
 # vendored in by `open_pdks`' own build), the same reproducible pin this
 # module's resistor/capacitor coefficients (§ "MiM capacitors"/"Drawn poly
@@ -442,6 +445,67 @@ def _sky130_lvs_provenance(rule_id: str) -> RuleProvenance:
     )
 
 
+# Junction-diode device recognition (issue #3803), transcribed from
+# `sky130.lvs`'s "DIODE DERIVATIONS" / "DIODE EXTRACTION" sections. The
+# recognition mark is `areaid.diode` (81/23, `areaid_de` upstream); a diff
+# region that also touches `areaid.ed` (81/19, `areaid_ed`) is an ESD-flagged
+# device upstream excludes, and `pnp.drawing` (82/44) keeps a vertical PNP's
+# p+ emitter (also a diff-in-nwell region) from reading as a diode, as
+# upstream's `ptap_conn` excludes `pnpid`. The oxide/threshold flavour is
+# keyed by `hvi` (75/20), `lvtn` (125/44) and `hvtp` (78/44), exactly as
+# upstream splits `*_05v5`, `*_05v5_lvt`, `*_05v5_nvt`, `*_05v5_hvt` and
+# `*_11v0`.
+_DIODE_MARK = (81, 23)  # areaid.diode
+_DIODE_ESD_MARK = (81, 19)  # areaid.ed
+_PNP_MARK = (82, 44)  # pnp.drawing
+_NWELL = (64, 20)
+_DNWELL = (64, 18)
+_DIFF = (65, 20)
+_NSDM = (93, 44)
+_PSDM = (94, 20)
+_HVI = (75, 20)
+_LVTN = (125, 44)
+_HVTP = (78, 44)
+
+
+def _sky130_diode(
+    name: str,
+    *,
+    n_plus: bool,
+    requires: tuple[tuple[int, int], ...] = (),
+    excludes: tuple[tuple[int, int], ...] = (),
+) -> DiodeDevice:
+    """One sky130 flavour of the n+/p-substrate (``n_plus``) or p+/nwell
+    diode, as upstream derives it: ``requires``/``excludes`` carry the
+    ``hvi``/``lvtn``/``hvtp`` flavour terms and apply to the diffusion
+    terminal."""
+    if n_plus:
+        # `ndiode_terminal_n = ncomp.outside(dnwell)...`; the p side
+        # (`ptap_conn.holes`) is the native substrate, so it is the marker
+        # footprint kept outside every well and tied to `substrate_net`.
+        return DiodeDevice(
+            name=name,
+            marker=_DIODE_MARK,
+            anode=None,
+            anode_excludes=(_NWELL, _DNWELL),
+            cathode=_DIFF,
+            cathode_requires=(_NSDM, *requires),
+            cathode_excludes=(_NWELL, _DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+            provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
+        )
+    # `pdiode_terminal_n = pcomp.outside(dnwell)...` is the p+ (anode) side;
+    # `pdiode_terminal_p = nwell...` is the cathode.
+    return DiodeDevice(
+        name=name,
+        marker=_DIODE_MARK,
+        anode=_DIFF,
+        anode_requires=(_PSDM, *requires),
+        anode_excludes=(_DNWELL, _DIODE_ESD_MARK, _PNP_MARK, *excludes),
+        cathode=_NWELL,
+        provenance=_sky130_lvs_provenance(f"sky130_fd_pr__{name}"),
+    )
+
+
 # This deck's rule thresholds below are authored assuming database units are
 # nanometres (dbu_um = 0.001), so a threshold in micrometres times 1000 gives
 # threshold_dbu. `run_drc()` rescales threshold_dbu by NOMINAL_DBU_UM /
@@ -460,6 +524,48 @@ DECK: list[DrcRule] = [
         # -> "poly.1a : min. poly width : 0.15um"
         scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.1a"),
+    ),
+    DrcRule(
+        id="poly.space.1",
+        description="minimum poly spacing",
+        layer=(66, 20),  # poly.drawing
+        check="space",
+        threshold_dbu=210,  # 0.21 um
+        # sky130A_mr.drc rule "poly.2": poly.not(areaid_ce).space(0.21,
+        # euclidian) -> "poly.2 : min. poly spacing : 0.21um". The deck is
+        # areaid-marker-blind (MARKER_BLIND_LAYERS), so the 0.21 um general
+        # value is applied everywhere, including inside areaid:core where the
+        # runset relaxes it to poly.3's 0.16 um (listed in UNMODELED_RULES).
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "poly.2"),
+    ),
+    DrcRule(
+        id="poly.endcap.diff.1",
+        description="minimum poly extension past diff at a gate (endcap)",
+        layer=(65, 20),  # diff.drawing -- the gate-end edges being probed
+        other_layer=(66, 20),  # poly.drawing -- must cover the probe zones
+        check="enclosed",
+        threshold_dbu=0,  # 0.0 um -- the 0.13 um lives in the derived zones
+        derived_layer=DerivedLayer(
+            base=(65, 20),
+            sized_by_um=0.13,
+            intersect_with=(66, 20),
+            mode="gate_endcap",
+        ),
+        # sky130.lydrc rule "poly.8":
+        #   poly.enclosing(gate, 0.13, projection).polygons.without_area(0)
+        # -> "poly.8 : min. poly extention gate (endcap) : 0.13um", with
+        # gate = diff & poly. Verified against the same open-pdks commit's
+        # sky130A.tech (`overhang *poly allfetsstd,allfetsspecial 130`).
+        # Not transcribed literally: that enclosing() also pairs the gate's
+        # long sides with poly's coincident edges and drops the zero-area
+        # pairs with `without_area(0)`, which would hide a *flush* endcap
+        # (the exact defect of issue #2936). `DerivedLayer(mode="gate_endcap")`
+        # probes 0.13 um outward from each diff edge under poly instead.
+        # The SRAM-core 0.11 um variant (`allfetscore`) and `poly.7`
+        # (diff extension past poly, 0.25 um) are not checked.
+        scope="poly",  # sky130.lydrc "poly.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "poly.8"),
     ),
     DrcRule(
         id="diff.width.1",
@@ -497,6 +603,33 @@ DECK: list[DrcRule] = [
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "difftap.1"),
     ),
     DrcRule(
+        id="diff.space.1",
+        description="minimum diff spacing (approximates the official difftap.3 rule)",
+        layer=(65, 20),  # diff.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3": difftap.space(0.27, euclidian),
+        # where difftap = diff.or(tap) -- a compound layer our engine does not
+        # evaluate; approximated like difftap.1 as a pair of single-layer
+        # rules (this one and tap.space.1). Diff-to-tap spacing across the two
+        # layers is NOT checked here (diff/tap abutting or overlapping merges
+        # in the source union, which a per-layer check cannot reproduce).
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+    ),
+    DrcRule(
+        id="tap.space.1",
+        description="minimum tap spacing (approximates the official difftap.3 rule)",
+        layer=(65, 44),  # tap.drawing
+        check="space",
+        threshold_dbu=270,  # 0.27 um
+        # sky130A_mr.drc rule "difftap.3" -- tap-side half; see diff.space.1.
+        # -> "difftap.3 : min. difftap spacing : 0.27um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "difftap.3"),
+    ),
+    DrcRule(
         id="li1.width.1",
         description="minimum li1 (local interconnect) width",
         layer=(67, 20),  # li1.drawing
@@ -519,6 +652,74 @@ DECK: list[DrcRule] = [
         # -> "li.3 : min. li spacing : 0.17um"
         scope="li",  # sky130.lydrc "li.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "li.3"),
+    ),
+    # Implant / npc rules (issue #2934): `klt gen` now draws nsdm/psdm/npc, so
+    # the width/spacing/area rules that were deliberately absent are checked.
+    DrcRule(
+        id="npc.width.1",
+        description="minimum npc width",
+        layer=(95, 20),  # npc.drawing
+        check="width",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.1": npc.width(0.27, euclidian)
+        # -> "npc.1 : min. npc width : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.1"),
+    ),
+    DrcRule(
+        id="npc.space.1",
+        description="minimum npc spacing (nearer shapes should be merged)",
+        layer=(95, 20),  # npc.drawing
+        check="isolated",
+        threshold_dbu=270,
+        # sky130.lydrc rule "npc.2": npc.isolated(0.27, euclidian)
+        # -> "npc.2 : min. npc spacing, should be manually merged if less : 0.27um"
+        scope="npc",  # sky130.lydrc "npc.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "npc.2"),
+    ),
+    DrcRule(
+        id="nsdm.width.1",
+        description="minimum nsdm width",
+        layer=(93, 44),  # nsdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "nsdm.1": nsdm.width(0.38, euclidian)
+        # -> "nsdm.1 : min. nsdm width : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nsdm.1"),
+    ),
+    DrcRule(
+        id="nsdm.space.1",
+        description="minimum nsdm spacing (nearer shapes should be merged)",
+        layer=(93, 44),  # nsdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": nsdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. nsdm spacing, should be manually merged if less : 0.38um"
+        scope="nsdm",  # sky130.lydrc "nsdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.width.1",
+        description="minimum psdm width",
+        layer=(94, 20),  # psdm.drawing
+        check="width",
+        threshold_dbu=380,
+        # sky130.lydrc rule "psdm.1": psdm.width(0.38, euclidian)
+        # -> "psdm.1 : min. psdm width : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "psdm.1"),
+    ),
+    DrcRule(
+        id="psdm.space.1",
+        description="minimum psdm spacing (nearer shapes should be merged)",
+        layer=(94, 20),  # psdm.drawing
+        check="isolated",
+        threshold_dbu=380,
+        # sky130.lydrc rule "n/psdm.1": psdm.isolated(0.38, euclidian)
+        # -> "n/psdm.1 : min. psdm spacing, should be manually merged if less : 0.38um"
+        scope="psdm",  # sky130.lydrc "psdm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "n/psdm.1"),
     ),
     DrcRule(
         id="met1.width.1",
@@ -549,6 +750,8 @@ DECK: list[DrcRule] = [
         layer=(68, 20),  # met1.drawing
         other_layer=(67, 44),  # mcon.drawing
         check="enclosing",
+        # #5737: every mcon lands on met1
+        require_containment=True,
         threshold_dbu=30,  # 0.03 um
         # sky130.lydrc rule "m1.4": not_in_cell6_m1.enclosing(mcon, 0.03, euclidian)
         # -> "m1.4 : min. m1 enclosure of mcon : 0.03um"
@@ -620,9 +823,9 @@ DECK: list[DrcRule] = [
         # had no width rule of any kind here, only enclosure rules), and so
         # the fixed-size table has a deck minimum to agree with.
         #
-        # No `threshold_max_dbu`, for the same reason via.width.1 below
-        # states (issue #2388's deferral): the max half is expressible, but
-        # backfilling it across this deck is that issue's scope, not #2594's.
+        # No `threshold_max_dbu` yet (issue #2388): via.width.1 below has
+        # taken its max half, but this rule's is still deferred -- see the
+        # compound-layer narrowing note below.
         # Two approximations stay even once it lands, both the same shape
         # via.width.1 already documents: the *rectangularity* half
         # ("licon.1_c", "licon should be rectangle") cannot be expressed as a
@@ -648,6 +851,7 @@ DECK: list[DrcRule] = [
         # sibling rule is licon.7, transcribed as tap.enclosing.licon.1
         # below at its own floor, issue #2321.)
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.5"),
     ),
     DrcRule(
         id="tap.enclosing.licon.1",
@@ -700,6 +904,7 @@ DECK: list[DrcRule] = [
         # sky130.lydrc rule "licon.8": poly.enclosing(licon, 0.05, euclidian)
         # -> "licon.8 : min. poly enclosure of licon : 0.05um"
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "licon.8"),
     ),
     DrcRule(
         id="li1.enclosing.licon1.1",
@@ -711,6 +916,8 @@ DECK: list[DrcRule] = [
         layer=(67, 20),  # li1.drawing -- the conductor *above* the cut
         other_layer=(66, 44),  # licon1.drawing
         check="enclosing",
+        # #5737: every licon (diff, tap and poly) lands on li1
+        require_containment=True,
         threshold_dbu=0,  # 0.0 um -- see the approximation note below
         # sky130A_mr.drc rule "li.5":
         #   li.enclosing(licon_peri, 0.08, projection).second_edges
@@ -763,7 +970,8 @@ DECK: list[DrcRule] = [
         # PDK-generic 0.22um contact budget, over the upstream maximum, and
         # this deck had no mcon width rule of any kind to notice.
         #
-        # No `threshold_max_dbu`, same #2388 deferral as via.width.1 below.
+        # No `threshold_max_dbu` yet: still deferred under issue #2388
+        # (via.width.1 below has taken its own).
         # Approximations that stay regardless, both mirroring via.width.1's:
         # the rectangularity half ("ct.1 : non-ring mcon should be
         # rectangular") is not a bounding-box bound, and sky130A_mr.drc's
@@ -828,36 +1036,29 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via.width.1",
         description=(
-            "minimum via1 (met1<->met2 via) size (approximates the "
-            "official rectangularity + min/max-length rule as a "
-            "minimum-width check)"
+            "min/max via1 (met1<->met2 via) size (fixed 0.15um; "
+            "rectangularity of via.1a stays approximated)"
         ),
         layer=(68, 44),  # via.drawing
         check="width",
         threshold_dbu=150,  # 0.15 um
+        threshold_max_dbu=150,  # 0.15 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via.1a_a" (part of the "via.1a" family):
         # via_not_mt.width(0.15, euclidian)
         # -> "via.1a_a : min. width of via outside of moduleCut : 0.15um"
-        # (mirrors gf180mcu.py's "contact.width.1" approximation: the
-        # official rule also requires the via be rectangular ("via.1a") and
-        # capped at the same 0.15um length ("via.1a_b") -- our width_check
-        # primitive only supports a minimum-width lower bound, so only the
-        # min-size half of the rule is enforced here.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via.1a_b" (`via_not_mt.drc(length > 0.15)`, "maximum length of via
+        # : 0.15um") is the equal `threshold_max_dbu`, measured as a
+        # bounding-box size (`Region.with_bbox_max`, see `_run_width_max_check`
+        # in `drc.py`) -- the same treatment gf180mcu's `contact.width.1`
+        # gets (issue #2370/#2388). The max half was deferred behind issue
+        # #2585 (`klt gen compose` drew this cut at the PDK-generic 0.22um);
+        # that generator clamp (`_PDK_CUT_FIXED_SIZE_UM`) has landed.
         #
-        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
-        # judgement that the max half is unenforceable (issue #2388). The
-        # max half is expressible -- `DrcRule.threshold_max_dbu` (issue
-        # #2370) would encode "via.1a_b"'s 0.15um cap exactly, the same way
-        # gf180mcu's `contact.width.1` already does. It is held back because
-        # `klt gen compose`'s via-drop ladder draws this cut at the
-        # PDK-generic `gen.CONTACT_SIZE_UM` (0.22um), so enforcing the real
-        # foundry maximum turns eight currently-green composer tests red --
-        # correctly, since that geometry genuinely violates "via.1a_b".
-        # Fixing the generator is issue #2585; this rule gets its
-        # `threshold_max_dbu` once that lands. Even then the *rectangularity*
-        # half ("via.1a") stays approximated: a bounding-box bound cannot
-        # reject an L-shaped cut that fits inside a 0.15um box.
-        # See docs/cli/drc.md's "sky130" approximation notes.
+        # One approximation remains: the official rule also requires the via
+        # be *rectangular* ("via.1a"). A bounding-box bound cannot reject an
+        # L-shaped cut that fits inside a 0.15um box, so rectangularity is
+        # not enforced. See docs/cli/drc.md's "sky130" approximation notes.
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.1a_a"),
     ),
@@ -878,14 +1079,31 @@ DECK: list[DrcRule] = [
         layer=(68, 20),  # met1.drawing
         other_layer=(68, 44),  # via.drawing
         check="enclosing",
+        # #5737: every via cut lands on met1 (met1<->met2)
+        require_containment=True,
         threshold_dbu=55,  # 0.055 um
         # sky130A_mr.drc rule "via.4a": m1.edges.enclosing(via, 0.055,
         # euclidian) -> "via.4a : min. m1 enclosure of 0.15um via : 0.055um"
-        # (a second, 2-adjacent-edges-relaxed refinement, "via.5a" (0.085um),
-        # is not modelled here -- the same "primary rule only" approximation
-        # met1.enclosing.mcon.1 above already makes for its own sibling
-        # refinement, "m1.5".)
+        # (the 2-adjacent-edges-relaxed refinement, "via.5a" (0.085um), is
+        # modelled by met1.enclosing_adjacent.via.1 below; "m1.5", the
+        # mcon sibling, is still not modelled.)
         scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.4a"),
+    ),
+    DrcRule(
+        id="met1.enclosing_adjacent.via.1",
+        description="minimum met1 enclosure of via1 on two adjacent edges (0.085 um)",
+        layer=(68, 20),  # met1.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "via.5a": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "via.5a : min. m1 enclosure of 0.15um via of 2 adjacent edges : 0.085um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="via",  # sky130A_mr.drc "via.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via.5a"),
     ),
     DrcRule(
         id="met2.enclosing.via.1",
@@ -893,15 +1111,32 @@ DECK: list[DrcRule] = [
         layer=(69, 20),  # met2.drawing
         other_layer=(68, 44),  # via.drawing
         check="enclosing",
+        # #5737: every via cut lands on met2 (met1<->met2)
+        require_containment=True,
         threshold_dbu=55,  # 0.055 um
         # sky130A_mr.drc rule "m2.4": m2.enclosing(via_outside_periphery,
         # 0.055, euclidian) -> "m2.4 : min. m2 enclosure of via : 0.055um"
         # (the official rule's periphery-scoped variant, "m2.4_b" (0.045um,
-        # areaid:core-only), and its 2-adjacent-edges-relaxed refinement,
-        # "m2.5" (0.085um), are not modelled -- this curated deck does not
-        # model areaid.* layers elsewhere either; same "primary rule only"
-        # approximation as met1.enclosing.via.1 above.)
+        # areaid:core-only), is not modelled -- this curated deck does not
+        # model areaid.* layers elsewhere either; its
+        # 2-adjacent-edges-relaxed refinement, "m2.5" (0.085um), is
+        # met2.enclosing_adjacent.via.1.)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met2.enclosing_adjacent.via.1",
+        description="minimum met2 enclosure of via1 on two adjacent edges (0.085 um)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(68, 44),  # via.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "m2.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "m2.5 : min. m2 enclosure of via of 2 adjacent edges : 0.085um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.5"),
     ),
     DrcRule(
         id="met2.area.1",
@@ -959,7 +1194,7 @@ DECK: list[DrcRule] = [
         threshold_dbu=300,  # 0.3 um
         # sky130A_mr.drc rule "m3.2": non_huge_m3.space(0.3, euclidian)
         # -> "m3.2 : min. m3 spacing : 0.3um"
-        # (the wide-metal 0.4um exception, "m3.3cd", is not modelled here --
+        # (the wide-metal 0.4um exception, "m3.3ab", is not modelled here --
         # the same approximation met1.space.1/met2.space.1 above already
         # make for their own wide-metal exceptions.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
@@ -968,19 +1203,26 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via2.width.1",
         description=(
-            "minimum via2 (met2<->met3 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via2 (met2<->met3 via) size (fixed 0.2um; "
+            "rectangularity of via2.1a stays approximated)"
         ),
         layer=(69, 44),  # via2.drawing
         check="width",
         threshold_dbu=200,  # 0.2 um
+        threshold_max_dbu=200,  # 0.2 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via2.1a_a" (part of the "via2.1a" family):
         # via2_not_mt.width(0.2, euclidian)
         # -> "via2.1a_a : min. width of via2 outside of moduleCut : 0.2um"
-        # (mirrors via.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via2.1a") and capped at the same
-        # 0.2um length ("via2.1a_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via2.1a_b" (maximum length of via2: 0.2um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via2.1a"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.1a_a"),
     ),
@@ -1001,10 +1243,13 @@ DECK: list[DrcRule] = [
         layer=(69, 20),  # met2.drawing
         other_layer=(69, 44),  # via2.drawing
         check="enclosing",
+        # #5737: every via2 cut lands on met2 (met2<->met3)
+        require_containment=True,
         threshold_dbu=40,  # 0.04 um
         # sky130A_mr.drc rule "via2.4": m2.enclosing(via2, 0.04, euclidian)
         # -> "via2.4 : min. m2 enclosure of via2 : 0.04um"
         scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.4"),
     ),
     DrcRule(
         id="met3.enclosing.via2.1",
@@ -1012,14 +1257,31 @@ DECK: list[DrcRule] = [
         layer=(70, 20),  # met3.drawing
         other_layer=(69, 44),  # via2.drawing
         check="enclosing",
+        # #5737: every via2 cut lands on met3 (met2<->met3)
+        require_containment=True,
         threshold_dbu=65,  # 0.065 um
         # sky130A_mr.drc rule "m3.4": m3.enclosing(via2, 0.065, euclidian)
         # -> "m3.4 : min. m3 enclosure of via2 : 0.065um"
-        # (the 2-adjacent-edges-relaxed refinement, "via2.5" (0.085um), is
-        # not modelled here -- the same "primary rule only" approximation
-        # met1.enclosing.via.1/met2.enclosing.via.1 above already make for
-        # their own sibling refinements.)
+        # (the 2-adjacent-edges-relaxed "via2.5" (0.085um) reads m2, not
+        # m3, in the official code: met2.enclosing_adjacent.via2.1.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met2.enclosing_adjacent.via2.1",
+        description="minimum met2 enclosure of via2 on two adjacent edges (0.085 um)",
+        layer=(69, 20),  # met2.drawing
+        other_layer=(69, 44),  # via2.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=85,  # 0.085 um
+        # sky130A_mr.drc rule "via2.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.085 um ->
+        # "via2.5 : min. m3 enclosure of via2 of 2 adjacent edges : 0.085um"
+        # (the message says "m3" but the code reads `m2.enclosing(via2, ...)`,
+        # like via2.4 -- this follows the code. A corner of short edges is
+        # the violation; two opposite short edges are legal -- see drc.py
+        # `_run_enclosing_adjacent_check`, #3316).
+        scope="via2",  # sky130A_mr.drc "via2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via2.5"),
     ),
     DrcRule(
         id="met3.area.1",
@@ -1082,18 +1344,25 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via3.width.1",
         description=(
-            "minimum via3 (met3<->met4 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via3 (met3<->met4 via) size (fixed 0.2um; "
+            "rectangularity of via3.1 stays approximated)"
         ),
         layer=(70, 44),  # via3.drawing
         check="width",
         threshold_dbu=200,  # 0.2 um
+        threshold_max_dbu=200,  # 0.2 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via3.1_a": via3_not_mt.width(0.2, euclidian)
         # -> "via3.1_a : min. width of via3 outside of moduleCut : 0.2um"
-        # (mirrors via2.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via3.1") and capped at the same
-        # 0.2um length ("via3.1_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via3.1_b" (maximum length of via3: 0.2um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via3.1"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.1_a"),
     ),
@@ -1118,10 +1387,24 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via3.4": m3.enclosing(via3, 0.06, euclidian)
         # -> "via3.4 : min. m3 enclosure of via3 : 0.06um"
         # (the 2-adjacent-edges-relaxed refinement, "via3.5" (0.09um), is
-        # not modelled here -- the same "primary rule only" approximation
-        # met3.enclosing.via2.1 above already makes for its own sibling
-        # refinement.)
+        # met3.enclosing_adjacent.via3.1.)
         scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.4"),
+    ),
+    DrcRule(
+        id="met3.enclosing_adjacent.via3.1",
+        description="minimum met3 enclosure of via3 on two adjacent edges (0.09 um)",
+        layer=(70, 20),  # met3.drawing
+        other_layer=(70, 44),  # via3.drawing
+        check="enclosing_adjacent",
+        threshold_dbu=90,  # 0.090 um
+        # sky130A_mr.drc rule "via3.5": flags every cut that has two
+        # *adjacent* edges both enclosed by less than 0.090 um ->
+        # "via3.5 : min. m3 enclosure of via3 of 2 adjacent edges : 0.09um"
+        # (a corner of short edges; two opposite short edges are legal --
+        # see drc.py `_run_enclosing_adjacent_check`, #3316).
+        scope="via3",  # sky130A_mr.drc "via3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via3.5"),
     ),
     DrcRule(
         id="met4.enclosing.via3.1",
@@ -1129,6 +1412,8 @@ DECK: list[DrcRule] = [
         layer=(71, 20),  # met4.drawing
         other_layer=(70, 44),  # via3.drawing
         check="enclosing",
+        # #5737: every via3 cut lands on met4 (capm via3 still reaches met4)
+        require_containment=True,
         threshold_dbu=65,  # 0.065 um
         # sky130A_mr.drc rule "m4.3": m4.enclosing(via3, 0.065, euclidian)
         # -> "m4.3 : min. m4 enclosure of via3 : 0.065um"
@@ -1192,18 +1477,25 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="via4.width.1",
         description=(
-            "minimum via4 (met4<->met5 via) size (approximates the "
-            "official rectangularity + max-length rule as a "
-            "minimum-width check)"
+            "min/max via4 (met4<->met5 via) size (fixed 0.8um; "
+            "rectangularity of via4.1 stays approximated)"
         ),
         layer=(71, 44),  # via4.drawing
         check="width",
         threshold_dbu=800,  # 0.8 um
+        threshold_max_dbu=800,  # 0.8 um -- same value: a *fixed*-size rule
         # sky130A_mr.drc rule "via4.1_a": rectVIA4.width(0.8, euclidian)
         # -> "via4.1_a : min. width of via4 outside of moduleCut : 0.8um"
-        # (mirrors via3.width.1's own approximation: the official rule also
-        # requires the via be rectangular ("via4.1") and capped at the same
-        # 0.8um length ("via4.1_b") -- only the min-size half is enforced.)
+        # Min half: `threshold_dbu` via `Region.width_check`. Max half:
+        # "via4.1_b" (maximum length of via4: 0.8um) is the equal
+        # `threshold_max_dbu`, measured as a bounding-box size
+        # (`Region.with_bbox_max`, see `_run_width_max_check` in `drc.py`),
+        # the same treatment via.width.1 gets (issue #2388/#2443).
+        #
+        # One approximation remains, mirroring via.width.1's: the official
+        # rule also requires the via be *rectangular* ("via4.1"), which a
+        # bounding-box bound cannot reject. See docs/cli/drc.md's "sky130"
+        # approximation notes.
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.1_a"),
     ),
@@ -1228,6 +1520,7 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "via4.4": m4.enclosing(via4, 0.19, euclidian)
         # -> "via4.4 : min. m4 enclosure of via4 : 0.19um"
         scope="via4",  # sky130A_mr.drc "via4.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "via4.4"),
     ),
     DrcRule(
         id="met5.enclosing.via4.1",
@@ -1235,6 +1528,8 @@ DECK: list[DrcRule] = [
         layer=(72, 20),  # met5.drawing
         other_layer=(71, 44),  # via4.drawing
         check="enclosing",
+        # #5737: every via4 cut lands on met5 (capm2 via4 still reaches met5)
+        require_containment=True,
         threshold_dbu=310,  # 0.31 um
         # sky130A_mr.drc rule "m5.3": m5.enclosing(via4, 0.31, euclidian)
         # -> "m5.3 : min. m5 enclosure of via4 : 0.31um"
@@ -1413,9 +1708,9 @@ DECK: list[DrcRule] = [
         check="width",
         threshold_dbu=840,  # 0.84 um
         # sky130.lydrc rule "nwell.1a": nwell.width(0.84, euclidian)
-        # -> "nwell.1a : min. nwell width : 0.84um"
+        # -> "nwell.1a : min. nwell width : 0.84um"; native id "nwell.1" (#5253)
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
-        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.1a"),
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.1"),
     ),
     DrcRule(
         id="nwell.space.1",
@@ -1439,237 +1734,59 @@ DECK: list[DrcRule] = [
         scope="nwell",  # sky130.lydrc "nwell.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "nwell.2a"),
     ),
+    DrcRule(
+        id="rpm.width.1",
+        description="minimum rpm (poly-resistor implant marker) width",
+        layer=(86, 20),  # rpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "rpm.1a": rpm.width(1.27, euclidian)
+        # -> "rpm.1a : min. rpm width : 1.27um"
+        scope="rpm",  # sky130A_mr.drc "rpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "rpm.1a"),
+    ),
+    DrcRule(
+        id="urpm.width.1",
+        description="minimum urpm (ultra-high-rho poly-resistor implant marker) width",
+        layer=(79, 20),  # urpm.drawing
+        check="width",
+        threshold_dbu=1270,  # 1.27 um
+        # sky130A_mr.drc rule "urpm.1a": urpm.width(1.27, euclidian)
+        # -> "urpm.1a : min. rpm width : 1.27um"
+        scope="urpm",  # sky130A_mr.drc "urpm.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "urpm.1a"),
+    ),
+    DrcRule(
+        id="nwell.enclosed.hvi.1",
+        description="HVnwell (nwell touching hvi) must be enclosed by hvi",
+        layer=(64, 20),  # nwell.drawing
+        check="enclosed",
+        other_layer=(75, 20),  # hvi.drawing
+        threshold_dbu=0,  # pure containment: no margin is required
+        # sky130A_mr.drc rule "nwell.9":
+        #   nwell.interacting(nwell.and(hvmarker)).not(hvmarker)
+        #   -> "nwell.9 : HVnwell must be enclosed by hv marker"
+        # with `hvmarker = hvi.or(rdl).or(uhvi).or(vhvi)`. The "enclosed"
+        # check's containment half (`nwell.interacting(hvi) - hvi`, the
+        # default `require_containment=False` scoping) is exactly the
+        # runset's expression for the `hvi` term, so a well drawn wholly
+        # outside hvi is a plain low-voltage well and stays clean. The
+        # `rdl` (74/20), `uhvi` (74/22) and `vhvi` (74/21) terms of
+        # `hvmarker` are NOT modelled (a single `other_layer`): a well
+        # inside one of those markers but touching hvi would be flagged.
+        # Those layers are not drawn by this curated deck, and a well
+        # touching hvi while sitting in another marker is not a layout this
+        # deck's PDK-cell inputs produce. The margin half (`threshold_dbu`)
+        # is 0 because the runset checks containment only.
+        scope="nwell",  # sky130A_mr.drc "nwell.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "nwell.9"),
+    ),
 ]
 
-# ---------------------------------------------------------------------------
-# Manufacturing-grid / corner-angle rules -- the source deck's own `OFFGRID`
-# rule group (issue #2642)
-# ---------------------------------------------------------------------------
-#
-# `sky130.lydrc` declares three rule groups it can run, as plain Ruby locals
-# near the top of the script:
-#
-#     FEOL    = false # front-end-of-line checks
-#     BEOL    = true # back-end-of-line checks
-#     OFFGRID = true # manufacturing grid/angle checks
-#
-# -- i.e. the grid/angle group is **on by default** in the deck a foundry
-# signs off against, and (unlike `FEOL`) is not one of the groups that ships
-# switched off. Until this issue the curated deck transcribed nothing from it
-# at all, on any layer: `klt drc`'s "clean" verdict was silent about a defect
-# class the real deck actively flags, and the only way to notice was to
-# cross-check a `klt precheck --grid-um 0.005` census (a separate,
-# deck-independent, caller-supplied check -- see `docs/cli/precheck.md`)
-# against a clean `klt drc` run on the same layout.
-#
-# The group's body is one or two calls per drawn layer:
-#
-#     dnwell.ongrid(0.005).output("dnwell_OFFGRID", "x.1b : OFFGRID vertex on dnwell")
-#     dnwell.with_angle(0 .. 45).output("dnwell_angle",
-#                                    "x.3a : non 45 degree angle dnwell")
-#
-# so the transcription below is a table with one row per source-deck layer,
-# in the source block's own line order, rather than ~75 near-identical
-# `DrcRule(...)` literals: a row-per-source-line table can be diffed directly
-# against that contiguous section of the upstream file, which is the property
-# that makes a transcription of this size reviewable. The rules it builds are
-# ordinary `DrcRule` entries appended to `DECK` (`DECK += ...` below), and
-# they live in *this* module on purpose -- `decks.deck_source_path()` hashes
-# this file as the deck's identity for `provenance.deck.content_hash`, so a
-# rule table moved to a sibling module would be invisible to that hash.
-#
-# Grid: **0.005um for every checked layer**, verbatim -- the source block
-# passes the same literal `0.005` to all 38 `ongrid` calls, with no per-layer
-# variation to get wrong. Expressed as `grid_um` (a real physical distance
-# rescaled against the layout's own dbu), not `threshold_dbu`; see that
-# field's docstring in `decks/rules.py`.
-#
-# Angle: two published limits, per layer, under two official rule ids --
-# `x.3a` ("non 45 degree angle <layer>", `with_angle(0 .. 45)`) on the
-# implant/well/metal layers, and `x.2` ("non 90 degree angle <layer>",
-# `with_angle(0 .. 90)`) on poly, the cut/via layers, and `mf`. What the
-# upstream primitive actually enforces is a *minimum interior corner angle*,
-# not "every edge lies on a multiple of 45 degrees" -- see
-# `DrcRule.angle_limit_deg` and `drc.py`'s `_run_angle_check` for the
-# verified semantics. This deck transcribes the primitive and the value the
-# source deck uses, and documents the gap, rather than "correcting" the rule
-# into something whose verdict is no longer comparable to the PDK deck's own.
-#
-# Two deliberate deviations, both recorded rather than silently defaulted:
-#
-# 1. `diff`/`tap` angle: the source deck does not apply one limit to these
-#    two layers. It splits each by a *three-input derived* layer --
-#
-#        diff.not(areaid_en.and(uhvi)).with_angle(0 .. 90) -> "x.2"
-#        diff.and(areaid_en.and(uhvi)).with_angle(0 .. 45) -> "x.2c"
-#
-#    -- i.e. 90 degrees outside the extended-drain/ultra-high-voltage marker
-#    intersection and 45 degrees inside it. `DerivedLayer` combines exactly
-#    two drawn layers, so neither half is expressible here. Both rows below
-#    therefore transcribe the **45-degree floor** (`x.2c`), the weaker of the
-#    two limits: every corner it flags is also flagged by the official deck
-#    (a corner under 45 degrees is under 90 too), so this can only
-#    under-report, never produce a finding the real deck would not. That is
-#    the same "transcribe the unconditional floor rather than the published
-#    conditional value" pattern this module's own threshold-fidelity note
-#    (see the module docstring, `li1.enclosing.licon1.1`/
-#    `tap.enclosing.licon.1`) already established. These two rules are also
-#    the only ones in this group left `voltage_independent=False`: their
-#    source rule genuinely publishes two columns, so the
-#    `coverage.voltage_domain_warnings` gate's "may have applied the wrong
-#    column" premise does hold for them (issue #552/#2369). Every other row
-#    here publishes a single value for every layer and voltage domain, which
-#    is what `voltage_independent=True` asserts.
-#
-# 2. `areaid_re` (areaid.rfdiode, 81/125) is checked `ongrid` but has **no
-#    `with_angle` call in the OFFGRID block at all** -- the one layer in the
-#    block with a grid check and no angle check. Its angle constraint lives
-#    in the `FEOL` block instead, as a differently-identified rule
-#    (`areaid_re.with_angle(0 .. 90).output("rfdiode.1", ...)`), which this
-#    deck does not transcribe. So its row below carries `None` for the angle
-#    limit and this deck emits no `areaid_re.angle.*` rule: an absence copied
-#    from the source, not an omission by oversight.
-#
-# Layers the OFFGRID block checks *neither* grid nor angle on are recorded in
-# `OFFGRID_UNCHECKED_LAYERS` below rather than left to inference.
+# Manufacturing-grid / corner-angle rules live in `sky130_offgrid` (pure move,
+# file-size ceiling; issue #2642).
+DECK += offgrid_rules(_sky130_provenance)
 
-#: The manufacturing grid every `ongrid` call in `sky130.lydrc`'s OFFGRID
-#: block passes, in micrometres (`layer.ongrid(0.005)`, 38 call sites, one
-#: literal). Also the grid a caller would pass to `klt precheck --grid-um`
-#: for this PDK.
-OFFGRID_GRID_UM = 0.005
-
-#: One row per layer `sky130.lydrc`'s `if OFFGRID ... end` block checks, in
-#: that block's own line order:
-#: ``(rule-id stem, (layer, datatype), angle limit in degrees or None,
-#: official angle rule id)``. The stem is this deck's own layer naming (so
-#: `m1` -> `met1`, matching `met1.width.1` et al.); the trailing comment on
-#: each row is the source deck's own variable name where it differs. An
-#: angle limit of `None` means the source block emits no `with_angle` call
-#: for that layer (see note 2 above).
-_OFFGRID_ROWS: tuple[tuple[str, tuple[int, int], float | None, str], ...] = (
-    ("dnwell", (64, 18), 45.0, "x.3a"),
-    ("nwell", (64, 20), 45.0, "x.3a"),
-    ("pwbm", (19, 44), 45.0, "x.3a"),
-    ("pwde", (124, 20), 45.0, "x.3a"),
-    ("hvtp", (78, 44), 45.0, "x.3a"),
-    ("hvtr", (18, 20), 45.0, "x.3a"),
-    ("lvtn", (125, 44), 45.0, "x.3a"),
-    ("ncm", (92, 44), 45.0, "x.3a"),
-    # `x.2`/`x.2c` pair, transcribed at the 45-degree floor -- see note 1.
-    ("diff", (65, 20), 45.0, "x.2c"),
-    ("tap", (65, 44), 45.0, "x.2c"),
-    ("tunm", (80, 20), 45.0, "x.3a"),
-    ("poly", (66, 20), 90.0, "x.2"),
-    ("rpm", (86, 20), 45.0, "x.3a"),
-    ("npc", (95, 20), 45.0, "x.3a"),
-    ("nsdm", (93, 44), 45.0, "x.3a"),
-    ("psdm", (94, 20), 45.0, "x.3a"),
-    ("licon1", (66, 44), 90.0, "x.2"),  # source deck: `licon`
-    ("li1", (67, 20), 45.0, "x.3a"),  # source deck: `li`
-    ("mcon", (67, 44), 90.0, "x.2"),
-    ("vpp", (82, 64), 45.0, "x.3a"),  # lyt layer-map: `capacitor.drawing`
-    ("met1", (68, 20), 45.0, "x.3a"),  # source deck: `m1`
-    ("via", (68, 44), 90.0, "x.2"),
-    ("met2", (69, 20), 45.0, "x.3a"),  # source deck: `m2`
-    ("via2", (69, 44), 90.0, "x.2"),
-    ("met3", (70, 20), 45.0, "x.3a"),  # source deck: `m3`
-    ("via3", (70, 44), 90.0, "x.2"),
-    ("nsm", (61, 20), 45.0, "x.3a"),
-    ("met4", (71, 20), 45.0, "x.3a"),  # source deck: `m4`
-    ("via4", (71, 44), 90.0, "x.2"),
-    ("met5", (72, 20), 45.0, "x.3a"),  # source deck: `m5`
-    ("pad", (76, 20), 45.0, "x.3a"),
-    ("mf", (76, 44), 90.0, "x.2"),  # lyt layer-map: `target.drawing`
-    ("hvi", (75, 20), 45.0, "x.3a"),
-    ("hvntm", (125, 20), 45.0, "x.3a"),
-    ("vhvi", (74, 21), 45.0, "x.3a"),
-    ("uhvi", (74, 22), 45.0, "x.3a"),
-    ("pwell_rs", (64, 13), 45.0, "x.3a"),  # lyt layer-map: `pwell.res`
-    # Grid-checked, angle-unchecked in the OFFGRID block -- see note 2.
-    ("areaid_re", (81, 125), None, ""),
-)
-
-#: Layers the source deck defines and this curated deck otherwise models, but
-#: which `sky130.lydrc`'s OFFGRID block checks **neither** grid nor angle on
-#: -- recorded so a reader can tell a transcribed absence from an untranscribed
-#: one (issue #2642's own "never silently default" requirement). Verified by
-#: reading every call in that block: the names below appear nowhere in it.
-#:
-#: The two MiM-capacitor top-plate marks are the interesting case, and exactly
-#: the "a layer is exempted while everything that contacts it is checked"
-#: shape the issue describes: `capm`/`capm2` carry width/space/enclosure rules
-#: in this deck (`capm.width.1`, ...) and sit directly on top of `via3`/`via4`
-#: and `met3`/`met4`, every one of which *is* grid- and angle-checked. So a
-#: layout whose MiM top plate is off-grid stays clean here, not because this
-#: deck declined to transcribe the rule but because the source deck declines
-#: to make it.
-OFFGRID_UNCHECKED_LAYERS: dict[tuple[int, int], str] = {
-    (89, 44): "capm.drawing -- no ongrid/with_angle call in the OFFGRID block",
-    (97, 44): "capm2.drawing (source deck `cap2m`) -- likewise unchecked",
-    (82, 44): "pnp.drawing -- device-recognition mark, not a patterned layer",
-}
-
-
-def _offgrid_rules() -> list[DrcRule]:
-    """Build the `DrcRule` entries for `_OFFGRID_ROWS` (issue #2642).
-
-    One `"ongrid"` rule per row, plus one `"angle"` rule for every row whose
-    source line emits a `with_angle` call. Every value comes from the table
-    above or from `OFFGRID_GRID_UM`; nothing is inferred here.
-    """
-    rules: list[DrcRule] = []
-    for stem, layer, angle_limit_deg, angle_rule_id in _OFFGRID_ROWS:
-        rules.append(
-            DrcRule(
-                id=f"{stem}.ongrid.1",
-                description=(
-                    f"{stem} vertices must be on the "
-                    f"{OFFGRID_GRID_UM}um manufacturing grid"
-                ),
-                layer=layer,
-                check="ongrid",
-                threshold_dbu=0,  # unused by "ongrid" -- see grid_um
-                grid_um=OFFGRID_GRID_UM,
-                # sky130.lydrc OFFGRID block: `<layer>.ongrid(0.005)`
-                # -> "x.1b : OFFGRID vertex on <layer>"
-                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "x.1b"),
-                # One grid for every layer and every voltage domain: the
-                # source block has no second column to have misread (#2369).
-                voltage_independent=True,
-            )
-        )
-        if angle_limit_deg is None:
-            continue
-        rules.append(
-            DrcRule(
-                id=f"{stem}.angle.1",
-                description=(
-                    f"minimum {angle_limit_deg:g}-degree interior corner "
-                    f"angle on {stem}"
-                ),
-                layer=layer,
-                check="angle",
-                threshold_dbu=0,  # unused by "angle" -- see angle_limit_deg
-                angle_limit_deg=angle_limit_deg,
-                # sky130.lydrc OFFGRID block:
-                # `<layer>.with_angle(0 .. <limit>)`
-                # -> "<rule id> : non <limit> degree angle <layer>"
-                scope="x",  # sky130.lydrc "x.*" rule-id family (#566)
-                provenance=_sky130_provenance(
-                    "sky130/klayout/sky130.lydrc", angle_rule_id
-                ),
-                # `x.2c` is the diff/tap floor of a genuinely two-column
-                # source rule (note 1 above) -- the only rows here that keep
-                # the conservative default.
-                voltage_independent=angle_rule_id != "x.2c",
-            )
-        )
-    return rules
-
-
-DECK += _offgrid_rules()
 
 # (layer, datatype) -> "name.purpose" string, from sky130.lyt's layer-map,
 # used only to render violations[].layer as e.g. "poly.drawing" instead of
@@ -1740,14 +1857,14 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # models from the default 1.8V core ones.
 #
 # `(75, 20)` is confirmed against three independent sources in the same real
-# fetched sky130A install (volare, `c6d73a35f524070e85faff4a6a9eef49553ebc2b`,
+# fetched sky130A install (volare, `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`,
 # the `SOURCES` line `open_pdks c6d73a35...`) this module's other provenance
 # notes cite:
 #   - `libs.tech/klayout/tech/sky130A.lyp:3127` (KLayout layer properties):
 #     `<name>hvi.drawing - 75/20</name>`
 #   - `libs.tech/klayout/lvs/sky130.lvs:941` (the official KLayout LVS deck):
 #     `hvi         = polygons(75 , 20 )`
-#   - `libs.tech/magic/sky130A.tech:3980` (magic technology file):
+#   - `libs.tech/magic/sky130A.tech:3975` (magic technology file):
 #     `calma HVI 75 20`  (under the comment `# HVI (THKOX)`)
 #
 # What issue #1369 closed: `EXTRACTION_DECK` below now declares one
@@ -1768,7 +1885,7 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # DRM publishes a second, medium-voltage threshold column selected by `hvi`
 # that this deck transcribes none of. The concrete residue behind the
 # threshold quoted below, from the same install's
-# `libs.tech/magic/sky130A.tech:4220-4224`: general diffusion width is
+# `libs.tech/magic/sky130A.tech:4215-4219`: general diffusion width is
 # `width *ndiff,... 150 "Diffusion width < %d (diff/tap.1)"` -- the 0.15um
 # `diff.width.1` rule above -- while `hvi`-marked (`mv*`) diffusion is
 # `width *mvndiff,... 290 "MV Diffusion width < %d (diff/tap.14)"`, i.e.
@@ -1776,13 +1893,24 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
 # 0.15um column here, which is why registering this marker still produces
 # `klt drc`'s `voltage_domain_warnings` diagnostic (issue #552) even though
 # the *extraction*-side binding gap is now closed.
+#: Process area-marker layers (``areaid.*``) whose rule-switching this deck
+#: does not model (issue #3815): the deck evaluates every rule uniformly, so a
+#: marker such as ``areaid.ce`` (81/2) -- which the foundry runsets use to
+#: narrow or relax rules inside/outside the marked area -- changes nothing
+#: here. ``klt drc`` lists those present in the stream as
+#: ``coverage.marker_blind_layers_in_stream`` and ``klt deck rules`` as
+#: ``marker_blind_layers``, so identical results with and without the marker
+#: are not misread as marker-aware behaviour.
+MARKER_BLIND_LAYERS: tuple[tuple[int, int], ...] = ((81, 2),)
+
 UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
     (75, 20): (
         "hvi (75/20) marks sky130's 5V-gate/10.5V-drain thick-oxide voltage "
         "domain (see sky130.lvs's ngate_high_voltage/pgate_high_voltage). "
         "This curated deck models it for MOS device recognition/model "
         "binding (issue #1369: sky130_fd_pr__nfet_g5v0d10v5/pfet_g5v0d10v5 "
-        "under --pdk) only; no DRC rule here reads hvi, so every rule still "
+        "under --pdk) and for one DRC rule (nwell.enclosed.hvi.1, "
+        "nwell.9, issue #3031); no other DRC rule here reads hvi, so every rule still "
         "applies its general-case threshold to geometry drawn inside hvi "
         "(e.g. diff.width.1 checks difftap.1's 0.15 um where the real DRM's "
         "medium-voltage column, difftap.14, requires 0.29 um -- not "
@@ -1947,8 +2075,8 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # resistance term `R = L / W * sheet_rho_ohm_sq` alone cannot express. Both
 # `sheet_rho_ohm_sq` and `fixed_offset_ohm` below are *measured* (not
 # transcribed), the same way this issue's own filing measured the gap --
-# via ngspice against the real PDK install (the same `volare enable sky130
-# c6d73a35f524070e85faff4a6a9eef49553ebc2b` fetch cited in the MiM
+# via ngspice against the real PDK install (the same `ciel enable --pdk
+# sky130 f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7` fetch cited in the MiM
 # capacitor provenance note above), at the nominal `tt` corner
 # (`libs.tech/combined/sky130.lib.spice`'s `.lib tt` section), `w=1um`,
 # sweeping `l` across {1, 5, 10, 35}um: total two-terminal resistance
@@ -1978,16 +2106,37 @@ UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
 # `R_total(l) = sheet_rho_ohm_sq * l / w + fixed_offset_ohm`. All five
 # measured points (including the held-out one) fit this affine law to a
 # relative residual under `1e-8` -- comfortably inside this deck's own
-# `rel=1e-6` verification bar (see `tests/test_extract.py`). No claim is
-# made here that this affine law holds at a `w` other than the `1um` this
-# issue measures (the real PDK model's `rhead` term does have its own,
-# undetermined `w`-dependence) -- the same single-coefficient,
-# curated-approximation limitation `sheet_rho_ohm_sq` alone already carries
-# for every other resistor entry in this deck, one coefficient over.
+# `rel=1e-6` verification bar (see `tests/test_extract.py`). The affine law
+# above is only exact at `w=1um`.
+#
+# `res_high_po` w-dependence (issue #3049): the same PDK model at other
+# widths, measured via one single-corner ngspice run (`tt`, 27 C,
+# `sky130_fd_pr__res_high_po` w={0.35, 0.69, 1.41, 2.85, 5.73}um, l={1, 5,
+# 10, 35}um, same `libs.tech/combined/sky130.lib.spice` as above), total
+# two-terminal resistance in ohm (w rows, l=1/5/10/35 columns):
+#   0.35: 1958.26 / 5938.03 / 10912.7 / 35786.3
+#   0.69: 996.672 / 2880.58 / 5235.45 / 17009.9
+#   1.41: 508.199 / 1429.43 / 2580.96 / 8338.63
+#   2.85: 257.127 / 712.729 / 1282.23 / 4129.74
+#   5.73: 129.400 / 355.968 / 639.178 / 2055.23
+# The model is `rbody` (`rsh*(l+0.247)/weff`) in series with `rhead`
+# (`345.8312*sw_poly_head_res/(weff+0.1558)`), `weff = w-0.001`, so its
+# head terms scale roughly 1/w, not as a constant. With `sheet_rho_ohm_sq`
+# and the `w=1um` sum held, the split `end_term_ohm_um / w + fixed_offset_ohm`
+# is a least-squares fit (relative error) over w >= 0.69um; the curated
+# `ResistorDevice` fields cannot represent the model's two different 1/(w+c)
+# shifts exactly, so a residual remains. Extracted-vs-model error by width,
+# for l=1/5/10/35um: 0.69um +2.0/+0.7/+0.4/+0.1 %, 1.41um -1.2/-0.4/-0.2/
+# -0.04 %, 2.85um -1.6/-0.5/-0.3/-0.04 %, 5.73um +0.8/+0.4/+0.2/+0.1 %;
+# 0.35um (a different `weff` regime in the model) is not fit well:
+# +1.9/-3.9/-5.2/-6.3 %. Before this fit the constant 379.7 ohm term
+# overstated the 1.41um resistor by ~4-5 %.
 EXTRACTION_DECK = ExtractionDeck(
     active=(65, 20),  # diff.drawing
     poly=(66, 20),  # poly.drawing
     nwell=(64, 20),  # nwell.drawing
+    substrate_isolation=_DNWELL,  # #5344: counts only if an n-well ring closes it
+    substrate_isolation_needs_nwell_ring=True,
     # MOS device-recognition provenance (issue #868): `sky130.lvs`'s core
     # 1.8V devices --
     #   extract_devices(mos4("sky130_fd_pr__nfet_01v8"),
@@ -1997,16 +2146,11 @@ EXTRACTION_DECK = ExtractionDeck(
     #     { "SD" => psd, "G" => pgate_1p8v, "tS" => psd, "tD" => psd,
     #       "tG" => poly_con, "W" => nwell })
     # -- both extracted off exactly this deck's own `active`/`poly`/`nwell`
-    # split (NMOS = active outside nwell, PMOS = active inside nwell). Real
-    # sky130 draws several other voltage/threshold flavours off the *same*
-    # split, keyed by additional implant/marker layers this curated deck
-    # does not model (e.g. `nfet_01v8_lvt`/`pfet_01v8_lvt`, the low-threshold
-    # siblings) -- this citation names the one flavour `nfet_class`/
-    # `pfet_class`'s generic `"nfet"`/`"pfet"` labels actually correspond to
-    # (the plain-active, no-implant-marker core device), not a claim that
-    # every sky130 MOS flavour is modelled. The `hvi`-marked
-    # `nfet_g5v0d10v5`/`pfet_g5v0d10v5` flavour *is* now modelled, via the
-    # `mos_flavours` entry below (issue #1369).
+    # split (NMOS = active outside nwell, PMOS = active inside nwell). Other
+    # sky130 voltage/threshold flavours share that split, keyed by extra
+    # implant/marker layers modelled only via `mos_flavours` below (hvi #1369,
+    # lvtn #5283); this names the flavour `nfet_class`/`pfet_class`'s generic
+    # labels correspond to (plain-active core device), not every flavour.
     nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_01v8"),
     pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_01v8"),
     tap=(65, 44),  # tap.drawing -- distinct from diff.drawing, see above
@@ -2119,8 +2263,9 @@ EXTRACTION_DECK = ExtractionDeck(
     # No `emitter_excludes`/`emitter_requires` narrowing (issue #302):
     # unlike gf180mcu (whose p+ emitter carries `Pplus` and whose n+ base
     # tie carries `Nplus`, so an `emitter_excludes=(Nplus,)` cleanly drops
-    # the base-contact ring), this curated deck models **no implant layers**
-    # (see this module's docstring, the #183/#223 negative finding). The real
+    # the base-contact ring), this bipolar entry models **no implant layers**
+    # (only the `diodes` entries below use `nsdm`/`psdm`; see this module's
+    # docstring, the #183/#223 negative finding). The real
     # `sky130_fd_pr__pnp` draws its base tie on the *distinct* `tap.drawing`
     # (65/44) layer, not the `diff.drawing` (65/20) emitter layer, so no
     # same-layer collision occurs in practice -- a base tie on `tap.drawing`
@@ -2128,7 +2273,7 @@ EXTRACTION_DECK = ExtractionDeck(
     # were a base tie drawn on the *literal* `diff.drawing` emitter layer,
     # no already-modelled layer could distinguish it from the emitter, so it
     # would still double-count. Resolving that would require modelling
-    # sky130's implant (`nsdm`/`psdm`) masks, which this starter deck does
+    # sky130's implant (`nsdm`/`psdm`) masks on this entry, which it does
     # not -- documented rather than partially/incorrectly worked around.
     bipolars=(
         BipolarDevice(
@@ -2146,6 +2291,84 @@ EXTRACTION_DECK = ExtractionDeck(
             # `res_high_po`/`res_xhigh_po`); cites the smaller variant as
             # representative.
             provenance=_sky130_lvs_provenance("sky130_fd_pr__pnp_05v5_W0p68L0p68"),
+        ),
+    ),
+    # Junction diodes (issue #3803) -- see `_sky130_diode` above for the
+    # `sky130.lvs` derivations these transcribe. Not modelled: the
+    # `photodiode` (needs `areaid.po` and a fixed-area filter) and the RF
+    # diode (`areaid.rfdiode`).
+    diodes=(
+        _sky130_diode(
+            "diode_pw2nd_05v5",
+            n_plus=True,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_lvt",
+            n_plus=True,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_05v5_nvt",
+            n_plus=True,
+            requires=(
+                _HVI,
+                _LVTN,
+            ),
+            excludes=(_HVTP,),
+        ),
+        _sky130_diode(
+            "diode_pw2nd_11v0",
+            n_plus=True,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5",
+            n_plus=False,
+            excludes=(
+                _HVTP,
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_lvt",
+            n_plus=False,
+            requires=(_LVTN,),
+            excludes=(
+                _HVTP,
+                _HVI,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_05v5_hvt",
+            n_plus=False,
+            requires=(_HVTP,),
+            excludes=(
+                _HVI,
+                _LVTN,
+            ),
+        ),
+        _sky130_diode(
+            "diode_pd2nw_11v0",
+            n_plus=False,
+            requires=(_HVI,),
+            excludes=(
+                _HVTP,
+                _LVTN,
+            ),
         ),
     ),
     # MiM capacitors (issue #225, see the module docstring's provenance note
@@ -2242,7 +2465,13 @@ EXTRACTION_DECK = ExtractionDeck(
             # rounded, area-only-equivalent `319.8` -- see the provenance
             # note above for the exact methodology/source files.
             sheet_rho_ohm_sq=324.827244,
-            fixed_offset_ohm=379.705147,
+            # The `w=1um` total head term (379.705147 ohm) is split into a
+            # width-normalized `end_term_ohm_um / w` part and a constant
+            # remainder (issue #3049) -- see the "w-dependence" note above.
+            # The two sum to the pre-#3049 `379.705147` at `w=1um`, so every
+            # `w=1um` value above is unchanged.
+            end_term_ohm_um=370.614275,
+            fixed_offset_ohm=9.090872,
             requires=(
                 (94, 20),  # psdm -- P+ implant, see the module comment above
                 (86, 20),  # rpm  -- 300 ohm precision-resistor implant mask
@@ -2377,14 +2606,39 @@ EXTRACTION_DECK = ExtractionDeck(
     # is the key `pdk_models.py`'s `_MOS_MODEL_FLAVOURS[("sky130", "sky130")]`
     # table binds to those two real subcircuit names under `--pdk` -- see
     # that module's docstring for the verified-provenance citation.
+    #
+    # Native-Vt NMOS (issue #3599): upstream `sky130.lvs` (open_pdks
+    # `c6d73a3`) derives `ngate_nvt = ngate_high_voltage.and(lvtn)
+    # .not(areaid_ed).not(areaid_ce)` (L1214) and `ngate_5p0v_nvt =
+    # ngate_nvt.not(areaid_le).not_interacting(vpp)` (L1226) ->
+    # `mos4("sky130_fd_pr__nfet_05v0_nvt")` (L2081): hvi AND lvtn (125/44,
+    # L924), minus areaid_ed (81/19, L1008), areaid_ce (81/2, L994),
+    # areaid_le (81/60, L1018, the 3v3 native variant -- out of scope) and
+    # anything interacting vpp (82/64, L989). NMOS only (no PMOS native).
+    # Known gap: the other `ngate_high_voltage` subtractions (uhvi, ncm,
+    # ldntm, pwbm) are not modelled, as for the `hvi` flavour. Must precede
+    # `hvi` (flavours claim in order); `hvi` also excludes lvtn, since
+    # upstream L1231 (`ngate_5p0v_hv = ngate_high_voltage.not(lvtn)...`)
+    # keeps lvtn devices out of `g5v0d10v5`.
     mos_flavours=(
         MOSFlavour(
             marker=(75, 20),  # hvi.drawing
+            flavour="nvt",
+            description="sky130 5V native-Vt NMOS (hvi 75/20 AND lvtn 125/44)",
+            nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_05v0_nvt"),
+            and_markers=((125, 44),),  # lvtn.drawing
+            not_markers=((81, 19), (81, 2), (81, 60), (82, 64)),
+            nfet_only=True,
+        ),
+        MOSFlavour(
+            marker=(75, 20),  # hvi.drawing
             flavour="hvi",
+            not_markers=((125, 44),),  # lvtn.drawing; sky130.lvs L1231
             description="sky130 5V-gate/10.5V-drain thick-oxide domain (hvi 75/20)",
             nfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__nfet_g5v0d10v5"),
             pfet_provenance=_sky130_lvs_provenance("sky130_fd_pr__pfet_g5v0d10v5"),
         ),
+        lvt_mos_flavour(_sky130_lvs_provenance),  # issue #5283
     ),
 )
 
@@ -2426,11 +2680,21 @@ PARASITICS = ParasiticsDeck(
     poly=LayerRC(sheet_res_ohm_sq=48.2, cap_area_ff_um2=0.107, cap_perim_ff_um=0.05527),
     metals=(
         # li1 local interconnect. perim from `defaultperimeter` li1 (40.7 aF/um).
-        LayerRC(sheet_res_ohm_sq=12.8, cap_area_ff_um2=0.037, cap_perim_ff_um=0.0407),
+        LayerRC(
+            sheet_res_ohm_sq=12.8,
+            sheet_res_high_ohm_sq=17.0,
+            sheet_res_low_ohm_sq=10.5,
+            cap_area_ff_um2=0.037,
+            cap_perim_ff_um=0.0407,
+        ),
         # met1. area/perim from `defaultareacap`/`defaultperimeter` met1
         # (25.78 aF/um^2, 40.57 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.02578, cap_perim_ff_um=0.04057
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.02578,
+            cap_perim_ff_um=0.04057,
         ),
         # met2 (issue #508). sheet: `resist (allm2)/metal2` in the same
         # nominal `variants (),(orig),(si)` block as met1 above (125
@@ -2439,7 +2703,11 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm2 metal2` entries (17.5
         # aF/um^2, 37.76 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.125, cap_area_ff_um2=0.0175, cap_perim_ff_um=0.03776
+            sheet_res_ohm_sq=0.125,
+            sheet_res_high_ohm_sq=0.145,
+            sheet_res_low_ohm_sq=0.105,
+            cap_area_ff_um2=0.0175,
+            cap_perim_ff_um=0.03776,
         ),
         # met3 (issue #619). sheet: `resist (allm3)/metal3` in the same
         # nominal `variants (),(orig),(si)` block as met1/met2 above (47
@@ -2448,7 +2716,11 @@ PARASITICS = ParasiticsDeck(
         # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
         # same branch met1/met2's own values above were transcribed from).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.01237, cap_perim_ff_um=0.04099
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.01237,
+            cap_perim_ff_um=0.04099,
         ),
         # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
         # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
@@ -2457,15 +2729,43 @@ PARASITICS = ParasiticsDeck(
         # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
         # aF/um^2, 36.68 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.047, cap_area_ff_um2=0.00842, cap_perim_ff_um=0.03668
+            sheet_res_ohm_sq=0.047,
+            sheet_res_high_ohm_sq=0.056,
+            sheet_res_low_ohm_sq=0.038,
+            cap_area_ff_um2=0.00842,
+            cap_perim_ff_um=0.03668,
         ),
         # met5 (issue #619). sheet: `resist (allm5)/metal5`, same nominal
         # block (29 milliohms/sq = 0.029 ohm/sq); area/perim from the
         # matching nominal, non-RERAM `defaultareacap`/`defaultperimeter
         # allm5 metal5` entries (6.32 aF/um^2, 38.85 aF/um).
         LayerRC(
-            sheet_res_ohm_sq=0.029, cap_area_ff_um2=0.00632, cap_perim_ff_um=0.03885
+            sheet_res_ohm_sq=0.029,
+            sheet_res_high_ohm_sq=0.036,
+            sheet_res_low_ohm_sq=0.021,
+            cap_area_ff_um2=0.00632,
+            cap_perim_ff_um=0.03885,
         ),
+    ),
+    # Per-cut via resistance and the interconnect-resistance corners (issue
+    # #3053), from `sky130A.tech` at the pinned PDK commit
+    # f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7. `contact` rows are milliohm
+    # per cut, divided by 1000. Nominal: `variants (),(orig),(si)` block
+    # (L5132-5138); high-R: `variants (hrhc),(hrlc)` (L5180-5186); low-R:
+    # `variants (lrhc),(lrlc)` (L5228-5234). The high/low *metal* sheet
+    # resistances on `metals` above are from L5166-5170 / L5214-5218 (li1 is
+    # `allli`, L5165 / L5213; nominal L5117-5122). Unlike gf180mcu the cuts
+    # differ per layer.
+    # `lower_metal_index` is the level the cut lands on: mcon = li1->met1,
+    # m2c = met1->met2, m3c = met2->met3, via3 = met3->met4, via4 =
+    # met4->met5. Not curated: the diffusion/poly contacts (`ndc`, `pdc`,
+    # `pc`, ...), `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack).
+    cuts=(
+        CutRC("mcon", 0, nominal_ohm=9.3, high_ohm=23.0, low_ohm=1.6),
+        CutRC("m2c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=2.0),
+        CutRC("m3c", 2, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via3", 3, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
+        CutRC("via4", 4, nominal_ohm=0.38, high_ohm=0.891, low_ohm=0.012),
     ),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
     # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`

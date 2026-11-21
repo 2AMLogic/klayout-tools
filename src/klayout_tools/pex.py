@@ -176,8 +176,9 @@ What is deliberately **not** weakened:
   measured rows -- so a reader of the evidence can tell a `klt sim`-measured
   record from an externally-measured one, and reproduce the latter.
 
-Two testbench-swap diagnostics are inapplicable here and are reported as
-``null``: ``pin_count_mismatch`` and ``flat_dut_mismatch`` both exist
+Three testbench-swap diagnostics are inapplicable here and are reported as
+``null``: ``pin_count_mismatch``, ``flat_dut_mismatch`` and
+``pin_order_mismatch`` (issue #2890) all exist
 because testbench mode reuses the testbench's own unmodified ``X...``
 instantiation line against both netlists, which a caller-supplied command
 does not do (it builds each side's deck itself). ``model_mismatch`` is
@@ -205,6 +206,8 @@ each row's comparison does and does not account for.
 
 from __future__ import annotations
 
+import collections
+import contextlib
 import copy
 import json
 import math
@@ -215,8 +218,11 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance
-from ._paths import _fold_spice_continuations, _resolve_relative
+from . import env_provenance, output_lock, pex_async, pex_runset, pex_sim_evidence
+from ._jsonnum import is_number
+from ._paths import _resolve_relative
+from ._provenance import content_hash, sha256_file
+from ._text import read_text as _read_text
 from .coverage import (
     REASON_NO_DELTA_ROWS,
     build_check_coverage,
@@ -225,11 +231,36 @@ from .coverage import (
     work_id,
 )
 from .extract import ExtractError, run_extract
+from .pex_asap7 import (
+    adapt_leg_netlists,
+    netlist_adaptation_for_deck,
+    with_fidelity_warnings,
+)
+from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
+    BODY_BIAS_BIASED,
+    BODY_BIAS_TIED,
+    BODY_BIAS_UNBIASED,
+    TIE_SOURCE_DECLARED,
+    _body_bias_report,
+)
+from .pex_netlist_text import (
+    _device_model_counts,
+    _dut_declares_a_circuit,
+    _expand_reference_includes,
+    _has_include_card,
+    _instantiated_model_counts,
+    _logical_cards,
+    _reference_is_hierarchical,
+    _subckt_interfaces,
+)
+from .pex_resistance_graph import _resistance_graph_echo
 from .sim import SimError, load_request, run_sim
+from .spice_flatten import SpiceFlattenError, flatten_spice
 
 __all__ = [
     "MEASURE_COMMAND_TIMEOUT_S",
     "MEASUREMENT_MODE_COMMAND",
+    "MEASUREMENT_MODE_EXTRACT_ONLY",
     "MEASUREMENT_MODE_TESTBENCH",
     "PexError",
     "run_pex",
@@ -245,7 +276,7 @@ __all__ = [
 #: evidence record wraps this response unmodified
 #: (`docs/design/sim-evidence-discipline-spike.md`), so an absolute path
 #: here used to leak the author's home directory/worktree layout into every
-#: such record. See `_report_path` below.
+#: such record. See `env_provenance.repo_relative_path`.
 SCHEMA_VERSION = 2
 
 #: A `.include`/`.inc` directive line, ngspice's two spellings, either
@@ -267,30 +298,6 @@ _PIN_COUNT_MISMATCH_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A ``.subckt`` header line -- ``group("body")`` is everything after the
-#: directive (the subcircuit name, then its pins, then optional
-#: ``name=value`` parameters). See :func:`_subckt_interfaces`.
-_SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
-
-#: Issue #1983: ``body_bias.status`` values -- whether the extracted netlist
-#: this run re-simulated has a DC bias path for every device body.
-#:
-#: - ``"biased"``: every PMOS body terminal resolved to a real, named net, so
-#:   both legs' operating points are comparable.
-#: - ``"unbiased"``: at least one PMOS body landed on an anonymous,
-#:   KLayout-synthesized net with **no DC bias path at all** (``klt
-#:   extract``'s own ``unbiased_pmos_body_nets[]``, issue #555). Per
-#:   ``docs/cli/extract.md`` -> "Coverage", that makes a full-circuit
-#:   resimulation of the extracted netlist "physically wrong, not merely
-#:   imprecise" -- the run converges and produces numbers, and those numbers
-#:   are not comparable to the schematic leg's.
-#:
-#: Deliberately a *separate* verdict from this command's top-level
-#: ``status``, which stays exactly what it has always been (every graded
-#: ``delta[]`` row met its tolerance). See :func:`_body_bias_report`.
-BODY_BIAS_BIASED = "biased"
-BODY_BIAS_UNBIASED = "unbiased"
-
 #: Issue #2478: ``measurement.mode`` values -- how this run's two legs were
 #: measured.
 #:
@@ -302,6 +309,7 @@ BODY_BIAS_UNBIASED = "unbiased"
 #:   module's "Measuring with a caller-supplied command" docstring section.
 MEASUREMENT_MODE_TESTBENCH = "testbench"
 MEASUREMENT_MODE_COMMAND = "command"
+MEASUREMENT_MODE_EXTRACT_ONLY = "extract-only"
 
 #: Default wall-clock cap on **one** ``--measure-command`` invocation (there
 #: are exactly two per run, one per side), in seconds. Deliberately the same
@@ -312,10 +320,6 @@ MEASUREMENT_MODE_COMMAND = "command"
 #: Override per run with ``measure_timeout_s`` (``klt pex
 #: --measure-timeout-s``).
 MEASURE_COMMAND_TIMEOUT_S = 1800.0
-
-#: The two sides a ``--measure-command`` is invoked for, in invocation order
-#: -- also the two keys of the report's ``measurement.sides`` object.
-_MEASURE_SIDES = ("schematic", "extracted")
 
 #: A measurement document row's permitted ``status`` values -- the same three
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
@@ -333,69 +337,139 @@ class PexError(Exception):
 
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- matching every other `klt` verb's error contract.
+
+    ``code`` is an optional machine-readable classification emitted as the
+    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
+    (every pre-#2889 error) keeps the envelope byte-identical.
     """
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
-def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``body_bias`` block (issue #1983): whether the extracted netlist
-    this run re-simulated actually has a DC bias path for every device body.
 
-    Built from the extraction this command drove itself -- ``klt extract``
-    already detects the condition and reports it as
-    ``unbiased_pmos_body_nets[]`` (issue #555), so nothing here re-derives
-    it; this reduces that array to a verdict plus its counts and carries the
-    entries through into `klt pex`'s own envelope.
+def _validate_tie_nets(
+    ties: Sequence[tuple[str, str]], extract_report: Mapping[str, Any]
+) -> None:
+    """Reject a ``--tie-net`` whose extracted half is not one of the
+    extraction's own unbiased nets (issue #4245), naming the valid ones.
 
-    **Why this belongs in the `klt pex` report and not only in the
-    extraction's.** ``docs/cli/extract.md`` states that a PMOS body on an
-    anonymous, synthesized net has no DC bias path at all, which makes a
-    full-circuit resimulation of that netlist *physically wrong, not merely
-    imprecise*. `klt pex`'s entire output is such a resimulation, compared
-    row-by-row against a schematic leg -- so this condition does not merely
-    reduce the precision of a ``delta[]`` row, it invalidates the comparison
-    the row reports. A `klt pex` record is also the artifact
-    ``docs/design-evidence-tiers.md`` item 7 is cited from, and that record
-    never carried the extraction's own JSON: a reader of the evidence had no
-    way to tell a post-layout number measured on a properly-biased netlist
-    from one measured on a floating-body netlist. That is the gap issue
-    #1983 reported.
-
-    **Reported, not enforced.** ``status`` is untouched: a run whose deltas
-    all met tolerance still reports ``status: "pass"`` with
-    ``body_bias.status: "unbiased"``. Whether an unbiased body should
-    invalidate the verdict is a policy question for the consumer of the
-    evidence (see ``docs/cli/signoff.md`` and
-    ``docs/design-evidence-tiers.md`` item 7), not one this command answers
-    on the caller's behalf -- and answering it here would retroactively fail
-    every design on a PDK whose deck has no well-tap mechanism, which is a
-    separate decision from making the condition visible.
-
-    ``unbiased_pmos_body_nets`` is carried verbatim (same field name, same
-    ``{"device", "net"}`` entry shape as ``klt extract``'s own) rather than
-    re-spelled, so a reader who knows one artifact already knows the other.
+    Confining the flag to reported floating bodies stops it rewriting
+    arbitrary nets of the extracted netlist.
     """
-    entries = list(extract_report.get("unbiased_pmos_body_nets") or [])
-    return {
-        "status": BODY_BIAS_UNBIASED if entries else BODY_BIAS_BIASED,
-        "unbiased_device_count": len(entries),
-        "unbiased_nets": sorted({entry["net"] for entry in entries}),
-        "unbiased_pmos_body_nets": entries,
-    }
+    valid = sorted(
+        {e["net"] for e in extract_report.get("unbiased_pmos_body_nets") or []}
+    )
+    for extracted, _schematic in ties:
+        if extracted not in valid:
+            listing = (
+                ", ".join(repr(net) for net in valid)
+                if valid
+                else "none -- this extraction reported no unbiased net"
+            )
+            raise PexError(
+                f"--tie-net: {extracted!r} is not an unbiased well/body net of "
+                f"this extraction (valid: {listing}). Anonymous net names are "
+                "synthesized per extraction; read them from "
+                "`body_bias.unbiased_nets` of an untied run.",
+                code="invalid_tie_net",
+            )
 
 
-def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
-    """Normalise one input-path field for this module's own JSON response
-    (issue #1261) -- a thin, module-local wrapper over
-    :func:`~klayout_tools.env_provenance.repo_relative_path` rather than a
-    second normalizer, so `klt pex`'s reports and `klt env-provenance`'s own
-    emitter agree on exactly one `{path, scope}` shape.
+def _apply_tie_nets(netlist_path: str, ties: Sequence[tuple[str, str]]) -> None:
+    """Merge each tied extracted net into its schematic net, in place, in
+    ``netlist_path`` (issue #4245).
 
-    Deliberately **not** applied to the nested `pin_count_mismatch`/
-    `flat_dut_mismatch` diagnostic blocks' own `netlist` fields -- those are
-    out of this issue's confirmed scope (tracked separately if it turns out
-    to matter) and stay raw strings, unchanged.
+    Only whole whitespace-delimited tokens on device/instance cards are
+    rewritten (never comments, directives or ``name=value`` parameters), and
+    all ties are applied in one pass so a chain such as ``a=b`` / ``b=c``
+    cannot cascade.
     """
-    return env_provenance.repo_relative_path(path, repo_root=repo_root)
+    mapping = dict(ties)
+    pattern = re.compile(
+        r"(?<!\S)(" + "|".join(re.escape(n) for n in mapping) + r")(?!\S)"
+    )
+    with open(netlist_path, encoding="utf-8", newline="") as handle:
+        lines = handle.read().splitlines(keepends=True)
+    seen: set[str] = set()
+
+    def swap(match: re.Match[str]) -> str:
+        seen.add(match.group(1))
+        return mapping[match.group(1)]
+
+    out = [
+        line if line.lstrip().startswith(("*", ".")) else pattern.sub(swap, line)
+        for line in lines
+    ]
+    missing = [net for net in mapping if net not in seen]
+    if missing:
+        raise PexError(
+            f"--tie-net: {missing[0]!r} does not appear on any device card of "
+            f"the extracted netlist {netlist_path}",
+            code="invalid_tie_net",
+        )
+    with open(netlist_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("".join(out))
+
+
+def _tie_nets_in_legs(
+    ties: Sequence[tuple[str, str]] | None,
+    extract_report: Mapping[str, Any],
+    extracted_netlist_path: str,
+    device_only_netlist_path: str | None,
+) -> None:
+    """Validate ``ties`` against the extraction, then apply them to every
+    netlist a simulated leg reads (issue #4245). A no-op when ``ties`` is empty.
+    """
+    if not ties:
+        return
+    _validate_tie_nets(ties, extract_report)
+    _apply_tie_nets(extracted_netlist_path, ties)
+    if device_only_netlist_path is not None:
+        _apply_tie_nets(device_only_netlist_path, ties)
+
+
+def _parasitic_integrity_report(
+    parasitics: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """The ``extraction.parasitic_integrity`` block (issue #2764):
+    propagate the extraction's own per-net parasitic RC network integrity
+    diagnostics into this command's summary.
+
+    ``klt pex`` re-simulates the netlist the extraction wrote, so a broken
+    emitted network (a ladder split into islands, a shorted pair, a
+    NaN-valued resistor) is exactly the kind of defect that would otherwise
+    surface only as a confusing ``delta[]`` row. ``klt extract --parasitics``
+    already checks the network it emits and reports per-net status values;
+    `klt pex` carries them through so a committed pex record is
+    self-describing about the health of the network its numbers were
+    measured on.
+
+    ``None`` when the extraction report carries no ``integrity`` summary
+    (never for this command's own runs -- extraction always runs with
+    ``--parasitics`` here -- but kept for a caller-supplied report from an
+    older build). The per-net entries are re-attached from the extraction's
+    ``parasitics.nets[]`` entries (where ``run_extract`` inlines them, so
+    rerun canonicalization re-sorts them together) in that same order,
+    verbatim, under the summary's ``nets`` key -- byte-identical payloads to
+    ``klt extract``'s own inline blocks. This block is reported, never
+    folded into ``status``: like ``body_bias`` above, grading on it is a
+    policy decision for the evidence consumer, not one this command makes.
+    """
+    summary = parasitics.get("integrity")
+    if not isinstance(summary, dict):
+        return None
+    nets = [
+        {
+            "net": entry.get("net"),
+            "net_id": entry.get("net_id"),
+            "rc_model": entry.get("rc_model"),
+            "integrity": entry.get("integrity"),
+        }
+        for entry in parasitics.get("nets") or []
+        if isinstance(entry, dict) and entry.get("integrity") is not None
+    ]
+    return {**summary, "nets": nets}
 
 
 def _strip_quotes(token: str) -> str:
@@ -431,8 +505,12 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
     leaving the real DUT in place and reporting the wrong
     ``reference_netlist``. A hard error naming every matched line is the
     documented behaviour instead; the fix is to leave exactly one
-    `.include`/`.inc` line in the testbench body (fold the others into the
-    DUT file, or inline them).
+    `.include`/`.inc` line in the testbench body. Content both simulation
+    legs need (a PDK switch-parameter file, shared ``.param`` cards) must
+    NOT be folded into the DUT file: the selected line is replaced by the
+    extracted netlist for the extracted-side run, so anything folded into
+    the schematic DUT is present on the schematic side only. Inline it
+    into the testbench body instead.
     """
     matches: list[tuple[int, str, str]] = []
     for index, line in enumerate(body_text.splitlines()):
@@ -450,10 +528,14 @@ def _find_dut_include(body_text: str, body_dir: str) -> tuple[int, str]:
             "(before this was an error it silently swapped the first one, "
             "which re-pointed the wrong file and reported the wrong "
             "reference_netlist -- issue #1030). Leave exactly one "
-            "`.include`/`.inc` line in the testbench body: fold any other "
-            "included file (a PDK switch-parameter file, shared `.param` "
-            "cards) into the DUT netlist itself or inline it into the "
-            "testbench"
+            "`.include`/`.inc` line in the testbench body, the DUT. Do not "
+            "fold another included file (a PDK switch-parameter file, shared "
+            "`.param` cards) into that DUT file: the DUT include is replaced "
+            "by the extracted netlist on the extracted side, so folded "
+            "content would exist on the schematic side only. Inline content "
+            "both sides need into the testbench body instead; if that is "
+            "not possible, this testbench cannot be represented by the "
+            "current request shape"
         )
     if matches:
         index, _text, target = matches[0]
@@ -530,89 +612,6 @@ def _check_dut_declares_a_circuit(testbench_path: str, dut_path: str) -> None:
         "its single `.include`/`.inc` line names the schematic DUT file "
         "itself"
     )
-
-
-def _read_text(path: str) -> str | None:
-    """``path``'s text, or ``None`` if it cannot be read -- every caller here
-    is building a *diagnostic*, so an unreadable file degrades the diagnostic
-    rather than raising over it."""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
-
-
-def _logical_lines(netlist_text: str) -> list[str]:
-    """``netlist_text``'s lines with SPICE ``+`` continuation lines folded
-    into the line they continue, and inline ``$``/``;`` comments stripped --
-    so :func:`_subckt_interfaces` sees each `.subckt` header whole."""
-    lines = [
-        re.split(r"\s\$|;", raw, maxsplit=1)[0].rstrip()
-        for raw in netlist_text.splitlines()
-    ]
-    return _fold_spice_continuations(lines)
-
-
-def _subckt_interfaces(netlist_text: str) -> dict[str, tuple[str, list[str]]]:
-    """``{lowercased subckt name: (name as written, [pin names])}`` for every
-    ``.subckt`` header in ``netlist_text``, in file order.
-
-    Pins stop at the first ``name=value`` token (or a ``params:`` keyword) --
-    a `.subckt` header's trailing default-parameter assignments are not part
-    of its terminal list. Lowercased keys because ngspice itself is
-    case-insensitive about subcircuit names, and `klt extract` writes an
-    upper-case ``.SUBCKT`` header where a hand-written schematic netlist
-    often does not.
-    """
-    interfaces: dict[str, tuple[str, list[str]]] = {}
-    for line in _logical_lines(netlist_text):
-        match = _SUBCKT_RE.match(line)
-        if not match:
-            continue
-        tokens = match.group("body").split()
-        name = tokens[0]
-        pins: list[str] = []
-        for token in tokens[1:]:
-            if "=" in token or token.lower() in ("params:", "param:"):
-                break
-            pins.append(token)
-        interfaces.setdefault(name.lower(), (name, pins))
-    return interfaces
-
-
-def _dut_declares_a_circuit(text: str) -> bool:
-    """``True`` if ``text`` -- a ``.include``/``.inc`` target's own file
-    contents -- declares at least one ``.subckt`` header or circuit element
-    card of its own, i.e. plausibly *is* a DUT netlist rather than
-    parameter/model/corner-file content with no circuit of its own (Gap 1,
-    issue #1255: a testbench whose only `.include` happens to name a shared
-    corner/parameter file used to be silently swapped in as if it were the
-    DUT).
-
-    Deliberately permissive about *how* the DUT is written: both a
-    ``.SUBCKT``-wrapped file (any header at all, even an empty body --
-    ``_subckt_interfaces`` only parses headers) and a flat file (bare device
-    cards, no wrapper) pass this check; only a file with *no* circuit
-    content at all -- pure ``.param``/``.model``/``.lib``/comment/`.` control
-    cards -- fails it. A flat schematic DUT against a `.SUBCKT`-wrapped
-    extraction is a *different*, separately-diagnosed condition -- see
-    :func:`_flat_dut_mismatch`.
-
-    Every non-blank line that survives comment-stripping and is not itself
-    a `.`-prefixed control card is treated as a circuit element -- SPICE's
-    own convention is that such a line names a device/subcircuit instance
-    (``R``/``C``/``L``/``M``/``Q``/``D``/``X``/``V``/``I``/...), so no fixed
-    prefix list is needed.
-    """
-    if _subckt_interfaces(text):
-        return True
-    for line in _logical_lines(text):
-        stripped = line.strip()
-        if not stripped or stripped.startswith(("*", ".")):
-            continue
-        return True
-    return False
 
 
 def _mismatch_side(
@@ -708,6 +707,116 @@ def _pin_count_mismatch(
     }
 
 
+def _refuse_submit_on_preflight_mismatch(
+    *,
+    submitting: bool,
+    flat_dut_mismatch: dict[str, Any] | None,
+    pin_count_mismatch: dict[str, Any] | None,
+    pin_order_mismatch: dict[str, Any] | None,
+) -> None:
+    """Issue #4696: raise :class:`PexError` for the first fired static
+    pre-flight diagnostic (which skips the extracted leg), so ``--submit-only``
+    refuses before any leg is submitted. No-op unless ``submitting``."""
+    if not submitting:
+        return
+    for code, diagnostic in (
+        ("flat_dut_mismatch", flat_dut_mismatch),
+        ("pin_count_mismatch", pin_count_mismatch),
+        ("pin_order_mismatch", pin_order_mismatch),
+    ):
+        if diagnostic is not None:
+            raise PexError(
+                f"--submit-only: the extracted leg cannot be submitted "
+                f"({code}): {diagnostic.get('detail') or code}",
+                code=code,
+            )
+
+
+def _no_preflight_mismatch(*diagnostics: dict[str, Any] | None) -> bool:
+    """True when none of the pre-flight mismatch diagnostics fired, i.e. the
+    extracted-side simulation is worth attempting."""
+    return all(d is None for d in diagnostics)
+
+
+def _pin_order_preflight(
+    command_mode: bool,
+    earlier: tuple[dict[str, Any] | None, ...],
+    *,
+    extract_only: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any] | None:
+    """The ``pin_order_mismatch`` pre-flight (issue #2890), gated: ``None`` in
+    ``--measure-command`` mode, ``None`` in ``--extract-only`` mode -- an
+    explicit gate since issue #5477, no longer implied by an empty
+    ``reference_netlist`` (:func:`run_pex` states why once; its siblings
+    ``flat_dut_mismatch``/``pin_count_mismatch`` are gated at their own call
+    sites) -- and once an earlier (mutually exclusive) pre-flight diagnostic
+    has fired; otherwise :func:`_pin_order_mismatch`."""
+    if command_mode or extract_only or not _no_preflight_mismatch(*earlier):
+        return None
+    return _pin_order_mismatch(**kwargs)
+
+
+def _pin_order_mismatch(
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+    top_cell: str,
+) -> dict[str, Any] | None:
+    """The structured ``pin_order_mismatch`` diagnostic (issue #2890), or
+    ``None``.
+
+    `klt pex` reuses the testbench's own positional ``X...`` instantiation
+    line on both legs, but `klt extract` writes the ``.SUBCKT`` header pins
+    in a deterministic order (real ports first, then parasitic references,
+    each alphabetical) while a schematic DUT declares them in symbol order.
+    When both sides declare ``top_cell`` with the same number of pins and the
+    same pin *set* (case-insensitively) but a different *sequence*,
+    :func:`_pin_count_mismatch` stays silent and the extracted leg simulates
+    with signals wired to the wrong pins. Same shape as
+    :func:`_pin_count_mismatch` (``ngspice_message`` is always ``None``: no
+    engine is consulted). Differing counts or pin sets are
+    :func:`_pin_count_mismatch`'s territory; a flat schematic DUT is
+    :func:`_flat_dut_mismatch`'s.
+    """
+    schematic_interface = _subckt_interfaces(_read_text(reference_netlist) or "").get(
+        top_cell.lower()
+    )
+    extracted_interface = _subckt_interfaces(_read_text(extracted_netlist) or "").get(
+        top_cell.lower()
+    )
+    if schematic_interface is None or extracted_interface is None:
+        return None
+    schematic_pins = [pin.lower() for pin in schematic_interface[1]]
+    extracted_pins = [pin.lower() for pin in extracted_interface[1]]
+    if len(schematic_pins) != len(extracted_pins):
+        return None
+    if sorted(schematic_pins) != sorted(extracted_pins):
+        return None
+    if schematic_pins == extracted_pins:
+        return None
+    return {
+        "subcircuit": extracted_interface[0],
+        "schematic": _mismatch_side(reference_netlist, schematic_interface),
+        "extracted": _mismatch_side(extracted_netlist, extracted_interface),
+        "ngspice_message": None,
+        "detail": (
+            f"the schematic DUT declares `.SUBCKT {schematic_interface[0]}` "
+            f"with pins in the order ({', '.join(schematic_interface[1])}) "
+            "but the extracted netlist declares the same pins in the order "
+            f"({', '.join(extracted_interface[1])}) -- klt pex reuses the "
+            "testbench's positional subcircuit instantiation line "
+            "unmodified on both legs, so the extracted leg would wire "
+            "signals and supplies to the wrong pins and report meaningless "
+            "deltas. The extracted order is deterministic (real ports "
+            "first, then parasitic references, each alphabetical; `--pins` "
+            "overrides it); or wrap the schematic DUT in a `.SUBCKT` that "
+            "declares the pins in the extracted order so one instantiation "
+            "line is valid for both legs"
+        ),
+    }
+
+
 def _flat_dut_mismatch(
     *,
     reference_netlist: str,
@@ -773,8 +882,10 @@ def _flat_dut_mismatch(
             "source/probe the testbench wires to the flat DUT's own nodes "
             "is left disconnected from the extracted netlist's `.SUBCKT` "
             "body on the extracted-side run, which may simulate to "
-            "completion and report a spurious value rather than error. Wrap "
-            "the schematic DUT in a matching `.SUBCKT ... .ENDS` (with the "
+            "completion and report a spurious value rather than error. Under "
+            "`--flatten-schematic` klt pex wraps a fragment DUT for you; "
+            "otherwise wrap the schematic DUT in a matching "
+            "`.SUBCKT ... .ENDS` (with the "
             "same top-level pin list `klt extract` produces) so the "
             "testbench's own instantiation line can be reused unmodified "
             "on both sides, the same convention `pin_count_mismatch` "
@@ -783,89 +894,8 @@ def _flat_dut_mismatch(
     }
 
 
-#: Device-instance card prefixes whose trailing (non-node) token names a
-#: model or `.subckt` -- see :func:`_device_model_counts`. Deliberately
-#: excludes passive cards (`R`/`C`/`L`) and sources (`V`/`I`): those are out
-#: of :func:`_model_mismatch`'s scope (issue #2402's own Acceptance
-#: Criteria -- "device-instance-based ... on `M`/`X` cards or equivalent",
-#: not every card that happens to carry a trailing token).
-_DEVICE_MODEL_CARD_PREFIXES = "MXQD"
-
-
-def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
-    """``{lowercased model/subcircuit name: (name as written, instance
-    count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
-    extract`'s own convention for a bound MOS/bipolar device -- see
-    ``pdk_models.py``'s ``_ModelBindingSpiceWriterDelegate.write_device``)/
-    `Q` (raw BJT)/`D` (raw diode) device-instance card in ``netlist_text``,
-    in file order.
-
-    The model/subcircuit name is *the last whitespace token on the card that
-    is not a ``name=value`` parameter assignment* -- SPICE's own convention
-    is that a device card's trailing tokens, after its nodes, are either
-    exactly one model/subcircuit name or a run of ``name=value`` parameters
-    (e.g. ``L=``/``W=``/``AS=``/``AD=``), never both interleaved. This holds
-    identically for a raw ``M<name> d g s b <model> [L=... W=...]`` card and
-    for an ``X<name> <nodes...> <subckt> [param=value ...]`` subcircuit
-    call, so one rule covers both without needing to know each card's exact
-    node count up front.
-
-    Lowercased keys, original-case values -- the same case-insensitive-key
-    convention :func:`_subckt_interfaces` uses, since ngspice is
-    case-insensitive about model/subcircuit names the same way it is about
-    `.subckt` names.
-    """
-    counts: dict[str, tuple[str, int]] = {}
-    for line in _logical_lines(netlist_text):
-        stripped = line.strip()
-        if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
-            continue
-        parts = [token for token in stripped.split() if "=" not in token]
-        if len(parts) < 2:
-            continue  # no nodes/model at all -- not a real device instance
-        name = parts[-1]
-        key = name.lower()
-        existing_name, existing_count = counts.get(key, (name, 0))
-        counts[key] = (existing_name, existing_count + 1)
-    return counts
-
-
-def _reference_is_hierarchical(netlist_text: str) -> bool:
-    """``True`` if ``netlist_text`` contains an `X` device-instance card
-    whose target names a `.subckt` **defined elsewhere in the same file**
-    -- i.e. the netlist is hierarchical (a leaf `.subckt` plus one or more
-    instance calls of it) rather than flat.
-
-    `klt extract`'s own output is always flat, by design
-    (``docs/cli/extract.md``: "Extraction is flat, not hierarchical"), so a
-    hierarchical *reference* netlist compared against it is exactly the
-    shape issue #1085 already documents for `klt lvs` (a leaf `.subckt`
-    called N times on the reference side has no counterpart circuit on the
-    flat extracted side to pair against). The same mismatch shows up here:
-    a device nested inside a locally-defined `.subckt` appears once per
-    *definition* in `_device_model_counts`'s card scan, not once per
-    physical *instance*, while the flat extracted side always counts once
-    per instance -- so a purely hierarchy-representation difference can
-    produce the same divergent multiset a genuine device-flavour swap
-    would, without being one. See :func:`_model_mismatch`.
-    """
-    local_subckts = set(_subckt_interfaces(netlist_text))
-    if not local_subckts:
-        return False
-    for line in _logical_lines(netlist_text):
-        stripped = line.strip()
-        if not stripped or stripped[0].upper() != "X":
-            continue
-        parts = [token for token in stripped.split() if "=" not in token]
-        if len(parts) < 2:
-            continue
-        if parts[-1].lower() in local_subckts:
-            return True
-    return False
-
-
 def _model_mismatch(
-    *, reference_netlist: str, extracted_netlist: str
+    *, reference_netlist: str, extracted_netlist: str, extracted_top: str | None = None
 ) -> dict[str, Any] | None:
     """The structured ``model_mismatch`` diagnostic (issue #2402), or
     ``None`` when the reference (schematic) and extracted netlists'
@@ -905,14 +935,30 @@ def _model_mismatch(
     should not be blocked; the point is only that the divergence must be
     *visible* rather than silently folded into an ordinary, gradeable delta.
 
+    **A hierarchical extraction is expanded, not scanned** (issue #6559): the
+    runset engine writes every circuit it produced, so the extracted side is
+    counted as the devices instantiated from ``extracted_top``
+    (:func:`_instantiated_model_counts`) -- a local cell name is never a
+    device family. A flat extraction counts exactly as before.
+
     The comparison is a multiset (instance *count* per model name, not just
     which names appear): a run whose two sides name the same models but a
     different number of each still reports the divergence, since that
     could equally mean a device was dropped/duplicated on one side.
+
+    The additive ``kind`` field (issue #3054) separates the two meanings:
+    ``"model_set"`` when either ``*_only`` list is non-empty (a wrong model
+    flavour), ``"count_only"`` when the model sets are identical and only
+    the instance counts differ (usually finger/multiplier decomposition),
+    each with its own ``detail`` wording.
     """
     reference_text = _read_text(reference_netlist) or ""
-    reference_counts = _device_model_counts(reference_text)
-    extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
+    reference_counts = _device_model_counts(
+        _expand_reference_includes(reference_text, reference_netlist)
+    )
+    extracted_counts = _instantiated_model_counts(
+        _read_text(extracted_netlist) or "", extracted_top
+    )
 
     reference_multiset = {
         key: count for key, (_name, count) in reference_counts.items()
@@ -934,20 +980,43 @@ def _model_mismatch(
         if key not in reference_multiset
     )
 
+    kind = "model_set" if reference_only or extracted_only else "count_only"
     hierarchical_reference = _reference_is_hierarchical(reference_text)
-    if hierarchical_reference:
+    if not reference_counts and _has_include_card(reference_text):
         unrelated_clause = (
-            "the reference netlist is hierarchical (it instantiates at "
-            "least one locally-defined `.subckt`), while `klt extract`'s "
-            "output is always flat -- see docs/cli/extract.md's "
-            '"Extraction is flat, not hierarchical" note and issue #1085 '
-            "(the same shape `klt lvs`'s `options.flatten_reference` "
-            "exists for). This divergence may simply be a "
-            "hierarchy-representation artifact -- a device nested inside a "
-            "locally-defined `.subckt` is counted once per definition here, "
-            "not once per physical instance -- rather than a genuine "
-            "device-flavour mismatch; verify with a flattened reference "
-            "before treating this as evidence the two sides are unrelated. "
+            "the reference netlist yielded no device cards, and it contains "
+            "an `.include` that could not be resolved or read (missing "
+            "file, `$VAR` path, or include cap), so this divergence may "
+            "only reflect the unread include rather than a genuine "
+            "model-set mismatch. "
+        )
+    elif hierarchical_reference:
+        unrelated_clause = (
+            "the reference netlist is hierarchical (it instantiates at least one "
+            "locally-defined `.subckt`), while `klt extract`'s curated engine "
+            "writes a flat netlist (`--engine klayout-runset` may write a "
+            "hierarchical one) -- see docs/cli/extract.md's \"Extraction is flat, "
+            "not hierarchical\" note and issue #1085 (the same shape `klt lvs`'s "
+            "`options.flatten_reference` exists for). This divergence may simply "
+            "be a hierarchy-representation artifact -- a device nested inside a "
+            "locally-defined `.subckt` is counted once per definition here, not "
+            "once per physical instance -- rather than a genuine device-flavour "
+            "mismatch; re-run with `klt pex --flatten-schematic` (issue #2889), "
+            "which flattens the schematic DUT to PDK leaf devices before the "
+            "schematic-side run, before treating this as evidence the two sides "
+            "are unrelated. "
+        )
+    elif kind == "count_only":
+        unrelated_clause = (
+            "the reference (schematic) and extracted netlists instantiate "
+            "the same device models/`.subckt`s and differ only in how many "
+            "instances of each they carry. The usual cause is "
+            "finger/multiplier decomposition: the layout draws a device as "
+            "several fingers while the schematic has one instance (with "
+            "`nf`/`m`, or none), a difference `klt lvs` has already "
+            "reconciled. It does not by itself make `delta[]` unrelated, "
+            "but representation effects (fingering, AS/AD) are folded "
+            "into `delta[]` alongside the parasitics. "
         )
     else:
         unrelated_clause = (
@@ -958,6 +1027,7 @@ def _model_mismatch(
         )
 
     return {
+        "kind": kind,
         "reference_only": reference_only,
         "extracted_only": extracted_only,
         "counts": {
@@ -982,7 +1052,7 @@ def _model_mismatch(
                 "to the PDK family's default flavour while the reference "
                 "netlist names a different one -- see docs/cli/pex.md's "
                 "`model_mismatch` section"
-                if not hierarchical_reference
+                if kind == "model_set" and not hierarchical_reference
                 else "See docs/cli/pex.md's `model_mismatch` section"
             )
         ),
@@ -1015,6 +1085,18 @@ def _pin_count_mismatch_from_message(
         subcircuit=match.group("subckt"),
         ngspice_message=_match_line(message, match),
     )
+
+
+def _backend_failure(testbench_path: str, exc: SimError) -> dict[str, Any]:
+    """The ``backend_failure`` record for an extracted-side
+    :class:`~klayout_tools.sim.SimError` that is not a pin-count mismatch
+    (issue #2990)."""
+    return {
+        "testbench": testbench_path,
+        "side": "extracted",
+        "message": str(exc),
+        "code": exc.code,
+    }
 
 
 def _pin_count_mismatch_from_report(
@@ -1096,7 +1178,10 @@ def _row_status(
     actually grades): ``"pass"`` unless the extracted measurement itself
     failed or errored, or the schematic side is missing/errored (in which
     case no trustworthy delta exists to report at all -- ``"error"``, never
-    a silently-fabricated ``"pass"``)."""
+    a silently-fabricated ``"pass"``). An optional measurement that is
+    ``"absent"`` (issue #3620) on exactly one side is a lost -- or newly
+    appearing -- figure, so also ``"error"``; absent on both sides is
+    ``"pass"`` (the figure legitimately does not exist)."""
     extracted_status = extracted_measurement["status"]
     schematic_status = (
         schematic_measurement["status"]
@@ -1109,52 +1194,234 @@ def _row_status(
         or extracted_status == "error"
     ):
         return "error"
+    if (schematic_status == "absent") != (extracted_status == "absent"):
+        return "error"
+    if extracted_status == "absent":
+        return "pass"
     if extracted_status == "fail":
         return "fail"
     return "pass"
 
 
+def _side_status(measurement: dict[str, Any] | None) -> str:
+    """One side's own limit status for a delta row's additive
+    ``schematic_status`` / ``extracted_status`` (issue #2989); a missing
+    measurement is ``"error"``, matching :func:`_row_status`."""
+    return measurement["status"] if measurement is not None else "error"
+
+
+#: Issue #3062: the failing stage of an errored ``delta[]`` row, keyed by the
+#: diagnostic / ``SimError`` code that names it. One table so the mapping is
+#: testable; anything absent is ``"unknown"`` (never guessed).
+_ERROR_STAGE_BY_CODE = {
+    "batch_no_capacity": "submit",
+    "batch_concurrency_cap": "submit",
+    "batch_job_failed": "execute",
+    "batch_job_timeout": "execute",
+    "batch_poll_timeout": "execute",
+    "batch_job_interrupted": "execute",
+    "missing_include": "execute",
+    "timeout_budget_unreachable": "execute",
+    "budget_exceeded": "execute",
+    "pin_count_mismatch": "execute",
+    "lost_shard": "collect",
+    "orphaned": "collect",
+}
+
+
+def _error_stage(code: str | None, message: str = "") -> str:
+    """``submit`` / ``execute`` / ``collect`` / ``parse`` / ``unknown`` for
+    one failure (issue #3062). The code table wins; a message that says its
+    output could not be recovered/parsed is ``collect``/``parse``."""
+    if code in _ERROR_STAGE_BY_CODE:
+        return _ERROR_STAGE_BY_CODE[code]
+    lowered = message.lower()
+    if "output recovery" in lowered or "collect" in lowered:
+        return "collect"
+    if "unparseable" in lowered or "could not parse" in lowered:
+        return "parse"
+    return "unknown"
+
+
+def _side_error(
+    side: str,
+    sim_report: Mapping[str, Any] | None,
+    corner_id: str,
+    *,
+    message: str | None = None,
+    code: str | None = None,
+    measurement: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The additive ``error`` object of an errored ``delta[]`` row (issue
+    #3062): ``side``, ``stage``, ``message`` and, when the source has one,
+    ``code`` -- taken from that side's corner ``diagnostics[]`` (first
+    error-severity entry), else from the caller-supplied ``message``/``code``
+    (a ``SimError``), never invented. ``remote`` carries the side's
+    ``environment.remote`` (the batch job id) when present.
+
+    When neither exists, the blamed side's ``measurement`` may carry the
+    ``message`` a ``--measure-command`` harness recorded (issue #4555); the
+    stage is then ``"execute"``."""
+    remote = None
+    if sim_report is not None:
+        remote = (sim_report.get("environment") or {}).get("remote")
+        if message is None:
+            for corner in sim_report.get("corners", []):
+                if corner.get("corner_id") != corner_id:
+                    continue
+                diagnostics = corner.get("diagnostics") or []
+                chosen = next(
+                    (d for d in diagnostics if d.get("severity") == "error"),
+                    diagnostics[0] if diagnostics else None,
+                )
+                if chosen is not None:
+                    message = chosen.get("message") or chosen.get("code")
+                    code = chosen.get("code")
+                break
+    stage = None
+    if not message and measurement is not None and measurement.get("message"):
+        message = measurement["message"]
+        stage = "execute"
+    text = message or "no diagnostic was recorded for this errored row"
+    error: dict[str, Any] = {
+        "side": side,
+        "stage": stage or _error_stage(code, text),
+        "message": text,
+    }
+    if code:
+        error["code"] = code
+    if remote is not None:
+        error["remote"] = copy.deepcopy(remote)
+    return error
+
+
+def _device_only_fields(
+    schematic_value: Any,
+    extracted_value: Any,
+    device_only_measurement: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The additive ``--device-only-leg`` fields of one delta row (issue
+    #3298): the parasitic-free leg's own value and the two components of
+    ``delta_pct``, each by the same :func:`_delta_pct` rule -- representation
+    is device-only vs schematic, parasitic is extracted vs device-only, so
+    ``(1+r/100)(1+p/100) == 1+delta_pct/100`` for positive-valued
+    measurements. ``device_only_measurement`` is ``None`` when the leg
+    produced nothing for this row: every field is then ``null`` and
+    ``device_only_status`` is ``"error"``, leaving the row's own ``status``
+    and ``delta_pct`` untouched."""
+    value = (
+        device_only_measurement["value"]
+        if device_only_measurement is not None
+        else None
+    )
+    return {
+        "device_only_value": value,
+        "representation_delta_pct": _delta_pct(schematic_value, value),
+        "parasitic_delta_pct": _delta_pct(value, extracted_value),
+        "device_only_status": (
+            device_only_measurement["status"]
+            if device_only_measurement is not None and value is not None
+            else "error"
+        ),
+    }
+
+
 def _build_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
     extracted_report: dict[str, Any],
+    device_only_report: dict[str, Any] | None = None,
+    device_only_leg: bool = False,
 ) -> list[dict[str, Any]]:
     schematic_index = _index_corner_measurements(schematic_report)
+    device_only_index = (
+        _index_corner_measurements(device_only_report)
+        if device_only_report is not None
+        else {}
+    )
     rows: list[dict[str, Any]] = []
     for corner in extracted_report["corners"]:
         corner_id = corner["corner_id"]
         schematic_measurements = schematic_index.get(corner_id, {})
         for extracted_measurement in corner["measurements"]:
             name = extracted_measurement["name"]
-            spec_row = name if spec_row_prefix is None else f"{spec_row_prefix}.{name}"
             schematic_measurement = schematic_measurements.get(name)
-            rows.append(
-                {
-                    "spec_row": spec_row,
-                    "corner_id": corner_id,
-                    "schematic_value": (
-                        schematic_measurement["value"]
-                        if schematic_measurement is not None
-                        else None
-                    ),
-                    "extracted_value": extracted_measurement["value"],
-                    "delta_pct": _delta_pct(
-                        schematic_measurement["value"]
-                        if schematic_measurement is not None
-                        else None,
-                        extracted_measurement["value"],
-                    ),
-                    "status": _row_status(schematic_measurement, extracted_measurement),
-                }
+            schematic_value = (
+                schematic_measurement["value"]
+                if schematic_measurement is not None
+                else None
             )
+            row = {
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
+                "corner_id": corner_id,
+                "schematic_value": schematic_value,
+                "extracted_value": extracted_measurement["value"],
+                "delta_pct": _delta_pct(
+                    schematic_value, extracted_measurement["value"]
+                ),
+                "status": _row_status(schematic_measurement, extracted_measurement),
+                "schematic_status": _side_status(schematic_measurement),
+                "extracted_status": _side_status(extracted_measurement),
+            }
+            if row["status"] == "error":
+                # Issue #3062: blame the schematic side when it is the one
+                # with no trustworthy value, else the extracted side.
+                # Issue #3620: an asymmetric ``absent`` blames the absent side.
+                schematic_bad = schematic_measurement is None or (
+                    schematic_measurement["status"] == "error"
+                    or (
+                        schematic_measurement["status"] == "absent"
+                        and extracted_measurement["status"] != "absent"
+                    )
+                )
+                row["error"] = (
+                    _side_error(
+                        "schematic",
+                        schematic_report,
+                        corner_id,
+                        measurement=schematic_measurement,
+                    )
+                    if schematic_bad
+                    else _side_error(
+                        "extracted",
+                        extracted_report,
+                        corner_id,
+                        measurement=extracted_measurement,
+                    )
+                )
+            if device_only_leg:
+                row.update(
+                    _device_only_fields(
+                        schematic_value,
+                        extracted_measurement["value"],
+                        device_only_index.get(corner_id, {}).get(name),
+                    )
+                )
+            rows.append(row)
     return rows
+
+
+def _static_extracted_failure(
+    pin_count_mismatch: dict[str, Any] | None,
+    flat_dut_mismatch: dict[str, Any] | None,
+) -> tuple[str, str | None] | None:
+    """``(message, code)`` for a statically detected extracted-side mismatch."""
+    static = pin_count_mismatch or flat_dut_mismatch
+    if static is None or not static.get("detail"):
+        return None
+    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
 
 
 def _unextracted_delta_rows(
     *,
+    testbench: str | None = None,
     spec_row_prefix: str | None,
     schematic_report: dict[str, Any],
+    failure_message: str | None = None,
+    failure_code: str | None = None,
+    device_only_leg: bool = False,
 ) -> list[dict[str, Any]]:
     """Delta rows for a testbench whose *extracted* side never produced a
     response at all (issue #1030's pin-count mismatch, surfaced as a
@@ -1171,18 +1438,28 @@ def _unextracted_delta_rows(
     for corner in schematic_report["corners"]:
         for measurement in corner["measurements"]:
             name = measurement["name"]
-            rows.append(
-                {
-                    "spec_row": name
-                    if spec_row_prefix is None
-                    else f"{spec_row_prefix}.{name}",
-                    "corner_id": corner["corner_id"],
-                    "schematic_value": measurement["value"],
-                    "extracted_value": None,
-                    "delta_pct": None,
-                    "status": "error",
-                }
-            )
+            row = {
+                **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
+                "corner_id": corner["corner_id"],
+                "schematic_value": measurement["value"],
+                "extracted_value": None,
+                "delta_pct": None,
+                "status": "error",
+                "schematic_status": _side_status(measurement),
+                "extracted_status": "error",
+                # Issue #3062: the extracted side has no report, so the
+                # cause is the failure the caller recorded, if any.
+                "error": _side_error(
+                    "extracted",
+                    None,
+                    corner["corner_id"],
+                    message=failure_message,
+                    code=failure_code,
+                ),
+            }
+            if device_only_leg:
+                row.update(_device_only_fields(measurement["value"], None, None))
+            rows.append(row)
     return rows
 
 
@@ -1244,10 +1521,9 @@ def _measurement_number(raw: Any) -> float | None:
     """
     if raw is None:
         return None
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+    if not is_number(raw):
         raise ValueError("must be a number or null")
-    value = float(raw)
-    if not math.isfinite(value):
+    if not math.isfinite(value := float(raw)):
         raise ValueError("must be a finite number (not NaN or Infinity)")
     return value
 
@@ -1408,7 +1684,15 @@ def _normalize_measurement_row(row: Any, *, where: str, fail: Any) -> dict[str, 
             f"{where}.status must be one of "
             f"{', '.join(_MEASUREMENT_STATUSES)} (got {status!r})"
         )
-    return {"name": name, "value": value, "status": status}
+    normalized = {"name": name, "value": value, "status": status}
+    if "message" in row:
+        # Issue #4555: optional free-text reason a harness gives for a
+        # value-less measurement; surfaced only via ``delta[].error``.
+        message = row["message"]
+        if not isinstance(message, str) or not message.strip():
+            raise fail(f"{where}.message must be a non-empty string")
+        normalized["message"] = message
+    return normalized
 
 
 def _run_measure_command(
@@ -1418,6 +1702,7 @@ def _run_measure_command(
     netlist_path: str,
     artifacts_dir: str,
     timeout_s: float,
+    backend: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Run the caller-supplied measurement command (issue #2478) once, for
     one side, and return ``(normalized measurement document, exit status)``.
@@ -1434,6 +1719,11 @@ def _run_measure_command(
       ``$KLT_PEX_ARTIFACTS_DIR`` (a per-side directory under this run's own
       ``--outdir``, created before the command runs, for whatever decks/logs/
       raw files the harness wants to keep).
+
+    When ``backend`` is given (``klt pex --backend``), it is also exported as
+    ``$KLT_PEX_BACKEND`` and ``$KLT_SIM_BACKEND`` so a child ``klt sim`` obeys
+    it (``--backend`` beats the inherited env, as in `klt sim` itself). When
+    it is ``None`` neither is set and the inherited environment applies.
 
     Run with :func:`subprocess.run` and an argv **list** -- never
     ``shell=True`` -- the same way `klt signoff` runs a command-backed
@@ -1453,6 +1743,13 @@ def _run_measure_command(
     env["KLT_PEX_SIDE"] = side
     env["KLT_PEX_NETLIST"] = netlist_path
     env["KLT_PEX_ARTIFACTS_DIR"] = artifacts_dir
+    if backend is not None:
+        env["KLT_PEX_BACKEND"] = backend
+        env["KLT_SIM_BACKEND"] = backend
+    # The parent holds the pex root locked while blocked here; let a nested
+    # `klt sim` under that root (its default `.klt/sim` beside a request in
+    # $KLT_PEX_ARTIFACTS_DIR) proceed instead of tripping outdir_locked (#3291).
+    env[output_lock.INHERIT_ENV] = output_lock.canonical_dir(artifacts_dir)
 
     try:
         completed = subprocess.run(
@@ -1497,23 +1794,79 @@ def _run_measure_command(
     )
 
 
+def _reject_extract_only_conflicts(conflicts: Sequence[tuple[bool, str]]) -> None:
+    """Raise :class:`PexError` naming the first ``--extract-only`` conflict
+    (issue #3739): ``conflicts`` is ``(present, flag-description)`` pairs."""
+    for present, name in conflicts:
+        if present:
+            raise PexError(
+                f"--extract-only cannot be combined with {name}: it "
+                "extracts and reports only, so there is no measurement "
+                "leg for that to apply to"
+            )
+
+
+def _resolve_reference_netlist_path(
+    extract_only: bool,
+    measured_reference_netlist: str | None,
+    dut_paths: Sequence[str],
+) -> str:
+    """The one ``reference_netlist`` for the run: the caller's own
+    ``--reference-netlist`` whenever one was given (``--measure-command``
+    mode, issue #2478, and ``--extract-only`` mode, issue #5477), ``""`` for
+    a bare ``--extract-only`` (no schematic side at all; every consumer of
+    the path is skipped and ``env_provenance.repo_relative_path`` /
+    :func:`content_hash` read it as ``null``), else the testbenches' own
+    single ``.include``d DUT. A non-empty path in ``--extract-only`` mode
+    feeds :func:`_model_mismatch` alone, not a schematic leg -- every
+    measurement-leg consumer stays gated on ``extract_only`` at its own call
+    site; see :func:`run_pex`."""
+    if measured_reference_netlist is not None:
+        return measured_reference_netlist
+    if extract_only:
+        return ""
+    return dut_paths[0]
+
+
 def _validate_measure_mode(
     measure_command: Sequence[str] | None,
     testbench_paths: Sequence[str],
     reference_netlist: str | None,
     measure_timeout_s: float | None,
+    *,
+    extract_only: bool = False,
+    flatten_schematic: bool = False,
+    device_only_leg: bool = False,
 ) -> list[str] | None:
-    """Resolve and validate which of :func:`run_pex`'s two input contracts
+    """Resolve and validate which of :func:`run_pex`'s input contracts
     this call uses (issue #2478) -- returning the measurement command's argv
     when it is ``--measure-command`` mode, and ``None`` when it is the
-    default testbench mode.
+    default testbench mode (or ``--extract-only`` mode, issue #3739, which
+    measures nothing and so is validated here as a third, mutually exclusive
+    contract).
 
     One place, one set of messages, so the library and the CLI can never
     disagree about what "exactly one of the two" means (the CLI deliberately
     does *not* express the exclusion with an argparse mutually-exclusive
     group -- `<testbench>` is a positional, and argparse's own message for
     that case says much less than these do).
+
+    Issue #5477: ``--extract-only`` accepts ``--reference-netlist`` -- it
+    buys the ``model_mismatch`` comparison alone (see :func:`run_pex`), so it
+    is not in the conflict list below; every other conflict is unchanged.
     """
+    if extract_only:
+        _reject_extract_only_conflicts(
+            [
+                (bool(testbench_paths), "a testbench request"),
+                (measure_command is not None, "--measure-command"),
+                (measure_timeout_s is not None, "--measure-timeout-s"),
+                (device_only_leg, "--device-only-leg"),
+                (flatten_schematic, "--flatten-schematic"),
+            ]
+        )
+        return None
+
     if measure_command is None:
         if reference_netlist is not None:
             raise PexError(
@@ -1593,42 +1946,57 @@ def _measure_both_sides(
     work_dir: str,
     timeout_s: float,
     repo_root: str | None,
+    backend: str | None = None,
+    device_only_netlist: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run ``command`` once per side and return ``(delta rows, the report's
     ``measurement.sides`` block)`` (issue #2478).
+
+    ``device_only_netlist`` (``--device-only-leg``, issue #4293) adds a third
+    invocation on the parasitic-free netlist with ``$KLT_PEX_SIDE=device-only``;
+    a failure there is a :class:`PexError`, like the other two sides.
 
     The *diff* is still :func:`_build_delta_rows`, byte-for-byte the function
     testbench mode uses -- the caller-supplied command replaces the two `klt
     sim` calls, nothing else. ``spec_row_prefix`` is ``None`` because there
     is exactly one measurement pair in this mode (and no testbench file to
     name), so a row's ``spec_row`` is the measurement name the caller's own
-    document declared, bare -- the same as a single-testbench run's.
+    document declared, bare, and ``testbench`` is ``null`` (issue #5681).
     """
     side_reports: dict[str, dict[str, Any]] = {}
     sides: dict[str, Any] = {}
-    for side, side_netlist in (
+    legs = [
         ("schematic", reference_netlist),
         ("extracted", extracted_netlist),
-    ):
+    ]
+    if device_only_netlist is not None:
+        legs.append(("device-only", device_only_netlist))
+    for side, side_netlist in legs:
         side_report, exit_status = _run_measure_command(
             command,
             side=side,
             netlist_path=side_netlist,
             artifacts_dir=os.path.join(work_dir, "measure", side),
             timeout_s=timeout_s,
+            backend=backend,
         )
         side_reports[side] = side_report
-        sides[side] = {
-            "netlist": _report_path(side_netlist, repo_root=repo_root),
+        sides[side.replace("-", "_")] = {
+            "netlist": env_provenance.repo_relative_path(
+                side_netlist or None, repo_root=repo_root
+            ),
             "exit_status": exit_status,
             "corner_count": side_report["corner_count"],
             "measurement_names": side_report["measurement_names"],
         }
 
     rows = _build_delta_rows(
+        testbench=None,
         spec_row_prefix=None,
         schematic_report=side_reports["schematic"],
         extracted_report=side_reports["extracted"],
+        device_only_report=side_reports.get("device-only"),
+        device_only_leg=device_only_netlist is not None,
     )
     return rows, sides
 
@@ -1637,6 +2005,8 @@ def _measurement_block(
     command: Sequence[str] | None,
     measure_timeout_s: float | None,
     sides: dict[str, Any] | None,
+    *,
+    extract_only: bool = False,
 ) -> dict[str, Any]:
     """The report's additive ``measurement`` block (issue #2478) -- always
     present, so a reader of a committed record never has to infer how a run's
@@ -1644,8 +2014,16 @@ def _measurement_block(
 
     ``command is None`` is testbench mode, and every other field is ``null``
     there: exactly the information a pre-#2478 report carried, stated rather
-    than implied.
+    than implied. ``extract_only`` (issue #3739) reports ``mode:
+    "extract-only"`` with the same null fields: nothing was measured.
     """
+    if extract_only:
+        return {
+            "mode": MEASUREMENT_MODE_EXTRACT_ONLY,
+            "command": None,
+            "timeout_s": None,
+            "sides": None,
+        }
     if command is None:
         return {
             "mode": MEASUREMENT_MODE_TESTBENCH,
@@ -1685,10 +2063,50 @@ def _prepare_extracted_request(
     work_dir: str,
     label: str,
 ) -> str:
-    """Build (and write, under ``work_dir``) an "extracted-side" copy of the
+    """The extracted-side DUT-swapped request copy -- see
+    :func:`_prepare_dut_swapped_request`."""
+    return _prepare_dut_swapped_request(
+        testbench_path=testbench_path,
+        dut_netlist_path=extracted_netlist_path,
+        work_dir=work_dir,
+        label=label,
+        side="extracted",
+    )
+
+
+def _prepare_schematic_request(
+    *,
+    testbench_path: str,
+    flattened_netlist_path: str,
+    work_dir: str,
+    label: str,
+) -> str:
+    """The schematic-side DUT-swapped request copy ``--flatten-schematic``
+    runs (issue #2889): the testbench's DUT `.include` re-pointed at the
+    flattened schematic DUT, every other field (including the request's own
+    ``netlist_source``) unchanged -- see :func:`_prepare_dut_swapped_request`."""
+    return _prepare_dut_swapped_request(
+        testbench_path=testbench_path,
+        dut_netlist_path=flattened_netlist_path,
+        work_dir=work_dir,
+        label=label,
+        side="schematic",
+    )
+
+
+def _prepare_dut_swapped_request(
+    *,
+    testbench_path: str,
+    dut_netlist_path: str,
+    work_dir: str,
+    label: str,
+    side: str,
+) -> str:
+    """Build (and write, under ``work_dir``) a ``side``-side copy of the
     testbench request at ``testbench_path``: identical in every field except
-    ``netlist`` (re-pointed at a new DUT-swapped body file, see
-    :func:`_rewrite_dut_include`) and ``netlist_source`` (forced to
+    ``netlist`` (re-pointed at a new body file whose DUT `.include` names
+    ``dut_netlist_path``, see :func:`_rewrite_dut_include`) and, for
+    ``side == "extracted"`` only, ``netlist_source`` (forced to
     ``"extracted"``). Returns the written request file's path, suitable for
     :func:`~klayout_tools.sim.run_sim`.
 
@@ -1717,18 +2135,14 @@ def _prepare_extracted_request(
         body_text = handle.read()
     body_dir = os.path.dirname(schematic_body_path)
     include_line, _dut_path = _find_dut_include(body_text, body_dir)
-    extracted_body_text = _rewrite_dut_include(
-        body_text, include_line, extracted_netlist_path
-    )
+    swapped_body_text = _rewrite_dut_include(body_text, include_line, dut_netlist_path)
 
-    extracted_body_path = os.path.join(
-        work_dir, f"{label}.extracted-dut-testbench.spice"
-    )
-    with open(extracted_body_path, "w", encoding="utf-8") as handle:
-        handle.write(extracted_body_text)
+    swapped_body_path = os.path.join(work_dir, f"{label}.{side}-dut-testbench.spice")
+    with open(swapped_body_path, "w", encoding="utf-8") as handle:
+        handle.write(swapped_body_text)
 
-    extracted_request = copy.deepcopy(request)
-    models = extracted_request.get("models")
+    swapped_request = copy.deepcopy(request)
+    models = swapped_request.get("models")
     if (
         isinstance(models, dict)
         and isinstance(models.get("lib"), str)
@@ -1739,20 +2153,349 @@ def _prepare_extracted_request(
     ):
         models = dict(models)
         models["lib"] = _resolve_relative(models["lib"], request_dir)
-        extracted_request["models"] = models
-    extracted_request["netlist"] = extracted_body_path
-    extracted_request["netlist_source"] = "extracted"
+        swapped_request["models"] = models
+    swapped_request["netlist"] = swapped_body_path
+    if side in ("extracted", "device-only"):
+        swapped_request["netlist_source"] = "extracted"
 
-    extracted_request_path = os.path.join(work_dir, f"{label}.extracted-request.json")
-    with open(extracted_request_path, "w", encoding="utf-8") as handle:
-        json.dump(extracted_request, handle, indent=2)
-    return extracted_request_path
+    swapped_request_path = os.path.join(work_dir, f"{label}.{side}-request.json")
+    with open(swapped_request_path, "w", encoding="utf-8") as handle:
+        json.dump(swapped_request, handle, indent=2)
+    return swapped_request_path
 
 
+def _testbench_inputs(
+    testbench_path: str,
+    dut_path: str,
+    identity: Mapping[str, Any],
+    *,
+    repo_root: str | None,
+) -> dict[str, Any]:
+    """The path + content-identity fields of one ``testbenches[]`` entry
+    (issue #2875). Shared by both summary-construction branches so a
+    diagnostic/partial run (extracted side skipped) carries exactly the same
+    keys as a full one. Digests are present even when a path is redacted as
+    ``scope: external``."""
+    return {
+        "request": env_provenance.repo_relative_path(
+            testbench_path or None, repo_root=repo_root
+        ),
+        "request_sha256": identity["request_sha256"],
+        "netlist": env_provenance.repo_relative_path(
+            identity["netlist"] or None, repo_root=repo_root
+        ),
+        "netlist_sha256": identity["netlist_sha256"],
+        "schematic_netlist": env_provenance.repo_relative_path(
+            dut_path or None, repo_root=repo_root
+        ),
+        "schematic_netlist_sha256": identity["schematic_netlist_sha256"],
+    }
+
+
+def _own_pex_root(
+    ownership: contextlib.ExitStack, artifacts_dir: str | None, layout_path: str
+) -> None:
+    """Own the PEX artifact root (``artifacts_dir`` or ``.klt/pex/``) (#2770)."""
+    ownership.enter_context(
+        output_lock.hold_output_dir(
+            artifacts_dir
+            if artifacts_dir
+            else os.path.join(
+                os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex"
+            )
+        )
+    )
+
+
+#: File name of the flattened schematic DUT ``--flatten-schematic`` writes
+#: under the run's artifact root (issue #2889).
+FLATTENED_SCHEMATIC_NAME = "schematic-dut.flat.spice"
+
+
+#: A file-level ``.lib <path> <section>`` card (the path form, not a
+#: ``.lib <section>`` section header inside a library file).
+_LIB_PATH_RE = re.compile(
+    r"^(?P<prefix>\s*\.lib\s+)(?P<target>\S+)(?P<rest>\s+\S+\s*)$", re.IGNORECASE
+)
+
+
+def _absolutize_includes(text: str, source_dir: str) -> str:
+    """``text`` with every relative ``.include``/``.inc``/``.lib <path>``
+    target joined onto ``source_dir`` (issue #2889; absolute, ``$``- and
+    ``~``-prefixed targets are left exactly as written): the flattened
+    copy is written under the artifact root, not next to the original DUT,
+    so a relative path would otherwise resolve against the wrong directory
+    (the #2891 shape)."""
+    lines = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\n")
+        match = _INCLUDE_RE.match(body) or _LIB_PATH_RE.match(body)
+        target = _strip_quotes(match.group("target").strip()) if match else ""
+        if match and target and not target.startswith(("/", "$", "~")):
+            rest = match.groupdict().get("rest") or ""
+            resolved = os.path.join(source_dir, target)
+            line = f'{match.group("prefix")}"{resolved}"{rest}{line[len(body) :]}'
+        lines.append(line)
+    return "".join(lines)
+
+
+def _flatten_schematic_dut(
+    reference_netlist_path: str,
+    *,
+    work_dir: str,
+    top: str,
+    repo_root: str | None,
+    wrap_pins: Sequence[str] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Flatten the schematic DUT ``reference_netlist_path`` to PDK leaf
+    devices (issue #2889, ``klt pex --flatten-schematic``) and write it to
+    ``<work_dir>/schematic-dut.flat.spice``.
+
+    Returns ``(flattened path, schematic_flatten report block)``. Every
+    locally defined subcircuit is inlined; ``top`` (the cell `klt extract`
+    wrapped its output in) is always kept as a `.subckt` definition so the
+    testbench's own `X...` line still binds. `X` targets with no local
+    definition are PDK leaf devices -- SPICE text alone cannot tell them
+    from a missing user subcircuit -- and are listed as
+    ``external_subckts`` for the caller to audit. See
+    :mod:`klayout_tools.spice_flatten` for the full rule set.
+
+    A flattener failure (cycle, `X`-call pin-count mismatch, a card it
+    cannot rename safely, unbalanced `.subckt`/`.ends`) is a
+    :class:`PexError` with ``code="schematic_flatten_<reason>"`` -- never a
+    partially flattened netlist.
+
+    A *fragment* DUT (no ``.subckt <top>``) is wrapped in one whose pins are
+    ``wrap_pins`` -- the extracted netlist's own header order (issue #4625);
+    ``schematic_flatten["wrapper"]`` then lists those pins (else ``None``).
+    """
+    text = _read_text(reference_netlist_path)
+    if text is None:
+        raise PexError(
+            "--flatten-schematic: schematic DUT could not be read: "
+            f"{reference_netlist_path}",
+            code="schematic_flatten_malformed",
+        )
+    try:
+        result = flatten_spice(
+            text,
+            top=top,
+            wrap_pins=wrap_pins,
+            banner=(
+                "flattened by klt pex --flatten-schematic from "
+                f"{os.path.basename(reference_netlist_path)} (issue #2889)"
+            ),
+        )
+    except SpiceFlattenError as exc:
+        raise PexError(
+            "--flatten-schematic: cannot flatten schematic DUT "
+            f"{reference_netlist_path}: {exc}",
+            code=f"schematic_flatten_{exc.code}",
+        ) from exc
+
+    flat_path = os.path.join(work_dir, FLATTENED_SCHEMATIC_NAME)
+    with open(flat_path, "w", encoding="utf-8") as handle:
+        handle.write(
+            _absolutize_includes(
+                result.text, os.path.dirname(os.path.abspath(reference_netlist_path))
+            )
+        )
+    return flat_path, {
+        "netlist": env_provenance.repo_relative_path(
+            flat_path or None, repo_root=repo_root
+        ),
+        "netlist_sha256": content_hash(flat_path),
+        "subckts": result.roots,
+        "inlined_instances": result.inlined_instances,
+        "inlined_subckts": result.inlined_subckts,
+        "external_subckts": result.external_subckts,
+        "already_flat": result.inlined_instances == 0,
+        "wrapper": (
+            {"synthesized": True, "pins": result.wrapper_pins}
+            if result.wrapper_pins is not None
+            else None
+        ),
+    }
+
+
+_STAR_NODE_SUFFIX = re.compile(r"__t\d+(?=\s|$)")
+
+
+def _device_only_parity(
+    parasitic_netlist: str, device_only_netlist: str
+) -> dict[str, Any]:
+    """Whether the parasitic-free extraction (issue #3298) carries the same
+    devices as the parasitic one, with the parasitic extraction's
+    per-terminal ``<net>__tN`` star nodes mapped back to ``<net>``: every
+    non-``R``/``C`` card must match as a multiset, and every ``R``/``C`` card
+    the device-only netlist has (a real resistor/capacitor device) must
+    also be in the parasitic one -- the parasitic ``R``/``C`` cards cannot be
+    told from real ones by name, so they are the only cards allowed to be
+    extra on that side. The leg is only a *device-only* leg if this holds, so
+    a divergence is reported rather than assumed away
+    (``device_cards_match: false``)."""
+
+    def cards(path: str, *, strip_star: bool) -> list[str]:
+        found = [
+            card
+            for card in _logical_cards(_read_text(path) or "")
+            if not card.startswith(".")
+        ]
+        if strip_star:
+            found = [_STAR_NODE_SUFFIX.sub("", card) for card in found]
+        return found
+
+    def active(found: list[str]) -> collections.Counter[str]:
+        return collections.Counter(c for c in found if c[0].upper() not in "RC")
+
+    parasitic_cards = cards(parasitic_netlist, strip_star=True)
+    device_only_cards = cards(device_only_netlist, strip_star=False)
+    passive_extra = collections.Counter(
+        c for c in device_only_cards if c[0].upper() in "RC"
+    ) - collections.Counter(c for c in parasitic_cards if c[0].upper() in "RC")
+    return {
+        "device_card_count": len(device_only_cards),
+        "device_cards_match": (
+            active(parasitic_cards) == active(device_only_cards) and not passive_extra
+        ),
+    }
+
+
+def _reject_resistance_graph_with_distributed_rc(
+    resistance_graph: bool, distributed_rc: bool
+) -> None:
+    """Issue #4037: the ladder keeps the legacy per-level resistance."""
+    if resistance_graph and distributed_rc:
+        raise PexError(
+            "--resistance-graph cannot be combined with --distributed-rc: the "
+            "ladder keeps the legacy per-level resistance, so a critical net "
+            "would mix resistance sources"
+        )
+
+
+def _extract_device_only_leg(
+    device_only_leg: bool,
+    extracted_netlist_path: str,
+    layout_path: str,
+    deck_name: str | None,
+    *,
+    top: str | None,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    deck_options: Any,
+    declared_pins: Any,
+    rename_declared_pins: bool,
+    tie_declared_pins: bool,
+    label_layers: Any,
+    device_models: Any = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The parasitic-free leg's netlist path and its parity against the
+    parasitic extraction (issue #3298), or ``(None, None)`` without
+    ``--device-only-leg``. It is the same extraction with
+    ``parasitics=False`` -- the parasitics-only options (``critical_nets``,
+    ``distributed_rc``, ``mom_rlc_*``) are not passed, as ``run_extract``
+    rejects them without parasitics."""
+    if not device_only_leg:
+        return None, None
+    stem, ext = os.path.splitext(extracted_netlist_path)
+    try:
+        device_only_extract = run_extract(
+            layout_path,
+            deck_name,
+            output=f"{stem}.device-only{ext}",
+            top=top,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            parasitics=False,
+            deck_options=deck_options,
+            declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
+            label_layers=label_layers,
+            device_models=device_models,
+        )
+    except ExtractError as exc:
+        raise PexError(f"device-only extraction failed: {exc}") from exc
+    netlist_path = os.path.abspath(device_only_extract["netlist_path"])
+    return netlist_path, _device_only_parity(extracted_netlist_path, netlist_path)
+
+
+def _run_device_only_sim(
+    device_only_netlist_path: str | None,
+    *,
+    testbench_path: str,
+    work_dir: str,
+    label: str,
+    backend: Any,
+    batch_shard: Mapping[str, int | float | bool | None] | None = None,
+) -> dict[str, Any] | None:
+    """One testbench re-run against the parasitic-free netlist (issue #3298),
+    or ``None`` without the leg. A failure here costs only the device-only
+    fields of this testbench's rows (``null``, ``device_only_status:
+    "error"``), never the run."""
+    if device_only_netlist_path is None:
+        return None
+    try:
+        return run_sim(
+            _prepare_dut_swapped_request(
+                testbench_path=testbench_path,
+                dut_netlist_path=device_only_netlist_path,
+                work_dir=work_dir,
+                label=label,
+                side="device-only",
+            ),
+            artifacts_dir=os.path.join(work_dir, label, "device-only"),
+            backend=backend,
+            **(batch_shard or {}),
+        )
+    except SimError:
+        return None
+
+
+def _device_only_result_fields(
+    device_only_netlist_path: str | None,
+    device_only_parity: dict[str, Any] | None,
+    *,
+    repo_root: Any,
+) -> dict[str, Any]:
+    """Additive report fields (issue #3298), present only under
+    ``--device-only-leg`` so a run without it is byte-identical to before."""
+    if device_only_netlist_path is None:
+        return {}
+    return {
+        "device_only_netlist": env_provenance.repo_relative_path(
+            device_only_netlist_path or None, repo_root=repo_root
+        ),
+        "device_only_netlist_sha256": content_hash(device_only_netlist_path),
+        **(device_only_parity or {}),
+    }
+
+
+def _load_testbench_request(testbench_path: str) -> dict[str, Any]:
+    """``load_request`` with a :class:`SimError` re-raised as a
+    :class:`PexError` naming the testbench."""
+    try:
+        return load_request(testbench_path)
+    except SimError as exc:
+        raise PexError(f"testbench '{testbench_path}': {exc}", code=exc.code) from exc
+
+
+def _require_single_dut(dut_paths: Sequence[str]) -> None:
+    """Every testbench in one run must ``.include`` the same schematic DUT."""
+    if len(set(dut_paths)) > 1:
+        raise PexError(
+            "testbenches reference different schematic DUT netlists "
+            f"({sorted(set(dut_paths))!r}) -- klt pex expects every "
+            "testbench in one run to `.include` the same block's schematic "
+            "netlist, so a single reference_netlist can be reported"
+        )
+
+
+@output_lock.owns_run
 def run_pex(
     layout_path: str,
     testbench_paths: Sequence[str],
-    deck_name: str,
+    deck_name: str | None,
     *,
     output: str | None = None,
     top: str | None = None,
@@ -1760,10 +2503,27 @@ def run_pex(
     pdk_root: str | None = None,
     artifacts_dir: str | None = None,
     backend: str | None = None,
+    max_units_per_job: int | None = None,
+    max_concurrent_jobs: int | None = None,
+    hosts: int | None = None,
+    resume: bool | None = None,
+    capacity_wait_s: float | None = None,
     deck_options: Mapping[str, str] | None = None,
     declared_pins: frozenset[str] | None = None,
+    rename_declared_pins: bool = False,
+    tie_declared_pins: bool = False,
+    label_layers: Mapping[str, tuple[int, int] | None] | None = None,
+    tie_nets: Sequence[tuple[str, str]] | None = None,
+    device_models: Mapping[str, str] | None = None,
     critical_nets: Sequence[str] | None = None,
+    critical_net_patterns: Sequence[str] | None = None,
+    critical_net_all: bool = False,
+    critical_net_excludes: Sequence[str] | None = None,
     distributed_rc: bool = False,
+    resistance_graph: bool = False,
+    resistance_graph_r_cut_ohm: float | None = None,
+    parasitic_variants: Sequence[str] | None = None,
+    substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
@@ -1771,6 +2531,14 @@ def run_pex(
     measure_command: Sequence[str] | None = None,
     reference_netlist: str | None = None,
     measure_timeout_s: float | None = None,
+    flatten_schematic: bool = False,
+    device_only_leg: bool = False,
+    extract_only: bool = False,
+    submit_only: bool = False,
+    attach: str | None = None,
+    submit_request: Mapping[str, Any] | None = None,
+    runset: pex_runset.PexRunset | None = None,
+    _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -1794,7 +2562,28 @@ def run_pex(
     caller resolves a ``pin_count_mismatch`` caused by flat extraction
     promoting more top-level pins than the schematic DUT declares. ``None``
     for both (the default) resolves the deck and promotes pins exactly as
-    before this feature existed. ``critical_nets`` (``klt
+    before this feature existed. ``rename_declared_pins`` (``klt pex
+    --rename-declared-pins``, issue #2854) is likewise passed straight
+    through to :func:`~klayout_tools.extract.run_extract` -- it renames each
+    surviving promoted pin net whose component labels contain exactly one
+    ``declared_pins`` name to that name, so the extracted DUT's ``.SUBCKT``
+    header carries the canonical interface names the schematic DUT declares
+    even when a boundary net carries extra drawn labels (the same rename
+    ``klt extract --rename-declared-pins`` performs; see ``run_extract``'s
+    own ``rename_declared_pins`` docstring paragraph). The effective value
+    is echoed as ``extraction.rename_declared_pins`` (``False`` when the
+    flag was never given -- the extraction is then byte-identical to before
+    this parameter existed). ``label_layers`` (``klt pex --label-layer
+    <role>=<layer>/<datatype>``, repeatable, issue #2686) is likewise passed
+    straight through to :func:`~klayout_tools.extract.run_extract` -- it
+    redirects which GDS purpose extraction reads net/pin name text from, per
+    label role, for a layout whose names sit on a text purpose the curated
+    deck does not read (see ``run_extract``'s own ``label_layers`` docstring
+    paragraph, issue #2656). Without it such a layout extracts with no
+    promoted top-level pins and the extracted-side testbench cannot bind the
+    DUT. The applied mapping is echoed as ``extraction.label_layers`` (``None``
+    when no override was given -- the extraction is then byte-identical to
+    before this parameter existed). ``critical_nets`` (``klt
     pex --critical-net``, repeatable, issue #976, Epic #709 Phase 2a) is
     also passed straight through to :func:`~klayout_tools.extract.run_extract`
     -- extracts lateral (same-layer, sidewall) coupling capacitance for any
@@ -1802,7 +2591,24 @@ def run_pex(
     always-on vertical-overlap coupling (issue #760), so the re-simulated
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
-    before this feature existed. ``distributed_rc`` (``klt pex
+    before this feature existed. ``critical_net_patterns``/
+    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
+    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
+    to ``klt extract``'s terminal-aware resistance graph and make the
+    extracted netlist use each ``resistance_source == "graph"`` net's
+    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
+    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
+    ``{net, net_id, resistance_source, selected_resistance_ohm,
+    legacy_resistance_ohm}`` entry per net, only when the flag was given --
+    otherwise the report and netlist are byte-identical. Combining it with
+    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
+    legacy scalar, so a critical net would mix resistance sources).
+
+    ``critical_net_all``/``critical_net_excludes`` (``klt pex
+    --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
+    issue #2974) are the glob / all-nets forms of ``critical_nets``, passed
+    straight through; ``extraction.critical_nets`` then echoes the resolved
+    concrete names. ``distributed_rc`` (``klt pex
     --distributed-rc``, issue #977, Epic #709 Phase 2b) is also passed
     straight through to :func:`~klayout_tools.extract.run_extract` --
     replaces the single-lumped-element star model with a distributed,
@@ -1827,7 +2633,13 @@ def run_pex(
     byte-identical to before this feature existed. ``backend`` is passed
     through to every :func:`~klayout_tools.sim.run_sim` call (schematic and
     extracted side, every testbench) -- see ``docs/cli/sim.md``'s
-    "Execution backends". ``artifacts_dir`` overrides where this command
+    "Execution backends". ``max_units_per_job`` / ``max_concurrent_jobs``
+    (issue #4616) are likewise passed to each of those calls, so each side's
+    batch grid is sharded on its own; ``None`` leaves the request's own
+    ``batch`` block in force. ``hosts`` / ``resume`` (#4624) and
+    ``capacity_wait_s`` (#5280) ride the same path (each leg re-attaches from
+    its own ``batch-shards.json``).
+    ``artifacts_dir`` overrides where this command
     writes its own generated artifacts (the extracted-side testbench body/
     request copies, see :func:`_prepare_extracted_request`, and each `klt
     sim` call's own ``options.keep_artifacts`` output, namespaced per
@@ -1908,23 +2720,126 @@ def run_pex(
     documents; the caller supplies measurements, never a finished
     comparison. ``measure_timeout_s`` caps one invocation
     (:data:`MEASURE_COMMAND_TIMEOUT_S` by default). The whole mode is
-    disclosed in the report's ``measurement`` block. ``pin_count_mismatch``
-    and ``flat_dut_mismatch`` are always ``null`` in this mode -- both
-    diagnose the testbench-`X...`-line-reuse contract, which a
+    disclosed in the report's ``measurement`` block. ``pin_count_mismatch``,
+    ``flat_dut_mismatch`` and ``pin_order_mismatch`` are always ``null`` in
+    this mode -- all diagnose the testbench-`X...`-line-reuse contract, which a
     caller-supplied command does not use -- while ``model_mismatch``,
     ``extraction``, ``body_bias`` and ``provenance`` are computed exactly as
     in testbench mode. See this module's "Measuring with a caller-supplied
     command" docstring section.
 
+
+    **``flatten_schematic`` (issue #2889) flattens the schematic leg.**
+    ``klt extract``'s curated-engine output is flat while a schematic DUT
+    is normally hierarchical (a ``--engine klayout-runset`` extraction may
+    not be), which makes ``model_mismatch`` fire on hierarchy alone and can
+    leave the two legs incomparable. With ``flatten_schematic``
+    (``klt pex --flatten-schematic``) the one resolved schematic DUT is
+    flattened to PDK leaf devices once (:func:`_flatten_schematic_dut`,
+    written to ``<artifacts root>/schematic-dut.flat.spice``), every
+    schematic-side ``run_sim`` call runs a DUT-swapped copy of its testbench
+    (:func:`_prepare_schematic_request`) -- or, in ``--measure-command``
+    mode, the command is handed the flattened netlist -- and
+    ``flat_dut_mismatch``/``pin_count_mismatch``/``model_mismatch`` compare
+    the flattened netlist against the extraction. ``reference_netlist`` and
+    ``testbenches[].schematic_netlist`` (and their digests) still name the
+    caller's original DUT; the flattened file's path, digest and inlining
+    summary are reported in ``schematic_flatten``. ``False`` (the default)
+    leaves every schematic-side run exactly as before this parameter
+    existed: ``flatten_schematic: false``, ``schematic_flatten: null``.
+
+    **``extract_only`` (issue #3739)** is a third, mutually exclusive input
+    mode: extract and report, measure nothing. ``extraction``, ``body_bias``
+    and ``provenance`` come from the same ``run_extract`` call as a graded
+    run; ``testbenches`` and ``delta`` are empty, ``reference_netlist`` is
+    ``{"path": null, ...}`` with a ``null`` digest, the netlist diagnostics
+    are ``null``, ``measurement.mode`` is ``"extract-only"`` and ``status`` is
+    ``"not_checked"`` (``coverage.reasons`` ``no_delta_rows``) -- nothing was
+    compared. Combining it with testbenches, ``measure_command``,
+    ``measure_timeout_s``, ``device_only_leg`` or ``flatten_schematic``
+    raises :class:`PexError`.
+
+    **``extract_only`` with ``reference_netlist`` (issue #5477)** is the one
+    exception to that list. ``model_mismatch`` compares what the two
+    netlists *contain* -- the per-model ``M``/``X``/``Q``/``D`` instance
+    multiset (:func:`_model_mismatch`) -- so it is well-defined with no
+    measurement leg at all, and it is the only deck-agnostic signal that an
+    extraction is missing a whole device family: a curated deck that
+    declares no class for a family whose recognition region the PDK
+    *derives* (rather than drawing a marker layer for) leaves
+    ``extraction.unsupported_devices`` empty and the devices simply absent
+    from the netlist. Supplying the schematic netlist makes that divergence
+    nameable -- ``kind: "model_set"``, the missing model in
+    ``reference_only`` -- in an envelope whose ``delta[]`` is not yet
+    runnable. ``reference_netlist``/``reference_netlist_sha256`` then report
+    the caller's file; ``measurement.mode`` stays ``"extract-only"``,
+    ``delta`` stays ``[]``, ``status`` stays ``"not_checked"``, and
+    ``flat_dut_mismatch``/``pin_count_mismatch``/``pin_order_mismatch`` stay
+    ``null`` -- all three describe a measurement leg's testbench
+    ``X...``-line reuse, which this mode does not do. Without a
+    ``reference_netlist`` the envelope is byte-identical to before.
+
+    **``device_only_leg`` (issue #3298)** adds a third, parasitic-free leg:
+    the same layout is extracted again with ``parasitics=False`` (no star
+    nodes, no ``R``/``C`` cards -- no text stripping, so nothing depends on
+    the ``<net>__tN`` naming), written beside the extracted netlist as
+    ``<name>.device-only<ext>``, and every testbench is re-run against it.
+    Each ``delta[]`` row then also carries ``device_only_value``,
+    ``representation_delta_pct`` (device-only vs schematic) and
+    ``parasitic_delta_pct`` (extracted vs device-only), separating
+    device-representation effects (fingers/units, AS/AD/PS/PD, dummies) from
+    parasitics; the result adds ``device_only_netlist``,
+    ``device_only_netlist_sha256``, ``device_card_count`` and
+    ``device_cards_match``. Without it the report is byte-identical.
+    Incompatible with ``measure_command`` (:class:`PexError`).
+
+    **``runset`` (issues #6559/#6606)** swaps the curated-deck extraction for
+    ``klt extract --engine klayout-runset``: no parasitics when ``deck_name`` is
+    ``None``, else that curated deck's parasitics attached by net correspondence;
+    ``extraction.engine``/``parasitics_carried`` say which (see :mod:`.pex_runset`).
+    ``None`` -- the curated route -- leaves the envelope byte-identical.
+
+    **Output-directory ownership (issue #2770).** The run owns its artifact
+    root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
+    whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
+    taken before anything is created: a competing cooperating run raises
+    :class:`~klayout_tools.output_lock.OutputDirLockedError`. The per-testbench
+    ``run_sim`` calls on ``<root>/<label>/schematic|extracted`` inherit that
+    ownership (they never re-acquire it), and a separate cooperating
+    ``run_sim``/``run_pex`` on one of those child directories is refused
+    while this run holds the root. ``_ownership`` is internal: the exit
+    stack that releases the lock when the run ends.
     """
+    # Issue #4619: refuse unrepresentable async combinations before any I/O.
+    pex_async.validate_async_flags(
+        submit_only=submit_only,
+        attach=attach,
+        backend=backend,
+        resume=resume,
+        measure_command=measure_command,
+        extract_only=extract_only,
+        device_only_leg=device_only_leg,
+    )
+    pex_async.validate_capacity_wait(capacity_wait_s, backend)
+    _own_pex_root(_ownership, artifacts_dir, layout_path)
     # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
     # `command` is the measurement command's argv in `--measure-command`
     # mode and `None` in the default testbench mode -- the single flag every
     # branch below reads.
     command = _validate_measure_mode(
-        measure_command, testbench_paths, reference_netlist, measure_timeout_s
+        measure_command,
+        testbench_paths,
+        reference_netlist,
+        measure_timeout_s,
+        extract_only=extract_only,
+        flatten_schematic=flatten_schematic,
+        device_only_leg=device_only_leg,
     )
     command_mode = command is not None
+    _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    pex_runset.refuse_unsupported(
+        runset, device_only_leg=device_only_leg, tie_nets=tie_nets
+    )
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -1937,21 +2852,32 @@ def run_pex(
     )
 
     try:
-        extract_report = run_extract(
+        # Issue #6559/#6606: the engine dispatch (curated / runset / the
+        # `--deck`-under-runset merged route) and the option mapping live in
+        # `pex_runset.run_extract_leg` -- the module that owns them.
+        extract_report = pex_runset.run_extract_leg(
             layout_path,
             deck_name,
+            runset=runset,
             output=output,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
-            parasitics=True,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
+            label_layers=label_layers,
+            device_models=device_models,
             deck_options=deck_options,
             declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             critical_nets=critical_nets,
+            critical_net_patterns=critical_net_patterns,
+            critical_net_all=critical_net_all,
+            critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
+            resistance_graph=resistance_graph,
+            resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+            parasitic_variants=parasitic_variants,
+            substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
@@ -1976,11 +2902,41 @@ def run_pex(
     # `work_dir` is even computed (so still unambiguously relative to the
     # caller's own invocation cwd), makes the `.include` line resolve
     # correctly regardless of `-o`/`--outdir`'s own relative/absolute shape.
-    # `_report_path` below (issue #1261) still renders this run's own
-    # `netlist`/`reference_netlist` JSON fields as repo-relative
+    # `env_provenance.repo_relative_path` (issue #1261) still renders this run's
+    # own `netlist`/`reference_netlist` JSON fields as repo-relative
     # `{path, scope}` -- an absolute `extracted_netlist_path` does not leak
     # into this module's user-facing report.
     extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
+
+    device_only_netlist_path, device_only_parity = _extract_device_only_leg(
+        device_only_leg,
+        extracted_netlist_path,
+        layout_path,
+        deck_name,
+        top=top,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        deck_options=deck_options,
+        declared_pins=declared_pins,
+        rename_declared_pins=rename_declared_pins,
+        tie_declared_pins=tie_declared_pins,
+        label_layers=label_layers,
+        device_models=device_models,
+    )
+
+    # Issue #4245: `--tie-net` merges reported-unbiased body nets into
+    # schematic nets in the netlist every simulated leg below reads. Checked
+    # against the extraction first, applied before any simulation; `None`
+    # leaves the netlist (and the whole report) untouched.
+    ext_path, dev_path = extracted_netlist_path, device_only_netlist_path
+    _tie_nets_in_legs(tie_nets, extract_report, ext_path, dev_path)
+    # The tie rewrites `extracted_netlist_path` in place, so the extract-time
+    # hash no longer identifies the file the report points at: re-hash it.
+    extracted_netlist_sha256 = (
+        sha256_file(extracted_netlist_path)
+        if tie_nets
+        else extract_report["netlist_sha256"]
+    )
 
     work_dir = (
         os.path.abspath(artifacts_dir)
@@ -1988,6 +2944,16 @@ def run_pex(
         else os.path.join(os.path.dirname(os.path.abspath(layout_path)), ".klt", "pex")
     )
     os.makedirs(work_dir, exist_ok=True)
+    leg_extracted, leg_device_only = adapt_leg_netlists(
+        deck_name, ext_path, dev_path, work_dir, skip=extract_only or command_mode
+    )
+    # Issue #4619: routes each `run_sim` leg (blocking / submit / attach).
+    legs = pex_async.AsyncLegs(
+        submit_only=submit_only,
+        attach=attach,
+        work_dir=work_dir,
+        request=submit_request,
+    )
 
     # Every testbench's schematic- and extracted-side `klt sim` call gets its
     # own `keep_artifacts` output directory, explicitly namespaced under
@@ -2001,6 +2967,10 @@ def run_pex(
     single_testbench = len(testbench_paths) == 1
     labels: list[str] = []
     dut_paths: list[str] = []
+    # Issue #2875: per-testbench content identities of the schematic-side
+    # inputs, taken at the resolution points below -- before either side
+    # simulates -- so the digests describe the files this run used.
+    input_identity: list[dict[str, Any]] = []
 
     # Issue #2478: in `--measure-command` mode there is no testbench at all,
     # so the loop below is a no-op (`testbench_paths` is validated empty
@@ -2012,9 +2982,13 @@ def run_pex(
     # circuit of its own would make the schematic leg (and therefore every
     # `delta[]` row) meaningless while the report still looked like a real
     # comparison.
+    # Issue #5477: `--extract-only` may now carry one too, for the same
+    # "it still has to *be* a DUT" reason (see `run_pex`). Testbench mode
+    # never reaches here with a reference (`_validate_measure_mode` rejects
+    # it), so this one condition covers both modes that can supply one.
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
-        if command is not None and reference_netlist is not None
+        if reference_netlist is not None
         else None
     )
 
@@ -2029,10 +3003,7 @@ def run_pex(
         label = f"{index:02d}-{os.path.splitext(os.path.basename(testbench_path))[0]}"
         labels.append(label)
 
-        try:
-            request = load_request(testbench_path)
-        except SimError as exc:
-            raise PexError(f"testbench '{testbench_path}': {exc}") from exc
+        request = _load_testbench_request(testbench_path)
 
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
@@ -2043,6 +3014,13 @@ def run_pex(
             )
         with open(schematic_body_path, encoding="utf-8") as handle:
             body_text = handle.read()
+        input_identity.append(
+            {
+                "request_sha256": content_hash(testbench_path),
+                "netlist": schematic_body_path,
+                "netlist_sha256": content_hash(schematic_body_path),
+            }
+        )
         _include_line, dut_path = _find_dut_include(
             body_text, os.path.dirname(schematic_body_path)
         )
@@ -2052,22 +3030,48 @@ def run_pex(
         # if it were the DUT.
         _check_dut_declares_a_circuit(testbench_path, dut_path)
         dut_paths.append(dut_path)
+        input_identity[-1]["schematic_netlist_sha256"] = content_hash(dut_path)
 
-    if len(set(dut_paths)) > 1:
-        raise PexError(
-            "testbenches reference different schematic DUT netlists "
-            f"({sorted(set(dut_paths))!r}) -- klt pex expects every "
-            "testbench in one run to `.include` the same block's schematic "
-            "netlist, so a single reference_netlist can be reported"
-        )
+    _require_single_dut(dut_paths)
+    # Issue #4619: an `--attach` manifest must match this run's inputs.
+    request_shas = {
+        label: identity["request_sha256"]
+        for label, identity in zip(labels, input_identity, strict=True)
+    }
+    legs.verify(
+        extracted_netlist_sha256=extracted_netlist_sha256, request_sha256=request_shas
+    )
     # One `reference_netlist` for the whole run either way: every testbench's
     # single `.include` target in testbench mode, the caller's own
     # `--reference-netlist` in `--measure-command` mode (issue #2478).
-    reference_netlist_path = (
-        measured_reference_netlist
-        if measured_reference_netlist is not None
-        else dut_paths[0]
+    # Issue #3739: `--extract-only` has no schematic side at all -- the
+    # reference netlist is `None` and the three netlist diagnostics below
+    # have nothing to compare, so they are skipped rather than faked.
+    reference_netlist_path = _resolve_reference_netlist_path(
+        extract_only, measured_reference_netlist, dut_paths
     )
+
+    # Issue #2875: hashed at the resolution point, before either side runs
+    # (`None` for `--extract-only`, which has no reference netlist).
+    reference_netlist_sha256 = content_hash(reference_netlist_path)
+
+    # Issue #2889: `--flatten-schematic` -- the netlist the schematic leg
+    # actually runs (and every diagnostic below compares) is a flattened
+    # copy of the DUT; `reference_netlist` keeps naming the caller's file.
+    schematic_flatten: dict[str, Any] | None = None
+    schematic_netlist_path = reference_netlist_path
+    if flatten_schematic:
+        schematic_netlist_path, schematic_flatten = _flatten_schematic_dut(
+            reference_netlist_path,
+            work_dir=work_dir,
+            top=extract_report["top"],
+            repo_root=repo_root,
+            wrap_pins=(
+                _subckt_interfaces(_read_text(extracted_netlist_path) or "").get(
+                    extract_report["top"].lower(), (None, None)
+                )[1]
+            ),
+        )
 
     # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
     # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
@@ -2090,9 +3094,9 @@ def run_pex(
     # extracted-side measurement the harness is perfectly able to take.
     flat_dut_mismatch = (
         None
-        if command_mode
+        if command_mode or extract_only
         else _flat_dut_mismatch(
-            reference_netlist=reference_netlist_path,
+            reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
             top_cell=extract_report["top"],
         )
@@ -2107,9 +3111,19 @@ def run_pex(
     # too (issue #2478): unlike the two pin-list diagnostics, it compares
     # what the two netlists *contain*, which is independent of how either
     # side was measured.
-    model_mismatch = _model_mismatch(
-        reference_netlist=reference_netlist_path,
-        extracted_netlist=extracted_netlist_path,
+    # Issue #5477: computed in `--extract-only` mode too whenever the caller
+    # supplied a `--reference-netlist` -- comparing the two netlists' text
+    # needs no measurement leg at all, and there it is reported, not enforced
+    # (`status` stays `not_checked`, the exit code stays 4). `run_pex` states
+    # why once.
+    model_mismatch = (
+        None
+        if not schematic_netlist_path
+        else _model_mismatch(
+            reference_netlist=schematic_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+            extracted_top=extract_report["top"],
+        )
     )
 
     testbenches_summary: list[dict[str, Any]] = []
@@ -2152,12 +3166,41 @@ def run_pex(
     # that makes a pin-count difference fatal is exactly what that mode does
     # not do.
     pin_count_mismatch: dict[str, Any] | None = None
-    if not command_mode and flat_dut_mismatch is None:
+    # Issue #2990: the first extracted-side `SimError` that is not a pin-count
+    # mismatch (e.g. a batch-fleet capacity refusal), `None` otherwise.
+    backend_failure: dict[str, Any] | None = None
+    # Issue #5282: legs that lost shards (partial result, resumable).
+    unfinished: list[dict[str, Any]] = []
+    if not command_mode and not extract_only and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
-            reference_netlist=reference_netlist_path,
+            reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
             subcircuit=extract_report["top"],
         )
+
+    # Issue #2890: same pins in a different order. Pre-flight like the two
+    # diagnostics above, mutually exclusive with both (counts must be equal,
+    # and the schematic must declare the subcircuit), and `None` in
+    # `--measure-command` mode for the same reason. It skips the extracted
+    # leg and yields `status: "error"` / exit 4, like its siblings.
+    pin_order_mismatch = _pin_order_preflight(
+        command_mode,
+        (flat_dut_mismatch, pin_count_mismatch),
+        extract_only=extract_only,
+        reference_netlist=reference_netlist_path,
+        extracted_netlist=extracted_netlist_path,
+        top_cell=extract_report["top"],
+    )
+
+    # Issue #4696: a static pre-flight diagnostic skips the extracted leg, so
+    # a --submit-only run would record only the schematic leg. Refuse before
+    # any leg is submitted rather than pay for shards that can never be graded.
+    _refuse_submit_on_preflight_mismatch(
+        submitting=legs.submitting,
+        flat_dut_mismatch=flat_dut_mismatch,
+        pin_count_mismatch=pin_count_mismatch,
+        pin_order_mismatch=pin_order_mismatch,
+    )
 
     # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it
     # is validated so above), so the per-testbench loop below is a no-op and
@@ -2166,14 +3209,25 @@ def run_pex(
     # The diff itself is still computed here, by the same
     # `_build_delta_rows` testbench mode uses.
     measurement_sides: dict[str, Any] | None = None
+    # Issue #4616: the sharding flags ride to every `run_sim` call. Only the
+    # given ones are passed, so omitting both is the call shape of before.
+    batch_shard = pex_async.batch_shard_flags(
+        max_units_per_job=max_units_per_job,
+        max_concurrent_jobs=max_concurrent_jobs,
+        hosts=hosts,
+        resume=resume,
+        capacity_wait_s=capacity_wait_s,
+    )
     if command is not None:
         command_rows, measurement_sides = _measure_both_sides(
             command,
-            reference_netlist=reference_netlist_path,
+            reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
             work_dir=work_dir,
             timeout_s=_measure_timeout(measure_timeout_s),
             repo_root=repo_root,
+            backend=backend,
+            device_only_netlist=device_only_netlist_path,
         )
         delta.extend(command_rows)
 
@@ -2182,17 +3236,40 @@ def run_pex(
         dut_path = dut_paths[index]
 
         try:
-            schematic_report = run_sim(
-                testbench_path,
+            # Issue #2889: `--flatten-schematic` runs a DUT-swapped copy of
+            # the testbench; otherwise the testbench itself, unmodified.
+            schematic_request_path = (
+                _prepare_schematic_request(
+                    testbench_path=testbench_path,
+                    flattened_netlist_path=schematic_netlist_path,
+                    work_dir=work_dir,
+                    label=label,
+                )
+                if flatten_schematic
+                else testbench_path
+            )
+            schematic_report = legs.run(
+                run_sim,
+                schematic_request_path,
+                testbench=label,
+                side="schematic",
                 artifacts_dir=os.path.join(work_dir, label, "schematic"),
                 backend=backend,
+                **batch_shard,
             )
         except SimError as exc:
+            # Issue #2990: keep `SimError.code` (e.g. `batch_no_capacity`)
+            # so the CLI's error envelope lets a caller retry mechanically.
             raise PexError(
-                f"testbench '{testbench_path}': schematic-side simulation failed: {exc}"
+                f"testbench '{testbench_path}': schematic-side simulation "
+                f"failed: {exc}",
+                code=exc.code,
             ) from exc
 
         extracted_report: dict[str, Any] | None = None
+        # Issue #3062: why the extracted side has no report, for the rows'
+        # ``error`` objects: ``(message, code)``.
+        extracted_failure: tuple[str, str | None] | None = None
         # Gap 2 (issue #1255) / issue #1041: already know (statically, from
         # both netlists' own `.SUBCKT` headers, via `flat_dut_mismatch` or
         # the pre-flight `pin_count_mismatch` check above) that the
@@ -2205,18 +3282,24 @@ def run_pex(
         # simulation attempt could add either way. Skip it entirely and fall
         # through to the `extracted_report is None` branch below, exactly as
         # an unrunnable extracted side already does.
-        if flat_dut_mismatch is None and pin_count_mismatch is None:
+        if _no_preflight_mismatch(
+            flat_dut_mismatch, pin_count_mismatch, pin_order_mismatch
+        ):
             try:
                 extracted_request_path = _prepare_extracted_request(
                     testbench_path=testbench_path,
-                    extracted_netlist_path=extracted_netlist_path,
+                    extracted_netlist_path=leg_extracted,
                     work_dir=work_dir,
                     label=label,
                 )
-                extracted_report = run_sim(
+                extracted_report = legs.run(
+                    run_sim,
                     extracted_request_path,
+                    testbench=label,
+                    side="extracted",
                     artifacts_dir=os.path.join(work_dir, label, "extracted"),
                     backend=backend,
+                    **batch_shard,
                 )
             except SimError as exc:
                 # Issue #1030: a pin-count mismatch reported through the
@@ -2225,39 +3308,61 @@ def run_pex(
                 # not an unexplained one -- report it as a named field plus
                 # per-corner error rows and keep going, instead of aborting
                 # the whole run with only a stderr message. Any other
-                # SimError still aborts, unchanged.
+                # SimError is recorded as `backend_failure` (issue #2990)
+                # and handled like the pin-count case: the schematic side's
+                # completed results are kept and every delta row is an
+                # error row, instead of discarding them by aborting.
                 mismatch = _pin_count_mismatch_from_message(
                     str(exc),
-                    reference_netlist=reference_netlist_path,
+                    reference_netlist=schematic_netlist_path,
                     extracted_netlist=extracted_netlist_path,
                 )
                 if mismatch is None:
-                    raise PexError(
-                        f"testbench '{testbench_path}': extracted-side simulation "
-                        f"failed: {exc}"
-                    ) from exc
-                pin_count_mismatch = pin_count_mismatch or mismatch
+                    backend_failure = backend_failure or _backend_failure(
+                        testbench_path, exc
+                    )
+                else:
+                    pin_count_mismatch = pin_count_mismatch or mismatch
+                extracted_failure = (str(exc), exc.code)
 
-        spec_row_prefix = (
-            None
-            if single_testbench
-            else os.path.splitext(os.path.basename(testbench_path))[0]
+        if legs.submitting:
+            # Issue #4619: submitted, not run -- nothing to grade yet.
+            continue
+
+        unfinished += pex_sim_evidence.unfinished_legs(
+            label, schematic_report, extracted_report
         )
+
+        stem = os.path.splitext(os.path.basename(testbench_path))[0]
+        spec_row_prefix = None if single_testbench else stem
         if extracted_report is None:
+            if extracted_failure is None:
+                extracted_failure = _static_extracted_failure(
+                    pin_count_mismatch, flat_dut_mismatch
+                )
             delta.extend(
                 _unextracted_delta_rows(
+                    testbench=stem,
                     spec_row_prefix=spec_row_prefix,
                     schematic_report=schematic_report,
+                    failure_message=extracted_failure[0] if extracted_failure else None,
+                    failure_code=extracted_failure[1] if extracted_failure else None,
+                    device_only_leg=device_only_leg,
                 )
             )
             testbenches_summary.append(
                 {
-                    "request": _report_path(testbench_path, repo_root=repo_root),
-                    "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                    **_testbench_inputs(
+                        testbench_path,
+                        dut_path,
+                        input_identity[index],
+                        repo_root=repo_root,
+                    ),
                     "corner_count": schematic_report["corner_count"],
                     "measurement_names": [
                         m["name"] for m in schematic_report["measurements"]
                     ],
+                    **pex_sim_evidence.project_testbench_sides(schematic_report, None),
                 }
             )
             continue
@@ -2275,26 +3380,54 @@ def run_pex(
         if pin_count_mismatch is None:
             pin_count_mismatch = _pin_count_mismatch_from_report(
                 extracted_report,
-                reference_netlist=reference_netlist_path,
+                reference_netlist=schematic_netlist_path,
                 extracted_netlist=extracted_netlist_path,
             )
 
+        device_only_report = _run_device_only_sim(
+            leg_device_only,
+            testbench_path=testbench_path,
+            work_dir=work_dir,
+            label=label,
+            backend=backend,
+            batch_shard=batch_shard,
+        )
+
         rows = _build_delta_rows(
+            testbench=stem,
             spec_row_prefix=spec_row_prefix,
             schematic_report=schematic_report,
             extracted_report=extracted_report,
+            device_only_report=device_only_report,
+            device_only_leg=device_only_leg,
         )
         delta.extend(rows)
         testbenches_summary.append(
             {
-                "request": _report_path(testbench_path, repo_root=repo_root),
-                "schematic_netlist": _report_path(dut_path, repo_root=repo_root),
+                **_testbench_inputs(
+                    testbench_path,
+                    dut_path,
+                    input_identity[index],
+                    repo_root=repo_root,
+                ),
                 "corner_count": extracted_report["corner_count"],
                 "measurement_names": [
                     m["name"] for m in extracted_report["measurements"]
                 ],
+                **pex_sim_evidence.project_testbench_sides(
+                    schematic_report, extracted_report
+                ),
             }
         )
+
+    if legs.submitting:
+        return legs.finish_submit(
+            extracted_netlist_sha256=extracted_netlist_sha256,
+            request_sha256=request_shas,
+        )
+
+    # Issue #4721: every leg collected -- an attach's shard maps are spent.
+    legs.remove_collected_shard_maps()
 
     corner_count = len({row["corner_id"] for row in delta})
     coverage = _build_coverage(
@@ -2303,6 +3436,9 @@ def run_pex(
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
+    # Issue #2989: schematic-side limit failures, reported beside -- never
+    # folded into -- `status`, `coverage` or the exit code.
+    schematic_failed = sum(1 for row in delta if row["schematic_status"] == "fail")
     # Issue #2109: use the shared coverage decision table so a partial
     # comparison can never be reported as an unconditional pass, while real
     # failures and errors retain precedence over coverage qualification.
@@ -2312,14 +3448,24 @@ def run_pex(
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
-        "layout": _report_path(layout_path, repo_root=repo_root),
-        "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
-        "reference_netlist": _report_path(reference_netlist_path, repo_root=repo_root),
+        "layout": env_provenance.repo_relative_path(
+            layout_path or None, repo_root=repo_root
+        ),
+        "netlist": env_provenance.repo_relative_path(
+            extracted_netlist_path or None, repo_root=repo_root
+        ),
+        "reference_netlist": env_provenance.repo_relative_path(
+            reference_netlist_path or None, repo_root=repo_root
+        ),
+        # Additive field (issue #2875): content identity of the schematic
+        # DUT / `--reference-netlist` the schematic leg used.
+        "reference_netlist_sha256": reference_netlist_sha256,
         "extraction": {
             "deck": deck_name,
+            "netlist_adaptation": netlist_adaptation_for_deck(deck_name),
             "device_count": extract_report["device_count"],
             "net_count": extract_report["net_count"],
-            "netlist_sha256": extract_report["netlist_sha256"],
+            "netlist_sha256": extracted_netlist_sha256,
             "model": parasitics.get("model"),
             # Additive field (issue #976): echoes `--critical-net` back --
             # `[]` when the flag was never given, byte-identical to before
@@ -2335,6 +3481,65 @@ def run_pex(
             # `run_extract`'s `mom_rlc_net` docstring paragraph) --
             # byte-identical to before this feature existed otherwise.
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
+            # Additive field (issue #2686): `klt extract`'s own
+            # `label_layers` echo for this run's extraction -- the applied
+            # `--label-layer` mapping as `{role: [layer, datatype] | null}`,
+            # or `None` when the flag was never given.
+            "label_layers": extract_report.get("label_layers"),
+            # Additive field (issue #4234): `klt extract`'s `device_models`
+            # echo -- the applied `--device-model` mapping, or `None`.
+            "device_models": extract_report.get("device_models"),
+            # Additive fields (issue #5477): `klt extract`'s own device
+            # coverage disclosure -- `device_classes` (issue #221, what the
+            # resolved deck can recognise) and `unsupported_devices` (issue
+            # #2919, the deck-declared "cannot extract this yet" marker
+            # geometry the layout draws) -- forwarded verbatim in every mode,
+            # so a committed envelope carries the same limit statement the
+            # extraction it cites published, instead of making a reader
+            # re-run `klt extract`. Neither sees a family the deck declares
+            # no class for *and* that draws no marker layer (e.g. `pnpMPA` on
+            # sg13cmos5l); see `run_pex` on `model_mismatch` for that gap.
+            "device_classes": extract_report.get("device_classes"),
+            "unsupported_devices": extract_report.get("unsupported_devices"),
+            # Additive field (issue #2854): echoes the effective
+            # `--rename-declared-pins` value back -- `False` when the flag
+            # was never given, byte-identical to before this feature
+            # existed. The renames themselves are `klt extract`'s own
+            # `pin_renames` report, visible here through the extraction's
+            # written netlist (`.SUBCKT` header) rather than re-embedded.
+            "rename_declared_pins": bool(extract_report.get("rename_declared_pins")),
+            "tie_declared_pins": "pin_ties" in extract_report,
+            # Additive field (issue #4383): the PDK install this extraction
+            # actually read -- `klt extract`'s own `pdk` block (`variant`,
+            # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
+            "pdk": extract_report.get("pdk"),
+            # Additive fields (issue #6559): present only for a runset leg.
+            **pex_runset.extraction_fields(extract_report),
+            # Additive field (issue #2764): the extraction's own
+            # per-net parasitic RC network integrity diagnostics --
+            # threshold/tolerances, aggregate counts, and one entry per net
+            # (verbatim per-net payloads, `parasitics.nets[]` order). See
+            # `_parasitic_integrity_report`.
+            "parasitic_integrity": _parasitic_integrity_report(parasitics),
+            # Additive field (issue #3056): echoes `--parasitic-variant`
+            # back so a variant run is attributable -- present only when
+            # the flag was given, byte-identical to before otherwise.
+            **(
+                {"parasitic_variant": parasitics["parasitic_variant"]}
+                if "parasitic_variant" in parasitics
+                else {}
+            ),
+            # Additive field (issue #4037): present only with
+            # `--resistance-graph`.
+            **(
+                {
+                    "resistance_graph": _resistance_graph_echo(
+                        parasitics, resistance_graph_r_cut_ohm
+                    )
+                }
+                if resistance_graph
+                else {}
+            ),
         },
         # Additive field (issue #1983): whether the extracted netlist this
         # run re-simulated has a DC bias path for every device body, reduced
@@ -2342,7 +3547,7 @@ def run_pex(
         # Reported beside `status`, never folded into it -- see
         # `_body_bias_report` for why an item-7 citation needs this in the
         # artifact it cites, and why this command does not grade on it.
-        "body_bias": _body_bias_report(extract_report),
+        "body_bias": _body_bias_report(extract_report, tie_nets),
         # Additive field (issue #2478): how this run's two legs were
         # measured, always present so a reader of a committed record never
         # has to infer it from the presence/absence of `testbenches[]`.
@@ -2359,7 +3564,7 @@ def run_pex(
         # externally-measured post-layout comparison from a `klt
         # sim`-measured one -- and to re-run it.
         "measurement": _measurement_block(
-            command, measure_timeout_s, measurement_sides
+            command, measure_timeout_s, measurement_sides, extract_only=extract_only
         ),
         "testbenches": testbenches_summary,
         "corner_count": corner_count,
@@ -2369,12 +3574,27 @@ def run_pex(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Additive field (issue #2989): rows whose schematic side itself
+        # failed its limits; `status` still grades the extracted side only.
+        "schematic_failed": schematic_failed,
         # Additive field (issue #1030): `None` on every run whose extracted
         # side actually simulated -- byte-identical to before this feature
         # existed. Non-`None` names the schematic/extracted top-level pin-list
         # mismatch that made the extracted-side deck unrunnable, with both
         # sides' pin lists (see `_pin_count_mismatch`).
         "pin_count_mismatch": pin_count_mismatch,
+        # Additive field (issue #2990): `None` on every run whose extracted
+        # side(s) did not raise -- byte-identical information to before.
+        # Non-`None` is `{testbench, side, message, code}` for the first
+        # extracted-side backend failure (`code` is `SimError.code`, e.g.
+        # `batch_no_capacity`, or `None`); that testbench's `delta[]` rows
+        # are `error` rows with the schematic value intact.
+        "backend_failure": backend_failure,
+        # Additive field (issue #5282): sim legs that lost shards. `[]` when
+        # every leg finished; else `{testbench, side, corner_ids,
+        # unfinished_shards, resumable, shard_map}` per leg. Finished corners
+        # keep their ordinary `delta[]` rows; re-run with `--resume`.
+        "unfinished": unfinished,
         # Additive field (issue #1255, Gap 2): `None` on every run whose
         # schematic DUT is `.SUBCKT`-wrapped (the normal case) --
         # byte-identical to before this feature existed. Non-`None` names
@@ -2384,6 +3604,11 @@ def run_pex(
         # simulation is even attempted, so `pin_count_mismatch` above stays
         # `None`.
         "flat_dut_mismatch": flat_dut_mismatch,
+        # Additive field (issue #2890): `None` unless both sides declare the
+        # top subcircuit with the same pin set in a different order (see
+        # `_pin_order_mismatch`); when it fires the extracted leg is skipped
+        # exactly as for the two diagnostics above.
+        "pin_order_mismatch": pin_order_mismatch,
         # Additive field (issue #2402): `None` on every run whose reference
         # (schematic) and extracted netlists instantiate the same device
         # models/`.subckt`s the same number of times -- byte-identical to
@@ -2395,6 +3620,15 @@ def run_pex(
         # mismatch`/`flat_dut_mismatch`, it never skips the extracted-side
         # simulation and never changes `status` -- see `_model_mismatch`.
         "model_mismatch": model_mismatch,
+        # Additive fields (issue #2889): echo of `--flatten-schematic`
+        # (`false` when not given) and, when given, the flattened schematic
+        # DUT the schematic leg ran -- path, sha256 and inlining summary
+        # (`null` otherwise, byte-identical information to before).
+        "flatten_schematic": bool(flatten_schematic),
+        "schematic_flatten": schematic_flatten,
         "provenance": extract_report["provenance"],
     }
-    return result
+    result |= _device_only_result_fields(
+        device_only_netlist_path, device_only_parity, repo_root=repo_root
+    )
+    return with_fidelity_warnings(result, deck_name)

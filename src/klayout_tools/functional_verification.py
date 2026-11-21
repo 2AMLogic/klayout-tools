@@ -111,29 +111,30 @@ implemented deliberately rather than rediscovered:
    therefore classifies a line only once it matches
    :data:`SDF_DIAGNOSTIC_LINE_RE` (the marker *plus* Icarus's own
    ``<file>:<line>:`` locator); a marker-bearing line without that shape is
-   a splice, not evidence, and counts as neither actionable nor benign.
+   a splice, not evidence, and counts as neither actionable nor benign. A
+   line that has the shape but embeds a cocotb log header
+   (:data:`SDF_SPLICED_LOG_HEADER_RE`, issue #2996) is the same splice
+   landing after the locator and is dropped likewise.
 
 9. **A bit-selected top-level-port ``INTERCONNECT`` entry can poison a
    sibling entry on the same net** (issue #1619, live on Icarus 13.0) --
-   distinct from finding 7's *scalar* bare-port fix, and only reachable once
-   that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve at all. Two
-   separate mechanisms, depending on which side of the entry carries the
-   bit-selected port -- see the module comment above
-   :func:`_split_sdf_bus_port_interconnects` for the full write-up and
-   `docs/design/sdf-annotate-feasibility-spike.md` §3.7 for the live
-   evidence: (a) as a *destination*, order-dependent -- fixed by deferring
-   every such entry to its own, later ``$sdf_annotate`` call
-   (:func:`_split_sdf_bus_port_interconnects`); (b) as a *source* feeding a
-   ``specify``-bearing destination -- fails even in total isolation,
-   unfixable by reordering, and confirmed sensitive to the testbench itself
-   (a no-op test resolves cleanly; any test that actually drives the DUT and
-   awaits a trigger does not) -- left unfixed and pinned down by
-   ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-   unresolvable`` rather than silently reported as "annotated" or masked.
-   The issue's own "wrapper double-binds the net identity" hypothesis is
-   refuted by shape (a) alone: reordering the entries (bit-selected-port
-   entry last instead of first) resolves everything, which a genuine
-   identity double-bind would not fix.
+   distinct from finding 7's *scalar* bare-port fix, and only reachable
+   once that fix let a *vector* port bit (``y[0]``, ``a[0]``) resolve.
+   Two separate mechanisms, depending on which side of the entry carries
+   the bit-selected port -- full write-up in the module comment above
+   :func:`_split_sdf_bus_port_interconnects` and
+   `docs/design/sdf-annotate-feasibility-spike.md` §3.7:
+   (a) as a *destination*, order-dependent -- fixed by deferring every
+   such entry to its own, later ``$sdf_annotate`` call; (b) as a *source*
+   -- the one-modpath-per-port-net cap (issue #5705, raw
+   ``iverilog``/``vvp`` 13.0): on a fanout-above-1 net ``$sdf_annotate``
+   annotates only the last-declared instance's destination and rejects
+   the rest, deterministically -- unfixable by reordering, left unfixed,
+   pinned down by ``test_integration_real_icarus_sdf_bus_port_input_
+   fanout_stays_unresolvable`` rather than silently reported as
+   "annotated" or masked. The "wrapper double-binds the net identity"
+   hypothesis is refuted by shape (a): reordering (bit-selected entry
+   last) resolves everything, which a genuine double-bind would not.
 
 10. **A run that fails on every test case under ``options.sdf`` -- often
     with the design's outputs reading a constant zero -- while the
@@ -195,45 +196,87 @@ support, the marker is gone, and CI now covers 3.10 through 3.14.)
 
 from __future__ import annotations
 
+import functools
 import importlib.metadata
-import json
-import multiprocessing
+import json  # noqa: F401 -- tests reach it as fv.json
 import os
-import queue as _queue_module
 import re
-import signal
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ElementTree
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._vendor import mutation_variants as _mutation_variants
+from ._provenance import sha256_file
+from .env_provenance import find_repo_root, repo_relative_path
+from .functional_verification_from_synthesize import (  # noqa: F401
+    _resolve_sources,
+    has_from_synthesize,
+)
+from .functional_verification_initial_state import (
+    INITIAL_STATE_MODULE,
+    SEED_PLUSARG,
+    build_initial_state_verilog,
+    count_d_nets,
+)
+from .functional_verification_pdk import (
+    _resolve_defines,
+)
+from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
-    _collect_sdf_alias_port_bits,
+    _collect_sdf_alias_port_bits,  # noqa: F401 -- tests reach it as fv._collect_sdf_alias_port_bits
     _collect_sdf_physical_only_instances,
+    _drop_sdf_bit_selected_bus_iopaths,
     _drop_sdf_non_interconnect_entries,
-    _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_unsupported_edge_modpath_iopaths,
+    _drop_sdf_zero_delay_alias_port_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_alias_port_interconnects
+    _drop_sdf_zero_delay_bus_port_source_interconnects,  # noqa: F401 -- tests reach it as fv._drop_sdf_zero_delay_bus_port_source_interconnects
     _drop_sdf_zero_delay_physical_only_interconnects,
-    _normalize_sdf_header_triples,
+    _normalize_sdf_header_triples,  # noqa: F401 -- tests reach it as fv._normalize_sdf_header_triples
+    _parse_toplevel_parameters,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
+    _reject_sdf_mis_scoped_top_cell,
     _reject_sdf_with_functional_models,
     _resolve_sdf_option,
     _scan_sdf_diagnostics,
+    _sdf_scope_reference,  # noqa: F401 -- reached via _fv by the verilog_top module
     _split_sdf_bus_port_interconnects,
     _write_sdf_annotate_shim,
-    _write_sdf_dut_wrapper,
+    _write_sdf_dut_wrapper,  # noqa: F401
 )
+from .functional_verification_sdf_instance import _reject_sdf_unresolvable_scopes
+from .functional_verification_sdf_internal_bus import (
+    SDF_INTERNAL_BUS_NET_REASONS,
+    _apply_sdf_internal_bus_net_drop,
+)
+from .functional_verification_sdf_rename import (
+    _apply_sdf_escaped_divider_rename,
+    _sdf_renamed_report,
+)
+from .functional_verification_sdf_steps import (
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS,
+    SDF_COND_EXPRESSION_REASONS,
+    _apply_sdf_alias_port_drop,
+    _apply_sdf_bus_port_source_drop,
+    _apply_sdf_cond_expression_drop,
+    _apply_sdf_header_normalization,
+    _sdf_refusal_attribution,
+    _sdf_refusal_error,
+)
+from .request_paths import RequestPaths
+from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -342,6 +385,19 @@ SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
 #: below is applied only to lines that match.
 SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
 
+#: cocotb's log-line header (``<sim-time><unit> <LEVEL> <logger>``), e.g.
+#: ``590.00ns INFO     cocotb.klt_sdf_dut_wrapper``. A marker-bearing line that
+#: *contains* one is a stdout splice even when it still matches
+#: :data:`SDF_DIAGNOSTIC_LINE_RE` (issue #2996, extending #1136's rule past
+#: the locator): the cut landed inside the message, or inside the path with
+#: the spliced-in line's own ``<file>:<line>:`` satisfying the locator. Keying
+#: on the interleaved writer's signature rather than on a second locator
+#: makes the result independent of path length and of which log line lands.
+SDF_SPLICED_LOG_HEADER_RE = re.compile(
+    r"\s\d+(?:\.\d+)?\s?(?:fs|ps|ns|us|ms|s)\s+"
+    r"(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+\S+"
+)
+
 #: The ``environment.sdf.dropped`` class counting the zero-delay
 #: ``INTERCONNECT`` entries removed before annotation because their
 #: destination is a top-level port bit the netlist drives through an
@@ -384,13 +440,39 @@ SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 #: *and* whose SDF carried at least one non-``INTERCONNECT`` delay entry.
 SDF_IOPATH_DROPPED_CLASS = "iopath_interconnect_only"
 
+#: The ``environment.sdf.dropped`` class counting the ``IOPATH`` entries
+#: removed before annotation because their arc's only module paths in the
+#: cell's own Verilog model are ``ifnone`` + edge-sensitive -- the gf180mcu
+#: models' XOR/XNOR/MUX-select shape, ``ifnone (posedge A1 => (Z:A1))``.
+#: Icarus discards every such path at elaboration (``sorry: ifnone with an
+#: edge-sensitive path is not supported``), so the arc has no modpath an
+#: ``IOPATH`` could match and each entry would otherwise fail with ``Unable
+#: to match ModPath`` (issue #2885). Like the zero-delay classes it is decided
+#: from the SDF text and the run's own sources up front
+#: (:func:`_drop_sdf_unsupported_edge_modpath_iopaths`), so Icarus never
+#: emits a diagnostic for these entries. Unlike them, the caller does lose
+#: real timing -- the arc simulates with no module-path delay -- so this
+#: class alone also carries an ``arcs`` list naming every dropped
+#: ``{celltype, from, to}`` arc.
+SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS = "iopath_ifnone_edge_modpath"
+
+#: The ``environment.sdf.dropped`` class counting the bit-selected ``IOPATH``
+#: entries removed before annotation because the cell's Verilog model reaches
+#: that bus output only through a whole-vector module path (a hard macro's
+#: ``(A_CLK *> A_DOUT)``), which registers no per-bit modpath for OpenSTA's
+#: per-bit ``IOPATH A_CLK A_DOUT[0]`` entries to match (issue #2958). Like
+#: :data:`SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS` it carries an ``arcs`` list
+#: naming every dropped ``{celltype, from, to}`` arc, since those arcs simulate
+#: without the SDF's delay.
+SDF_BUS_BIT_MODPATH_DROPPED_CLASS = "iopath_bus_bit_modpath"
+
 #: A human-readable reason per dropped class, surfaced in
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
 #: Keyed by the lowercased :data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS` member
-#: whose diagnostics were filtered out, plus
-#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` (issue #2285) for the one class that
-#: is dropped from the SDF text instead of from the transcript.
+#: whose diagnostics were filtered out, plus every ``SDF_*_DROPPED_CLASS``
+#: constant (a class handled in the SDF text, not the transcript); the class
+#: table in docs/cli/functional-verification.md lists them all.
 SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
     "timingcheck": (
         "Icarus Verilog implements SDF delay annotation (IOPATH/INTERCONNECT) "
@@ -423,6 +505,15 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "instead of failing the run -- a non-zero-delay entry on the same "
         "destination is left in place and still fails loudly"
     ),
+    SDF_BUS_PORT_SOURCE_DROPPED_CLASS: (
+        "Icarus Verilog can fail to insert an intermodpath for an "
+        "INTERCONNECT entry whose source is a bit-selected top-level input "
+        "port -- such an entry fails with 'Could not find intermodpath!'. "
+        "Entries whose every min:typ:max delay value is zero model no delay "
+        "at any corner, so they are removed before annotation and counted "
+        "here instead of failing the run -- a non-zero-delay entry on the "
+        "same source is left in place and still fails loudly"
+    ),
     SDF_IOPATH_DROPPED_CLASS: (
         "The request selected options.sdf.entries: 'interconnect' "
         "(net-delay back-annotation only), so every non-INTERCONNECT delay "
@@ -438,6 +529,39 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "hand-filtered. A run that did not select the mode never carries "
         "this class"
     ),
+    SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS: (
+        "The cell's own Verilog model declares this arc only through "
+        "'ifnone' edge-sensitive module paths (e.g. 'ifnone (posedge A1 => "
+        "(Z:A1))', the shape gf180mcu models give XOR/XNOR inputs and MUX "
+        "selects), which Icarus Verilog does not support: it discards every "
+        "such path at elaboration ('sorry: ifnone with an edge-sensitive path "
+        "is not supported'), so no IOPATH entry -- unqualified or "
+        "edge-qualified -- can match it ('Unable to match ModPath'). Those "
+        "IOPATH entries were removed before annotation and counted here, and "
+        "'arcs' names every affected cell arc. Removing them cannot change "
+        "simulated timing relative to annotating them, but the listed arcs "
+        "simulate with NO module-path delay at all (neither the SDF's nor "
+        "the model's placeholder): their characterised cell delay is not "
+        "represented in this run. An IOPATH that fails to match any other "
+        "arc is left in place and still fails loudly"
+    ),
+    SDF_BUS_BIT_MODPATH_DROPPED_CLASS: (
+        "The cell's own Verilog model declares this output as a bus and "
+        "reaches it only through a whole-vector module path (e.g. '(A_CLK *> "
+        "A_DOUT)', a hard macro's shape), which registers no per-bit modpath "
+        "in Icarus Verilog: a per-bit 'IOPATH A_CLK A_DOUT[0]' entry (OpenSTA's "
+        "write_sdf output) is a syntax error unescaped and 'Unable to match "
+        "ModPath' escaped, so it can never annotate. Those IOPATH entries "
+        "were removed before annotation and counted here, and 'arcs' names "
+        "every affected cell arc (the bus, bit-select dropped). The listed "
+        "arcs simulate with the model's own module-path delay, not the SDF's "
+        "per-bit delay: their characterised cell delay is not represented in "
+        "this run. An IOPATH onto a bus with a bit-indexed model path, a "
+        "scalar port, or a cell with no model is left in place and still "
+        "fails loudly"
+    ),
+    **SDF_COND_EXPRESSION_REASONS,
+    **SDF_INTERNAL_BUS_NET_REASONS,
 }
 
 #: Not an ``SDF``-prefixed diagnostic at all, but the single most dangerous
@@ -520,7 +644,21 @@ class FunctionalVerificationError(Exception):
     traceback. A run that *did* complete and reported failing tests is not
     an error -- it is ``status: "fail"`` + exit code 3 (see this module's
     docstring and ``docs/cli/functional-verification.md``).
+
+    ``code`` is an optional stable machine-readable classification the CLI
+    passes through as ``error.code`` (``None`` for every error without one).
     """
+
+    code: str | None = None
+    details: dict[str, Any] | None = None
+
+    def __init__(self, message: str = "", *, code: str | None = None) -> None:
+        super().__init__(message)
+        if code is not None:
+            self.code = code
+
+
+_rpath = RequestPaths(FunctionalVerificationError)
 
 
 # ---------------------------------------------------------------------------
@@ -528,19 +666,26 @@ class FunctionalVerificationError(Exception):
 # ---------------------------------------------------------------------------
 
 
-_REQUIRED_REQUEST_FIELDS = ("sources", "hdl_toplevel", "testbench")
+# "sources" is checked in _resolve_sources: options.from_synthesize may omit it.
+_REQUIRED_REQUEST_FIELDS = ("hdl_toplevel", "testbench")
 
 
 def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
-    """Shared shape check for a JSON-decoded request, however it was sourced
-    (file, inline JSON, stdin). ``source`` is folded into the "must be a JSON
-    object" error for context."""
-    return _shared_validate_request_shape(
+    """Shared shape check for a JSON-decoded request, however sourced;
+    ``source`` is folded into the "must be a JSON object" error."""
+    doc = _shared_validate_request_shape(
         data,
         source,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
     )
+    return _require_sources(doc)
+
+
+def _require_sources(doc: dict[str, Any]) -> dict[str, Any]:
+    if "sources" not in doc and not has_from_synthesize(doc.get("options")):
+        raise FunctionalVerificationError("request is missing required field: sources")
+    return doc
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -550,26 +695,31 @@ def load_request(request_path: str) -> dict[str, Any]:
     Raises :class:`FunctionalVerificationError` if the file is missing/
     unreadable, not valid JSON, or missing a required top-level field
     (``sources``, ``hdl_toplevel``, ``testbench``). Does not require a
-    ``schema`` field, matching ``klt lvs``/``klt sim``/``klt synthesize``'s
-    own ``load_request`` (user-authored input, never emitted by this tool).
+    ``schema`` field (user-authored input, never emitted by this tool).
     """
     request = _load_request_json(request_path, FunctionalVerificationError)
     return _validate_request_shape(request, "request file")
 
 
-def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+def load_request_arg(
+    value: str, base_dir: str | None = None
+) -> tuple[dict[str, Any], str]:
     """Resolve the CLI ``request`` argument into a request dict plus the
     directory relative paths inside it should resolve against -- the same
-    three forms ``klt lvs``'s own ``request`` argument accepts (a path to a
-    JSON file, ``"-"`` for stdin, or an inline JSON object string), so this
-    verb composes into ``klt eval``'s descriptor unchanged.
+    three forms ``klt lvs``'s own ``request`` argument accepts, so this
+    verb composes into ``klt eval``'s descriptor unchanged. ``base_dir``
+    optionally overrides that anchor so a request archived beside an
+    evidence record re-runs from the directory its paths were written
+    against (issue #5673); it must exist and be a directory.
     """
-    return _shared_load_request_arg(
+    doc, request_dir = _shared_load_request_arg(
         value,
         error_cls=FunctionalVerificationError,
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
+        base_dir=base_dir,
     )
+    return _require_sources(doc), request_dir
 
 
 # ---------------------------------------------------------------------------
@@ -577,55 +727,13 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
-    """Validate ``request.sources`` and resolve each entry to an absolute,
-    readable path (relative to ``request_dir`` -- the same convention every
-    other request-taking verb uses)."""
-    if not isinstance(sources, list) or not sources:
-        raise FunctionalVerificationError(
-            "request.sources must be a non-empty array of paths"
-        )
-    if not all(isinstance(entry, str) and entry for entry in sources):
-        raise FunctionalVerificationError(
-            "request.sources entries must be non-empty strings"
-        )
-
-    resolved: list[str] = []
-    for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
-        if not os.path.isfile(path):
-            raise FunctionalVerificationError(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise FunctionalVerificationError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
-
-
 def _resolve_testbench(
-    testbench: Any, request_dir: str
+    testbench: Any, request_dir: str, *, require_module: bool = True
 ) -> tuple[str, str, str | list[str] | None]:
-    """Validate ``request.testbench`` and return
-    ``(module, module_dir, testcase)``.
+    """Resolve a cocotb module name, search directory, and selected testcases.
 
-    ``module`` is a Python *module name* (``"test_gcd"``), not a path -- it is
-    what cocotb's ``Runner.test(test_module=...)`` imports. By default the
-    module's file is located next to the request
-    (``<request_dir>/<module>.py``) so a missing testbench is a clear
-    request-level error here rather than a ``ModuleNotFoundError`` raised deep
-    inside the simulator process (where, verified live, cocotb still exits
-    ``0`` and simply writes no ``results.xml``).
-
-    An optional ``testbench.search_path`` overrides *where* ``module`` is
-    looked up -- resolved absolute-or-relative-to-``request_dir`` the same way
-    ``_resolve_sources()`` resolves each ``request.sources`` entry -- so one
-    unmodified testbench module can be shared by several requests that live in
-    different directories. When omitted, behavior is unchanged: the module is
-    resolved next to the request.
+    A run needs the module file under ``testbench.search_path`` (defaulting
+    to the request directory). An offline check only validates the declaration.
     """
     if not isinstance(testbench, dict):
         raise FunctionalVerificationError("request.testbench must be a JSON object")
@@ -648,15 +756,15 @@ def _resolve_testbench(
                 "request.testbench.search_path must be a non-empty string when given"
             )
         search_dir = (
-            search_path
-            if os.path.isabs(search_path)
-            else os.path.join(request_dir, search_path)
+            _rpath(search_path, request_dir, "request.testbench.search_path")
+            if require_module
+            else search_path
         )
     else:
         search_dir = request_dir
 
     module_path = os.path.join(search_dir, f"{module}.py")
-    if not os.path.isfile(module_path):
+    if require_module and not os.path.isfile(module_path):
         location = (
             "request.testbench.search_path"
             if search_path is not None
@@ -691,7 +799,7 @@ def _resolve_testbench(
 
 
 def _resolve_options(
-    options: Any, engine: str, request_dir: str
+    options: Any, engine: str, request_dir: str, *, require_include_dirs: bool = True
 ) -> tuple[
     bool,
     tuple[str, str],
@@ -763,16 +871,16 @@ def _resolve_options(
         resolved_timescale = (timescale[0], timescale[1])
 
     random_seed = options.get("random_seed")
-    if random_seed is not None and (
-        isinstance(random_seed, bool) or not isinstance(random_seed, int)
-    ):
+    if random_seed is not None and (not is_int(random_seed)):
         raise FunctionalVerificationError(
             "request.options.random_seed must be an integer when given"
         )
 
     defines = _resolve_defines(options.get("defines"))
     build_args = _resolve_build_args(options.get("build_args"))
-    includes = _resolve_includes(options.get("includes"), request_dir)
+    includes = _resolve_includes(
+        options.get("includes"), request_dir, require_dirs=require_include_dirs
+    )
     sdf = _resolve_sdf_option(options.get("sdf"), engine, request_dir)
     _reject_sdf_with_functional_models(sdf, defines)
 
@@ -788,32 +896,410 @@ def _resolve_options(
     )
 
 
-def _resolve_defines(defines: Any) -> dict[str, str | None]:
-    """Validate the optional ``request.options.defines`` object and return it
-    unchanged (or ``{}`` when omitted).
+INITIAL_STATE_MODES = ("x", "random")
 
-    Forwarded to ``Runner.build(defines=...)`` -- cocotb's own ``Runner``
-    already accepts a ``Mapping[str, str | None]`` (a ``None`` value defines
-    the macro with no value, e.g. ``` `define USE_POWER_PINS ```), so this
-    module never needs to translate the mapping itself.
-    """
-    if defines is None:
-        return {}
-    if not isinstance(defines, dict):
+
+def _resolve_initial_state_seeds(mode: str, seeds: Any) -> list[int]:
+    """``initial_state.seeds``: absent for ``x``, a non-empty duplicate-free
+    integer array for ``random``."""
+    if mode == "x":
+        if seeds is not None:
+            raise FunctionalVerificationError(
+                "request.options.initial_state.seeds is only valid with mode 'random'"
+            )
+        return []
+    if not isinstance(seeds, list) or not seeds or any(not is_int(s) for s in seeds):
         raise FunctionalVerificationError(
-            "request.options.defines must be a JSON object of string -> string|null"
+            "request.options.initial_state.seeds must be a non-empty "
+            "array of integers when mode is 'random'"
         )
-    for key, value in defines.items():
+    if len(set(seeds)) != len(seeds):
+        raise FunctionalVerificationError(
+            "request.options.initial_state.seeds must not repeat a seed"
+        )
+    return list(seeds)
+
+
+def _resolve_initial_state(
+    options: Any, engine: str, request_dir: str, *, require_netlist: bool = True
+) -> dict[str, Any] | None:
+    """Validate ``request.options.initial_state`` (issue #2998); ``None`` when
+    the key is absent. Shape: ``{"mode": "x" | "random", "seeds": [int, ...],
+    "netlist": "<gate-level Verilog netlist>", "clock": "<net>"}``.
+
+    ``clock`` (optional) names the net of ``hdl_toplevel`` whose first full
+    cycle captures the forced values; when absent it is the one net every
+    state element's clock/enable pin connects to, and a netlist with several
+    (or none) is a request error asking for it.
+    ``netlist`` (resolved against ``request_dir``) is the flat gate-level
+    netlist of ``hdl_toplevel`` the state elements are derived from;
+    ``request.sources`` supply the PDK cell models. ``seeds`` is required and
+    non-empty for ``random`` (one regression runs per seed) and rejected for
+    ``x`` (a single run). Icarus only: the drive relies on hierarchical
+    ``force`` of cell-model pins, which Verilator does not model -- a request
+    error, never a silently-ignored option, like ``options.sdf``.
+    """
+    if not isinstance(options, dict) or "initial_state" not in options:
+        return None
+    raw = options["initial_state"]
+    if not isinstance(raw, dict):
+        raise FunctionalVerificationError(
+            "request.options.initial_state must be a JSON object"
+        )
+    unknown = sorted(set(raw) - {"mode", "seeds", "netlist", "clock"})
+    if unknown:
+        raise FunctionalVerificationError(
+            f"request.options.initial_state has unknown key(s): {', '.join(unknown)}"
+        )
+    mode = raw.get("mode")
+    if mode not in INITIAL_STATE_MODES:
+        raise FunctionalVerificationError(
+            "request.options.initial_state.mode must be one of "
+            f"{', '.join(repr(m) for m in INITIAL_STATE_MODES)}"
+        )
+    seeds = _resolve_initial_state_seeds(mode, raw.get("seeds"))
+    netlist = raw.get("netlist")
+    if not isinstance(netlist, str) or not netlist:
+        raise FunctionalVerificationError(
+            "request.options.initial_state.netlist must be a non-empty path "
+            "to the gate-level Verilog netlist"
+        )
+    clock = raw.get("clock")
+    if clock is not None and (not isinstance(clock, str) or not clock):
+        raise FunctionalVerificationError(
+            "request.options.initial_state.clock must be a non-empty net name"
+        )
+    if engine != "icarus":
+        raise FunctionalVerificationError(
+            f"options.initial_state requires engine 'icarus' -- engine "
+            f"'{engine}' cannot force cell-model pins hierarchically"
+        )
+    netlist_path = (
+        _rpath(netlist, request_dir, "request.options.initial_state.netlist")
+        if require_netlist
+        else netlist
+    )
+    if require_netlist and not os.path.isfile(netlist_path):
+        raise FunctionalVerificationError(
+            f"request.options.initial_state.netlist '{netlist_path}' not found"
+        )
+    return {
+        "mode": mode,
+        "seeds": seeds,
+        "netlist": os.path.abspath(netlist_path),
+        "clock": clock,
+    }
+
+
+class _Report(dict):
+    """A report ``dict`` that also carries the resolved absolute artifact
+    paths (``local_paths``) for ``--format text``. The attribute is never
+    serialised: the JSON contract only ever sees the repo-relative
+    ``{path, scope}`` envelope (docs/json-contract.md, #2224)."""
+
+    local_paths: dict[str, str | None]
+
+
+def _path_envelope(
+    path: str | None, *, repo_root: RepoRoot = ANCHOR_CWD
+) -> dict[str, Any]:
+    """``path`` as the committable ``{path, scope}`` shape (never absolute),
+    relative to ``repo_root`` (default: the cwd's repo -- a run passes the
+    request's, so its report does not vary with the invoking directory)."""
+    root = find_repo_root() if repo_root is ANCHOR_CWD else repo_root
+    if path is not None and root is None:
+        return {"path": None, "scope": "external"}
+    return repo_relative_path(path, repo_root=root)
+
+
+def _initial_state_run_specs(
+    initial_state: dict[str, Any] | None,
+    *,
+    engine: str,
+    output_dir: str,
+    results_xml: str,
+    test_log: str,
+) -> list[dict[str, Any]]:
+    """One regression normally; one per seed for ``initial_state.mode:
+    "random"`` -- same build, a different ``+klt_init_seed`` plusarg and its
+    own results/transcript files."""
+    if initial_state is None or initial_state["mode"] != "random":
+        return [
+            {
+                "seed": None,
+                "results_xml": results_xml,
+                "test_log": test_log,
+                "plusargs": [],
+            }
+        ]
+    return [
+        {
+            "seed": seed,
+            "results_xml": os.path.join(
+                output_dir, f"results_{engine}_init_seed{seed}.xml"
+            ),
+            "test_log": os.path.join(output_dir, f"test_{engine}_init_seed{seed}.log"),
+            "plusargs": [f"+{SEED_PLUSARG}={seed}"],
+        }
+        for seed in initial_state["seeds"]
+    ]
+
+
+def _parse_run_results(
+    spec: dict[str, Any], *, engine: str, build_log: str
+) -> list[dict[str, Any]]:
+    """``parse_results_xml`` for one run, with the ABI-mismatch augmentation
+    (issue #1103) on a missing results file."""
+    spec_xml = spec["results_xml"]
+    try:
+        return parse_results_xml(spec_xml)
+    except FunctionalVerificationError as exc:
+        # The pre-flight ABI check catches the common case up front; this
+        # is the fallback for whatever it doesn't -- only fires when
+        # `results.xml` is confirmed missing, so a genuinely unparseable or
+        # unreadable results file keeps its own unaugmented message.
+        diagnostic = None
+        if not os.path.isfile(spec_xml):
+            diagnostic = _scan_interpreter_mismatch_diagnostics(
+                build_log, spec["test_log"]
+            )
+        if diagnostic is None:
+            raise
+        raise FunctionalVerificationError(
+            f"{exc} -- probable cause: the {engine} transcript contains "
+            f"{diagnostic!r}, which usually means the installed cocotb was "
+            "built for a different CPython than the one running klt (an "
+            "ABI-mismatched wheel)"
+        ) from exc
+
+
+def _run_spec_test(engine_runner, spec: dict[str, Any], **kwargs: Any) -> None:
+    """One :func:`_run_test` for a run spec, after clearing its stale results
+    file (a leftover must never be mistaken for this run's evidence)."""
+    try:
+        os.remove(spec["results_xml"])
+    except OSError:
+        pass
+    _run_test(
+        engine_runner,
+        results_xml=spec["results_xml"],
+        log_path=spec["test_log"],
+        plusargs=spec["plusargs"],
+        **kwargs,
+    )
+
+
+def _initial_state_echo(
+    initial_state: dict[str, Any] | None,
+    info: dict[str, Any],
+    runs: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """``environment.initial_state`` (additive, issue #2998): ``None`` unless
+    requested; ``seeds`` is the effective seed list (empty for mode "x") and
+    ``runs`` has one entry per seed."""
+    if initial_state is None:
+        return None
+    return {
+        "mode": initial_state["mode"],
+        "seeds": initial_state["seeds"],
+        "netlist": initial_state["netlist"],
+        "clock": info["clock"],
+        "state_elements": info["state_elements"],
+        "d_nets": info["d_nets"],
+        "runs": runs,
+    }
+
+
+def _reject_initial_state_with_mutations(
+    options: Any, engine: str, request_dir: str
+) -> None:
+    """The baseline would be driven from a chosen power-up state while each
+    isolated per-mutant build (which does not replicate the generated shim)
+    would not, so a killed/survived verdict would compare unlike runs."""
+    if _resolve_initial_state(options, engine, request_dir) is not None:
+        raise FunctionalVerificationError(
+            "options.initial_state cannot currently be combined with "
+            "--mutations -- not yet designed"
+        )
+
+
+def _choose_initial_state_clock(
+    elements: list[dict[str, Any]], requested: str | None
+) -> str:
+    """The net whose first full cycle captures the forced values: the
+    request's ``clock``, else the one net every state element's clock/enable
+    pin connects to."""
+    if requested is not None:
+        return requested
+    nets = {e["capture_net"] for e in elements}
+    if len(nets) == 1 and isinstance(next(iter(nets)), str):
+        return next(iter(nets))
+    raise FunctionalVerificationError(
+        "options.initial_state: the state elements' clock pins connect to "
+        f"{len(nets)} different nets -- name the capture clock net in "
+        "options.initial_state.clock"
+    )
+
+
+def _write_initial_state_shim(
+    initial_state: dict[str, Any],
+    *,
+    sources: list[str],
+    hdl_toplevel: str,
+    output_dir: str,
+) -> tuple[str, dict[str, Any]]:
+    """Derive the state elements of ``hdl_toplevel`` from the netlist and
+    write the generated ``klt_initial_state`` shim; returns ``(path, info)``
+    with ``info = {"state_elements", "d_nets", "clock"}``. A sequential cell
+    or hard macro the force-D drive cannot reach is a request error naming it
+    (the issue's "all flops" contract), never a silent skip."""
+    try:
+        elements, unsupported = sequential_elements(
+            initial_state["netlist"], sources, hdl_toplevel
+        )
+    except ResetCoverageError as exc:
+        raise FunctionalVerificationError(f"options.initial_state: {exc}") from exc
+    if unsupported:
+        shown = ", ".join(
+            f"{u['instance']} ({u['cell']}: {u['reason']})" for u in unsupported[:5]
+        )
+        raise FunctionalVerificationError(
+            f"options.initial_state cannot drive {len(unsupported)} state "
+            f"element(s): {shown}"
+        )
+    if not elements:
+        raise FunctionalVerificationError(
+            f"options.initial_state: netlist module '{hdl_toplevel}' has no "
+            "sequential cell (per request.sources' cell models)"
+        )
+    clock = _choose_initial_state_clock(elements, initial_state["clock"])
+    path = os.path.join(output_dir, f"{INITIAL_STATE_MODULE}.v")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(
+            build_initial_state_verilog(
+                mode=initial_state["mode"],
+                elements=elements,
+                scope=hdl_toplevel,
+                clock=clock,
+            )
+        )
+    info = {
+        "state_elements": len(elements),
+        "d_nets": count_d_nets(elements),
+        "clock": clock,
+    }
+    return path, info
+
+
+def _resolve_source_defines(
+    options: Any, sources: list[str], request_dir: str
+) -> dict[str, dict[str, str | None]]:
+    """Validate ``request.options.source_defines`` (issue #3290) and return it
+    keyed by the **resolved absolute path** of the ``request.sources`` entry
+    it names (``{}`` when omitted).
+
+    Each key must name an entry of ``request.sources`` (matched after the same
+    path resolution :func:`_resolve_sources` applies); each value is validated
+    like ``options.defines``. The defines apply to that one source only, via a
+    generated wrapper (:func:`_write_scoped_define_wrappers`), so a vendor
+    hard-macro model can take ``FUNCTIONAL`` while the PDK std-cell sources --
+    and the ``options.sdf`` + global ``FUNCTIONAL`` rejection that protects
+    them -- are untouched.
+    """
+    raw = (options or {}).get("source_defines") if isinstance(options, dict) else None
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise FunctionalVerificationError(
+            "request.options.source_defines must be a JSON object of "
+            "source path -> defines object"
+        )
+    resolved: dict[str, dict[str, str | None]] = {}
+    for key, value in raw.items():
         if not isinstance(key, str) or not key:
             raise FunctionalVerificationError(
-                "request.options.defines keys must be non-empty strings"
+                "request.options.source_defines keys must be non-empty strings"
             )
-        if value is not None and not isinstance(value, str):
+        path = os.path.abspath(
+            _rpath(key, request_dir, "request.options.source_defines key")
+        )
+        if path not in sources:
             raise FunctionalVerificationError(
-                f"request.options.defines[{key!r}] must be a string or null "
-                f"-- got a {type(value).__name__}"
+                f"request.options.source_defines names '{key}', which is not "
+                f"an entry of request.sources"
             )
-    return defines
+        if not isinstance(value, dict):
+            raise FunctionalVerificationError(
+                f"request.options.source_defines[{key!r}] must be a JSON "
+                f"object of string -> string|null"
+            )
+        for name, define_value in value.items():
+            if not isinstance(name, str) or not name:
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}] keys must be "
+                    f"non-empty strings"
+                )
+            if define_value is not None and not isinstance(define_value, str):
+                raise FunctionalVerificationError(
+                    f"request.options.source_defines[{key!r}][{name!r}] must "
+                    f"be a string or null -- got a {type(define_value).__name__}"
+                )
+        resolved[path] = value
+    return resolved
+
+
+def _write_scoped_define_wrappers(
+    sources: list[str],
+    source_defines: dict[str, dict[str, str | None]],
+    wrapper_dir: str,
+) -> tuple[list[str], list[str]]:
+    """Substitute a generated one-file wrapper for each source named in
+    ``source_defines``, **in the same list position** (issue #3290).
+
+    The wrapper is ``` `define K [V] ``` / ``` `include "<abs path>" ``` /
+    ``` `undef K ```, so the defines are visible to that one file and cannot
+    leak into later sources. Returns ``(build_sources, include_dirs)``;
+    ``include_dirs`` holds the directory of each wrapped source so a nested
+    relative `` `include `` inside the vendor model still resolves. Sources not
+    named are returned untouched (byte-identical build to a run without
+    ``source_defines``).
+    """
+    if not source_defines:
+        return list(sources), []
+    try:
+        os.makedirs(wrapper_dir, exist_ok=True)
+    except OSError as exc:
+        raise FunctionalVerificationError(
+            f"could not create output directory '{wrapper_dir}': {exc}"
+        ) from exc
+    build_sources: list[str] = []
+    include_dirs: list[str] = []
+    for index, source in enumerate(sources):
+        defines = source_defines.get(source)
+        if defines is None:
+            build_sources.append(source)
+            continue
+        lines = [
+            f"`define {name}" if value is None else f"`define {name} {value}"
+            for name, value in defines.items()
+        ]
+        lines.append(f'`include "{source}"')
+        lines.extend(f"`undef {name}" for name in defines)
+        wrapper_path = os.path.join(
+            wrapper_dir, f"scoped_defines_{index}_{os.path.basename(source)}"
+        )
+        try:
+            with open(wrapper_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            raise FunctionalVerificationError(
+                f"could not write scoped-defines wrapper '{wrapper_path}': {exc}"
+            ) from exc
+        build_sources.append(wrapper_path)
+        source_dir = os.path.dirname(source)
+        if source_dir not in include_dirs:
+            include_dirs.append(source_dir)
+    return build_sources, include_dirs
 
 
 def _resolve_build_args(build_args: Any) -> list[str]:
@@ -836,7 +1322,9 @@ def _resolve_build_args(build_args: Any) -> list[str]:
     return list(build_args)
 
 
-def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
+def _resolve_includes(
+    includes: Any, request_dir: str, *, require_dirs: bool = True
+) -> list[str]:
     """Validate the optional ``request.options.includes`` array and resolve
     each entry to an absolute directory path (relative to ``request_dir`` --
     the same convention :func:`_resolve_sources`/:func:`_resolve_testbench`
@@ -854,9 +1342,11 @@ def _resolve_includes(includes: Any, request_dir: str) -> list[str]:
             "request.options.includes must be an array of non-empty strings"
         )
 
+    if not require_dirs:
+        return includes
     resolved: list[str] = []
     for entry in includes:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.options.includes entry")
         if not os.path.isdir(path):
             raise FunctionalVerificationError(f"include directory not found: {entry}")
         resolved.append(os.path.abspath(path))
@@ -918,458 +1408,197 @@ def _resolve_parameters(parameters: Any) -> dict[str, Any]:
     return parameters
 
 
-# ---------------------------------------------------------------------------
-# `--mutations`: the `<proposals>` document (spike section 3b)
-# ---------------------------------------------------------------------------
+def _resolve_env(env: Any, *, verilog_top: bool = False) -> dict[str, str]:
+    """Validate the optional ``request.env`` object and return it unchanged
+    (or ``{}`` when omitted). ``verilog_top`` rejects a non-empty env: the
+    Verilog-bench path has no cocotb test process to apply it to.
 
-
-#: `<proposals>` top-level required fields (spike §3b). `schema` is not
-#: required or validated -- user-authored input, the same posture every
-#: other request-taking verb's own `schema` field already takes.
-_MUTATION_PROPOSALS_REQUIRED_FIELDS = ("scope", "proposals")
-
-#: `proposals[]` entry required fields (spike §3b). `detectability_argument`
-#: is optional and never validated beyond "string or absent" -- free-text,
-#: echoed back unmodified, never acted on programmatically.
-_MUTATION_PROPOSAL_REQUIRED_FIELDS = (
-    "index",
-    "category",
-    "file",
-    "line",
-    "original_code",
-    "mutated_code",
-)
-
-
-@dataclass(frozen=True)
-class _ProposalRecord:
-    """One validated `<proposals>.proposals[]` entry -- satisfies the ported
-    `_mutation_variants.MutationProposal` protocol (`index`/`file`/`line`/
-    `original_code`/`mutated_code`) by construction, plus the two fields
-    (`category`, `detectability_argument`) that protocol doesn't need but the
-    response's `results[]` echoes back."""
-
-    index: int
-    category: str
-    file: str
-    line: int
-    original_code: str
-    mutated_code: str
-    detectability_argument: str | None = None
-
-
-def _load_mutation_proposals_json(path: str) -> Any:
-    """Read ``path`` and decode it as JSON, raising
-    :class:`FunctionalVerificationError` for every failure mode a caller
-    needs to report -- the `<proposals>`-specific analogue of
-    :func:`klayout_tools._paths._load_request_json`, kept separate only so
-    the error text says "mutation proposals file", not "request file"."""
-    if not os.path.exists(path):
-        raise FunctionalVerificationError(f"mutation proposals file not found: {path}")
-    if os.path.isdir(path):
-        raise FunctionalVerificationError(
-            f"mutation proposals path is not a file: {path}"
-        )
-    try:
-        with open(path, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise FunctionalVerificationError(
-            f"could not read mutation proposals file: {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise FunctionalVerificationError(
-            f"mutation proposals file is not valid JSON: {exc}"
-        ) from exc
-
-
-def load_mutation_proposals(path: str) -> tuple[list[str], list[_ProposalRecord]]:
-    """Load and validate a ``<proposals>`` document (spike §3b): ``schema``
-    (unvalidated), ``scope`` (array of RTL source paths, matched against
-    `<request>.sources` by the caller -- see
-    :func:`_validate_mutation_scope`), and ``proposals[]`` (booley's own
-    byte-exact shape, §1a).
-
-    Structural/type errors here are always whole-document failures (exit 1)
-    -- a malformed `<proposals>` document can produce no trustworthy
-    mutation run at all, the same "fail the whole request, don't run half a
-    plan" posture ``options.sdf`` validation already takes in the base
-    contract. Per-proposal *anchor* validation (does ``original_code``
-    actually occur once on the declared line of the *pristine* source) is
-    deliberately **not** done here -- that needs the request's own resolved
-    ``sources``, and belongs to :func:`_resolve_mutation_proposals`, whose
-    failures are individual ``"rejected"`` results, not whole-document ones.
-
-    Returns ``(scope, proposals)``.
+    Forwarded to ``Runner.test(extra_env=...)`` so the cocotb test process
+    sees each entry in ``os.environ`` (issue #4338). Echoed verbatim as
+    ``environment.env``, so it must never carry credentials.
     """
-    document = _load_mutation_proposals_json(path)
-    if not isinstance(document, dict):
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
         raise FunctionalVerificationError(
-            f"mutation proposals file must contain a JSON object: {path}"
+            "request.env must be a JSON object (string key -> string value)"
         )
-    for field in _MUTATION_PROPOSALS_REQUIRED_FIELDS:
-        if field not in document:
+
+    for key, value in env.items():
+        if not isinstance(key, str) or not key or "=" in key:
             raise FunctionalVerificationError(
-                f"mutation proposals file is missing required field: {field}"
+                "request.env keys must be non-empty strings without '='"
+            )
+        if not isinstance(value, str):
+            raise FunctionalVerificationError(
+                f"request.env[{key!r}] must be a string -- got a {type(value).__name__}"
             )
 
-    scope_raw = document["scope"]
-    if not isinstance(scope_raw, list) or not all(
-        isinstance(entry, str) and entry for entry in scope_raw
-    ):
+    if verilog_top and env:
         raise FunctionalVerificationError(
-            "mutation proposals 'scope' must be an array of non-empty strings"
+            "request.env cannot be combined with testbench.verilog_top -- "
+            "the Verilog-bench path has no cocotb test process to apply it to"
         )
-    scope = list(scope_raw)
+    return env
 
-    proposals_raw = document["proposals"]
-    if not isinstance(proposals_raw, list):
+
+_REQUIRES_TOOLS_KEYS = frozenset({"name", "version", "sha256"})
+
+
+def _resolve_requires_tools(
+    requires_tools: Any, env: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Validate the optional ``request.requires_tools`` array and resolve each
+    tool before any build starts (issue #4473).
+
+    Each entry is ``{"name": str, "version": str|null, "sha256": str|null}``.
+    ``name`` is looked up with ``shutil.which`` on ``request.env["PATH"]`` when
+    that is set (else the ambient ``PATH``); ``version`` is a substring match on
+    the tool's ``--version`` output; ``sha256`` is compared with the resolved
+    binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
+    Returns the ``environment.tools`` echo (``[]`` when omitted).
+    """
+    entries = _requires_tool_entries(requires_tools)
+    search_path = env.get("PATH")
+    run_env = {**os.environ, **env}
+    tools: list[dict[str, Any]] = []
+    unmet: list[dict[str, Any]] = []
+    for name, want_version, want_sha256 in entries:
+        tool, shortfall = _check_required_tool(
+            name, want_version, want_sha256, search_path, run_env
+        )
+        if shortfall is not None:
+            unmet.append(shortfall)
+        if tool is not None:
+            tools.append(tool)
+
+    if unmet:
+        raise _MissingToolError(unmet)
+    return tools
+
+
+def _requires_tool_entries(
+    requires_tools: Any,
+) -> list[tuple[str, str | None, str | None]]:
+    if requires_tools is None:
+        return []
+    if not isinstance(requires_tools, list):
         raise FunctionalVerificationError(
-            "mutation proposals 'proposals' must be an array"
+            "request.requires_tools must be a JSON array of "
+            '{"name": ..., "version": ..., "sha256": ...} objects'
         )
 
-    proposals: list[_ProposalRecord] = []
-    for position, entry in enumerate(proposals_raw):
-        if not isinstance(entry, dict):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}] must be a JSON object"
-            )
-        for field in _MUTATION_PROPOSAL_REQUIRED_FIELDS:
-            if field not in entry:
-                raise FunctionalVerificationError(
-                    f"mutation proposals.proposals[{position}] is missing "
-                    f"required field: {field}"
-                )
-
-        index = entry["index"]
-        if not isinstance(index, int) or isinstance(index, bool):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].index must be an integer"
-            )
-        category = entry["category"]
-        if not isinstance(category, str) or not category:
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].category must be "
-                "a non-empty string"
-            )
-        file_field = entry["file"]
-        if not isinstance(file_field, str) or not file_field:
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].file must be a "
-                "non-empty string"
-            )
-        line = entry["line"]
-        if not isinstance(line, int) or isinstance(line, bool):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].line must be an integer"
-            )
-        original_code = entry["original_code"]
-        if not isinstance(original_code, str):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].original_code "
-                "must be a string"
-            )
-        mutated_code = entry["mutated_code"]
-        if not isinstance(mutated_code, str):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].mutated_code "
-                "must be a string"
-            )
-        detectability_argument = entry.get("detectability_argument")
-        if detectability_argument is not None and not isinstance(
-            detectability_argument, str
-        ):
-            raise FunctionalVerificationError(
-                f"mutation proposals.proposals[{position}].detectability_argument "
-                "must be a string when given"
-            )
-
-        proposals.append(
-            _ProposalRecord(
-                index=index,
-                category=category,
-                file=file_field,
-                line=line,
-                original_code=original_code,
-                mutated_code=mutated_code,
-                detectability_argument=detectability_argument,
-            )
-        )
-
-    return scope, proposals
+    return [
+        _parse_requires_tool_entry(index, entry)
+        for index, entry in enumerate(requires_tools)
+    ]
 
 
-def _validate_proposal_indices(proposals: list[_ProposalRecord]) -> None:
-    """Reject a duplicate or non-positive ``index`` before any build runs
-    (spike §3b: "the same 'fail the whole request, don't run half a plan'
-    posture ``options.sdf`` validation already takes"). Whole-document exit
-    1, unlike a bad ``file``/anchor mismatch on one proposal, which is a
-    per-proposal ``"rejected"`` result instead (see
-    :func:`_resolve_mutation_proposals`)."""
-    seen: set[int] = set()
-    for proposal in proposals:
-        if proposal.index <= 0 or proposal.index in seen:
-            raise FunctionalVerificationError(
-                "mutation proposals[].index must be unique and positive "
-                f"(got {proposal.index!r})"
-            )
-        seen.add(proposal.index)
-
-
-def _validate_mutation_scope(scope: list[str], request_sources: list[str]) -> None:
-    """``<proposals>.scope`` must be a subset of `<request>.sources` (spike
-    §3b) -- a proposal targeting a file the baseline build never compiles
-    cannot be meaningfully tested. Whole-document exit 1, checked before the
-    (expensive) baseline ever runs.
-    """
-    missing = [entry for entry in scope if entry not in request_sources]
-    if missing:
+def _parse_requires_tool_entry(
+    index: int, entry: Any
+) -> tuple[str, str | None, str | None]:
+    """Validate one ``request.requires_tools`` entry and return
+    ``(name, version, sha256)``."""
+    where = f"request.requires_tools[{index}]"
+    if not isinstance(entry, dict):
+        raise FunctionalVerificationError(f"{where} must be a JSON object")
+    unknown = sorted(set(entry) - _REQUIRES_TOOLS_KEYS)
+    if unknown:
         raise FunctionalVerificationError(
-            "mutation proposals 'scope' must be a subset of request.sources "
-            f"-- not present in request.sources: {', '.join(missing)}"
+            f"{where} has unknown field(s) {unknown} (allowed: name, version, sha256)"
         )
-
-
-def _resolve_mutation_proposals(
-    proposals: list[_ProposalRecord], scope: list[str], request_dir: str
-) -> tuple[_mutation_variants.MutationVariantPlan, dict[int, str]]:
-    """Anchor-validate every proposal against the *pristine* scope source
-    (the ported seam, spike §1a), splitting them into a
-    :class:`~klayout_tools._vendor.mutation_variants.MutationVariantPlan`
-    of the ones that resolved cleanly and a ``{index: reason}`` map of the
-    ones that did not.
-
-    Deliberately does **not** call the ported module's own
-    ``MutationVariantPlan.resolve()`` classmethod, which aborts the entire
-    batch on the *first* proposal that fails ``file``-in-scope or anchor
-    validation -- booley's own atomic-batch posture (§1a). This module's own
-    contract is per-proposal (spike §3b/§3c): a bad ``file`` or an
-    anchor mismatch on one proposal is that proposal's own ``"rejected"``
-    result, not a whole-document failure -- "the same 'one bad entry doesn't
-    poison the batch' posture ``klt drc``'s per-violation reporting already
-    takes." So this function drives the ported module's own building blocks
-    (``_read_originals``, ``_resolve_one``) directly, one proposal at a time,
-    instead.
-    """
-    allowed = set(scope)
-    try:
-        originals = _mutation_variants.MutationVariantPlan._read_originals(
-            Path(request_dir), allowed
+    name = entry.get("name")
+    if not isinstance(name, str) or not name:
+        raise FunctionalVerificationError(
+            f"{where}.name is required and must be a non-empty string"
         )
-    except _mutation_variants.MutationVariantError as exc:
-        # Every `scope` entry is already a `request.sources` member (see
-        # `_validate_mutation_scope`), and every `request.sources` entry was
-        # already confirmed readable by `_resolve_sources` -- so this should
-        # not fire in practice. Kept as a whole-document exit 1 (not a
-        # per-proposal rejection) rather than assumed unreachable: an
-        # unreadable *scope* file affects every proposal naming it, not one.
-        raise FunctionalVerificationError(str(exc)) from exc
-
-    resolved: list[_mutation_variants.ResolvedMutation] = []
-    rejected: dict[int, str] = {}
-    for proposal in proposals:
-        if proposal.file not in allowed:
-            rejected[proposal.index] = (
-                f"file '{proposal.file}' is outside the declared scope"
+    for field in ("version", "sha256"):
+        value = entry.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise FunctionalVerificationError(
+                f"{where}.{field} must be a non-empty string or null"
             )
-            continue
-        try:
-            resolved.append(
-                _mutation_variants.MutationVariantPlan._resolve_one(
-                    proposal, originals[proposal.file]
-                )
-            )
-        except _mutation_variants.MutationVariantError as exc:
-            rejected[proposal.index] = str(exc)
-
-    plan = _mutation_variants.MutationVariantPlan(
-        Path(request_dir), originals, tuple(resolved)
-    )
-    return plan, rejected
+    return name, entry.get("version"), entry.get("sha256")
 
 
-# ---------------------------------------------------------------------------
-# `--mutations`: isolated per-mutant build+test, bounded by a klt-level
-# subprocess timeout (issue #1592, spike "Open questions")
-# ---------------------------------------------------------------------------
-
-
-def _build_and_test_variant(
-    *,
-    engine: str,
-    sources: list[str],
-    hdl_toplevel: str,
-    build_dir: str,
-    build_args: list[str],
-    defines: dict[str, str | None],
-    includes: list[str],
-    timescale: tuple[str, str],
-    parameters: dict[str, Any],
-    build_log: str,
-    module: str,
-    module_dir: str,
-    testcase: str | list[str] | None,
-    random_seed: int | None,
-    test_dir: str,
-    results_xml: str,
-    test_log: str,
-) -> None:
-    """``_run_build`` then ``_run_test`` against whatever source bytes are on
-    disk right now -- the isolated per-mutant build+test this module runs
-    once per resolved proposal, inside :func:`plan.applied(index)
-    <klayout_tools._vendor.mutation_variants.MutationVariantPlan.applied>`
-    so the mutated bytes are only ever on disk for the duration of this call.
-
-    Always runs inside the forked child process :func:`_run_isolated_variant`
-    starts -- never called directly from the parent process -- so that a
-    mutation that wedges the simulator (spike §2's mutant #4: an FSM that
-    never reaches its terminal count) can be killed outright by the parent
-    once :data:`DEFAULT_MUTATION_TIMEOUT_S` elapses, which is not possible
-    for a blocking in-process call once cocotb's own ``Runner.test()`` has
-    handed control to a synchronous ``subprocess.run()`` with no timeout
-    parameter of its own (verified against cocotb 2.0.1's own
-    ``cocotb_tools/runner.py``).
-    """
-    runner_module = _import_runner()
-    engine_runner = _run_build(
-        runner_module,
-        engine=engine,
-        sources=sources,
-        hdl_toplevel=hdl_toplevel,
-        build_dir=build_dir,
-        build_args=build_args,
-        defines=defines,
-        includes=includes,
-        timescale=timescale,
-        parameters=parameters,
-        log_path=build_log,
-    )
-    _run_test(
-        engine_runner,
-        engine=engine,
-        module=module,
-        module_dir=module_dir,
-        hdl_toplevel=hdl_toplevel,
-        testcase=testcase,
-        random_seed=random_seed,
-        build_dir=build_dir,
-        test_dir=test_dir,
-        results_xml=results_xml,
-        timescale=timescale,
-        parameters=parameters,
-        log_path=test_log,
-    )
-
-
-def _mutation_subprocess_entry(kwargs: dict[str, Any], result_queue: Any) -> None:
-    """Target of the forked child process :func:`_run_isolated_variant`
-    starts. ``os.setpgrp()`` moves the child into its own process group
-    *before* it can spawn cocotb's own simulator subprocess, so the parent
-    can SIGKILL the whole group -- child plus simulator grandchild -- rather
-    than orphaning the simulator process on a timeout kill.
-    """
+def _check_required_tool(
+    name: str,
+    want_version: str | None,
+    want_sha256: str | None,
+    search_path: str | None,
+    run_env: dict[str, str],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve one tool; return ``(tool_echo, unmet)``. ``tool_echo`` is
+    ``None`` when the binary was not found; ``unmet`` is ``None`` when every
+    requested constraint holds."""
+    resolved = shutil.which(name, path=search_path)
+    if resolved is None:
+        missing: dict[str, Any] = {
+            "name": name,
+            "wanted": "on PATH",
+            "found": None,
+            "reason": "not found",
+        }
+        return None, missing
+    observed = _tool_version_output(resolved, run_env)
     try:
-        os.setpgrp()
-    except OSError:  # pragma: no cover - defensive; absent on non-POSIX
-        pass
-    try:
-        _build_and_test_variant(**kwargs)
-    except BaseException as exc:  # noqa: BLE001 - reported back, never raised across the process boundary
-        try:
-            result_queue.put(("error", f"{exc}"))
-        except Exception:  # pragma: no cover - defensive: an unpicklable exc
-            result_queue.put(("error", f"{type(exc).__name__}"))
-        return
-    result_queue.put(("ok", None))
-
-
-def _kill_process_tree(pid: int | None) -> None:
-    """SIGKILL ``pid``'s whole process group (see :func:`_mutation_subprocess_entry`),
-    falling back to just ``pid`` if the group lookup itself fails. Never
-    raises -- called only after a timeout has already been decided; a kill
-    that fails because the process already exited on its own is not this
-    function's problem to report."""
-    if pid is None:
-        return
-    try:
-        pgid = os.getpgid(pid)
+        digest = sha256_file(resolved)
     except OSError:
-        pgid = None
-    if pgid is not None:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-        except OSError:
-            pass
+        digest = None
+    tool: dict[str, Any] = {
+        "name": name,
+        "path": resolved,
+        "version": observed,
+        "sha256": digest,
+    }
+    problems = []
+    if want_version is not None and (observed is None or want_version not in observed):
+        problems.append(f"version {want_version!r} not in --version output")
+    if want_sha256 is not None and digest != want_sha256.lower():
+        problems.append(f"sha256 {want_sha256} != {digest}")
+    if not problems:
+        return tool, None
+    unmet: dict[str, Any] = {
+        "name": name,
+        "wanted": {"version": want_version, "sha256": want_sha256},
+        "found": {"path": resolved, "version": observed, "sha256": digest},
+        "reason": "; ".join(problems),
+    }
+    return tool, unmet
+
+
+def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
+    """First non-empty line of ``<path> --version`` (stdout, else stderr);
+    ``None`` if it cannot run. A non-zero exit still counts when it printed."""
     try:
-        os.kill(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
-def _run_isolated_variant(
-    *, timeout_s: float, **build_and_test_kwargs: Any
-) -> tuple[bool, tuple[str, str | None]]:
-    """Run :func:`_build_and_test_variant` in a forked child process bounded
-    by ``timeout_s`` wall-clock seconds -- the ``klt``-level per-mutant
-    subprocess timeout (issue #1592, spike "Open questions"), independent of
-    and in addition to whatever cycle bound the testbench's own code has.
-
-    Forking (rather than, say, a ``threading.Thread`` with a join timeout)
-    is the load-bearing choice: a thread cannot forcibly terminate a
-    blocking ``subprocess.run()`` several call frames down inside cocotb's
-    own ``Runner.test()``, which has no timeout parameter to begin with
-    (this module's own :func:`_build_and_test_variant` docstring). A forked
-    child gives this function an OS process-group handle it can SIGKILL
-    outright on a timeout -- see :func:`_kill_process_tree`.
-
-    Returns ``(timed_out, (status, detail))``:
-
-    - ``timed_out=True`` -- the child did not finish within ``timeout_s`` and
-      was killed. Booley's own rule, ported verbatim (spike §1a): **"a
-      timed-out mutant counts as detected because the mutation can wedge the
-      design"** -- the caller classifies this as ``"killed"``, never
-      ``"rejected"``.
-    - ``timed_out=False, ("ok", None)`` -- the isolated build+test ran to
-      completion (a failing *regression* is not an error here -- see
-      :func:`_run_test`); the caller compares its ``results.xml`` against the
-      baseline's own to classify ``"killed"``/``"survived"``.
-    - ``timed_out=False, ("error", detail)`` -- the isolated build+test
-      raised (a build/elaboration failure, a missing ``results.xml``, or any
-      other exception) before producing a trustworthy verdict; the caller
-      classifies this ``"rejected"``.
-    """
-    if "fork" not in multiprocessing.get_all_start_methods():
-        # POSIX-only by construction (`os.setpgrp`/`os.killpg` above are
-        # both POSIX-only too) -- a clear request-time error beats a cryptic
-        # platform failure deep inside `multiprocessing`.
-        raise FunctionalVerificationError(
-            "--mutations requires OS process-fork support (POSIX) to bound "
-            "each isolated per-mutant build+test with a klt-level subprocess "
-            "timeout -- unavailable on this platform"
+        proc = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+            check=False,
         )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for stream in (proc.stdout, proc.stderr):
+        for line in (stream or "").splitlines():
+            if line.strip():
+                return line.strip()
+    return None
 
-    ctx = multiprocessing.get_context("fork")
-    result_queue: Any = ctx.Queue()
-    process = ctx.Process(
-        target=_mutation_subprocess_entry,
-        args=(build_and_test_kwargs, result_queue),
-    )
-    process.start()
-    process.join(timeout_s)
-    if process.is_alive():
-        _kill_process_tree(process.pid)
-        process.join(_MUTATION_KILL_GRACE_S)
-        return True, ("error", f"timed out after {timeout_s}s")
 
-    try:
-        return False, result_queue.get_nowait()
-    except _queue_module.Empty:
-        return False, (
-            "error",
-            "isolated build/test process exited without a result "
-            f"(exit code {process.exitcode})",
+class _MissingToolError(FunctionalVerificationError):
+    """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
+    surfaces ``details`` flat on ``error`` (``error.unmet_tools``)."""
+
+    def __init__(self, unmet: list[dict[str, Any]]) -> None:
+        listing = "; ".join(f"{u['name']} ({u['reason']})" for u in unmet)
+        super().__init__(
+            f"{len(unmet)} required tool(s) unmet before build: {listing}",
+            code="missing_tool",
         )
+        self.details = {"unmet_tools": unmet}
 
 
 # ---------------------------------------------------------------------------
@@ -1380,11 +1609,9 @@ def _run_isolated_variant(
 def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     """Parse a cocotb ``results.xml`` into the contract's ``tests[]`` list.
 
-    Structure (spike section 4, captured live): a ``<testcase>`` with no
-    child element is a pass, a ``<failure>`` child is a failure, a
-    ``<skipped>`` child is a skip. ``error_type``/``error_message`` are taken
-    verbatim from the ``<failure>`` element's own attributes and are present
-    only on failing entries.
+    A testcase passes unless it contains a failure or skip. Only failures
+    carry an error type and message. The parser reads the raw diagnostic
+    from the failure attributes or element text.
 
     Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
     *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``
@@ -1399,7 +1626,7 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
             "regression did not run to completion"
         )
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except ElementTree.ParseError as exc:
         raise FunctionalVerificationError(
             f"results file '{results_xml}' is not parseable XML: {exc}"
@@ -1575,7 +1802,7 @@ def _extract_random_seed_property(results_xml: str) -> int | None:
     perfectly well defined.
     """
     try:
-        tree = ElementTree.parse(results_xml)
+        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
     except (ElementTree.ParseError, OSError):
         return None
     for prop in tree.iter("property"):
@@ -1603,9 +1830,14 @@ def _import_runner():
         from cocotb_tools import runner
     except ImportError as exc:  # pragma: no cover - exercised via monkeypatch
         raise FunctionalVerificationError(
-            f"cocotb is not installed (import failed: {exc}) -- install it with "
-            "`pip install cocotb`, or `uv sync --extra functional-verification` "
-            "for this repo's pinned version"
+            f"cocotb is not installed (import failed: {exc}; interpreter: "
+            f"{sys.executable}) -- for a tool install (`uv tool install` / "
+            "`pipx install` / `uvx --from`) reinstall with the extra on the "
+            "install spec: `klayout-tools[functional-verification] @ "
+            "<url-or-version>`; for a source checkout run `uv sync --extra "
+            "functional-verification`; `pip install cocotb` only works if "
+            "that `pip` belongs to the interpreter above",
+            code="missing_optional_dependency",
         ) from exc
     return runner
 
@@ -1719,13 +1951,18 @@ def _run_build(
             f"could not initialise the '{engine}' simulator: {exc}"
         ) from exc
 
+    # cocotb >= 2.0 serialises every ``defines`` value as an SV literal and
+    # raises TypeError for ``None`` (issue #2884), so valueless defines are
+    # passed as a plain ``-DNAME`` build arg (icarus and verilator both take it).
+    valued_defines = {k: v for k, v in defines.items() if v is not None}
+    valueless_args = [f"-D{k}" for k, v in defines.items() if v is None]
     try:
         engine_runner.build(
             sources=sources,
             hdl_toplevel=hdl_toplevel,
             build_dir=build_dir,
-            build_args=build_args,
-            defines=defines,
+            build_args=[*build_args, *valueless_args],
+            defines=valued_defines,
             includes=includes,
             always=True,
             timescale=timescale,
@@ -1771,6 +2008,8 @@ def _run_test(
     parameters: dict[str, Any],
     log_path: str,
     waves: bool = False,
+    plusargs: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> None:
     """``Runner.test()``, with the simulator's own exit code deliberately
     discarded (spike section 4): a :class:`SystemExit` here means only "the
@@ -1800,6 +2039,9 @@ def _run_test(
     passed to both the build and test steps, matching cocotb's own
     ``Runner`` contract).
 
+    ``extra_env`` (``request.env``, issue #4338), when non-empty, is forwarded
+    to ``Runner.test(extra_env=...)`` -- the test step only, never the build.
+
     ``waves`` (``options.trace``, issue #1845) is forwarded to cocotb's own
     ``Runner.test(waves=...)``, which is what actually triggers the
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
@@ -1822,6 +2064,8 @@ def _run_test(
             parameters=parameters,
             log_file=log_path,
             waves=waves,
+            plusargs=plusargs or [],
+            extra_env=extra_env or {},
         )
     except (SystemExit, subprocess.CalledProcessError):
         # Expected on a failing regression -- the results file is the truth.
@@ -2029,30 +2273,6 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
-def _apply_sdf_header_normalization(sdf_path: str, output_dir: str) -> str:
-    """Issue #1880's always-on first step of
-    :func:`run_functional_verification`'s SDF-normalization pipeline: fill
-    the empty member of any ``VOLTAGE``/``TEMPERATURE``/``PROCESS`` header
-    triple (OpenSTA's ``write_sdf`` writes them as ``min::max``) so
-    ``iverilog -T typ`` does not reject the header with ``Chosen value not
-    defined``. See :func:`_normalize_sdf_header_triples`.
-
-    Returns ``sdf_path`` unchanged when the header needed nothing (a run on
-    such an SDF is byte-identical to before), else the normalized-copy path.
-    Nothing is dropped, so no ``environment.sdf.dropped`` class is recorded:
-    Icarus selects no delay from these fields. A separate function for the
-    same cyclomatic-complexity reason ``_apply_sdf_physical_only_drop``'s
-    docstring records.
-    """
-    normalized = _normalize_sdf_header_triples(sdf_path)
-    if normalized is None:
-        return sdf_path
-    new_path = os.path.join(output_dir, "klt_sdf_header_normalized.sdf")
-    with open(new_path, "w", encoding="utf-8") as handle:
-        handle.write(normalized)
-    return new_path
-
-
 def _apply_sdf_interconnect_only_drop(
     annotate_source_path: str,
     output_dir: str,
@@ -2091,6 +2311,95 @@ def _apply_sdf_interconnect_only_drop(
         handle.write(iopath_text)
     sdf_pre_dropped_counts[SDF_IOPATH_DROPPED_CLASS] = iopath_dropped_count
     return new_path
+
+
+def _apply_sdf_unsupported_edge_modpath_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> str:
+    """Issue #2885's ``ifnone`` edge-sensitive-modpath ``IOPATH`` drop,
+    applied as one step of :func:`run_functional_verification`'s
+    SDF-normalization pipeline: an ``IOPATH`` entry onto a cell arc whose
+    only module paths in the request's own cell models are ``ifnone`` +
+    edge-sensitive (which Icarus discards at elaboration) cannot match any
+    modpath, so it is removed from the SDF text before ``$sdf_annotate`` and
+    counted under :data:`SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS`, with the
+    distinct dropped arcs recorded alongside it.
+
+    Returns the path the next normalization step should read --
+    ``annotate_source_path`` unchanged when nothing was dropped, or a new
+    normalized-copy path otherwise. The count and arcs are recorded into the
+    two dicts in place, for the same cyclomatic-complexity reason
+    :func:`_apply_sdf_physical_only_drop`'s own docstring records.
+    """
+    edge_drop = _drop_sdf_unsupported_edge_modpath_iopaths(
+        annotate_source_path, sources
+    )
+    if edge_drop is None:
+        return annotate_source_path
+    edge_text, edge_count, edge_arcs = edge_drop
+    new_path = os.path.join(output_dir, "klt_sdf_ifnone_edge_modpath_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(edge_text)
+    sdf_pre_dropped_counts[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_count
+    sdf_pre_dropped_arcs[SDF_IFNONE_EDGE_MODPATH_DROPPED_CLASS] = edge_arcs
+    return new_path
+
+
+def _apply_sdf_bus_bit_modpath_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    sdf_pre_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> str:
+    """Issue #2958's bit-selected-bus ``IOPATH`` drop, applied as one step of
+    :func:`run_functional_verification`'s SDF-normalization pipeline: a
+    per-bit ``IOPATH`` onto a bus output the cell's model reaches only
+    through a whole-vector module path cannot match any modpath, so it is
+    removed from the SDF text before ``$sdf_annotate`` and counted under
+    :data:`SDF_BUS_BIT_MODPATH_DROPPED_CLASS`, with the distinct dropped arcs
+    recorded alongside it.
+
+    Returns the path the next normalization step should read --
+    ``annotate_source_path`` unchanged when nothing was dropped. Count and
+    arcs are recorded into the two dicts in place, as in
+    :func:`_apply_sdf_unsupported_edge_modpath_drop`.
+    """
+    bus_drop = _drop_sdf_bit_selected_bus_iopaths(annotate_source_path, sources)
+    if bus_drop is None:
+        return annotate_source_path
+    bus_text, bus_count, bus_arcs = bus_drop
+    new_path = os.path.join(output_dir, "klt_sdf_bus_bit_modpath_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(bus_text)
+    sdf_pre_dropped_counts[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_count
+    sdf_pre_dropped_arcs[SDF_BUS_BIT_MODPATH_DROPPED_CLASS] = bus_arcs
+    return new_path
+
+
+def _sdf_dropped_report(
+    sdf_dropped_counts: dict[str, int],
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]],
+) -> dict[str, dict[str, Any]]:
+    """``environment.sdf.dropped``: per class, ``{count, reason}`` -- plus
+    ``arcs`` for a class that recorded the specific cell arcs it dropped
+    (any class whose pass populates ``sdf_pre_dropped_arcs``, e.g. issues
+    #2885, #2958 and #5296; additive, absent on a class that records no
+    arcs)."""
+    report: dict[str, dict[str, Any]] = {}
+    for klass, count in sorted(sdf_dropped_counts.items()):
+        entry: dict[str, Any] = {
+            "count": count,
+            "reason": SDF_BENIGN_DIAGNOSTIC_REASONS.get(klass, ""),
+        }
+        if klass in sdf_pre_dropped_arcs:
+            entry["arcs"] = sdf_pre_dropped_arcs[klass]
+        report[klass] = entry
+    return report
 
 
 def _apply_sdf_physical_only_drop(
@@ -2140,45 +2449,75 @@ def _apply_sdf_physical_only_drop(
 # ---------------------------------------------------------------------------
 
 
-def run_functional_verification(request: str) -> dict[str, Any]:
-    """Run the cocotb regression declared by ``request``.
+def _resolve_output_dir(request_dir: str, output_dir: str | None) -> str:
+    """Directory run artifacts are written to: ``output_dir`` (relative
+    paths resolve against the cwd) or, by default,
+    ``<request_dir>/.klt/functional-verification``."""
+    if output_dir:
+        return os.path.abspath(output_dir)
+    return os.path.join(request_dir, ".klt", "functional-verification")
 
-    ``request`` accepts the same three forms every other ``klt`` request
-    argument does (see :func:`load_request_arg`): a path to a request JSON
-    file, ``"-"`` to read the request from stdin, or an inline JSON object
-    string.
 
-    Returns a dict matching the documented JSON schema (see
-    ``docs/cli/functional-verification.md``). Raises
-    :class:`FunctionalVerificationError` for anything that prevents a
-    trustworthy verdict from being produced at all -- a failing *test* is
-    never an error, it is ``status: "fail"`` in the returned report (which
-    the CLI turns into exit code 3).
-
-    Artifacts (the build directory, the raw ``results.xml``, the engine
-    transcripts, and any coverage ``.info``) are written to
-    ``.klt/functional-verification/`` next to the request file -- the same
-    "next to the input" default ``klt sim``/``klt synthesize`` already use --
-    and kept, never deleted.
-    """
-    request_doc, request_dir = load_request_arg(request)
-
+def _resolve_engine(request_doc: dict[str, Any]) -> str:
     engine = request_doc.get("engine", DEFAULT_ENGINE)
     if engine not in SUPPORTED_ENGINES:
         raise FunctionalVerificationError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
+    return engine
 
-    sources = _resolve_sources(request_doc["sources"], request_dir)
+
+def run_functional_verification(
+    request: str,
+    output_dir: str | None = None,
+    base_dir: str | None = None,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """Run the cocotb regression declared by ``request`` -- accepting the
+    same three forms every other ``klt`` request argument does (see
+    :func:`load_request_arg`).
+
+    ``base_dir`` optionally overrides that anchor (issue #5673): every
+    relative path (and the default artifact directory) resolves against
+    it, as the stdin form anchored there would; it must be a directory.
+
+    Returns a dict matching the documented JSON schema (see
+    ``docs/cli/functional-verification.md``). Raises
+    :class:`FunctionalVerificationError` for anything that prevents a
+    trustworthy verdict -- a failing *test* is ``status: "fail"`` (exit 3).
+
+    Artifacts (build directory, raw ``results.xml``, engine transcripts,
+    coverage ``.info``) are written to ``.klt/functional-verification/``
+    next to the request file (or under ``base_dir``) -- the same default
+    ``klt sim``/``klt synthesize`` use -- and kept, never deleted.
+    """
+    request_doc, request_dir = load_request_arg(request, base_dir=base_dir)
+    output_dir = _resolve_output_dir(request_dir, output_dir)
+    # Issue #6762: every `{path, scope}` envelope in the report is relative to
+    # the *request's* repo, never the cwd's, so one run yields one report.
+    repo_root = find_repo_root(request_dir)
+
+    engine = _resolve_engine(request_doc)
 
     hdl_toplevel = request_doc["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise FunctionalVerificationError(
-            "request.hdl_toplevel must be a non-empty string"
-        )
+    # Issue #5684: verify the synthesized netlist before anything is built.
+    # Issue #5782: the CLI's --pdk/--pdk-root merge over request.pdk here.
+    sources, run_inputs = resolve_run_inputs(
+        request_doc,
+        request_dir,
+        hdl_toplevel,
+        functools.partial(_path_envelope, repo_root=repo_root),
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+    )
 
-    module, module_dir, testcase = _resolve_testbench(
-        request_doc["testbench"], request_dir
+    verilog_tb = _resolve_verilog_top(
+        request_doc["testbench"], sources, engine, request_doc.get("options")
+    )
+    module, module_dir, testcase = _resolve_testbench_target(
+        verilog_tb, request_doc["testbench"], request_dir
     )
     (
         coverage_requested,
@@ -2190,9 +2529,27 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         sdf,
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
+    run_inputs.pin_sdf(sdf)
+    # Caller defines override PDK defaults. Derived FUNCTIONAL only applies
+    # when the request has no SDF (#5782).
+    defines = {**run_inputs.pdk_defines, **defines}
+    _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
+    initial_state = _resolve_initial_state(
+        request_doc.get("options"), engine, request_dir
+    )
+    if initial_state is not None and sdf is not None:
+        raise FunctionalVerificationError(
+            "options.initial_state cannot currently be combined with "
+            "options.sdf -- not yet designed (the SDF build elaborates a "
+            "generated wrapper as the root and scans a single transcript)"
+        )
     parameters = _resolve_parameters(request_doc.get("parameters"))
+    env = _resolve_env(request_doc.get("env"), verilog_top=verilog_tb is not None)
+    tools = _resolve_requires_tools(request_doc.get("requires_tools"), env)
+    source_defines = _resolve_source_defines(
+        request_doc.get("options"), sources, request_dir
+    )
 
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
     build_dir = os.path.join(output_dir, f"sim_build_{engine}")
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -2243,6 +2600,11 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     # transcript scan (issue #2285). Merged with the scan's own counts once
     # the run is over.
     sdf_pre_dropped_counts: dict[str, int] = {}
+    # Per-class dropped cell arcs, for a class that names them (issue #2885).
+    sdf_pre_dropped_arcs: dict[str, list[dict[str, str]]] = {}
+    # Instances renamed by issue #2897's escaped-divider rewrite, reported
+    # as `environment.sdf.renamed` (absent when empty).
+    sdf_renamed: list[dict[str, str]] = []
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -2253,11 +2615,22 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         _check_sdf_engine_capability(_engine_version(engine))
         # Issue #1890: an escaped identifier containing a literal
         # occurrence of the SDF's own DIVIDER character in an INTERCONNECT
-        # entry crashes vvp outright (a genuine Icarus upstream limitation,
-        # not something the wrapper/shim below can work around) -- caught
-        # here, before any build artifact is written, rather than surfacing
-        # as a bare SIGABRT core dump four layers down.
+        # entry crashes vvp outright (a genuine Icarus upstream limitation)
+        # -- caught here, before any build artifact is written, rather than
+        # surfacing as a bare SIGABRT core dump four layers down. Narrowed
+        # by issue #2897 to a *pin/port* of that shape: an *instance* of
+        # that shape is renamed below instead.
         _reject_sdf_escaped_divider_interconnects(sdf["file"])
+        # Issue #4521: an SDF rooted at a child of the annotation scope
+        # (a bench wrapping the netlist) also aborts vvp -- named here.
+        _reject_sdf_mis_scoped_top_cell(
+            sdf["file"], sources, hdl_toplevel, sdf.get("scope")
+        )
+        # Issue #3740: an INTERCONNECT endpoint naming an instance the
+        # netlist does not have aborts vvp the same way -- caught here too.
+        _reject_sdf_unresolvable_scopes(
+            sdf["file"], sources, hdl_toplevel, sdf.get("scope")
+        )
         if parameters:
             # cocotb's own Icarus parameter-override syntax is always
             # `-P<hdl_toplevel>.<name>=<value>` (its Runner, not this
@@ -2284,8 +2657,8 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # (a compile-time flag, not an `$sdf_annotate` argument; see
         # `SDF_CORNERS`).
         ports = _parse_toplevel_ports(sources, hdl_toplevel)
+        wrapper_parameters = _parse_toplevel_parameters(sources, hdl_toplevel)
         wrapper_path = os.path.join(output_dir, f"{SDF_WRAPPER_MODULE}.v")
-        _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
 
         # Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
         # back-annotation only, as the first entry-level normalization step.
@@ -2301,9 +2674,57 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # which `iverilog -T typ` (the default corner) rejects as `Chosen
         # value not defined`. Always-on, header-only, and a no-op on an SDF
         # whose header is already complete.
-        annotate_source_path = _apply_sdf_header_normalization(sdf["file"], output_dir)
+        # Issue #2897: an instance name that is an escaped identifier
+        # containing a literal `.` (or the SDF's own DIVIDER) -- a flattened
+        # `generate` array's `\g[0].sub.u1` -- crashes vvp in an
+        # INTERCONNECT endpoint and fails to resolve in a CELL's INSTANCE,
+        # under either DIVIDER. Renamed to a plain identifier consistently
+        # in build-dir copies of the SDF and of every source declaring it
+        # (the caller's own files are untouched); reported as
+        # `environment.sdf.renamed`. A no-op on any other SDF.
+        annotate_source_path, sources, sdf_renamed = _apply_sdf_escaped_divider_rename(
+            sdf["file"], sources, output_dir
+        )
+        annotate_source_path = _apply_sdf_header_normalization(
+            annotate_source_path, output_dir
+        )
         annotate_source_path = _apply_sdf_interconnect_only_drop(
             annotate_source_path, output_dir, sdf_pre_dropped_counts, sdf["entries"]
+        )
+        # Issue #2885: an IOPATH onto a cell arc whose only module paths are
+        # `ifnone` + edge-sensitive (gf180mcu's XOR/XNOR/MUX-select shape)
+        # has no modpath to match -- Icarus discards those paths at
+        # elaboration -- so it is removed here and counted (with the arcs
+        # named) in `environment.sdf.dropped` instead of failing the run as
+        # `Unable to match ModPath`. Any other IOPATH mismatch is left in
+        # place and still fails the diagnostic gate loudly. A no-op (the
+        # SDF is not even read) when no source mentions `ifnone`.
+        annotate_source_path = _apply_sdf_unsupported_edge_modpath_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
+        )
+        # Issue #2958: a per-bit IOPATH onto a bus output the cell model
+        # reaches only through a whole-vector module path (a hard macro's
+        # `(CLK *> DOUT)`) has no per-bit modpath to match, so it is removed
+        # here and counted (arcs named) like the #2885 drop above. A no-op
+        # (the SDF is not even read) when no source declares a bus output
+        # alongside a `specify` block.
+        annotate_source_path = _apply_sdf_bus_bit_modpath_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
+        )
+        # Issue #5296: drop operator-expression COND IOPATHs (Icarus parse error).
+        annotate_source_path = _apply_sdf_cond_expression_drop(
+            annotate_source_path,
+            output_dir,
+            sdf_pre_dropped_counts,
+            sdf_pre_dropped_arcs,
         )
         # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
         # (any real design's bus ports produce these) can poison a sibling
@@ -2313,51 +2734,65 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # of the two confirmed mechanisms this actually fixes) is a no-op
         # for a design with only scalar top-level ports (#1069's own case)
         # -- `sdf_paths` stays a single-element list in that case.
-        # Issue #2285: an `INTERCONNECT` entry whose destination is a
-        # top-level port bit the netlist drives through an `assign` alias
-        # (a P&R backend's tie-cell shape, `assign uio_oe[0] = net0;`)
-        # cannot be annotated by Icarus at all -- and cannot be made
-        # annotatable by rewriting the endpoint either (verified live; see
-        # the module comment above
-        # :func:`_drop_sdf_zero_delay_alias_port_interconnects`). When such
-        # an entry is zero-delay at every corner, dropping it cannot change
-        # any simulated timing, so it is removed from the SDF text here and
-        # counted in `environment.sdf.dropped` instead of failing the run.
-        # A non-zero-delay entry is left in place and still fails the
-        # diagnostic gate loudly.
-        alias_port_bits = _collect_sdf_alias_port_bits(sources, hdl_toplevel)
-        alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
-            annotate_source_path, alias_port_bits
+        # Issue #2285: an `INTERCONNECT` onto a top-level port bit the
+        # netlist drives through an `assign` alias (a P&R backend's
+        # tie-cell shape) cannot be annotated by Icarus at all and cannot
+        # be made annotatable by rewriting the endpoint either; a
+        # zero-delay-at-every-corner entry is dropped up front and counted
+        # in `environment.sdf.dropped` instead of failing the run (the
+        # helper carries the full write-up; non-zero entries stay in
+        # place and still fail the diagnostic gate loudly).
+        annotate_source_path = _apply_sdf_alias_port_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            sdf_pre_dropped_counts,
         )
-        if alias_drop is not None:
-            alias_text, alias_dropped_count = alias_drop
-            annotate_source_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
-            with open(annotate_source_path, "w", encoding="utf-8") as handle:
-                handle.write(alias_text)
-            sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
 
         vector_ports = {name for _, width, name in ports if width}
 
         # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
         # input port onto a pin of a *physical-only* instance -- a
         # router-inserted antenna diode, or any filler/tapcell whose model
-        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
-        # cannot be annotated by Icarus at all. Unlike the general shape (b)
-        # case (which stays failing, pinned by
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike: on a
+        # fanout-above-1 net, #5705's cap leaves every non-last-declared
+        # load's entry unannotated. Unlike the general shape (b) case
+        # (which stays failing, pinned by
         # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-        # unresolvable`), this destination's elaborated model carries no
-        # `specify` block and no output pin, so there is no modpath the
-        # entry could ever annotate. When such an entry is zero-delay at
-        # every corner, dropping it cannot change any simulated timing, so
+        # unresolvable`), this destination has no timing content and no
+        # logic observes the pin -- its entry can still be the cap's
+        # survivor, so the drop rests on timing emptiness, not "no modpath
+        # exists". A zero-delay-at-every-corner entry is timing-neutral, so
         # it is removed here and counted in `environment.sdf.dropped`
-        # instead of failing the run. A non-zero-delay entry is left in
-        # place and still fails the diagnostic gate loudly.
+        # instead of failing the run; a non-zero-delay entry still fails.
         annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
             output_dir,
             sources,
             hdl_toplevel,
             ports,
+            sdf_pre_dropped_counts,
+        )
+
+        # Issue #2984: the remaining zero-delay sub-shape of shape (b) -- the
+        # same bit-selected-input-port source with a destination that is not
+        # physical-only. Zero-delay entries model no delay at any corner, so
+        # dropping them is timing-neutral; non-zero ones stay and still fail.
+        annotate_source_path = _apply_sdf_bus_port_source_drop(
+            annotate_source_path, output_dir, ports, sdf_pre_dropped_counts
+        )
+
+        # Issue #6075: the same cap also bites bit-selected INTERNAL nets,
+        # where Icarus inserts no survivor at all (0-of-N at any fanout).
+        # Both endpoints are instance pins here, so neither sibling pass
+        # above can have claimed these entries; the decision reads the same
+        # gate-level parse, and the zero-delay bound is the same.
+        annotate_source_path = _apply_sdf_internal_bus_net_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
             sdf_pre_dropped_counts,
         )
 
@@ -2373,17 +2808,69 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             with open(deferred_path, "w", encoding="utf-8") as handle:
                 handle.write(deferred_text)
             sdf_paths = [safe_path, deferred_path]
+        # Issue #5769: remember what Icarus actually reads -- a refusal
+        # resolves its intermodpath locators against these files (Icarus's
+        # line counter is cumulative across the calls above), never
+        # against the request's own SDF path.
+        sdf.update(_sdf_refusal_attribution(sdf_paths, ports))
 
         shim_path = os.path.join(output_dir, f"{SDF_ANNOTATE_MODULE}.v")
         _write_sdf_annotate_shim(
             shim_path,
             sdf_paths=sdf_paths,
-            scope=f"{SDF_WRAPPER_MODULE}.{SDF_WRAPPER_DUT_INSTANCE}",
+            scope=_sdf_annotate_scope(verilog_tb, sdf.get("scope")),
         )
-        sources = [*sources, wrapper_path, shim_path]
+        sources, build_hdl_toplevel = _sdf_extend_sources(
+            verilog_tb,
+            sources,
+            wrapper_path=wrapper_path,
+            shim_path=shim_path,
+            hdl_toplevel=hdl_toplevel,
+            ports=ports,
+            wrapper_parameters=wrapper_parameters,
+        )
         build_args += [*SDF_BUILD_ARGS, "-T", sdf["corner"]]
-        build_hdl_toplevel = SDF_WRAPPER_MODULE
+    initial_state_info: dict[str, Any] = {}
+    if initial_state is not None:
+        shim_path, initial_state_info = _write_initial_state_shim(
+            initial_state,
+            sources=sources,
+            hdl_toplevel=hdl_toplevel,
+            output_dir=output_dir,
+        )
+        sources = [*sources, shim_path]
+        build_args += ["-s", INITIAL_STATE_MODULE]
     build_args += user_build_args
+    # Issue #3290: scoped defines are applied last, to the build source list
+    # only -- the port parse and source-text scans above read the real files.
+    sources, scoped_include_dirs = _write_scoped_define_wrappers(
+        sources, source_defines, output_dir
+    )
+    includes = [*includes, *scoped_include_dirs]
+
+    if verilog_tb is not None:
+        return with_run_inputs(
+            _run_verilog_top(
+                verilog_tb,
+                engine=engine,
+                hdl_toplevel=hdl_toplevel,
+                sources=sources,
+                build_args=build_args,
+                defines=defines,
+                includes=includes,
+                build_dir=build_dir,
+                build_log=build_log,
+                test_log=test_log,
+                sdf=sdf,
+                sdf_pre_dropped_counts=sdf_pre_dropped_counts,
+                sdf_pre_dropped_arcs=sdf_pre_dropped_arcs,
+                sdf_renamed=sdf_renamed,
+                source_defines=source_defines,
+                tools=tools,
+                repo_root=repo_root,
+            ),
+            run_inputs,
+        )
 
     runner_module = _import_runner()
     _check_cocotb_abi_compatibility()
@@ -2401,22 +2888,31 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         log_path=build_log,
         waves=trace_requested,
     )
-    _run_test(
-        engine_runner,
+    run_specs = _initial_state_run_specs(
+        initial_state,
         engine=engine,
-        module=module,
-        module_dir=module_dir,
-        hdl_toplevel=build_hdl_toplevel,
-        testcase=testcase,
-        random_seed=random_seed,
-        build_dir=build_dir,
-        test_dir=output_dir,
+        output_dir=output_dir,
         results_xml=results_xml,
-        timescale=timescale,
-        parameters=parameters,
-        log_path=test_log,
-        waves=trace_requested,
+        test_log=test_log,
     )
+    for spec in run_specs:
+        _run_spec_test(
+            engine_runner,
+            spec,
+            engine=engine,
+            module=module,
+            module_dir=module_dir,
+            hdl_toplevel=build_hdl_toplevel,
+            testcase=testcase,
+            random_seed=random_seed,
+            build_dir=build_dir,
+            test_dir=output_dir,
+            timescale=timescale,
+            parameters=parameters,
+            extra_env=env,
+            waves=trace_requested,
+        )
+    results_xml = run_specs[0]["results_xml"]
 
     sdf_dropped_counts: dict[str, int] = {}
     if sdf is not None:
@@ -2435,36 +2931,23 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # run (issue #2285), for which Icarus emits nothing at all.
         sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
-            shown = " | ".join(diagnostics[:5])
-            more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
-            raise FunctionalVerificationError(
-                f"SDF back-annotation of '{sdf['file']}' did not fully apply: "
-                f"{len(diagnostics)} diagnostic(s) in the {engine} transcript "
-                f"-- {shown}{more}. The simulator exits 0 after skipping an "
-                "annotation it cannot apply, so this run's verdict would have "
-                "been a zero-delay one reported as if it were annotated."
+            raise _sdf_refusal_error(
+                sdf,
+                engine,
+                diagnostics,
+                _sdf_dropped_report(sdf_dropped_counts, sdf_pre_dropped_arcs),
             )
 
-    try:
-        tests = parse_results_xml(results_xml)
-    except FunctionalVerificationError as exc:
-        # The pre-flight ABI check catches the common case up front; this is
-        # the fallback for whatever it doesn't (issue #1103) -- only fires
-        # when `results.xml` is confirmed missing, so a genuinely unparseable
-        # or unreadable results file (a different failure mode entirely)
-        # keeps its own unaugmented message.
-        diagnostic = None
-        if not os.path.isfile(results_xml):
-            diagnostic = _scan_interpreter_mismatch_diagnostics(build_log, test_log)
-        if diagnostic is None:
-            raise
-        raise FunctionalVerificationError(
-            f"{exc} -- probable cause: the {engine} transcript contains "
-            f"{diagnostic!r}, which usually means the installed cocotb was "
-            "built for a different CPython than the one running klt (an "
-            "ABI-mismatched wheel)"
-        ) from exc
-    passed_count, failed_count, skipped_count = _executed_result_counts(tests, module)
+    tests, (passed_count, failed_count, skipped_count), run_reports = (
+        _collect_run_results(
+            run_specs,
+            engine=engine,
+            module=module,
+            build_log=build_log,
+            repo_root=repo_root,
+        )
+    )
+    run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
     if coverage_requested:
@@ -2486,431 +2969,125 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             hdl_toplevel=build_hdl_toplevel, build_dir=build_dir, test_dir=output_dir
         )
 
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "engine": engine,
-        "hdl_toplevel": hdl_toplevel,
-        "testbench": module,
-        "status": "fail" if failed_count else "pass",
-        "test_count": len(tests),
-        "passed_count": passed_count,
-        "failed_count": failed_count,
-        "skipped_count": skipped_count,
-        "tests": tests,
-        "coverage": coverage,
-        "trace": trace,
-        "environment": {
+    report = _Report(
+        {
+            "schema_version": SCHEMA_VERSION,
             "engine": engine,
-            "engine_version": _engine_version(engine),
-            "cocotb_version": _cocotb_version(),
-            "results_xml": results_xml,
-            "random_seed": _extract_random_seed_property(results_xml),
-            # Additive (issue #1002, spike §4.2 item 5): `null` on an
-            # ordinary run, an object on an SDF-annotated one -- so a caller
-            # can tell an annotated run from an unannotated one *from the
-            # JSON*, without reading a transcript. `annotated: true` is
-            # load-bearing rather than redundant: reaching this point at all
-            # means the diagnostic scan above found nothing *actionable*,
-            # i.e. every non-benign diagnostic class applied cleanly.
-            #
-            # `annotated: true` alone cannot distinguish "every delay and
-            # every timing check applied" from "every IOPATH applied and
-            # every TIMINGCHECK section was dropped" -- the normal case on
-            # Icarus, which has no SDF TIMINGCHECK support at all (issue
-            # #1102). `partial`/`dropped` make that distinction
-            # machine-readable: `partial` is true whenever any benign class
-            # was filtered out of the diagnostic gate above, and `dropped`
-            # names each such class with the count of diagnostic lines
-            # filtered and a human-readable reason
-            # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
-            # -clean run reports `partial: false` and `dropped: {}`.
-            "sdf": (
-                None
-                if sdf is None
-                else {
-                    "file": sdf["file"],
-                    "corner": sdf["corner"],
-                    # Additive (issue #2364): echoes the request's entry
-                    # population -- "all" (every delay entry) or
-                    # "interconnect" (net delays only, every non-INTERCONNECT
-                    # delay entry dropped and counted in `dropped`). Absent
-                    # on no older reader's contract: the field is new, and a
-                    # consumer that ignores unknown keys (the JSON contract's
-                    # additive rule) is unaffected.
-                    "entries": sdf["entries"],
-                    "annotated": True,
-                    "partial": bool(sdf_dropped_counts),
-                    "dropped": {
-                        klass: {
-                            "count": count,
-                            "reason": SDF_BENIGN_DIAGNOSTIC_REASONS.get(klass, ""),
-                        }
-                        for klass, count in sorted(sdf_dropped_counts.items())
-                    },
-                }
-            ),
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# `--mutations` entry point (issue #1592, spike section 3)
-# ---------------------------------------------------------------------------
-
-
-def _first_new_failure(
-    baseline_tests: list[dict[str, Any]], mutant_tests: list[dict[str, Any]]
-) -> str | None:
-    """The first ``@cocotb.test()`` name in ``mutant_tests`` that failed
-    where the baseline did not (spike §3c's ``first_killing_test``), or
-    ``None`` if every mutant failure (if any) also failed on the baseline.
-
-    The baseline-must-pass gate (:func:`run_functional_verification_with_mutations`)
-    means ``baseline_tests`` never actually contains a ``"failed"`` entry by
-    the time this is called -- so in practice this reduces to "the first
-    mutant test that failed at all" -- but the lookup is written generally
-    rather than assumed, since nothing about this function's own contract
-    depends on that invariant holding.
-    """
-    baseline_status_by_name = {test["name"]: test["status"] for test in baseline_tests}
-    for test in mutant_tests:
-        baseline_status = baseline_status_by_name.get(test["name"])
-        if test["status"] == "failed" and baseline_status != "failed":
-            return test["name"]
-    return None
-
-
-def _write_mutant_combined_log(
-    combined_path: str, build_log: str, test_log: str
-) -> None:
-    """Concatenate one mutant's build+test transcripts into the single
-    ``log_path`` artifact the response references (spike §3c) -- `klt`'s own
-    choice, not part of the ported seam: the baseline contract already keeps
-    ``build_<engine>.log``/``test_<engine>.log`` as two separate files, but
-    ``mutation_testing.results[].log_path`` is documented as one path per
-    mutant, so this writes a single, clearly-labelled concatenation of both
-    (the per-mutant ``build_<engine>.log``/``test_<engine>.log`` themselves
-    are also kept on disk, unreferenced by the JSON, for anyone who wants
-    them individually).
-
-    Never raises -- a missing/unreadable per-step transcript degrades to
-    "leave it out of the combined log", the same posture :func:`_log_tail`
-    already takes toward a captured transcript it cannot read.
-    """
-    parts: list[str] = []
-    for label, path in (("build", build_log), ("test", test_log)):
-        try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                content = handle.read()
-        except OSError:
-            continue
-        parts.append(f"--- {label} log ({path}) ---\n{content}")
-    try:
-        with open(combined_path, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(parts))
-    except OSError:  # pragma: no cover - defensive, mirrors _log_tail's own posture
-        pass
-
-
-def run_functional_verification_with_mutations(
-    request: str, proposals_path: str
-) -> dict[str, Any]:
-    """Run ``klt functional-verification --mutations`` end to end (issue
-    #1592, spike section 3): the unmodified baseline run from
-    :func:`run_functional_verification`, gated by the baseline-must-pass
-    check (spike §3d), followed by one isolated, timeout-bounded build+test
-    per resolved proposal in ``proposals_path`` (spike §1a's ported seam),
-    classified ``killed``/``survived``/``rejected`` (spike §1a/§3c) into the
-    additive ``mutation_testing`` response block (spike §3c).
-
-    Raises :class:`FunctionalVerificationError` (CLI exit 1) for every
-    whole-run failure mode: anything the base contract already raises for
-    (bad request, missing sources, ...), a malformed ``<proposals>``
-    document, a ``<proposals>.scope`` entry outside ``request.sources``,
-    ``options.coverage``/``options.sdf`` combined with ``--mutations``
-    (neither is designed yet -- see "Out of scope" in
-    ``docs/cli/functional-verification.md``'s "`--mutations`" section), the
-    baseline itself failing (spike §3d), or every proposal ending up
-    ``"rejected"`` (``valid_count == 0`` with ``proposal_count > 0`` --
-    mirrors the base contract's own "a regression that registered zero
-    tests is exit 1, not a vacuous pass").
-
-    A successful return is always a baseline "pass" (`status: "pass"`) --
-    the returned dict is the ordinary :func:`run_functional_verification`
-    response, unmodified, plus the additive ``mutation_testing`` block. The
-    CLI (``cli/functional_verification_cmd.py``) derives exit 3 from
-    ``mutation_testing.survived_count > 0``, exit 0 otherwise -- see this
-    module's own docstring's "Exit codes" table replicated in
-    ``docs/cli/functional-verification.md``.
-    """
-    # Cheap, whole-document validation first -- before the (expensive)
-    # baseline ever runs. Order matters: a malformed proposals document or
-    # an out-of-scope entry should never cost a full build+test cycle to
-    # discover.
-    scope, proposal_records = load_mutation_proposals(proposals_path)
-    _validate_proposal_indices(proposal_records)
-
-    request_doc, request_dir = load_request_arg(request)
-    raw_sources = request_doc.get("sources")
-    _validate_mutation_scope(
-        scope, raw_sources if isinstance(raw_sources, list) else []
-    )
-
-    engine = request_doc.get("engine", DEFAULT_ENGINE)
-    if engine not in SUPPORTED_ENGINES:
-        raise FunctionalVerificationError(
-            f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
-        )
-    (
-        coverage_requested,
-        timescale,
-        random_seed,
-        defines,
-        user_build_args,
-        includes,
-        sdf,
-        trace_requested,
-    ) = _resolve_options(request_doc.get("options"), engine, request_dir)
-    if trace_requested:
-        # Also not designed (issue #1845/Epic #1585 Phase 3 only wires
-        # `options.trace` into the base contract): each isolated per-mutant
-        # variant (:func:`_run_isolated_variant`) builds in its own
-        # throwaway `build_dir` this function never surfaces, so there is no
-        # single trace artifact a `mutation_testing` response block could
-        # point at -- a request error is safer than silently tracing only
-        # the baseline (or dropping the flag) with no signal either way.
-        raise FunctionalVerificationError(
-            "options.trace cannot currently be combined with --mutations -- "
-            "not yet designed (Epic #1585 Phase 3 wires options.trace into "
-            "the base contract only)"
-        )
-    if coverage_requested:
-        # Explicitly out of scope (issue #1592, per the spike's "Open
-        # questions"): the N+1-multiplied Verilator cost of coverage-per-
-        # mutant has not been measured, so this is a clean request error
-        # rather than a silently-ignored or silently-wrong combination.
-        raise FunctionalVerificationError(
-            "options.coverage cannot currently be combined with --mutations "
-            "-- not yet designed (docs/design/mutation-testing-spike.md, "
-            "'Open questions')"
-        )
-    if sdf is not None:
-        # Also not designed (not explicitly listed in the issue's own "Out
-        # of scope", but the same reasoning applies): options.sdf swaps in a
-        # generated wrapper module as the elaboration root and adds extra
-        # generated source files that this function's own isolated per-
-        # mutant build does not replicate, so silently running it would
-        # produce a build that diverges from the baseline's own in a way
-        # nothing here would catch -- a request error is safer than a
-        # silently-wrong mutant build.
-        raise FunctionalVerificationError(
-            "options.sdf cannot currently be combined with --mutations -- "
-            "not yet designed (docs/design/mutation-testing-spike.md, "
-            "'Open questions')"
-        )
-
-    sources = _resolve_sources(request_doc["sources"], request_dir)
-    hdl_toplevel = request_doc["hdl_toplevel"]
-    if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
-        raise FunctionalVerificationError(
-            "request.hdl_toplevel must be a non-empty string"
-        )
-    module, module_dir, testcase = _resolve_testbench(
-        request_doc["testbench"], request_dir
-    )
-    parameters = _resolve_parameters(request_doc.get("parameters"))
-    build_args = list(user_build_args)
-
-    output_dir = os.path.join(request_dir, ".klt", "functional-verification")
-    mutants_dir = os.path.join(output_dir, "mutants")
-    try:
-        os.makedirs(mutants_dir, exist_ok=True)
-    except OSError as exc:
-        raise FunctionalVerificationError(
-            f"could not create output directory '{mutants_dir}': {exc}"
-        ) from exc
-
-    # The baseline-must-pass gate (spike §3d): the exact same request the
-    # caller already used for an ordinary (non-mutation) run, reused
-    # unchanged -- see `docs/design/mutation-testing-spike.md` §3a.
-    baseline = run_functional_verification(request)
-    if baseline["status"] != "pass":
-        failing_names = ", ".join(
-            test["name"] for test in baseline["tests"] if test["status"] == "failed"
-        )
-        raise FunctionalVerificationError(
-            "the baseline run itself failed ({}/{} tests failed{}) -- "
-            "mutation testing aborted before running any proposal: "
-            "comparing mutant behavior against an already-broken baseline "
-            "cannot distinguish 'the mutation broke it' from 'it was "
-            "already broken' (docs/design/mutation-testing-spike.md "
-            "section 3d)".format(
-                baseline["failed_count"],
-                baseline["test_count"],
-                f": {failing_names}" if failing_names else "",
-            )
-        )
-    baseline_tests = baseline["tests"]
-
-    plan, doc_rejections = _resolve_mutation_proposals(
-        proposal_records, scope, request_dir
-    )
-
-    results: list[dict[str, Any]] = []
-    rejected_count = 0
-    killed_count = 0
-    survived_count = 0
-
-    for record in proposal_records:
-        index = record.index
-        base_result = {
-            "index": index,
-            "category": record.category,
-            "file": record.file,
-            "line": record.line,
+            "hdl_toplevel": hdl_toplevel,
+            "testbench": module,
+            "status": "fail" if failed_count else "pass",
+            "test_count": len(tests),
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "tests": tests,
+            "coverage": coverage,
+            "trace": trace,
+            "environment": {
+                "engine": engine,
+                "engine_version": _engine_version(engine),
+                "tools": tools,
+                "cocotb_version": _cocotb_version(),
+                "results_xml": _hashed_path_envelope(results_xml, repo_root=repo_root),
+                # Additive (issue #3013): the simulator/cocotb console and build
+                # transcripts, named by path (never inlined) like `results_xml`.
+                "test_log": _hashed_path_envelope(test_log, repo_root=repo_root),
+                "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
+                "random_seed": _extract_random_seed_property(results_xml),
+                # Additive (issue #3290): `options.source_defines` keyed by the
+                # request.sources entry as resolved; `{}` when absent.
+                "source_defines": source_defines,
+                # Additive (issue #4338): `request.env` as given; `{}` when absent.
+                "env": env,
+                # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
+                "parameters": parameters,
+                # Additive (issue #2998): `null` unless the request set
+                # `options.initial_state`. `seeds` echoes the effective seeds
+                # (empty for mode "x"); `runs` has one entry per seed.
+                "initial_state": _initial_state_echo(
+                    initial_state, initial_state_info, run_reports
+                ),
+                # Additive (issue #1002, spike §4.2 item 5): `null` on an
+                # ordinary run, an object on an SDF-annotated one -- so a caller
+                # can tell an annotated run from an unannotated one *from the
+                # JSON*, without reading a transcript. `annotated: true` is
+                # load-bearing rather than redundant: reaching this point at all
+                # means the diagnostic scan above found nothing *actionable*,
+                # i.e. every non-benign diagnostic class applied cleanly.
+                #
+                # `annotated: true` alone cannot distinguish "every delay and
+                # every timing check applied" from "every IOPATH applied and
+                # every TIMINGCHECK section was dropped" -- the normal case on
+                # Icarus, which has no SDF TIMINGCHECK support at all (issue
+                # #1102). `partial`/`dropped` make that distinction
+                # machine-readable: `partial` is true whenever any benign class
+                # was filtered out of the diagnostic gate above, and `dropped`
+                # names each such class with the count of diagnostic lines
+                # filtered and a human-readable reason
+                # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
+                # -clean run reports `partial: false` and `dropped: {}`.
+                "sdf": (
+                    None
+                    if sdf is None
+                    else {
+                        "file": sdf["file"],
+                        "corner": sdf["corner"],
+                        # Additive (issue #2364): echoes the request's entry
+                        # population -- "all" (every delay entry) or
+                        # "interconnect" (net delays only, every non-INTERCONNECT
+                        # delay entry dropped and counted in `dropped`). Absent
+                        # on no older reader's contract: the field is new, and a
+                        # consumer that ignores unknown keys (the JSON contract's
+                        # additive rule) is unaffected.
+                        "entries": sdf["entries"],
+                        **({"scope": sdf["scope"]} if "scope" in sdf else {}),
+                        "annotated": True,
+                        "partial": bool(sdf_dropped_counts),
+                        "dropped": _sdf_dropped_report(
+                            sdf_dropped_counts, sdf_pre_dropped_arcs
+                        ),
+                        # Additive (issue #2897): `{from, to}` per escaped-
+                        # divider instance renamed for annotation.
+                        **_sdf_renamed_report(sdf_renamed),
+                    }
+                ),
+            },
         }
-
-        if index in doc_rejections:
-            results.append(
-                {
-                    **base_result,
-                    "status": "rejected",
-                    "reason": doc_rejections[index],
-                    "first_killing_test": None,
-                    "log_path": None,
-                }
-            )
-            rejected_count += 1
-            continue
-
-        mutant_dir = os.path.join(mutants_dir, f"mutant_{index}")
-        try:
-            os.makedirs(mutant_dir, exist_ok=True)
-        except OSError as exc:
-            raise FunctionalVerificationError(
-                f"could not create mutant directory '{mutant_dir}': {exc}"
-            ) from exc
-        build_dir = os.path.join(mutant_dir, f"sim_build_{engine}")
-        mutant_results_xml = os.path.join(mutant_dir, f"results_{engine}.xml")
-        build_log = os.path.join(mutant_dir, f"build_{engine}.log")
-        test_log = os.path.join(mutant_dir, f"test_{engine}.log")
-        combined_log = os.path.join(mutants_dir, f"mutant_{index}.log")
-
-        with plan.applied(index):
-            timed_out, (status_kind, detail) = _run_isolated_variant(
-                timeout_s=DEFAULT_MUTATION_TIMEOUT_S,
-                engine=engine,
-                sources=sources,
-                hdl_toplevel=hdl_toplevel,
-                build_dir=build_dir,
-                build_args=build_args,
-                defines=defines,
-                includes=includes,
-                timescale=timescale,
-                parameters=parameters,
-                build_log=build_log,
-                module=module,
-                module_dir=module_dir,
-                testcase=testcase,
-                random_seed=random_seed,
-                test_dir=mutant_dir,
-                results_xml=mutant_results_xml,
-                test_log=test_log,
-            )
-        _write_mutant_combined_log(combined_log, build_log, test_log)
-
-        if timed_out:
-            # Booley's own rule, ported verbatim (spike §1a): "a timed-out
-            # mutant counts as detected because the mutation can wedge the
-            # design."
-            results.append(
-                {
-                    **base_result,
-                    "status": "killed",
-                    "first_killing_test": None,
-                    "log_path": combined_log,
-                }
-            )
-            killed_count += 1
-            continue
-
-        if status_kind == "error":
-            results.append(
-                {
-                    **base_result,
-                    "status": "rejected",
-                    "reason": detail,
-                    "first_killing_test": None,
-                    "log_path": combined_log,
-                }
-            )
-            rejected_count += 1
-            continue
-
-        try:
-            mutant_tests = parse_results_xml(mutant_results_xml)
-        except FunctionalVerificationError as exc:
-            results.append(
-                {
-                    **base_result,
-                    "status": "rejected",
-                    "reason": str(exc),
-                    "first_killing_test": None,
-                    "log_path": combined_log,
-                }
-            )
-            rejected_count += 1
-            continue
-
-        first_killing_test = _first_new_failure(baseline_tests, mutant_tests)
-        if first_killing_test is not None:
-            results.append(
-                {
-                    **base_result,
-                    "status": "killed",
-                    "first_killing_test": first_killing_test,
-                    "log_path": combined_log,
-                }
-            )
-            killed_count += 1
-        else:
-            results.append(
-                {
-                    **base_result,
-                    "status": "survived",
-                    "first_killing_test": None,
-                    "log_path": combined_log,
-                }
-            )
-            survived_count += 1
-
-    proposal_count = len(proposal_records)
-    valid_count = proposal_count - rejected_count
-    if valid_count == 0 and proposal_count > 0:
-        # Mirrors the base contract's own "a regression that registered
-        # zero tests is exit 1, not a vacuous pass": a mutation run that
-        # tested nothing must never look like a clean `mutation_score: null`
-        # success (spike "Exit codes" table).
-        reasons = "; ".join(
-            f"#{entry['index']}: {entry['reason']}"
-            for entry in results
-            if entry["status"] == "rejected"
-        )
-        raise FunctionalVerificationError(
-            f"every mutation proposal was rejected ({proposal_count} "
-            f"proposal(s), 0 valid) -- {reasons}"
-        )
-
-    mutation_score = (killed_count / valid_count) if valid_count else None
-
-    baseline["mutation_testing"] = {
-        "schema_version": MUTATION_SCHEMA_VERSION,
-        "proposal_count": proposal_count,
-        "valid_count": valid_count,
-        "rejected_count": rejected_count,
-        "killed_count": killed_count,
-        "survived_count": survived_count,
-        "mutation_score": mutation_score,
-        "results": results,
+    )
+    with_run_inputs(report, run_inputs)
+    report.local_paths = {
+        "results_xml": results_xml,
+        "test_log": test_log,
+        "build_log": build_log,
     }
-    return baseline
+    return report
+
+
+# Re-exports of the subsystems split out of this module. Imported last so the
+# sibling modules (which reach back into this one lazily via ``_fv``) find
+# every name they need already defined.
+from .functional_verification_mutation import (  # noqa: E402, F401
+    run_functional_verification_with_mutations,
+)
+from .functional_verification_mutation_proposals import (  # noqa: E402, F401
+    _ProposalRecord,
+    _validate_mutation_scope,
+    _validate_proposal_indices,
+    load_mutation_proposals,
+)
+from .functional_verification_mutation_variant import (  # noqa: E402, F401
+    _build_and_test_variant,
+    _run_isolated_variant,
+)
+from .functional_verification_run_results import (  # noqa: E402
+    _collect_run_results,
+)
+from .functional_verification_verilog_top import (  # noqa: E402, F401
+    _check_verilog_top_sdf,
+    _reject_verilog_top_mutations,
+    _resolve_testbench_target,
+    _resolve_verilog_top,
+    _run_verilog_top,
+    _sdf_annotate_scope,
+    _sdf_extend_sources,
+)

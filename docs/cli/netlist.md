@@ -7,7 +7,7 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--format text|json]
+klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--symbol-path <dir>]... [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
@@ -31,12 +31,27 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   With `--pdk`/`--pdk-root` (or `$PDK`/`$PDK_ROOT`), the PDK root the
   `xschemrc` declares is cross-checked against the resolved PDK — see
   [PDK-root consistency](#pdk-root-consistency).
+- `--symbol-path` — extra xschem symbol directory, repeatable. Exported to
+  xschem as `XSCHEM_USER_LIBRARY_PATH` (`DIR[:DIR…]`, absolute-resolved,
+  placed ahead of any value already in the environment), so a project's
+  sibling `.sym` files resolve without an exported variable or an `--rcfile`
+  edit. A missing or non-directory `DIR` is exit `1`. Under `--backend batch`
+  see [Batch backend](#batch-backend): each `DIR` must be under the batch
+  root. Recorded as `xschem.symbol_path`.
 - `--pdk`, `--pdk-root` — resolve a PDK the same way `klt sim` does, to
   cross-check against `--rcfile`'s declared PDK root. See
   [PDK-root consistency](#pdk-root-consistency).
 - `--xschem-binary` — the xschem executable to run (default: `xschem`,
   resolved on `PATH`), for a pinned install or a container wrapper. It never
   changes the forced flag set below.
+- `--backend` — where xschem runs: `local` (this host) or `batch` (the
+  batch runner). Default: `$KLT_NETLIST_BACKEND`, else `local`. See
+  [Batch backend](#batch-backend).
+- `--batch-root` — `--backend batch` only: the directory whose git-tracked
+  files are uploaded (default: the schematic's git checkout).
+- `--batch-include <glob>` / `--batch-exclude <glob>` — `--backend batch`
+  only, repeatable: narrow the uploaded set to the files a schematic needs
+  while keeping a repo-level root (see "What is uploaded").
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 ## Why this verb exists
@@ -119,6 +134,92 @@ was left running. A batch netlist normally takes well under a second, so this is
 a hang rather than slow work: ...
 ```
 
+## Unevaluated `expr()` is a failure, not a netlist
+
+Older xschem releases do not evaluate a symbol's `expr(...)` attributes, so
+they write a perfectly "fresh" `.spice` that still contains the literal
+`expr(...)` — which ngspice cannot load. After the export (and after `--block`
+post-processing) the netlist is scanned, outside `*` comment lines, for an
+`expr` token followed by `(` (whitespace allowed; longer identifiers such as
+`myexpr(` do not match). A hit is an error (exit `1`) with
+`error.code: "unevaluated_expr"`; the message names the first offending line,
+the detected `xschem.version` (or `unknown`), and the minimum release reported
+to evaluate `expr()` (3.4.5 — taken from issue #3482, not verified against
+xschem's release notes). It applies to `--check` too, which fails with this
+cause instead of reporting `drifted`, and nothing is written. Under
+`--backend batch` the same code is returned.
+
+### `--allow-unevaluated-expr`
+
+For a caller that evaluates `expr()` itself downstream, `--allow-unevaluated-expr`
+downgrades this one gate to a warning: the netlist is written (or, with
+`--check`, compared) as xschem produced it and the run exits `0`/`3` as usual.
+The condition is never silent: a `klt netlist: warning:` line goes to stderr
+and `--format json` gains an additive `warnings` array (present only when
+non-empty; entries are discriminated by their `code`, see the next section)
+with an entry
+`{"code": "unevaluated_expr", "line": N, "snippet": "...", "xschem_version": "..."}`
+for the first offending line. A netlist with no `expr(` is unchanged. It works
+with `--block`, does **not** relax the `unresolved_symbol` gate, and combined
+with `--backend batch` is a usage error (exit `1`) — the runner applies the
+gate itself.
+
+### `pdk_variant_unestablished` — a defaulted PDK variant is a warning, not a fact
+
+When no PDK variant was selected (`--pdk` and `$PDK` both unset) and the
+resolved root holds more than one variant, the variant `klt netlist` resolves
+is a sorted first-match default — a guess, not something the run can stand
+behind (issue #5639). A provenance record asserting the guess would be worse
+than none, so the netlist is still written, the exit code is unchanged, but
+the run never asserts it as fact:
+
+- the `** klt-netlist-inputs:` record line carries `"pdk_variant": null`
+  (the other fields are unaffected);
+- the additive `warnings` array gains an entry
+  `{"code": "pdk_variant_unestablished", "variant": "<default taken>", "alternative_variants": ["..."], "root": "<abs root>", "message": "..."}`
+  naming the default and the alternatives;
+- a `klt netlist: warning:` line goes to stderr, in both output formats.
+
+Passing `--pdk <variant>` — as `--backend batch` already requires — or
+exporting `$PDK` records that variant and silences the warning. A
+single-variant root, and a run with no PDK in play (`pdk_variant` was already
+`null` there), behave exactly as before. This is never a gate: `--check`'s
+`status` is unchanged, and on a committed netlist written before this
+behaviour only `drift.inputs.changed` gains `pdk_variant`.
+
+## An unresolved symbol is a failure, not a netlist
+
+When an instance refers to a symbol xschem cannot find, xschem still writes a
+"fresh" `.spice`; the only trace is a comment line such as
+`*  E1 -  no_such_device  IS MISSING !!!!`, and the device is absent from the
+netlist. After the export (and after `--block` post-processing) the netlist is
+scanned — **including** `*` comment lines, since the marker lives in one — for
+`IS MISSING`. A hit is an error (exit `1`) with
+`error.code: "unresolved_symbol"`; the message names the first offending line
+number and text. It applies to `--check` too, which fails with this cause
+instead of reporting `drifted`, and nothing is written. Under `--backend batch`
+the same code is returned. This is on by default; there is no flag. xschem's
+ERC output is only consulted with `--erc` (below).
+
+## `diagnostics` and `--erc`
+
+Every local-backend payload carries `diagnostics`: `stdout` / `stderr` from
+xschem (each capped to the last 4096 bytes, with `stdout_truncated` /
+`stderr_truncated` flags). Additive; nothing else changes.
+
+xschem 3.4.7 has no `-erc` flag, but its netlister prints findings such as
+`Error: undriven node: #net1` during a normal run. `--erc` fails the run
+(exit `1`, `error.code: "erc_findings"`, `error.findings` /
+`error.finding_count`) when any `Error:` line appears on stdout/stderr, and
+nothing is written. Without `--erc` behaviour and netlist bytes are unchanged.
+Local backend only: `--backend batch` rejects `--erc`.
+
+**Verified (xschem 3.4.7):** a dangling wire (undriven node) is caught, and so
+are shorted pins: two differently-named `ipin`s wired to one net make xschem
+print `Error: Net shorted: A - B`, so `--erc` exits `1` with
+`error.code: "erc_findings"` and `error.findings: ["Error: Net shorted: A - B"]`
+(fixture `tests/data/netlist/shorted_pins.sch`, #4962).
+
 ## Success is the output file, not the exit status
 
 `xschem -n -s -q -x` returns a **non-zero** status after a *successful* batch
@@ -153,7 +254,8 @@ and CI need no schematic-capture tool installed. The risk is that it drifts:
 simulation results to a schematic that no longer exists.**
 
 `klt netlist <schematic> -o <committed netlist> --check` regenerates into a
-temp directory and compares byte-for-byte against the committed file:
+temp directory and compares against the committed file, after the
+normalizations described below (checkout paths, `+` layout):
 
 | Outcome | `status` | Exit | Notes |
 | --- | --- | --- | --- |
@@ -163,6 +265,120 @@ temp directory and compares byte-for-byte against the committed file:
 
 `--check` never writes `--output`. Re-run without `--check` to refresh it.
 
+**The comparison is independent of the checkout path** (issue #3010). xschem
+writes the absolute path of every schematic and symbol it expands into the
+netlist as a comment (`** sch_path: /abs/path/x.sch`, `** sym_path: ...`), so
+the same schematic netlisted in two checkouts differs on those lines alone.
+`--check` compares with each such comment reduced to its file name: a netlist
+committed from one checkout (a developer's home directory, a CI workspace, a
+worktree, the batch runner) still reports `"match"` from any other, while a
+change to any other line, or a subcircuit taken from a different file, still
+reports `"drifted"`. When the two files differ *only* in those comment
+directories, `drift.path_comments_differ` is `true`. By default generation is
+unchanged: the written netlist carries xschem's paths as xschem wrote them.
+
+**`--relative-paths` (issue #5046)** makes the *written* netlist
+checkout-independent too. Each `** sch_path:` / `** sym_path:` comment is
+rewritten relative to the schematic's git toplevel (fallback: the schematic's
+parent directory); paths outside that root, such as PDK symbols, are reduced to
+their basename. Regenerating the same sources from two checkouts or worktrees
+is then byte-identical, so a one-device edit shows up as a one-device diff.
+It works with `--block` and `--backend batch` (applied after the runner's paths
+are mapped back to the local checkout), and `--check` reports `match` against a
+committed netlist written either way. `netlist.content_hash` / `netlist.bytes`
+describe the rewritten text; no JSON field is added or changed.
+
+**`--check` text output labels its hashes** (issue #5743). The `netlist:` line becomes `netlist (generated, not compared): …` (it describes the raw generated bytes), and is followed by `committed:` (`drift.committed_content_hash`, equal to `sha256sum` of the `-o` file) and `compared:` (`drift.compared_content_hash`, `-` when drifted or absent). Generate-mode output is unchanged.
+
+**The comparison is also independent of `+` continuation layout** (issue
+#3324). Before comparing, each `+` continuation line is joined onto its
+predecessor and whitespace runs are collapsed (comment lines are left as
+lines; CRLF and trailing whitespace are ignored), so a netlist whose long
+cards a project post-processor re-wrapped still reports `"match"`. Only
+layout is normalized, never a token: a changed device card, parameter value,
+node or pin order still reports `"drifted"`. The one exception is the port
+order of xschem's informational `**.subckt <name> <ports...>` comment line,
+which differs between xschem versions and is compared order-insensitively
+(issue #3743); the electrical `.subckt` card's port order is still strict, and
+a permutation-only change is diagnosed in `drift.subckt_port_order` (issue #4524).
+When the files match only because of this, `drift.layout_differs` is `true`. This does not hide the
+`.subckt`/`.ends` wrapper difference — for a committed netlist wrapped as a
+real `.subckt`, pass `--block`, which `--check` applies before comparing
+([Block mode](#block-mode-an-includable-subckt)).
+
+**`--canonical-wrap` (issue #5715)** makes the *written* netlist
+layout-independent too: every `+` continuation line is folded onto the card it
+continues and whitespace runs inside non-comment lines are collapsed to single
+spaces — exactly the layout `--check` compares — so two hosts whose xschem
+builds wrap long cards differently write byte-identical files from the same
+schematic. Comment lines are left byte-intact: the informational
+`**.subckt <name> <ports...>` port order is not rewritten, a `+` line is never
+joined onto a comment, and a quoted expression with embedded spaces
+(`ad='int((nf+1)/2) * w/nf * 0.29'`) survives verbatim. The fold is idempotent,
+so canonical output is a fixed point of the comparison: a netlist written with
+the flag still checks `match` (with or without the flag on the checking run).
+It is honoured under `--backend batch` too, applied client-side after the
+runner's paths are mapped back. Default off, like the other write-side flags:
+without it no written byte changes. In generate mode the payload reports
+`canonical_wrap` (`false` by default), and `netlist.content_hash` /
+`netlist.bytes` describe the folded bytes.
+
+Three parts of a written netlist are a property of the **host or the
+checkout** rather than of the circuit, and `--check` forgives all three. Each
+has its own opt-in write-side flag:
+
+| Host/checkout-dependent surface | Written without a flag | Write-side flag |
+| --- | --- | --- |
+| `+` continuation wrapping | the host xschem's wrap column | `--canonical-wrap` (issue #5715) |
+| `** sch_path:` / `** sym_path:` absolute paths | this checkout's absolute paths | `--relative-paths` (issue #5046) |
+| `** klt-netlist-inputs:` line (embeds `xschem_version`) | this xschem build's version | `--no-provenance-header` (issue #5085) |
+
+So `klt netlist <sch> -o out.spice --canonical-wrap --relative-paths
+--no-provenance-header` is the form whose regenerations are byte-identical
+across hosts and checkouts. The combination is required: the provenance
+header embeds `xschem_version`, so with the header enabled two hosts running
+different xschem builds differ on that line whatever the wrapping. Without
+the flags the written netlist keeps the generating host's form, and
+`--check` still forgives all three surfaces when comparing.
+
+**Generation inputs are recorded** (issue #4945). The line is a stable, strippable contract; pass `--no-provenance-header` (issue #5085) to omit it, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
+one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
+"xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
+directory is checkout-specific) and the PDK variant that produced it —
+recorded as `null` when the variant was defaulted, not selected (no
+`--pdk`/`$PDK` with more than one variant under the resolved root; see the
+[`pdk_variant_unestablished`](#pdk_variant_unestablished--a-defaulted-pdk-variant-is-a-warning-not-a-fact)
+warning). xschem's
+own output carries no such record, so klt writes it. `--check` excludes that
+line from the comparison and from `drift.diff`, and compares it with the
+current inputs in `drift.inputs`; `drift.reason` then says whether the inputs
+changed (tool environment) or are unchanged (the schematic or a symbol it uses
+changed). A committed netlist written before this record existed has none:
+`drift.inputs.committed` is `null` and the reason says the two causes cannot be
+told apart until it is regenerated. Nothing is normalized on device cards:
+`pd=`/`ps=` or any other token difference is still drift. Being a `**` comment,
+the line is ignorable with `--ignore-comments`. Because the line is part of the
+written file, `netlist.content_hash` / `netlist.bytes` / `netlist.lines`
+include it, in `check` mode too (what a generation would write).
+
+**Post-processed committed netlists: `--ignore-comments`** (issue #4525).
+When a project lightly post-processes the export (an added header comment, a
+rewritten `** sch_path:` line), pass `--ignore-comments` with `--check`: every
+SPICE comment line (first non-blank character `*`) and blank line is ignored
+on both sides, so the files compare equal if only comments differ. Any
+change to a non-comment line (device card, parameter, node or pin order) still
+reports `"drifted"`; without the flag a comment-only difference still does.
+When the match relied on this, `drift.comments_differ` is `true`
+(`drift.comments_differ` is `false` otherwise). The flag only affects the
+comparison, so it is a usage error (exit `2`) without `--check`; it works
+under `--backend batch` too. Note a `*` line inside a `.control` block counts
+as a comment, as in SPICE.
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice \
+    --block --check --ignore-comments
+```
+
 The `0`/`3` split is deliberately the same one `klt drc --check` and `klt lvs
 --check` use for `"match"`/`"drifted"`, so a CI gate treats a stale committed
 netlist exactly as it already treats a stale committed report. One
@@ -170,6 +386,141 @@ difference worth stating: those verbs' `--check` takes a committed
 `--format json` *report path* as the flag's value, whereas the artifact being
 re-verified here is the netlist itself, which `--output` already names — so
 here `--check` is a boolean switch.
+
+## Batch backend
+
+`--backend batch` runs the export on the batch runner instead of this host,
+through the same S3 job contract and transport `klt sim --backend batch`
+uses (see [`klt sim`'s "Batch backend"](sim.md)): the same
+`KLT_BATCH_PROVISION_SCRIPT`, `KLT_BATCH_JOB_BUCKET`, `KLT_BATCH_REGION`,
+`KLT_BATCH_PROFILE` and `batch-fleet.env` resolution, the same submit /
+launch / poll / collect steps, and the same runner-version preflight, which
+refuses a runner whose `klt --version` differs from this client's.
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --backend batch \
+    --pdk sky130A --rcfile design/xschemrc
+```
+
+**Host default — `$KLT_NETLIST_BACKEND`.** Precedence is `--backend` >
+`$KLT_NETLIST_BACKEND` > `local`. A host that must not run xschem sets
+`KLT_NETLIST_BACKEND=batch` in its environment. Unlike
+`$KLT_SIM_BACKEND`, this is a hard routing choice, **not** a preference: a
+netlist export is always a single unit, so `klt sim`'s "step a single unit
+back to local" rule would make the setting a no-op. Nothing steps an
+env-sourced `batch` back to `local`; pass `--backend local` to run on the host
+on purpose.
+
+**No local fallback.** Every batch failure is an error (exit `1`), never a
+silent local run: unresolvable batch configuration, a failed upload or
+launch, a capacity refusal, the poll budget elapsing, a job that ends
+`failed` or `timeout`, a runner-version rejection, and a missing or invalid
+report. The message names the job id (when one was allocated); the error
+envelope's `error.code` classifies it:
+
+| `error.code` | Meaning |
+| --- | --- |
+| `batch_no_capacity` | The launch was refused for lack of Spot capacity (retryable). |
+| `batch_concurrency_cap` | The launch was refused because the shared fleet is at `BATCH_MAX_CONCURRENT_INSTANCES` (retryable; waited out under `batch.capacity_wait_s`). |
+| `batch_runner_version_mismatch` / `batch_runner_version_unknown` | The runner's `klt` differs from this client's, or could not be read; nothing ran. A mismatch that the AMI manifest already publishes is refused before upload, with no job launched ([sim.md](sim.md), "Pre-launch check from the AMI manifest"). |
+| `batch_poll_timeout` | The job did not finish within the poll budget. It may still finish on the runner; nothing was collected. |
+| `batch_job_interrupted` | The job stayed `interrupted` (Spot-reclaimed, no re-launch seen) for longer than the default 1800 s grace ([#2992](https://github.com/2AMLogic/klayout-tools/issues/2992)), so polling stopped before the poll budget. It may still be recoverable on the fleet; the client does not re-launch it. `klt netlist` has no request to carry `batch.interrupted_grace_s`, and prints no progress lines (its stderr carries the error envelope). |
+| `batch_job_timeout` | The harness stopped the job at its `timeout_seconds`. |
+| `batch_job_failed` | The job failed, or left no usable report or netlist. When the runner's own `klt netlist` reported an error, its message is quoted (and its `error.code` used, when it has one). |
+| `unevaluated_expr` | The netlist still contains a literal `expr(...)` (see above). Also returned by the local backend. |
+| `unresolved_symbol` | The netlist contains an `IS MISSING` marker: xschem could not resolve a symbol (see above). Also returned by the local backend. |
+| `batch_input_too_large` | The input tree is above the size cap (below). Raised before any upload. |
+
+**What is uploaded.** The job instance holds no forge credential and cannot
+clone the repository, so the client ships one `tree.tar.gz` of the
+**git-tracked** files under a root: the schematic's git checkout by default,
+or `--batch-root`. Untracked files are never included, and the schematic and
+a project `--rcfile` must be tracked files under the root (exit `1`
+otherwise, naming the file). The uncompressed total is capped at **64 MiB**
+(`netlist_batch.MAX_BATCH_TREE_BYTES`) and checked before the archive is
+built; above it, pass a narrower `--batch-root` (the directory holding the
+schematics, symbols and `xschemrc`) or select just what the schematic needs.
+
+**Selecting files.** `--batch-include <glob>` keeps only the tracked files
+matching a root-relative glob (repeatable; none given means every tracked
+file); `--batch-exclude <glob>` then drops matches. Matching is `fnmatch`
+over the POSIX path, so `*` also crosses `/`; a pattern without glob
+characters names a file or a directory (`design` selects everything under
+it). The schematic and a project `--rcfile` must stay in the selected set
+(exit `1` naming the file otherwise). The 64 MiB cap and
+`environment.remote.input_files` / `input_bytes` describe the *selected*
+set. Keep a repo-level root when the `xschemrc` uses root-relative paths:
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --backend batch \
+  --batch-include design --batch-include pdk-symbols --batch-exclude 'design/layout/*'
+```
+
+Member owner names are cleared.
+
+**Failure diagnostics.** When a job fails and the runner's `stderr.log` holds
+no klt error envelope (the job died in `tar`, the shell wrapper, or an xschem
+crash), the error carries the last 2 KiB of that file, sanitized (invalid
+UTF-8 replaced, ANSI escapes and control characters other than newline/tab
+dropped), in `error.remote_stderr_tail`, plus `error.remote_exit_code`,
+`error.remote_state` and `error.harness_log` (the `s3://` URI of the full
+`harness.log`). These fields are absent when the runner's own envelope was
+recovered. The tail is raw runner output and may contain paths from the
+runner; it is netlist-only (`klt sim` still never surfaces raw stderr).
+
+**`--symbol-path`.** Each `DIR` must exist, lie under the batch root and hold
+at least one tracked file in the selected set (exit `1` before any archive or
+S3 write otherwise). It is forwarded to the runner as a quoted root-relative
+`--symbol-path` argument; with the flag absent the job command is unchanged.
+The runner's `klt` must know `--symbol-path` (added with issue #4952); an older
+runner rejects the unknown flag, so use a runner image with a matching `klt`.
+
+**PDK-relative `--rcfile`.** An `xschemrc` that ships with the PDK is given in
+its PDK-relative form, quoted so the shell does not expand it:
+
+```bash
+klt netlist design/block.sch -o design/netlist/block.spice --backend batch \
+    --pdk sky130A --rcfile '$PDK_ROOT/$PDK/libs.tech/xschem/xschemrc'
+```
+
+It is not uploaded. `$PDK` is replaced with `--pdk` and the result is
+resolved on the runner against the runner's own `$PDK_ROOT`. No path from
+this host's PDK install is ever sent.
+
+**Flags on batch.**
+
+- `--pdk` is **required**: it selects the runner image and is sent as
+  `job.json`'s `pdk_variant`. A missing or unsupported value is exit `1`
+  before any upload.
+- `--xschem-binary` names an executable on this host, so a non-default value
+  is refused (exit `1`).
+- `--pdk-root` names a path on this host. It is not forwarded and
+  `job.json` never carries a `pdk_root`. A warning goes to stderr.
+- `--timeout-s` is forwarded to the runner's `klt netlist`, and `job.json`'s
+  `timeout_seconds` is `--timeout-s` plus a fixed overhead (120 s). That way
+  the runner's own timeout, with its hang message, always fires before the
+  harness's outer bound.
+- `--block` is applied on the runner, by the same code as a local run. The
+  client does not apply it again.
+
+**What runs.** The job command is the runner-version preflight, then: extract
+the tree into a fresh directory, `cd` into it, and run
+`klt netlist <schematic> -o "$EDA_OUTPUT_DIR/netlist.spice" ... --backend local
+--format json > "$EDA_OUTPUT_DIR/report.json"`. `--backend local` is
+explicit, so a runner environment that sets `KLT_NETLIST_BACKEND` cannot
+recurse, and the forced xschem flags and process-group kill apply on the
+runner as they do on a workstation.
+
+**What comes back.** The collected netlist is checked against the
+`content_hash` the runner reported. xschem's `** sch_path:` / `** sym_path:`
+comments that point into the runner's scratch directory are rewritten to this
+checkout's root, so the file reads as a local export from here would. Paths
+outside the tree, such as PDK symbols, are left as the runner wrote them.
+Then it is written to `-o`, or under `--check` compared **on this host** with
+the committed file, path-independently as described in
+[`--check`](#--check-the-staleness-gate). The payload is the same
+`schema_version: 1` shape as a local run. `xschem`, `block` and `pdk` are the
+runner's own, and there is one additional `environment.remote` object (below).
 
 ## Not in this slice
 
@@ -190,7 +541,11 @@ is a reusable block meant to be `.include`d elsewhere: the including deck
 already has its own `.end`, so a second one would terminate it early.
 
 `--block` post-processes the export: the first commented `.subckt`/`.ends`
-pair is uncommented, and the trailing `.end` is dropped. The result carries a
+pair is uncommented, and the trailing `.end` is dropped. When xschem wrapped a
+long port list onto commented continuation lines (`*+ ...`) directly after the
+header, those lines are rewritten to real `+` continuations so the `.subckt`
+card carries the whole port list. The cell's **subcircuit parameters are
+restored** onto that header (see below). The result carries a
 `block` object in the JSON payload:
 
 | Field | Type | Description |
@@ -199,12 +554,189 @@ pair is uncommented, and the trailing `.end` is dropped. The result carries a
 | `subckt_uncommented` | boolean | Whether a commented `**.subckt` header was found and uncommented. |
 | `ends_uncommented` | boolean | Whether a commented `**.ends` was found and uncommented. |
 | `trailing_end_removed` | boolean | Whether a trailing `.end` line was found and dropped. |
-| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist. The netlist is still written as xschem produced it; this is a warning, not an error. |
+| `warning` | string \| null | Set when any of the above was *not* found — the export may not have been shaped like a testbench netlist — when the cell's symbol attributes could not be read for its subcircuit parameters, or when the emitted port order is not the schematic's (see [Where the port order comes from](#where-the-port-order-comes-from)). The netlist is still written as xschem produced it; this is a warning, not an error. |
+| `port_order` | object \| null | `null` when the emitted ports are the ones the schematic declares, in that order, and when the two cannot be compared (see below). Otherwise `{"schematic": [...], "emitted": [...], "symbol": "<path>" \| null}` — the pin names in schematic file order, the ports on the emitted card, and the sibling `.sym` the order came from. Additive (issue #5473); `schema_version` stays `1`. |
 
-This is purely a post-processing step on the netlist text; it does not change
-the xschem invocation (`--block` adds no xschem flags). Under `--check`,
-the transform runs before the comparison, so a committed block artifact is
-diffed against the transformed (not the raw testbench-shaped) regeneration.
+`--block` adds no xschem flags: it does not change the xschem invocation.
+Under `--check`, the whole transform runs before the comparison, so a
+committed block artifact is diffed against the transformed (not the raw
+testbench-shaped) regeneration. A committed block netlist whose header lacks
+the subcircuit parameters therefore reports `"drifted"` — regenerate it. That
+is the same rule as the [port-list rewrite](#port-list-form-and-symbol-references).
+
+### Where the port order comes from
+
+A `.subckt` card's port order is the positional contract of every
+`subckt-call` instantiation and every LVS reference of the block: permute it
+and each positional caller is mis-wired until something electrical catches
+it, several steps downstream. It is worth knowing exactly what sets it.
+Measured against xschem 3.4.7:
+
+- **A sibling `<stem>.sym` decides it.** When the schematic has one, the top
+  sheet's ports are *that symbol's* pins, in the symbol's pin order — not the
+  schematic's. To change the order, reorder the symbol's pins.
+- **Without a sibling symbol, the pin instances decide it**, in the order
+  they are stored in the `.sch` *file* — not canvas position, not `name=pN`
+  numbering. Reordering them in the file reorders the card.
+- **`sim_pinnumber` overrides the file order** when every pin carries it —
+  but only in the no-symbol case: with a sibling symbol the symbol's order
+  wins and `sim_pinnumber` on the schematic pins is ignored.
+- **A schematic pin the sibling symbol does not declare is dropped** from the
+  `.subckt` card entirely, and the run still succeeds.
+
+A comment next to the pin declarations asserting that *their* order sets the
+terminal order is therefore false for any block that has a symbol — which is
+every block a parent sheet instantiates.
+
+`klt netlist --block` does not rewrite the header to the schematic's order:
+the emitted card has to stay the card xschem writes for the same cell when a
+parent instantiates it, or the block would disagree with its own callers. It
+**reports** the difference instead, in `block.port_order` and
+`block.warning`:
+
+```
+block: WARNING: --block emitted a '.subckt' port order that is not the pin
+order declared by cell.sch: the schematic declares 'vdda vssa inp outp bias'
+and the header carries 'vdda vssa inp bias outp'. The top sheet's ports come
+from the pin order of the sibling symbol cell.sym, ...
+```
+
+Generation still exits `0` in every case above — this is a warning, not a
+failure. When the ports *are* the schematic's, in that order, nothing is
+printed and `port_order` is `null`.
+
+Four cases are reported as **not comparable** (`port_order: null`, no
+warning) rather than risking a false alarm on a contract this important: a
+pin label that is not a plain scalar name (a bus `a[3:0]` or a comma list,
+which xschem expands onto the header in a form this comparison does not
+model); a sheet whose ports come from custom pin symbols rather than
+xschem's `ipin`/`opin`/`iopin` devices, which reads as having no pins at
+all; an emitted port the schematic never declared, which means a pin was not
+read far more often than it means the symbol grew one; and an export that
+was not shaped like a testbench netlist, where the file's first `.subckt` is
+some nested cell's rather than the top sheet's.
+
+### Subcircuit parameters on the restored header
+
+A cell declares its subcircuit parameters in the `template` attribute of its
+*symbol* attributes — the top-level `K {...}` element of its `.sym`, or of the
+`.sch` itself (or, for a `.sym` written without a `K` element at all, its
+`G {...}` element). When a parent sheet instantiates the cell, xschem writes
+those parameters onto the child's `.subckt` card. The top sheet gets none:
+xschem comments its wrapper out (a top sheet is a deck, and a deck declares no
+parameters), and xschem's own netlist post-processing skips every commented
+line, so the `**.subckt` header never reaches the step that would add them.
+
+Under `--block` the premise is inverted — the sheet *is* a cell, one a
+testbench instantiates and overrides parameters on — so `klt netlist` restores
+them. Without them the export is silently unusable: the instance lines inside
+the block still reference the parameter names, so `.include`-ing it fails at
+parse time with `unknown parameter`, and a caller overriding one at the call
+site has nothing to override.
+
+```
+.subckt stage1 A B wstv=0.42 lstv=2 cld=0.5f
+```
+
+The goal is parity: **for a template whose every value is a single token —
+which is what real symbol templates carry — the restored card is the card
+xschem itself writes for that cell when a parent instantiates it**, verified
+against xschem 3.4.7 rather than derived from its rules. Parity stops where
+xschem's own card is not loadable — the unusable-value limit below. The rules
+follow xschem's, so:
+
+- **Source precedence** is what a parent would use — the sibling `<stem>.sym`
+  next to the schematic when it exists, otherwise the schematic's own `K {}`
+  block. A sibling symbol whose `template` holds no parameters means *no*
+  parameters, even when the `.sch` has some: the symbol is what a parent reads.
+- **A sibling `.sym` with no `K` element is read from its `G {...}` element**,
+  which is where a symbol written before xschem split the two apart keeps its
+  attributes. A `.sym` that *has* a `K` element is read from it whatever is in
+  `G {}` — including an empty `K {}`, which means no parameters, and in either
+  order — and `file_version` does not enter into it: a `file_version=1.2`
+  `.sym` carrying its attributes in `G {}` has its `template` read exactly
+  like a 1.1 one. The schematic itself is never read from `G {}`. All of this
+  is xschem 3.4.7's own behavior, measured rather than inferred.
+- **Parameters land after the pin list**, in `template` order, and after the
+  *last* `+` continuation line's ports when the header was wrapped — never in
+  the middle of the port list.
+- **`name=` and `spiceprefix=` are dropped**, as is any token named by the
+  symbol's own `extra=` attribute, and the first ` m=<digits>` (xschem treats
+  `m` as a multiplier, not a parameter).
+- **Nothing is doubled.** A header that already carries a `key=value` token is
+  left exactly as xschem wrote it.
+- **A cell with no `template`** (or one holding only `name=`) produces the same
+  bytes it did before this existed.
+- **Reading the symbol never fails the run.** An unreadable or unparsable
+  `.sym` leaves the header as xschem produced it and says so in
+  `block.warning`.
+
+Four limits are worth stating.
+
+- Bare `key=value` text in a `G {...}` element is **not** a parameter source,
+  in a `.sch` or a `.sym`: only a `template` attribute is, so reading a
+  `K`-less `.sym` from `G {}` picks up its `template` and nothing else.
+  xschem ignores bare assignments for every cell, so a block built from them
+  would disagree with the same cell netlisted as a child — move such
+  parameters into the symbol `template`, which is also what makes them work
+  from a parent sheet.
+- A parameter *value* containing a **comma** (`f=max(1,2)`) is left intact,
+  deliberately unlike xschem, which spaces commas across the whole `.subckt`
+  card and would corrupt the expression.
+- A parameter whose value is one **SPICE cannot spell as a parameter
+  default** is **left off the card**, and `block.warning` names it. Such a
+  value only arises from a quoted or backslash-escaped `template` value, as in
+  `template="name=x1 note=\"a b\" w=2"`. The unusable shapes, each measured
+  against ngspice, are: whitespace or a second `=` **outside** braces
+  (`note=a b`, `a=b=c` — the tail lands as a stray token and `.include`-ing
+  the block fails with `Formula() error`), an empty value (`note=`), and an
+  unbalanced brace (`Missing }`). Inside braces both are fine, so an
+  expression default is restored untouched — `f={a + b}`, `f={a==b}` and
+  `f={a>1?2:3}` all survive and evaluate.
+
+  This is the one place parity is deliberately dropped, because xschem's own
+  card is unusable too: it truncates the parameter list at the whitespace,
+  losing both that value's tail *and* every parameter after it (`note=a`, no
+  `w=2`). Every other parameter is still restored, so the header stays
+  loadable; a device referencing the omitted name still fails on `unknown
+  parameter`, but loudly, with the warning naming it.
+- A **multi-line** `template` is restored onto one line. xschem instead
+  continues the tail onto a bare second line with no `+`, which SPICE does not
+  read as a continuation; klt's single-line form is the valid one. The
+  parameters and their order are identical.
+
+Under [`--backend batch`](#batch-backend) this runs on the runner through the
+same code path, with no batch-specific behaviour — but the sibling `.sym` is
+only found if it was uploaded, so keep it inside `--batch-root` (and inside
+any `--batch-include` globs you narrow with).
+
+### What `--block` does and does not restore
+
+| Restored | Left as xschem wrote it |
+| --- | --- |
+| The first commented `**.subckt` / `**.ends` pair, uncommented | Anything in the sheet's `G {}`, `V {}`, `S {}` or `E {}` elements |
+| Commented `*+` continuation lines of that header, as real `+` continuations | `.GLOBAL` lines and other deck-level content |
+| The cell's `template` subcircuit parameters, each value a single token | `*.ipin` / `*.opin` comment lines |
+| Removal of the trailing `.end` | Nested sub-block `.subckt` cards (xschem already writes their parameters) |
+| — | A `template` parameter whose value contains whitespace: omitted from the card and named in `block.warning` |
+| — | The **port order**, which stays xschem's: reported in `block.port_order` and `block.warning`, never rewritten ([above](#where-the-port-order-comes-from)) |
+
+## Port-list form and symbol references
+
+xschem writes a bus port as a comma-joined group (`a[1],a[0]`). ngspice
+silently mis-maps the ports of a subcircuit with two or more such groups (the
+trailing nodes are left unconnected, so the failure shows up only as a
+singular matrix or wrong results). `klt netlist` therefore rewrites every
+`.subckt` header — the `--block` top sheet and nested sub-block headers,
+including their `+` continuation lines — to a space-separated port list
+(`a[1] a[0]`). Text from `params:` onward, comments and device cards are not
+touched, and a bus-free netlist is unchanged. The rewrite runs before the
+write and before the `--check` comparison, so a committed netlist that still
+has comma-joined ports reports `"drifted"`: regenerate it.
+
+A symbol reference relative to the schematic (`../x/y.sym`) resolves only when
+that schematic is the netlisting top, because xschem resolves it against the
+working directory. Nested blocks need a library-path reference.
 
 ## PDK-root consistency
 
@@ -219,10 +751,28 @@ naming a *different* variant under the same install root, or merely sitting
 above the install root, is a mismatch. A mismatch is a **warning**, not an
 error: the netlist is still produced and the exit code is unchanged.
 
+When a PDK resolves, `klt netlist` also **exports it to xschem**: the xschem
+process is launched with `PDK_ROOT` set to the resolved install root and `PDK`
+to the resolved variant, overriding any inherited values, so an `xschemrc`
+that reads `$env(PDK_ROOT)`/`$env(PDK)` agrees with `--pdk`/`--pdk-root`. With
+no PDK in play, xschem inherits klt's environment unchanged. The
+`unresolved_symbol` error names the `--rcfile` used and the `PDK_ROOT`/`PDK`
+xschem was given (or "inherited / not set"). The `--backend batch` runner
+resolves its own `$PDK_ROOT`.
+
 - `--pdk`/`--pdk-root` given: strict — an unresolvable PDK is an error (exit `1`).
 - Neither given, `--rcfile` given, and `$PDK`/`$PDK_ROOT` set: best effort — an
   unresolvable PDK is silently skipped.
 - No PDK in play: no `pdk` field, exactly as before.
+
+With no `--pdk`/`$PDK` and more than one variant under the resolved root, the
+resolved variant is a first-match default, and the run says so rather than
+recording it as provenance: `pdk.variant_established` is `false`, the
+generation-inputs record says `"pdk_variant": null`, and a
+`pdk_variant_unestablished` entry is appended to `payload.warnings` with a
+matching `klt netlist: warning:` line on stderr (issue #5639; details above).
+This warning is independent of #2680's declared-root mismatch warning — an
+rcfile declaring the other variant's directory fires both.
 
 ## JSON output
 
@@ -260,22 +810,28 @@ error: the netlist is still produced and the exit code is unchanged.
 | `output` | string | The `--output` path exactly as provided. Written in `generate` mode; read and compared in `check` mode. |
 | `mode` | `"generate"` \| `"check"` | Which mode ran (`"check"` iff `--check` was passed). |
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
+| `canonical_wrap` | boolean | **`generate` mode only**: whether `--canonical-wrap` folded the written netlist onto the layout `--check` compares (issue #5715). Absent in `check` mode. |
 | `xschem` | object | How xschem was invoked and what it returned — see below. |
 | `netlist` | object | Identity of the netlist this run produced — see below. |
+| `instances` | array\<object\> | One entry per device instance in the netlist this run produced, in file order — see below and [The device multiplier](#the-device-multiplier-two-forms-both-load-bearing). Additive (issue #5687). |
+| `instances_truncated` | boolean | Whether `instances` was cut off at its cap. |
 | `pdk` | object | **Only when a PDK resolved** (see [PDK-root consistency](#pdk-root-consistency)); absent otherwise. Additive. |
 | `block` | object | **Only when `--block` was passed** (see [Block mode](#block-mode-an-includable-subckt)); absent otherwise. Additive. |
 | `drift` | object | **`check` mode only** (absent in `generate` mode) — see below. |
+| `environment` | object | **`--backend batch` only**: `environment.remote` describes the job. Additive. |
 
 ### `xschem`
 
 | Field | Type | Description |
 | --- | --- | --- |
 | `binary` | string | The executable that was run (`--xschem-binary`). |
+| `version` | string \| null | xschem's version (e.g. `"3.4.7"`), from a bounded `<binary> --version` probe run after the export. `null` — never an error — when the probe fails, times out, or prints nothing parseable. Always `null` for a `--backend batch` runner whose `klt` predates this field. |
 | `argv` | array\<string\> | The complete command line, so a consumer can verify `-x` was there. |
 | `forced_flags` | array\<string\> | The flags this verb always passes, in a fixed order. |
 | `exit_status` | integer | xschem's own exit status. **Not the verdict** — non-zero on success. |
 | `exit_status_trusted` | boolean | Always `false`, stated in the payload so a consumer is not left to infer it. |
 | `timeout_s` | number | The bound that was in force (`--timeout-s`). |
+| `symbol_path` | array\<string\> | The `--symbol-path` directories (absolute for a local run, batch-root-relative under `--backend batch`); `[]` when the flag is unused. Additive. |
 | `duration_s` | number | Wall-clock seconds the xschem run took, rounded to milliseconds. |
 
 ### `netlist`
@@ -285,7 +841,39 @@ error: the netlist is still produced and the exit code is unchanged.
 | `path` | string \| null | Where the netlist is. `null` in `check` mode: the regenerated copy lives in a temp directory removed before returning, so naming it would hand the caller a path that no longer exists — `content_hash` is the durable identity in that mode. |
 | `bytes` | integer | Size of the produced netlist. |
 | `lines` | integer | Newline count. |
-| `content_hash` | string | `sha256:<hex>` of the produced netlist's bytes. |
+| `content_hash` | string | `sha256:<hex>` of the produced netlist's bytes. In `check` mode these are the raw bytes just generated (provenance header and `** klt-netlist-inputs:` record included), which are never written and are **not** what the verdict compared: it is not a verification handle and it varies with the generation directory and generator version. `bytes` / `lines` describe the same generated bytes. To reconcile with a file or pin across checkouts use `drift.committed_content_hash` (the `-o` file on disk) or `drift.compared_content_hash` (the normalized body both sides matched on). Issue #5743. |
+
+### `instances`
+
+One entry per device instance in the netlist this run produced, in file order
+— in **both** modes: `generate`, and `--check` (where it is derived from the
+**regenerated** side, the one `--check` actually compared, never from the
+committed file) — and under **both** backends: local, and `--backend batch`
+(where the collected netlist the runner produced is the regenerated side).
+`+` continuation lines are folded onto their card first (the
+same shared primitive `--check`'s layout normalization uses), so a parameter
+xschem wrapped onto a continuation line is present here — the whole point of
+the block, since `grep '^XM2'` on the written netlist shows neither form of
+the multiplier (see [The device multiplier](#the-device-multiplier-two-forms-both-load-bearing)).
+Comments, `.`-directives and `.control` … `.endc` blocks are not instances: a
+code symbol's ngspice commands (`run`, `write out.raw`, `let vgs = 0.5`) are
+skipped as a block, so they never inflate `instances` or appear as a device
+(`.control` / `.endc` match case-insensitively; a `.control` with no `.endc`
+skips through the end of the deck).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | The instance's first token (`XM2`). |
+| `card` | string | The instance's logical card with `+` continuations folded onto one line. |
+| `model` | string \| null | The token immediately before the first `key=value` parameter (SPICE's positional prefix — nodes — ends where named parameters begin, which is how xschem's `format=` output shapes every device card); `null` for a card with no named parameters (a bare `R1 a b 1k`). |
+| `params` | object | Every `key=value` on the folded card, values verbatim as written; the last one wins on a duplicate key. |
+| `multiplier` | object | The two device-multiplier forms resolved, tri-state: `{"m": <value or null>, "mult": <value or null>, "agree": <bool or null>}`. `agree` is `true` when both forms are present and numerically equal, `false` when both are present and differ, `null` when fewer than two are present **or** a value is not numeric (an `expr(...)` or a SPICE-suffixed literal like `6u`, say — a suffix is a scale factor, `6u` is `6e-6`, so a suffixed form is never called equal to an unsuffixed one) — so a consumer can tell "disagree" from "not applicable" without re-parsing, and a non-numeric value can never crash the block. |
+
+The array is capped at `INSTANCES_CAP` (1000) entries; a deck above the cap
+truncates the array and sets the sibling `instances_truncated` flag (the
+`diagnostics.*_truncated` convention), so a large deck cannot balloon the
+payload unboundedly. A deck with no device instances carries `instances: []`,
+never an absent key, in either backend.
 
 ### `pdk`
 
@@ -299,6 +887,8 @@ error: the netlist is still produced and the exit code is unchanged.
 | `consistent` | boolean \| null | Whether `rcfile_pdk_root` matches `root`; `null` when there is nothing to compare. |
 | `warning` | string \| null | Mismatch explanation when `consistent` is `false`. |
 | `ambiguity_warning` | string \| null | `klt pdk`'s multiple-installs warning, when applicable. |
+| `variant_established` | boolean | `false` when the variant was defaulted, not selected (no `--pdk`/`$PDK` and the root holds more than one) — the record's `pdk_variant` is then `null`. Additive (issue #5639). |
+| `unestablished_warning` | object \| null | The `pdk_variant_unestablished` entry also carried in `payload.warnings`; `null` when the variant was established. Additive (issue #5639). |
 
 ### `drift` (`--check` only)
 
@@ -307,16 +897,86 @@ error: the netlist is still produced and the exit code is unchanged.
 | `committed_present` | boolean | Whether a file existed at `--output`. `false` reports `status: "drifted"`. |
 | `committed_bytes` | integer \| null | Size of the committed netlist, or `null` when absent. |
 | `committed_content_hash` | string \| null | `sha256:<hex>` of the committed netlist, or `null` when absent. |
+| `compared_content_hash` | string \| null | `sha256:<hex>` of the normalized body that both sides reduced to when the verdict is `"match"` (path-comment directories reduced to basenames, `+` continuations joined, whitespace runs collapsed, the inputs record excluded), so two checkouts that agree report the same value whatever their header or path comments say. With `--ignore-comments` and a match that relied on it (`comments_differ` is `true`), it is the hash of the comment-stripped body instead. `null` on `"drifted"` and when no committed file exists. Additive (issue #5743); no `schema_version` bump. |
+| `path_comments_differ` | boolean | `true` when the files differ only in the directories of xschem's `** sch_path:` / `** sym_path:` comments, which `--check` ignores (status is then `"match"`). Additive (issue #3010). |
+| `layout_differs` | boolean | `true` when the files match only after `--check` ignored `+` continuation layout, whitespace runs, or the port order of the `**.subckt` comment line (issue #3743). Additive (issue #3324). |
+| `subckt_port_order` | array\<object\> | One `{subckt, committed, regenerated}` entry per `.subckt` card whose port set is unchanged but whose port order differs, when that is the *only* drift. Status stays `"drifted"` (port order is the positional contract of `subckt-call` and LVS), and `reason` names the local xschem version, says where the order comes from — the sibling `.sym`'s pin order for a `--block` top sheet that has one, otherwise the cell's symbol or its schematic's pins, with a different xschem build as a further possible cause (issue #5473) — and warns to recheck positional callers. `[]` otherwise, including a missing file or any other drift. Additive (issue #4524). |
+| `inputs` | object | `{committed, fresh, changed}` (issue #4945). `fresh` is the current `{xschem_version, rcfile, pdk_variant}`; `committed` is the record parsed from the committed netlist's `** klt-netlist-inputs:` line, or `null` for a legacy netlist or a missing file; `changed` lists the keys whose values differ (`[]` = none, `null` = no committed record to compare). `reason` quotes the changes. Additive; no `schema_version` bump. |
 | `diff` | array\<string\> | Unified diff lines, committed → regenerated. `[]` on `"match"`. Capped at 200 lines. |
 | `diff_truncated` | boolean | Whether `diff` was cut off at the cap. |
 | `reason` | string \| null | Human-readable explanation of the verdict; `null` on `"match"`. |
+
+### `environment.remote` (`--backend batch` only)
+
+The fields `klt sim` reports for a batch job (`provider`, `job_id`,
+`bucket`, `region`, `instance_id`, `instance_type`, `availability_zone`,
+`ami_id`, `lifecycle`, `spot`, `state`, `exit_code`, `concurrency`,
+`physical_cores`, `elapsed_seconds`, `runner_klt_version`,
+`client_klt_version`, `runner_compatibility`), plus:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `batch_root` | string | The root whose git-tracked files were uploaded. |
+| `input_files` | integer | How many files the uploaded tree held. |
+| `input_bytes` | integer | Their uncompressed total. |
+
+## The device multiplier: two forms, both load-bearing
+
+A wide sky130 device instance is emitted with its parameters wrapped onto `+`
+continuation lines and its multiplier emitted **twice**:
+
+```
+XM2 n1 n2 n3 n4 sky130_fd_pr__nfet_01v8 L=1 W=2 ... sd=0
++ mult=6 m=6
+```
+
+Both the wrapping and the `mult=`/`m=` pairing are the **PDK symbol's own
+`format=` attribute** (`sky130A/libs.tech/xschem/sky130_fd_pr/nfet_01v8.sym`
+embeds the literal `+` breaks and the pair) — not a choice `klt netlist`
+makes. `klt` does not reflow xschem's bytes: `--check`'s byte comparison and
+`--no-provenance-header`'s byte-identity both depend on the export being
+exactly what xschem wrote.
+
+The two forms are not redundant, and neither is safe to drop:
+
+- **`m=` is the one that drives.** It is SPICE's own subcircuit-instance
+  multiplier. sky130's device subcircuits declare `mult` and **do not forward
+  it** to the inner primitive (`m = {mult}` appears on no primitive line in
+  `models_fet.spice`), so a netlist carrying only `mult=N` would simulate a
+  **1×** device with no diagnostic from anyone.
+- **`mult=` is the one that de-rates mismatch.** It is consumed inside the
+  subcircuit, in the mismatch sigma denominator
+  (`AGAUSS(0,1.0,1)/sqrt(l*w*mult)`, feeding `delvto`), gated on
+  `MC_MM_SWITCH` (default `0`): inert in a nominal run, **live in a mismatch
+  Monte Carlo run**. Dropping it overstates mismatch by `sqrt(N)`.
+
+`mult=N m=N` — what the symbols emit when a multiplier is set — is a correct,
+non-redundant pair: `m` supplies the drive, `mult` supplies the mismatch
+de-rating, and the two should agree. (Checking that the pair agrees is issue
+#5779's lint; it must never suggest a form is removable.)
+
+**Reviewing a multiplier?** Don't grep the netlist — `grep '^XM2'` shows
+neither form (they sit one line down), `git diff | grep '^[+-]XM2'` shows no
+change when only the multiplier changed, and `grep -lE '<model>.* m='` over a
+tree matches nothing, because `m=` is never on the same line as the model
+name. Read the structured view instead:
+
+```console
+$ klt netlist <sch> -o <spice> --block --format json \
+    | jq '.instances[] | select(.name=="XM2") | .multiplier'
+{
+  "m": "6",
+  "mult": "6",
+  "agree": true
+}
+```
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | `0` | The netlist was exported (`status: "generated"`), or `--check` found the committed netlist still matches (`"match"`). |
-| `1` | Failed to run — unreadable schematic, missing `--rcfile`, xschem not found or unlaunchable, xschem hung (timeout, after SIGTERM→SIGKILL escalation), no fresh output file, or an unwritable `--output`. |
+| `1` | Failed to run — unreadable schematic, missing `--rcfile`, xschem not found or unlaunchable, xschem hung (timeout, after SIGTERM→SIGKILL escalation), no fresh output file, or an unwritable `--output`. Under `--backend batch`, also every batch failure (see [Batch backend](#batch-backend)), with `error.code` set. |
 | `2` | Usage error (missing `--output`, bad `--format` value) — from argparse. |
 | `3` | `--check` found the committed netlist drifted (or is absent). |
 
@@ -365,3 +1025,66 @@ Bound a suspect schematic more tightly while debugging a hang:
 ```bash
 klt netlist design/block.sch -o /tmp/block.spice --timeout-s 10
 ```
+
+Netlist several entry points. `klt netlist` takes exactly one schematic and one
+`-o`, so a build script with several entry points loops over `<schematic>:<output>`
+pairs. The loop keeps going past a failure, remembers the worst exit code, and
+exits with it:
+
+```bash
+set -u
+rc=0
+for pair in \
+    design/amp.sch:design/netlist/amp.spice \
+    design/bias.sch:design/netlist/bias.spice; do
+  sch=${pair%%:*}
+  out=${pair##*:}
+  klt netlist "$sch" -o "$out" --rcfile design/xschemrc --format json \
+      > "${out%.spice}.report.json"
+  code=$?
+  [ "$code" -gt "$rc" ] && rc=$code
+done
+exit "$rc"
+```
+
+The `--check` variant is the same loop with `--check` added. Exit `3` (drifted)
+and `1` (failed to run) stay distinguishable, because the loop exits with the
+numerically highest code seen: **a failure (`1`) takes precedence over drift
+(`3`) only if you want it to**, and the snippet above does *not* — `3 > 1`, so
+a drifted entry masks a failed one. To make failure win, track the two
+separately:
+
+```bash
+set -u
+failed=0 drifted=0
+for pair in design/amp.sch:design/netlist/amp.spice \
+            design/bias.sch:design/netlist/bias.spice; do
+  klt netlist "${pair%%:*}" -o "${pair##*:}" --rcfile design/xschemrc \
+      --check --format json > "${pair##*:}.check.json"
+  case $? in
+    0) ;;
+    3) drifted=1 ;;
+    *) failed=1 ;;
+  esac
+done
+[ "$failed" -eq 1 ] && exit 1   # failed to run wins over drift
+[ "$drifted" -eq 1 ] && exit 3  # at least one committed netlist is stale
+exit 0
+```
+
+Notes on the loop:
+
+- Each invocation is independent: its own xschem run, its own `--timeout-s`,
+  and its own JSON report. With `--format json` each report is a separate
+  document on stdout, so redirect one file per entry (as above) rather than
+  concatenating them.
+- Under `--backend batch`, each call is a separate batch job.
+- The loop body is `klt netlist`, nothing else. Do not call raw `xschem` in the
+  loop on hosts that forbid it; `klt netlist` forces the headless flags and
+  kills a hung run.
+
+Verification status: the first loop was run against two entries whose
+schematics could not be netlisted (one missing, one with unresolved symbols, as
+no self-contained xschem fixture exists in CI); it visited both entries, wrote a
+report per entry, and exited `1`. The success path and the `--check` variant
+are **not run** here.

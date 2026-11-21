@@ -95,12 +95,24 @@ arbitrary boolean/derived expression):
   NWell, and the thick-gate-oxide marker) and ``Gat.g`` (45-degree bent
   GatPoly width) -- ``Act.a``/``Gat.a`` above already cover the
   layer-general minimum-width floor these refine.
-- ``Cnt.c``/``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
-  -- each scoped to a compound derivation (``act_nsram.join(activ_mask)
-  .not(digibnd_drw)``, SRAM/DigiBnd-region carve-outs, pSD-vs-nSD Activ
-  splits) this curated deck does not otherwise model; ``Cnt.c``/``Cnt.d``
-  below transcribe the *general-case* Activ/GatPoly enclosure-of-Cont floor
-  each of those refines.
+- ``Cnt.c.digibnd``/``Cnt.c.SRAM``/``Cnt.e``/``Cnt.g1``/``Cnt.g2``
+  -- each scoped to a compound derivation (SRAM/DigiBnd-region carve-outs,
+  pSD-vs-nSD Activ splits) this curated deck does not otherwise model;
+  ``Cnt.c``/``Cnt.d`` below transcribe the *general-case* Activ/GatPoly
+  enclosure-of-Cont floor each of those refines. ``Cnt.c`` itself
+  (``activ.enclosing.cont.1``) is a *corrected subset* since issue #2688: its
+  ``.join(activ_mask)`` enclosing-region term and square-contact
+  (``cont_sq``) selection are modelled, but its ``.not(digibnd_drw)``,
+  SRAM, ``svaricap`` and ``EdgeSeal`` carve-outs are not -- so inside those
+  regions it can over-report against the official deck (never under-report).
+
+  A general transcription rule this deck learned the hard way (#2688): when
+  approximating a compound official rule, dropping a ``.not(X)`` carve-out
+  is conservative, but dropping a ``.join(X)`` from an enclosing/overlap
+  region is **not** -- it shrinks the region the rule measures against, so
+  correct geometry (here, every HBT contact in IHP's own ``npn13G2`` PCell)
+  reports as violating. Model ``join`` terms (``DerivedLayer(mode="union")``)
+  rather than dropping them.
 - ``M1.e``/``M1.f``/``M1.g``/``M1.i`` and their per-metal-level ``Mn.*``
   analogues (wide-line/45-degree-bend spacing refinements, ``Metal2``
   through ``Metal5``) and ``TopMetal2``'s own ``TM2.bR`` (a
@@ -113,7 +125,9 @@ arbitrary boolean/derived expression):
   ``MIM.gR`` (issue #2581's own group's third rule) falls here too: a
   ``RECOMMENDED``-gated *whole-chip* total-``MIM``-area budget, which is a
   sum over the layout rather than the per-polygon bound ``check="area"``
-  expresses.
+  expresses. The one exception is ``pSD.k`` (``psd.area.1``, issue #3787), a
+  per-polygon minimum area; ``pSD.a``/``pSD.b``/``pSD.k`` are also the deck's
+  only transcriptions from ``sg13g2_maximal.drc``.
 - ``MIM.a``/``MIM.b``/``MIM.e``/``MIM.f`` (issue #2581) -- a different kind
   of omission from everything above: these are not approximated, they are
   not in the ``main`` tables at all. Despite reading like siblings of
@@ -171,7 +185,10 @@ device, never a wrong device with a plausible value):
 - ``schottky_nbl1`` -- see "Schottky diode (``schottky_nbl1``) --
   investigated, declined" below -- plus the ``isolbox`` isolation device,
   the ``sg13_hv_svaricap`` varactor, inductors, ESD devices, and the RF MOS
-  variants, none of which is tracked yet. (``rfcmim``, the RF MIM variant,
+  variants, none of which is tracked yet. (ESD devices were investigated in
+  issue #3858 and declined natively -- see ``UNMODELED_DEVICE_MARKERS``
+  below: ``klt extract`` warns when ``Recog.esd`` 99/30 carries shapes, and
+  ``scr1`` has no upstream LVS extraction at all.) (``rfcmim``, the RF MIM variant,
   *is* recognised as of issue #1454 -- as its 2-terminal plate-to-plate
   core, not its full 3-terminal RF network; see "MIM capacitors" below.)
 
@@ -375,7 +392,11 @@ fetched IHP-Open-PDK v0.3.0 install (``bjt_derivations.lvs``/
   pwell_allowed.not(nwell_drw).not(digisub_gap)`` in
   ``general_derivations.lvs`` -- the same "sg13g2 draws no separate
   PWell layer" gap this module's MOS-recognition note above already
-  documents for the NMOS body/``substrate_net`` fallback).
+  documents for the NMOS body/``substrate_net`` fallback). Issue #2860 has
+  since let ``marker`` be a derived :class:`~klayout_tools.decks.LayerExpr`
+  (AND/NOT of drawn layers, nestable), which can express this boolean; the
+  remaining bullets here are still open (#2861-#2863), so no ``npn13G2``
+  entry is declared.
 - **Collector/base/emitter pins are shape-filtered, not boolean-filtered.**
   E.g. ``npn13G2_e_pin = npn13G2_e_.with_bbox_min(0.07.um)
   .with_bbox_max(0.9.um).with_area(0.063.um)`` -- ``npn13G2``,
@@ -412,6 +433,13 @@ this engine grows a size-filtered/dynamic-relationship device-recognition
 primitive general enough for SG13G2's own custom extractor, or a future
 issue revisits this with a narrower, explicitly-approximate scope.
 
+Operator ruling 2026-10-08 (#2864): the PDK's own KLayout LVS runset (#2849) is
+the accepted route for SG13G2 bipolars -- runset-backed LVS recognises them,
+the curated deck does not declare bipolars yet. Of the four native gaps above
+(#2860-#2863), #2860, #2862 and #2863 have landed and only #2861 remains open,
+as a general improvement. The evidence acceptance conditions for runset-backed
+results live in #2870.
+
 ## No #524 cross-check
 
 Epic #711's Phase 1 (sky130, #747) and the sky130 LVS phases (#867-#869)
@@ -442,6 +470,7 @@ from __future__ import annotations
 
 from . import (
     CapacitorDevice,
+    DerivedLayer,
     DiodeDevice,
     DrcRule,
     ExtractionDeck,
@@ -451,11 +480,16 @@ from . import (
     ParasiticsDeck,
     ResistorDevice,
     RuleProvenance,
+    UnmodelledDeviceFamily,
+)
+from .sg13g2_unmodeled import (  # noqa: F401  (size-split re-export, #5916)
+    UNMODELED_DEVICE_MARKERS,
+    UNMODELED_RULES,
+    UNMODELED_VOLTAGE_MARKERS,
 )
 
-# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module
-# -- the same "one repo/commit pin, per-rule source_path/rule_id" shape
-# `sky130.py`'s `_sky130_provenance`/`_sky130_lvs_provenance` helpers use.
+# `RuleProvenance.source_repo`/`.commit` shared by every rule in this module:
+# one repo/commit pin, per-rule source_path/rule_id (as `sky130.py`'s helpers).
 _IHP_OPEN_PDK_REPO = "IHP-GmbH/IHP-Open-PDK"
 _IHP_OPEN_PDK_COMMIT = "5cccb161f7492697cfa52eb14dc03beb00bdca9e"  # v0.3.0 tag
 
@@ -525,6 +559,7 @@ def _sg13g2_mom_provenance(source_file: str, rule_id: str) -> RuleProvenance:
 
 
 _FEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/feol"
+_MAXIMAL_RUNSET = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc"
 _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
 
 # This deck's rule thresholds below are authored assuming database units are
@@ -534,6 +569,340 @@ _BEOL = "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/beol"
 NOMINAL_DBU_UM = 0.001
 
 DECK: list[DrcRule] = [
+    # --- NWell (issue #3571), rule_decks/feol/5_1_nwell.drc + the maximal
+    # deck. Before this the deck had no NWell rule at all, so `31/0` was
+    # reported under `coverage.layers_in_stream_without_rules` and a
+    # multi-well layout got a vacuous `clean`. Only the two geometry-only
+    # rules are transcribed; NW.b1 (different-net spacing) is net-aware and
+    # is surfaced via `UNCHECKED_RULES` below instead. Values are
+    # sg13g2_tech_default.json's NW_a / NW_b. ----------------------------
+    DrcRule(
+        id="nwell.width.1",
+        description="minimum NWell width",
+        layer=(31, 0),  # NWell.drawing
+        check="width",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.a": NWell.ext_width(0.62.um) -> "Min. NWell width
+        # = 0.62" (drc_rules['NW_a'] == 0.62). NW.a is NOT in the modular 5_1_nwell.drc
+        # -- only the maximal deck implements it.
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(
+            "ihp-sg13g2/libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc",
+            "NW.a",
+        ),
+    ),
+    DrcRule(
+        id="nwell.space.1",
+        description="minimum NWell space or notch",
+        layer=(31, 0),  # NWell.drawing
+        check="space",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.b": "Min. NWell space or notch (same net). NWell
+        # regions separated by less than this value will be merged" (drc_rules['NW_b']
+        # == 0.62). Approximation: the foundry rule is same-net and *merges* closer
+        # same-net wells; this geometric check has no net identity, so it flags any two
+        # wells closer than 0.62 um (stricter than the foundry deck for same-net pairs;
+        # for different-net pairs it is implied by the stricter NW.b1, 1.80 um, so it
+        # adds no false positive there).
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.b"),
+    ),
+    # --- NWell enclosure/space to implanted Activ (issue #3585): NW.c/c1/e/e1
+    # (enclosure of P+/N+ Activ), NW.d/d1/f/f1 (space to external N+ / substrate
+    # tie P+) and their DigiBnd-relaxed `.dig`/`.digibnd` variants. Mirrors the
+    # sg13cmos5l transcription (#3573/#3645/#3646/#3682); values are this
+    # deck's own (sg13g2_tech_default.json NW_c..NW_f1_digibnd), read from its
+    # own pinned PDK. Each rule checks a *derived* implanted-Activ region
+    # (`Activ & pSD` / `Activ & nSD`) against NWell, split LV/HV by the
+    # ThickGateOx marker (44/0) and HV/digital by DigiBnd (16/0) through the
+    # near/far well-context partition (whole-polygon selection).
+    # Approximations versus the upstream operand derivations (none dropped):
+    #   * P+/N+ Activ is the drawn implant overlap; the upstream operand is
+    #     `Activ - nSD_drv` for P+. Activ with neither implant drawn is not
+    #     checked here.
+    #   * ThickGateOx/DigiBnd scoping selects whole Activ polygons; upstream
+    #     clips with a boolean NOT. Only a polygon straddling a marker edge
+    #     can differ.
+    #   * schottky_nbl1/nw1, scr1 and `NWell_Nsram` (SRAM-marked NWell) are not
+    #     modelled: held to the ordinary (stricter) threshold. NW.c's SVaricap
+    #     carve-out *is* modelled -- see `sg13g2_svaricap.py`.
+    #   * NW.e "tie surrounded entirely by NWell" is the enclosed check on
+    #     N+ Activ: N+ Activ wholly outside NWell (NMOS S/D) is not flagged,
+    #     one straddling a well edge is. Activ inside the well is the
+    #     enclosure rules' job and is not reported by the space rules. ----
+    DrcRule(
+        id="nwell.enclosing.pactiv.1",
+        description="minimum NWell enclosure of P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.c": lNw_c.ext_enclosed(NWell_Nsram, 0.31.um,
+        # consider_overlaps_as_errors: true) -> "Min. NWell enclosure of P+Activ not
+        # inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.hv.1",
+        description="minimum NWell enclosure of P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.c1":
+        # PActHV_ana.ext_outside(SVaricap_or_schottky_nbl1).ext_enclosed(NWell, 0.62.um,
+        # ...) -> "Min. NWell enclosure of P+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c1"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ (well tie) outside ThickGateOx"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.e":
+        # NAct_NWellLV.ext_not(nw_outDev).ext_enclosed(NWell, 0.24.um, ...) -> "Min.
+        # NWell enclosure of NWell tie surrounded entirely by NWell in N+Activ not
+        # inside ThickGateOx = 0.24". `nw_outDev` is an HV-only subtraction, so it is
+        # empty for this LV operand. N+ Activ wholly outside NWell (an NMOS
+        # source/drain) is not an NWell tie and is not flagged; one straddling a well
+        # edge is
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.hv.1",
+        description="minimum NWell enclosure of N+ Activ (well tie) inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.e1":
+        # NAct_NWellHV_ana.ext_outside(SVaricap.ext_or(schottky_nbl1, schottky_nw1,
+        # scr1)).ext_enclosed(NWell, 0.62.um, ...) -> "Min. NWell enclosure of NWell tie
+        # surrounded entirely by NWell in N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e1"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.1",
+        description="minimum NWell space to external N+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.d": NWell_Nsram.ext_separation(NActLV, 0.31.um,
+        # ...) -> "Min. NWell space to external N+Activ not inside ThickGateOx = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.hv.1",
+        description="minimum NWell space to external N+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # sg13g2_maximal.drc rule "NW.d1": NWell.ext_separation(NActHV_ana, 0.62.um) ->
+        # "Min. NWell space to external N+Activ inside ThickGateOx = 0.62"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d1"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.1",
+        description="minimum NWell space to substrate-tie P+ Activ outside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.f": NWell.ext_separation(PAct_PWellLV minus
+        # SVaricap-coincident edges, 0.24.um) -> "Min. NWell space to substrate tie in
+        # P+Activ not inside ThickGateOx = 0.24". SVaricap coincident edges are not
+        # exempted (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.f"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.hv.1",
+        description="minimum NWell space to substrate-tie P+ Activ inside ThickGateOx",
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=620,  # 0.62 um
+        # 5_1_nwell.drc rule "NW.f1": feol/5_1_nwell.drc (modular deck only; the maximal
+        # deck has no NW.f1): `ptap & thickgateox_drw` minus DigiBnd, separated from
+        # `nwell_drw - svaricap` by drc_rules["NW_f1"] -> "Min. NWell space to substrate
+        # tie in P+Activ inside ThickGateOx = 0.62". SVaricap is not modelled (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="far",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.f1"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.pactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.c1.dig":
+        # PActHV_digi.ext_outside(SVaricap_or_schottky_nbl1).ext_enclosed(NWell,
+        # 0.31.um, ...) -> "... inside ThickGateOx inside DigiBnd = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.c1.dig"),
+    ),
+    DrcRule(
+        id="nwell.enclosing.nactiv.dig.1",
+        description=(
+            "minimum NWell enclosure of N+ Activ "
+            "(well tie) inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="enclosed",
+        threshold_dbu=240,  # 0.24 um
+        # sg13g2_maximal.drc rule "NW.e1.dig": NAct_NWellHV_digi.ext_enclosed(NWell,
+        # 0.24.um, ...) -> "... inside ThickGateOx inside DigiBnd = 0.24"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.e1.dig"),
+    ),
+    DrcRule(
+        id="nwell.space.nactiv.dig.1",
+        description=(
+            "minimum NWell space to external N+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "NW.d1.dig": NWell.ext_separation(NActHV_digi,
+        # 0.31.um) -> "... inside ThickGateOx inside DigiBnd = 0.31"
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(7, 0),  # nSD -> N+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "NW.d1.dig"),
+    ),
+    DrcRule(
+        id="nwell.space.pactiv.dig.1",
+        description=(
+            "minimum NWell space to substrate-tie "
+            "P+ Activ inside ThickGateOx and DigiBnd"
+        ),
+        layer=(1, 0),  # Activ.drawing (reporting identity; region is derived)
+        other_layer=(31, 0),  # NWell.drawing
+        check="separation",
+        threshold_dbu=240,  # 0.24 um
+        # 5_1_nwell.drc rule "NW.f1.digibnd": feol/5_1_nwell.drc (modular deck only):
+        # `ptap & thickgateox_drw & digibnd_drw` separated from `nwell_drw - svaricap`
+        # by drc_rules["NW_f1_digibnd"] -> "Min. NWell space to substrate tie in P+Activ
+        # inside ThickGateOx (Inside DigiBnd) = 0.24". SVaricap is not modelled
+        # (stricter)
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ
+            sized_by_um=0.0,
+            intersect_with=(14, 0),  # pSD -> P+ Activ
+            context_layers=((44, 0),),  # ThickGateOx
+            context="near",
+            context2_layers=((16, 0),),  # DigiBnd
+            context2="near",
+        ),
+        scope="NW",
+        provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_1_nwell.drc", "NW.f1.digibnd"),
+    ),
     # --- 5.5 Activ (feol/5_5_activ.drc) -------------------------------
     DrcRule(
         id="activ.width.1",
@@ -604,34 +973,80 @@ DECK: list[DrcRule] = [
         scope="Gat",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_8_gatpoly.drc", "Gat.d"),
     ),
+    # --- pSD (sg13g2_maximal.drc; issue #3787) -----------------------
+    # Unlike every other group here, pSD's width/space/area rules are
+    # defined only in the stricter top-level `sg13g2_maximal.drc` runset
+    # (`feol/5_10_psd.drc` implements just `pSD.c1`). They are transcribed
+    # so a stream drawing pSD (14/0) is not reported as a vacuous `clean`
+    # with `14/0` under `coverage.layers_in_stream_without_rules`.
+    #
+    # Not transcribed (out of scope, need multi-layer derived regions):
+    # `pSD.c`/`c1`/`d`/`d1` (enclosure/separation vs Activ/NWell/PWell) and
+    # `pSD.e`/`f`/`g`/`h` (abutted-tie rules). `UNCHECKED_RULES` is wired
+    # only for `sg13cmos5l` (`get_unchecked_rules`), so they are named here
+    # rather than registered.
+    DrcRule(
+        id="psd.width.1",
+        description="minimum pSD width",
+        layer=(14, 0),  # pSD.drawing
+        check="width",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "pSD.a": pSD.ext_width(0.31.um)
+        # -> "Min. pSD width = 0.31"
+        # (sg13g2_tech_default.json: drc_rules.pSD_a == 0.31)
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.a"),
+    ),
+    DrcRule(
+        id="psd.space.1",
+        description="minimum pSD space or notch",
+        layer=(14, 0),  # pSD.drawing
+        check="space",
+        threshold_dbu=310,  # 0.31 um
+        # sg13g2_maximal.drc rule "pSD.b": pSD.ext_space(0.31.um)
+        # -> "Min. pSD space or notch ... = 0.31"
+        # (sg13g2_tech_default.json: drc_rules.pSD_b == 0.31)
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.b"),
+    ),
+    DrcRule(
+        id="psd.area.1",
+        description="minimum pSD area",
+        layer=(14, 0),  # pSD.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=250_000,  # 0.25 um^2 (250000 dbu^2 at dbu_um = 0.001)
+        # sg13g2_maximal.drc rule "pSD.k":
+        # pSD.ext_with_area([["<", 0.25.um2]]) -> "Min. pSD area = 0.25"
+        scope="pSD",
+        provenance=_sg13g2_drc_provenance(_MAXIMAL_RUNSET, "pSD.k"),
+    ),
     # --- 5.14 Cont (feol/5_14_cont.drc) -------------------------------
     DrcRule(
         id="cont.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Cont width -- "
-            "approximated here as a minimum-width floor only, pending the "
-            "generator fix issue #2585 tracks"
-        ),
+        description="min/max Cont size (fixed 0.16 x 0.16 um square)",
         layer=(6, 0),  # Cont.drawing
         check="width",
         threshold_dbu=160,  # 0.16 um
+        threshold_max_dbu=160,  # 0.16 um -- same value: a *fixed*-size rule
+        # Square-contact selection (issues #2943, #3139): only `cont_sq` is
+        # measured; contact bars and rows of abutting contacts (the PDK's own
+        # npn13G2/rsil cells) are `CntB.*`'s, not `Cnt.a`'s.
+        layer_selection="squares",
         # 5_14_cont.drc rule "Cnt.a":
         # cont_sq.without_bbox_width(0.16um)  (min AND max bbox width)
         # -> "5.14. Cnt.a : Min. and max. Cont width : 0.16 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_a == 0.16)
         #
-        # No `threshold_max_dbu` yet, and that is a *deferral*, not a
-        # judgement that the max half is unenforceable (issue #2388). The
-        # upstream rule is literally bounding-box shaped
-        # (`without_bbox_width`), which is exactly what
-        # `DrcRule.threshold_max_dbu` (issue #2370) measures -- the same
-        # field `topvia1.width.1`/`topvia2.width.1` below already set. It is
-        # held back only because every `klt gen` generator draws this cut at
-        # the PDK-generic `gen.CONTACT_SIZE_UM` (0.22um, 0.06um over the
-        # foundry maximum), so enforcing the max half turns twenty
-        # currently-green sg13g2 generator tests red -- correctly, since that
-        # geometry genuinely violates "Cnt.a". Fixing the generator is issue
-        # #2585; this rule gets its `threshold_max_dbu` once that lands.
+        # Both halves are enforced (issue #2388): `threshold_dbu` is the
+        # minimum-width lower bound (`Region.width_check`) and the equal
+        # `threshold_max_dbu` is the fixed-size upper bound, measured as a
+        # bounding-box size (`Region.with_bbox_max`, see
+        # `_run_width_max_check` in `drc.py`) -- exactly the
+        # `without_bbox_width` semantics upstream uses. The max half was
+        # deferred behind issue #2585 (every `klt gen` generator drew this
+        # cut at the PDK-generic 0.22um); that generator clamp has landed.
+        # Threshold value unmodified.
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.a"),
     ),
@@ -641,6 +1056,7 @@ DECK: list[DrcRule] = [
         layer=(6, 0),  # Cont.drawing
         check="space",
         threshold_dbu=180,  # 0.18 um
+        layer_selection="squares",  # cont_sq only (issues #2943, #3139)
         # 5_14_cont.drc rule "Cnt.b": cont_sq.space(0.18um, euclidian)
         # -> "5.14. Cnt.b : Min. Cont space : 0.18 um"
         # (sg13g2_tech_default.json: drc_rules.Cnt_b == 0.18)
@@ -650,24 +1066,56 @@ DECK: list[DrcRule] = [
     DrcRule(
         id="activ.enclosing.cont.1",
         description=(
-            "minimum Activ enclosure of Cont (approximates the official "
-            "rule's SRAM/DigiBnd-scoped compound-layer derivation as a "
-            "plain, unconditional Activ-encloses-Cont floor -- the same "
-            "class of approximation sky130.py's diff.enclosing.licon.1 "
-            "makes for its own compound-layer official rule)"
+            "minimum Activ enclosure of square Cont (Activ.drawing joined "
+            "with Activ.mask, as the official rule's enclosing region is; "
+            "approximates the official rule's SRAM/DigiBnd/svaricap/"
+            "EdgeSeal carve-outs as an unconditional 0.07 um floor)"
         ),
-        layer=(1, 0),  # Activ.drawing
+        layer=(1, 0),  # Activ.drawing -- reporting identity only, see below
         other_layer=(6, 0),  # Cont.drawing
         check="enclosing",
         threshold_dbu=70,  # 0.07 um
         # 5_14_cont.drc rule "Cnt.c":
-        # cont_nsvaricap.enclosed(act_nsram.join(activ_mask).not(digibnd_drw),
-        #                         0.07um, euclidian)
-        # -> "5.14. Cnt.c : Min. Activ enclosure of Cont : 0.07 um"
-        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07; the SRAM
-        # (0.006um)/DigiBnd (0.05um) region-specific refinements -- Cnt.c.SRAM/
-        # Cnt.c.digibnd -- are not modelled here, see the module docstring's
-        # "Scope guard" section)
+        #   cnt_c_act = act_nsram.join(activ_mask).not(digibnd_drw)
+        #   cnt_c_l   = cont_nsvaricap.enclosed(cnt_c_act, 0.07um, euclidian)
+        # -> "5.14. Cnt.c Min. Activ enclosure of Cont is 0.07 um"
+        # (sg13g2_tech_default.json: drc_rules.Cnt_c == 0.07), with, from
+        # the same pinned v0.3.0 tree: `activ_mask = get_polygons(1, 20)`
+        # (`layers_def.drc`), `act_nsram = activ_drw.not(sram_drw)`,
+        # `cont_nsvaricap = cont_sq.not(svaricap)` (`5_14_cont.drc`), and
+        # `cont_nseal = cont_drw.not(edgeseal_drw)`, `contbar =
+        # cont_nseal.non_squares`, `cont_sq = cont_nseal.not(contbar)`
+        # (`ihp-sg13g2.drc`'s "cont/contbar general derivations").
+        #
+        # Modelled (issue #2688):
+        # - the `.join(activ_mask)` term, via `DerivedLayer(mode="union")`
+        #   over Activ.drawing (1/0) + Activ.mask (1/20). This term *enlarges*
+        #   the enclosing region, so dropping it (as this rule did before
+        #   #2688) was not a conservative approximation: every contact whose
+        #   enclosure IHP's own HBT PCell (`npn13G2`) supplies on Activ.mask
+        #   reported a false positive the caller could not fix. The rule runs
+        #   whenever *either* Activ layer is present.
+        # - the square-contact selection (`cont_sq`), via
+        #   `other_layer_selection="squares"`: contact bars are `CntB.*`'s
+        #   business, never `Cnt.c`'s.
+        #
+        # Not modelled -- each is a `.not(...)` carve-out that only *narrows*
+        # which geometry the official rule applies 0.07 um to, so omitting
+        # it can over-report (never under-report) inside that region:
+        # - `.not(digibnd_drw)` / `sram_drw` (16/0, 25/0): inside DigiBnd/
+        #   SRAM the official deck applies `Cnt.c.digibnd` (0.05 um) /
+        #   `Cnt.c.SRAM` (0.006 um) instead; this rule still applies 0.07 um
+        #   there (see the module docstring's "Scope guard" section).
+        # - `.not(svaricap)` (contacts inside the sg13_hv_svaricap device)
+        #   and `.not(edgeseal_drw)` (seal-ring contacts): still checked.
+        # So this is a corrected subset of `Cnt.c`, not an equivalent of it.
+        derived_layer=DerivedLayer(
+            base=(1, 0),  # Activ.drawing
+            intersect_with=(1, 20),  # Activ.mask
+            sized_by_um=0.0,
+            mode="union",
+        ),
+        other_layer_selection="squares",
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.c"),
     ),
@@ -683,6 +1131,22 @@ DECK: list[DrcRule] = [
         # (sg13g2_tech_default.json: drc_rules.Cnt_d == 0.07)
         scope="Cnt",
         provenance=_sg13g2_drc_provenance(f"{_FEOL}/5_14_cont.drc", "Cnt.d"),
+    ),
+    # Curated upper landing (#2726, issue #5916): the conductor above Cont is
+    # Metal1 only, so the cut side is single-population. Upstream defines no
+    # Metal1-enclosure-of-Cont rule in the curated `main`-table decks, so no
+    # margin is invented (threshold 0, containment only, no provenance).
+    DrcRule(
+        id="metal1.enclosing.cont.1",
+        description="every Cont must lie fully inside Metal1 (upper landing)",
+        layer=(8, 0),  # Metal1.drawing
+        other_layer=(6, 0),  # Cont.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Covers every Cont shape, bars included: `CntB.*` is not
+        # transcribed, but a contact bar lands inside Metal1 like a square.
+        scope="Cont upper-landing containment (curated)",
     ),
     # --- 5.16 Metal1 (beol/5_16_metal1.drc) ---------------------------
     DrcRule(
@@ -712,19 +1176,16 @@ DECK: list[DrcRule] = [
     # --- 5.19 Via1 (beol/5_19_via1.drc) --------------------------------
     DrcRule(
         id="via1.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via1 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation cont.width.1 above makes"
-        ),
+        description="min/max Via1 size (fixed 0.19 x 0.19 um square)",
         layer=(19, 0),  # Via1.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_19_via1.drc rule "V1.a": via1_nseal.without_bbox_min/max(0.19um)
         # -> "5.19. V1.a : Min. and max. Via1 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19). No
-        # `threshold_max_dbu` yet for the same, deferred reason
-        # cont.width.1's note above gives in full (issue #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.V1_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.a"),
     ),
@@ -746,12 +1207,26 @@ DECK: list[DrcRule] = [
         layer=(8, 0),  # Metal1.drawing
         other_layer=(19, 0),  # Via1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=10,  # 0.01 um
         # 5_19_via1.drc rule "V1.c": via1_nseal.enclosed(metal1_drw, 0.01um,
         # euclidian) -> "5.19. V1.c : Min. Metal1 enclosure of Via1 is 0.01 um"
         # (sg13g2_tech_default.json: drc_rules.V1_c == 0.01)
         scope="V1",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_19_via1.drc", "V1.c"),
+    ),
+    DrcRule(
+        id="metal2.enclosing.via1.1",
+        description="every Via1 must lie fully inside Metal2 (upper landing)",
+        layer=(10, 0),  # Metal2.drawing
+        other_layer=(19, 0),  # Via1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via1 cut connects
+        # Metal1 to Metal2, so it must always sit on both; no upstream
+        # Metal2-side margin was verified, so none is invented.
+        scope="Via1 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal2 instance (beol/5_17_metaln.drc) -----------
     DrcRule(
@@ -783,20 +1258,18 @@ DECK: list[DrcRule] = [
     # --- 5.20 Vian, Via2 instance (beol/5_20_vian.drc) ------------------
     DrcRule(
         id="via2.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via2 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1 above makes"
-        ),
+        description="min/max Via2 size (fixed 0.19 x 0.19 um square)",
         layer=(29, 0),  # Via2.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V2.a" (via_no=2 instance of the templated
         # "Vn.a" rule): via2_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V2.a : Min. and max. Via2 width: 0.19 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19, shared by
-        # Via2-Via4). No `threshold_max_dbu` yet: see cont.width.1's note
-        # above (issue #2388/#2585).
+        # Via2-Via4)
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.a"),
     ),
@@ -818,12 +1291,26 @@ DECK: list[DrcRule] = [
         layer=(10, 0),  # Metal2.drawing
         other_layer=(29, 0),  # Via2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V2.c": via2_nseal.enclosed(metal2_drw, 0.005um,
         # euclidian) -> "5.20. V2.c : Min. Metal2 enclosure of Via2 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V2",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V2.c"),
+    ),
+    DrcRule(
+        id="metal3.enclosing.via2.1",
+        description="every Via2 must lie fully inside Metal3 (upper landing)",
+        layer=(30, 0),  # Metal3.drawing
+        other_layer=(29, 0),  # Via2.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via2 cut connects
+        # Metal2 to Metal3, so it must always sit on both; no upstream
+        # Metal3-side margin was verified, so none is invented.
+        scope="Via2 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal3 instance (beol/5_17_metaln.drc) -----------
     # Issue #1243: extending the connectivity/DRC stack past Metal2, up
@@ -871,21 +1358,17 @@ DECK: list[DrcRule] = [
     # below it, exactly like Via1/Via2 above).
     DrcRule(
         id="via3.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via3 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1/via2.width.1 above "
-            "make"
-        ),
+        description="min/max Via3 size (fixed 0.19 x 0.19 um square)",
         layer=(49, 0),  # Via3.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V3.a" (via_no=3 instance of "Vn.a"):
         # via3_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V3.a : Min. and max. Via3 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
-        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
-        # #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V3",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.a"),
     ),
@@ -907,12 +1390,26 @@ DECK: list[DrcRule] = [
         layer=(30, 0),  # Metal3.drawing
         other_layer=(49, 0),  # Via3.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V3.c": via3_nseal.enclosed(metal3_drw, 0.005um,
         # euclidian) -> "5.20. V3.c : Min. Metal3 enclosure of Via3 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V3",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V3.c"),
+    ),
+    DrcRule(
+        id="metal4.enclosing.via3.1",
+        description="every Via3 must lie fully inside Metal4 (upper landing)",
+        layer=(50, 0),  # Metal4.drawing
+        other_layer=(49, 0),  # Via3.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via3 cut connects
+        # Metal3 to Metal4, so it must always sit on both; no upstream
+        # Metal4-side margin was verified, so none is invented.
+        scope="Via3 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal4 instance (beol/5_17_metaln.drc) -----------
     DrcRule(
@@ -943,21 +1440,17 @@ DECK: list[DrcRule] = [
     # --- 5.20 Vian, Via4 instance (beol/5_20_vian.drc) ------------------
     DrcRule(
         id="via4.width.1",
-        description=(
-            "minimum (and, on the real rule, maximum) Via4 width -- "
-            "approximated as a minimum-width floor only, the same "
-            "#2585-deferred approximation via1.width.1/via2.width.1/"
-            "via3.width.1 above make"
-        ),
+        description="min/max Via4 size (fixed 0.19 x 0.19 um square)",
         layer=(66, 0),  # Via4.drawing
         check="width",
         threshold_dbu=190,  # 0.19 um
+        threshold_max_dbu=190,  # 0.19 um -- same value: a *fixed*-size rule
         # 5_20_vian.drc rule "V4.a" (via_no=4 instance of "Vn.a"):
         # via4_nseal.without_bbox_min/max(0.19um)
         # -> "5.20. V4.a : Min. and max. Via4 width: 0.19 um"
-        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19). No
-        # `threshold_max_dbu` yet: see cont.width.1's note above (issue
-        # #2388/#2585).
+        # (sg13g2_tech_default.json: drc_rules.Vn_a == 0.19).
+        # Both halves enforced (issue #2388, after the #2585 generator clamp);
+        # see cont.width.1 above for the min/max-half mechanics.
         scope="V4",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.a"),
     ),
@@ -979,12 +1472,26 @@ DECK: list[DrcRule] = [
         layer=(50, 0),  # Metal4.drawing
         other_layer=(66, 0),  # Via4.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=5,  # 0.005 um
         # 5_20_vian.drc rule "V4.c": via4_nseal.enclosed(metal4_drw, 0.005um,
         # euclidian) -> "5.20. V4.c : Min. Metal4 enclosure of Via4 is 0.005 um"
         # (sg13g2_tech_default.json: drc_rules.Vn_c == 0.005)
         scope="V4",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/5_20_vian.drc", "V4.c"),
+    ),
+    DrcRule(
+        id="metal5.enclosing.via4.1",
+        description="every Via4 must lie fully inside Metal5 (upper landing)",
+        layer=(67, 0),  # Metal5.drawing
+        other_layer=(66, 0),  # Via4.drawing
+        check="enclosing",
+        threshold_dbu=0,  # pure geometric containment, no margin
+        require_containment=True,
+        # Curated topology assertion (#2726, #5916): a Via4 cut connects
+        # Metal4 to Metal5, so it must always sit on both; no upstream
+        # Metal5-side margin was verified, so none is invented.
+        scope="Via4 upper-landing containment (curated)",
     ),
     # --- 5.17 Metaln, Metal5 instance (beol/5_17_metaln.drc) -----------
     # Metal5 is the top of `metaln.drc`'s own templated table
@@ -1067,6 +1574,7 @@ DECK: list[DrcRule] = [
         layer=(67, 0),  # Metal5.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: MIM.c nests every MIM inside Metal5
         threshold_dbu=100,  # 0.10 um
         # 5_21_topvia1.drc rule "TV1.c":
         # topvia1_nseal.enclosed(metal5_drw, 0.10um, euclidian)
@@ -1081,6 +1589,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(125, 0),  # TopVia1.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=420,  # 0.42 um
         # 5_21_topvia1.drc rule "TV1.d":
         # topvia1_nseal.enclosed(topmetal1_drw, 0.42um, euclidian)
@@ -1161,6 +1670,7 @@ DECK: list[DrcRule] = [
         layer=(126, 0),  # TopMetal1.drawing
         other_layer=(133, 0),  # TopVia2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=500,  # 0.50 um
         # 5_24_topvia2.drc rule "TV2.c":
         # topvia2_nseal.enclosed(topmetal1_drw, 0.50um, euclidian)
@@ -1175,6 +1685,7 @@ DECK: list[DrcRule] = [
         layer=(134, 0),  # TopMetal2.drawing
         other_layer=(133, 0),  # TopVia2.drawing
         check="enclosing",
+        require_containment=True,  # #2726: every cut must land on this conductor
         threshold_dbu=500,  # 0.50 um
         # 5_24_topvia2.drc rule "TV2.d":
         # topvia2_nseal.enclosed(topmetal2_drw, 0.50um, euclidian)
@@ -1316,14 +1827,35 @@ DECK: list[DrcRule] = [
         # elsewhere in a layout are untouched for the same reason the
         # zero-overlap-escape term above is `.interacting`-scoped: a routing
         # TopVia1 nowhere near a MIM plate faces no MIM edge to measure
-        # against.
+        # against. Keeps the legacy `require_containment=False` (#5916):
+        # TopVia1 is shared between the MIM population (this rule) and
+        # ordinary routing, so containment in MIM would flag every via.
         scope="MIM",
         provenance=_sg13g2_drc_provenance(f"{_BEOL}/6_11_mim.drc", "MIM.d"),
     ),
 ]
+DRC_RULE_SOURCES = ("sg13g2_cont_grid", "sg13g2_svaricap", "sg13g2_runset_notes")
+for _hook in DRC_RULE_SOURCES:
+    __import__(f"{__package__}.{_hook}", fromlist=["x"]).apply(DECK)
+# Known but unevaluated rules (#3571): `{rule id: (layer, description)}`.
+# DRC reports each under `coverage.unchecked_rules` whenever its layer is
+# present in the stream, so a `clean` verdict cannot be read as "this rule
+# was checked".
+UNCHECKED_RULES: dict[str, tuple[tuple[int, int], str]] = {
+    "NW.b1": (
+        (31, 0),
+        "NW.b1 (min. PWell width between NWell regions of different nets, "
+        "1.80 um) is net-aware and this engine has no net-aware spacing "
+        "check; wells on different nets closer than 1.80 um are not "
+        "flagged. Only the geometric nwell.space.1 (0.62 um) ran.",
+    ),
+}
 
 LAYER_NAMES: dict[tuple[int, int], str] = {
     (1, 0): "Activ.drawing",
+    # `layers_def.drc`'s `activ_mask = get_polygons(1, 20)` -- read by
+    # `activ.enclosing.cont.1`'s `Cnt.c` enclosing-region union (#2688).
+    (1, 20): "Activ.mask",
     (5, 0): "GatPoly.drawing",
     (6, 0): "Cont.drawing",
     (8, 0): "Metal1.drawing",
@@ -1392,45 +1924,9 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (46, 21): "PWell.block",
 }
 
-# Voltage-domain marker layer this deck draws but does not *fully* model the
-# DRC/extraction scoping of (issue #552's `decks.get_unmodeled_voltage_markers`,
-# the same mechanism gf180mcu.py registers its own `Dualgate` marker under).
-# sg13g2's `general_derivations.lvs` splits every MOS device recognition rule
-# into a "-LV" (thin, default gate oxide) and "-HV" (thick gate oxide) pair
-# keyed off `thickgateox_drw` (44/0, see `ngate_lv_base`/`ngate_hv_base` in
-# that file): `ngate_lv_base = ngate.not(thickgateox_drw)`, `ngate_hv_base =
-# ngate.and(thickgateox_drw)` (and the PMOS analogues).
-#
-# What issue #1231 closed: `EXTRACTION_DECK` below now declares one
-# `mos_flavours` entry keyed on this same marker (see `MOSFlavour`'s own
-# docstring in `decks/__init__.py`), so a transistor drawn inside ThickGateOx
-# is recognised in its own extraction pass and binds the real
-# `sg13_hv_nmos`/`sg13_hv_pmos` models under `--pdk` instead of silently
-# taking the thin-oxide ("-LV") ones -- and `extract.py`'s own MOS
-# `voltage_domain_warnings` stops firing for this marker (it only ever warned
-# about that *MOS binding* gap). This mirrors exactly what #1111 did for
-# gf180mcu's `Dualgate`.
-#
-# What is NOT modelled, and is what this entry still warns about: every DRC
-# rule in `DECK` above applies the general-case FEOL thresholds regardless of
-# ThickGateOx's presence -- sg13g2's own DRM scopes several FEOL rules to the
-# thick-oxide domain (e.g. `Gat.a1`/`Gat.a2`'s channel-length-specific GatPoly
-# widths, themselves compound `ngate`/`pgate` derivations of GatPoly, Activ,
-# NWell *and* this marker -- see the module docstring's "Scope guard"), and
-# none of that is transcribed here. So the registry entry stays, with its
-# description narrowed to the DRC-rule residue.
-UNMODELED_VOLTAGE_MARKERS: dict[tuple[int, int], str] = {
-    (44, 0): (
-        "ThickGateOx (44/0) marks sg13g2's thick-gate-oxide ('-HV') MOS "
-        "voltage domain (see general_derivations.lvs's ngate_hv_base/"
-        "pgate_hv_base). EXTRACTION_DECK models it for MOS device "
-        "recognition/model binding (issue #1231: sg13_hv_nmos/sg13_hv_pmos "
-        "under --pdk); this curated deck's DRC rules still apply the "
-        "general-case ('-LV') thresholds to geometry regardless of "
-        "ThickGateOx's presence (e.g. the Gat.a1/Gat.a2 channel-length-"
-        "specific GatPoly widths, not transcribed in this deck yet)."
-    ),
-}
+# The unmodeled registries (voltage-domain/device markers, untranscribed
+# rule ids) moved verbatim to `sg13g2_unmodeled.py` (file-size ceiling,
+# issue #5916) and are re-exported at this module's top.
 
 # --------------------------------------------------------------------------- #
 # `klt extract` connectivity + device-extraction deck
@@ -1602,14 +2098,14 @@ EXTRACTION_DECK = ExtractionDeck(
         (134, 25),  # TopMetal2.text
     ),
     # No distinct drawn tap layer (`tap` stays `None`) -- but `tap_nplus`/
-    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie
-    # region from these same implant layers (issue #1273, mirroring
-    # gf180mcu's #1084; see the module docstring note above this deck's
-    # definition for the full derivation, and for issue #2591's correction
-    # of the well-tie half against upstream).
+    # `tap_pplus` let `extract.py` derive an equivalent well-/substrate-tie region
+    # from these same implant layers (issue #1273, mirroring gf180mcu's #1084;
+    # module docstring note above: the derivation and #2591's well-tie correction).
     tap=None,
     tap_nplus=(7, 0),  # nSD.drawing -- well-tie implant (n+ Activ inside NWell)
     tap_pplus=(14, 0),  # pSD.drawing -- substrate-tie implant (p+ Activ outside NWell)
+    substrate_isolation=(32, 0),  # nBuLay.drawing (#5345)
+    substrate_isolation_needs_nwell_ring=True,  # #5359: needs a closing NWell ring
     # Issue #2591: upstream's own well-tie form -- Activ inside NWell with
     # *no* pSD over it (`nactiv = activ.not(psd_drw...)`), unioned with the
     # positive `tap_nplus` form above so either drawing convention extracts.
@@ -1949,22 +2445,28 @@ EXTRACTION_DECK = ExtractionDeck(
     #   extract_devices(GeneralNTerminalExtractor.new('rsil', 2),
     #     { 'core' => rsil_res, 'ports' => rsil_ports, ... })   (ditto rppd)
     #
-    # Mapping onto this engine's `ResistorDevice` model (`body & marker &
-    # requires - excludes`, terminals = `body - segment`): `body` is GatPoly,
-    # `marker` is `polyres` (128/0), and each flavour's distinguishing
-    # implant/block masks become `requires`/`excludes`. This reproduces
-    # upstream's own terminal derivation exactly -- `rsil_ports`/`rppd_ports`
-    # are `gatpoly.interacting(core).not(core)`, i.e. the drawn poly heads on
-    # either side of the marked segment, which is what `terminal=None`
-    # (default: `body` minus the segment) already yields.
+    # Mapping onto this engine's `ResistorDevice` model (issue #2679,
+    # `topology="abutting_heads"`): IHP's own `SG13_dev/rsil|rppd|rhigh`
+    # PCells draw `polyres` (128/0) as the whole resistive body and `GatPoly`
+    # (5/0) only as the two head pads that *abut* it (zero overlap area), so
+    # the segment is `marker & requires - excludes` -- upstream's `core`,
+    # `polyres_mk` narrowed per flavour -- not `body & marker`. It is kept
+    # only where it touches the GatPoly heads in two separate regions
+    # (upstream's `polyres_mk.interacting(gatpoly)`, strengthened to both
+    # ends so a missing head is not a resistor). Terminals are the touching
+    # GatPoly heads (`gatpoly.interacting(core).not(core)`, i.e. what
+    # `terminal=None` -- `body` minus the segment -- yields), attached by
+    # KLayout's native resistor extractor directly across the shared edge
+    # (no upstream-style 5 nm port growth is needed). A layout that instead
+    # draws one continuous GatPoly bar under `polyres` still extracts the
+    # same way, since the segment is also cut out of GatPoly.
     #
     # Documented approximations, in this deck's usual "known-unmodelled beats
     # silently wrong" style:
     #
     # - Upstream's `core` is the *marker* region (`polyres & extblock`, merely
-    #   `interacting` GatPoly); this engine intersects it with the body layer.
-    #   For a real device cell -- where `polyres` is drawn coincident with the
-    #   poly bar it marks -- the two are the same region.
+    #   `interacting` GatPoly); so is this engine's segment in
+    #   `abutting_heads` mode -- it is never intersected with GatPoly.
     # - `polyres_exclude` is a 14-layer join. Only its two members this deck
     #   otherwise declares layers for are subtracted below (`Activ`, so a
     #   marked *gate* is never mistaken for a resistor -- the same guard
@@ -2018,7 +2520,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rsil",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rsilG2_rspec` in sg13g2_tech.json (`techName == "SG13G2"`;
             # `rsil_code.py` reads the `G2` key unconditionally, and the
             # non-G2 key carries the same 7.0 value).
@@ -2050,7 +2553,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rppd",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # `rppdG2_rspec` in sg13g2_tech.json -- `rppd_code.py` selects the
             # `G2` suffix for `techName == "SG13G2"` (260.0, vs the non-G2
             # 250.0 of the older SG13 flavour).
@@ -2082,7 +2586,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ResistorDevice(
             name="rhigh",  # upstream LVS device-class name
             body=(5, 0),  # GatPoly.drawing
-            marker=(128, 0),  # polyres.drawing
+            marker=(128, 0),  # polyres.drawing -- the resistive body itself
+            topology="abutting_heads",  # GatPoly is only the two abutting heads
             # See the "sheet-rho ambiguity" note above: `rhighG2_rspec` in
             # sg13g2_tech.json, corroborated by `cornerRES.lib`'s
             # `res_typ` corner (`rsh_rhigh = 1360`) over `rhigh_code.py`'s
@@ -2271,6 +2776,23 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
             cathode=(31, 0),  # NWell.drawing -- shares this deck's well node
             provenance=_sg13g2_lvs_provenance("diode_extraction.lvs", "dpantenna"),
+        ),
+    ),
+    # Device families this deck deliberately does not recognise (issue
+    # #3137): the SiGe HBT (see "SiGe HBTs -- investigated, declined" in the
+    # module docstring). A drawn HBT's Activ matches the `dantenna` predicates
+    # minus `Recog.diode`; this lets that near-miss warning say so. The
+    # signature is the HBT's `TRANS` (26/0) device layer alone -- upstream's
+    # `npn_mk = trans_drw.and(pwell).and(ptap_holes)` also needs `pwell`/
+    # `ptap_holes`, which are derived layers this deck does not draw.
+    unmodelled_families=(
+        UnmodelledDeviceFamily(
+            name="SiGe HBT (npn13G2/npn13G2l/npn13G2v)",
+            signature=(26, 0),  # TRANS.drawing
+            reference=(
+                "the sg13g2.py docstring section 'SiGe HBTs -- investigated, "
+                "declined (issue #1232)'"
+            ),
         ),
     ),
 )

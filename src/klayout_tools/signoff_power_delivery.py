@@ -31,9 +31,19 @@ back-reference into ``extract.py``).
 from __future__ import annotations
 
 import json
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
-from ._provenance import sha256_file
+from ._jsonnum import is_int, is_number
+from ._provenance import content_hash
+from .signoff_artifact import report_artifact_unavailable
+from .signoff_power_delivery_substrate import (
+    REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
+    add_substrate_continuity,
+    erc_ties_checked_by_assertion,
+    substrate_undecidable_gate,
+)
+from .signoff_runset import check_runset, runset_disclosure
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason
@@ -46,9 +56,13 @@ from ._provenance import sha256_file
 #: checklist text:
 #:
 #: - :data:`_REASON_NO_PDN` -- the cited `klt place-and-route` response says
-#:   no power grid was built (``power.pdn`` is not ``true``, or no
-#:   ``power.tapcell_master`` was placed). Fix: re-run P&R with a
-#:   ``request.power`` block.
+#:   no power grid was built (``power.pdn`` is not ``true``). Fix: re-run
+#:   P&R with a ``request.power`` block.
+#: - :data:`_REASON_NO_TAPCELL_MASTER` -- the grid was built (``power.pdn``
+#:   is ``true``) but ``power.tapcell_master`` is null and the response does
+#:   not state ``power.tapless: true`` (issue #4199). A library documented
+#:   tapless (``sg13g2_stdcell``) states it and is exempt; a tapped library
+#:   whose tap step did not run, or a pre-#4199 envelope, is not.
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read at *any* path it could mean from here (issue #2608 --
@@ -135,20 +149,91 @@ from ._provenance import sha256_file
 #:   is blocked on it too) -- never the ERC spec, which already asked and
 #:   answered.
 _REASON_NO_PDN = "no_pdn"
+_REASON_NO_TAPCELL_MASTER = "no_tapcell_master"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 _REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
+#: Issue #4193: the cited set resolved cleanly but lacks the ``erc`` and/or
+#: the ``lvs`` part. Distinct from ``wrong_kind`` ("cite a different
+#: artifact"): the parts that are cited are right, the set is incomplete.
+_REASON_POWER_DELIVERY_PARTS_MISSING = "power_delivery_parts_missing"
 
-#: The three :func:`~klayout_tools.signoff._classify` kinds T1 item 11's
+#: Issue #2839: T1 item 11's **port-accessibility** sub-checks -- the
+#: provisional amendment (2AMLogic/product#134, drafted in product PR #168)
+#: requiring every declared supply to be published as an edge-accessible
+#: boundary port *and* as a matching LEF ``PIN`` with ``USE POWER``/``USE
+#: GROUND``. Graded only when the requirement is in force for the block
+#: (:func:`_power_port_policy_active`: the manifest's ``power_ports.required``
+#: or a cited ``socket-check``/``lef-abstract`` part), and only after the
+#: ERC/LVS(/PDN) half above is already proven -- so every pre-existing
+#: reason, and every block that does not opt in, grades exactly as before.
+#: Six reasons, one per independently-actionable gap:
+#:
+#: - :data:`_REASON_POWER_PORT_UNPROVEN` -- the requirement is in force but
+#:   no `klt socket-check` envelope carrying ``power_ports`` facts is cited
+#:   (none at all, or one produced before #2839). Fix: cite one.
+#: - :data:`_REASON_NO_EDGE_POWER_PORT` -- a declared supply has no port at
+#:   all: no ``POWER``/``GROUND`` pin of that name in the socket descriptor,
+#:   its label is not where the descriptor says, or no drawn conductor sits
+#:   under it. Fix: declare and draw the port.
+#: - :data:`_REASON_POWER_PORT_INTERIOR_ONLY` -- the supply has drawn
+#:   port(s), but none reaches the edge band of a counted outline edge with
+#:   a clear approach channel. Fix: bring the port to the boundary.
+#: - :data:`_REASON_POWER_PORT_LAYER_DISALLOWED` -- the supply's
+#:   edge-accessible port is on a layer the policy does not allow (by
+#:   default: one that does not resolve to a LEF routing layer, so the LEF
+#:   pin has no layer). Fix: move the port to an allowed metal.
+#: - :data:`_REASON_LEF_POWER_PIN_MISSING` -- no `klt lef-abstract` part is
+#:   cited, or its abstract has no ``PIN`` named for the supply.
+#: - :data:`_REASON_LEF_POWER_PIN_MISMATCH` -- the LEF pin exists but does
+#:   not agree with the GDS port: ``USE`` is not ``POWER``/``GROUND`` or
+#:   differs from the port's, its ``PORT`` is not drawn geometry, its GDS
+#:   layer differs, its ``PORT`` rectangles do not touch the
+#:   edge-accessible port, or the macro ``SIZE`` differs from the outline.
+_REASON_POWER_PORT_UNPROVEN = "power_port_unproven"
+_REASON_NO_EDGE_POWER_PORT = "no_edge_power_port"
+_REASON_POWER_PORT_INTERIOR_ONLY = "power_port_interior_only"
+_REASON_POWER_PORT_LAYER_DISALLOWED = "power_port_layer_disallowed"
+_REASON_LEF_POWER_PIN_MISSING = "lef_power_pin_missing"
+_REASON_LEF_POWER_PIN_MISMATCH = "lef_power_pin_mismatch"
+
+#: `klt socket-check`'s per-port reasons (``socket_check.grade_power_ports``)
+#: mapped onto item 11's reasons (issue #2839).
+_SOCKET_PORT_REASONS: dict[str, str] = {
+    "missing": _REASON_NO_EDGE_POWER_PORT,
+    "missing_label": _REASON_NO_EDGE_POWER_PORT,
+    "no_drawn_geometry": _REASON_NO_EDGE_POWER_PORT,
+    "interior_only": _REASON_POWER_PORT_INTERIOR_ONLY,
+    "channel_blocked": _REASON_POWER_PORT_INTERIOR_ONLY,
+    "layer_disallowed": _REASON_POWER_PORT_LAYER_DISALLOWED,
+}
+
+#: The outline edges a port may be accessible from (issue #2839) -- the
+#: same vocabulary as ``socket_check.POWER_PORT_EDGES``.
+_POWER_PORT_EDGES: tuple[str, ...] = ("left", "bottom", "right", "top")
+
+#: The :func:`~klayout_tools.signoff._classify` kinds T1 item 11's
 #: compound evidence list may
-#: cite (issue #2025). A cited part of any other recognised kind renders
+#: cite (issue #2025; ``socket-check``/``lef-abstract`` added by #2839 for
+#: the port-accessibility half). A cited part of any other recognised kind renders
 #: :data:`~klayout_tools.signoff._REASON_WRONG_KIND` -- it proves nothing
 #: about power delivery, and
 #: item 11 must never reach ``"met"`` by borrowing an unrelated check's pass.
-_POWER_DELIVERY_KINDS: frozenset[str] = frozenset({"erc", "lvs", "place-and-route"})
+_POWER_DELIVERY_KINDS: frozenset[str] = frozenset(
+    {"erc", "lvs", "place-and-route", "socket-check", "lef-abstract"}
+)
+
+#: Citation order of item 11's parts (the leading ``erc`` part first).
+_POWER_DELIVERY_PART_ORDER: tuple[str, ...] = (
+    "erc",
+    "lvs",
+    "place-and-route",
+    "socket-check",
+    "lef-abstract",
+)
 
 
 def _erc_supply_spec_hash_reason(
@@ -198,8 +283,7 @@ def _erc_supply_spec_hash_reason(
     )
     if not isinstance(recorded_hash, str) or not recorded_hash:
         return _REASON_UNVERIFIABLE_PROVENANCE
-    digest = sha256_file(resolved_path)
-    actual_hash = f"sha256:{digest}" if digest is not None else None
+    actual_hash = content_hash(resolved_path)
     if actual_hash is None:
         return _REASON_UNVERIFIABLE_PROVENANCE
     if actual_hash != recorded_hash:
@@ -557,6 +641,7 @@ def _lvs_reference_carries_supplies(
 
 def _resolve_power_delivery_parts(
     specs: list[dict[str, Any]],
+    repo_root: str | Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
     """Resolve every part of T1 item 11's compound citation (issue #2025) and
     index the resolutions by :func:`~klayout_tools.signoff._classify` kind --
@@ -578,13 +663,18 @@ def _resolve_power_delivery_parts(
     docstring). The item-specific rules (:func:`_grade_power_delivery`) apply
     only to a set that survives all of these.
 
-    A later part of the same kind replaces an earlier one -- citing two ERC
-    runs for one item is a manifest authoring mistake, not a shape this
-    grading has a meaning for; the last one named wins, the same way a
-    duplicate JSON key would.
+    Two parts of the same kind is a manifest authoring mistake, not a shape
+    this grading has a meaning for: issue #5597 renders it
+    :data:`~klayout_tools.signoff._REASON_INVALID_EVIDENCE` instead of
+    letting the last one named win. Last-wins was order-dependent -- a
+    failing stream cited *first* beside a clean one graded ``"met"`` on the
+    clean one alone -- and once the grouped form
+    (:func:`~klayout_tools.signoff_grouped_citations.normalize_evidence_groups`)
+    gives several streams a shape of their own, the mistake is unambiguous.
     """
     from .signoff import (
         _REASON_CHECK_ERRORED,
+        _REASON_INVALID_EVIDENCE,
         _REASON_STALE_EVIDENCE,
         _REASON_UNVERIFIABLE_PROVENANCE,
         _REASON_WRONG_KIND,
@@ -593,7 +683,7 @@ def _resolve_power_delivery_parts(
 
     by_kind: dict[str, dict[str, Any]] = {}
     for spec in specs:
-        resolution, reason = _resolve_evidence(spec)
+        resolution, reason = _resolve_evidence(spec, repo_root)
         if resolution is None:
             return None, reason
         kind = resolution["kind"]
@@ -606,6 +696,8 @@ def _resolve_power_delivery_parts(
             if resolution["content_hash"] is None:
                 return None, _REASON_UNVERIFIABLE_PROVENANCE
             return None, _REASON_STALE_EVIDENCE
+        if kind in by_kind:
+            return None, _REASON_INVALID_EVIDENCE
         by_kind[kind] = resolution
     return by_kind, None
 
@@ -621,8 +713,9 @@ def _pdn_branch_reason(
 
     Three conditions, in the order a reader would debug them: the response
     itself must pass (a P&R run that errored proves nothing); it must report
-    ``power.pdn: true`` with a ``power.tapcell_master`` named, i.e. a grid
-    was actually built (:data:`_REASON_NO_PDN`); and every
+    ``power.pdn: true`` (:data:`_REASON_NO_PDN`) with a
+    ``power.tapcell_master`` named, or ``power.tapless: true`` for a library
+    documented tapless (:data:`_REASON_NO_TAPCELL_MASTER`); and every
     ``power.straps[].layer`` it reports must be covered by the ERC spec's own
     stackup (:data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- an ERC run that never
     looked at the layers the supply is routed on says nothing about the grid
@@ -636,8 +729,10 @@ def _pdn_branch_reason(
     if not _check_passed("place-and-route", par["envelope"]):
         return _REASON_CHECK_FAILED
     power = par["envelope"].get("power") or {}
-    if power.get("pdn") is not True or not power.get("tapcell_master"):
+    if power.get("pdn") is not True:
         return _REASON_NO_PDN
+    if not power.get("tapcell_master") and power.get("tapless") is not True:
+        return _REASON_NO_TAPCELL_MASTER
     strap_layers = _strap_layers(par["envelope"])
     if not strap_layers or any(
         layer not in supply_spec["stackup"] for layer in strap_layers
@@ -829,36 +924,6 @@ def _erc_disclosed_undeclared_tie_classes(
     return classes
 
 
-def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
-    """The cited `klt erc` run's ``erc_coverage.checked_by_assertion``
-    (issue #2234): the ``erc.missing_tie`` work identities whose tap region
-    came from a caller **assertion** (``ties[].tap_boxes``) rather than
-    PDK-marker narrowing -- ``[]`` for every run that used none, and for
-    every report produced before the field existed.
-
-    Carried into a ``"met"`` item 11 citation's ``power_delivery`` block
-    (:func:`_grade_power_delivery`) for the same reason `klt erc` grades it
-    as its own classification rather than folding it into ``checked``: an
-    asserted tie is real, evaluated work -- the geometry was intersected and
-    the connectivity walked, and a degenerate or unmatched assertion is
-    rejected exactly as any other narrowing form is (``docs/cli/erc.md`` →
-    "A tie with no distinguishing marker layer at all") -- but *which
-    geometry counts as the tap* rested on the caller's word rather than on a
-    drawn marker. That is a provenance difference a reader of the verdict of
-    record should not have to re-open the cited ERC envelope to discover.
-    It does not change the verdict: item 11 is ``"met"`` on an asserted tie
-    exactly as on a marker-derived one.
-    """
-    block = envelope.get("erc_coverage")
-    if not isinstance(block, dict):
-        return []
-    return [
-        identity
-        for identity in block.get("checked_by_assertion") or []
-        if isinstance(identity, str)
-    ]
-
-
 def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
     """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
     (issues #2255 and #2540): the ``erc.missing_tie`` work identities whose
@@ -874,7 +939,7 @@ def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
       because no drawn layer separates the tub's two bias classes.
 
     Carried into a ``"met"`` item 11 citation beside
-    :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
+    :func:`erc_ties_checked_by_assertion`'s tap-side list, and deliberately
     **not** merged into it, because the two state different things about the
     same verdict. A ``tap_boxes`` assertion says which of the drawn tap
     geometry counts as the tap; the well is still drawn, and still measured.
@@ -945,7 +1010,7 @@ def _erc_supply_unlabelled_islands(
         count = entry.get("unlabelled_islands")
         if not isinstance(name, str) or name.upper() not in declared:
             continue
-        if isinstance(count, bool) or not isinstance(count, int):
+        if not is_int(count):
             continue
         islands[name] = count
     return islands
@@ -1004,7 +1069,33 @@ def _resolve_erc_supply_spec(
     if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
 
+    undecidable = substrate_undecidable_gate(erc["envelope"])  # issue #5346
+    if undecidable is not None:
+        return None, REASON_SUBSTRATE_ISOLATION_UNDECIDABLE, undecidable
+
     return supply_spec, None, {}
+
+
+def _lvs_half_verdict(
+    envelope: dict[str, Any], supply_spec: dict[str, Any] | None
+) -> tuple[tuple[str, str, None, dict[str, Any]] | None, bool]:
+    """Return item 11's LVS refusal, if any, and the re-hash disclosure flag.
+
+    A report that did not pass renders :func:`_failed_lvs_verdict`'s reason.
+    A passing PDK-runset report goes through
+    :func:`~klayout_tools.signoff_runset.check_runset`.
+    If the digest is unavailable, the flag discloses that outcome on the
+    LVS citation when the rest of item 11 is met.
+    """
+    from .signoff import _check_passed
+
+    if not _check_passed("lvs", cast(Any, envelope)):
+        reason, detail = _failed_lvs_verdict(envelope, supply_spec)
+        return ("unmet", reason, None, detail), False
+    runset_reason, rehash_unverifiable = check_runset(envelope)
+    if runset_reason is not None:
+        return ("unmet", runset_reason, None, runset_disclosure(envelope) or {}), False
+    return None, rehash_unverifiable
 
 
 def _failed_lvs_verdict(
@@ -1066,8 +1157,511 @@ def _failed_lvs_verdict(
     }
 
 
+#: Issue #2839: the port-accessibility policy every block is graded under
+#: unless its manifest's ``power_ports`` object overrides a field.
+#: **Provisional** until 2AMLogic/product#134 ratifies the T1 item 11
+#: amendment: ``required`` is ``False`` (the amendment is not in force, so
+#: no existing block's verdict changes), the edge band is ``0`` um (the
+#: port must touch the outline -- the strictest, PDK-independent reading of
+#: the draft's open "edge band"), every outline edge counts, and any layer
+#: that resolves to a LEF routing layer is allowed (the draft's own
+#: recommendation: "any routing metal the PDK stackup declares").
+_DEFAULT_POWER_PORT_POLICY: dict[str, Any] = {
+    "required": False,
+    "edge_band_um": 0.0,
+    "edges": list(_POWER_PORT_EDGES),
+    "allowed_layers": None,
+}
+
+
+def _policy_required(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _policy_edge_band(value: Any) -> float | None:
+    return None if not is_number(value) or value < 0 else float(value)
+
+
+def _policy_edges(value: Any) -> list[str] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    if any(edge not in _POWER_PORT_EDGES for edge in value):
+        return None
+    return list(value)
+
+
+def _policy_allowed_layers(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    if not all(isinstance(layer, str) and layer for layer in value):
+        return None
+    return list(value)
+
+
+#: Per-field validators for a manifest ``power_ports`` object: each returns
+#: the normalized value, or ``None`` for a malformed one (issue #2839).
+_POLICY_FIELDS: dict[str, tuple[Any, str]] = {
+    "required": (_policy_required, "a boolean"),
+    "edge_band_um": (_policy_edge_band, "a non-negative number"),
+    "edges": (
+        _policy_edges,
+        "a non-empty list of: " + ", ".join(_POWER_PORT_EDGES),
+    ),
+    "allowed_layers": (
+        _policy_allowed_layers,
+        'a list of layer names (LEF names like "met4" or GDS "layer/datatype" '
+        "strings) or null",
+    ),
+}
+
+
+def _read_power_port_policy(raw: Any) -> dict[str, Any]:
+    """Validate a block manifest's optional ``power_ports`` object (issue
+    #2839) and merge it over :data:`_DEFAULT_POWER_PORT_POLICY`. Raises
+    :class:`~klayout_tools.signoff.SignoffError` for a malformed one -- a
+    manifest-level error, like a malformed ``partition_boundary``. A field
+    given as ``null`` keeps its default.
+
+    The returned policy also carries ``source`` (``"manifest"`` when the
+    manifest declared the object, else ``"default"``) and ``provisional:
+    true`` so a report states which parameters it was graded under."""
+    from .signoff import SignoffError
+
+    policy = {
+        **_DEFAULT_POWER_PORT_POLICY,
+        "edges": list(_DEFAULT_POWER_PORT_POLICY["edges"]),
+        "source": "default",
+        "provisional": True,
+    }
+    if raw is None:
+        return policy
+    if not isinstance(raw, dict):
+        raise SignoffError(
+            "block manifest 'power_ports' must be a JSON object, got "
+            f"{type(raw).__name__}"
+        )
+    unknown = set(raw) - set(_POLICY_FIELDS)
+    if unknown:
+        raise SignoffError(
+            "block manifest 'power_ports' has unknown field(s): "
+            + ", ".join(sorted(unknown))
+        )
+    for field, value in raw.items():
+        if value is None:
+            continue
+        validate, expected = _POLICY_FIELDS[field]
+        normalized = validate(value)
+        if normalized is None:
+            raise SignoffError(
+                f"block manifest 'power_ports.{field}' must be {expected}"
+            )
+        policy[field] = normalized
+    policy["source"] = "manifest"
+    return policy
+
+
+def _power_port_policy_active(
+    policy: dict[str, Any], by_kind: dict[str, dict[str, Any]]
+) -> bool:
+    """Whether item 11's port-accessibility half is graded for this block
+    (issue #2839): the manifest requires it, or the cited set includes a
+    ``socket-check``/``lef-abstract`` part -- citing port evidence is opting
+    in, and cited evidence is never silently ignored."""
+    return bool(policy.get("required")) or any(
+        kind in by_kind for kind in ("socket-check", "lef-abstract")
+    )
+
+
+def _policy_echo(policy: dict[str, Any]) -> dict[str, Any]:
+    allowed = policy["allowed_layers"]
+    return {
+        "required": policy["required"],
+        "edge_band_um": policy["edge_band_um"],
+        "edges": list(policy["edges"]),
+        "allowed_layers": list(allowed) if allowed is not None else None,
+        "source": policy["source"],
+        "provisional": policy["provisional"],
+    }
+
+
+def _port_finding(
+    net: str | None, reason: str, aspect: str, message: str
+) -> dict[str, Any]:
+    return {"net": net, "reason": reason, "aspect": aspect, "message": message}
+
+
+def _rects_touch(a: list[float], b: dict[str, float]) -> bool:
+    """Whether LEF rectangle ``a`` (``[x0, y0, x1, y1]``) and box ``b``
+    (``{x0, y0, x1, y1}``) overlap or touch."""
+    tol = 1e-6
+    return not (
+        a[2] < b["x0"] - tol
+        or b["x1"] < a[0] - tol
+        or a[3] < b["y0"] - tol
+        or b["y1"] < a[1] - tol
+    )
+
+
+def _ports_on_allowed_layer(
+    lef_layer: Any, ports: list[dict[str, Any]], allowed: list[str] | None
+) -> list[dict[str, Any]]:
+    """The ports whose layer the policy allows: by default any port whose
+    LEF pin resolved to a (routing) LEF layer; with ``allowed``, a port
+    whose LEF layer name or GDS ``layer/datatype`` is listed."""
+    if allowed is None:
+        return ports if isinstance(lef_layer, str) and lef_layer else []
+    return [
+        port
+        for port in ports
+        if lef_layer in allowed
+        or port.get("metal_layer") in allowed
+        or port.get("layer") in allowed
+    ]
+
+
+def _ports_on_lef_gds_layer(
+    lef_pin: dict[str, Any], ports: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The ports labelled on the GDS layer the LEF pin was emitted from --
+    every port when the LEF envelope predates the ``gds_layer`` echo."""
+    gds_layer = lef_pin.get("gds_layer")
+    if not (isinstance(gds_layer, list) and len(gds_layer) == 2):
+        return ports
+    label = f"{gds_layer[0]}/{gds_layer[1]}"
+    return [port for port in ports if port.get("layer") == label]
+
+
+def _ports_touching_lef_rects(
+    lef_pin: dict[str, Any], ports: list[dict[str, Any]], outline: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The ports some LEF ``PORT`` rectangle (macro-local, origin at the
+    outline's lower-left) overlaps or touches."""
+    rects = [
+        rect
+        for rect in lef_pin.get("rects_um") or []
+        if isinstance(rect, list) and len(rect) == 4
+    ]
+    origin_x = outline.get("x0", 0.0)
+    origin_y = outline.get("y0", 0.0)
+    touching = []
+    for port in ports:
+        bbox = port.get("bbox_um") or {}
+        local = {
+            "x0": bbox.get("x0", 0.0) - origin_x,
+            "y0": bbox.get("y0", 0.0) - origin_y,
+            "x1": bbox.get("x1", 0.0) - origin_x,
+            "y1": bbox.get("y1", 0.0) - origin_y,
+        }
+        if any(_rects_touch(rect, local) for rect in rects):
+            touching.append(port)
+    return touching
+
+
+def _lef_pin_findings(
+    net: str,
+    lef_pin: dict[str, Any],
+    use: str | None,
+    ports: list[dict[str, Any]],
+    outline: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Compare one supply's LEF pin (written ``USE`` ``use``) against its
+    edge-accessible GDS ``ports`` (issue #2839). Returns ``(findings,
+    agreeing_ports)`` -- the first failing aspect only, so a reader fixes
+    one thing at a time."""
+    name = lef_pin.get("name")
+    same_use = [port for port in ports if port.get("use") == use]
+    if use not in ("POWER", "GROUND") or not same_use:
+        message = f"LEF PIN {name} is USE {use}, the GDS port is {ports[0].get('use')}"
+        return [_port_finding(net, _REASON_LEF_POWER_PIN_MISMATCH, "use", message)], []
+
+    lef_layer = lef_pin.get("layer")
+    allowed = policy["allowed_layers"]
+    on_allowed = _ports_on_allowed_layer(lef_layer, same_use, allowed)
+    if not on_allowed:
+        rule = "a LEF routing layer" if allowed is None else f"one of {allowed}"
+        message = (
+            f"port layer {same_use[0].get('metal_layer')} (LEF {lef_layer!r}) "
+            f"is not {rule}"
+        )
+        return [
+            _port_finding(net, _REASON_POWER_PORT_LAYER_DISALLOWED, "layer", message)
+        ], []
+
+    checks = (
+        (
+            "geometry",
+            lambda candidates: (
+                candidates if lef_pin.get("geometry_source") == "drawn" else []
+            ),
+            f"LEF PIN {name} PORT is {lef_pin.get('geometry_source')!r}, not drawn "
+            "layout geometry",
+        ),
+        (
+            "layer",
+            lambda candidates: _ports_on_lef_gds_layer(lef_pin, candidates),
+            f"LEF PIN {name} was emitted from GDS layer {lef_pin.get('gds_layer')}, "
+            "not the edge-accessible port's",
+        ),
+        (
+            "location",
+            lambda candidates: _ports_touching_lef_rects(lef_pin, candidates, outline),
+            f"LEF PIN {name} PORT rectangles do not touch the edge-accessible GDS port",
+        ),
+    )
+    candidates = on_allowed
+    for aspect, narrow, message in checks:
+        candidates = narrow(candidates)
+        if not candidates:
+            return [
+                _port_finding(net, _REASON_LEF_POWER_PIN_MISMATCH, aspect, message)
+            ], []
+    return [], candidates
+
+
+def _socket_port_facts(
+    socket: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any], dict[str, Any] | None]:
+    """``(ports, outline, finding)`` from a cited `klt socket-check`
+    resolution -- ``ports`` is ``None`` (with a ``power_port_unproven``
+    finding) when there is none, or it predates the ``power_ports`` block."""
+    facts = socket["envelope"].get("power_ports") if socket is not None else None
+    if not isinstance(facts, dict) or not isinstance(facts.get("ports"), list):
+        message = (
+            "no klt socket-check citation"
+            if socket is None
+            else "the cited klt socket-check envelope carries no power_ports "
+            "facts (produced before #2839)"
+        )
+        finding = _port_finding(None, _REASON_POWER_PORT_UNPROVEN, "evidence", message)
+        return None, {}, finding
+    outline = facts.get("outline_um")
+    ports = [port for port in facts["ports"] if isinstance(port, dict)]
+    return ports, outline if isinstance(outline, dict) else {}, None
+
+
+def _gds_port_findings(
+    ports: list[dict[str, Any]], supply_nets: list[str], policy: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """The GDS half: every declared supply has an edge-accessible port,
+    graded with `klt socket-check`'s own grader under *this* policy."""
+    from .socket_check import grade_power_ports
+
+    return [
+        _port_finding(
+            violation["pin"],
+            _SOCKET_PORT_REASONS[violation["reason"]],
+            violation["reason"],
+            f"supply {violation['pin']}: {violation['reason']}",
+        )
+        for violation in grade_power_ports(
+            ports,
+            edge_band_um=policy["edge_band_um"],
+            edges=policy["edges"],
+            required_names=supply_nets,
+            require_power_and_ground=False,
+        )
+    ]
+
+
+def _lef_size_finding(
+    lef_envelope: dict[str, Any], outline: dict[str, Any]
+) -> dict[str, Any] | None:
+    """A ``size`` mismatch when the LEF ``SIZE`` differs from the outline."""
+    size = lef_envelope.get("size_um")
+    if not isinstance(size, dict) or not outline:
+        return None
+    width = outline.get("x1", 0.0) - outline.get("x0", 0.0)
+    height = outline.get("y1", 0.0) - outline.get("y0", 0.0)
+    if (
+        abs((size.get("width") or 0.0) - width) <= 1e-6
+        and abs((size.get("height") or 0.0) - height) <= 1e-6
+    ):
+        return None
+    message = (
+        f"LEF SIZE {size.get('width')} BY {size.get('height')} differs from the "
+        f"socket outline {width} BY {height}"
+    )
+    return _port_finding(None, _REASON_LEF_POWER_PIN_MISMATCH, "size", message)
+
+
+def _accessible_ports(
+    ports: list[dict[str, Any]], net: str, policy: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """``net``'s edge-accessible supply ports, each with its
+    ``accessible_edges``."""
+    from .socket_check import SUPPLY_PIN_USES, assess_power_port
+
+    accessible = []
+    for port in ports:
+        if str(port.get("name", "")).upper() != net.upper():
+            continue
+        if port.get("use") not in SUPPLY_PIN_USES:
+            continue
+        reason, edges = assess_power_port(
+            port, edge_band_um=policy["edge_band_um"], edges=policy["edges"]
+        )
+        if reason is None:
+            accessible.append({**port, "accessible_edges": edges})
+    return accessible
+
+
+def _matched_port(
+    net: str, port: dict[str, Any], lef_pin: dict[str, Any], use: str | None
+) -> dict[str, Any]:
+    return {
+        "net": net,
+        "use": port.get("use"),
+        "port": {
+            "name": port.get("name"),
+            "layer": port.get("layer"),
+            "metal_layer": port.get("metal_layer"),
+            "bbox_um": port.get("bbox_um"),
+            "accessible_edges": port["accessible_edges"],
+        },
+        "lef_pin": {
+            "name": lef_pin.get("name"),
+            "use": use,
+            "layer": lef_pin.get("layer"),
+            "geometry_source": lef_pin.get("geometry_source"),
+        },
+    }
+
+
+def _lef_pin_matches(
+    lef_envelope: dict[str, Any],
+    ports: list[dict[str, Any]],
+    outline: dict[str, Any],
+    supply_nets: list[str],
+    policy: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The LEF half, per supply: ``(findings, matched)``. A pin's ``USE`` is
+    the one read back from the written file (``power_pins.pins[]``) when the
+    envelope reports it, else the envelope's own ``pins[].use``."""
+    lef_pins = {
+        str(pin.get("name", "")).upper(): pin
+        for pin in lef_envelope.get("pins") or []
+        if isinstance(pin, dict)
+    }
+    read_back = {
+        str(pin.get("name", "")).upper(): pin.get("use_read_back")
+        for pin in (lef_envelope.get("power_pins") or {}).get("pins") or []
+        if isinstance(pin, dict)
+    }
+    findings: list[dict[str, Any]] = []
+    matched: list[dict[str, Any]] = []
+    for net in supply_nets:
+        lef_pin = lef_pins.get(net.upper())
+        if lef_pin is None:
+            message = f"the LEF abstract has no PIN {net}"
+            findings.append(
+                _port_finding(net, _REASON_LEF_POWER_PIN_MISSING, "pin", message)
+            )
+            continue
+        use = read_back.get(net.upper()) or lef_pin.get("use")
+        pin_findings, agreeing = _lef_pin_findings(
+            net, lef_pin, use, _accessible_ports(ports, net, policy), outline, policy
+        )
+        findings.extend(pin_findings)
+        if agreeing:
+            matched.append(_matched_port(net, agreeing[0], lef_pin, use))
+    return findings, matched
+
+
+def _grade_power_ports(
+    socket: dict[str, Any] | None,
+    lef: dict[str, Any] | None,
+    supply_nets: list[str],
+    policy: dict[str, Any],
+) -> tuple[str | None, dict[str, Any]]:
+    """Grade T1 item 11's port-accessibility half (issue #2839) -- ``(None,
+    block)`` when every declared supply has an edge-accessible port with a
+    matching LEF pin, else ``(<reason>, block)``.
+
+    ``block`` always carries the ``policy`` graded under and ``findings``
+    (``{"net", "reason", "aspect", "message"}``, ``net: null`` for a
+    set-level finding); when met, ``ports`` names, per supply, the agreeing
+    GDS port and LEF pin. The item's ``reason`` is the first finding's.
+
+    The GDS half re-grades the cited `klt socket-check` envelope's
+    ``power_ports`` **facts** under *this* policy (via the verb's own
+    :func:`~klayout_tools.socket_check.grade_power_ports`), never the verb's
+    own verdict, so one envelope grades reproducibly under whatever
+    band/edges the block's manifest declares. The supplies are the cited
+    ERC spec's declared ``kind: "supply"`` nets -- the same names the rest
+    of item 11 grades. The LEF half runs only once the GDS half holds.
+    """
+    from .signoff import _REASON_CHECK_FAILED, _check_passed
+
+    block: dict[str, Any] = {"policy": _policy_echo(policy), "findings": []}
+    ports, outline, evidence_finding = _socket_port_facts(socket)
+    if ports is None:
+        block["findings"].append(evidence_finding)
+    else:
+        block["findings"].extend(_gds_port_findings(ports, supply_nets, policy))
+    if not block["findings"] and lef is None:
+        block["findings"].append(
+            _port_finding(
+                None,
+                _REASON_LEF_POWER_PIN_MISSING,
+                "evidence",
+                "no klt lef-abstract citation",
+            )
+        )
+    if block["findings"]:
+        return block["findings"][0]["reason"], block
+    if not _check_passed("lef-abstract", lef["envelope"]):
+        return _REASON_CHECK_FAILED, block
+
+    size_finding = _lef_size_finding(lef["envelope"], outline)
+    findings, matched = (
+        ([size_finding], [])
+        if size_finding is not None
+        else _lef_pin_matches(lef["envelope"], ports, outline, supply_nets, policy)
+    )
+    block["findings"].extend(findings)
+    if block["findings"]:
+        return block["findings"][0]["reason"], block
+    block["ports"] = matched
+    return None, block
+
+
+def _port_accessibility_verdict(
+    by_kind: dict[str, dict[str, Any]],
+    supply_nets: list[str],
+    policy: dict[str, Any] | None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """``(reason, block)`` for item 11's port-accessibility half (issue
+    #2839) -- ``(None, None)`` when it is not in force for this block
+    (:func:`_power_port_policy_active`), so the item grades exactly as it
+    did before #2839."""
+    policy = policy or _read_power_port_policy(None)
+    if not _power_port_policy_active(policy, by_kind):
+        return None, None
+    return _grade_power_ports(
+        by_kind.get("socket-check"), by_kind.get("lef-abstract"), supply_nets, policy
+    )
+
+
+def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
+    """``{"tapless": True}`` when the cited ``place-and-route`` part states
+    ``power.tapless`` is ``true`` (issue #4199), else ``{}``; split out of
+    :func:`_grade_power_delivery` to keep its own complexity under the repo's
+    ratchet (issue #2094)."""
+    if par is None:
+        return {}
+    tapless = (par["envelope"].get("power") or {}).get("tapless") is True
+    return {"tapless": True} if tapless else {}
+
+
+@report_artifact_unavailable
 def _grade_power_delivery(
-    specs: list[dict[str, Any]], *, partition_kind: str
+    specs: list[dict[str, Any]],
+    *,
+    partition_kind: str,
+    power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
+    failed_parts_citation: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
     the **set** of evidence entries cited for it, and return ``(status,
@@ -1159,7 +1753,8 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`,
-    :data:`_REASON_LVS_DID_NOT_PASS`) are reserved for a cited set that
+    :data:`_REASON_LVS_DID_NOT_PASS`,
+    :data:`_REASON_POWER_DELIVERY_PARTS_MISSING`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
     Issue #2496: ``stale_evidence``/``unverifiable_provenance`` can also
     arise a second way for the ``erc`` part specifically -- not from the
@@ -1184,20 +1779,33 @@ def _grade_power_delivery(
     :func:`~klayout_tools.signoff._critical_metric_detail`, without making
     those unrelated findings
     newly fatal.
-    """
-    from .signoff import _REASON_WRONG_KIND, _check_passed, _citation
 
-    by_kind, reason = _resolve_power_delivery_parts(specs)
+    ``failed_parts_citation`` (issue #5597) is the multi-citation
+    aggregation's opt-in: on every ``"unmet"`` verdict reached *after* the
+    cited set resolved, the returned ``citation`` carries the resolved
+    ``parts`` (and nothing more -- ``power_delivery`` states facts about a
+    proven grid, and an unmet group has none), so a grouped report accounts
+    for every cited envelope even when a group's own rules failed. The
+    default keeps a failing single-group citation at ``citation: null``."""
+    from .signoff import _citation
+    from .signoff_grouped_citations import (
+        missing_parts_verdict as _missing_parts_verdict,
+    )
+    from .signoff_grouped_citations import (
+        parts_citation_or_none,
+    )
+
+    by_kind, reason = _resolve_power_delivery_parts(specs, repo_root)
     if by_kind is None:
         return "unmet", reason, None, {}
+
+    parts_citation = parts_citation_or_none(by_kind) if failed_parts_citation else None
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
     if erc is None or lvs is None:
-        # The cited set does not contain the artifacts this item names at
-        # all -- "cite a different artifact", which is exactly what
-        # `wrong_kind` means everywhere else in this module.
-        return "unmet", _REASON_WRONG_KIND, None, {}
+        status, reason, _, detail = _missing_parts_verdict(by_kind)
+        return status, reason, parts_citation, detail
 
     # Issue #2495: the ERC half is resolved *before* the LVS pass gate, not
     # after it, so a failing LVS citation can say which of the two halves is
@@ -1205,11 +1813,12 @@ def _grade_power_delivery(
     # the already-resolved ERC part plus the spec document it names, so
     # doing it unconditionally changes nothing but the reason rendered.
     supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
-    if not _check_passed("lvs", lvs["envelope"]):
-        lvs_reason, lvs_detail = _failed_lvs_verdict(lvs["envelope"], supply_spec)
-        return "unmet", lvs_reason, None, lvs_detail
+    lvs_verdict, rehash_unverifiable = _lvs_half_verdict(lvs["envelope"], supply_spec)
+    if lvs_verdict is not None:
+        status, reason, _, verdict_detail = lvs_verdict
+        return status, reason, parts_citation, verdict_detail
     if supply_spec is None:
-        return "unmet", reason, None, detail
+        return "unmet", reason, parts_citation, detail
 
     par = by_kind.get("place-and-route")
     if par is not None:
@@ -1219,7 +1828,17 @@ def _grade_power_delivery(
     else:
         reason = _REASON_LVS_SUPPLY_UNPROVEN
     if reason is not None:
-        return "unmet", reason, None, {}
+        return "unmet", reason, parts_citation, {}
+
+    # Issue #2839: the port-accessibility half, graded only once everything
+    # above is proven and only when the requirement is in force for this
+    # block -- so no pre-existing reason or verdict changes for a block that
+    # does not opt in. See `_grade_power_ports`.
+    port_reason, power_ports_block = _port_accessibility_verdict(
+        by_kind, supply_spec["supply_nets"], power_port_policy
+    )
+    if port_reason is not None:
+        return "unmet", port_reason, parts_citation, {"power_ports": power_ports_block}
 
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
@@ -1230,8 +1849,8 @@ def _grade_power_delivery(
     # through the leading part.
     citation = _citation(erc)
     citation["parts"] = [
-        _citation(by_kind[kind])
-        for kind in ("erc", "lvs", "place-and-route")
+        _citation(by_kind[kind], runset_rehash_unverifiable=rehash_unverifiable)
+        for kind in _POWER_DELIVERY_PART_ORDER
         if kind in by_kind
     ]
     citation["power_delivery"] = {
@@ -1250,8 +1869,8 @@ def _grade_power_delivery(
         # Issue #2234: which of the cited run's `erc.missing_tie` checks
         # rested on a caller assertion (`ties[].tap_boxes`) rather than on
         # PDK-marker narrowing -- `[]` for a purely marker-derived (or
-        # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
-        "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
+        # pre-#2234) run. See `erc_ties_checked_by_assertion`.
+        "ties_checked_by_assertion": erc_ties_checked_by_assertion(erc["envelope"]),
         # Issue #2255: which of them rested on a caller-asserted *well*
         # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
         # than on a drawn well/tub layer -- the native-substrate case, `[]`
@@ -1271,6 +1890,7 @@ def _grade_power_delivery(
             erc["envelope"], supply_spec["supply_nets"]
         ),
     }
+    add_substrate_continuity(citation["power_delivery"], erc["envelope"])  # #5346
     # Issue #2623: a *partial* tie declaration (one or more `ties[]` entries
     # declared and checked -- this is the `tie_count > 0` path, already
     # `"met"` on those merits -- plus one or more further classes disclosed
@@ -1287,6 +1907,14 @@ def _grade_power_delivery(
         citation["power_delivery"]["disclosed_undeclared_tie_classes"] = (
             disclosed_undeclared_tie_classes
         )
+    # Issue #4199: present only when the cited P&R response states the
+    # library is tapless, so a `null` tapcell_master reads as by-design.
+    citation["power_delivery"].update(_par_tapless_field(par))
+    # Issue #2839: present only when the port-accessibility half was graded,
+    # so a block that does not opt in renders this citation exactly as before.
+    citation["power_delivery"].update(
+        {"power_ports": power_ports_block} if power_ports_block is not None else {}
+    )
     return "met", None, citation, {}
 
 
@@ -1302,6 +1930,8 @@ def _build_power_delivery_item(
     partition_boundary: str | None = None,
     evidence: dict[str, Any],
     graded_by_build: bool = True,
+    power_port_policy: dict[str, Any] | None = None,
+    repo_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Render T1 item 11's report entry (issue #2025) -- the compound
     counterpart of :func:`~klayout_tools.signoff._build_tier_item`, which
@@ -1313,7 +1943,7 @@ def _build_power_delivery_item(
     the whole item :data:`~klayout_tools.signoff._REASON_INVALID_EVIDENCE`
     rather than being
     silently dropped from the cited set), and that grading is delegated to
-    :func:`_grade_power_delivery`.
+    :func:`~klayout_tools.signoff_grouped_citations.grade_grouped_power_delivery`.
 
     ``partition_kind`` -- the partition being graded -- both selects the
     per-block-kind rule :func:`_grade_power_delivery` applies and (issue
@@ -1334,15 +1964,15 @@ def _build_power_delivery_item(
     source of truth for every rendered item.
     """
     from .signoff import (
-        _REASON_INVALID_EVIDENCE,
         _REASON_NO_EVIDENCE,
         _REASON_UNGRADEABLE_BY_BUILD,
         _lookup_evidence,
-        _normalize_evidence_parts,
     )
+    from .signoff_grouped_citations import grade_grouped_power_delivery
 
     citation = None
     failure_detail: dict[str, Any] = {}
+    extra: dict[str, Any] = {}
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
@@ -1350,13 +1980,13 @@ def _build_power_delivery_item(
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif raw_entry is not None:
-        specs = _normalize_evidence_parts(raw_entry)
-        if specs is None:
-            reason = _REASON_INVALID_EVIDENCE
-        else:
-            status, reason, citation, failure_detail = _grade_power_delivery(
-                specs, partition_kind=partition_kind
-            )
+        status, reason, citation, failure_detail, extra = grade_grouped_power_delivery(
+            item_id,
+            raw_entry,
+            partition_kind=partition_kind,
+            power_port_policy=power_port_policy,
+            repo_root=repo_root,
+        )
 
     return {
         "tier": tier,
@@ -1375,4 +2005,5 @@ def _build_power_delivery_item(
         "graded_by_build": graded_by_build,
         "citation": citation,
         **({"detail": failure_detail} if failure_detail else {}),
+        **extra,
     }

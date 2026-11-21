@@ -585,3 +585,113 @@ def test_cli_bad_region_exit_one(tmp_path):
     )
 
     assert exit_code == 1
+
+
+# --- Boolean `and` / `not` qualifiers (issue #2921) --------------------------
+
+_MARKER = (75, 0)
+_M2L = (69, 20)
+_M3L = (71, 20)
+_FUSE = (72, 20)
+_VIA2 = (38, 0)
+_MIM_CONDUCTORS = [
+    {"name": "m2", "layer": list(_M2L)},
+    {"name": "m3", "layer": list(_M3L)},
+    {"name": "fusetop", "layer": list(_FUSE)},
+]
+
+
+def _mim_layout(path) -> None:
+    # m2 is the bottom plate; m3 and fusetop sit over the marker (x>=10000).
+    # The only via lands inside the marker, on m2, m3 and fusetop alike.
+    _write(
+        path,
+        {
+            _M2L: [kdb.Box(0, 0, 20000, 10000)],
+            _M3L: [kdb.Box(10000, 0, 20000, 10000)],
+            _FUSE: [kdb.Box(10000, 0, 20000, 10000)],
+            _VIA2: [kdb.Box(12000, 2000, 14000, 4000)],
+            _MARKER: [kdb.Box(10000, 0, 20000, 10000)],
+        },
+    )
+
+
+def test_via_and_not_qualifiers_split_mim_plates(tmp_path):
+    path = tmp_path / "mim.gds"
+    _mim_layout(path)
+    plain = [
+        {"name": "routing", "layer": list(_VIA2), "between": ["m2", "m3"]},
+        {"name": "topplate", "layer": list(_VIA2), "between": ["fusetop", "m3"]},
+    ]
+    report = run_components_report(str(path), _MIM_CONDUCTORS, vias=plain)
+    assert report["component_count"] == 1
+    assert all("and" not in v and "not" not in v for v in report["vias"])
+
+    qualified = [
+        {
+            "name": "routing",
+            "layer": list(_VIA2),
+            "not": [list(_MARKER)],
+            "between": ["m2", "m3"],
+        },
+        {
+            "name": "topplate",
+            "layer": list(_VIA2),
+            "and": [list(_MARKER)],
+            "between": ["fusetop", "m3"],
+        },
+    ]
+    report = run_components_report(str(path), _MIM_CONDUCTORS, vias=qualified)
+    assert report["component_count"] == 2
+    assert report["vias"][0]["not"] == [[75, 0]]
+    assert "and" not in report["vias"][0]
+    assert report["vias"][1]["and"] == [[75, 0]]
+
+
+def test_not_qualifier_splits_resistor_body(tmp_path):
+    path = tmp_path / "res.gds"
+    _write(
+        path,
+        {
+            (66, 20): [kdb.Box(0, 0, 30000, 2000)],
+            _MARKER: [kdb.Box(10000, -1000, 20000, 3000)],
+        },
+    )
+    conductors = [{"name": "poly", "layer": [66, 20]}]
+    assert run_components_report(str(path), conductors)["component_count"] == 1
+
+    qualified = [{"name": "poly", "layer": [66, 20], "not": [list(_MARKER)]}]
+    report = run_components_report(str(path), qualified)
+    assert report["component_count"] == 2
+
+
+def test_and_then_not_applied_in_order_and_missing_layer_is_empty(tmp_path):
+    path = tmp_path / "res2.gds"
+    _write(
+        path,
+        {(66, 20): [kdb.Box(0, 0, 30000, 2000)], _MARKER: [kdb.Box(0, 0, 20000, 2000)]},
+    )
+    both = [{"name": "p", "layer": [66, 20], "and": [list(_MARKER)], "not": [[66, 20]]}]
+    assert run_components_report(str(path), both)["component_count"] == 0
+    absent_and = [{"name": "p", "layer": [66, 20], "and": [[99, 9]]}]
+    assert run_components_report(str(path), absent_and)["component_count"] == 0
+    absent_not = [{"name": "p", "layer": [66, 20], "not": [[99, 9]]}]
+    assert run_components_report(str(path), absent_not)["component_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "bad", [[], "x", [[1]], [[1, 2, 3]], [[True, 0]], [["a", 0]], 5]
+)
+@pytest.mark.parametrize("key", ["and", "not"])
+def test_malformed_qualifier_raises(tmp_path, key, bad):
+    path = tmp_path / "res3.gds"
+    _write(path, {(66, 20): [kdb.Box(0, 0, 1000, 1000)]})
+    with pytest.raises(ComponentsError, match="'p'"):
+        run_components_report(str(path), [{"name": "p", "layer": [66, 20], key: bad}])
+
+
+def test_cli_malformed_qualifier_exit_one(tmp_path):
+    path = tmp_path / "res4.gds"
+    _write(path, {(66, 20): [kdb.Box(0, 0, 1000, 1000)]})
+    conductors = [{"name": "p", "layer": [66, 20], "not": []}]
+    assert main(["components", str(path), "--conductors", json.dumps(conductors)]) == 1

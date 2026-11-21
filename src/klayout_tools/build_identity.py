@@ -1,34 +1,38 @@
 """Build identity of the running ``klt``: which commit is this, and is it a
-tagged release? (issue #1202)
+tagged release? (issues #1202, #2823)
 
-``klayout_tools.__version__`` is the *package* version -- the static string in
-``pyproject.toml``. It is deliberately unchanged by this module: a wheel built
-from the ``v0.2.0`` tag and a wheel built from a commit 300 changes later both
-declare ``0.2.0`` to ``pip``, because that is the version they were built from.
-That is correct for packaging and useless for identity: a downstream repo that
-commits ``klt`` output as evidence cannot tell, from ``klt --version`` alone,
-whether the build that produced it was the release it thinks it pinned or an
-arbitrary post-tag source build shipping different rule decks.
+``klayout_tools.__version__`` is the installed *distribution* version
+(``importlib.metadata``). Since issue #2823 that version itself carries the
+build identity: ``pyproject.toml`` declares only a ``base-version``, and the
+build computes the distribution version from it plus the checkout's git facts
+(:mod:`klayout_tools._version_scheme`) -- bare ``X.Y.Z`` only for a clean
+build sitting exactly on the release tag, ``X.Y.(Z+1).devN+g<sha>`` after it,
+``X.Y.Z.dev0+unknown`` with no git facts at all. A post-tag build therefore
+no longer satisfies a ``klayout-tools==X.Y.Z`` pin.
 
-This module adds the missing half -- the *build* identity:
+Before #2823 the package version was a static string, and this module bolted
+a ``+g<sha>`` local segment onto it only in ``klt``'s *output*. That told a
+reader which build ran, but changed nothing for a resolver: the wheel still
+declared ``X.Y.Z``, so a cached dev build silently satisfied ``==X.Y.Z``.
 
-- :func:`build_version` -- ``0.2.0`` for a build made at the matching release
-  tag with a clean tree, and a PEP 440 local-version form otherwise:
-  ``0.2.0+g<sha>``, ``0.2.0+g<sha>.dirty``, or ``0.2.0+unknown`` when the
-  build carries no recoverable git provenance at all. A consumer can answer
-  "am I on a release?" by string inspection alone, with no subprocess and no
-  network.
+This module reports the identity:
+
+- :func:`build_version` -- the identity-bearing version string. For any built
+  distribution it *is* ``__version__``; for an editable/source install it is
+  recomputed live from the checkout with the same scheme, because the working
+  tree moves under the install.
 - :func:`version_report` -- the same answer as the machine-readable payload
-  behind ``klt version --format json`` (see ``docs/json-contract.md``).
+  behind ``klt version --format json`` (see ``docs/json-contract.md``),
+  together with the git facts behind it.
 
-Two independent sources feed it, in priority order:
+Two independent sources feed the git facts, in priority order:
 
 1. **Recorded at build time** -- ``hatch_build.py`` (this repo's hatchling
    build hook) captures the commit/tag/dirty state of the checkout a wheel or
-   sdist was built from and writes it into the distribution as
-   ``klayout_tools/_build_info.py``. This is the source that matters for the
-   case the issue is about: an installed wheel has no ``.git`` directory of
-   its own, so without a build-time record its origin is unrecoverable.
+   sdist was built from, plus the version chosen for it, and writes them into
+   the distribution as ``klayout_tools/_build_info.py``. An installed wheel
+   has no ``.git`` directory of its own, so without a build-time record its
+   origin is unrecoverable.
 2. **Probed live from the checkout** -- for an editable/source install (where
    the build hook deliberately records nothing, since the working tree can
    move under the install at any time), the git state is read from the
@@ -75,17 +79,7 @@ import re
 import subprocess
 from typing import Any
 
-from . import __version__
-
-#: Characters of the commit SHA embedded in the local-version segment. Long
-#: enough to be unambiguous in this repo's history, short enough to read.
-_SHORT_SHA_LEN = 12
-
-#: Local-version segment used when a build carries no recoverable git
-#: provenance (e.g. a wheel built from an unpacked tarball with no repo).
-#: Deliberately *not* an empty suffix: "I cannot tell" must never render as
-#: the bare release form.
-_UNKNOWN_LOCAL = "unknown"
+from . import __version__, _version_scheme
 
 _GIT_TIMEOUT_S = 5
 
@@ -126,9 +120,7 @@ def tag_matches_package_version(tag: str | None, package_version: str) -> bool:
     tolerate. A build sitting on some *other* tag (a doc tag, a tag for a
     different version) is not this version's release.
     """
-    if not tag:
-        return False
-    return tag == package_version or tag == f"v{package_version}"
+    return _version_scheme.tag_is_release_of(tag, package_version)
 
 
 def _resolve(
@@ -179,6 +171,37 @@ def _recorded_identity(package_version: str) -> dict[str, Any] | None:
     return _resolve(commit, tag, dirty, package_version)
 
 
+def _checkout_root(directory: str | None = None) -> str | None:
+    """Top level of the git checkout ``directory`` (default: this package's
+    own source directory) is *tracked* in, or ``None``.
+
+    A non-editable install into a virtualenv that happens to sit *inside* an
+    unrelated checkout (``.venv/`` in a repo working tree) must not inherit
+    that repo's state, so the directory must contain files git actually
+    tracks -- true for a source checkout, false for anything under
+    ``site-packages``.
+    """
+    directory = directory or os.path.dirname(os.path.abspath(__file__))
+    if _git(directory, "rev-parse", "--is-inside-work-tree") != "true":
+        return None
+    if _git(directory, "ls-files", "--error-unmatch", "--", directory) is None:
+        return None
+    return _git(directory, "rev-parse", "--show-toplevel")
+
+
+def _checkout_base_version(directory: str | None = None) -> str | None:
+    """``base-version`` from the checkout's own ``pyproject.toml`` (issue
+    #2823), or ``None`` outside a checkout or when it declares none."""
+    root = _checkout_root(directory)
+    if root is None:
+        return None
+    try:
+        with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as handle:
+            return _version_scheme.read_base_version(handle.read())
+    except OSError:
+        return None
+
+
 def _checkout_identity(
     directory: str | None = None, package_version: str | None = None
 ) -> dict[str, Any]:
@@ -187,33 +210,44 @@ def _checkout_identity(
     ``directory`` defaults to this package's own source directory, so an
     editable/source install reports the checkout it is actually importing
     from. Every field is ``None`` when that directory is not part of a git
-    working tree.
+    working tree (see :func:`_checkout_root` for the tracked-files guard).
 
-    A non-editable install into a virtualenv that happens to sit *inside* an
-    unrelated checkout (``.venv/`` in a repo working tree) must not inherit
-    that repo's HEAD, so the probe additionally requires the directory to
-    contain files git actually tracks -- true for a source checkout, false
-    for anything under ``site-packages``.
+    ``package_version`` -- the version whose release tag counts as "a
+    release" -- defaults to the checkout's ``base-version`` (issue #2823),
+    falling back to ``__version__``. ``dirty`` ignores untracked files, the
+    same rule the build applies (issue #2248), so the live identity and the
+    live version (:func:`_checkout_version`) can never disagree about it.
     """
     directory = directory or os.path.dirname(os.path.abspath(__file__))
-    package_version = package_version if package_version is not None else __version__
+    if package_version is None:
+        package_version = _checkout_base_version(directory) or __version__
 
     unknown = _resolve(None, None, None, package_version)
-    if _git(directory, "rev-parse", "--is-inside-work-tree") != "true":
-        return unknown
-    if _git(directory, "ls-files", "--error-unmatch", "--", directory) is None:
+    if _checkout_root(directory) is None:
         return unknown
 
     commit = _git(directory, "rev-parse", "HEAD")
     if commit is None:
         return unknown
     tag = _git(directory, "describe", "--exact-match", "--tags", "HEAD")
-    status = _git(directory, "status", "--porcelain")
+    status = _git(directory, "status", "--porcelain", "--untracked-files=no")
     dirty = None if status is None else bool(status)
     return _resolve(commit, tag, dirty, package_version)
 
 
-def _klayout_version() -> str | None:
+def _checkout_version(directory: str | None = None) -> str | None:
+    """The version a build of the live checkout would declare right now
+    (issue #2823) -- what an editable install reports, since its installed
+    metadata was computed at install time and the tree has moved since.
+    ``None`` outside a checkout or without a ``base-version``."""
+    root = _checkout_root(directory)
+    base = _checkout_base_version(directory)
+    if root is None or base is None:
+        return None
+    return _version_scheme.version_for_checkout(root, base)
+
+
+def klayout_version() -> str | None:
     """``klayout.__version__`` (the KLayout Python engine build actually
     resolved into this process), or ``None`` when unresolvable.
 
@@ -370,29 +404,41 @@ def identity() -> dict[str, Any]:
     return _checkout_identity()
 
 
-def format_build_version(package_version: str, ident: dict[str, Any]) -> str:
-    """Render ``package_version`` plus ``ident``'s build identity as a PEP 440
-    version string.
+def build_version() -> str:
+    """The running build's identity-bearing version string (issue #2823).
 
-    A confirmed release renders bare (``0.2.0``) so existing consumers parsing
-    ``klt X.Y.Z`` are unaffected -- that regression guard is the whole reason
-    this is a local-version *suffix* rather than a different version scheme.
+    A built distribution (one carrying a build-time record) reports its own
+    distribution version, ``__version__``: the build already folded the git
+    facts into it, so ``klt --version``, ``importlib.metadata`` and the
+    version a resolver matched are the same string. An editable/source
+    install recomputes it live from the checkout with the same scheme; with
+    neither (e.g. a wheel built from a tarball with no git facts),
+    ``__version__`` again -- which the build already rendered as
+    ``X.Y.Z.dev0+unknown``.
+    """
+    if _recorded_identity(__version__) is not None:
+        return __version__
+    live = _checkout_version()
+    return live if live is not None else __version__
+
+
+_REPO_URL = "https://github.com/2AMLogic/klayout-tools"
+
+
+def reinstall_spec(ident: dict[str, Any], version: str) -> str | None:
+    """A ``uvx --from``/``pip install`` spec that re-obtains this build (issue #3985).
+
+    A release is resolvable from the index by version. A ``.devN+g<sha>``
+    build is not published anywhere, but its commit is installable from git.
+    ``None`` means "not reinstallable": a dirty tree (the working-tree edits
+    exist nowhere else) or no recorded commit (e.g. ``X.Y.Z.dev0+unknown``).
     """
     if ident.get("is_release") is True:
-        return package_version
+        return f"klayout-tools=={version}"
     commit = ident.get("git_commit")
-    if commit:
-        local = f"g{commit[:_SHORT_SHA_LEN]}"
-        if ident.get("dirty"):
-            local = f"{local}.dirty"
-        return f"{package_version}+{local}"
-    return f"{package_version}+{_UNKNOWN_LOCAL}"
-
-
-def build_version() -> str:
-    """The running build's identity-bearing version string (see
-    :func:`format_build_version`)."""
-    return format_build_version(__version__, identity())
+    if commit and ident.get("dirty") is False:
+        return f"klayout-tools @ git+{_REPO_URL}@{commit}"
+    return None
 
 
 def version_report() -> dict[str, Any]:
@@ -414,12 +460,17 @@ def version_report() -> dict[str, Any]:
     ident = identity()
     return {
         "schema_version": 1,
-        "version": format_build_version(__version__, ident),
+        # Issue #2823: equal to `package_version` for every built
+        # distribution; differs only for an editable install whose checkout
+        # has moved since it was installed (`build_version`).
+        "version": build_version(),
         "package_version": __version__,
         "git_commit": ident["git_commit"],
         "git_tag": ident["git_tag"],
         "dirty": ident["dirty"],
         "is_release": ident["is_release"],
+        # Issue #3985: how to get this build back, or null when it cannot be.
+        "reinstall_spec": reinstall_spec(ident, build_version()),
         # Issue #2216: a content hash of the grading rules `klt signoff`'s
         # tier-verdict mode ships -- distinct from git_commit/git_tag, which
         # identify the checkout, not the grading code. See
@@ -430,6 +481,6 @@ def version_report() -> dict[str, Any]:
         # and the version this build/commit was tested against -- a caller
         # can detect a drifted engine before trusting a "reproduced" report
         # without waiting for a `klt drc`/`klt lvs` run to say so.
-        "klayout_version": _klayout_version(),
+        "klayout_version": klayout_version(),
         "klayout_version_expected": klayout_version_expected(),
     }

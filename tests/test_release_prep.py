@@ -1,0 +1,318 @@
+"""Tests for scripts/release_prep.py and the release workflows (issue #4920)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location(
+    "release_prep", REPO_ROOT / "scripts" / "release_prep.py"
+)
+rp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rp)
+
+PYPROJECT = '[tool.hatch.version]\nsource = "x"\nbase-version = "0.8.0"\n'
+CHANGELOG = (
+    "# Changelog\n\n## Unreleased\n\n- a fix\n\n## 0.8.0 (2026-10-24)\n\n- old\n"
+)
+SIGNOFF = "first ships in the first release after `v0.8.0`. Other 0.7.0 text.\n"
+
+
+def _repo(tmp_path: Path) -> Path:
+    (tmp_path / "docs" / "cli").mkdir(parents=True)
+    (tmp_path / "pyproject.toml").write_text(PYPROJECT)
+    (tmp_path / "CHANGELOG.md").write_text(CHANGELOG)
+    (tmp_path / "docs" / "cli" / "signoff.md").write_text(SIGNOFF)
+    return tmp_path
+
+
+def test_next_minor_resets_patch() -> None:
+    assert rp.next_minor("0.8.3") == "0.9.0"
+
+
+def test_prepare_bumps_all_three_files(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    info = rp.prepare(repo, None, "2026-11-09")
+    assert info == {"previous": "0.8.0", "version": "0.9.0", "date": "2026-11-09"}
+    assert 'base-version = "0.9.0"' in (repo / "pyproject.toml").read_text()
+    log = (repo / "CHANGELOG.md").read_text()
+    assert "## Unreleased\n\n## 0.9.0 (2026-11-09)\n\n- a fix" in log
+    assert "`klt 0.9.0`" in (repo / "docs/cli/signoff.md").read_text()
+    assert "Other 0.7.0 text" in (repo / "docs/cli/signoff.md").read_text()
+
+
+def test_prepare_is_idempotent(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    rp.prepare(repo, None, "2026-11-09")
+    snapshot = {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+    rp.prepare(repo, "0.9.0", "2026-11-10")
+    assert snapshot == {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+
+
+def test_patch_override_and_downgrade_refused(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    assert rp.prepare(repo, "0.8.1", "2026-11-09")["version"] == "0.8.1"
+    with pytest.raises(rp.PrepError):
+        rp.prepare(repo, "0.7.0", "2026-11-09")
+
+
+def test_missing_unreleased_heading_is_an_error() -> None:
+    with pytest.raises(rp.PrepError):
+        rp.add_changelog_heading("# Changelog\n", "0.9.0", "2026-11-09")
+
+
+EMPTY_CHANGELOG = "# Changelog\n\n## Unreleased\n\n## 0.8.0 (2026-10-24)\n\n- old\n"
+
+
+def test_prepare_releases_fragments_in_filename_order(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    fragments = repo / "changelog.d"
+    fragments.mkdir()
+    (fragments / "200-second.md").write_text("- second\n\n")
+    (fragments / "100-first.md").write_text("- first\n  continued")
+    (fragments / "150-empty.md").write_text(" \n\n")
+    (fragments / "README.md").write_text("# Changelog fragments\n")
+    (fragments / "draft.txt").write_text("draft")
+    (fragments / "subdirectory.md").mkdir()
+
+    assert rp.main(["--repo", str(repo), "prepare", "--date", "2026-11-09"]) == 0
+
+    changelog = repo / "CHANGELOG.md"
+    expected = (
+        "# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-09)\n\n"
+        "- a fix\n\n- first\n  continued\n\n- second\n\n"
+        "## 0.8.0 (2026-10-24)\n\n- old\n"
+    )
+    assert changelog.read_text() == expected
+    assert {path.name for path in fragments.iterdir()} == {
+        "150-empty.md",
+        "README.md",
+        "draft.txt",
+        "subdirectory.md",
+    }
+
+    rp.prepare(repo, "0.9.0", "2026-11-10")
+    assert changelog.read_text() == expected
+
+    pending = fragments / "300-next.md"
+    pending.write_text("- next release\n")
+    rp.prepare(repo, "0.9.0", "2026-11-10")
+    assert changelog.read_text() == expected
+    assert pending.read_text() == "- next release\n"
+
+
+def test_prepare_releases_fragments_with_no_legacy_entries(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    changelog = repo / "CHANGELOG.md"
+    changelog.write_text(EMPTY_CHANGELOG)
+    fragments = repo / "changelog.d"
+    fragments.mkdir()
+    entry = fragments / "100-fix.md"
+    entry.write_text("- a fix\n")
+
+    rp.prepare(repo, None, "2026-11-09")
+
+    assert changelog.read_text() == EMPTY_CHANGELOG.replace(
+        "## Unreleased\n\n", "## Unreleased\n\n## 0.9.0 (2026-11-09)\n\n- a fix\n\n"
+    )
+    assert not entry.exists()
+
+
+def test_prepare_with_empty_fragment_directory_keeps_legacy_output(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path)
+    (repo / "changelog.d").mkdir()
+    rp.prepare(repo, None, "2026-11-09")
+    assert (repo / "CHANGELOG.md").read_bytes() == CHANGELOG.replace(
+        "## Unreleased\n\n", "## Unreleased\n\n## 0.9.0 (2026-11-09)\n\n"
+    ).encode("utf-8")
+
+
+def test_independent_changelog_fragments_merge_cleanly(tmp_path: Path) -> None:
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init", "--initial-branch=base")
+    git("config", "user.name", "Release Test")
+    git("config", "user.email", "release-test@example.com")
+    git("config", "commit.gpgsign", "false")
+    (tmp_path / "CHANGELOG.md").write_text(EMPTY_CHANGELOG)
+    git("add", "CHANGELOG.md")
+    git("commit", "-m", "Base changelog")
+
+    for branch, filename in [("first", "100-first.md"), ("second", "200-second.md")]:
+        git("switch", "-c", branch, "base")
+        fragments = tmp_path / "changelog.d"
+        fragments.mkdir(exist_ok=True)
+        (fragments / filename).write_text(f"- {branch} change\n")
+        git("add", f"changelog.d/{filename}")
+        git("commit", "-m", f"Add {branch} fragment")
+
+    tree = git("merge-tree", "--write-tree", "first", "second")
+    assert git("show", f"{tree}:changelog.d/100-first.md") == "- first change"
+    assert git("show", f"{tree}:changelog.d/200-second.md") == "- second change"
+
+
+def test_prepare_refuses_empty_unreleased_section(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(EMPTY_CHANGELOG)
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.prepare(repo, None, "2026-11-09")
+    # The refusal happens before any write: the tree is untouched.
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+    assert (repo / "CHANGELOG.md").read_text() == EMPTY_CHANGELOG
+
+
+def test_prepare_refuses_whitespace_only_unreleased_section(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## Unreleased\n\n   \n\n## 0.8.0 (2026-10-24)\n"
+    )
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.prepare(repo, None, "2026-11-09")
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+
+
+def test_add_changelog_heading_refuses_empty_section_at_eof() -> None:
+    text = "# Changelog\n\n## Unreleased\n"
+    with pytest.raises(rp.PrepError, match="nothing to release"):
+        rp.add_changelog_heading(text, "0.9.0", "2026-11-09")
+
+
+def test_rerun_after_release_cut_skips_empty_section_gate(tmp_path: Path) -> None:
+    # Post-release state: the cut left '## Unreleased' empty with the
+    # '## X.Y.Z (' heading present; an idempotent re-run must not trip the gate.
+    repo = _repo(tmp_path)
+    rp.prepare(repo, None, "2026-11-09")
+    log = (repo / "CHANGELOG.md").read_text()
+    assert log.startswith("# Changelog\n\n## Unreleased\n\n## 0.9.0 (2026-11-09)")
+    snapshot = {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+    rp.prepare(repo, "0.9.0", "2026-11-10")  # no raise
+    assert snapshot == {p.name: p.read_text() for p in repo.rglob("*") if p.is_file()}
+
+
+def test_cli_prepare_empty_section_exits_2(tmp_path: Path, capsys) -> None:
+    repo = _repo(tmp_path)
+    (repo / "CHANGELOG.md").write_text(EMPTY_CHANGELOG)
+    assert rp.main(["--repo", str(repo), "prepare", "--date", "2026-11-09"]) == 2
+    assert "nothing to release" in capsys.readouterr().err
+
+
+def test_prepare_refuses_stale_anchor(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    stale = "intro\n\nfirst ships in the first release after `v0.7.0`.\n"
+    (repo / "docs/cli/signoff.md").write_text(stale)
+    fragment = repo / "changelog.d" / "1234.added.md"
+    fragment.parent.mkdir()
+    fragment.write_bytes(b"- a pending entry\n")
+    with pytest.raises(rp.PrepError, match=r"0\.7\.0") as excinfo:
+        rp.prepare(repo, None, "2026-11-09")
+    assert ":3:" in str(excinfo.value)  # names the offending line
+    # The refusal happens before any write: the tree is untouched (issue #6211).
+    assert (repo / "pyproject.toml").read_text() == PYPROJECT
+    assert (repo / "CHANGELOG.md").read_text() == CHANGELOG
+    assert (repo / "docs/cli/signoff.md").read_text() == stale
+    # Pending fragments survive the refusal byte-for-byte, so a stale anchor
+    # cannot cost the operator unreleased entries (issue #6604).
+    assert fragment.read_bytes() == b"- a pending entry\n"
+
+
+def test_prepare_leaves_newer_anchor_untouched(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "docs/cli/signoff.md").write_text(
+        "first ships in the first release after `v0.8.0` "
+        "and later the next release after v0.9.5 too.\n"
+    )
+    rp.prepare(repo, None, "2026-11-09")
+    text = (repo / "docs/cli/signoff.md").read_text()
+    assert "`klt 0.9.0` and later the next release after v0.9.5" in text
+
+
+def test_prepare_rerun_skips_stale_anchor_check(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    rp.prepare(repo, None, "2026-11-09")  # current is now 0.9.0
+    (repo / "docs/cli/signoff.md").write_text(
+        "first ships in the first release after `v0.7.0`.\n"
+    )
+    rp.prepare(repo, "0.9.0", "2026-11-10")  # idempotent re-run: no raise
+    assert "v0.7.0" in (repo / "docs/cli/signoff.md").read_text()
+
+
+def test_releasing_convention_prose_is_not_scanned(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "RELEASING.md").write_text(
+        'Fill in availability notes. Replace "the next release after 0.7.0"\n'
+        "in docs/cli/signoff.md with X.Y.Z.\n"
+    )
+    rp.prepare(repo, None, "2026-11-09")  # must not raise: only signoff.md is scanned
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("chore(release): bump version to 0.9.0", "0.9.0"),
+        ("chore(release): bump version to 0.9.0 (#4999)", "0.9.0"),
+        ("Merge pull request #4922 from 2AMLogic/release/v0.9.0", "0.9.0"),
+        ("Merge pull request #4922 from release/v0.9.0", None),
+        ("Merge pull request #4922 from 2AMLogic/feature/issue-1", None),
+        ("Merge pull request #4922 from 2AMLogic/release/v0.9.0.dev1", None),
+        ("fix: chore(release): bump version to 0.9.0", None),
+        ("chore(release): bump version to 0.9.0.dev1", None),
+        ("feat: something", None),
+    ],
+)
+def test_detect(subject: str, expected: str | None) -> None:
+    assert rp.release_version_from_subject(subject) == expected
+
+
+def test_cli_next_and_detect(tmp_path: Path, capsys) -> None:
+    repo = _repo(tmp_path)
+    assert rp.main(["--repo", str(repo), "next"]) == 0
+    assert capsys.readouterr().out.strip() == "0.9.0"
+    assert rp.main(["detect", "--subject", "chore: nope"]) == 0
+    assert capsys.readouterr().out == ""
+    assert rp.main(["--repo", str(repo), "prepare", "--date", "2026-11-09"]) == 0
+    assert json.loads(capsys.readouterr().out)["version"] == "0.9.0"
+
+
+# --- workflow wiring -------------------------------------------------------
+
+RELEASE = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+PUBLISH = (REPO_ROOT / ".github/workflows/publish.yml").read_text()
+
+
+def test_release_workflow_triggers_and_gates() -> None:
+    assert "schedule:" in RELEASE and "workflow_dispatch:" in RELEASE
+    assert "scripts/check-release-lag.sh" in RELEASE
+    assert "scripts/check_native_extras.py" in RELEASE
+    assert "pull_request:" not in RELEASE
+
+
+def test_release_workflow_never_pushes_to_main_or_merges() -> None:
+    for forbidden in ("git push origin main", "gh pr merge", "--auto", "HEAD:main"):
+        assert forbidden not in RELEASE
+
+
+def test_tag_job_dispatches_publish_on_the_tag() -> None:
+    assert (
+        'gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref "$v"' in RELEASE
+    )
+    assert 'git tag -a "$v" -m "Release ${v#v}" "$GITHUB_SHA"' in RELEASE
+    assert "workflow_dispatch:" in PUBLISH
+
+
+def test_publish_refuses_non_tag_refs() -> None:
+    assert "refs/tags/v*) ;;" in PUBLISH
+    assert PUBLISH.index("Require a release tag ref") < PUBLISH.index("uv build")
+
+
+def test_release_lag_workflow_is_retired() -> None:
+    assert not (REPO_ROOT / ".github/workflows/release-lag.yml").exists()

@@ -1,0 +1,403 @@
+{
+  "netlist": "pll_device.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.98
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27,
+      125
+    ]
+  },
+  "analysis": {
+    "kind": "tran",
+    "args": "5n 300u"
+  },
+  "measurements": [
+    {
+      "name": "t_first_div_lo",
+      "spice": ".meas tran t_first_div_lo WHEN v(div_lo)=0.5 RISE=1",
+      "unit": "s",
+      "limits": {
+        "max": 5e-06
+      }
+    },
+    {
+      "name": "up_acq_lo_s",
+      "spice": ".meas tran up_acq_lo_s INTEG v(up_lo) FROM=0 TO={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "dn_acq_lo_s",
+      "spice": ".meas tran dn_acq_lo_s INTEG v(dn_lo) FROM=0 TO={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "up_acq_lo",
+      "spice": ".meas tran up_acq_lo param='1e6*up_acq_lo_s'",
+      "unit": "us",
+      "limits": {
+        "min": 4
+      }
+    },
+    {
+      "name": "dn_acq_lo",
+      "spice": ".meas tran dn_acq_lo param='1e6*dn_acq_lo_s'",
+      "unit": "us",
+      "limits": {
+        "max": 1
+      }
+    },
+    {
+      "name": "up_lock_lo_s",
+      "spice": ".meas tran up_lock_lo_s INTEG v(up_lo) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "dn_lock_lo_s",
+      "spice": ".meas tran dn_lock_lo_s INTEG v(dn_lo) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "up_lock_lo",
+      "spice": ".meas tran up_lock_lo param='1e9*up_lock_lo_s'",
+      "unit": "ns",
+      "limits": {
+        "min": 2,
+        "max": 100
+      }
+    },
+    {
+      "name": "dn_lock_lo",
+      "spice": ".meas tran dn_lock_lo param='1e9*dn_lock_lo_s'",
+      "unit": "ns",
+      "limits": {
+        "min": 2,
+        "max": 100
+      }
+    },
+    {
+      "name": "t1_div_a_lo",
+      "spice": ".meas tran t1_div_a_lo WHEN v(div_lo)=0.5 RISE=1 TD={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "t5_div_a_lo",
+      "spice": ".meas tran t5_div_a_lo WHEN v(div_lo)=0.5 RISE=5 TD={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "period_div_a_lo",
+      "spice": ".meas tran period_div_a_lo param='(t5_div_a_lo-t1_div_a_lo)/4'",
+      "unit": "s",
+      "limits": {
+        "min": 6.633333e-06,
+        "max": 6.7e-06
+      }
+    },
+    {
+      "name": "phase_err_a_lo",
+      "spice": ".meas tran phase_err_a_lo TRIG v(refclk) VAL=0.9 RISE=1 TD={tref0+27.5/fref} TARG v(div_lo) VAL=0.5 RISE=1 TD={tref0+27.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -3e-08,
+        "max": 3e-08
+      }
+    },
+    {
+      "name": "vctrl_avg_a_lo",
+      "spice": ".meas tran vctrl_avg_a_lo AVG v(vctrl_lo) FROM={tref0+27.5/fref} TO={tref0+27.5/fref+4/fref}",
+      "unit": "V",
+      "limits": {
+        "min": 0.35,
+        "max": 0.85
+      }
+    },
+    {
+      "name": "t1_div_b_lo",
+      "spice": ".meas tran t1_div_b_lo WHEN v(div_lo)=0.5 RISE=1 TD={tref0+39.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "t5_div_b_lo",
+      "spice": ".meas tran t5_div_b_lo WHEN v(div_lo)=0.5 RISE=5 TD={tref0+39.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "period_div_b_lo",
+      "spice": ".meas tran period_div_b_lo param='(t5_div_b_lo-t1_div_b_lo)/4'",
+      "unit": "s",
+      "limits": {
+        "min": 6.633333e-06,
+        "max": 6.7e-06
+      }
+    },
+    {
+      "name": "phase_err_b_lo",
+      "spice": ".meas tran phase_err_b_lo TRIG v(refclk) VAL=0.9 RISE=1 TD={tref0+39.5/fref} TARG v(div_lo) VAL=0.5 RISE=1 TD={tref0+39.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -3e-08,
+        "max": 3e-08
+      }
+    },
+    {
+      "name": "vctrl_avg_b_lo",
+      "spice": ".meas tran vctrl_avg_b_lo AVG v(vctrl_lo) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V",
+      "limits": {
+        "min": 0.35,
+        "max": 0.85
+      }
+    },
+    {
+      "name": "vctrl_b_max_lo",
+      "spice": ".meas tran vctrl_b_max_lo MAX v(vctrl_lo) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V"
+    },
+    {
+      "name": "vctrl_b_min_lo",
+      "spice": ".meas tran vctrl_b_min_lo MIN v(vctrl_lo) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V"
+    },
+    {
+      "name": "vctrl_ripple_lo_mv",
+      "spice": ".meas tran vctrl_ripple_lo_mv param='1000*(vctrl_b_max_lo-vctrl_b_min_lo)'",
+      "unit": "mV",
+      "limits": {
+        "max": 10
+      }
+    },
+    {
+      "name": "vctrl_drift_lo_mv",
+      "spice": ".meas tran vctrl_drift_lo_mv param='1000*(vctrl_avg_b_lo-vctrl_avg_a_lo)'",
+      "unit": "mV",
+      "limits": {
+        "min": -5,
+        "max": 5
+      }
+    },
+    {
+      "name": "vctrl_min_lo",
+      "spice": ".meas tran vctrl_min_lo MIN v(vctrl_lo) FROM=0.1u TO=300u",
+      "unit": "V",
+      "limits": {
+        "min": 0.3
+      }
+    },
+    {
+      "name": "vctrl_max_lo",
+      "spice": ".meas tran vctrl_max_lo MAX v(vctrl_lo) FROM=0.1u TO=300u",
+      "unit": "V",
+      "limits": {
+        "max": 0.9
+      }
+    },
+    {
+      "name": "t_first_div_hi",
+      "spice": ".meas tran t_first_div_hi WHEN v(div_hi)=0.5 RISE=1",
+      "unit": "s",
+      "limits": {
+        "max": 5e-06
+      }
+    },
+    {
+      "name": "up_acq_hi_s",
+      "spice": ".meas tran up_acq_hi_s INTEG v(up_hi) FROM=0 TO={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "dn_acq_hi_s",
+      "spice": ".meas tran dn_acq_hi_s INTEG v(dn_hi) FROM=0 TO={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "up_acq_hi",
+      "spice": ".meas tran up_acq_hi param='1e6*up_acq_hi_s'",
+      "unit": "us",
+      "limits": {
+        "max": 1
+      }
+    },
+    {
+      "name": "dn_acq_hi",
+      "spice": ".meas tran dn_acq_hi param='1e6*dn_acq_hi_s'",
+      "unit": "us",
+      "limits": {
+        "min": 3
+      }
+    },
+    {
+      "name": "up_lock_hi_s",
+      "spice": ".meas tran up_lock_hi_s INTEG v(up_hi) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "dn_lock_hi_s",
+      "spice": ".meas tran dn_lock_hi_s INTEG v(dn_hi) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "up_lock_hi",
+      "spice": ".meas tran up_lock_hi param='1e9*up_lock_hi_s'",
+      "unit": "ns",
+      "limits": {
+        "min": 2,
+        "max": 100
+      }
+    },
+    {
+      "name": "dn_lock_hi",
+      "spice": ".meas tran dn_lock_hi param='1e9*dn_lock_hi_s'",
+      "unit": "ns",
+      "limits": {
+        "min": 2,
+        "max": 100
+      }
+    },
+    {
+      "name": "t1_div_a_hi",
+      "spice": ".meas tran t1_div_a_hi WHEN v(div_hi)=0.5 RISE=1 TD={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "t5_div_a_hi",
+      "spice": ".meas tran t5_div_a_hi WHEN v(div_hi)=0.5 RISE=5 TD={tref0+27.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "period_div_a_hi",
+      "spice": ".meas tran period_div_a_hi param='(t5_div_a_hi-t1_div_a_hi)/4'",
+      "unit": "s",
+      "limits": {
+        "min": 6.633333e-06,
+        "max": 6.7e-06
+      }
+    },
+    {
+      "name": "phase_err_a_hi",
+      "spice": ".meas tran phase_err_a_hi TRIG v(refclk) VAL=0.9 RISE=1 TD={tref0+27.5/fref} TARG v(div_hi) VAL=0.5 RISE=1 TD={tref0+27.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -3e-08,
+        "max": 3e-08
+      }
+    },
+    {
+      "name": "vctrl_avg_a_hi",
+      "spice": ".meas tran vctrl_avg_a_hi AVG v(vctrl_hi) FROM={tref0+27.5/fref} TO={tref0+27.5/fref+4/fref}",
+      "unit": "V",
+      "limits": {
+        "min": 0.35,
+        "max": 0.85
+      }
+    },
+    {
+      "name": "t1_div_b_hi",
+      "spice": ".meas tran t1_div_b_hi WHEN v(div_hi)=0.5 RISE=1 TD={tref0+39.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "t5_div_b_hi",
+      "spice": ".meas tran t5_div_b_hi WHEN v(div_hi)=0.5 RISE=5 TD={tref0+39.5/fref}",
+      "unit": "s"
+    },
+    {
+      "name": "period_div_b_hi",
+      "spice": ".meas tran period_div_b_hi param='(t5_div_b_hi-t1_div_b_hi)/4'",
+      "unit": "s",
+      "limits": {
+        "min": 6.633333e-06,
+        "max": 6.7e-06
+      }
+    },
+    {
+      "name": "phase_err_b_hi",
+      "spice": ".meas tran phase_err_b_hi TRIG v(refclk) VAL=0.9 RISE=1 TD={tref0+39.5/fref} TARG v(div_hi) VAL=0.5 RISE=1 TD={tref0+39.5/fref}",
+      "unit": "s",
+      "limits": {
+        "min": -3e-08,
+        "max": 3e-08
+      }
+    },
+    {
+      "name": "vctrl_avg_b_hi",
+      "spice": ".meas tran vctrl_avg_b_hi AVG v(vctrl_hi) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V",
+      "limits": {
+        "min": 0.35,
+        "max": 0.85
+      }
+    },
+    {
+      "name": "vctrl_b_max_hi",
+      "spice": ".meas tran vctrl_b_max_hi MAX v(vctrl_hi) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V"
+    },
+    {
+      "name": "vctrl_b_min_hi",
+      "spice": ".meas tran vctrl_b_min_hi MIN v(vctrl_hi) FROM={tref0+39.5/fref} TO={tref0+39.5/fref+4/fref}",
+      "unit": "V"
+    },
+    {
+      "name": "vctrl_ripple_hi_mv",
+      "spice": ".meas tran vctrl_ripple_hi_mv param='1000*(vctrl_b_max_hi-vctrl_b_min_hi)'",
+      "unit": "mV",
+      "limits": {
+        "max": 10
+      }
+    },
+    {
+      "name": "vctrl_drift_hi_mv",
+      "spice": ".meas tran vctrl_drift_hi_mv param='1000*(vctrl_avg_b_hi-vctrl_avg_a_hi)'",
+      "unit": "mV",
+      "limits": {
+        "min": -5,
+        "max": 5
+      }
+    },
+    {
+      "name": "vctrl_min_hi",
+      "spice": ".meas tran vctrl_min_hi MIN v(vctrl_hi) FROM=0.1u TO=300u",
+      "unit": "V",
+      "limits": {
+        "min": 0.3
+      }
+    },
+    {
+      "name": "vctrl_max_hi",
+      "spice": ".meas tran vctrl_max_hi MAX v(vctrl_hi) FROM=0.1u TO=300u",
+      "unit": "V",
+      "limits": {
+        "max": 0.9
+      }
+    },
+    {
+      "name": "vctrl_lock_match_mv",
+      "spice": ".meas tran vctrl_lock_match_mv param='1000*(vctrl_avg_b_lo-vctrl_avg_b_hi)'",
+      "unit": "mV",
+      "limits": {
+        "min": -5,
+        "max": 5
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 3600,
+    "keep_artifacts": false
+  }
+}

@@ -5,7 +5,9 @@ no dependency on an external corpus.
 """
 
 import json
+from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -143,6 +145,59 @@ def test_json_contract(tmp_path, capsys):
     # Reserved annotation range (990-999, any datatype) is named as such.
     assert by_pair[(994, 0)]["annotation"] is True
     assert by_pair[(1, 0)]["annotation"] is False
+
+
+_SCHEMA = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "layers-response.schema.json"
+    ).read_text()
+)
+
+
+def _assert_conforms_and_requires(payload: dict, drop: list) -> None:
+    """The real payload validates, and deleting each required field breaks it."""
+    jsonschema.Draft202012Validator.check_schema(_SCHEMA)
+    jsonschema.validate(payload, _SCHEMA, cls=jsonschema.Draft202012Validator)
+    for path in drop:
+        broken = json.loads(json.dumps(payload))
+        target = broken
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, _SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def test_json_response_schema(tmp_path, capsys):
+    """Real `--format json` output (default and --flattened --include-text)
+    validates against the shipped response schema."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    assert main(["layers", str(path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    _assert_conforms_and_requires(
+        data,
+        [["schema_version"], ["file"], ["dbu_um"], ["layer_count"], ["layers"]]
+        + [
+            ["layers", 0, k]
+            for k in ("layer", "datatype", "name", "shapes", "annotation")
+        ],
+    )
+
+    hier = tmp_path / "hier.gds"
+    _make_flattened_hierarchy().write(str(hier))
+    argv = ["layers", str(hier), "--flattened", "--include-text", "--format", "json"]
+    assert main(argv) == 0
+    flat = json.loads(capsys.readouterr().out)
+    _assert_conforms_and_requires(
+        flat,
+        [["layers", 0, "bbox_um", "width"], ["layers", 0, "contributors", 0, "cell"]]
+        + [["layers", 0, "texts", 0, "count"]],
+    )
 
 
 def test_default_format_is_text(tmp_path, capsys):
@@ -533,3 +588,54 @@ def test_cli_include_text_without_flattened_exits_one(tmp_path, capsys):
     assert main(["layers", str(path), "--include-text"]) == 1
     err = capsys.readouterr().err
     assert "--include-text requires --flattened" in err
+
+
+# --- --deck (issue #3092) ---------------------------------------------------
+
+
+def _deck_layer_gds(tmp_path):
+    from klayout_tools.decks import get_layer_names
+
+    (layer, datatype), name = next(iter(sorted(get_layer_names("sky130").items())))
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(layer, datatype)).insert(kdb.Box(0, 0, 10, 10))
+    top.shapes(layout.layer(999, 7)).insert(kdb.Box(0, 0, 10, 10))
+    path = tmp_path / "deck.gds"
+    layout.write(str(path))
+    return path, (layer, datatype), name
+
+
+def test_layers_deck_fills_names_and_pins_content_hash(tmp_path):
+    from klayout_tools.decks.history import deck_rules
+
+    path, pair, name = _deck_layer_gds(tmp_path)
+    report = layers_report(str(path), deck="sky130")
+
+    by_pair = {(e["layer"], e["datatype"]): e["name"] for e in report["layers"]}
+    assert by_pair[pair] == name
+    assert by_pair[(999, 7)] is None
+    assert report["deck"] == {
+        "name": "sky130",
+        "content_hash": deck_rules("sky130")["content_hash"],
+    }
+
+
+def test_layers_without_deck_is_unchanged(tmp_path):
+    path, pair, _ = _deck_layer_gds(tmp_path)
+    report = layers_report(str(path))
+    assert "deck" not in report
+    assert all(e["name"] is None for e in report["layers"])
+
+
+def test_cli_layers_deck_json_and_unknown_deck(tmp_path, capsys):
+    path, pair, name = _deck_layer_gds(tmp_path)
+    assert main(["layers", str(path), "--deck", "sky130", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deck"]["name"] == "sky130"
+    assert name in [e["name"] for e in payload["layers"]]
+
+    assert main(["layers", str(path), "--deck", "nope", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "layers"
+    assert "unknown deck 'nope'" in err["error"]["message"]

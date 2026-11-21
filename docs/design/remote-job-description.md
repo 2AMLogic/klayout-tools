@@ -68,7 +68,7 @@ job = JobDescription(
 
 > The `klt sim` job above shows the two *fixed* inputs. Since issue #2485
 > it also carries one additional `JobInput` per file in the netlist's
-> resolved `.include`/`.inc` closure (`sim_staging.stage_sim_netlist`), with
+> resolved `.include`/`.inc` closure (`sim_staging.stage_sim_job`), with
 > the netlist itself supplied as rewritten `content` when any of its
 > directives were re-pointed at a staged name. That is a `klt sim` job
 > description detail, not a contract change: `push_job` sees an

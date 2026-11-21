@@ -5,7 +5,9 @@ no dependency on an external corpus.
 """
 
 import json
+from pathlib import Path
 
+import jsonschema
 import klayout.db as kdb
 import pytest
 
@@ -208,6 +210,67 @@ def test_json_contract_with_top_flag(tmp_path, capsys):
     assert data["top_cell_count"] == 2
     assert {entry["name"] for entry in data["cells"]} == {"TOP", "LONELY_TOP"}
     assert all(entry["is_top"] for entry in data["cells"])
+
+
+_SCHEMA = json.loads(
+    (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "cells-response.schema.json"
+    ).read_text()
+)
+
+
+def _assert_conforms_and_requires(payload: dict, drop: list) -> None:
+    """The real payload validates, and deleting each required field breaks it."""
+    jsonschema.Draft202012Validator.check_schema(_SCHEMA)
+    jsonschema.validate(payload, _SCHEMA, cls=jsonschema.Draft202012Validator)
+    for path in drop:
+        broken = json.loads(json.dumps(payload))
+        target = broken
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, _SCHEMA, cls=jsonschema.Draft202012Validator)
+
+
+def test_json_response_schema(tmp_path, capsys):
+    """Real `--format json` output (full and --top) validates against the
+    shipped response schema."""
+    path = tmp_path / "design.oas"
+    _make_layout().write(str(path))
+
+    assert main(["cells", str(path), "--format", "json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    _assert_conforms_and_requires(
+        data,
+        [
+            ["schema_version"],
+            ["file"],
+            ["dbu_um"],
+            ["cell_count"],
+            ["top_cell_count"],
+            ["cells"],
+        ]
+        + [
+            ["cells", 0, k]
+            for k in (
+                "name",
+                "index",
+                "is_top",
+                "shapes",
+                "instances",
+                "children",
+                "parents",
+                "bbox_um",
+            )
+        ],
+    )
+
+    assert main(["cells", str(path), "--top", "--format", "json"]) == 0
+    _assert_conforms_and_requires(json.loads(capsys.readouterr().out), [["cells"]])
 
 
 def test_default_format_is_text(tmp_path, capsys):

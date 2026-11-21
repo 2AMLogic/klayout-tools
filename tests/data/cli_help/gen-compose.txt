@@ -1,0 +1,30 @@
+Place a set of already-generated `klt gen` blocks (each block's own JSON
+response, read from a file path or embedded inline) and/or existing library
+cells (blocks[].cell -- an existing cell in a stream, named by
+gds_path/cell_name, with its bbox read from the stream when not declared) into
+one composed GDS/OASIS stream, per a request document's
+blocks[]/placement/connectivity[]/routing/options shape -- see
+docs/design/gen-composition-spike.md section 2 for the contract and
+docs/cli/gen-compose.md for the CLI surface. Supports placement.strategy:
+"row" (single left-to-right strip), "explicit" (each block at its own declared
+origin), and "array" (one block repeated on a regular rows x cols grid,
+emitted as a single hierarchical instance); connectivity[] is always
+validated, and routed when `routing` is supplied (omitting/emptying `routing`
+is a declare-only validate-without-drawing request, #1188). Its own response
+is a valid blocks[].generator_report for a further run (generator: 'gen-
+compose', plus a ports[] promoted from pins[]), so compositions nest. A
+distinct top-level verb (not a `gen` sub-subcommand) -- see docs/cli/gen-
+compose.md's 'CLI shape' note for why. Runs fully headless via KLayout's
+native pya -- no GUI, no Qt. Takes a request-document path (like `klt
+sim`/`klt lvs`), not positional block file args. `nets[].legs[].routed: true`
+is NOT a DRC-clean guarantee -- it means this command's own routability
+heuristics found no problem, not that none exists; always re-run `klt drc` on
+the composed output before treating it as sign-off ready, see docs/cli/gen-
+compose.md's 'Geometry is advisory' note.
+
+positional arguments:
+  request path to a klt gen-compose request JSON file
+
+options:
+  -h, --help show this help message and exit
+  --format {text,json} output format (default: text)

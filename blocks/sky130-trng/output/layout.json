@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:13:21.099107+00:00",
+  "slug": "sky130-trng",
+  "name": "Sky130 Trng",
+  "description": "Canary \u2014 sky130 true random number generator. AI-designed, open-source.",
+  "pdk": "sky130",
+  "layer_count": 6,
+  "cell_count": 2,
+  "instance_count": 1,
+  "layout_file": "nfet_starve_w0p42_l2.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "diff.drawing": "renders/65_20.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "li1.drawing": "renders/67_20.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "npc.drawing": "renders/95_20.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Entropy source",
+        "target": "N-way array of independent free-running ring oscillators, XOR-combined ahead of a single sampler; N re-sized from a jitter budget at the entropy-binding corner",
+        "stretch": "metastability hybrid as a secondary tap"
+      },
+      {
+        "parameter": "Raw rate",
+        "target": "> 1 Mbps sustained at the raw tap, binding at the slowest-RO corner",
+        "stretch": "> 4 Mbps"
+      },
+      {
+        "parameter": "Raw min-entropy per bit",
+        "target": "H\u2080 = 0.5 bit/sample as a design *target* at the entropy-binding corner \u2014 a sizing input, not a claim, until measured"
+      },
+      {
+        "parameter": "Quality",
+        "target": "designed-for-SP 800-90B (raw access + RCT/APT + entropy-source model); validation deferred to measured silicon",
+        "stretch": "AIS-31 PTG.2 structure"
+      },
+      {
+        "parameter": "Conditioning",
+        "target": "non-vetted CRC-32 LFSR compression, K = 8 (256 raw bits in : one 32-bit word out)",
+        "stretch": "vetted conditioner if the area budget allows"
+      },
+      {
+        "parameter": "Health tests",
+        "target": "continuous RCT + APT on the raw stream; cutoffs re-derived from sky130 noise/leakage corners, not copied from gf180"
+      },
+      {
+        "parameter": "Power",
+        "target": "< 500 \u00b5W active; idle target set after a sky130 leakage survey"
+      },
+      {
+        "parameter": "Area",
+        "target": "< 0.05 mm\u00b2"
+      },
+      {
+        "parameter": "Operating envelope",
+        "target": "\u221240 \u2026 +125 \u00b0C; supply per sky130 device flavor (1.8 V core, 3.3 V I/O devices available) \u2014 confirm before ratification"
+      },
+      {
+        "parameter": "Interface",
+        "target": "streaming, mode-selectable raw / conditioned; raw access always available and never gated"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-trng",
+    "ref": "c978cd546247141384494afdec5f71a12f424873",
+    "path": "layout/primitives/nfet_starve_w0p42_l2/nfet_starve_w0p42_l2.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

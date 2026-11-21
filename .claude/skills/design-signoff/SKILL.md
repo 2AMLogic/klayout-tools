@@ -98,7 +98,13 @@ With the kind resolved:
 - **`digital`** — walk items 1–10 using the *Digital* column for items 1,
   2, 5, and 7; item 6 applies only to whichever spec rows are actually
   statistical (state explicitly if none are — most digital spec rows are
-  not, per the doc); item 8 includes Fmax, area, and power across the
+  not, per the doc; `klt signoff` grades that statement as item 6
+  `not_applicable` when the manifest's item-6 entry is
+  `{"not_applicable": {"spec": {"file", "content_hash"}, "statement":
+  {"file", "content_hash"}}}` — a ratified spec plus a committed
+  `rows[]` statement of `id`/`class`/`reason`, digital partition only, refused
+  with `not_applicable_statistical_row` if any spec row is statistical;
+  it counts toward T1 but is reported apart from `met`); item 8 includes Fmax, area, and power across the
   corner set. Items 3, 4, 9, and 10 apply as written. No analog-only
   artifact (schematic capture, PVT corner sweeps, Monte Carlo runs) is
   required or graded for a block with no reason to produce it.

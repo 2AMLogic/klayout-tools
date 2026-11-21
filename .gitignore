@@ -2,6 +2,8 @@ __pycache__/
 *.egg-info/
 dist/
 .venv/
+# foreign environments moved aside by scripts/bootstrap-auditor-python.sh --replace-venv
+.venv.foreign-*/
 site/node_modules/
 site/dist/
 .pytest_cache/
@@ -93,10 +95,15 @@ native/*/target/
 .loom/retry-state/
 .loom/exit-codes/
 .loom/sweep-checkpoint/
+.loom/private-jobs/
 .loom/sweep-run/
+.loom/targets/
+.loom/target*/
+.cargo-target*/
+.loom-target/
+/target-*/
 .loom/state/*
 !.loom/state/detect-unlabeled-epics-dismissed
-.loom/concierge/
 .loom/stats/
 .loom/diagnostics/
 .loom/guide-docs-state.json
@@ -134,9 +141,24 @@ native/*/target/
 .loom/gh-config-by-owner/
 .loom/gh-config-by-owner.*/
 .loom/gh-config-by-owner-*/
-.loom-local/
+/.loom-local/
 # <<< loom-managed <<<
+
+# Provider-namespaced token ranking caches written next to account-health.json
+# by `loom-daemon tokens check --ranking` (issue #6834) — the managed block's
+# .loom/tokens/ rule covers Claude's default; these cover the workspace-root
+# paths, so the primary checkout stays clean.
+.loom/account-ranking.*
+.loom/.ranking
 
 # repo-remote per-repo config (issue #2277): instance sizing + pinned instance id.
 # Contains no credentials; kept out of git because it is machine-local state.
 .env
+
+# pytest-cov output (issue #3223)
+.coverage
+.coverage.*
+coverage.json
+
+# Repo Skills Codex-side machine-local install metadata (never committed)
+.agents/skills/repo/.install-local.json

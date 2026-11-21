@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:10:19.391121+00:00",
+  "slug": "sg13g2-bandgap",
+  "name": "Sg13G2 Bandgap",
+  "description": "Bandgap voltage reference on IHP SG13G2 \u2014 2AM Logic canary block",
+  "pdk": "sg13g2",
+  "layer_count": 13,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "bandgap_amp.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "Activ.drawing": "renders/1_0.png",
+    "GatPoly.drawing": "renders/5_0.png",
+    "layer_5_1": "renders/5_1.png",
+    "Cont.drawing": "renders/6_0.png",
+    "nSD.drawing": "renders/7_0.png",
+    "Metal1.drawing": "renders/8_0.png",
+    "layer_8_1": "renders/8_1.png",
+    "Metal1.text": "renders/8_25.png",
+    "Metal2.drawing": "renders/10_0.png",
+    "pSD.drawing": "renders/14_0.png",
+    "Via1.drawing": "renders/19_0.png",
+    "NWell.drawing": "renders/31_0.png",
+    "layer_63_0": "renders/63_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Output reference",
+        "target": "1.050 V \u2014 \u00b116% untrimmed (3\u03c3, mismatch MC + PVT); \u00b10.5% trimmed (1-point @ 27 \u00b0C)"
+      },
+      {
+        "parameter": "Trim",
+        "target": "1-point @ 27 \u00b0C only \u2014 no second (hot) sort insertion and no second (CTAT/TC) trim knob ([`0014`](spec/decision-records/0014-trim-row-keep-1-point.md), proposed); range \u2265 \u00b115%; resolution \u2264 0.25%/step; magnitude only"
+      },
+      {
+        "parameter": "Temp coefficient (\u221240\u2026125 \u00b0C)",
+        "target": "< 50 ppm/\u00b0C",
+        "stretch": "< 20 ppm/\u00b0C"
+      },
+      {
+        "parameter": "PSRR @ DC",
+        "target": "> 60 dB",
+        "stretch": "> 70 dB"
+      },
+      {
+        "parameter": "Supply",
+        "target": "3.3 V \u00b110% (HV flavor)",
+        "stretch": "1.2 V (LV flavor)"
+      },
+      {
+        "parameter": "Iq",
+        "target": "< 50 \u00b5A",
+        "stretch": "< 20 \u00b5A"
+      },
+      {
+        "parameter": "Startup",
+        "target": "self-starting, < 1 ms"
+      }
+    ],
+    "status_note": "RATIFIED; Output-reference row re-cast by the two-key-gated decision record 0011 \u2014 see below"
+  },
+  "source": {
+    "repo": "2AMLogic/sg13g2-bandgap",
+    "ref": "b5e4f8b4e48308dfbc97fde349eb3d9a345ee6c9",
+    "path": "layout/bandgap_amp/bandgap_amp.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

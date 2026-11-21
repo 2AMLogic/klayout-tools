@@ -40,11 +40,12 @@ document" section for the schema.
 
 ``--check <report>`` (issue #1106) switches ``klt drc`` from running a fresh
 DRC into *verifying a previously committed* ``--format json`` report still
-reproduces -- see ``docs/cli/drc.md``, "--check" -- and is mutually exclusive
-with the positional ``file`` argument (the input path is read from the
-committed report itself). Cheap mode (default): re-hash the input/deck named
-in the report and compare against its own recorded ``content_hash`` values,
-no DRC engine re-run. Full mode (``--check <report> --rerun``): actually
+reproduces -- see ``docs/cli/drc.md``, "--check". The input path is read from
+the committed report itself unless the positional ``file`` is also given
+(issue #2699), which then overrides the recorded input unconditionally.
+Cheap mode (default): re-hash the input/deck named in the report and compare
+against its own recorded ``content_hash`` values, no DRC engine re-run. Full mode
+(``--check <report> --rerun``): actually
 re-run the deck the report names and diff verdict-bearing fields. Both reuse
 ``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
 normal run (see ``klayout_tools._report_verify``).
@@ -53,19 +54,33 @@ normal run (see ``klayout_tools._report_verify``).
 import argparse
 
 from .. import pdk as pdk_module
+from .._jsonnum import is_int
 from .._paths import looks_like_request_document
 from ..drc import (
     REQUEST_SCHEMA,
     DrcError,
     check_drc_report,
     drc_exit_code,
+    list_deck_rules,
     load_request_arg,
+    load_rule_category_manifest,
+    parse_rule_selectors,
     rerun_drc_report,
     run_drc,
     run_drc_klayout_engine,
 )
+from ..drc_crosscheck import crosscheck_exit_code, run_drc_crosscheck
+from . import _drc_list_categories
+from . import _drc_native as native_deck
 from . import _request_document as reqdoc
-from .output import emit_error, emit_success, render_rerun_drift
+from .drc_text import _print_crosscheck_text, _print_rule_list, _print_text
+from .output import (
+    emit_error,
+    emit_success,
+    render_check_text,
+    render_rerun_drift,
+    write_json_file,
+)
 
 EXIT_CLEAN = 0
 EXIT_VIOLATIONS = 3
@@ -77,27 +92,51 @@ EXIT_DRIFTED = EXIT_VIOLATIONS
 
 
 def run(args: argparse.Namespace) -> int:
-    # `file` and `--check` are a required, mutually exclusive argparse group
-    # (parser.py) -- omitting both, or giving both, is already a usage error
-    # (exit 2) by the time `run()` is ever called.
+    # `file`/`--check`/`--list-rules`/`--list-rule-categories`: at least one
+    # is required and the two listing modes each stand alone -- both usage
+    # errors (exit 2) enforced by `parser._require_one_input` before `run()`
+    # is ever called. `file` may accompany `--check` (issue #2699) as an
+    # explicit input override.
     if args.check is not None:
         return _run_check(args)
 
     if args.rerun:
         return emit_error("drc", "--rerun requires --check <report>", args.format)
 
+    if args.list_rules:
+        return _run_list_rules(args)
+
+    # Issue #5444: the native-deck counterpart of `--list-rules` -- what a
+    # PDK-native deck *declares*, derived by running it on a tool-generated
+    # empty layout, so the result can be fed back in as
+    # `--expect-rule-categories-file` without being circular.
+    if args.list_rule_categories:
+        return _drc_list_categories.run_list_rule_categories(
+            args, _non_default_flags, EXIT_CLEAN
+        )
+
     try:
         # Issue #1867: the positional slot carries either a layout path or a
         # request document; `_apply_request` normalizes the latter into the
         # same namespace fields the argv form produces, so `_run` below sees
         # exactly one shape and the two forms cannot drift.
+        request_arg = args.file
         if args.file is not None and looks_like_request_document(args.file):
             args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
-        return emit_error("drc", str(exc), args.format)
+        reqdoc.annotate_missing_file(exc, str(request_arg), str(args.file))
+        return emit_error("drc", str(exc), args.format, **vars(exc))
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
+
+    write_failure = _write_output(report, args)
+    if write_failure is not None:
+        return write_failure
+
+    if report.get("mode") == "crosscheck":
+        emit_success(report, args.format, _print_crosscheck_text)
+        return crosscheck_exit_code(report)
 
     emit_success(report, args.format, _print_text)
 
@@ -109,18 +148,116 @@ def run(args: argparse.Namespace) -> int:
     return drc_exit_code(report)
 
 
-def _run_check(args: argparse.Namespace) -> int:
+def _write_output(report: dict, args: argparse.Namespace) -> int | None:
+    """Write the ``-o/--output`` file copy; return an exit code only on failure.
+
+    Issue #4393: an additive copy of the envelope, written before emitting so
+    it lands regardless of the verdict's exit code and an unwritable path
+    fails with the error envelope. Stdout is unchanged.
+    """
+    if not args.output:
+        return None
     try:
-        if args.rerun:
-            result = rerun_drc_report(args.check)
-        else:
-            result = check_drc_report(args.check)
+        write_json_file(report, args.output)
+    except OSError as exc:
+        return emit_error(
+            "drc", f"could not write report to '{args.output}': {exc}", args.format
+        )
+    return None
+
+
+def _run_list_rules(args: argparse.Namespace) -> int:
+    """``--list-rules`` (issue #2768): enumerate a curated deck's rules.
+
+    Listing reads no layout and runs no check, so the only inputs it takes
+    are ``--deck`` (required) and the default ``--engine curated``; any other
+    input flag is rejected rather than silently ignored -- a caller passing
+    ``--rules`` or ``--top`` here almost certainly meant to run DRC. Exit 0
+    on success: a listing has no verdict, so it never borrows a DRC status.
+    """
+    try:
+        if args.engine == "klayout":
+            raise DrcError(
+                "--list-rules is not supported with --engine klayout: a "
+                "PDK-native runset does not share the curated rule "
+                "registry. Use --list-rule-categories to list what a "
+                "native deck declares (see docs/cli/drc.md, 'Rule listing "
+                "and selection')"
+            )
+        extra = _non_default_flags(args, allowed=("deck", "engine"))
+        if extra:
+            raise DrcError(
+                f"--list-rules takes only --deck; also given: {', '.join(extra)}"
+            )
+        if not args.deck:
+            raise DrcError("--list-rules requires --deck <name>")
+        listing = list_deck_rules(args.deck)
+    except DrcError as exc:
+        return emit_error("drc", str(exc), args.format)
+
+    emit_success(listing, args.format, _print_rule_list)
+    return EXIT_CLEAN
+
+
+def _non_default_flags(
+    args: argparse.Namespace, *, allowed: tuple[str, ...]
+) -> list[str]:
+    """Option strings of this command's input flags set away from their
+    parser default, other than ``allowed`` dests -- the same table
+    ``reject_argv_flags`` reads for request-document conflicts."""
+    return [
+        option
+        for dest, (option, default) in sorted(args.request_argv_flags.items())
+        if dest not in allowed and getattr(args, dest, default) != default
+    ]
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    if args.output is not None:
+        # Issue #4393: --check emits a verification result, not a run report.
+        return emit_error(
+            "drc",
+            "-o/--output cannot be combined with --check: --check emits no "
+            "run report to write",
+            args.format,
+        )
+    if args.waivers is not None:
+        # Issue #3483: like --rules, the waivers a report was run with are
+        # recorded in its provenance and replayed by `--check --rerun`.
+        return emit_error(
+            "drc",
+            "--waivers cannot be combined with --check: --check --rerun "
+            "replays the committed report's own recorded waivers file",
+            args.format,
+        )
+    if args.tile is not None:
+        # Issue #4226: the abutment context a report was run with is
+        # recorded in its `tile` echo and replayed by `--check --rerun`.
+        return emit_error(
+            "drc",
+            "--tile cannot be combined with --check: --check --rerun replays "
+            "the committed report's own recorded tile",
+            args.format,
+        )
+    if args.rules is not None:
+        # Issue #2768: `--check` verifies a committed report as it was run;
+        # `--rerun` replays that report's own recorded `rule_selection`, so a
+        # second, argv-supplied selection would be ambiguous.
+        return emit_error(
+            "drc",
+            "--rules cannot be combined with --check: --check --rerun replays "
+            "the committed report's own recorded rule selection",
+            args.format,
+        )
+    try:
+        run = rerun_drc_report if args.rerun else check_drc_report
+        result = run(args.check, input_path=args.file, deck_path=args.deck_file)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
     except pdk_module.PdkNotFoundError as exc:
         return emit_error("drc", str(exc), args.format)
 
-    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
@@ -143,8 +280,19 @@ _REQUEST_FIELD_DESTS = {
     "timeout_s": "timeout_s",
     "allow_deck_errors": "allow_deck_errors",
     "allow_missing_host_tools": "allow_missing_host_tools",
+    "expect_rule_categories": "expect_rule_categories",
+    "expect_rule_categories_file": "expect_rule_categories_file",
+    "min_klayout_version": "min_klayout_version",
+    "klayout_binary": "klayout_binary",
+    "negative_control": "negative_control",
+    "negative_control_categories": "negative_control_categories",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
+    "rules": "rules",
+    "waivers_file": "waivers",
+    "output": "output",
+    "tile": "tile",
+    "max_violations": "max_violations",
 }
 
 
@@ -152,10 +300,11 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     """Load the request document in ``args.file`` and return a namespace with
     its fields in place of the argv flags they mirror (issue #1867).
 
-    Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``)
-    resolve against the document's own directory for the file form, or the
-    current working directory for the stdin/inline forms -- ``klt lvs``'s
-    convention, implemented by the same shared helper.
+    Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``,
+    ``expect_rule_categories_file``, ``waivers_file``) resolve against the
+    document's own directory for the file form, or the current working directory for the
+    stdin/inline forms -- ``klt lvs``'s convention, implemented by the same
+    shared helper.
     """
     request, base_dir = load_request_arg(args.file)
     reqdoc.check_schema(
@@ -176,10 +325,10 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
     timeout_s = reqdoc.get_number(request, "timeout_s", verb="drc", error_cls=DrcError)
     engine = _str("engine")
-    if engine is not None and engine not in ("curated", "klayout"):
+    if engine is not None and engine not in ("curated", "klayout", "both"):
         raise DrcError(
-            f"`klt drc` request field 'engine' must be 'curated' or "
-            f"'klayout' (got {engine!r})"
+            f"`klt drc` request field 'engine' must be 'curated', "
+            f"'klayout' or 'both' (got {engine!r})"
         )
 
     return argparse.Namespace(
@@ -188,10 +337,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "file": _path("file"),
             "deck": _str("deck"),
             "top": _str("top"),
-            # `args.engine`, not a literal, for an omitted field: every flag
-            # is provably still at its parser default here (`reject_argv_flags`
-            # raised otherwise), so reusing it keeps the two forms' defaults
-            # from drifting apart.
+            # `args.engine` (still its parser default; `reject_argv_flags`
+            # raised otherwise) keeps the two forms' defaults from drifting.
             "engine": engine if engine is not None else args.engine,
             "deck_file": _path("deck_file"),
             "deck_var": reqdoc.get_str_map_as_pairs(
@@ -204,148 +351,213 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "allow_missing_host_tools": reqdoc.get_bool(
                 request, "allow_missing_host_tools", verb="drc", error_cls=DrcError
             ),
+            "expect_rule_categories": _expect_rule_categories(request),
+            # Issue #2806: resolved against the request document's own
+            # directory, like every other path field.
+            "expect_rule_categories_file": _path("expect_rule_categories_file"),
+            "min_klayout_version": _str("min_klayout_version"),
+            "klayout_binary": _path("klayout_binary"),
+            # Issue #3076: resolved against the request document's own
+            # directory, like every other path field.
+            "negative_control": _path("negative_control"),
+            "negative_control_categories": _str("negative_control_categories"),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
+            "rules": _request_rules(request),
+            # Issue #3483: resolved against the request document's directory.
+            "waivers": _path("waivers_file"),
+            # Issue #4393: resolved against the request document's directory.
+            "output": _path("output"),
+            "tile": _str("tile"),
+            "max_violations": reqdoc.get_int(
+                request, "max_violations", verb="drc", error_cls=DrcError
+            ),
         }
     )
 
 
-def _run(args: argparse.Namespace) -> dict:
-    if args.engine == "klayout":
-        deck_file = args.deck_file
-        if deck_file is None:
-            deck_file = pdk_module.drc_deck_file(variant=args.pdk, root=args.pdk_root)
-        if deck_file is None:
-            raise DrcError(
-                "no PDK-native klayout DRC deck script found for this PDK "
-                "variant -- pass --deck-file to point at one directly (see "
-                "docs/cli/drc.md, 'Engine' -> 'klayout')"
-            )
-        return run_drc_klayout_engine(
-            args.file,
-            deck_file,
-            top=args.top,
-            timeout_s=args.timeout_s,
-            deck_vars=_parse_deck_vars(args.deck_var),
-            pdk_variant=args.pdk,
-            pdk_root=args.pdk_root,
-            allow_deck_errors=args.allow_deck_errors,
-            allow_missing_host_tools=args.allow_missing_host_tools,
-        )
+def _request_rules(request: dict) -> str | list[str] | None:
+    """``request["rules"]`` (issue #2768): the ``--rules`` selection, as one
+    comma-separated string (the argv spelling) or a list of strings. Any
+    other type -- a number, an object, a list holding a non-string -- is a
+    clean error; token-level checks (empty/unmatched) are shared with the
+    argv form downstream in :func:`~klayout_tools.drc.parse_rule_selectors`
+    and :func:`~klayout_tools.drc.resolve_rule_selection`."""
+    value = request.get("rules")
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise DrcError(
+        "`klt drc` request field 'rules' must be a string of comma-separated "
+        f"rule ids/globs or a list of strings (got {value!r})"
+    )
 
+
+def _expect_rule_categories(request: dict) -> int | None:
+    """``request["expect_rule_categories"]`` as a positive int, or ``None``
+    (issue #2697). Booleans, floats and strings are rejected."""
+    value = request.get("expect_rule_categories")
+    if value is None:
+        return None
+    if not is_int(value) or value < 1:
+        raise DrcError(
+            "`klt drc` request field 'expect_rule_categories' must be a "
+            f"positive integer (got {value!r})"
+        )
+    return value
+
+
+def _run_crosscheck(args: argparse.Namespace) -> dict:
+    """``--engine both`` (issue #3973): both engines, one comparison report."""
+    for flag, value in (
+        ("--rules", args.rules),
+        ("--waivers", args.waivers),
+        ("--tile", args.tile),
+        ("--max-violations", args.max_violations),
+    ):
+        if value is not None:
+            raise DrcError(
+                f"{flag} is not supported with --engine both: the cross-check "
+                "compares each engine's whole-deck report unchanged (see "
+                "docs/cli/drc.md, 'Cross-check')"
+            )
+    if not args.deck:
+        raise DrcError("argument --deck is required for --engine both")
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
+    result = run_drc_crosscheck(
+        args.file,
+        args.deck,
+        deck_file,
+        top=args.top,
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        native_unavailable_reason=native_deck.native_family_error(args),
+        native_kwargs={
+            "timeout_s": args.timeout_s,
+            "deck_vars": deck_vars,
+            "allow_deck_errors": args.allow_deck_errors,
+            "allow_missing_host_tools": args.allow_missing_host_tools,
+            "expected_rule_categories": args.expect_rule_categories,
+            "min_klayout_version": min_version,
+            "klayout_binary": args.klayout_binary,
+            "expected_rule_category_names": _expected_rule_category_names(args),
+            "negative_control": args.negative_control,
+            "negative_control_categories": _negative_control_categories(args),
+        },
+    )
+    return native_deck.attach_native_deck(result, native)
+
+
+def _run_klayout_engine(args: argparse.Namespace) -> dict:
+    if args.tile is not None:
+        raise DrcError(
+            "--tile is not supported with --engine klayout: the abutment "
+            "context is built by the curated engine (see docs/cli/drc.md, "
+            "'Abutment context')"
+        )
+    if args.waivers is not None:
+        raise DrcError(
+            "--waivers is not supported with --engine klayout: "
+            "only the curated engine matches waivers and reports waived violations "
+            "(see docs/cli/drc.md, 'Waivers')"
+        )
+    if args.rules is not None:
+        # Issue #2768: a native runset's rules are not the curated
+        # registry `--rules` resolves against (its declared categories are
+        # listed by `--list-rule-categories`, #5444), so the selection is
+        # refused, not ignored.
+        raise DrcError(
+            "--rules is not supported with --engine klayout: a PDK-native "
+            "runset does not share the curated rule registry (see "
+            "docs/cli/drc.md, 'Rule listing and selection')"
+        )
+    deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
+    if deck_file is None:
+        raise DrcError(native_deck.no_deck_message(args))
+    result = run_drc_klayout_engine(
+        args.file,
+        deck_file,
+        top=args.top,
+        timeout_s=args.timeout_s,
+        deck_vars=deck_vars,
+        pdk_variant=args.pdk,
+        pdk_root=args.pdk_root,
+        deck_name=args.deck or None,
+        allow_deck_errors=args.allow_deck_errors,
+        allow_missing_host_tools=args.allow_missing_host_tools,
+        expected_rule_categories=args.expect_rule_categories,
+        min_klayout_version=min_version,
+        klayout_binary=args.klayout_binary,
+        expected_rule_category_names=_expected_rule_category_names(args),
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
+        max_violations=args.max_violations,
+    )
+    return native_deck.attach_native_deck(result, native)
+
+
+def _run(args: argparse.Namespace) -> dict:
+    if args.engine == "both":
+        return _run_crosscheck(args)
+    if args.max_violations is not None and args.max_violations < 0:
+        raise DrcError(f"--max-violations must be >= 0 (got {args.max_violations})")
+    if args.engine == "klayout":
+        return _run_klayout_engine(args)
+
+    if args.max_violations is not None:
+        raise DrcError(
+            "--max-violations is only supported with --engine klayout: the "
+            "curated report is bounded by its rule set (see docs/cli/drc.md)"
+        )
     if not args.deck:
         raise DrcError("argument --deck is required for --engine curated")
+    # Token syntax (empty tokens) is checked here, before any file is read;
+    # matching against the deck happens in `run_drc`, still before the
+    # layout is loaded.
+    selectors = parse_rule_selectors(args.rules)
     return run_drc(
         args.file,
         args.deck,
         top=args.top,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
+        rules=selectors,
+        waivers_file=args.waivers,
+        tile=args.tile,
+        negative_control=args.negative_control,
+        negative_control_categories=_negative_control_categories(args),
     )
 
 
-def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
-    """Parse repeatable ``--deck-var name=value`` values (issue #1302) into
-    the ``deck_vars`` mapping :func:`run_drc_klayout_engine` threads through
-    as extra ``-rd`` script globals. Silently ignored (returns ``{}``) when
-    ``--engine curated`` is selected -- ``--deck-var`` is a klayout-engine-
-    only flag, the same "ignored, not rejected" treatment ``--deck-file``
-    and ``--timeout-s`` already get under the curated engine.
-
-    Raises :class:`DrcError` for a malformed value missing the required
-    ``=`` separator -- a clean error (exit 1) rather than a confusing
-    ``KeyError``/silent no-op.
-    """
-    if not raw:
-        return {}
-    deck_vars: dict[str, str] = {}
-    for item in raw:
-        name, sep, value = item.partition("=")
-        if not sep:
-            raise DrcError(
-                f"invalid --deck-var {item!r}: expected 'name=value' "
-                "(e.g. --deck-var feol=true)"
-            )
-        deck_vars[name] = value
-    return deck_vars
-
-
-def _print_coverage_gaps(coverage: dict) -> None:
-    """The text form's "here is what was not looked at" lines.
-
-    Two different gaps, both of which a bare ``status:`` line would hide:
-
-    - **Skipped requested rules** (issue #2110): the common block's
-      ``skipped`` list -- rules the deck asked for that did not run and could
-      have found something. This is exactly what makes a run
-      ``clean_partial``, so the text form names the rules rather than letting
-      a partial run read as an unqualified pass. Rules with nothing
-      applicable to check land in ``inapplicable`` instead and are
-      deliberately *not* printed here: they are not a gap (see
-      ``docs/cli/drc.md``).
-    - **Unchecked stream layers** (issue #189): geometry drawn on layers no
-      active rule references at all.
-    """
-    skipped_requested = coverage.get("skipped") or []
-    if skipped_requested:
-        print(f"skipped requested rules: {len(skipped_requested)}")
-        for record in skipped_requested:
-            print(f"  {record['id']}: {record['reason']}")
-
-    unchecked_layers = coverage["layers_in_stream_without_rules"]
-    if unchecked_layers:
-        print(f"unchecked layers in stream: {len(unchecked_layers)}")
-
-
-def _print_text(report: dict) -> None:
-    print(f"file: {report['file']}")
-    print(f"deck: {report['deck']}")
-    if "engine" in report:
-        print(f"engine: {report['engine']}")
-    print(f"dbu_um: {report['dbu_um']}")
-    print(f"status: {report['status']}")
-    # Issue #1941: a run that tolerated deck errors via --allow-deck-errors
-    # ran only part of its deck -- say so, so the text form never renders a
-    # partial run as an unqualified "clean".
-    deck_errors = report.get("engine_deck_errors")
-    if deck_errors is not None:
-        print(
-            "deck errors tolerated (--allow-deck-errors): klayout exit "
-            f"status {deck_errors['exit_status']}, "
-            f"{len(deck_errors['error_lines'])} ERROR line(s)"
+def _negative_control_categories(args: argparse.Namespace) -> list[str] | None:
+    """Split ``--negative-control-categories`` (issue #3076) into names;
+    refused without ``--negative-control`` rather than silently ignored."""
+    raw = args.negative_control_categories
+    if raw is None:
+        return None
+    if args.negative_control is None:
+        raise DrcError(
+            "--negative-control-categories requires --negative-control <layout>"
         )
-        for line in deck_errors["error_lines"]:
-            print(f"  {line}")
-    print(f"violations: {report['violation_count']}")
-    _print_coverage_gaps(report["coverage"])
+    names = sorted({name.strip() for name in raw.split(",") if name.strip()})
+    if not names:
+        raise DrcError("--negative-control-categories names no category")
+    return names
 
-    rule_counts = report["rule_counts"]
-    if rule_counts:
-        print()
-        print("rule_counts:")
-        for rule_id in sorted(rule_counts):
-            print(f"  {rule_id}: {rule_counts[rule_id]}")
 
-    violations = report["violations"]
-    if not violations:
-        return
-
-    print()
-    for entry in violations:
-        bbox = entry["bbox"]
-        print(
-            f"{entry['rule']}  {entry['cell']}  {entry['layer']}  "
-            f"({bbox['left']},{bbox['bottom']})-({bbox['right']},{bbox['top']})  "
-            f"{entry['description']}"
+def _expected_rule_category_names(args: argparse.Namespace) -> list[str] | None:
+    """Resolve ``--expect-rule-categories-file`` (issue #2806) into the
+    sorted, deduplicated names :func:`run_drc_klayout_engine` compares
+    against, once, at the CLI/request boundary -- before KLayout is launched.
+    Combining it with ``--expect-rule-categories`` is rejected first, so a
+    conflicting invocation never even reads the manifest."""
+    manifest = args.expect_rule_categories_file
+    if manifest is None:
+        return None
+    if args.expect_rule_categories is not None:
+        raise DrcError(
+            "--expect-rule-categories and --expect-rule-categories-file are "
+            "mutually exclusive -- pass one rule-category assertion"
         )
-
-
-def _print_check_text(result: dict) -> None:
-    print(f"report: {result['report']}")
-    print(f"status: {result['status']}")
-    for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
-        print(f"  [{mark}] {check['field']}")
-        if not check["match"]:
-            print(f"      expected: {check['expected']}")
-            print(f"      actual:   {check['actual']}")
+    return load_rule_category_manifest(manifest)

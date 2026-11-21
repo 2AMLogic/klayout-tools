@@ -12,9 +12,12 @@ on:
 permissions:
   contents: read
 
+# PRs: one group per PR number; a newer push cancels the superseded run.
+# main: one shared group (github.ref) that never cancels a started run; the
+# default single pending slot still lets a newer merge replace a waiting run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # uv caches (issue #2559): every `astral-sh/setup-uv` step below RESTORES on any
 # ref but SAVES only on pushes to main (`save-cache`). The repo's Actions cache
@@ -60,10 +63,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # Issue #6390: one run measured 599s in this step (full-history
+        # clone), tripping the job's 10-minute cap so the eight gates after
+        # it were skipped with no named failing step. A per-step timeout
+        # makes a hung clone fail here, named, without touching the job cap.
+        timeout-minutes: 4
+        with:
+          # Full history: the per-file size ratchet below (issue #2766)
+          # computes a PR's merge-base against its actual target branch,
+          # and a push-to-main run fetches the push's before SHA (which a
+          # force-push leaves unreachable from the new tip). ~40 MiB of
+          # pack per fetch (measured 2026-10-12) buys the ratchet its
+          # trusted comparison revision; the other steps don't care.
+          fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -105,6 +121,75 @@ jobs:
         # before merging rather than trusting a snapshot taken earlier in the
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
+
+      - name: Per-file size ratchet (merge-base)
+        # scripts/check_file_size_baseline.py (issue #2766). It reads
+        # file-size-baseline.json from the comparison revision to
+        # identify allowed debt and caps growth at the sizes measured there.
+        # Existing oversized paths can carry forward a larger trusted entry
+        # after a shrink. Edited entries must match the candidate size. At
+        # or below the hard limit, or after deletion, remove the entry.
+        # Full policy and vendor-update path are in scripts/README.md.
+        #
+        # Comparison revision (see also fetch-depth: 0 on this job's
+        # checkout): PRs use the merge-base with their ACTUAL target
+        # branch -- the pull_request checkout is GitHub's merge result, so
+        # concurrent main changes are represented; pushes to main use the
+        # push's before SHA, which covers multi-commit pushes where a
+        # merge-base with main itself would compare the push against
+        # itself. A missing ref fails the step with fetch instructions
+        # rather than silently comparing against nothing. When the
+        # comparison revision predates this checker (this gate's own
+        # landing PR), the checker bootstraps the trusted baseline from
+        # that tree's measured content.
+        env:
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags origin \
+              "refs/heads/${PR_BASE_BRANCH}:refs/remotes/origin/${PR_BASE_BRANCH}"
+            compare_rev="$(git merge-base HEAD "refs/remotes/origin/${PR_BASE_BRANCH}")"
+          else
+            if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              echo "::error::push event has no usable 'before' SHA ('$PUSH_BEFORE'); cannot determine the comparison revision" >&2
+              exit 2
+            fi
+            git fetch --no-tags origin "$PUSH_BEFORE"
+            compare_rev="$PUSH_BEFORE"
+          fi
+          uv run --frozen --extra dev python scripts/check_file_size_baseline.py \
+            --comparison-rev "$compare_rev"
+
+      - name: Type-check ratchet (mypy)
+        # scripts/check_type_baseline.py (issue #3221): mypy over src/ against
+        # type-baseline.json, keyed on (file, error code, message). Fails on a
+        # new diagnostic or a baselined one occurring more often; decreases
+        # never fail. Runs on this job's single Python version only. Refresh
+        # procedure: docs/type-checking.md. GATES -- do not add
+        # continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_type_baseline.py
+
+      - name: Verb-module import boundaries
+        # scripts/check_import_boundaries.py (issue #2767): static AST gate
+        # for docs/ARCHITECTURE.md's "verb modules stay self-contained"
+        # rule. Fails on an unclassified module, a cross-group private-symbol
+        # import, or an undeclared cross-group edge, against the policy and
+        # seeded legacy exceptions in import-boundaries.json. Never imports
+        # klayout_tools. GATES -- do not add continue-on-error.
+        run: uv run --frozen --extra dev python scripts/check_import_boundaries.py
+
+      - name: Canary manifest matches the forge
+        # `ingest-canary.py --check-manifest` (issue #4642): fails when a public
+        # 2AMLogic canary repo is missing from blocks/canaries.json, or a listed
+        # repo is no longer public. Only reads public repo names, so the
+        # read-only GITHUB_TOKEN a fork PR gets is enough. A `gh` failure is a
+        # failure (never a silent pass). Fix: `scripts/ingest-canary.py
+        # --sync-manifest`, then ingest the new entries (blocks/README.md).
+        # GATES -- do not add continue-on-error.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen --extra dev python scripts/ingest-canary.py --check-manifest
 
       - name: Committed examples/ carry no absolute host paths
         # `klt env-provenance lint-envelope` (issue #2224) over every
@@ -224,23 +309,24 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # Both files share this one crate (issue #923, Phase 3 of the
+            # All three files share this one crate (issue #923, Phase 3 of the
             # statistical/yield epic #710, added `klt yield-sensitivity` to
-            # the same `klt_yield_native` extension `klt yield` uses).
-            test_paths: tests/test_yield.py tests/test_yield_sensitivity.py
+            # the same `klt_yield_native` extension `klt yield` uses; issue
+            # #2675 added the `klt yield-campaign` native end-to-end tests).
+            test_paths: tests/test_yield.py tests/test_yield_campaign.py tests/test_yield_sensitivity.py
             extension_module: klt_yield_native
-            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
+            no_skip_message: "klt_yield_native did not install -- tests/test_yield.py's, tests/test_yield_campaign.py's and tests/test_yield_sensitivity.py's statistics tiers would have skipped"
     defaults:
       run:
         working-directory: ${{ matrix.dir }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -265,7 +351,7 @@ jobs:
         run: cargo test ${{ matrix.cargo_test_args }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -539,13 +625,13 @@ jobs:
       run:
         working-directory: native/statime
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -572,7 +658,7 @@ jobs:
         run: cargo test
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -675,13 +761,13 @@ jobs:
       run:
         working-directory: native/techmap
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -707,7 +793,7 @@ jobs:
         # above only runs *its own* package's tests, never a path
         # dependency's, so the shared crate's own union-of-both-forks test
         # suite needs its own explicit invocation below.
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -747,13 +833,13 @@ jobs:
       run:
         working-directory: native/wave
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: cargo --version
         run: cargo --version && rustc --version
 
       - name: Cache cargo registry + build output
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -798,10 +884,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -832,7 +918,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so the diff below can compare against the PR base
           # / pre-push commit -- the default shallow (depth-1) checkout
@@ -866,7 +952,7 @@ jobs:
         with:
           # Node 22+ per site/README.md / site's @types/node -- matches
           # deploy-site.yml's own Node setup.
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: site/package-lock.json
 
@@ -895,13 +981,20 @@ jobs:
     runs-on: ubuntu-24.04
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
-    # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
-    # built from source on a cache miss, not the ~2-3 minute cache-hit path
-    # this job normally takes) measured 23m26s-24m28s across the matrix on
-    # run 31452136100 (2026-08-11, triggered by a cache-key change in #689):
-    # Yosys ~14.5min, Verilator ~6min, Icarus ~1m45s. 45 minutes leaves
-    # ~1.9x margin over that measurement for runner variance.
-    timeout-minutes: 45
+    # minutes. Sized 2026-11-17 (issue #6061) from fresh measurements:
+    # warm-cache pytest alone ran 18.7-35.2 min across the 25 legs of 5
+    # recent main runs (median ~25 min), and a cold-cache run (Yosys/Icarus
+    # Verilog/Verilator all built from source on a cache miss, not the
+    # ~2-3 minute cache-hit path this job normally takes) spent ~26 min of
+    # setup before pytest even started (run 44079621959, PR #6103,
+    # 2026-11-16 — a cold cache hits ordinary PRs too, not only ones that
+    # bust installer cache keys; run 43983075799 / PR #6000 showed the same
+    # 19-26 min cold setup). Worst observed cold case ~26 min setup + ~35
+    # min pytest overflowed the old 45-minute cap, cancelling the slowest
+    # legs with zero test failures. 90 minutes leaves ~1.4x margin over
+    # that worst case for runner variance while still bounding a hang at
+    # well under the 360-minute platform default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -915,10 +1008,10 @@ jobs:
         # one per interpreter that exists.
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -949,7 +1042,7 @@ jobs:
         # failed -- confirmed on main and PR #1194 (multiple ~45min hangs on
         # this exact step, 2026-08-19). 5 minutes is generous for a normal
         # `apt-get update && apt-get install` of one package, while still
-        # failing fast relative to the 45-minute job budget.
+        # failing fast well inside the job budget.
         #
         # The timeout alone only converts the stall into a *red check*
         # though (issue #1219): on 2026-08-19 the runner-local
@@ -975,6 +1068,20 @@ jobs:
       - name: Verify ngspice runs headlessly
         run: ngspice -v
 
+      - name: Cache gallery-cell SPICE netlists
+        # Issue #4908 (recurrence of #4726): raw.githubusercontent.com outages
+        # longer than the fetch script's retry budget failed unrelated PRs.
+        # Restoring the already-verified directory lets the script's
+        # `.fetched-manifest-version` marker short-circuit skip the network.
+        # The key hashes the script, which holds the pinned SHAs, checksums
+        # and MANIFEST_VERSION, so any pin/manifest edit forces a refetch and
+        # re-verification. The fetch step below is unchanged and still fails
+        # closed on a checksum mismatch.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: pdks/cell-netlists
+          key: cell-netlists-${{ runner.os }}-${{ hashFiles('scripts/fetch-cell-netlists.sh', 'scripts/_install_common.sh') }}
+
       - name: Fetch real gallery-cell SPICE netlists
         # Pinned, checksum-verified per-file fetch (see the script's header
         # comment) -- small (~9 MB), unlike fetch-pdks.sh's lambdapdk. Backs
@@ -983,7 +1090,20 @@ jobs:
         # silently pass) if this step is ever unavailable, but CI always has it.
         run: scripts/fetch-cell-netlists.sh
 
+      - name: Cache pinned Yosys build
+        id: yosys-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/yosys-0.67
+          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
+
       - name: Install Yosys build dependencies
+        # Cache-hit gate (issue #4100): these packages exist only to compile
+        # Yosys, and the compile step below is already skipped on a cache hit,
+        # so a warm-cache leg no longer touches the apt mirror at all. The
+        # cache step therefore runs before this one. Cache-miss runs still
+        # install and build, and remain exposed to mirror flakes by design.
+        if: steps.yosys-cache.outputs.cache-hit != 'true'
         # scripts/install-yosys.sh builds Yosys from a pinned, checksum-
         # verified source release (issue #417) -- `apt-get install yosys`
         # would resolve Ubuntu 24.04's 0.33-5build2, ~30 releases stale
@@ -1047,13 +1167,6 @@ jobs:
             cmake bison flex libfl-dev libreadline-dev gawk tcl-dev \
             libffi-dev pkg-config zlib1g-dev
 
-      - name: Cache pinned Yosys build
-        id: yosys-cache
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/yosys-0.67
-          key: yosys-0.67-${{ runner.os }}-${{ hashFiles('scripts/install-yosys.sh', 'scripts/_install_common.sh') }}
-
       - name: Build + install pinned Yosys (cache miss only)
         if: steps.yosys-cache.outputs.cache-hit != 'true'
         run: scripts/install-yosys.sh
@@ -1063,6 +1176,37 @@ jobs:
 
       - name: Verify Yosys runs headlessly
         run: yosys -V
+
+      - name: Cache pinned sv2v install
+        # Issue #5956: the sv2v front end `klt synthesize`'s
+        # `sv_frontend: "sv2v"` route shells out to. Prebuilt upstream
+        # release asset, so -- unlike the Yosys block above -- a cache
+        # miss is a ~2 MB download + unzip, no apt packages and no build.
+        id: sv2v-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/sv2v-0.0.13
+          key: sv2v-0.0.13-${{ runner.os }}-${{ hashFiles('scripts/install-sv2v.sh', 'scripts/_install_common.sh') }}
+
+      - name: Install pinned sv2v (cache miss only)
+        # scripts/install-sv2v.sh (issue #5956) installs the pinned,
+        # checksum-verified sv2v release binary so
+        # tests/test_synthesize_netlist_normalize.py's two real-sv2v
+        # reproducibility tests (issue #5594's AC2/AC4) run here instead
+        # of skipping -- before this, no CI leg installed sv2v, so both
+        # tests skipped on every leg and AC2/AC4 were verified locally
+        # only, on hosts that happen to have sv2v on PATH.
+        if: steps.sv2v-cache.outputs.cache-hit != 'true'
+        run: scripts/install-sv2v.sh
+
+      - name: Add pinned sv2v to PATH
+        run: echo "$HOME/.cache/sv2v-0.0.13/bin" >>"$GITHUB_PATH"
+
+      - name: Verify sv2v runs headlessly
+        # Also the per-leg presence guard (issue #5956 AC3): if the
+        # cache restore or install ever breaks, this fails the leg here
+        # instead of letting the sv2v tests silently skip.
+        run: sv2v --version
 
       - name: Install SymbiYosys (sby) + Bitwuzla runtime dependencies
         # scripts/install-symbiyosys.sh (issue #1312, Phase 2 of Epic #707)
@@ -1095,7 +1239,7 @@ jobs:
 
       - name: Cache pinned SymbiYosys + Bitwuzla install
         id: symbiyosys-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/symbiyosys-0.67
           key: symbiyosys-0.67-bitwuzla-0.9.1-${{ runner.os }}-${{ hashFiles('scripts/install-symbiyosys.sh', 'scripts/_install_common.sh') }}
@@ -1121,10 +1265,10 @@ jobs:
 
       - name: Cache pinned sky130_fd_sc_hd liberty
         id: sky130-liberty-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: pdks/sky130-liberty
-          key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh') }}
+          key: sky130-liberty-${{ hashFiles('scripts/fetch-sky130-liberty.sh', 'scripts/_install_common.sh') }}
 
       - name: Fetch sky130_fd_sc_hd liberty (tt_025C_1v80 corner)
         # A real, Yosys-parseable Liberty timing view for `klt synthesize`'s
@@ -1164,7 +1308,7 @@ jobs:
 
       - name: Cache pinned Icarus Verilog build
         id: icarus-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/icarus-13.0
           key: icarus-13.0-${{ runner.os }}-${{ hashFiles('scripts/install-icarus-verilog.sh', 'scripts/_install_common.sh') }}
@@ -1181,7 +1325,7 @@ jobs:
 
       - name: Cache pinned Verilator build
         id: verilator-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/verilator-5.050
           key: verilator-5.050-${{ runner.os }}-${{ hashFiles('scripts/install-verilator.sh', 'scripts/_install_common.sh') }}
@@ -1197,7 +1341,7 @@ jobs:
         run: verilator --version
 
       - name: Cache native/techmap cargo build (debug)
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -1218,6 +1362,24 @@ jobs:
         # since `klt-techmap` has no `pyo3` extension surface to build);
         # the cache step above keeps a warm-cache rebuild fast.
         run: cargo build --manifest-path native/techmap/Cargo.toml
+
+      - name: Cache native/wave cargo build (debug)
+        # tests/test_wave.py::test_build_then_query_modexp_canary_counts_done_handshakes
+        # builds `native/wave` from inside pytest (`build_cargo_binary`), which
+        # on a cold cargo registry does a crates.io fetch of `fst-reader` et
+        # al. in every matrix leg; one stalled fetch reds an unrelated PR
+        # (issue #6635, PR #6304's `Tests (Python 3.12)`). Mirrors the
+        # `native/techmap` step above. No separate build step: pytest builds
+        # the crate, and this step's post-job save captures the fetched
+        # registry.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/wave/target
+          key: cargo-wave-debug-${{ runner.os }}-${{ hashFiles('native/wave/Cargo.lock') }}
+          restore-keys: cargo-wave-debug-${{ runner.os }}-
 
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
@@ -1261,11 +1423,70 @@ jobs:
         # coverage percentages, plus the `options.random_seed` end-to-end
         # pinning/echo tests (issue #423 AC #4) -- including that two runs of
         # the same seeded request reproduce identical `tests[]` content.
-        run: uv run --frozen --extra dev --extra functional-verification pytest
+        #
+        # Report-only coverage (issue #3223): COV_ARGS is non-empty on the
+        # 3.12 leg only (one leg, to respect the wall-clock budget), where it
+        # adds --cov and a JSON report that the two steps below publish.
+        # No --cov-fail-under: measure first, ratchet in a follow-up. Config
+        # lives in pyproject.toml's [tool.coverage.*]; see
+        # docs/guides/test-coverage.md.
+        run: uv run --frozen --extra dev --extra functional-verification pytest $COV_ARGS
         env:
           GH_TOKEN: ${{ github.token }}
           PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
           PDK: sky130A
+          COV_ARGS: ${{ matrix.python-version == '3.12' && '--cov --cov-report=json:coverage.json --cov-report=term' || '' }}
+
+      - name: Assert the sv2v reproducibility tests ran (no silent skip)
+        # Issue #5956: before the pinned sv2v steps above,
+        # tests/test_synthesize_netlist_normalize.py's two `_needs_sv2v`
+        # tests skipped on every CI leg, so issue #5594's AC2/AC4 were
+        # host-only. Same no-silent-skip posture as the `test-numerical`
+        # job's cross-check assert (issue #2276): this job provisions
+        # sv2v, Yosys and the sky130 liberty, so a skip in that file is a
+        # red, never a green lie. Runs the file explicitly with -rs on
+        # one leg (3.12, the leg that already carries the coverage extra)
+        # so any skip is named in this step's own log block -- that log
+        # line is also the AC1 "tests ran, 0 skipped" evidence.
+        if: matrix.python-version == '3.12'
+        run: |
+          set -o pipefail
+          sv2v --version
+          uv run --frozen --extra dev --extra functional-verification pytest \
+            tests/test_synthesize_netlist_normalize.py -rs \
+            | tee /tmp/sv2v-normalize-pytest.log
+          summary="$(tail -n 1 /tmp/sv2v-normalize-pytest.log)"
+          echo "pytest summary: $summary"
+          if echo "$summary" | grep -q 'skipped'; then
+            echo "::error::test_synthesize_netlist_normalize.py reported skips -- sv2v/Yosys/sky130 liberty are all provisioned in this job, so a skip here is a bug (issue #5956: this file's real-sv2v tests must RUN, never skip)"
+            exit 1
+          fi
+        env:
+          PDK_ROOT: ${{ github.workspace }}/pdks/sky130-liberty
+          PDK: sky130A
+
+      - name: Coverage job summary (report-only)
+        # `!cancelled()` so a red pytest still publishes what was measured;
+        # hashFiles guards the legs that did not collect coverage.
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        run: python3 scripts/coverage_summary.py coverage.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage floor (ratchet)
+        # Issue #3312. Fails when a module's line/branch coverage drops below
+        # its floor in coverage-baseline.json. Only on the leg that measures
+        # coverage, and only when pytest passed (a red run's coverage is
+        # partial and would double-report). Re-seed from completed main runs:
+        # docs/guides/test-coverage.md.
+        if: ${{ success() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        run: python3 scripts/check_coverage_baseline.py coverage.json
+
+      - name: Upload coverage report
+        if: ${{ !cancelled() && matrix.python-version == '3.12' && hashFiles('coverage.json') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.json
+          retention-days: 30
 
       - name: klt kb validate
         # Belt-and-suspenders alongside tests/test_kb.py (which calls the same
@@ -1313,7 +1534,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1322,12 +1543,12 @@ jobs:
         # different prefix AND a different path length, so a generator that
         # embeds its own absolute path produces different bytes here --
         # precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1437,7 +1658,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Prepare fixture block directories
         # `layout-metrics` expects a block *directory* (docs/cli/layout-metrics.md),
@@ -1555,7 +1776,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out the primary copy
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: primary
 
@@ -1563,12 +1784,12 @@ jobs:
         # A different prefix AND a different path length: a generator that
         # embeds its own absolute path produces different bytes here, which
         # is precisely what the byte-compare below is looking for.
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           path: second-checkout/nested/deeper-than-the-primary
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           # Restore anywhere, save only on main -- see the uv-cache note above
@@ -1623,6 +1844,123 @@ jobs:
           retention-days: 90
           if-no-files-found: ignore
 
+  asap7-drc-deck:
+    name: ASAP7 DRC deck fixtures (klayout binary)
+    # The in-repo ASAP7 deck (src/klayout_tools/decks/asap7.drc, issue #2760)
+    # is a KLayout DRC-DSL script, which only the standalone `klayout`
+    # application binary can run -- the pip `klayout` wheel the `test` job
+    # installs has no DSL runner, so there tests/test_drc_asap7_deck.py's
+    # per-rule fixture tier skips. This job installs the binary (Ubuntu
+    # 24.04's apt package, KLayout 0.28.16, the version the deck was
+    # validated against) and runs that module, so every rule's failing and
+    # boundary-passing fixture is checked in CI. It also runs
+    # tests/test_place_and_route_via_tip.py (issue #5886): its differential
+    # oracle runs the real deck over generated geometry, and at 0.28.16 it
+    # was measured to agree rule-for-rule with the in-process tip pass --
+    # per-rule counts M1.S.2/M1.S.3/M1.S.4/M1.S.5 = 1/1/1/1 on both sides,
+    # identical to 0.30.12 -- so the DSL semantics this job pins are the ones
+    # the wheel-side edge-check API agrees with. The shipped-cell clean run
+    # in test_drc_asap7_deck.py still skips here: it needs
+    # scripts/fetch-pdks.sh's lambdapdk payload, which CI does not fetch.
+    #
+    # Its own job rather than an apt step in `test`: installing the binary
+    # there would also switch on every other real-binary tier of the suite
+    # across the whole matrix.
+    #
+    # No row in .github/ci-wall-clock-budget.json yet: an unbudgeted job
+    # falls back to `default_job_budget_seconds` (600 s), the documented path
+    # for a job with no measured baseline (docs/guides/ci-wall-clock-budget.md).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          # Restore anywhere, save only on main -- see the uv-cache note above
+          # the `jobs:` key (issue #2559).
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Restore cached klayout .deb closure
+        # Issue #4392: the apt `klayout` package drags in a large Qt5 .deb
+        # set, and a slow mirror (#4059, #4075, #4372) either failed the
+        # install or pushed the job past its wall-clock budget. Caching the
+        # downloaded .debs means most runs never touch the mirror. Restore
+        # anywhere, save only on main (same pattern as the uv cache, #2559).
+        # Bump the `v1` in the key when the pinned version/deps change.
+        id: klayout-debs
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: klayout-0.28.16-ubuntu24.04-v1-${{ hashFiles('scripts/ci-apt-*.sh') }}
+
+      - name: Install the klayout binary
+        # Cache hit: install offline from the restored .debs; any failure
+        # (stale/corrupt cache, missing dep) falls through to the apt path.
+        # Same bounded, mirror-tolerant apt wrapper as the `test` job's
+        # ngspice step (issues #1204, #1219). The apt `klayout` package
+        # pulls Qt5 widgets libs, so the bare 90s per-command cap killed a
+        # slow-but-live mirror mid-download on every retry (issue #4059).
+        # Same sizing as the Yosys-deps step (#2662): two full-length
+        # attempts fit (60 + 150 + 5 backoff + 150 = 365s <= 380s) inside
+        # the 420s (`timeout-minutes: 7`) backstop. Only a degraded-mirror
+        # day pays the worst case; a normal run is unchanged (~30s).
+        timeout-minutes: 7
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "380"
+          CI_APT_PER_CMD_TIMEOUT: "150"
+        run: |
+          DEBS="$HOME/.cache/klayout-debs"
+          HIT="${{ steps.klayout-debs.outputs.cache-hit }}"
+          # Record path + seconds so the first post-merge cache hit is
+          # verifiable from the job summary (hit should be seconds, a miss
+          # pays the mirror).
+          report() {
+            echo "klayout install: cache-hit=${HIT:-false} path=$1 seconds=$SECONDS" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          if [ "$HIT" = "true" ] \
+             && sudo dpkg -i "$DEBS"/*.deb && klayout -v; then
+            echo "klayout installed from cached .debs (no network)"
+            report offline
+            exit 0
+          fi
+          # A failed offline install can leave packages half-configured;
+          # settle dpkg before the apt path takes over.
+          [ "$HIT" = "true" ] && { sudo dpkg --configure -a || true; }
+          scripts/ci-apt-install.sh klayout
+          # Populate the cache dir for the save step (miss / fallback path).
+          # The glob may match nothing if the runner purges the apt archive;
+          # that must not turn a successful install into a red step.
+          rm -rf "$DEBS" && mkdir -p "$DEBS"
+          if compgen -G "/var/cache/apt/archives/*.deb" >/dev/null; then
+            cp /var/cache/apt/archives/*.deb "$DEBS"/
+          else
+            echo "no .debs in /var/cache/apt/archives; nothing to cache"
+          fi
+          report apt
+
+      - name: Save klayout .deb closure (main only)
+        if: github.ref == 'refs/heads/main' && steps.klayout-debs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/klayout-debs
+          key: ${{ steps.klayout-debs.outputs.cache-primary-key }}
+
+      - name: ASAP7 deck fixtures
+        run: |
+          klayout -v
+          # The via-tip oracle's one @_needs_klayout test
+          # (test_counts_match_the_real_deck) skips without the binary, so it
+          # only executes here (#5762, ~+10 s measured).
+          uv run --frozen --extra dev pytest tests/test_drc_asap7_deck.py tests/test_place_and_route_via_tip.py -q -rs
+
   wall-clock-budget:
     name: CI wall-clock budget
     # Issue #1971 measured CI wall clock across the 2AM Logic repos and found
@@ -1633,9 +1971,9 @@ jobs:
     # parallelised. That makes klayout-tools the one repo where the work
     # itself has to shrink, and so the one repo where a compute regression is
     # worth gating on. Before this job nothing did: the per-job
-    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 45
-    # minutes for a 3-minute job), so a leg could quietly triple and still be
-    # green. See docs/guides/ci-wall-clock-budget.md.
+    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 90
+    # minutes for a job whose median is ~25), so a leg could quietly triple
+    # and still be green. See docs/guides/ci-wall-clock-budget.md.
     #
     # `needs:` every measured job so this runs last and sees their completed
     # timings; `if: always()` so a red run still gets its breakdown (a
@@ -1647,6 +1985,7 @@ jobs:
       - native-techmap
       - native-wave
       - signoff-example
+      - asap7-drc-deck
       - site
       - test
       - test-numerical
@@ -1662,7 +2001,7 @@ jobs:
       # The Actions API call below reads this run's own job timings.
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Fetch this run's job and run timings
         env:

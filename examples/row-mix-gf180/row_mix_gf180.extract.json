@@ -1,0 +1,432 @@
+{
+  "device_count": 14,
+  "device_counts": {
+    "nfet": 7,
+    "pfet": 7
+  },
+  "devices": [
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$1",
+      "nets": {
+        "b": "VSS",
+        "d": "\\$4",
+        "g": "A",
+        "s": "VSS"
+      },
+      "params": {
+        "ad_um2": 0.208,
+        "as_um2": 0.352,
+        "l_um": 0.28,
+        "pd_um": 1.32,
+        "ps_um": 2.48,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$10",
+      "nets": {
+        "b": "VDD",
+        "d": "\\$12",
+        "g": "\\$5",
+        "s": "VDD"
+      },
+      "params": {
+        "ad_um2": 0.416,
+        "as_um2": 0.704,
+        "l_um": 0.28,
+        "pd_um": 2.12,
+        "ps_um": 4.08,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$11",
+      "nets": {
+        "b": "VDD",
+        "d": "\\$13",
+        "g": "B",
+        "s": "\\$12"
+      },
+      "params": {
+        "ad_um2": 0.416,
+        "as_um2": 0.416,
+        "l_um": 0.28,
+        "pd_um": 2.12,
+        "ps_um": 2.12,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$12",
+      "nets": {
+        "b": "VDD",
+        "d": "\\$6",
+        "g": "C",
+        "s": "\\$13"
+      },
+      "params": {
+        "ad_um2": 0.704,
+        "as_um2": 0.416,
+        "l_um": 0.28,
+        "pd_um": 4.08,
+        "ps_um": 2.12,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$13",
+      "nets": {
+        "b": "VDD",
+        "d": "Y",
+        "g": "\\$6",
+        "s": "VDD"
+      },
+      "params": {
+        "ad_um2": 0.416,
+        "as_um2": 0.704,
+        "l_um": 0.28,
+        "pd_um": 2.12,
+        "ps_um": 4.08,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$14",
+      "nets": {
+        "b": "VDD",
+        "d": "VDD",
+        "g": "VDD",
+        "s": "Y"
+      },
+      "params": {
+        "ad_um2": 0.704,
+        "as_um2": 0.416,
+        "l_um": 0.28,
+        "pd_um": 4.08,
+        "ps_um": 2.12,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$2",
+      "nets": {
+        "b": "VSS",
+        "d": "\\$5",
+        "g": "S",
+        "s": "\\$4"
+      },
+      "params": {
+        "ad_um2": 0.352,
+        "as_um2": 0.208,
+        "l_um": 0.28,
+        "pd_um": 2.48,
+        "ps_um": 1.32,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$3",
+      "nets": {
+        "b": "VSS",
+        "d": "\\$6",
+        "g": "\\$5",
+        "s": "VSS"
+      },
+      "params": {
+        "ad_um2": 0.208,
+        "as_um2": 0.352,
+        "l_um": 0.28,
+        "pd_um": 1.32,
+        "ps_um": 2.48,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$4",
+      "nets": {
+        "b": "VSS",
+        "d": "VSS",
+        "g": "B",
+        "s": "\\$6"
+      },
+      "params": {
+        "ad_um2": 0.208,
+        "as_um2": 0.208,
+        "l_um": 0.28,
+        "pd_um": 1.32,
+        "ps_um": 1.32,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$5",
+      "nets": {
+        "b": "VSS",
+        "d": "\\$6",
+        "g": "C",
+        "s": "VSS"
+      },
+      "params": {
+        "ad_um2": 0.352,
+        "as_um2": 0.208,
+        "l_um": 0.28,
+        "pd_um": 2.48,
+        "ps_um": 1.32,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$6",
+      "nets": {
+        "b": "VSS",
+        "d": "Y",
+        "g": "\\$6",
+        "s": "VSS"
+      },
+      "params": {
+        "ad_um2": 0.208,
+        "as_um2": 0.352,
+        "l_um": 0.28,
+        "pd_um": 1.32,
+        "ps_um": 2.48,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "nfet",
+      "instance_path": [],
+      "name": "$7",
+      "nets": {
+        "b": "VSS",
+        "d": "VSS",
+        "g": "VSS",
+        "s": "Y"
+      },
+      "params": {
+        "ad_um2": 0.352,
+        "as_um2": 0.208,
+        "l_um": 0.28,
+        "pd_um": 2.48,
+        "ps_um": 1.32,
+        "w_um": 0.8
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$8",
+      "nets": {
+        "b": "VDD",
+        "d": "\\$4",
+        "g": "A",
+        "s": "VDD"
+      },
+      "params": {
+        "ad_um2": 0.416,
+        "as_um2": 0.704,
+        "l_um": 0.28,
+        "pd_um": 2.12,
+        "ps_um": 4.08,
+        "w_um": 1.6
+      }
+    },
+    {
+      "class": "pfet",
+      "instance_path": [],
+      "name": "$9",
+      "nets": {
+        "b": "VDD",
+        "d": "\\$5",
+        "g": "SB",
+        "s": "\\$4"
+      },
+      "params": {
+        "ad_um2": 0.704,
+        "as_um2": 0.416,
+        "l_um": 0.28,
+        "pd_um": 4.08,
+        "ps_um": 2.12,
+        "w_um": 1.6
+      }
+    }
+  ],
+  "net_count": 13,
+  "nets": [
+    {
+      "device_count": 2,
+      "label_positions_um": [
+        {
+          "text": "A",
+          "x_um": 0.8,
+          "y_um": 3.6
+        }
+      ],
+      "name": "A",
+      "net_id": 2,
+      "pin": true,
+      "pin_index": 0
+    },
+    {
+      "device_count": 2,
+      "label_positions_um": [
+        {
+          "text": "B",
+          "x_um": 3.17,
+          "y_um": 5.4
+        }
+      ],
+      "name": "B",
+      "net_id": 10,
+      "pin": true,
+      "pin_index": 1
+    },
+    {
+      "device_count": 2,
+      "label_positions_um": [
+        {
+          "text": "C",
+          "x_um": 4.8,
+          "y_um": 6.0
+        }
+      ],
+      "name": "C",
+      "net_id": 3,
+      "pin": true,
+      "pin_index": 2
+    },
+    {
+      "device_count": 1,
+      "label_positions_um": [
+        {
+          "text": "S",
+          "x_um": 1.6,
+          "y_um": 3.0
+        }
+      ],
+      "name": "S",
+      "net_id": 8,
+      "pin": true,
+      "pin_index": 3
+    },
+    {
+      "device_count": 1,
+      "label_positions_um": [
+        {
+          "text": "SB",
+          "x_um": 1.6,
+          "y_um": 6.6
+        }
+      ],
+      "name": "SB",
+      "net_id": 9,
+      "pin": true,
+      "pin_index": 4
+    },
+    {
+      "device_count": 12,
+      "label_positions_um": [
+        {
+          "text": "VDD",
+          "x_um": 0.3,
+          "y_um": 9.9
+        }
+      ],
+      "name": "VDD",
+      "net_id": 11,
+      "pin": true,
+      "pin_index": 5
+    },
+    {
+      "device_count": 14,
+      "label_positions_um": [
+        {
+          "text": "VSS",
+          "x_um": 0.3,
+          "y_um": 0.35
+        }
+      ],
+      "name": "VSS",
+      "net_id": 14,
+      "pin": true,
+      "pin_index": 6
+    },
+    {
+      "device_count": 4,
+      "label_positions_um": [
+        {
+          "text": "Y",
+          "x_um": 6.8,
+          "y_um": 5.0
+        }
+      ],
+      "name": "Y",
+      "net_id": 7,
+      "pin": true,
+      "pin_index": 7
+    },
+    {
+      "device_count": 2,
+      "label_positions_um": [],
+      "name": "\\$12",
+      "net_id": 12,
+      "pin": false,
+      "pin_index": null
+    },
+    {
+      "device_count": 2,
+      "label_positions_um": [],
+      "name": "\\$13",
+      "net_id": 13,
+      "pin": false,
+      "pin_index": null
+    },
+    {
+      "device_count": 4,
+      "label_positions_um": [],
+      "name": "\\$4",
+      "net_id": 4,
+      "pin": false,
+      "pin_index": null
+    },
+    {
+      "device_count": 4,
+      "label_positions_um": [],
+      "name": "\\$5",
+      "net_id": 5,
+      "pin": false,
+      "pin_index": null
+    },
+    {
+      "device_count": 6,
+      "label_positions_um": [],
+      "name": "\\$6",
+      "net_id": 6,
+      "pin": false,
+      "pin_index": null
+    }
+  ],
+  "split_net_labels": [],
+  "status": "extracted"
+}

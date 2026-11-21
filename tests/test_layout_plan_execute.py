@@ -1124,3 +1124,143 @@ def test_execute_propagates_phase_b_validation_errors_unchanged(
     request = _geometry_request(tmp_path, pdk_root, empty_netlist, groups, rows)
     with pytest.raises(LayoutPlanError):
         execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+
+# Issue #4202: row placement used to leave group origins off the PDK
+# manufacturing grid, so every shape in a downstream group failed *.ongrid.1.
+def test_resolved_group_origins_snap_up_onto_mfg_grid(
+    tmp_path, gf180mcu_pdk_root, empty_netlist
+):
+    groups = [
+        {
+            "id": "r1",
+            "devices": [],
+            "generator": "res_array",
+            "params": {"width_um": 4.0, "length_um": 0.343, "snap": False},
+        },
+        {"id": "m1", "devices": [], "generator": "mos_array"},
+    ]
+    request = _geometry_request(
+        tmp_path,
+        gf180mcu_pdk_root,
+        empty_netlist,
+        groups,
+        [{"order": ["r1", "m1"], "spacing_um": 2.003}],
+    )
+    request["pdk"] = _gf180mcu_pdk_spec(gf180mcu_pdk_root)
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    assert exit_code_for(response) == 0
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+    assert any("snapped by" in w and "'m1'" in w for w in response["warnings"])
+
+
+# Issue #4666: a group's `snap`/`short_length` overrides reach `generate()`.
+def test_res_array_group_forwards_snap_and_short_length(
+    tmp_path, gf180mcu_pdk_root, empty_netlist
+):
+    def run(params):
+        groups = [
+            {
+                "id": "r1",
+                "devices": [],
+                "generator": "res_array",
+                "params": {"width_um": 4.0, **params},
+            }
+        ]
+        request = _geometry_request(
+            tmp_path, gf180mcu_pdk_root, empty_netlist, groups, [{"order": ["r1"]}]
+        )
+        request["pdk"] = _gf180mcu_pdk_spec(gf180mcu_pdk_root)
+        return execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert exit_code_for(run({"length_um": 1.343})) == 0
+    # snap=false skips the refuse path (verbatim draw, warning only).
+    assert exit_code_for(run({"length_um": 0.3, "snap": False})) == 0
+    with pytest.raises(LayoutPlanExecuteError, match="minimum mask width"):
+        run({"length_um": 0.3})
+    assert exit_code_for(run({"length_um": 0.3, "short_length": "lengthen"})) == 0
+
+
+def test_on_grid_origins_are_left_unchanged_and_unwarned(
+    tmp_path, pdk_root, empty_netlist
+):
+    groups = [_strip_group("a", 2.0, 1.0), _strip_group("b", 2.0, 3.0)]
+    request = _geometry_request(
+        tmp_path,
+        pdk_root,
+        empty_netlist,
+        groups,
+        [{"order": ["a", "b"], "spacing_um": 1.0, "align": "bottom"}],
+    )
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+    offsets = {g["id"]: g["offset_um"] for g in response["device_groups"]}
+    assert offsets["b"] == pytest.approx({"x": 3.0, "y": 0.0})
+    assert not any("snapped by" in w for w in response["warnings"])
+
+
+def _bbox(width, height=1.0):
+    return {"x0": 0.0, "y0": 0.0, "x1": width, "y1": height}
+
+
+def test_row_snap_keeps_spacing_a_lower_bound_for_every_adjacent_pair():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    widths = {"a": 1.003, "b": 1.001, "c": 1.002}
+    offsets, warnings = _resolve_placement(
+        [{"order": ["a", "b", "c"], "spacing_um": 0.1, "align": "bottom"}],
+        [],
+        {k: _bbox(w) for k, w in widths.items()},
+        set(widths),
+        {},
+        0.005,
+    )
+    for left, right in (("a", "b"), ("b", "c")):
+        gap = offsets[right]["x"] - (offsets[left]["x"] + widths[left])
+        assert gap >= 0.1 - 1e-6
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+    assert len(warnings) == 2
+
+
+def test_stack_and_abutment_snap_keep_margin_and_gap_lower_bounds():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    bboxes = {k: _bbox(1.003, 1.001) for k in ("a", "b", "c", "d")}
+    offsets, _ = _resolve_placement(
+        [
+            {"order": ["a"], "spacing_um": 0.0, "align": "center"},
+            {"order": ["b"], "spacing_um": 0.0, "align": "bottom", "margin_um": 0.1},
+        ],
+        [
+            {"a": "a", "b": "c", "edge": "left", "gap_um": 0.1},
+            {"a": "b", "b": "d", "edge": "top", "gap_um": 0.1},
+        ],
+        bboxes,
+        set(bboxes),
+        {},
+        0.005,
+    )
+    assert offsets["b"]["y"] - (offsets["a"]["y"] + 1.001) >= 0.1 - 1e-6
+    assert offsets["a"]["x"] - (offsets["c"]["x"] + 1.003) >= 0.1 - 1e-6
+    assert offsets["d"]["y"] - (offsets["b"]["y"] + 1.001) >= 0.1 - 1e-6
+    for offset in offsets.values():
+        for value in offset.values():
+            assert round(value / 0.005) * 0.005 == pytest.approx(value, abs=1e-9)
+
+
+def test_snap_is_disabled_without_a_grid():
+    from klayout_tools.layout_plan_execute import _resolve_placement
+
+    offsets, warnings = _resolve_placement(
+        [{"order": ["a", "b"], "spacing_um": 0.1, "align": "bottom"}],
+        [],
+        {"a": _bbox(1.003), "b": _bbox(1.001)},
+        {"a", "b"},
+        {},
+    )
+    assert offsets["b"]["x"] == pytest.approx(1.103)
+    assert warnings == []

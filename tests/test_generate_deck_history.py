@@ -142,6 +142,32 @@ def test_build_entries_hash_matches_streamed_sha256_of_raw_bytes(
     assert entry["content_hash"] == expected
 
 
+def test_release_uses_its_own_rule_sources(_tagged_repo, monkeypatch):
+    repo = _tagged_repo
+    decks = repo / "src/klayout_tools/decks"
+    primary = b'DRC_RULE_SOURCES = ("sky130_extra",)\n'
+    (decks / "sky130.py").write_bytes(primary)
+    (decks / "sky130_extra.py").write_bytes(b"grid = 1\n")
+    _commit(repo, "v0.3.0")
+    (decks / "sky130_extra.py").write_bytes(b"grid = 2\n")
+    _commit(repo, "v0.4.0")
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+    pins = {
+        row["git_tag"]: row["content_hash"]
+        for row in gdh.build_entries()
+        if row["deck"] == "sky130"
+    }
+    assert pins["v0.2.0"] == "sha256:" + hashlib.sha256(b"DECK_B = 2\n").hexdigest()
+    for tag, sibling in [("v0.3.0", b"grid = 1\n"), ("v0.4.0", b"grid = 2\n")]:
+        records = (
+            b"sky130.py\0"
+            + hashlib.sha256(primary).digest()
+            + b"sky130_extra.py\0"
+            + hashlib.sha256(sibling).digest()
+        )
+        assert pins[tag] == "sha256:" + hashlib.sha256(records).hexdigest()
+
+
 def test_build_entries_records_commit_and_tag(_tagged_repo, monkeypatch):
     monkeypatch.setattr(gdh, "REPO_ROOT", _tagged_repo)
 
@@ -161,6 +187,32 @@ def test_build_entries_records_commit_and_tag(_tagged_repo, monkeypatch):
     assert entry["git_commit"] == expected_commit
 
 
+def test_build_entries_records_standalone_drc_deck_file(tmp_path, monkeypatch):
+    """Issue #3826: ``<name>.drc`` at a tag is a separate hashed artifact."""
+    repo = _make_repo(tmp_path)
+    decks_dir = repo / "src" / "klayout_tools" / "decks"
+    _write_pyproject(repo, "0.1.0")
+    (decks_dir / "asap7.py").write_text("MODULE = 1\n")
+    (decks_dir / "asap7.drc").write_text("# drc deck\n")
+    (decks_dir / "sky130.py").write_text("DECK = 1\n")
+    _commit(repo, "v0.1.0")
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+
+    entries = gdh.build_entries()
+
+    (drc,) = [e for e in entries if e.get("artifact") == "drc_deck"]
+    assert drc["deck"] == "asap7"
+    assert (
+        drc["content_hash"] == "sha256:" + hashlib.sha256(b"# drc deck\n").hexdigest()
+    )
+    module = [e for e in entries if e["deck"] == "asap7" and "artifact" not in e]
+    assert len(module) == 1
+    assert module[0]["content_hash"] != drc["content_hash"]
+    # sky130 has no .drc file -> no artifact entry for it.
+    assert not [e for e in entries if e["deck"] == "sky130" and "artifact" in e]
+    assert gdh.build_entries() == entries  # deterministic
+
+
 # --------------------------------------------------------------------------- #
 # main() -- writes _history.json, idempotent, fails loudly with no tags
 # --------------------------------------------------------------------------- #
@@ -173,12 +225,12 @@ def test_main_writes_history_json_and_is_idempotent(
     monkeypatch.setattr(gdh, "REPO_ROOT", _tagged_repo)
     monkeypatch.setattr(gdh, "HISTORY_PATH", history_path)
 
-    assert gdh.main() == 0
+    assert gdh.main([]) == 0
     first = history_path.read_text()
     payload = json.loads(first)
     assert len(payload["entries"]) == 3
 
-    assert gdh.main() == 0
+    assert gdh.main([]) == 0
     assert history_path.read_text() == first  # byte-identical re-run
 
 
@@ -191,8 +243,49 @@ def test_main_no_tags_fails_loudly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(gdh, "REPO_ROOT", repo)
     monkeypatch.setattr(gdh, "HISTORY_PATH", tmp_path / "_history.json")
 
-    exit_code = gdh.main()
+    exit_code = gdh.main([])
 
     assert exit_code == 1
     assert "no v* git tags" in capsys.readouterr().err
     assert not (tmp_path / "_history.json").exists()
+
+
+def test_version_regex_reads_both_pyproject_version_styles():
+    """Tags before issue #2823 carry a static `[project]` `version`; tags
+    after it carry `[tool.hatch.version]`'s `base-version` instead."""
+    module = _load_generate_deck_history()
+    legacy = '[project]\nname = "klayout-tools"\nversion = "0.6.0"\n'
+    dynamic = (
+        '[project]\nname = "klayout-tools"\ndynamic = ["version"]\n\n'
+        '[tool.hatch.version]\nsource = "code"\nbase-version = "0.8.0"\n'
+    )
+    assert module._VERSION_RE.search(legacy).group(1) == "0.6.0"
+    assert module._VERSION_RE.search(dynamic).group(1) == "0.8.0"
+    real = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text("utf-8")
+    assert module._VERSION_RE.search(real) is not None
+
+
+def test_as_release_entries_match_real_tag_modulo_git_commit(tmp_path, monkeypatch):
+    """The release PR records HEAD as a pseudo-tag; after tagging, the real-tag
+    entries must be identical except ``git_commit`` (null while pending, since
+    amend/squash change the sha), so the tag job's reconciliation can pass."""
+    repo = _make_repo(tmp_path)
+    decks_dir = repo / "src" / "klayout_tools" / "decks"
+    _write_pyproject(repo, "0.1.0")
+    (decks_dir / "sky130.py").write_text("DECK_A = 1\n")
+    _commit(repo, "v0.1.0")
+    _write_pyproject(repo, "0.2.0")
+    (decks_dir / "sky130.py").write_text("DECK_B = 2\n")
+    _commit(repo, None)
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+    monkeypatch.setitem(gdh._PSEUDO_TAGS, "v0.2.0", "HEAD")
+
+    pending = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
+    gdh._PSEUDO_TAGS.clear()
+    _git("tag", "v0.2.0", cwd=repo)
+    real = [e for e in gdh.build_entries() if e["git_tag"] == "v0.2.0"]
+
+    assert pending and all(e["git_commit"] is None for e in pending)
+    assert all(e["git_commit"] for e in real)
+    strip = lambda es: [{k: v for k, v in e.items() if k != "git_commit"} for e in es]  # noqa: E731
+    assert strip(pending) == strip(real)

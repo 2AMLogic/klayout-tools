@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:13:08.041004+00:00",
+  "slug": "sky130-sram-compiler",
+  "name": "Sky130 Sram Compiler",
+  "description": "SRAM compiler on a logic-rule bitcell for sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "layer_count": 36,
+  "cell_count": 37,
+  "instance_count": 3404,
+  "layout_file": "control.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "layer_64_5": "renders/64_5.png",
+    "layer_64_16": "renders/64_16.png",
+    "nwell.drawing": "renders/64_20.png",
+    "layer_64_59": "renders/64_59.png",
+    "diff.drawing": "renders/65_20.png",
+    "tap.drawing": "renders/65_44.png",
+    "poly.drawing": "renders/66_20.png",
+    "licon1.drawing": "renders/66_44.png",
+    "layer_67_5": "renders/67_5.png",
+    "layer_67_16": "renders/67_16.png",
+    "li1.drawing": "renders/67_20.png",
+    "mcon.drawing": "renders/67_44.png",
+    "layer_68_5": "renders/68_5.png",
+    "layer_68_16": "renders/68_16.png",
+    "met1.drawing": "renders/68_20.png",
+    "via.drawing": "renders/68_44.png",
+    "layer_69_5": "renders/69_5.png",
+    "layer_69_16": "renders/69_16.png",
+    "met2.drawing": "renders/69_20.png",
+    "via2.drawing": "renders/69_44.png",
+    "met3.drawing": "renders/70_20.png",
+    "via3.drawing": "renders/70_44.png",
+    "met4.drawing": "renders/71_20.png",
+    "via4.drawing": "renders/71_44.png",
+    "layer_72_5": "renders/72_5.png",
+    "layer_72_16": "renders/72_16.png",
+    "met5.drawing": "renders/72_20.png",
+    "hvtp.drawing": "renders/78_44.png",
+    "layer_81_4": "renders/81_4.png",
+    "layer_83_44": "renders/83_44.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "psdm.drawing": "renders/94_20.png",
+    "npc.drawing": "renders/95_20.png",
+    "layer_122_16": "renders/122_16.png",
+    "layer_235_4": "renders/235_4.png",
+    "layer_236_0": "renders/236_0.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Bitcell",
+        "target": "6T, logic design rules only"
+      },
+      {
+        "parameter": "Ports",
+        "target": "1RW, synchronous",
+        "stretch": "1RW1R"
+      },
+      {
+        "parameter": "Compiler range",
+        "target": "words 16\u20131024, bits 8\u201364, column mux 1/2/4/8",
+        "fallback": "single fixed 256 \u00d7 32 instance through the compiler path",
+        "stretch": "words to 4096"
+      },
+      {
+        "parameter": "Reference instances",
+        "target": "64 \u00d7 32, 256 \u00d7 32, 1024 \u00d7 32 all DRC/LVS-clean",
+        "fallback": "256 \u00d7 32"
+      },
+      {
+        "parameter": "Supply",
+        "target": "1.8 V \u00b110%"
+      },
+      {
+        "parameter": "Margins",
+        "target": "read SNM, hold SNM, write margin strictly positive at every corner, with Monte Carlo"
+      },
+      {
+        "parameter": "Views per instance",
+        "target": "GDS, LEF, Liberty, Verilog behavioural model",
+        "fallback": "GDS, LEF"
+      }
+    ],
+    "status_note": "DRAFT \u2014 EE-key and market-key reviews first, then operator ratification; see issue #8"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-sram-compiler",
+    "ref": "b44a038241ee6c2b538c1621ed472d2b3375e344",
+    "path": "layout/control/control.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

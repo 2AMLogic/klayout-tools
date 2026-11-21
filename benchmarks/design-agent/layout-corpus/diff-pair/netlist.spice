@@ -1,0 +1,4 @@
+.subckt diffpair_cell vsubs
+M1 d1 g1 s1 vsubs nfet L=0.5U W=8U
+M2 d2 g2 s2 vsubs nfet L=0.5U W=8U
+.ends

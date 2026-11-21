@@ -4,21 +4,36 @@
   "dbu_um": 0.001,
   "dead_metal": [],
   "deck": "sky130",
+  "declared_pins": null,
+  "def_pin_promotion": null,
+  "def_pins": null,
   "device_classes": [
     "nfet",
     "pfet",
     "pnp",
     "sky130_fd_pr__model__cap_mim",
     "sky130_fd_pr__model__cap_mim_m4",
-    "resistor"
+    "resistor",
+    "diode_pw2nd_05v5",
+    "diode_pw2nd_05v5_lvt",
+    "diode_pw2nd_05v5_nvt",
+    "diode_pw2nd_11v0",
+    "diode_pd2nw_05v5",
+    "diode_pd2nw_05v5_lvt",
+    "diode_pd2nw_05v5_hvt",
+    "diode_pd2nw_11v0"
   ],
   "device_count": 0,
   "device_counts": {},
   "device_recognition_only_layers": [],
   "devices": [],
   "dummy_devices_dropped": 0,
-  "file": "examples/critical-net-mom-fidelity/lateral-coupling.gds",
+  "file": {
+    "path": "examples/critical-net-mom-fidelity/lateral-coupling.gds",
+    "scope": "repo"
+  },
   "ignored_layers": [],
+  "label_layers": null,
   "matched_device_groups": [],
   "merged_net_labels": [],
   "metrics": {
@@ -34,9 +49,11 @@
     "extract__resistance__ohm": 0.75,
     "extract__resistor__count": 3
   },
+  "missing_flavour_markers": [],
   "net_count": 3,
+  "netlist_normalized_sha256": "c7983fe50c160236e385428201973bc9a982f6d77520c6bd0bd342d4c13d02b9",
   "netlist_path": "examples/critical-net-mom-fidelity/phase2b-distributed-rc.spice",
-  "netlist_sha256": "fe67e78a86c8b27a004067cfc0df563a0e62f06cf83e0f7869ce689e6af6fab6",
+  "netlist_sha256": "18251fe1c9cbecb4b80d78cf84ad50eb80031c7c9f61c7f7a99e536a6dab4a76",
   "nets": [
     {
       "device_count": 0,
@@ -88,6 +105,22 @@
       "VIC"
     ],
     "distributed_rc": true,
+    "integrity": {
+      "cap_tolerance": {
+        "absolute_ff": 1e-06,
+        "relative": 1e-09
+      },
+      "capacitance_mismatches": 0,
+      "island_components": 0,
+      "max_detail_items": 20,
+      "nets_checked": 3,
+      "nets_with_findings": 0,
+      "open_nets": 0,
+      "orphan_nodes": 0,
+      "short_candidates": 0,
+      "short_threshold_ohm": 1.0,
+      "suspicious_resistors": 0
+    },
     "l_count": 0,
     "metals_without_coefficient": [],
     "model": {
@@ -96,6 +129,7 @@
       "frequency": "quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior",
       "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star"
     },
+    "model_revision": 2,
     "mom_crosscheck": null,
     "mom_rlc_override": null,
     "nets": [
@@ -121,8 +155,53 @@
         ],
         "hub_net": "AGR__par",
         "inductance_nh": 0.0,
+        "integrity": {
+          "capacitance": {
+            "computed_ff": 0.29498,
+            "declared_ff": 0.29498,
+            "delta_ff": 0.0,
+            "reason": null,
+            "status": "pass",
+            "tolerance": {
+              "absolute_ff": 1e-06,
+              "relative": 1e-09
+            }
+          },
+          "islands": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": "no required terminals: no main body for an island to be detached from"
+          },
+          "open": {
+            "details_truncated": false,
+            "disconnected_count": 0,
+            "disconnected_terminals": [],
+            "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+            "status": "not_applicable"
+          },
+          "orphan_nodes": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "short_candidates": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "suspicious_resistors": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          }
+        },
         "net": "AGR",
         "net_id": 1,
+        "pin_order": null,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
         "resistance_ohm_top_cell": null,
@@ -142,8 +221,53 @@
         "coupled": [],
         "hub_net": "FAR__par",
         "inductance_nh": 0.0,
+        "integrity": {
+          "capacitance": {
+            "computed_ff": 0.29498,
+            "declared_ff": 0.29498,
+            "delta_ff": 0.0,
+            "reason": null,
+            "status": "pass",
+            "tolerance": {
+              "absolute_ff": 1e-06,
+              "relative": 1e-09
+            }
+          },
+          "islands": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": "no required terminals: no main body for an island to be detached from"
+          },
+          "open": {
+            "details_truncated": false,
+            "disconnected_count": 0,
+            "disconnected_terminals": [],
+            "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+            "status": "not_applicable"
+          },
+          "orphan_nodes": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "short_candidates": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "suspicious_resistors": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          }
+        },
         "net": "FAR",
         "net_id": 3,
+        "pin_order": null,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
         "resistance_ohm_top_cell": null,
@@ -172,8 +296,53 @@
         ],
         "hub_net": "VIC__par",
         "inductance_nh": 0.0,
+        "integrity": {
+          "capacitance": {
+            "computed_ff": 0.29498,
+            "declared_ff": 0.29498,
+            "delta_ff": 0.0,
+            "reason": null,
+            "status": "pass",
+            "tolerance": {
+              "absolute_ff": 1e-06,
+              "relative": 1e-09
+            }
+          },
+          "islands": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": "no required terminals: no main body for an island to be detached from"
+          },
+          "open": {
+            "details_truncated": false,
+            "disconnected_count": 0,
+            "disconnected_terminals": [],
+            "reason": "lumped model: terminal legs attach to the hub by construction; no distributed segments to check connectivity over",
+            "status": "not_applicable"
+          },
+          "orphan_nodes": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "short_candidates": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          },
+          "suspicious_resistors": {
+            "count": 0,
+            "details": [],
+            "details_truncated": false,
+            "reason": null
+          }
+        },
         "net": "VIC",
         "net_id": 2,
+        "pin_order": null,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
         "resistance_ohm_top_cell": null,
@@ -185,6 +354,7 @@
     "parasitics_nets": [],
     "r_count": 3,
     "substrate_dc_tie": {
+      "mode": "shunt",
       "nets": [
         {
           "device": "Rvsubs_dctie",
@@ -194,6 +364,7 @@
       "node_scope": "global",
       "resistance_ohm": 1000000000000.0
     },
+    "substrate_spreading": null,
     "top_cell_only": false,
     "total_capacitance_ff": 0.88494,
     "total_coupling_capacitance_ff": 0.044,
@@ -202,27 +373,45 @@
   },
   "pdk": null,
   "pin_count": 3,
+  "pin_renames": null,
+  "probes": [],
   "provenance": {
     "deck": {
-      "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+      "content_hash": "sha256:ba0f97887e3d231aec8b54f1f52f2941ded0228f0234b6759712bcaca0e942e6",
       "name": "sky130",
       "released": false
     },
     "input": {
-      "content_hash": "sha256:245643d86efe2e0bde07753f19817a9aab43834502d192a41994e4b7fab9cac8",
+      "content_hash": "sha256:86d220aa33c1e97dd869ed3b5659f1d4b0417eefa19c251302215c2bc01c904b",
       "role": "layout"
     },
-    "klayout_version": "0.30.10",
-    "klt_version": "0.5.0+g24594473db10.dirty",
+    "klayout_version": "0.30.12",
+    "klt_version": "0.7.1.dev1480+gc4ee5fe00f83.dirty",
     "pdk": null
   },
-  "schema_version": 3,
+  "rename_declared_pins": false,
+  "schema_version": 4,
   "single_terminal_nets": [],
   "spef_path": null,
+  "split_net_labels": [],
   "status": "extracted",
+  "subcircuit": null,
+  "timing": {
+    "stages": {
+      "device_extraction": 0.003,
+      "diagnostics": 0.0,
+      "netlist_hash": 0.0,
+      "netlist_normalized_hash": 0.0,
+      "netlist_write": 0.0,
+      "read_layout": 0.0
+    },
+    "total_seconds": 0.073,
+    "unattributed_seconds": 0.07
+  },
   "top": "TOP",
   "unbiased_pmos_body_nets": [],
   "unmodelled_poly": [],
+  "unsupported_devices": [],
   "voltage_domain_warnings": [],
   "warnings": [
     "--distributed-rc name(s) 'VIC' matched a net with fewer than 2 device terminals -- kept the star/Gamma-shunt model for them instead of a distributed ladder (nothing to chain). See docs/cli/extract.md's '--distributed-rc' section."

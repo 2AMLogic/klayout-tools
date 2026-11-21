@@ -175,6 +175,48 @@ fi
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || COMMAND=""
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null) || CWD=""
 
+# Champion state files (#13180). `/loom:champion --pr N` keeps a pin file and a
+# PR-facts file directly under the git common dir. The shell would expand
+# `$(git rev-parse --git-common-dir)/loom-champion-{pin,facts}-pr-<digits>` to
+# exactly that directory, but this guard cannot evaluate a substitution and
+# fails closed on it. Rewrite ONLY that exact, anchored spelling (literal PR
+# digits, fixed basename) to the resolved absolute path so the ordinary
+# containment logic judges a literal path; _champion_state_path_ok() below then
+# admits that one shape. Any other `$(…)` target stays unresolvable and denied.
+_CHAMPION_STATE_RE='\$\(git rev-parse --git-common-dir\)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)([^A-Za-z0-9._/-]|$)'
+_CHAMPION_COMMON_DIR=""
+if [[ -n "$CWD" && -d "$CWD" ]]; then
+    _CHAMPION_COMMON_DIR=$(cd "$CWD" 2>/dev/null && cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P) || _CHAMPION_COMMON_DIR=""
+fi
+if [[ -n "$_CHAMPION_COMMON_DIR" && "$COMMAND" == *'$(git rev-parse --git-common-dir)/loom-champion-'* ]]; then
+    _cs_rest="$COMMAND"
+    _cs_out=""
+    while [[ "$_cs_rest" =~ $_CHAMPION_STATE_RE ]]; do
+        _cs_whole="${BASH_REMATCH[0]}"
+        _cs_name="${BASH_REMATCH[1]}"
+        _cs_term="${BASH_REMATCH[4]}"
+        _cs_out+="${_cs_rest%%"$_cs_whole"*}${_CHAMPION_COMMON_DIR}/${_cs_name}${_cs_term}"
+        _cs_rest="${_cs_rest#*"$_cs_whole"}"
+    done
+    COMMAND="${_cs_out}${_cs_rest}"
+fi
+
+# True if $1 (an absolute, normalized path) is exactly one of the Champion
+# state files, a DIRECT child of the git common dir. Anchored on the basename
+# pattern and the resolved directory, so `.git/config`, a sibling file, a
+# `..` traversal or a nested path never matches.
+_champion_state_path_ok() {
+    local p="$1"
+    [[ -n "$_CHAMPION_COMMON_DIR" && -n "$p" ]] || return 1
+    [[ "$p" =~ ^(.*)/(loom-champion-(pin|facts)-pr-[0-9]+(\.json)?)$ ]] || return 1
+    local dir="${BASH_REMATCH[1]}"
+    [[ "$dir" == *"/../"* || "$dir" == */.. || "$dir" == *"/./"* ]] && return 1
+    [[ "$dir" == "$_CHAMPION_COMMON_DIR" ]] && return 0
+    local phys
+    phys=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    [[ "$phys" == "$_CHAMPION_COMMON_DIR" ]]
+}
+
 # If no command to check, allow
 if [[ -z "$COMMAND" ]]; then
     exit 0
@@ -1360,6 +1402,30 @@ stash_scope_guard_enabled() {
     [[ "$_STASH_SCOPE_CACHE" == "true" ]]
 }
 
+# =============================================================================
+# Primary-checkout mutation guard toggle (#13589)
+#
+#   1. LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION env var (0/false/no disables)
+#   2. guards.primaryCheckoutMutation in .loom/config.json (default true)
+# Invoked lazily, only after a git checkout/switch/commit segment matched.
+# =============================================================================
+_PCM_CACHE=""
+primary_checkout_mutation_guard_enabled() {
+    if [[ -z "$_PCM_CACHE" ]]; then
+        local enabled=true raw
+        if [[ -n "$REPO_ROOT" ]]; then
+            raw=$(loom_config_get "$REPO_ROOT" "guards.primaryCheckoutMutation" "true" 2>/dev/null) || raw=true
+            [[ "$raw" == "false" ]] && enabled=false
+        fi
+        case "${LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION:-}" in
+            0|false|no)  enabled=false ;;
+            1|true|yes)  enabled=true ;;
+        esac
+        _PCM_CACHE="$enabled"
+    fi
+    [[ "$_PCM_CACHE" == "true" ]]
+}
+
 # True if $1 (the ask-scan form of a command) contains at least one stash
 # CREATE invocation: bare `git stash`, `git stash push …`, `git stash save …`,
 # or an option-prefixed create (`git stash -u`, `git stash --include-untracked`,
@@ -1906,12 +1972,18 @@ function has_live_subst(str,    i, c, bs) {
 # Do not restate this as "harmless": state the direction.
 #
 # Shared as a single awk source string so the three parsers cannot drift.
+#
+# SEPARATOR SIDE-CHANNEL (#9405): every `\n` emitted for a `;`/`&&`/`&`/`||`/`|`
+# also records that operator in the global qsplit_op[k] (k = 1..qsplit_nops,
+# reset per call), so qsplit_op[k] is the operator BETWEEN output segments k
+# and k+1. Callers that ignore it are unaffected; parse_force_ops() reads it.
 # =============================================================================
 _QSPLIT_AWK="$_HASLIVESUBST_AWK"'
 function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs, bk) {
     SQ = sprintf("%c", 39)   # single quote
     DQ = sprintf("%c", 34)   # double quote
     out = ""
+    qsplit_nops = 0
     n = length(s)
     i = 1
     while (i <= n) {
@@ -2020,14 +2092,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             k = i + 1
             while (k < ci) {
                 ch = substr(s, k, 1)
-                if (ch == ";") { out = out "\n"; k++; continue }
+                if (ch == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; k++; continue }
                 if (ch == "&") {
-                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "&"; k++; continue
                 }
                 if (ch == "|") {
-                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; k += 2; continue }
-                    out = out "\n"; k++; continue
+                    if (substr(s, k + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; k += 2; continue }
+                    out = out "\n"; qsplit_op[++qsplit_nops] = "|"; k++; continue
                 }
                 out = out ch
                 k++
@@ -2108,14 +2180,14 @@ function qsplit(s,   out, n, i, c, j, qc, ci, inner, SQ, DQ, k, ch, scanfrom, bs
             i += 2
             continue
         }
-        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == ";") { out = out "\n"; qsplit_op[++qsplit_nops] = ";"; i++; continue }
         if (c == "&") {
-            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "&") { out = out "\n"; qsplit_op[++qsplit_nops] = "&&"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "&"; i++; continue
         }
         if (c == "|") {
-            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
-            out = out "\n"; i++; continue
+            if (i < n && substr(s, i + 1, 1) == "|") { out = out "\n"; qsplit_op[++qsplit_nops] = "||"; i += 2; continue }
+            out = out "\n"; qsplit_op[++qsplit_nops] = "|"; i++; continue
         }
         out = out c
         i++
@@ -2671,7 +2743,7 @@ BEGIN {
 # (a masked-away `>` can only DROP a write target, never invent a new deny).
 # =============================================================================
 _MASKGT_AWK='
-function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick) {
+function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, btick, bq) {
     SQ = sprintf("%c", 39)    # single quote
     DQ = sprintf("%c", 34)    # double quote
     MASK = sprintf("%c", 1)   # SOH -- placeholder for a quoted/arith-context ">"/"<" (never a real char)
@@ -2683,6 +2755,7 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
     tdepth = 0   # `[[...]]` test-context nesting depth (unquoted only)
     esc = 0      # previous byte was an unescaped backslash (mode 0/2 only, #6472)
     btick = 0    # inside an unquoted `...` command substitution (#8211)
+    bq = 0       # quote state INSIDE a backtick span, for masking ">" only (#12076): 0 none, 1 single, 2 double
     while (i <= n) {
         c = substr(s, i, 1)
         if (esc) {
@@ -2692,12 +2765,13 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
             # every ">" is already masked regardless of escaping, so that
             # half of the ternary is a no-op there, not a behavior change.
             esc = 0
-            out = out (mode == 2 && c == ">" ? MASK : c)
+            out = out ((mode == 2 || bq == 2) && c == ">" ? MASK : c)
             i++
             continue
         }
-        if (c == "\\" && mode != 1) {
-            # Single-quoted mode (mode == 1) is handled below and never
+        if (c == "\\" && mode != 1 && bq != 1) {
+            # Single-quoted mode (mode == 1, or bq == 1 inside a backtick
+            # span) is handled below and never
             # reaches here: a backslash has no escaping power inside single
             # quotes in real bash, so it must stay a plain literal byte
             # there and must never suppress the next quote-close check.
@@ -2709,7 +2783,20 @@ function mask_gt(s,   out, n, i, c, mode, SQ, DQ, MASK, adepth, tdepth, esc, bti
         if (mode == 0) {
             # An unquoted backtick span makes the quote characters inside it
             # literal data (#8211 -- lockstep with mask_ws(), see above).
-            if (c == "`") { btick = 1 - btick; out = out c; i++; continue }
+            #
+            # #12076: a quoted ">" inside that span is still data, so track a
+            # SEPARATE quote state (bq) that only masks ">" bytes. It never
+            # touches `mode`, so mask_ws() lockstep and the #8211 span-boundary
+            # handling are unchanged, and a backtick always closes the span
+            # (resetting bq) so a quote can never hide the real close.
+            if (c == "`") { btick = 1 - btick; bq = 0; out = out c; i++; continue }
+            if (btick && bq == 0 && (c == SQ || c == DQ)) { bq = (c == SQ ? 1 : 2); out = out c; i++; continue }
+            if (btick && bq != 0) {
+                if ((bq == 1 && c == SQ) || (bq == 2 && c == DQ)) bq = 0
+                out = out (c == ">" ? MASK : c)
+                i++
+                continue
+            }
             if (c == SQ && !btick) { mode = 1; out = out c; i++; continue }
             if (c == DQ && !btick) { mode = 2; out = out c; i++; continue }
             if (c == "(" && i < n && substr(s, i + 1, 1) == "(") {
@@ -4713,12 +4800,18 @@ parse_force_ops() {
                         if (_cdpwd_rest == "" || _cdpwd_rest == DQ) _cdpwd_closed = 1
                     }
                 }
+                # #9405: only a `&&`/`;` split (or a line break, i == 1) runs
+                # `pwd` in the cd'"'"'d shell. `|`/`&` run each side in its own
+                # subshell and `||` skips `pwd` -- abandon unresolved (ask).
+                if (i > 1 && qsplit_op[i - 1] != "&&" && qsplit_op[i - 1] != ";") _cdpwd_closed = 0
                 if (_cdpwd_closed) {
                     _cdpwd_resolved = resolve_cdpwd_literal(pending_cdpwd_path, curcwd, home)
                     if (_cdpwd_resolved != "") varmap[pending_cdpwd_name] = _cdpwd_resolved
                     pending_cdpwd_name = ""
                     continue
                 }
+                # The shell DID assign NAME even though the close was refused: never keep the stale prior value (ask->allow flip). AMBIG, not delete, so a later conditional reassignment is not trusted.
+                varmap[pending_cdpwd_name] = AMBIG
                 pending_cdpwd_name = ""
             }
             # Record any `NAME=value` assignment(s) leading this segment into
@@ -5011,6 +5104,62 @@ resolve_stash_cwd() {
         }
     }
     END { if (!found) print curcwd }'
+}
+
+# List every `git checkout|switch|commit` segment of a command with the cwd it
+# would run in (#13589). One line per segment: "<cwd>\x1f<subcmd>\x1f<args>".
+# Threads `cd <dir>` across segments (same as resolve_stash_cwd) and a
+# `git -C <dir>` global option (relative -C joins the running cwd). Leading
+# `(`/`{`, `sudo`, and `VAR=val` env prefixes are stripped; only a segment that
+# STARTS with `git` counts, so quoted text mentioning `git commit` is inert.
+resolve_primary_mutations() {
+    printf '%s' "$1" | awk -v startcwd="$2" -v home="$HOME" "$_QSPLIT_AWK""$_CDEXPAND_AWK""$_CDQUOTE_AWK""$_MASKWS_AWK"'
+    BEGIN { curcwd = startcwd }
+    {
+        $0 = qsplit($0)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t(){]+/, "", seg)
+            sub(/^sudo[ \t]+/, "", seg)
+            while (seg ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/) sub(/^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/, "", seg)
+            if (seg == "") continue
+            wseg = mask_ws(seg)
+            m = split(wseg, toks, /[ \t]+/)
+            if (m == 0) continue
+            for (j = 1; j <= m; j++) toks[j] = unmask_ws(toks[j])
+            if (toks[1] == "cd") {
+                if (m >= 2 && toks[2] != "" && toks[2] != "-") {
+                    cdarg = expand_cd_arg(toks[2], home)
+                    cdclass = strip_cd_quoting(cdarg)
+                    if (cdclass ~ /^\//) curcwd = cdarg
+                    else if (curcwd != "") curcwd = curcwd "/" cdarg
+                }
+                continue
+            }
+            if (toks[1] != "git") continue
+            gcwd = curcwd
+            k = 2
+            while (k <= m && toks[k] ~ /^-/) {
+                if (toks[k] == "-C" && k < m) {
+                    carg = expand_cd_arg(toks[k+1], home)
+                    if (strip_cd_quoting(carg) ~ /^\//) gcwd = carg
+                    else if (gcwd != "") gcwd = gcwd "/" carg
+                    k += 2
+                } else if ((toks[k] == "-c" || toks[k] == "--git-dir" || toks[k] == "--work-tree" || toks[k] == "--namespace") && k < m) {
+                    k += 2
+                } else {
+                    k++
+                }
+            }
+            if (k > m) continue
+            sub_ = toks[k]
+            if (sub_ != "checkout" && sub_ != "switch" && sub_ != "commit") continue
+            args = ""
+            for (j = k + 1; j <= m; j++) args = args (j > k + 1 ? " " : "") toks[j]
+            printf "%s\037%s\037%s\n", gcwd, sub_, args
+        }
+    }'
 }
 
 # Redact the quoted VALUES of known text-carrying flags (--body, -m/--message,
@@ -6216,6 +6365,241 @@ mask_catastrophic_comment_lines() {
     }'
 }
 
+# Extract every `>`/`>>` redirect target that could be the sink of a
+# `cat > file <<'EOF'` block, from lines that at least START like one
+# (`cat …` containing `<<`). Deliberately LOOSE: anything this over-collects
+# only makes the proof below stricter -- a path that gets checked without
+# being a real sink skips masking, it never enables it. Output: one target
+# token per line, drawn from the masker's own TGT charset, so a token can
+# contain neither blanks nor newlines.
+heredoc_filesink_candidate_targets() {
+    printf '%s\n' "$1" | awk '
+    BEGIN { PAT = ">[ \t]*[A-Za-z0-9_./+@%,:-]+" }
+    {
+        line = $0
+        if (line !~ /^[ \t]*cat[ \t]/ || line !~ /<</) next
+        # Dynamic STRING regex (not a /.../ literal): an unescaped "/" inside
+        # a bracket expression ends the literal early on BWK awk (macOS).
+        while (match(line, PAT)) {
+            t = substr(line, RSTART, RLENGTH)
+            sub(/^>[ \t]*/, "", t)
+            print t
+            line = substr(line, RSTART + RLENGTH)
+        }
+    }'
+}
+
+# The filesystem half of the sink proof (#9870 review): see condition (5) of
+# mask_catastrophic_filesink_heredocs()'s header above. Returns 0 only when
+# EVERY candidate target's final component -- resolved against the session
+# cwd from the hook input when the target is relative -- is not a symlink
+# and is either absent or a plain regular file.
+heredoc_filesink_targets_are_inert() {
+    local t p targets
+    # Capture the extractor's output AND status first: a failed extraction
+    # (awk dialect parse error, ...) must fail CLOSED, never read as "no
+    # candidates -> inert". (Judge review, macOS BWK awk.)
+    targets=$(heredoc_filesink_candidate_targets "$1" 2>/dev/null) || return 1
+    while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        case "$t" in
+            /*) p=$t ;;
+            *)
+                # A relative target opens against the session cwd (the hook
+                # input's `cwd`), not against this hook process's own cwd.
+                # No CWD in the input -> the open's directory is unknown ->
+                # fail closed.
+                if [[ -z "$CWD" ]]; then return 1; fi
+                p="$CWD/$t" ;;
+        esac
+        # A symlink is denied whatever it points at (regular file included):
+        # resolution adds nothing but doubt, and a dangling link, a
+        # link-to-FIFO and a link to somewhere off-tree all fail the same
+        # way. Anything that exists but is not a regular file -- FIFO,
+        # socket, device, directory -- is likewise no inert sink.
+        if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then
+            return 1
+        fi
+    done <<EOF
+$targets
+EOF
+    return 0
+}
+
+# Mask the bodies of direct file-write heredocs (`cat > file <<'EOF' ... EOF`)
+# for the catastrophic scan ONLY (#9870). Without this, a fixture, a doc or a
+# note written with a QUOTED-delimiter heredoc hard-denies whenever its body
+# merely mentions a catastrophic-tier phrase, even though that text is written
+# to a file and never executed. (The SQL-DDL half of #9870 was already fixed:
+# that check reads COMMAND_ASK_SCAN, which has its own heredoc pass.)
+#
+# THIS NARROWS THE UNGATED DENIAL FLOOR, so it is a WHOLE-COMMAND SINK
+# ALLOWLIST and nothing else. It is deliberately NOT a reuse of
+# mask_heredoc_bodies_selective(): that pass is an interpreter DENYLIST (it
+# masks every quoted heredoc except openers it recognises as interpreters), so
+# any sink nobody listed -- `ssh host <<'EOF'`, `psql db <<'EOF'`, `sudo -s`,
+# `xargs` -- would be masked here. Wrong polarity for the floor.
+#
+# Bodies are masked only when the ENTIRE command, line by line, is nothing but
+# blank lines and heredoc blocks that each satisfy ALL of:
+#
+#   1. OPENER LINE, IN FULL, is one bare `cat` with exactly one `>`/`>>`
+#      redirect and exactly one heredoc, in either order:
+#          cat > TARGET <<'DELIM'      cat <<'DELIM' > TARGET
+#      (`>>`, `<<-`, `<<"DELIM"` and optional blanks accepted). Anchored at
+#      both ends, so no other word, flag, argument, second redirect, fd
+#      number, pipe, `;`, `&`, `(`, `{`, `$(`, backtick, assignment prefix,
+#      wrapper (`sudo`, `env`, a path to cat) or line continuation can sit on
+#      the line. `tee` is excluded on purpose: it copies the body to stdout.
+#   2. DELIMITER IS QUOTED (single or double, both quotes present) and is
+#      [A-Za-z0-9_]+ -- so the outer shell performs NO expansion on the body.
+#      An unquoted or backslash-escaped delimiter never qualifies.
+#   3. TARGET IS A LITERAL PATH drawn from [A-Za-z0-9_./+@%,:-] only: no `$`,
+#      backtick, quote, glob, brace, `~`, `=`, `&`, space. It must not have a
+#      `dev`, `proc` or `..` path component (case-insensitively), so it cannot
+#      name /dev/stdout, /dev/fd/N, /dev/tcp/..., /proc/self/fd/N -- and it
+#      must also pass the ON-DISK proof in (5) below.
+#   4. THE BLOCK IS CLOSED by a line that is exactly DELIM, using the real
+#      shell rule (leading TABS stripped only for `<<-`). Terminating earlier
+#      or later than the shell does would misclassify live lines, so there is
+#      no best-effort matching here.
+#   5. THE TARGET PROVES INERT ON DISK (#9870 review). A literal token is a
+#      claim about TEXT, not about the filesystem: `cat > P` does not create
+#      P -- it OPENS whatever P already is. If an earlier command or an
+#      unrelated process left a FIFO at P, the body becomes that FIFO's
+#      reader's input (`bash </tmp/f`, `xargs -a /tmp/f`, a logger), and a
+#      symlink resolves to whichever object really sits at the end -- the
+#      body executes even though the command reads as a plain file write.
+#      heredoc_filesink_targets_are_inert() therefore stats every candidate
+#      target (resolved against the session cwd from the hook input when
+#      relative): the final component must NOT be a symlink, and must be
+#      either ABSENT (a fresh open creates a regular file or fails outright)
+#      or a plain REGULAR FILE (writing truncates bytes; it feeds nobody).
+#      FIFO, socket, device, directory, symlink and dangling link all leave
+#      the buffer unchanged, keeping the whole command visible to the
+#      catastrophic floor. Residual TOCTOU -- an object swapped in between
+#      this stat and the command's own open(2) -- requires a hostile local
+#      process already racing the guard and is accepted; it is unreachable
+#      without one.
+#
+# WHY WHOLE-COMMAND, and not "this one block looks fine" (which is what the
+# curated plan on #9870 proposed, with a "target basename appears nowhere
+# else" read check). Two same-command bypasses of the per-block rule:
+#   * QUOTE CONTEXT. A perfect-looking opener line can sit INSIDE a quoted
+#     string opened on an earlier line; the shell then sees no heredoc at all
+#     and the "body" is live text after the closing quote.
+#   * `cat` REBOUND. An earlier `cat() { bash; }` (or `hash -p`, an alias, a
+#     PATH prefix) makes the opener feed the body to an interpreter.
+# and one of the basename check: a file can be executed without being named
+# (`bash ./*.sh`, `for f in *`, `find -exec`). Requiring that NOTHING else is
+# in the command removes all three at once and needs no heuristics: the first
+# opener is at command position in a fresh shell, nothing can rebind `cat`,
+# and nothing exists that could read or execute what was written. The cost is
+# that `cat > f <<'EOF' ... EOF` followed by any other command keeps today's
+# behaviour (body visible, still denied if it mentions a catastrophic phrase).
+#
+# FAIL CLOSED: any line that is neither blank, a qualifying opener, part of a
+# qualifying closed body, nor its terminator returns the buffer UNCHANGED --
+# no partial masking, so a second heredoc that does not qualify leaves the
+# first one visible too. Line count and every non-body line are preserved, so
+# the two copies derived from COMMAND_NO_LITERAL_TEXT are unaffected.
+mask_catastrophic_filesink_heredocs() {
+    # On-disk sink proof FIRST (#9870 review): the text pass below can only
+    # reason about tokens. If any candidate target is (or may resolve to)
+    # something other than an absent path or a plain regular file, return the
+    # buffer unchanged so the catastrophic floor stays armed.
+    if ! heredoc_filesink_targets_are_inert "$1"; then
+        printf '%s' "$1"
+        return
+    fi
+    printf '%s' "$1" | awk '
+    BEGIN {
+        SQ = sprintf("%c", 39)
+        DQ = sprintf("%c", 34)
+        MASKC = sprintf("%c", 23) # ETB, same placeholder as mask_heredoc_bodies()
+        WS = "[ \t]*"
+        TGT = "[A-Za-z0-9_./+@%,:-]+"
+        DLM = "(" SQ "[A-Za-z0-9_]+" SQ "|" DQ "[A-Za-z0-9_]+" DQ ")"
+        RED = ">>?" WS TGT
+        HD = "<<-?" WS DLM
+        OPENER = "^" WS "cat[ \t]+(" RED WS HD "|" HD WS RED ")" WS "$"
+        buf = ""
+    }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END {
+        nl = split(buf, lines, "\n")
+        nblocks = 0
+        i = 1
+        while (i <= nl) {
+            line = lines[i]
+            if (line ~ /^[ \t]*$/) { i++; continue }
+            if (line !~ OPENER) { printf "%s", buf; exit }
+            # Target: the word after the one `>`/`>>` on the line.
+            tgt = substr(line, index(line, ">"))
+            sub(/^>>?[ \t]*/, "", tgt)
+            if (!match(tgt, "^" TGT)) { printf "%s", buf; exit }
+            tgt = tolower(substr(tgt, 1, RLENGTH))
+            if (tgt ~ /(^|\/)(dev|proc|\.\.)(\/|$)/) { printf "%s", buf; exit }
+            # Delimiter: the quoted word after the one `<<` on the line.
+            rest = substr(line, index(line, "<<") + 2)
+            dash = 0
+            if (substr(rest, 1, 1) == "-") { dash = 1; rest = substr(rest, 2) }
+            sub(/^[ \t]+/, "", rest)
+            q = substr(rest, 1, 1)
+            rest = substr(rest, 2)
+            e = index(rest, q)
+            if ((q != SQ && q != DQ) || e < 2) { printf "%s", buf; exit }
+            delim = substr(rest, 1, e - 1)
+            closeat = 0
+            for (j = i + 1; j <= nl; j++) {
+                t = lines[j]
+                if (dash) sub(/^\t+/, "", t)
+                if (t == delim) { closeat = j; break }
+            }
+            if (closeat == 0) { printf "%s", buf; exit }
+            nblocks++
+            bfrom[nblocks] = i + 1
+            bto[nblocks] = closeat - 1
+            i = closeat + 1
+        }
+        # Every line was accounted for: only now is anything masked.
+        for (b = 1; b <= nblocks; b++) {
+            for (j = bfrom[b]; j <= bto[b]; j++) {
+                body = lines[j]
+                gsub(/./, MASKC, body)
+                lines[j] = body
+            }
+        }
+        out = lines[1]
+        for (i = 2; i <= nl; i++) out = out "\n" lines[i]
+        printf "%s", out
+    }'
+}
+
+# Toggle hint (issue #10434): one line naming the env var (set under the
+# Claude Code settings.json "env" block -- the hook is a separate process, so an
+# inline `VAR=x cmd` prefix is invisible to it and is never suggested) and the
+# .loom/config.json key for a TOGGLEABLE category. Ungated-floor tags
+# (catastrophic:*, rm-protected-path, cloud-delete-ask, ...) match no arm and
+# get no hint, since no toggle can disable them. Keep in sync with
+# `loom-daemon guards status` (loom-daemon/src/guards_status.rs).
+toggle_hint_for_tag() {
+    local env="" key=""
+    case "$1" in
+        sql-ddl|sql-delete-no-where)  env="LOOM_GUARD_SQL=0";               key='"guards.sqlDdl": false' ;;
+        cloud-cli:*)                  env="LOOM_GUARD_CLOUD=0";             key='"guards.cloudCli": false' ;;
+        reversible-gh:*)              env="LOOM_GUARD_REVERSIBLE_GH=1";     key='"guards.reversibleGh": true' ;;
+        cargo-clean-scope-outside-repo) env="LOOM_GUARD_CARGO_CLEAN=0";     key='"guards.cargoCleanScope": false' ;;
+        rm-scope-unresolved-var|rm-scope-outside-repo) env="LOOM_RM_SCOPE=off"; key='"guards.rmScope": "off"' ;;
+        force-op:*)                   env="LOOM_FORCE_SCOPE=off";           key='"guards.forceScope": "off"' ;;
+        stash-scope:*)                env="LOOM_GUARD_STASH_SCOPE=0";       key='"guards.stashScope": false' ;;
+        primary-checkout-mutation:*)  env="LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0"; key='"guards.primaryCheckoutMutation": false' ;;
+        worktree-write-confinement*)  env="LOOM_GUARD_WORKTREE_ISOLATION=0"; key='"guards.worktreeIsolation": false' ;;
+        *) return 0 ;;
+    esac
+    printf '\nToggle: set %s in Claude Code settings "env", or %s in .loom/config.json' "$env" "$key"
+}
+
 # Helper: output a deny decision and exit
 #
 # Optional second arg is a short, STABLE rule tag (issue #3771) recorded as the
@@ -6228,6 +6612,7 @@ deny() {
     local reason="$1"
     local tag="${2:-deny}"
     log_guard_decision "deny" "catastrophic" "$tag" || true
+    reason="${reason}$(toggle_hint_for_tag "$tag")"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -6253,6 +6638,7 @@ ask() {
     local reason="$1"
     local tag="${2:-ask}"
     log_guard_decision "ask" "ask" "$tag" || true
+    reason="${reason}$(toggle_hint_for_tag "$tag")"
     if jq -n --arg reason "$reason" '{
         hookSpecificOutput: {
             hookEventName: "PreToolUse",
@@ -6323,7 +6709,20 @@ ALWAYS_BLOCK_PATTERNS=(
     # quoted/nested invocation such as `bash -c 'curl … | sh'` is not caught
     # by the leading-position anchor, because the character immediately
     # before `curl` is a quote, not one of the anchor's separator classes.
-    '(^|[;&|[:space:](])(curl|wget)[^;&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])'
+    # #11136: the span between curl/wget and the sink is quote-aware (a quoted
+    # run is consumed whole), so a literal `|` or shell name inside a later
+    # stage's quoted argument (`… | rg -n 'a|dash|b'`) is never the sink pipe;
+    # only an unquoted pipe followed by a shell command word matches. Kept as
+    # a regex refinement (not a daemon subcommand) because this is a one-token
+    # change to an existing floor pattern that must stay fail-closed in-hook.
+    # Fail-closed on stray quotes: `\\.` consumes a backslash-escaped char
+    # (`curl a\' | sh`), and the two trailing sink alternatives let an
+    # UNBALANCED quote (no partner later on the line) degrade to the old
+    # `[^;&]*` over-match. A plain lone-quote span alternative is NOT enough:
+    # grep -E accepts any parse, so it would re-split `'a|dash|b'` and restore
+    # the #11136 false positive. Pathological-input cost is polynomial (DFA, no
+    # backrefs), measured ~4ms at 4KB.
+    '(^|[;&|[:space:](])(curl|wget)([^;&|'"'"'"\\]|\\.|'"'"'[^'"'"']*'"'"'|"([^"\\]|\\.)*"|\|)*(\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])|'"'"'[^'"'"';&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])[^'"'"']*$|"[^";&]*\|[[:space:]]*(sudo[[:space:]]+(-[^[:space:]]+[[:space:]]+)*)?([^[:space:]|;&]*/)?(ba|da|z|k|c|tc|fi|pw)?sh([[:space:]]|$|[;&|)])[^"]*$)'
 
     # Cloud infrastructure destruction. The aws forms below are specific
     # multi-token phrases, so they stay in this raw substring scan. The az/gcloud
@@ -6427,6 +6826,15 @@ ALWAYS_BLOCK_PATTERNS=(
 # payloads still reach the raw scan; spans carrying `$(` / backtick are left
 # intact so command-substitution smuggling still hard-denies.
 COMMAND_NO_LITERAL_TEXT="$COMMAND"  # scan-contract: COMMAND_NO_LITERAL_TEXT=catastrophic-safe from=COMMAND
+# #9870: mask the bodies of direct file-write heredocs FIRST, while the working
+# copy is still byte-identical to $COMMAND, and only when the WHOLE command is
+# nothing but `cat > <literal file> <<'DELIM' ... DELIM` blocks -- see
+# mask_catastrophic_filesink_heredocs()'s header for the allowlist and why it
+# is whole-command rather than per-block. Anything else returns the buffer
+# unchanged. Cheap substring gate keeps the awk call off the hot path.
+if [[ "$COMMAND" == *"<<"* ]]; then
+    COMMAND_NO_LITERAL_TEXT=$(mask_catastrophic_filesink_heredocs "$COMMAND_NO_LITERAL_TEXT")
+fi
 # #6002: mask a fully-closed `for <var> in "<lit>" ...; do ... done` word
 # list's OWN quoted literals BEFORE every other pass below, so a phrase like
 # `for q in "sql-ddl" "catastrophic:aws s3 rb"; do gh issue list --search
@@ -6540,9 +6948,9 @@ done
 # `--body "@reviewer Could you clarify..."`, the shape doctor.md's own
 # "Can't Understand Feedback" example uses) and must NOT be treated as the
 # `-F body=@path` anti-pattern (#4577).
-GH_COMMENT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+comment[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
+GH_COMMENT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+comment[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@([/.~]|-([\"'[:space:]]|$))"
 if echo "$COMMAND" | grep -qiE "$GH_COMMENT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' does NOT expand the file — it posts the literal string '@path' as the comment (lost the PR #4457 review this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"  # scan-reads: none
+    deny "BLOCKED: 'gh pr comment'/'gh issue comment --body @path' (or '--body @-') does NOT expand the file or read stdin — it posts the literal string '@path'/'@-' as the comment (lost the PR #4457 review this way; #9258 merged on an approval whose body was '@-'). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-comment-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -6555,9 +6963,9 @@ fi
 # widened GH_COMMENT_BODY_AT_PATTERN (#4577's additive-not-widened precedent),
 # so the two subcommands' patterns can be fixed/tuned independently.
 # =============================================================================
-GH_EDIT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+edit[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@[/.~]"
+GH_EDIT_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+(pr|issue)[[:space:]]+edit[^;&]*(-b|--body)[[:space:]]*=?[[:space:]]*[\"']?@([/.~]|-([\"'[:space:]]|$))"
 if echo "$COMMAND" | grep -qiE "$GH_EDIT_BODY_AT_PATTERN"; then
-    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' does NOT expand the file — it writes the literal string '@path' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"  # scan-reads: none
+    deny "BLOCKED: 'gh pr edit'/'gh issue edit --body @path' (or '--body @-') does NOT expand the file or read stdin — it writes the literal string '@path'/'@-' as the issue/PR body (corrupted issue #4608's body this way). Use --body \"\$(cat <<'EOF' ... EOF)\", -F/--body-file <path>, or 'gh api ... -F body=@<path>' instead." "gh-edit-body-literal-at"  # scan-reads: none
 fi
 
 # =============================================================================
@@ -6604,7 +7012,7 @@ fi
 #      @scratch/review.md
 # Deliberately NOT `@\S+`: that would match `@rjwalters`, `@org/team`, and
 # `@example.com` prose, i.e. exactly the #4577 false-positive family.
-GH_AT_PATHISH="@((/|~/|\.\.?/)[^[:space:]\"';&|]*|[^[:space:]\"';&|]*\.(md|markdown|txt|text|log|json|ya?ml|diff|patch|out))"
+GH_AT_PATHISH="@((/|~/|\.\.?/)[^[:space:]\"';&|]*|[^[:space:]\"';&|]*\.(md|markdown|txt|text|log|json|ya?ml|diff|patch|out)|-([\"'[:space:];&|]|$))"
 
 # Both rules below require a literal `@` somewhere in the command, so this
 # bash-builtin prefilter keeps them entirely off the hot path for the vast
@@ -6741,7 +7149,7 @@ if [[ "$COMMAND" == *"@"* ]]; then
     fi
     GH_API_RAWFIELD_BODY_AT_PATTERN="(^|[;&|[:space:]])gh[[:space:]]+api[^;&]*[[:space:]](-f|--raw-field)[[:space:]]*=?[[:space:]]*[\"']?body=[\"']?$GH_AT_PATHISH"
     if echo "$COMMAND_GH_API_RAWFIELD_SCAN" | grep -qE "$GH_API_RAWFIELD_BODY_AT_PATTERN"; then
-        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' does NOT read the file — only -F/--field gives '@<path>' its read-from-file meaning. As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"  # scan-reads: COMMAND_GH_API_RAWFIELD_SCAN
+        deny "BLOCKED: 'gh api ... -f/--raw-field body=@<path>' (or 'body=@-') does NOT read the file or stdin — only -F/--field gives '@<path>'/'@-' its read meaning (#9258). As written this posts the literal string '@<path>' as the body (same silent data loss as PR #4457/issue #4608). Use '-F body=@<path>' instead." "gh-api-rawfield-body-literal-at"  # scan-reads: COMMAND_GH_API_RAWFIELD_SCAN
     fi
 fi
 
@@ -7086,10 +7494,99 @@ fi
 # text-carrying flags, so the real invocations (`psql -c '…'`, `mysql -e '…'`)
 # are untouched and still deny.
 # =============================================================================
-SQL_DDL_PATTERN='DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'
-if echo "$COMMAND_ASK_SCAN" | grep -qiE "$SQL_DDL_PATTERN" && sql_guard_enabled; then
-    matched=$(echo "$COMMAND_ASK_SCAN" | grep -oiE "$SQL_DDL_PATTERN" | head -1)
-    deny "BLOCKED: Command matches dangerous pattern: ${matched:-SQL DDL statement}" "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+# WHAT RUNS THE PHRASE, NOT WHERE IT APPEARS (#11007). The phrase is only
+# dangerous when it reaches something that EXECUTES it, so sql_ddl_exec_match()
+# segments the command with qsplit() and matches only a segment whose command
+# word is a DB client (`sqlite3`, `psql`, `mysql`, ...), an interpreter given
+# inline code (`python -c`, `node -e`, `bash -c`, ...), or a wrapper whose
+# payload is a command string (`ssh`, `docker|podman|kubectl exec|run`) -- or a
+# DB client fed the phrase by the pipeline (`echo 'DROP TABLE t;' | sqlite3 db`)
+# or by its own heredoc. Editors, `sed -i`, `git log -S`, search tools, `jq`,
+# `cat` and interpreters reading a script/heredoc no longer match, so no
+# SQL-specific carve-out is needed for them. Accepted trade-off: an
+# interpreter running DDL from a script file or heredoc is not caught (as with
+# `python3 script.py` before).
+sql_ddl_exec_match() {
+    printf '%s' "$1" | awk "$_QSPLIT_AWK"'
+    function phrase(t,   l) {
+        l = tolower(t)
+        if (match(l, /drop database|drop table|drop schema|truncate table/))
+            return toupper(substr(l, RSTART, RLENGTH))
+        return ""
+    }
+    function is_wrapper(w,   base) {
+        base = w
+        sub(/^.*\//, "", base)
+        sub(/^\\/, "", base)
+        return base ~ /^(env|command|exec|builtin|sudo|doas|nohup|setsid|nice|ionice|stdbuf|timeout|time|xargs|unbuffer)$/
+    }
+    function runs_sql(cmd, toks, m,   j, base) {
+        base = cmd
+        sub(/^.*\//, "", base)
+        if (base ~ /^(sqlite3?|psql|mysql|mariadb|duckdb|clickhouse-client|sqlcmd)$/) return 1
+        if (base ~ /^(python[0-9.]*|node|nodejs|ruby|perl|bash|sh|zsh|dash|ksh)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] ~ /^-[A-Za-z]*[ceE][A-Za-z]*$/) return 1
+            return 0
+        }
+        if (base == "ssh") return 1
+        if (base ~ /^(docker|podman|kubectl)$/) {
+            for (j = 2; j <= m; j++) if (toks[j] == "exec" || toks[j] == "run") return 1
+        }
+        return 0
+    }
+    # Whole-command scan: a heredoc body spans physical lines, so buffer them all.
+    { buf = (NR > 1 ? buf "\n" : "") $0 }
+    END {
+        out = qsplit(buf)   # quote-aware segmentation (#3755)
+        n = split(out, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            # Unwrap command-prefix wrappers (#12237). The list mirrors the
+            # heredoc-interpreter scan earlier in this file; keep them in sync.
+            # After a wrapper, skip its -flags, VAR=val and numeric operands. A
+            # bare word right after a flag is that flag operand (`sudo -u pg
+            # psql`, `nice -n 10`) unless it is itself a DB client or wrapper,
+            # so `sudo -E psql` still unwraps to psql.
+            mr = split(seg, raw, /[ \t]+/)
+            j = 1
+            while (j <= mr && raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/) j++
+            while (j <= mr && is_wrapper(raw[j])) {
+                j++
+                prevflag = 0
+                while (j <= mr) {
+                    if (raw[j] ~ /^-/) { prevflag = 1; j++; continue }
+                    if (raw[j] ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || raw[j] ~ /^[0-9]+([.][0-9]+)?[smhd]?$/) { prevflag = 0; j++; continue }
+                    if (prevflag && !is_wrapper(raw[j]) && !runs_sql(raw[j], raw, mr)) { prevflag = 0; j++; continue }
+                    break
+                }
+            }
+            m = 0
+            for (k = j; k <= mr; k++) toks[++m] = raw[k]
+            if (m == 0 || !runs_sql(toks[1], toks, m)) continue
+            ph = phrase(segs[i])
+            if (ph != "") { print ph; exit }
+            # Phrase fed by the pipeline: walk back over `|`-joined segments.
+            for (j = i - 1; j >= 1 && qsplit_op[j] == "|"; j--) {
+                ph = phrase(segs[j])
+                if (ph != "") { print ph; exit }
+            }
+            # Phrase in a later heredoc-body segment of this same command.
+            if (seg ~ /<</ && seg !~ /<<</) {
+                for (j = i + 1; j <= n; j++) {
+                    ph = phrase(segs[j])
+                    if (ph != "") { print ph; exit }
+                }
+            }
+        }
+    }'
+}
+# Cheap grep first so the awk and the config read stay off the hot path.
+if echo "$COMMAND_ASK_SCAN" | grep -qiE 'DROP DATABASE|DROP TABLE|DROP SCHEMA|TRUNCATE TABLE'; then
+    matched=$(sql_ddl_exec_match "$COMMAND_ASK_SCAN")
+    if [[ -n "$matched" ]] && sql_guard_enabled; then
+        deny "BLOCKED: Command matches dangerous pattern: $matched. Editing source that contains this statement? Use the Edit/Write tools." "sql-ddl"  # scan-reads: COMMAND_ASK_SCAN
+    fi
 fi
 
 # =============================================================================
@@ -7712,6 +8209,108 @@ wt_write_mktemp_same_command_safe() {
 }
 
 # =============================================================================
+# write-confinement /tmp-CWD LOOP-VARIABLE RESOLUTION (#12285)
+#
+# Sibling of wt_write_mktemp_same_command_safe() for routine scratch work:
+#
+#     cd /tmp/probe && for name in a b; do echo x > "$name.gds"; done
+#
+# The target starts with an unexpanded `$`, so the "root unknown" deny
+# (worktree-write-confinement-unresolved-var) fires even though every value the
+# variable can take is a bare literal word and the cwd is a literal /tmp
+# directory -- the write cannot leave /tmp/probe. Skip that deny ONLY when ALL
+# hold (each is lexical and fails closed):
+#
+#   1. The tracked cwd is a literal /tmp/<dir>[/<dir>...] path (components
+#      start alphanumeric, so no `.`/`..`; no `$`, backtick or quote) outside
+#      every managed worktree and the main checkout, AND the
+#      command has an earlier `cd /tmp/<literal>` segment, so the cwd came from
+#      this command and not from the hook's inherited cwd.
+#   2. The target is `$var`/`${var}` plus a literal suffix with no `/`, `..`,
+#      `$`, backtick or quote.
+#   3. EVERY binding of var in the command is a literal `for var in <words>` or
+#      `var=<word>` whose words are `/`-free, `..`-free, non-absolute names,
+#      and the first binding precedes the first use of the target. Any other
+#      rebinding (read, +=, eval, source, unset, ...) or no binding at all keeps
+#      the deny.
+#   4. The command contains no `ln` command word: a symlink created in the same
+#      command could redirect the write out of /tmp/<dir>. A symlink that
+#      already exists from an EARLIER command remains a residual gap, since the
+#      guard is lexical and never resolves paths.
+# =============================================================================
+wt_write_tmp_cwd_loop_var_safe() {
+    local target="$1" cwd="$2" cmdtext="$3" t c1 c2 varname suffix verdict
+    t="$target"
+    if [[ ${#t} -ge 2 ]]; then
+        c1="${t:0:1}"; c2="${t: -1}"
+        if [[ ("$c1" == '"' && "$c2" == '"') || ("$c1" == "'" && "$c2" == "'") ]]; then
+            t="${t:1:${#t}-2}"
+        fi
+    fi
+    if [[ "$t" =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*)\}(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    elif [[ "$t" =~ ^\$([A-Za-z_][A-Za-z0-9_]*)(.*)$ ]]; then
+        varname="${BASH_REMATCH[1]}"; suffix="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+    [[ "$suffix" =~ ^[A-Za-z0-9._+@%,=:-]*$ ]] || return 1
+    [[ "$suffix" == *..* ]] && return 1
+    c1="${cwd:0:1}"; c2="${cwd: -1}"
+    if [[ ${#cwd} -ge 2 && ("$c1" == '"' || "$c1" == "'") && "$c1" == "$c2" ]]; then
+        cwd="${cwd:1:${#cwd}-2}"
+    fi
+    [[ "$cwd" =~ ^/tmp(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || return 1
+    # A checkout or worktree that itself lives under /tmp is still protected.
+    _wt_in_protected_area "$cwd" && return 1
+    # A symlink made in this same command could redirect the write.
+    [[ "$cmdtext" =~ (^|[^A-Za-z0-9_.-])ln([[:space:]]|$) ]] && return 1
+    verdict=$(printf '%s' "$cmdtext" | awk -v varname="$varname" -v tok="\$${varname}${suffix}" -v btok="\${${varname}}${suffix}" "$_QSPLIT_AWK""$_MKTEMP_REBIND_AWK"'
+    function strip_q(w,   a, b) {
+        a = substr(w, 1, 1); b = substr(w, length(w), 1)
+        if (length(w) >= 2 && (a == "\"" || a == "\047") && a == b) return substr(w, 2, length(w) - 2)
+        return w
+    }
+    function lit_ok(w) { return w ~ /^[A-Za-z0-9_][A-Za-z0-9._-]*$/ }
+    {
+        $0 = qsplit($0)
+        n = split($0, segs, "\n")
+        for (i = 1; i <= n; i++) {
+            seg = segs[i]
+            sub(/^[ \t]+/, "", seg)
+            sub(/[ \t]+$/, "", seg)
+            while (sub(/^(do|then|else|elif|if|while|until|!|\{|\()[ \t]+/, "", seg)) { }
+            if (seg ~ /^cd[ \t]+/) {
+                w = seg; sub(/^cd[ \t]+/, "", w); sub(/[ \t].*$/, "", w)
+                w = strip_q(w)
+                if (cdat == 0 && w ~ /^\/tmp(\/[A-Za-z0-9_][A-Za-z0-9._-]*)+$/) cdat = i
+            }
+            if (useat == 0 && (index(seg, tok) > 0 || index(seg, btok) > 0)) useat = i
+            bseg = _mktemp_strip_decl_kw(seg)
+            if (seg ~ ("^for[ \t]+" varname "[ \t]+in[ \t]+")) {
+                total++
+                w = seg; sub(/^for[ \t]+[A-Za-z0-9_]+[ \t]+in[ \t]+/, "", w)
+                m = split(w, words, /[ \t]+/)
+                ok = (m >= 1)
+                for (k = 1; k <= m; k++) if (!lit_ok(words[k])) ok = 0
+                if (ok) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (length(bseg) > length(varname) + 1 && substr(bseg, 1, length(varname) + 1) == varname "=") {
+                total++
+                w = strip_q(substr(bseg, length(varname) + 2))
+                if (lit_ok(w)) { valid++; if (firstbind == 0) firstbind = i }
+            } else if (_mktemp_is_other_rebind(seg, varname)) {
+                total++
+            }
+        }
+    }
+    END {
+        if (total >= 1 && total == valid && cdat > 0 && useat > 0 && cdat < useat && firstbind > 0 && firstbind < useat) print "SAFE"
+        else print "UNSAFE"
+    }')
+    [[ "$verdict" == "SAFE" ]]
+}
+
+# =============================================================================
 # rm-scope SAME-COMMAND LITERAL-PATH RESOLUTION (#6676)
 #
 # rm_scope_mktemp_same_command_safe() (above) proves ONLY the exact-string
@@ -8258,6 +8857,7 @@ _extract_write_targets_scan() {
     BEGIN {
         SEP = sprintf("%c", 31)
         curcwd = startcwd
+        sw_depth = 0; sw_pending = 0; pd_depth = 0   # #12082 subshell / pushd stacks
     }
     # Slurp the whole (possibly multi-line) command into ONE buffer,
     # preserving embedded newlines (mirrors the #3898 multi-line
@@ -8342,6 +8942,38 @@ _extract_write_targets_scan() {
             sub(/^[ \t]+/, "", seg)
             sub(/^sudo[ \t]+/, "", seg)
             sub(/^[ \t]+/, "", seg)
+
+            # GROUPING OPENERS AND CLOSERS AROUND A `cd` (#12082). The cd
+            # tracker below only fires when the segment WORD is `cd`, so
+            # `( cd /tmp/x && echo hi > a.txt )` and `{ cd /tmp/x; ...; }` were
+            # never tracked: the relative write resolved against the hook cwd
+            # (the main checkout) and was denied although it lands in /tmp/x.
+            #   * A subshell `(` saves curcwd on a stack and its matching `)`
+            #     restores it, because a cd inside a subshell never leaks out.
+            #     Restoring on an unmatched `)` can only RESTORE the pre-group
+            #     cwd, so a miscount errs toward more denials, not fewer.
+            #   * A brace group `{ ` runs in the current shell, so it is only
+            #     stripped; its cd correctly persists.
+            # Quoted spans are blanked before counting parens so a `(` or `)`
+            # inside a string can neither open nor close a group.
+            if (sw_pending > 0) {
+                while (sw_pending > 0 && sw_depth > 0) { curcwd = sw_stack[sw_depth]; sw_depth--; sw_pending-- }
+                sw_pending = 0
+            }
+            while (seg ~ /^\{[ \t]/) sub(/^\{[ \t]+/, "", seg)
+            while (seg ~ /^\(/ && seg !~ /^\(\(/) {
+                sw_depth++
+                sw_stack[sw_depth] = curcwd
+                sub(/^\([ \t]*/, "", seg)
+            }
+            if (sw_depth > 0) {
+                _pq = seg
+                gsub(/"[^"]*"/, "", _pq)
+                gsub(/'"'"'[^'"'"']*'"'"'/, "", _pq)
+                _po = gsub(/\(/, "", _pq)
+                _pc = gsub(/\)/, "", _pq)
+                if (_pc > _po) sw_pending = _pc - _po
+            }
             if (seg == "") continue
 
             # `NAME=value` assignments in any ordinary shell assignment
@@ -8408,7 +9040,13 @@ _extract_write_targets_scan() {
             mseg = substr(gsegs[i], stripped + 1)
             mm = split(mseg, mtoks, /[ \t]+/)
 
-            if (toks[1] == "cd") {
+            # `popd` undoes the most recent `pushd` of THIS command (#12082).
+            if (toks[1] == "popd") {
+                if (pd_depth > 0) { curcwd = pd_stack[pd_depth]; pd_depth-- }
+                continue
+            }
+            if (toks[1] == "cd" || (toks[1] == "pushd" && m >= 2 && toks[2] !~ /^-/)) {
+                if (toks[1] == "pushd") { pd_depth++; pd_stack[pd_depth] = curcwd }
                 if (m >= 2 && toks[2] != "" && toks[2] != "-") {
                     # SAME-COMMAND VARIABLE RESOLUTION FOR THE cd ARGUMENT
                     # ITSELF (#7294, mirrors parse_force_ops'"'"' identical
@@ -8700,14 +9338,44 @@ _extract_write_targets_scan() {
                 # every FILE argument after that is still fully scanned, so a
                 # genuine main-checkout target among them still denies.
                 bare_i_pending = 0
+                have_script = 0
+                end_opts = 0
                 sed_skip = 1
                 nf = 0
                 delete nfargs
                 for (j = 2; j <= m; j++) {
                     if (j in stdin_redir) continue
                     if (j in numfd_redir) continue
+                    # `--` ends options (#11074): every later token -- even one
+                    # spelled `-e`/`-f`/`--file=x` -- is an operand, never a
+                    # script option that could swallow the next file.
+                    if (!end_opts && toks[j] == "--") { end_opts = 1; continue }
+                    if (end_opts) {
+                        if (toks[j] == "") continue
+                        if (toks[j] ~ /^<<-?/) {
+                            if (toks[j] == "<<" || toks[j] == "<<-" || toks[j] == "<<<") j++
+                            continue
+                        }
+                        nf++
+                        nfargs[nf] = toks[j]
+                        bare_i_pending = 0
+                        continue
+                    }
                     if (toks[j] == "-i") { has_i = 1; bare_i_pending = 1; continue }
                     if (toks[j] ~ /^-i/) has_i = 1
+                    # Script options (#11074): `-e`/`-f`/`--expression`/`--file`
+                    # (or a short cluster ending in e/f with no `i` before it --
+                    # after `i` the rest is the backup suffix) take the NEXT
+                    # token as script text/file, never a file operand; attached
+                    # forms (`-es/a/b/`, `--file=s.sed`) carry it in-token. Either
+                    # way there is no positional script: every remaining
+                    # non-option token is a file.
+                    if (toks[j] == "--expression" || toks[j] == "--file" || toks[j] ~ /^-[^-eif]*[ef]$/) {
+                        have_script = 1; bare_i_pending = 0; j++; continue
+                    }
+                    if (toks[j] ~ /^--(expression|file)=/ || toks[j] ~ /^-[^-eif]*[ef]./) {
+                        have_script = 1; bare_i_pending = 0; continue
+                    }
                     if (toks[j] ~ /^-/) continue
                     if (toks[j] == "") continue
                     # Same heredoc/herestring exclusion as the `tee` branch
@@ -8726,6 +9394,9 @@ _extract_write_targets_scan() {
                     }
                     bare_i_pending = 0
                 }
+                # With -e/-f there is no positional script: only the BSD `-i ''`
+                # suffix token (sed_skip == 2 -> 1) is left to skip.
+                if (have_script) sed_skip = (sed_skip == 2) ? 1 : 0
                 if (has_i && nf > sed_skip) {
                     for (j = sed_skip + 1; j <= nf; j++) print curcwd SEP resolve_var_q(nfargs[j])
                 }
@@ -9041,8 +9712,24 @@ expand_leading_tilde() {
 #
 # Cheap pre-check keeps awk off the hot path for the ~99% of commands that have
 # no recursive/force rm at all.
-if echo "$COMMAND_ASK_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
-    RM_TARGETS=$(extract_rm_targets "$COMMAND_ASK_SCAN" | head -20)
+# NON-SHELL INTERPRETER HEREDOC DATA (#10422): COMMAND_ASK_SCAN deliberately
+# leaves bodies fed to python/perl/ruby/node VISIBLE (right for the ask-tier
+# scans). For the rm scan that is a false positive: a python3 stdin heredoc
+# carrying rm-looking TEXT is data the outer shell never executes. Build a
+# rm-scan-only copy that re-runs the selective heredoc masker with
+# shell_only=1, so quoted (or provably expansion-free) bodies of NON-shell
+# interpreters are data, while bash/sh/zsh/dash/ksh/eval/source/. -fed bodies
+# (and `cat <<EOF | bash`, `sh -s`) stay visible and fail closed. The true
+# original $COMMAND is passed so capture-then-reparse shapes still fail closed.
+COMMAND_RM_SCAN="$COMMAND_ASK_SCAN"  # scan-contract: COMMAND_RM_SCAN=deny-safe from=COMMAND_ASK_SCAN
+if [[ "$COMMAND_RM_SCAN" == *"<<"* ]]; then
+    COMMAND_RM_SCAN=$(printf '%s' "$COMMAND_RM_SCAN" | ORIG_COMMAND_FOR_READ_CHECK="$COMMAND" awk "$_MASKHEREDOC_AWK"'
+    BEGIN { origcmd = ENVIRON["ORIG_COMMAND_FOR_READ_CHECK"] }
+    { buf = buf (NR > 1 ? "\n" : "") $0 }
+    END { printf "%s", mask_heredoc_bodies_selective(buf, 1, origcmd) }')
+fi
+if echo "$COMMAND_RM_SCAN" | grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rf]'; then
+    RM_TARGETS=$(extract_rm_targets "$COMMAND_RM_SCAN" | head -20)
 
     for target in $RM_TARGETS; do
         # Strip the #8217 provenance mark (0x1E) the span pass prefixes onto
@@ -9808,6 +10495,12 @@ if worktree_isolation_guard_enabled && \
                         if wt_write_mktemp_same_command_safe "$_wtarget" "$COMMAND_WT_MKTEMP_SCAN"; then
                             continue
                         fi
+                        # #12285: literal-loop-variable scratch write under a
+                        # literal `cd /tmp/<dir>` -- see
+                        # wt_write_tmp_cwd_loop_var_safe()'s doc comment.
+                        if wt_write_tmp_cwd_loop_var_safe "$_wtarget" "$_wcwd" "$COMMAND_WT_MKTEMP_SCAN"; then
+                            continue
+                        fi
                         deny "BLOCKED: Bash-tool write target '${_wtarget}' is an unexpanded shell variable from the path root down, so this guard cannot tell where the write lands — it may resolve to an absolute path inside the main repository checkout ('${_WT_MAIN_ROOT}'), and a Loom-managed worktree exists in this repository. Unresolvable write targets fail closed (#4921). Need this variable resolved instead? Declare it literally in the SAME command, before the write: VAR=/literal/path; <write> -- the guard's same-command resolver (record_assign()/resolve_var(), #4881) substitutes it before this check runs, so the write is judged on the real resolved path. A false or self-serving declaration gains nothing: the resolved path is still checked against this same containment rule, so it can never grant an allow beyond what writing that literal path outright would already grant (#6172). Otherwise, write to an explicit literal path — inside your issue worktree ($(_wt_worktree_hint)) for repo files, or a spelled-out /tmp path for scratch. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement-unresolved-var"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
                     fi
                     continue
@@ -9932,6 +10625,10 @@ if worktree_isolation_guard_enabled && \
         fi
         _wabs=$(normalize_abs_path "$_wabs")
 
+        # (a0) The Champion pin / PR-facts file, a direct child of the git
+        # common dir (#13180) -> allow. Exactly those two name patterns.
+        _champion_state_path_ok "$_wabs" && continue
+
         # (a) Already inside some managed worktree -> allow. This is exactly
         # where a builder is supposed to write.
         _in_any_managed_worktree "$_wabs" && continue
@@ -10007,7 +10704,7 @@ if worktree_isolation_guard_enabled && \
         # base is resolved off the same main-checkout root so the "a managed
         # worktree exists" gate stays consistent with the containment test.
         if _wt_isolation_in_play; then
-            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv/mkdir — do NOT retry the write through Bash. cd into your issue worktree ($(_wt_worktree_hint)) and write there instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
+            deny "BLOCKED: Bash-tool write to '${_wabs}' resolves to the main repository checkout ('${_WT_MAIN_ROOT}'), but a Loom-managed worktree exists elsewhere in this repository (this check cannot verify it belongs to the acting session — see #4245). This is a worktree-isolation bypass via Bash redirection/tee/sed -i/cp/mv/mkdir — do NOT retry the write through Bash. cd into your issue worktree ($(_wt_worktree_hint)) and write there instead. Gitignored status does not exempt a path: Edit/Write and Bash writes are confined by the same rule. For repo-local scratch/notes/journal files, write under your issue worktree or under /tmp (session scratch) instead. Not a Builder and need to write here directly? Set guards.worktreeIsolation:false in .loom/config.json for the session -- an inline 'LOOM_GUARD_WORKTREE_ISOLATION=0 <command>' prefix does NOT work (this hook runs as a separate process). (#4178)" "worktree-write-confinement"  # scan-reads: COMMAND_ASK_SCAN,COMMAND_WT_MKTEMP_SCAN
         fi
     done <<< "$WRITE_TARGETS"
 fi
@@ -11467,6 +12164,91 @@ index_mutation_unisolated() {
     fi
     return 1
 }
+
+# =============================================================================
+# PRIMARY-CHECKOUT MUTATION (#13589) — deny `git commit`, `git switch`,
+# `git checkout -b/-B/--detach`, and `git checkout <branch|sha>` when the
+# resolved cwd (honouring `cd X &&` and `git -C X`) is a workspace's PRIMARY
+# checkout during an AGENT STEP. Builder/Doctor work in worktrees; a stray
+# commit or branch switch in the primary clone parks it off the default branch
+# (rjwalters/repo, loom-worker-4, 2026-11-04) and holds fleet sync.
+#
+# Agent step = LOOM_SWEEP_ID or LOOM_WORKTREE_PATH is exported (the dispatcher
+# sets them; an operator's interactive session has neither, so is untouched).
+# Deny, not ask: headless fleet runs have nobody to answer an ask.
+#
+# Allowed shapes (legitimate primary-clone callers):
+#   - checkout/switch whose target is main or master (Auditor's
+#     `git checkout -B main origin/main`, `git checkout main`)
+#   - `git checkout -- <path>` / `git checkout <path>` (file restore) and -h
+#   - anything inside a linked worktree, and all of worktree.sh,
+#     check-main-clean.sh, resync-installed.sh, merge-pr.sh, version.sh (their
+#     internal git calls are invisible to this hook; only the top-level command
+#     text is scanned).
+# Gated by primary_checkout_mutation_guard_enabled(), evaluated lazily.
+# =============================================================================
+if [[ -n "${LOOM_SWEEP_ID:-}${LOOM_WORKTREE_PATH:-}" ]] \
+   && echo "$COMMAND_NO_COMMENT" | grep -qE '(^|[;&|(`{]|[[:space:]])git[[:space:]].*(checkout|switch|commit)' \
+   && primary_checkout_mutation_guard_enabled; then
+    while IFS=$'\037' read -r _pcm_cwd _pcm_sub _pcm_args; do
+        [[ -z "$_pcm_sub" ]] && continue
+        if [[ "$_pcm_cwd" == *"'"* || "$_pcm_cwd" == *'"'* ]]; then
+            strip_target_quoting "$_pcm_cwd" && _pcm_cwd="$_UNQUOTED_TARGET"
+        fi
+        [[ -n "$_pcm_cwd" && -d "$_pcm_cwd" ]] || continue
+        _pcm_top=$(cd "$_pcm_cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || continue
+        _pcm_top=$(cd "$_pcm_top" 2>/dev/null && pwd -P) || continue
+        _pcm_common=$(cd "$_pcm_cwd" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || continue
+        _pcm_parent=$(cd "$_pcm_cwd" 2>/dev/null && cd "$_pcm_common/.." 2>/dev/null && pwd -P) || continue
+        [[ "$_pcm_top" == "$_pcm_parent" ]] || continue   # linked worktree: unaffected
+
+        read -r -a _pcm_t <<< "$_pcm_args"
+        _pcm_deny=false
+        _pcm_help=false
+        _pcm_dashdash=false
+        _pcm_new=""        # branch named by -b/-B/-c/-C
+        _pcm_makes=false   # creates/detaches
+        _pcm_pos=""        # first positional
+        _pcm_prev=""
+        for _pcm_a in "${_pcm_t[@]}"; do
+            if [[ "$_pcm_prev" == "-b" || "$_pcm_prev" == "-B" || "$_pcm_prev" == "-c" || "$_pcm_prev" == "-C" ]]; then
+                _pcm_new="$_pcm_a"; _pcm_prev=""; continue
+            fi
+            case "$_pcm_a" in
+                -h|--help) _pcm_help=true ;;
+                --) _pcm_dashdash=true; break ;;
+                -b|-B|-c|-C) _pcm_makes=true; _pcm_prev="$_pcm_a" ;;
+                --orphan|--detach|-d|--create|--force-create) _pcm_makes=true ;;
+                -*) ;;
+                *) [[ -z "$_pcm_pos" ]] && _pcm_pos="$_pcm_a" ;;
+            esac
+        done
+        [[ "$_pcm_help" == true ]] && continue
+        _pcm_target="${_pcm_new:-$_pcm_pos}"
+        case "$_pcm_sub" in
+            commit) _pcm_deny=true ;;
+            switch)
+                if [[ "$_pcm_target" == "main" || "$_pcm_target" == "master" ]]; then
+                    [[ "$_pcm_makes" == true && -z "$_pcm_new" ]] && _pcm_deny=true
+                else
+                    _pcm_deny=true
+                fi ;;
+            checkout)
+                [[ "$_pcm_dashdash" == true && -z "$_pcm_new" && "$_pcm_makes" != true ]] && continue
+                if [[ "$_pcm_target" == "main" || "$_pcm_target" == "master" ]]; then
+                    :   # return to / refresh the default branch
+                elif [[ "$_pcm_makes" == true ]]; then
+                    _pcm_deny=true
+                elif [[ -n "$_pcm_pos" ]] \
+                     && (cd "$_pcm_cwd" 2>/dev/null && git rev-parse --verify --quiet "${_pcm_pos}^{commit}" >/dev/null 2>&1); then
+                    _pcm_deny=true   # a branch / sha, not a path
+                fi ;;
+        esac
+        if [[ "$_pcm_deny" == true ]]; then
+            deny "Blocked: $COMMAND (git $_pcm_sub in the PRIMARY checkout $_pcm_top during an agent step — this moves the workspace off the default branch or commits onto it, which holds fleet sync (wrong-branch). Builder/Doctor work happens in a worktree: run './.loom/scripts/worktree.sh <issue-number>' and work in .loom/worktrees/issue-<N>. Switching back to main/master and file restores ('git checkout -- <path>') remain allowed. To opt out repo-wide set guards.primaryCheckoutMutation:false in .loom/config.json, or export LOOM_GUARD_PRIMARY_CHECKOUT_MUTATION=0 in the agent's OWN environment before the session — an inline prefix does not reach this hook, which runs as a separate process)" "primary-checkout-mutation:$_pcm_sub"  # scan-reads: COMMAND_NO_COMMENT
+        fi
+    done < <(resolve_primary_mutations "$COMMAND_NO_COMMENT" "$CWD")
+fi
 
 # =============================================================================
 # git read-tree WITHOUT an isolating GIT_INDEX_FILE assignment

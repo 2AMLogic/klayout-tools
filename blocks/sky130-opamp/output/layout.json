@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:12:42.358706+00:00",
+  "slug": "sky130-opamp",
+  "name": "Sky130 Opamp",
+  "description": "Two-stage Miller op-amp on SkyWater sky130 \u2014 agent-built, open-tool verified",
+  "pdk": "sky130",
+  "layer_count": 4,
+  "cell_count": 1,
+  "instance_count": 0,
+  "layout_file": "fe_masks.gds",
+  "renders": {
+    "overview": "renders/overview.png",
+    "poly.drawing": "renders/66_20.png",
+    "nsdm.drawing": "renders/93_44.png",
+    "psdm.drawing": "renders/94_20.png",
+    "npc.drawing": "renders/95_20.png",
+    "center_crop": "renders/center_crop/overview.png"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-opamp",
+    "ref": "26b1547f94448a7e454b0ab375539f3283c33f33",
+    "path": "layout/opamp_bias/gen/fe_masks.gds"
+  },
+  "downloadable": true,
+  "status": "ok"
+}

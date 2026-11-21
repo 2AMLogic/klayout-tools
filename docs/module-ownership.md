@@ -8,7 +8,7 @@ This document maps each `klt` verb implementation to its constituent modules, id
 
 This map is **mechanically assisted, hand-verified**:
 
-1. **CLI parser registration** in `src/klayout_tools/cli/parser.py`: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
+1. **CLI parser registration** in `src/klayout_tools/cli/parser.py` and the per-verb `src/klayout_tools/cli/parsers/<verb>.py` modules: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
 2. **Import graph analysis**: tracing the `from .. import` chains in each `<verb>_cmd.py` module to find all related modules
 3. **Module docstrings**: extracting the first paragraph from each module's `"""..."""` to document ownership boundaries
 
@@ -50,6 +50,7 @@ The `extract` verb extracts SPICE-compatible netlists from layout. Its implement
 - **extract** (`extract.py`): Core netlist extraction engine; main public API (`run_extract()`) and data structures
 - **extract_abstract** (`extract_abstract.py`): Black-box cell abstraction subsystem (cell-level abstractions with pins, per `--abstract-cells`)
 - **extract_parasitics** (`extract_parasitics.py`): RC-parasitics measurement and critical-net analysis (geometry-based R/C computation)
+- **extract_progress** (`extract_progress.py`): Per-stage wall-clock timing (the response's additive `timing` object) and stderr progress/heartbeat for long runs
 - **extract_report** (`extract_report.py`): Netlist-report-description subsystem — shapes an already-resolved `kdb.Circuit`/`kdb.LayoutToNetlist` into the response's `devices[]`/`nets[]` arrays, `device_counts`, and the layer/net warning lists (`merged_net_labels`, `unbiased_pmos_body_nets`, `single_terminal_nets`, `ignored_layers`, `device_recognition_only_layers`, the `parasitics` deck-gap reports)
 - **extract_spef** (`extract_spef.py`): SPEF (Standard Parasitic Exchange Format) export subsystem (identifiers, netgen integration, RC-star node generation)
 - **decks.extraction** (`decks/extraction.py`): PDK-specific extraction deck management (deck selection, validation)
@@ -106,6 +107,7 @@ The `place_and_route` verb runs placement, global/detail routing, and post-PnR o
 
 - **place_and_route_cmd** (`cli/place_and_route_cmd.py`): CLI interface, JSON envelope and request document handling
 - **place_and_route** (`place_and_route.py`): Core place-and-route engine coordination (tool invocation, flow control)
+- **place_and_route_request** (`place_and_route_request.py`): Request validation — the pure validators/resolvers for the request document plus `PlaceAndRouteError` (issue #3699); re-exported from `place_and_route`
 - **place_and_route_gds_merge** (`place_and_route_gds_merge.py`): Post-PnR GDS file merging, port cleanup, and design finalization
 - **place_and_route_min_area** (`place_and_route_min_area.py`): Post-route minimum-**area** repair pass over the merged GDS — floors routed metal against the resolved PDK family's own `*.area.*` deck rules and reports what it could not repair safely (issue #2139); called only from `place_and_route_gds_merge._merge_def_to_gds`
 - **place_and_route_sta** (`place_and_route_sta.py`): Post-routing static timing analysis integration (timing closure, slew/delay annotation)
@@ -119,6 +121,7 @@ The `signoff` verb grades digital RTL-flow blocks and coordinates multi-stage ve
 - **signoff** (`signoff.py`): Core digital RTL-flow grading, multi-stage verification coordination (STA/functional verification per kind)
 - **signoff_envelopes** (`signoff_envelopes.py`): Typed evidence-envelope shapes the ingestion boundary validates against — one `TypedDict` per `_classify` kind, the `_EvidenceEnvelope` union they narrow to, and the `_ENVELOPE_SHAPES`/`_SCALAR_CHECKS`/`_UNION_ORIGINS` lookup tables `signoff.py`'s validator walks them with (issue #2313). Pure declarations, no runtime logic
 - **signoff_power_delivery** (`signoff_power_delivery.py`): T1 item 11's ("Power delivery (structural)") grading subsystem — reading and hash-verifying a cited `klt erc` supply spec, the LVS and place-and-route halves of the item's two branches, and rendering the item's report entry (issue #2626)
+- **signoff_store_pin** (`signoff_store_pin.py`): Store-pinned evidence companions (issue #5963) — resolving a `yield` citation's samples-document hash offline from a committed artifact-store manifest, plus the report-relative companion-path resolvers shared by the yield/erc lookups (issues #2197, #2608; moved out of `signoff.py` for its size-ratchet ceiling)
 
 ### sim
 
@@ -127,6 +130,8 @@ The `sim` verb runs SPICE simulations over generated netlists and produces struc
 - **sim_cmd** (`cli/sim_cmd.py`): CLI interface, JSON envelope output, request document handling
 - **sim** (`sim.py`): Core SPICE simulation engine wrapper, netlist execution, result collection
 - **sim_plot** (`sim_plot.py`): Result plotting and waveform display utilities (matplotlib/HTML output)
+- **sim_crossings** (`sim_crossings.py`): `measurements[].crossings` (issue #2868) — request validation, the per-measurement rawfile `.control` lines, and the linearly interpolated threshold-crossing extraction run inside each corner
+- **sim_injected** (`sim_injected.py`): `monte_carlo.injected` design-owned per-instance mismatch (issue #2911) — request validation, instance resolution against the netlist closure, the seeded per-sample draws, and the deck `.param` lines
 - **sim_remote** (`sim_remote.py`): Remote simulation orchestration (AMI/cloud runner invocation and result retrieval)
 
 ### sta
@@ -155,10 +160,15 @@ The `synthesize` verb maps RTL to a standard-cell netlist against a resolved lib
 
 **Naming trap**: there is no `yield.py` — the verb's core module is `yield_analysis.py`.
 
+`klt yield-samples` (issue #2563) is a separate verb whose CLI module is `cli/yield_samples_cmd.py`, but whose core (`derive_sample_set`) deliberately lives in `yield_analysis.py`: it reuses `klt yield`'s own sim-report reader so the draw-screening rules exist in exactly one place.
+
+`klt yield-csv` (issue #2931) follows the same split: CLI in `cli/yield_csv_cmd.py`, core (`derive_sample_set_from_csv`) in `yield_analysis.py`.
+
 **Not part of this split**: `klt yield-campaign` and `klt yield-sensitivity` are separate, independently-registered CLI verbs (their own `set_defaults` entries in `cli/parser.py`), not additional files of `klt yield` itself, despite the shared `yield*` module-name prefix:
 
 - `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
 - `yield-sensitivity` = `cli/yield_sensitivity_cmd.py` + `yield_sensitivity.py` (parameter sensitivity ranking for a completed campaign)
+- `yield-threshold` = `cli/yield_threshold_cmd.py` + `probit.py` (probit threshold fit for binary-outcome decision circuits; pure Python, no native extension, issue #2976)
 
 Both fit the single-implementation-module pattern (see "Single-File Verbs" below) once their own cmd/core pair is counted separately from `yield`'s.
 
@@ -166,7 +176,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, ring_check, size, socket_check, stats, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, interface_check, kb, layers, layout_metrics, lef_abstract, mom, pex, power, power_intent, precheck, render, report, reset_coverage, ring_check, seam_check, size, socket_check, stats, tap_distance, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 

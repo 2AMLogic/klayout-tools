@@ -1,285 +1,55 @@
-"""Curated MOS device-model binding table + SPICE writer delegate for
-`klt extract --pdk ...` (see ``docs/cli/extract.md`` and issue #209).
+"""Curated device-model binding table + SPICE writer delegate for
+`klt extract --pdk ...`.
 
-**Problem this solves**: `klt extract`'s default (no ``--pdk``) SPICE output
-writes each extracted MOS device as a bare ``M`` card whose model name is the
-curated deck's own device-class label (``nfet``/``pfet``, see
-``klayout_tools.decks.ExtractionDeck``) -- that label does not correspond to
-any model a real PDK ships, so the netlist cannot bind the real PDK model
-library at all (neither sky130 nor gf180mcu defines a ``.model nfet``; both
-ship the real primitive device as a ``.subckt``, not a built-in ``nmos``/
-``pmos`` model -- see the module docstring's "Card shape" note below). When
-``klt extract`` is given ``--pdk``/``--pdk-root`` and the PDK resolves, this
-module supplies the pieces that rewrite each MOS device onto the resolved
-PDK's real device library instead: a small curated
-``(deck_name, pdk_variant_family) -> {"nfet": ..., "pfet": ...}`` lookup
-table (:func:`resolve_mos_model_table`) and a
-``kdb.NetlistSpiceWriterDelegate`` subclass
-(:func:`create_model_binding_delegate`) that emits an ``X`` subcircuit call
-per bound device instead of KLayout's default ``M`` card.
+User-facing behaviour (per-family binding table, card shapes, geometry
+styles, scope limits) is documented in ``docs/cli/extract.md`` -> "SPICE model
+binding"; LVS-side ingestion is in ``docs/cli/lvs.md`` -> "Per-deck coverage".
 
-**Scope** (deliberately narrower than the general PDK-device-metadata
-resolver ``docs/design/pdk-device-corner-metadata-spike.md`` proposes as a
-follow-up epic -- see issue #209's Curator enhancement). As of issue #339 the
-binding covers, per PDK family (``sky130``, ``gf180mcu``, and -- MOS only, as
-of issue #1231 -- ``sg13g2``; MOS only, as of issue #1400 -- ``sg13cmos5l``):
+Without ``--pdk``, `klt extract` writes bare ``M`` cards named after the
+deck's device-class labels (``nfet``/``pfet``), which no real PDK defines.
+With ``--pdk``, this module rewrites each recognised device onto the resolved
+PDK's real ``.subckt`` as an ``X`` card.
 
-- **MOS** (all four decks) -- the deck's default voltage flavor per family,
-  plus (issue #1111 for gf180mcu, issue #1231 for sg13g2, issue #1369 for
-  sky130) any additional marker-scoped flavor its
-  ``ExtractionDeck.mos_flavours`` declares (``nfet_06v0``/``pfet_06v0`` for a
-  transistor recognised inside ``Dualgate``; ``sg13_hv_nmos``/
-  ``sg13_hv_pmos`` for one inside ``ThickGateOx``;
-  ``sky130_fd_pr__nfet_g5v0d10v5``/``sky130_fd_pr__pfet_g5v0d10v5`` for one
-  inside sky130's ``hvi``) -- see :data:`MOS_FLAVOUR_PROPERTY` and
-  :data:`_MOS_MODEL_FLAVOURS` below, and ``klayout_tools.extract``'s module
-  docstring.
-- **Resistor** (sky130/gf180mcu, plus -- issue #1457 -- sg13g2's three drawn
-  poly flavours) -- every ``ResistorDevice`` class each deck declares
-  (:func:`resolve_device_bindings` reads the deck's own list) that has a real
-  subcircuit to bind to. sg13g2's ``rsil``/``rppd``/``rhigh`` (issues
-  #1231/#1235) bind to the real 3-terminal ``rsil``/``rppd``/``rhigh``
-  subcircuits. sg13g2's two drawn *metal* resistors (``res_metal1``/
-  ``res_metal2``, issue #1235) are a **deliberate, verified carve-out**, not
-  a "not implemented yet" gap: a real fetched IHP-Open-PDK v0.3.0 install
-  defines no ``.subckt``/``.model`` for either name at all (IHP's own
-  reference CDL netlists instantiate them as a bare
-  semiconductor-resistor-with-model-reference card that a consumer's own
-  simulation deck must supply the ``.model`` for) -- the same documented
-  bare-primitive carve-out gf180mcu's bipolar gets below. sky130's five
-  drawn *metal* resistors (``res_generic_m1``..``res_generic_m5``, issue
-  #1621) are the identical carve-out: sky130's own
-  ``sky130_fd_pr__model__r+c.model.spice`` wraps a ``.subckt`` around
-  ``res_generic_po`` (its poly flavour) but only a bare ``.model ... r``
-  card for every metal flavour -- no ``.subckt`` to bind to there either.
-- **Capacitor** (sky130/gf180mcu, plus -- issue #1470 -- sg13g2's two MIM
-  capacitors) -- every ``CapacitorDevice`` class each deck declares, with
-  plate ``L``/``W`` derived from the extracted plate area and perimeter via
-  :func:`equivalent_rectangle_um`. sg13g2's ``cap_cmim`` (declared since
-  #1456) binds to its own identically-named subcircuit; ``rfcmim`` binds to
-  ``cap_rfcmim``, IHP's real upstream name for the device.
-- **Bipolar** -- **sky130 only** (``sky130_fd_pr__pnp_05v5``). gf180mcu's
-  bipolar is deliberately left **unbound** (its recognised ``bjt`` device
-  keeps KLayout's bare ``Q``-card form), because the gf180mcu deck itself has
-  no positively-identified single device-cell name to bind against -- an
-  existing, already-documented data gap in that deck
-  (``decks/gf180mcu.py:557-559``), not something this binding can resolve by
-  guessing a subcircuit name. See ``docs/cli/extract.md`` -> "SPICE model
-  binding" -> "Scope limits".
+Public entry points:
 
-Any recognised device class with no curated binding entry is written as its
-bare primitive card (the pre-``--pdk`` form), never a guessed subcircuit call
--- the gf180mcu-bipolar carve-out above is the only such case today.
+- :func:`resolve_mos_model_table` / :func:`resolve_mos_model_table_for_deck`:
+  the curated ``(deck_name, pdk_variant_family) -> {"nfet": ..., "pfet": ...}``
+  MOS lookup.
+- :func:`resolve_device_bindings`: the writing-direction bindings for every
+  MOS/resistor/capacitor/bipolar/diode class a deck declares. The diode
+  family's curated tables and both of its binding builders live in
+  :mod:`klayout_tools.pdk_diode_models` (issue #5491); this module only calls
+  them.
+- :func:`build_device_binding_map`: the ingestion-direction map used by
+  `klt lvs`'s ``reference.form: "subckt-call"`` converter.
+- :func:`create_model_binding_delegate`: the
+  ``kdb.NetlistSpiceWriterDelegate`` subclass that emits the ``X`` cards.
+- :func:`equivalent_rectangle_um`: recovers ``L``/``W`` from plate area and
+  perimeter for capacitors, and the junction ``l``/``w`` of a geometry-
+  parameterized diode subcircuit from its measured area and perimeter.
 
-**The two directions are not symmetric** (issue #1464). The scope above is the
-*writing* direction (``klt extract --pdk``, :func:`resolve_device_bindings`),
-where a missing curated entry must fall back to the bare primitive card rather
-than guess. The *ingestion* direction (``klt lvs``'s
-``reference.form: "subckt-call"`` converter, :func:`build_device_binding_map`)
-additionally derives an assumed-identity binding -- declared LVS device-class
-name taken as its own subcircuit name -- for each ``resistors``/``capacitors``
-class of a deck whose corresponding family table has no curated entry at all,
-so ``sg13cmos5l``'s ``rsil``/``rppd``/``rhigh`` are readable back without a
-hand-written ``reference.device_map``. That fallback only helps where the
-identity assumption actually holds upstream -- it does not, for example, cover
-a family with even one non-identity class, since the fallback is gated on the
-whole ``(deck_name, family)`` pair (see :func:`build_device_binding_map` and
-``docs/cli/lvs.md`` -> "Per-deck coverage"). Guessing is safe there and unsafe
-here: the worst case reading is a failed or rejected conversion of a name no
-PDK ships, while the worst case writing is a shipped netlist that binds a
-subcircuit that does not exist. See :func:`build_device_binding_map` for that
-fallback's three guard rails.
+Invariants that live only here:
 
-This table is intentionally a single small module, not scattered inline
-literals, so a future ``klt pdk device`` resolver can absorb/replace it
-without touching the delegate/writer plumbing.
-
-**Card shape**: sky130 and gf180mcu both ship their primitive MOS device as a
-SPICE ``.subckt`` (taking ``d g s b`` terminals plus ``l``/``w`` geometry
-params), never a built-in ``nmos``/``pmos`` model -- so binding a real model
-means switching the *card shape* from ``M`` (built-in device) to ``X``
-(subcircuit call), not just renaming the ``M`` card's model field (KLayout's
-``NetlistSpiceWriter`` only ever writes the ``M``-card shape for a
-``DeviceClassMOS4Transistor`` device; ``NetlistSpiceWriterDelegate`` --
-confirmed directly against the installed ``klayout.db`` module -- is
-KLayout's documented escape hatch for "using subcircuits rather than the
-built-in devices").
-
-**Subcircuit names + parameter convention, verified against real fetched PDK
-installs** (not guessed from this issue's own suggested names):
-
-- ``sky130_fd_pr__nfet_01v8`` / ``sky130_fd_pr__pfet_01v8`` -- confirmed via
-  ``scripts/fetch-pdks.sh``'s lambdapdk mirror, whose real SkyWater sky130
-  SRAM macro netlist
-  (``pdks/lambdapdk/lambdapdk/sky130/libs/sky130sram/sky130_sram_1rw1r_64x256_8/spice/sky130_sram_1rw1r_64x256_8.sp``)
-  instantiates both subcircuits directly, e.g.
-  ``X1000 a_511_725# a_n8_115# VDD VDD sky130_fd_pr__pfet_01v8 W=3 L=0.15`` --
-  confirming both the subcircuit name and a ``d g s b <model> W=... L=...``
-  terminal order matching KLayout's own default ``M``-card terminal order
-  (see below).
-- ``nfet_03v3`` / ``pfet_03v3`` (gf180mcu's 3.3V core-voltage flavor,
-  gf180mcu's analogue to sky130's "01v8" designation -- gf180mcu has no
-  ``gf180mcu_fd_pr__`` naming prefix convention the way sky130 does; verified
-  by grepping the real, no-prefix subcircuit names throughout the installed
-  tree) -- confirmed via a real gf180mcuA install (volare,
-  ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064.ngspice``, ``.subckt
-  nfet_03v3 d g s b w=1e-5 l=2.8e-7 ...``) and a real analog-IP SPICE view
-  instantiating it
-  (``~/.volare/gf180mcuA/libs.ref/gf180mcu_fd_io/spice/gf180mcu_fd_io.spice``,
-  e.g. ``X5 n56 IE VSS VSS nfet_06v0 m=1.0 w=1.5e-6 l=700e-9 ...`` for the
-  sibling 6V flavor -- same subcircuit family, confirming the no-prefix
-  naming and the ``d g s b <model>`` terminal order). gf180mcu's real
-  in-the-wild geometry values are written in raw SI (metres, e.g.
-  ``w=1.5e-6``), never bare micrometre literals -- unlike the sky130 SRAM
-  netlist's bare-micrometre convention above. Each family's geometry-literal
-  convention is therefore written out per family; see
-  ``_GEOMETRY_STYLE_BY_FAMILY`` below for the (verified, ngspice-reproduced)
-  reason a unit-suffixed literal is *not* portable across the two.
-
-Both real installs instantiate their MOS subcircuit with only ``l``/``w``
-supplied -- no ``nf``/``mult``/``par`` override at the call site -- relying
-on the subcircuit's own defaults (confirmed ``nf=1``/``par=1``-equivalent in
-both fetched installs). The curated extraction decks' device extractor never
-models multi-finger/multiplied devices either (one flat
-``DeviceExtractorMOS4Transistor`` device per drawn gate -- see
-``klayout_tools.extract``'s module docstring), so
-:func:`create_model_binding_delegate` matches this real-world convention and
-the extractor's own scope by emitting only ``L``/``W`` and omitting
-``nf``/``mult``/``par`` (left at the resolved subcircuit's own default of 1).
-
-Source/drain area+perimeter (``AS``/``AD``/``PS``/``PD``, present on the bare
-``M``-card form) **are** carried onto the ``X`` card (issue #695): both
-``sky130_fd_pr__nfet_01v8``/``pfet_01v8`` and ``nfet_03v3``/``pfet_03v3``
-declare ``as``/``ad``/``ps``/``pd`` call-site parameters (confirmed in the
-same real fetched installs, both defaulting to ``0`` -- e.g. gf180mcu's
-``.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7 + as=0 ad=0 ps=0 pd=0 ...``), so
-leaving them off the ``X`` card silently zeroed every bound MOS device's
-source/drain junction area and perimeter -- and with it, its junction
-capacitance -- even though the extractor measured the real, non-zero drawn
-values right there on the unbound card. ``write_device`` reads them the same
-way it reads ``L``/``W`` and writes them under the same (KLayout-native,
-uppercase) parameter spelling the unbound ``M``-card form already uses --
-SPICE subcircuit parameter names are matched case-insensitively by both
-PDKs' real ngspice decks, so this does not need to track each PDK's own
-lowercase spelling the way ``length_param``/``width_param`` do for
-resistor/capacitor. Under the ``"unit_suffix"`` geometry style (gf180mcu, and
-the unverified-family default -- see ``_GEOMETRY_STYLE_BY_FAMILY``) areas are
-formatted with an explicit ``P`` (pico) unit suffix rather than ``U``
-(micro) -- a source/drain area in square micrometres is numerically identical
-to the same value in square metres times ``1e-12`` (e.g. ``0.8`` um²
-``== 0.8e-12`` m² ``== 0.8P``), matching KLayout's own default ``M``-card
-writer's formatting of ``AS``/``AD`` exactly. Under the ``"bare_um"`` style
-(sky130) the *same* square-micrometre number is written with no suffix at
-all, because that deck's ambient ``.option scale=1.0u`` already supplies the
-unit (see ``docs/cli/extract.md``'s "SPICE model binding" section for a
-worked ``M``-card/``X``-card example).
-
-**Resistor / capacitor / bipolar subcircuit names + parameter conventions,
-verified against the same real fetched PDK installs** (issue #339; every name
-and parameter spelling below was read off a real install's own ``.subckt``
-definition and a real in-the-wild instantiation, not transcribed from a deck
-comment):
-
-- **sky130 resistors** -- ``sky130_fd_pr__res_generic_po`` (two terminals
-  ``r0 r1``), ``sky130_fd_pr__res_high_po`` / ``sky130_fd_pr__res_xhigh_po``
-  (three terminals ``r0 r1 b``, the bulk tie), all geometry-parameterized by
-  ``l``/``w`` in micrometres. Confirmed in
-  ``~/.volare/sky130A/libs.tech/combined/continuous/models_resistors.spice``
-  (``.subckt  sky130_fd_pr__res_high_po r0 r1 b mult=1`` + ``w=1 l=1``) and a
-  real device-model instantiation
-  (``sky130_fd_pr__res_high_po_2p85.model.spice``:
-  ``x0 r0 r1 sub sky130_fd_pr__res_high_po l=l w=2.85 mult=mult``). The deck's
-  ``bulk_to_substrate`` flag matches the two-vs-three-terminal split exactly
-  (``res_generic_po`` is two-terminal, the ``rpm``/``urpm`` flavours carry the
-  bulk tie).
-- **gf180mcu resistors** -- ``ppolyf_u`` / ``ppolyf_u_1k`` / ``ppolyf_u_2k`` /
-  ``ppolyf_u_3k`` (three terminals),
-  geometry-parameterized by ``r_length``/``r_width`` (**not** ``l``/``w``) in
-  metres, no ``gf180mcu_fd_pr__`` name prefix (same no-prefix convention the
-  MOS table's ``nfet_03v3`` uses). Confirmed in
-  ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064.ngspice``
-  (``.subckt ppolyf_u 1 2 3 r_length=l r_width=w dtemp=0 par=1 s=1``, plus
-  ``.subckt ppolyf_u_1k 1 2 3 r_length=l r_width=w ...`` and its ``_2k`` /
-  ``_3k`` siblings on the identical terminal/parameter convention -- all
-  three high-sheet-rho flavours are real, separately-modelled subcircuits,
-  which is why ``--deck-option poly_res=2k`` can bind one) and a
-  real analog-IP instantiation
-  (``... ppolyf_u r_width=800e-9 r_length=1.6e-6 m=1.0 r=907.859 par=1``). The
-  per-family parameter-name difference (``l``/``w`` vs ``r_length``/
-  ``r_width``) is why the binding carries the subcircuit's own length/width
-  parameter names per family rather than assuming one convention.
-- **gf180mcu metal resistors** -- ``rm1`` / ``rm2`` / ``rm3`` / ``tm6k`` /
-  ``tm9k`` / ``tm11k`` / ``tm30k`` (issue #1640, two terminals -- no bulk tie,
-  unlike ``ppolyf_u`` above), same ``r_length``/``r_width`` convention,
-  same real fetched ``gf180mcuB`` install's
-  ``libs.tech/ngspice/sm141064.ngspice``. **Unlike** sky130's
-  ``res_generic_m1``..``res_generic_m5`` (a bare-``.model``-only carve-out,
-  see ``_RESISTOR_MODEL_TABLE`` below), all seven of these gf180mcu classes
-  *do* have a real ``.subckt`` each (``.subckt rm1 1 2 r_length=l r_width=w
-  dtemp=0 par=1 s=1`` ... ``rb 1 2 r='r_temp*r_n*(r_rsh0+...)' ... .ends
-  rm1``, and identically-shaped ``rm2``/``rm3``/``tm6k``/``tm9k``/``tm11k``/
-  ``tm30k`` blocks), cross-checked against the same install's reference CDL
-  testcases (``libs.tech/klayout/lvs/testing/testcases/unit/res_devices/
-  netlist/rm1.cdl``/``tm6k.cdl``) and process-corner ``+rsh_rm1=0.09``/
-  ``+rsh_tm6k=60e-3`` parameters, which agree with ``decks/gf180mcu.py``'s
-  own transcribed ``sheet_rho_ohm_sq`` literals. See
-  ``decks/gf180mcu.py``'s own module-docstring derivation note (immediately
-  above its ``resistors=(...)`` declaration) for the full citation.
-- **sg13g2 resistors** -- ``rsil`` / ``rppd`` / ``rhigh`` (issue #1457), each
-  a three-terminal ``1 2 bn`` subcircuit (``bn`` the bulk/substrate tie,
-  matching the deck's own ``bulk_to_substrate=True`` on all three classes),
-  geometry-parameterized by ``l``/``w`` in raw metres (same convention as
-  gf180mcu's resistors, but sky130-style parameter *names*). Confirmed in a
-  real fetched IHP-Open-PDK v0.3.0 install's
-  ``libs.tech/ngspice/models/resistors_mod.lib`` (``.subckt rsil 1 2 bn`` +
-  ``.param w=0.5e-6 l=0.5e-6 ...``, and the ``rppd``/``rhigh`` siblings on the
-  identical terminal/parameter convention with their own default
-  ``w``/``l``). sg13g2's two drawn *metal* resistors (``res_metal1``/
-  ``res_metal2``) have **no** curated entry: the same fetched install defines
-  no ``.subckt``/``.model`` for either name anywhere under ``libs.tech/
-  ngspice/`` or ``libs.tech/xyce/`` -- there is no real subcircuit to bind to,
-  a verified carve-out rather than an unimplemented one (see the module
-  docstring's "Scope" section above and ``docs/cli/extract.md``'s "Scope
-  limits").
-- **sky130 capacitors** -- the deck's LVS device names
-  (``sky130_fd_pr__model__cap_mim`` on ``capm``/met3,
-  ``sky130_fd_pr__model__cap_mim_m4`` on ``capm2``/met4) map to the
-  *simulation* subcircuits ``sky130_fd_pr__cap_mim_m3_1`` and
-  ``sky130_fd_pr__cap_mim_m3_2`` respectively (the ``_1``/``_2`` suffix is the
-  lower/upper MiM stack), geometry-parameterized by ``w``/``l`` in
-  micrometres. Confirmed in
-  ``~/.volare/sky130A/libs.ref/sky130_fd_pr/spice/sky130_fd_pr__cap_mim_m3_1.model.spice``
-  (``.subckt  sky130_fd_pr__cap_mim_m3_1 c0 c1 w=1 l=1 mf=1``).
-- **gf180mcu capacitor** -- ``cap_mim_2f0_m4m5_noshield`` (the deck name is
-  already the real subcircuit name), geometry-parameterized by
-  ``c_length``/``c_width`` in metres. Confirmed in
-  ``~/.volare/gf180mcuA/libs.tech/ngspice/sm141064_mim.ngspice``
-  (``.subckt cap_mim_2f0_m4m5_noshield  1 2  c_length=l  c_width=w dtemp=0
-  par=1``). KLayout's capacitor extractor exposes the plate ``A``/``P``
-  (area/perimeter) but not ``L``/``W``, so the writer solves the same
-  equivalent-rectangle quadratic ``extract.py``'s ``_n_squares`` already uses
-  (factored into :func:`equivalent_rectangle_um`) to recover ``l``/``w`` for
-  these geometry-parameterized subcircuits.
-- **sky130 bipolar** -- ``sky130_fd_pr__pnp_05v5`` ships as a **geometry-named
-  family**, not one parameterized cell: only two discrete emitter sizes exist,
-  ``sky130_fd_pr__pnp_05v5_W0p68L0p68`` (emitter 0.68x0.68um, AE=0.4624um^2)
-  and ``sky130_fd_pr__pnp_05v5_W3p40L3p40`` (3.40x3.40um, AE=11.56um^2), each a
-  three-terminal ``c b e`` subcircuit. Confirmed in
-  ``~/.volare/sky130A/libs.tech/combined/continuous/models_bjt.spice``
-  (``.subckt  sky130_fd_pr__pnp_05v5_W0p68L0p68 c b e mult=1`` -- the vendor's
-  own provenance comment on this line notes the substrate pin was removed for
-  backwards compatibility). The writer selects the variant whose nominal
-  emitter area is nearest the device's measured ``AE`` (there is no
-  continuously-parameterized cell to pass a geometry to); for this vertical
-  PNP the collector *is* the substrate, and the extraction deck already ties
-  the collector to ``substrate_net``, so no separate substrate pin is emitted.
-
-Geometry values on every new ``X`` card use the same per-family style the MOS
-path uses -- bare micrometres for sky130 (whose ``w``/``l`` are
-micrometre-convention under its own ``.option scale=1.0u``), an explicit
-micrometre-unit-suffixed literal for gf180mcu (whose ``r_length``/
-``c_length`` etc. are raw-metre convention with no ambient scale). See
-:data:`_GEOMETRY_STYLE_BY_FAMILY` for the reproduction behind each.
+- The writing direction never guesses: a device class with no curated entry
+  is written as its bare primitive card (gf180mcu's bipolar, sky130's
+  ``res_generic_m*`` and sg13g2's ``res_metal*`` are verified carve-outs --
+  no real subcircuit exists to bind). The ingestion direction may fall back
+  to an assumed-identity subcircuit name, because a wrong guess there only
+  fails a conversion rather than shipping a netlist that binds a missing
+  subcircuit.
+- Subcircuit names and parameter spellings were read off real fetched PDK
+  installs, not guessed. Parameter names differ per family
+  (``l``/``w`` vs gf180mcu's ``r_length``/``r_width``/``c_length``/
+  ``c_width``), so each binding carries its own; geometry literal style is
+  per family (:data:`_GEOMETRY_STYLE_BY_FAMILY`).
+- MOS ``X`` cards emit only ``L``/``W`` plus ``AS``/``AD``/``PS``/``PD``;
+  ``nf``/``mult``/``par`` are left at the subcircuit default because the
+  extractor models one flat device per gate.
+- sky130 bipolar is a geometry-named family: the writer picks the variant
+  whose nominal emitter area is nearest the measured ``AE``; the collector
+  is the substrate, so no separate substrate pin is emitted.
+- The table stays a single small module so a future ``klt pdk device``
+  resolver can replace it without touching the delegate plumbing.
 """
 
 from __future__ import annotations
@@ -289,6 +59,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from .pdk_diode_models import (
+    DIODE_MODEL_TABLE,
+    diode_lookup_bindings,
+    diode_write_bindings,
+)
 from .pdk_families import pdk_variant_family
 
 if TYPE_CHECKING:
@@ -347,6 +122,22 @@ _MOS_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
     },
 }
 
+#: (deck_name, pdk_variant_family) -> {"nfet": (min_width_um, fallback_subckt)}
+#: (issue #4575). The scalable `sky130_fd_pr__nfet_01v8` is a binned model
+#: whose narrowest W bin starts at `wmin = 4.2e-07` (0.42 um) in
+#: `libs.ref/sky130_fd_pr/spice/sky130_fd_pr__nfet_01v8__tt.pm3.spice`
+#: (verified against a fetched sky130A install); ngspice rejects any `W`
+#: below it at parse time. The same file also declares the fixed-geometry
+#: `sky130_fd_pr__special_nfet_01v8` (same `d g s b` ports and `l`/`w`/`as`/
+#: `ad`/`ps`/`pd` params, single bin `wmin = 3.59e-07`, `wmax = 3.61e-07`),
+#: so an nFET narrower than the threshold is bound to it instead. Only
+#: sky130's nfet is curated: its pfet has no analogous gap in the same file.
+_MOS_NARROW_FALLBACK_TABLE: dict[tuple[str, str], dict[str, tuple[float, str]]] = {
+    ("sky130", "sky130"): {
+        "nfet": (0.42, "sky130_fd_pr__special_nfet_01v8"),
+    },
+}
+
 #: The KLayout device-property key `extract.py` sets (`kdb.Device.set_property`)
 #: on a MOS device it extracted from inside a
 #: `~klayout_tools.decks.ExtractionDeck.mos_flavours` marker (issue #1111),
@@ -396,13 +187,16 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: -- the derivation `decks/sg13g2.py`'s `mos_flavours` entry transcribes.
 #:
 #: sky130's 5V-gate/10.5V-drain thick-oxide pair (issue #1369) is confirmed in
-#: the same real fetched sky130A install (volare,
-#: `c6d73a35f524070e85faff4a6a9eef49553ebc2b`) the module docstring's `01v8`
-#: entry above cites -- `libs.tech/combined/continuous/models_fet.spice:15382`
-#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and `:36917`
-#: (the `pfet` analogue), each followed by the identical
+#: the same real fetched sky130A install (ciel,
+#: `f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7`) the module docstring's `01v8`
+#: entry above cites --
+#: `libs.tech/combined/continuous/models_fet/sky130_fd_pr__nfet_g5v0d10v5.spice:29`
+#: (`.subckt  sky130_fd_pr__nfet_g5v0d10v5  d g s b  mult=1`) and
+#: `.../sky130_fd_pr__pfet_g5v0d10v5.spice:30` (the `pfet` analogue), each
+#: followed by the identical
 #: `.param  l = 1 w = 1 nf = 1 ad = 0 as = 0 pd = 0 ps = 0 ...` line the
-#: `01v8` pair carries at `:10037`, i.e. the same `d g s b` terminal order
+#: `01v8` pair carries at `.../sky130_fd_pr__nfet_01v8.spice:34`, i.e. the
+#: same `d g s b` terminal order
 #: and `l`/`w`/`as`/`ad`/`ps`/`pd` call-site convention
 #: :func:`create_model_binding_delegate` already writes for the default pair.
 #: Extracted under exactly those names by the PDK's own
@@ -420,12 +214,22 @@ MOS_FLAVOUR_PROPERTY = "mos_flavour"
 #: independent sources in the same install: the KLayout layer-properties
 #: file `libs.tech/klayout/tech/sky130A.lyp:3127`
 #: (`<name>hvi.drawing - 75/20</name>`) and the magic technology file
-#: `libs.tech/magic/sky130A.tech:3980` (`calma HVI 75 20`).
+#: `libs.tech/magic/sky130A.tech:3975` (`calma HVI 75 20`).
 _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     ("gf180mcu", "gf180mcu"): {
         "06v0": {
             "nfet": "nfet_06v0",
             "pfet": "pfet_06v0",
+        },
+        # Drain-extended LDMOS (issue #4570); the PDK's own `mos_extraction.lvs`
+        # extracts them as `mos4('nfet_10v0_asym')` / `mos4('pfet_10v0_asym')`.
+        "10v0_asym_n": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
+        },
+        "10v0_asym_p": {
+            "nfet": "nfet_10v0_asym",
+            "pfet": "pfet_10v0_asym",
         },
     },
     ("sg13g2", "sg13g2"): {
@@ -457,10 +261,14 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         },
     },
     ("sky130", "sky130"): {
+        # Native-Vt NMOS only (issue #3599, `sky130.lvs` L1214/1226/2081);
+        # deliberately no "pfet" entry -- there is no native PMOS.
+        "nvt": {"nfet": "sky130_fd_pr__nfet_05v0_nvt"},
         "hvi": {
             "nfet": "sky130_fd_pr__nfet_g5v0d10v5",
             "pfet": "sky130_fd_pr__pfet_g5v0d10v5",
         },
+        "lvt": {p: f"sky130_fd_pr__{p}_01v8_lvt" for p in ("nfet", "pfet")},
     },
 }
 
@@ -594,6 +402,10 @@ def _unbound_resistor_card(
 #: own ``PARAMS:`` default writer -- the #2355 bug).
 _MOM_CAPACITOR_TERMINAL_NAMES = frozenset({"A", "B"})
 _MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L", "MMIN", "MMAX"})
+#: ``cap_cmomi``'s parameter set: the shared one plus ``FEED`` (issue #2445).
+#: ``cap_cmomf`` keeps :data:`_MOM_CAPACITOR_PARAMETER_NAMES` -- its upstream
+#: ``.subckt`` declares no ``feed``, so its class never registers it.
+_MOM_CAPACITOR_FEED_PARAMETER_NAMES = _MOM_CAPACITOR_PARAMETER_NAMES | {"FEED"}
 
 
 def _unbound_mom_capacitor_card(
@@ -604,6 +416,7 @@ def _unbound_mom_capacitor_card(
     length_um: float,
     mmin: int | None = None,
     mmax: int | None = None,
+    feed: str | None = None,
 ) -> str:
     """The plain-element ``X`` card for one *unbound* MoM-capacitor device
     (``cap_cmomi``/``cap_cmomf``), with its measured ``W``/``L`` geometry
@@ -629,9 +442,21 @@ def _unbound_mom_capacitor_card(
     cards, so both geometry parameters parse as microns regardless of the
     caller's ``.option scale``.
 
-    **Four of the upstream subcircuit's parameters are written, three are
-    not.** The subcircuit this card's trailing class-name token binds onto
-    declares (``IHP-GmbH/ihp-sg13cmos5l`` at
+    **Issue #2445 -- ``feed`` is written when measured.** ``feed`` (``cap_cmomi``
+    only) is the token ``none``/``same``/``double`` the extractor recovered
+    from the drawn port placement
+    (``extract_passive_regions._mom_feed_variant``); it is
+    written as ``FEED=<token>`` after ``MMAX=`` and omitted entirely when
+    ``None`` (a layout matching no PCell signature, or a ``cap_cmomf``), so an
+    unmeasured feed still falls to the ``.subckt`` default instead of being
+    guessed. See ``extract_passive_regions._mom_feed_variant`` for the settled
+    mapping.
+
+    **Four of the upstream subcircuit's parameters are always written, plus
+    ``feed`` when measured; ``subblock``/``mm_ok`` are never.** The
+    subcircuit this card's trailing class-name token binds onto
+    declares (archived ``IHP-GmbH/ihp-sg13cmos5l``,
+    now IHP-Open-PDK ``ihp-sg13cmos5l/``, at
     ``607e18d4bd9214a52575c194b4181ef449f9252f``,
     ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
     ``cap_cmomf.lib:53``)::
@@ -658,22 +483,9 @@ def _unbound_mom_capacitor_card(
     tokens rather than writing a fabricated ``0``: the #2408 rule still
     holds for a value that was not measured.
 
-    ``feed``/``subblock``/``mm_ok`` are still left off, taking those
-    ``.subckt`` defaults:
+    ``subblock``/``mm_ok`` are still left off, taking those ``.subckt``
+    defaults:
 
-    - ``feed`` (``cap_cmomi`` only -- ``none``/``same``/``double``) is only
-      *partly* recoverable and is tracked separately rather than guessed
-      at here. The PCell's ``same`` variant is distinguishable (it stacks
-      its two pins on adjacent metals, so the two recognised ports carry
-      different metal indices), but ``double`` and ``none`` both place two
-      ports on the top metal and are told apart only by where those ports
-      sit relative to the core -- which this recognition step, reading one
-      marker plus two port polygons, does not know. Emitting ``double`` for
-      a ``none`` layout would be exactly the invisible wrong answer #2408
-      rejected, and ``none`` is upstream's own documented *not a standalone
-      2-terminal device* configuration. Split out as issue #2445, which
-      settles the question against the PCell generator itself rather than
-      guessing here.
     - ``subblock`` is a PCell layout switch (substrate isolation block) with
       no counterpart in the recognition geometry at all.
     - ``mm_ok`` is a documented no-op in this release ("accepted for
@@ -691,6 +503,8 @@ def _unbound_mom_capacitor_card(
     )
     if mmin is not None and mmax is not None and mmin >= 1 and mmax >= 1:
         card += f" MMIN={mmin} MMAX={mmax}"
+    if feed is not None:
+        card += f" FEED={feed}"
     return card
 
 
@@ -777,6 +591,32 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     return result
 
 
+def mos_flavour_for_subckt(subckt_name: str) -> str | None:
+    """The ``_MOS_MODEL_FLAVOURS`` flavour key (e.g. ``"nvt"``, ``"hvi"``,
+    ``"06v0"``) a MOS subcircuit name belongs to, or ``None`` for a
+    default-flavour model or an unknown name (issue #3650).
+
+    The inverse of the flavour tables :func:`build_subckt_to_class_map`
+    deliberately collapses: it is what ``options.compare_mos_flavour`` uses to
+    tell a reference ``X`` call of a flavoured model apart from a default one.
+    A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
+    sg13cmos5l) resolves to the same key in each.
+    """
+    for flavours in _MOS_MODEL_FLAVOURS.values():
+        for flavour, table in flavours.items():
+            if subckt_name in table.values():
+                return flavour
+    return None
+
+
+def flavoured_mos_class_name(device_class: str, flavour: str) -> str:
+    """The device-class name a flavoured MOS device is compared under when
+    ``options.compare_mos_flavour`` is on (issue #3650), e.g. ``nfet`` +
+    ``nvt`` -> ``nfet__nvt``. Both the reference conversion and the layout-side
+    split derive the name here, so the two sides cannot disagree."""
+    return f"{device_class}__{flavour}"
+
+
 def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
     """Every curated MOS device subcircuit name across *all* decks, mapped to
     the ``(deck_name, device_class)`` it resolves to (e.g.
@@ -818,8 +658,8 @@ class DeviceLookup:
     tables that are already deck-name-keyed.
 
     ``kind`` mirrors :attr:`DeviceBinding.kind`
-    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``). ``device_class``
-    is the plain-element card's model-field label (``nfet``,
+    (``"mos"``/``"resistor"``/``"capacitor"``/``"bipolar"``/``"diode"``).
+    ``device_class`` is the plain-element card's model-field label (``nfet``,
     ``res_generic_po``, ...). ``length_param``/``width_param`` are the *real*
     subcircuit's own call-site parameter spellings (``l``/``w`` for sky130,
     ``r_length``/``r_width`` or ``c_length``/``c_width`` for gf180mcu) --
@@ -996,6 +836,11 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
         )
+    for deck_name, family in DIODE_MODEL_TABLE:
+        _setdefault_bindings(
+            result,
+            _tagged_bindings(deck_name, diode_lookup_bindings(deck_name, family)),
+        )
     return result
 
 
@@ -1127,6 +972,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
+    _setdefault_bindings(result, diode_lookup_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1240,15 +1086,24 @@ class DeviceBinding:
     - ``"capacitor"`` -- terminals ``A B``, plate ``L``/``W`` derived from the
       device's ``A``/``P`` via :func:`equivalent_rectangle_um` (the extractor
       exposes area/perimeter, not ``L``/``W``).
+    - ``"diode"`` -- terminals ``A C`` (anode, cathode -- ``DeviceClassDiode``'s
+      own two terminals, in the order every PDK diode subcircuit declares
+      them), junction ``l``/``w`` derived from the device's measured ``A``/``P``
+      exactly as for a capacitor plate, and for the same reason: KLayout's
+      diode extractor reports the junction's area and perimeter, not a
+      rectangle. Only emitted for a family listed in
+      :data:`~klayout_tools.pdk_diode_models.DIODE_PARAM_STYLE`
+      (issue #5491).
     - ``"bipolar"`` -- terminals ``C B E`` (matching the vendor subcircuit's
       real three-terminal ``c b e`` declaration); no ``L``/``W`` params (the
       geometry is encoded by :attr:`variants`, selected by measured ``AE``).
 
     ``length_param``/``width_param`` are the subcircuit's own spellings of its
     length/width parameters (``l``/``w`` for sky130, ``r_length``/``r_width``
-    or ``c_length``/``c_width`` for gf180mcu -- see the module docstring's
-    verified-provenance section). ``variants`` is the ``(nominal AE in um^2,
-    subcircuit name)`` selection table for a geometry-named bipolar family.
+    or ``c_length``/``c_width`` for gf180mcu, ``l``/``w`` for sg13g2's antenna
+    diodes -- see the module docstring's verified-provenance section).
+    ``variants`` is the ``(nominal AE in um^2, subcircuit name)`` selection
+    table for a geometry-named bipolar family.
 
     ``dropped_params`` names every parameter the extractor measures on this
     device class that this binding deliberately does **not** carry onto the
@@ -1289,6 +1144,13 @@ class DeviceBinding:
     :data:`_GEOMETRY_STYLE_BY_FAMILY` for the per-family evidence. Defaults to
     the unit-suffix form, which is what every caller got before this field
     existed.
+
+    ``narrow_fallback`` (issue #4575, ``"mos"`` only) is an optional
+    ``(min_width_um, subckt)`` pair: a device whose extracted ``W`` is below
+    ``min_width_um`` (and that carries no flavour override) is written against
+    ``subckt`` instead of :attr:`subckt`, and the delegate records the
+    substitution in its ``substitution_notes``. See
+    :data:`_MOS_NARROW_FALLBACK_TABLE`.
     """
 
     kind: str
@@ -1300,6 +1162,7 @@ class DeviceBinding:
     dropped_params: tuple[str, ...] = field(default_factory=tuple)
     flavour_subckts: dict[str, str] = field(default_factory=dict)
     geometry_style: str = GEOMETRY_STYLE_UNIT_SUFFIX
+    narrow_fallback: tuple[float, str] | None = None
 
 
 #: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> subckt name}.
@@ -1445,8 +1308,30 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "sky130_fd_pr__model__cap_mim": "sky130_fd_pr__cap_mim_m3_1",
         "sky130_fd_pr__model__cap_mim_m4": "sky130_fd_pr__cap_mim_m3_2",
     },
+    # The `1f0`/`1f5` densities (selectable via `--deck-option mim_cap=`,
+    # issue #1151) are bound too (issue #3090): the PDK ships
+    # `.subckt cap_mim_1f0_m4m5_noshield` / `cap_mim_1f5_m4m5_noshield`
+    # (`libs.tech/ngspice/sm141064_mim.ngspice`, same `c_length`/`c_width`
+    # parameters as `2f0`), whose `mim_corner_*` params the process-corner
+    # sections scale -- a bare `C` card cannot follow those corners.
     ("gf180mcu", "gf180mcu"): {
+        "cap_mim_1f0_m4m5_noshield": "cap_mim_1f0_m4m5_noshield",
+        "cap_mim_1f5_m4m5_noshield": "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield": "cap_mim_2f0_m4m5_noshield",
+        # MOS capacitors (issue #2919): the PDK ships `.subckt cap_nmos_03v3
+        # 1 2 c_length=l c_width=w dtemp=0` (and the pmos/06v0/`_b` forms) in
+        # `libs.tech/ngspice/sm141064.ngspice`, same `c_` spellings as the
+        # MiM. The `_dn` classes have no subcircuit of their own (the runset
+        # folds them onto the plain name unless CONSIDER_DN_DW_FEATURES), so
+        # they stay unbound.
+        "cap_nmos_03v3": "cap_nmos_03v3",
+        "cap_pmos_03v3": "cap_pmos_03v3",
+        "cap_nmos_06v0": "cap_nmos_06v0",
+        "cap_pmos_06v0": "cap_pmos_06v0",
+        "cap_nmos_03v3_b": "cap_nmos_03v3_b",
+        "cap_pmos_03v3_b": "cap_pmos_03v3_b",
+        "cap_nmos_06v0_b": "cap_nmos_06v0_b",
+        "cap_pmos_06v0_b": "cap_pmos_06v0_b",
     },
     # sg13g2's two declared MIM capacitor classes (issue #1470; classes
     # recognised by issue #1456). Confirmed against a real fetched
@@ -1543,15 +1428,19 @@ _CAPACITOR_PARAM_STYLE: dict[str, tuple[str, str]] = {
 
 
 def resolve_device_bindings(
-    deck_name: str, pdk_variant: str, deck: Any
+    deck_name: str,
+    pdk_variant: str,
+    deck: Any,
+    device_models: Mapping[str, str] | None = None,
 ) -> dict[str, DeviceBinding]:
     """Resolve the full ``{device-class-name -> DeviceBinding}`` map for
     ``deck`` against ``pdk_variant`` (issue #339): MOS, plus every resistor and
-    capacitor class the deck declares, plus a bindable bipolar class.
+    capacitor class the deck declares, plus a bindable bipolar class, plus a
+    bindable junction-diode class (issue #5491).
 
     ``deck`` is the deck object (duck-typed: its ``nfet_class``/``pfet_class``,
-    ``mos_flavours``, ``resistors``, ``capacitors`` and ``bipolars``
-    attributes are read) -- kept a parameter rather than an import so this
+    ``mos_flavours``, ``resistors``, ``capacitors``, ``bipolars`` and
+    ``diodes`` attributes are read) -- kept a parameter rather than an import so this
     module stays free of a ``decks`` dependency.
 
     Raises :class:`ModelBindingError` (via :func:`resolve_mos_model_table`)
@@ -1587,6 +1476,7 @@ def resolve_device_bindings(
         for flavour, table in mos_flavours.items()
         if "pfet" in table
     }
+    narrow = _MOS_NARROW_FALLBACK_TABLE.get((deck_name, family), {})
     bindings: dict[str, DeviceBinding] = {
         deck.nfet_class: DeviceBinding(
             "mos",
@@ -1594,6 +1484,7 @@ def resolve_device_bindings(
             ("D", "G", "S", "B"),
             flavour_subckts=nfet_flavour_subckts,
             geometry_style=geometry_style,
+            narrow_fallback=narrow.get("nfet"),
         ),
         deck.pfet_class: DeviceBinding(
             "mos",
@@ -1635,6 +1526,8 @@ def resolve_device_bindings(
             geometry_style=geometry_style,
         )
 
+    bindings.update(diode_write_bindings(deck_name, family, deck, geometry_style))
+
     bjt_table = _BIPOLAR_MODEL_TABLE.get((deck_name, family), {})
     for bipolar in getattr(deck, "bipolars", ()):
         variants = bjt_table.get(bipolar.class_name)
@@ -1651,7 +1544,48 @@ def resolve_device_bindings(
             geometry_style=geometry_style,
         )
 
+    # Caller-supplied bipolar model (`klt extract --device-model CLASS=SUBCKT`):
+    # fills in only a class with *no* curated binding above -- never overrides
+    # curated data (the gf180mcu carve-out exists because the tool cannot guess
+    # the cell name; the caller can state it).
+    if device_models:
+        _bind_caller_bipolar_models(
+            bindings, deck_name, deck, device_models, geometry_style
+        )
+
     return bindings
+
+
+def _bind_caller_bipolar_models(
+    bindings: dict[str, DeviceBinding],
+    deck_name: str,
+    deck: Any,
+    device_models: Mapping[str, str],
+    geometry_style: str,
+) -> None:
+    """Add the caller's ``--device-model CLASS=SUBCKT`` bipolar bindings to
+    ``bindings`` in place (issue #4234)."""
+    bipolar_classes = sorted(b.class_name for b in getattr(deck, "bipolars", ()))
+    for class_name, subckt in device_models.items():
+        if class_name not in bipolar_classes:
+            available = ", ".join(bipolar_classes) or "none"
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} is not a bipolar "
+                f"class of deck {deck_name!r} (bindable classes: {available})"
+            )
+        if class_name in bindings:
+            raise ModelBindingError(
+                f"--device-model class {class_name!r} already has a curated "
+                f"PDK binding for deck {deck_name!r}; it cannot be overridden"
+            )
+        bindings[class_name] = DeviceBinding(
+            "bipolar",
+            "",
+            ("C", "B", "E"),
+            variants=((0.0, subckt),),
+            dropped_params=_BIPOLAR_DROPPED_PARAMS,
+            geometry_style=geometry_style,
+        )
 
 
 def _select_bipolar_variant(
@@ -1661,6 +1595,40 @@ def _select_bipolar_variant(
     (sky130's ``pnp_05v5`` ships as discrete geometry-named cells, not a
     continuously-parameterized one -- see the module docstring)."""
     return min(variants, key=lambda entry: abs(entry[0] - emitter_area_um2))[1]
+
+
+def _apply_narrow_fallback(
+    binding: DeviceBinding,
+    subckt: str,
+    name: str,
+    length_um: float,
+    width_um: float,
+    notes: list[str],
+) -> str:
+    """Return the subckt a MOS device is written against (issue #4575).
+
+    ``subckt`` unchanged unless ``binding`` carries a ``narrow_fallback`` and
+    ``subckt`` is the binding's default (no flavour override) and ``width_um``
+    is below the fallback threshold; then the fallback subckt, with one
+    human-readable line appended to ``notes``.
+    """
+    if (
+        binding.kind != "mos"
+        or binding.narrow_fallback is None
+        or subckt != binding.subckt
+    ):
+        return subckt
+    min_width_um, fallback_subckt = binding.narrow_fallback
+    if round(width_um, _PARAM_PRECISION_UM) >= min_width_um:
+        return subckt
+    w_txt = _format_um(width_um, GEOMETRY_STYLE_BARE_UM)
+    l_txt = _format_um(length_um, GEOMETRY_STYLE_BARE_UM)
+    notes.append(
+        f"device {name} (W={w_txt} um, L={l_txt} um) is "
+        f"narrower than {subckt}'s smallest width bin "
+        f"({min_width_um:g} um); bound to {fallback_subckt}"
+    )
+    return fallback_subckt
 
 
 def create_model_binding_delegate(
@@ -1755,6 +1723,10 @@ def create_model_binding_delegate(
             super().__init__()
             self._bindings = mapping
             self._global_nets = list(global_net_names)
+            # One human-readable line per device bound to a narrow-width
+            # fallback subcircuit (issue #4575); `extract.py` surfaces them in
+            # `warnings[]`.
+            self.substitution_notes: list[str] = []
 
         def write_header(self) -> None:
             if self._global_nets:
@@ -1923,7 +1895,10 @@ def create_model_binding_delegate(
             parameter_names = {
                 param.name for param in device_class.parameter_definitions()
             }
-            if parameter_names != _MOM_CAPACITOR_PARAMETER_NAMES:
+            if parameter_names not in (
+                _MOM_CAPACITOR_PARAMETER_NAMES,
+                _MOM_CAPACITOR_FEED_PARAMETER_NAMES,
+            ):
                 return False
 
             terminal_ids = [terminal.id() for terminal in terminal_defs]
@@ -1947,6 +1922,20 @@ def create_model_binding_delegate(
             mmin = self._device_param(device, "MMIN")
             mmax = self._device_param(device, "MMAX")
 
+            # Issue #2445: `cap_cmomi`'s measured feed variant. The class
+            # carries an integer enum (`extract.MOM_FEED_*`); only a measured
+            # code (1..3) is mapped back to the `.subckt`'s string token, and
+            # `0`/absent (`cap_cmomf`, an unmeasured or pre-#2445 device)
+            # writes nothing.
+            from .extract import MOM_FEED_TOKENS
+
+            feed_code = self._device_param(device, "FEED")
+            feed_token = (
+                MOM_FEED_TOKENS.get(int(round(feed_code)))
+                if feed_code is not None
+                else None
+            )
+
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
@@ -1958,6 +1947,7 @@ def create_model_binding_delegate(
                     length_um,
                     int(round(mmin)) if mmin is not None else None,
                     int(round(mmax)) if mmax is not None else None,
+                    feed_token,
                 )
             )
             return True
@@ -2033,7 +2023,13 @@ def create_model_binding_delegate(
                 self.emit_line(f"X{name} {pins} {subckt}")
                 return
 
-            if binding.kind == "capacitor":
+            if binding.kind in ("capacitor", "diode"):
+                # Both kinds state a rectangle at the call site while the
+                # extractor measures area+perimeter: a MiM plate
+                # (`DeviceClassCapacitor`'s secondary `A`/`P`) and a junction
+                # diode (`DeviceClassDiode`'s only two parameters, identically
+                # named). Same recovery, same square fallback for a shape no
+                # real rectangle matches (issue #5491 reuses #339's path).
                 dims = equivalent_rectangle_um(
                     self._device_param(device, "A") or 0.0,
                     self._device_param(device, "P") or 0.0,
@@ -2047,6 +2043,10 @@ def create_model_binding_delegate(
             else:
                 length_um = self._device_param(device, "L") or 0.0
                 width_um = self._device_param(device, "W") or 0.0
+
+            subckt = _apply_narrow_fallback(
+                binding, subckt, name, length_um, width_um, self.substitution_notes
+            )
 
             extra_params = ""
             if binding.kind == "mos":

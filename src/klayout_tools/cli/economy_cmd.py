@@ -2,13 +2,68 @@
 
 import argparse
 
-from ..economy import EconomyError, economy_report
-from .output import emit_error, emit_success, render_table
+from ..economy import EconomyError
+from ..economy_footprint import economy_report_with_footprint
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success, render_table
+
+
+def register(parser: argparse.ArgumentParser) -> None:
+    """Add ``--pnr-report`` (issue #5181), the ``--cell-footprint`` family
+    (issue #5180) and bind the command handler."""
+    parser.add_argument(
+        "--pnr-report",
+        metavar="REPORT_JSON",
+        help=(
+            "place-and-route report JSON (requires --attribute): adds "
+            "attribution.pnr_decomposition splitting the bbox into logical "
+            "cells, physical-only cells, core whitespace, die margin and "
+            "guard ring, plus overrun_ratio (issue #5181)"
+        ),
+    )
+    parser.add_argument(
+        "--cell-footprint",
+        action="store_true",
+        dest="cell_footprint",
+        help=(
+            "add a 'cell_footprint' block: per-master abutment footprint "
+            "(prBoundary, else --lef SIZE, else bbox) and a logic/sequential/"
+            "buffer/clock-tree/fill/tap/endcap split (issue #5180)"
+        ),
+    )
+    parser.add_argument(
+        "--group-by-instance-prefix",
+        default=None,
+        dest="group_by_instance_prefix",
+        metavar="SEP",
+        help=(
+            "group placed instances by the first SEP-delimited component of "
+            "their name (implies --cell-footprint); reports 'unavailable' "
+            "when the layout carries no instance names"
+        ),
+    )
+    parser.add_argument(
+        "--lef",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "LEF file or directory supplying MACRO SIZE for masters with no "
+            "prBoundary (repeatable; first path wins); needs --cell-footprint"
+        ),
+    )
+    parser.set_defaults(func=run)
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.flatten_wrappers and not args.attribute:
+        return emit_error(
+            "economy",
+            "--flatten-wrappers requires --attribute",
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
+        )
     try:
-        report = economy_report(
+        report = economy_report_with_footprint(
             args.file,
             top=args.top,
             grid_cols=args.grid_cols,
@@ -22,6 +77,13 @@ def run(args: argparse.Namespace) -> int:
                 args.area_eff_max_empty_region_fraction
             ),
             area_eff_require_bbox_tightness=args.area_eff_require_bbox_tightness,
+            what_if=args.what_if,
+            attribute=args.attribute,
+            pnr_report=args.pnr_report,
+            flatten_wrappers=args.flatten_wrappers,
+            cell_footprint=args.cell_footprint,
+            group_by_instance_prefix=args.group_by_instance_prefix,
+            lef_paths=tuple(args.lef or ()),
         )
     except EconomyError as exc:
         return emit_error("economy", str(exc), args.format)
@@ -34,6 +96,108 @@ def _fmt_bbox(bbox: dict) -> str:
     return (
         f"({bbox['left']:g}, {bbox['bottom']:g}) - ({bbox['right']:g}, {bbox['top']:g})"
     )
+
+
+def _print_what_if(what_if: dict | None) -> None:
+    if what_if is None:
+        return
+    print(
+        f"what_if: {len(what_if['moves_applied'])} move(s), "
+        f"{len(what_if['reshaped_cells'])} reshape(s), "
+        f"{len(what_if['overlaps'])} overlap(s), "
+        f"{len(what_if['broken_contacts'])} broken contact(s)  "
+        f"[legality: {what_if['legality']}; estimate only]"
+    )
+    for ov in what_if["overlaps"]:
+        print(
+            f"  overlap: {ov['a']['cell']}#{ov['a']['index']} x "
+            f"{ov['b']['cell']}#{ov['b']['index']} "
+            f"area={ov['overlap_area_um2']:.3f} um2"
+        )
+    for bc in what_if["broken_contacts"]:
+        label = f" '{bc['text']}'" if bc["text"] else ""
+        print(
+            f"  broken: {bc['kind']}{label} on {bc['layer']}/{bc['datatype']} "
+            f"from {bc['instance']['cell']}#{bc['instance']['index']}"
+        )
+
+
+def _print_attribution(attribution: dict | None) -> None:
+    if attribution is None:
+        return
+    print(
+        f"attribution: sums_to_total={attribution['sums_to_total']} "
+        f"unattributed={attribution['unattributed_um2']:.3f} um2 "
+        f"overlap={attribution['instance_overlap_um2']:.3f} um2"
+    )
+    attr_rows: list[tuple[str, ...]] = []
+    for c in attribution["children"]:
+        attr_rows.append(("child", str(c["name"]), f"{c['bbox_area_um2']:.3f}"))
+    for g in attribution["gap_components"]:
+        attr_rows.append(("gap", str(g["position"]), f"{g['area_um2']:.3f}"))
+    render_table(("kind", "name", "area_um2"), attr_rows, left_aligned={0, 1})
+    pnr = attribution.get("pnr_decomposition")
+    if pnr is not None:
+        ratio = pnr["overrun_ratio"]
+        print(
+            f"pnr_decomposition: sums_to_total={pnr['sums_to_total']} "
+            f"residual={pnr['residual_um2']:.3f} um2 "
+            f"bbox={pnr['bbox_area_um2']:.3f} um2 "
+            f"overrun_ratio={'n/a' if ratio is None else f'{ratio:.3f}'}"
+        )
+        for term in (
+            "logical_cells",
+            "physical_only_cells",
+            "core_whitespace",
+            "die_margin",
+            "guard_ring",
+        ):
+            print(f"  {term}: {pnr[term]['area_um2']:.3f} um2  [{pnr[term]['source']}]")
+    print()
+
+
+def _print_footprint(fp: dict | None) -> None:
+    if fp is None:
+        return
+    print(
+        f"cell_footprint: {fp['instance_count']} instance(s), "
+        f"total={fp['total_footprint_um2']:.3f} um2, "
+        f"physical_only={fp['physical_only_um2']:.3f} um2"
+    )
+    render_table(
+        ("master", "category", "source", "count", "footprint_um2"),
+        [
+            (
+                m["master"],
+                m["category"],
+                m["source"],
+                str(m["instance_count"]),
+                f"{m['footprint_um2']:.3f}",
+            )
+            for m in fp["masters"]
+        ],
+        left_aligned={0, 1, 2},
+    )
+    grouping = fp.get("grouping")
+    if grouping is None:
+        return
+    if grouping["status"] != "ok":
+        print(f"grouping: {grouping['status']} ({grouping['reason']})")
+        return
+    render_table(
+        ("group", "instances", "footprint_um2", "share_of_bbox"),
+        [
+            (
+                g["group"],
+                str(g["instance_count"]),
+                f"{g['footprint_um2']:.3f}",
+                "-" if g["share_of_bbox"] is None else f"{g['share_of_bbox']:.4f}",
+            )
+            for g in grouping["groups"]
+        ],
+        left_aligned={0},
+    )
+    print()
 
 
 def _print_text(report: dict) -> None:
@@ -119,6 +283,10 @@ def _print_text(report: dict) -> None:
         if "bbox_tightness" in checks:
             c = checks["bbox_tightness"]
             print(f"  bbox_tightness: {c['status']} (actual={c['actual']:.4f})")
+
+    _print_what_if(report.get("what_if"))
+    _print_attribution(report.get("attribution"))
+    _print_footprint(report.get("cell_footprint"))
 
     cells = report["cells"]
     if not cells:

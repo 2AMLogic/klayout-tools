@@ -5,6 +5,7 @@ import json
 import pytest
 
 from klayout_tools.signoff import build_signoff, build_tier_report
+from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
 
 
 def _passing_regression():
@@ -40,11 +41,14 @@ def _assert_annotation_credit(tmp_path, envelope, *, annotated, corner="typ"):
     assert check["detail"]["passed_count"] == 2
     assert check["detail"]["skipped_count"] == 1
 
+    # Digital item 5 needs STA plus the functional suite (issue #3741).
+    sta_path = tmp_path / "sta.json"
+    sta_path.write_text(json.dumps(STA_MULTI_CORNER_CLEAN_ENVELOPE), encoding="utf-8")
     tier = build_tier_report(
         {
             "block": "sdf-domain",
             "kind": "digital",
-            "evidence": {"5": str(path), "7": str(path)},
+            "evidence": {"5": [str(path), str(sta_path)], "7": str(path)},
         }
     )
     items = {item["id"]: item for item in tier["items"]}

@@ -17,6 +17,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+from ._common_params import (
+    declare_cut_and_metal_params,
+    declare_metal_label_present,
+    declare_tap_and_well_layers,
+)
+
 
 def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``well_island`` reference generator's PCell -- an isolated well
@@ -74,6 +80,10 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         to :data:`WELL_ENCLOSURE_MARGIN_UM`, never below). See
         :func:`_well_island_isolation`.
         """
+
+        # Declared via ``self.param("mfg_grid_um", ...)`` below; the
+        # PCellDeclarationHelper stubs cannot see it, so annotate for mypy.
+        mfg_grid_um: float
 
         def __init__(self) -> None:
             super().__init__()
@@ -173,48 +183,23 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "net is equipotential and is not isolated from",
                 default=[],
             )
-            self.param(
-                "tap_layer",
-                self.TypeLayer,
-                "Substrate/well tap drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "contact_layer",
-                self.TypeLayer,
-                "Contact drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
-            self.param(
-                "metal_layer",
-                self.TypeLayer,
-                "Local routing metal drawing layer",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_tap_and_well_layers(self, kdb)
+            declare_cut_and_metal_params(self, kdb)
             self.param(
                 "metal_label_layer",
                 self.TypeLayer,
                 "Label layer the net name is drawn on (only used when "
                 "metal_label_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
-            self.param(
-                "metal_label_present",
-                self.TypeBoolean,
-                "Whether metal_label_layer is a real label layer for the resolved PDK",
-                default=False,
-            )
-            self.param(
-                "well_layer",
-                self.TypeLayer,
-                "Well drawing layer (only used when well_present)",
-                default=kdb.LayerInfo(0, 0),
-            )
+            declare_metal_label_present(self)
             self.param(
                 "well_present",
                 self.TypeBoolean,
                 "Whether well_layer is a real layer for the resolved PDK",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "well_tap_implant_layer",
@@ -223,6 +208,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_margin_um of extension beyond every edge of it "
                 "(only used when well_tap_implant_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_tap_implant_present",
@@ -230,6 +216,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the tap ring as a well tie",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "ring_implant_margin_um",
@@ -238,6 +225,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the tap ring's own band on every edge (only used when "
                 "well_tap_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "well_margin_resolved_um",
@@ -245,18 +233,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved well enclosure actually drawn (see "
                 "_well_island_isolation)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
-            )
-            # Fixed drawn side of every cut on contact_layer (issue #2585) --
-            # harness-computed by `_cut_fixed_size_um` from the resolved PDK
-            # family and layer. `0.0` (no upper size bound) leaves the cuts
-            # exactly as laid out; see `gen._clamp_cut_boxes`.
-            self.param(
-                "contact_fixed_size_um",
-                self.TypeDouble,
-                "Fixed drawn side (um) every cut on contact_layer is clamped "
-                "down to on the resolved PDK family -- 0.0 leaves the "
-                "generator's own cut size unchanged",
-                default=0.0,
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:
@@ -286,6 +263,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_ring(
                 self.cell,
@@ -294,6 +272,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 info["outer_box_um"],
                 info["inner_box_um"],
                 gap_box,
+                self.mfg_grid_um,
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.well_tap_implant_present:
@@ -313,6 +292,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     gap_box,
                     info["gap"]["side"] if info["gap"] is not None else None,
                     self.ring_implant_margin_um,
+                    self.mfg_grid_um,
                 )
             if self.well_present:
                 _insert_boxes(
@@ -338,6 +318,12 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
 
             # Issue #2585: clamp every cut on a fixed-size cut/via layer down
             # to that size, inside the unchanged generic-budget layout.
-            _clamp_cut_boxes(self.cell, li_contact, dbu, self.contact_fixed_size_um)
+            _clamp_cut_boxes(
+                self.cell,
+                li_contact,
+                dbu,
+                self.contact_fixed_size_um,
+                self.mfg_grid_um,
+            )
 
     return {"well_island": _WellIslandPCell}

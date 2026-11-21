@@ -33,7 +33,7 @@ circular import evaluated mid-load.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .decks import ExtractionDeck, ParasiticsDeck
@@ -96,6 +96,7 @@ def _describe_devices(
         _PARAM_PRECISION_FARAD,
         _PARAM_PRECISION_OHM,
         _PARAM_PRECISION_UM,
+        MOM_FEED_TOKENS,
     )
 
     devices: list[dict[str, Any]] = []
@@ -114,8 +115,19 @@ def _describe_devices(
             )
 
         params: dict[str, float] = {}
+        feed_token: str | None = None
         for param in device_class.parameter_definitions():
-            if param.name == "W":
+            if param.name == "FEED":
+                # Issue #2445, `cap_cmomi` only: the feed variant is a
+                # *string* token (`none`/`same`/`double`), which `params` (an
+                # object of numbers) cannot carry without breaking typed
+                # consumers, so it is reported as an additive optional
+                # top-level device field instead -- present only when
+                # measured (the integer code `0` is "unmeasured").
+                feed_token = MOM_FEED_TOKENS.get(
+                    int(round(device.parameter(param.id())))
+                )
+            elif param.name == "W":
                 params["w_um"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
@@ -173,7 +185,11 @@ def _describe_devices(
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
-            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS:
+            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS and not (
+                # FinFET classes (issue #2761) do not measure junction
+                # geometry; omit the keys rather than report fake zeros.
+                device_class.has_parameter("NFIN")
+            ):
                 # MOS source/drain junction geometry (issue #695), all four
                 # rounded to the same micrometre-domain precision, so one
                 # name->key table replaces four identical branches:
@@ -191,6 +207,13 @@ def _describe_devices(
                 params[_MOS_JUNCTION_PARAM_JSON_KEYS[param.name]] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
+            elif param.name in ("NFIN", "FINGERS"):
+                # FinFET device classes only (issue #2761, see
+                # `extract_finfet`): `nfin` is the geometry-counted fin total
+                # over this device's merged parallel fingers -- the PDK
+                # reference netlist's own `nfin` -- and `fingers` how many
+                # gate fingers were merged. Integers, like `mmin`/`mmax`.
+                params[param.name.lower()] = int(round(device.parameter(param.id())))
             elif param.name in ("MMIN", "MMAX"):
                 # MoM-capacitor device classes only (issue #2435,
                 # `mom_capacitor_device_class` in `extract.py`): the
@@ -209,6 +232,7 @@ def _describe_devices(
                 # both (see `docs/json-contract.md`).
                 params[param.name.lower()] = int(round(device.parameter(param.id())))
 
+        feed_field = {"feed": feed_token} if feed_token is not None else {}
         devices.append(
             {
                 # expanded_name() yields a bare $<n> for anonymous devices:
@@ -227,6 +251,7 @@ def _describe_devices(
                 # docstrings. `[]` when it resolved to none (drawn directly
                 # in the top cell) or `device_instance_paths` was not given.
                 "instance_path": instance_paths.get(device.id(), []),
+                **feed_field,
             }
         )
         device_counts[class_name] = device_counts.get(class_name, 0) + 1
@@ -515,6 +540,79 @@ def _detect_merged_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         merged.append({"net": name, "labels": labels})
     return merged
+
+
+def detect_case_colliding_net_names(names: Iterable[str]) -> list[list[str]]:
+    """Group net names that are equal after case-folding but differ as written.
+
+    ``klt lvs`` reads the written SPICE back case-insensitively, so two
+    extracted nets named ``pb`` and ``PB`` come back as one net and show up
+    downstream as a false ``net.merged``. Returns one sorted list of the
+    distinct spellings per colliding group, groups ordered by folded name.
+    Exact duplicates (the split-label case, :func:`_detect_split_net_labels`)
+    are not collisions. Always a list; empty when nothing collides.
+    """
+    spellings: dict[str, set[str]] = {}
+    for name in names:
+        spellings.setdefault(name.casefold(), set()).add(name)
+    return [sorted(group) for _, group in sorted(spellings.items()) if len(group) >= 2]
+
+
+def _case_collision_warnings(nets: list[dict[str, Any]]) -> list[str]:
+    """One warning string per case-fold net-name collision in ``nets[]``."""
+    return [
+        f"nets {', '.join(repr(n) for n in group)} differ only by case -- "
+        "`klt lvs` reads the written netlist back case-insensitively and "
+        "will merge them (a false net.merged); for a composed layout pass "
+        "--hierarchical-cells with the placed-cell names "
+        "(`<block id>__<cell name>`) to split the hierarchy -- see "
+        "docs/cli/extract.md's 'Hierarchical output' section."
+        for group in detect_case_colliding_net_names(n["name"] for n in nets)
+    ]
+
+
+def _detect_split_net_labels(nets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the response's ``split_net_labels[]`` array (issue #3920).
+
+    The inverse of :func:`_detect_merged_net_labels`: one drawn label text
+    carried by 2+ distinct extracted nets, e.g. two unstrapped ``VDD``
+    rails. Such nets share one ``name`` in ``nets[]`` and surface downstream
+    only as ``VDD``/``VDD$1`` pins in the written netlist, which then show
+    up in ``klt lvs`` as anonymous ``net.merged``/``net.split`` errors.
+
+    Scans the already-built ``nets[]`` array, grouping ``net_id`` by each
+    ``label_positions_um[].text`` (a label repeated on one net counts once).
+    Returns one entry per label, sorted by label: ``{"label": str, "nets":
+    [net_id, ...], "count": int}``. ``nets`` lists ``net_id`` (not ``name``,
+    which is identical across the split nets). Always a list; empty when
+    every label names exactly one net.
+    """
+    ids_by_label: dict[str, list[int]] = {}
+    for net in nets:
+        for text in {entry["text"] for entry in net["label_positions_um"]}:
+            ids_by_label.setdefault(text, []).append(net["net_id"])
+    return [
+        {"label": label, "nets": sorted(ids), "count": len(ids)}
+        for label, ids in sorted(ids_by_label.items())
+        if len(ids) >= 2
+    ]
+
+
+def _split_net_label_warnings(split_net_labels: list[dict[str, Any]]) -> list[str]:
+    """One warning string per ``split_net_labels[]`` entry (issue #3920).
+
+    Kept out of ``run_extract`` so the cyclomatic-complexity ratchet
+    (``scripts/check_complexity_baseline.py``) does not see the loop.
+    """
+    return [
+        f"label '{entry['label']}' is drawn on {entry['count']} separate nets "
+        f"(net_id {', '.join(str(i) for i in entry['nets'])}) -- the "
+        "same-named nets are not connected in the layout (e.g. unstrapped "
+        "supply rails), so the written netlist names them "
+        f"'{entry['label']}', '{entry['label']}$1', ... -- "
+        "see docs/cli/extract.md's 'Split net labels' section."
+        for entry in split_net_labels
+    ]
 
 
 #: Every anonymous KLayout-synthesized net name reported anywhere in this

@@ -180,13 +180,20 @@ def test_real_doc_item_11_columns_name_their_own_evidence():
     assert "power_connectivity" in digital
     assert "full-custom" in digital
 
-    assert len(item_11["notes"]) == 1
+    # Issue #2839 added a second note: the provisional port-accessibility
+    # clause (edge power ports + LEF abstract), marked as not yet in force.
+    assert len(item_11["notes"]) == 2
     note = item_11["notes"][0]
     assert "erc.missing_tie" in note
     assert "erc.unconnected_net" in note
     # IR-drop/EM stays out of T1 -- the ruling's own scoping, stated in the
     # item so a reader cannot conflate the two questions.
     assert "klt power" in note
+    port_note = item_11["notes"][1]
+    assert "PROVISIONAL" in port_note
+    assert "klt socket-check" in port_note
+    assert "klt lef-abstract" in port_note
+    assert "USE POWER" in port_note
 
 
 def test_real_doc_item_11_gives_one_answer_on_native_substrate_ties():

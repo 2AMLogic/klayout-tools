@@ -24,7 +24,13 @@ from .output import emit_error, emit_success
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_power(args.file, args.spec, top=args.top)
+        report = run_power(
+            args.file,
+            args.spec,
+            top=args.top,
+            deck=args.deck,
+            resistance_corner=args.resistance_corner,
+        )
     except PowerError as exc:
         return emit_error("power", str(exc), args.format)
 

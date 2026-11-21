@@ -1,14 +1,21 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "engine": "klayout",
-  "layout": "layout.spice",
-  "reference": "schematic.spice",
+  "layout": {
+    "path": "examples/signoff/layout.spice",
+    "scope": "repo"
+  },
+  "reference": {
+    "path": "examples/signoff/schematic.spice",
+    "scope": "repo"
+  },
   "top": "CURRENT_MIRROR",
   "reference_top": "CURRENT_MIRROR",
   "parameter_tolerance": null,
   "options": {
     "combine_devices": false,
     "combine_devices_per_circuit": null,
+    "combine_devices_max_attempts": 5,
     "flatten_layout": false,
     "flatten_reference": false,
     "netgen_setup": null,
@@ -16,6 +23,9 @@
     "compare_parameters": null,
     "power_connectivity": null,
     "anchor_top_level_pins": null,
+    "strict_top_level_pin_count": false,
+    "compare_mos_flavour": false,
+    "ignore_mos_bulk": false,
     "supply_nets": [
       "GND",
       "VCC",
@@ -23,9 +33,11 @@
       "VGND",
       "VPWR",
       "VSS"
-    ]
+    ],
+    "finfet_bulk": null
   },
   "hints_applied": null,
+  "constant_nets_applied": null,
   "status": "match",
   "power_connectivity": {
     "status": "unchecked",
@@ -35,6 +47,7 @@
     "instance_count": 0,
     "expected_nets": null,
     "unchecked_expected_pins": [],
+    "excluded_pins": [],
     "findings": [],
     "finding_count": 0
   },
@@ -43,10 +56,40 @@
     "reason": "no request.layout.deck was given (the pre-extracted request.layout.netlist form), so nothing establishes this layout's substrate/well-tap convention and no synthesized body net can be told apart from a real one -- this run verified nothing about the device bodies either way",
     "device_classes": [],
     "device_count": 0,
+    "inspected_count": 0,
     "findings": [],
     "finding_count": 0
   },
-  "device_parameter_coverage": [],
+  "device_parameter_coverage": [
+    {
+      "class": "NFET",
+      "device_kind": "mos",
+      "layout_devices": 2,
+      "reference_devices": 2,
+      "compared": [
+        "L",
+        "W"
+      ],
+      "not_compared": [
+        {
+          "parameter": "AS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "AD",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PS",
+          "reason": "secondary"
+        },
+        {
+          "parameter": "PD",
+          "reason": "secondary"
+        }
+      ]
+    }
+  ],
   "mismatch_count": 0,
   "error_count": 0,
   "category_counts": {},
@@ -79,6 +122,8 @@
   },
   "provenance": {
     "klt_version": null,
+    "klt_git_commit": null,
+    "klt_reinstall_spec": null,
     "klayout_version": "0.30.12",
     "pdk": null,
     "deck": null,
@@ -92,17 +137,23 @@
   "net_correspondence": [
     {
       "layout": "VIN",
+      "layout_id": 0,
       "reference": "VIN",
+      "reference_id": 0,
       "pin": true
     },
     {
       "layout": "VOUT",
+      "layout_id": 1,
       "reference": "VOUT",
+      "reference_id": 1,
       "pin": true
     },
     {
       "layout": "VSS",
+      "layout_id": 2,
       "reference": "VSS",
+      "reference_id": 2,
       "pin": true
     }
   ]

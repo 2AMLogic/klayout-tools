@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-30T19:09:46.932086+00:00",
+  "slug": "gf180-torchsynth",
+  "name": "Gf180 Torchsynth",
+  "description": "TorchSynth Voice on gf180mcu \u2014 a deterministic sound-explorer hardware canary",
+  "pdk": "gf180mcu",
+  "source": {
+    "repo": "2AMLogic/gf180-torchsynth",
+    "ref": "3ad94faa016dc462b7f3d25538ccdb4fae5731b9",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

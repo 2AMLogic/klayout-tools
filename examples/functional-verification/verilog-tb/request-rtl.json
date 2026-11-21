@@ -1,0 +1,11 @@
+{
+  "schema": "klt.functional_verification.request/1",
+  "engine": "icarus",
+  "sources": ["and_cell.v", "and2.v", "tb_and2.v"],
+  "hdl_toplevel": "and2",
+  "testbench": {
+    "verilog_top": "tb_and2",
+    "pass_marker": "PASS",
+    "fail_marker": "FAIL"
+  }
+}

@@ -67,6 +67,46 @@ AWS config.
 See [`docs/cli/sim.md`'s "Batch backend"](../../docs/cli/sim.md#batch-backend)
 for the full field table and the four-step seam this implements.
 
+## Sequential campaign: bounded bisection
+
+[`adaptive-search.py`](adaptive-search.py) is a worked recipe for a search
+whose next input depends on the previous result (see
+[`docs/cli/sim.md`'s "Sequential (adaptive) campaigns"](../../docs/cli/sim.md#sequential-adaptive-campaigns-on-the-batch-backend)).
+It bisects a literal DC source value until a named measurement crosses a
+target. Each probe is one single-unit `klt sim --backend batch` request that
+blocks until its report is collected; only the controller runs on your host.
+
+You supply the template request (a testbench with a literal DC source, a
+`batch` block with the placeholders above, and the named measurement), plus
+the process, temperature, and bracket:
+
+```sh
+python examples/sim-batch/adaptive-search.py \
+  --template my-batch.request.json --source vdd --measurement vout_v \
+  --target 0.9 --lo 0.8 --hi 1.8 --tol 0.01 --max-probes 12 \
+  --workdir probes/ --process tt --temperature 27 --klt "uv run klt"
+```
+
+`--direction decreasing` flips the comparison. Per-probe request and report
+files (`probe-NNN.request.json` / `probe-NNN.report.json`) are kept in
+`--workdir`, which must not already contain them, and the JSON summary on
+stdout lists each probe's input, measurement, request/report paths, and batch
+job id (the paths are recorded even when a probe stops the search). Exit `0`
+means converged; `2` means stopped on an unusable probe or out of probes.
+
+Because probe requests are written into `--workdir`, only the template's
+`netlist` is rebased onto the template's directory. Every other path in the
+template (`models.lib` without `models.pdk`, per-corner process libs, an OSDI
+preload, an ngspice binary override) must be absolute or PDK-relative.
+
+Assumptions and cost: the measurement must be monotonic in the source value
+and the crossing must lie inside the bracket (the edges are not probed). Each
+probe is its own fleet job, so it repeats launch overhead and shares no
+simulator state. A poll timeout stops the search and reports the job id; the
+job may still be running and is not replaced automatically. The decision
+loop is tested without AWS or a simulator in
+`tests/test_adaptive_search_example.py`.
+
 ## Live-run slot: deliberately empty
 
 **No `matrix-batch.report.json` is committed, on purpose.** A committed

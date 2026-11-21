@@ -296,6 +296,120 @@ section models converging toward each other is exactly the kind of
 independent-implementation agreement epic #701's Phase 0 section asks this
 cross-check to demonstrate.
 
+## Bent-path driving-point mode
+
+The open/short technique above is valid only for a *uniform* line, so it
+cannot validate an arbitrary bent winding (issue #3037, child of #2730).
+`scripts/mom_nec_reference.py` therefore has a second, separate request mode,
+`"mode": "bent_path_driving_point"`; requests without `mode` keep the legacy
+straight-line schema and output unchanged.
+
+**Request.** `signal_path_um` (near signal terminal → far signal terminal) and
+`return_path_um` (far return terminal → near return terminal) are ordered 3-D
+polylines in micrometres, plus `radius_um`, `frequency_hz` and
+`segment_size_um` (optional `segments_per_leg`, an int or per-leg list).
+
+**Closed loop, explicit return.** Each consecutive point pair is one NEC wire
+leg, tagged `1..N` in traversal order: signal legs, a *far connector* (signal
+path's last point → return path's first point), return legs, then a *near feed
+stub* (return path's last point → signal path's first point). Free space has
+no ground plane, and no implicit return: the return terminal is the explicit
+return path.
+
+**Terminal polarity.** The 1 V NEC source sits on the stub's single segment.
+The stub is oriented return → signal, so the signal terminal is driven
+positive with respect to the return terminal and the reported current is the
+current entering the signal path.
+
+**Effective radius.** One shared `radius_um` on every leg, using the same
+equal-area-circle `a_eff = sqrt(area / pi)` convention as the legacy mode.
+
+**Discretisation.** Each signal/return leg gets an odd segment count,
+`ceil(length / segment_size_um)` bumped to odd (or the validated
+`segments_per_leg`, which must be odd and no coarser than `segment_size_um`).
+The connector and stub are single-segment wires. Keep segments well above
+~2× the wire radius for NEC2++'s thin-wire kernel (see "Geometry mapping").
+
+**Output.** `z_in_real_ohm` / `z_in_imag_ohm` — the near-terminal
+*driving-point impedance* — plus `frequency_hz`, `radius_um`, `tool`
+(`nec2++` via `PyNEC`, with version) and the realized `wires` (tag, role,
+segments, endpoints) and `source`. No `Z0`, `gamma` or S-parameters are
+reported: a bent, non-uniform loop is not a transmission line, and a
+one-terminal-pair impedance of a closed loop is not a winding two-port
+S-matrix (that would additionally need port definition and de-embedding,
+out of scope here).
+
+**Rejected inputs** (exit code 2, diagnostic on stderr naming the field or
+leg): fewer than two points, non-numeric/non-finite coordinates, zero-length
+legs (including a collapsed far connector or feed stub), signal/return paths
+sharing a vertex, non-positive `radius_um` / `frequency_hz` /
+`segment_size_um`, and bad `segments_per_leg`.
+
+**Straight-control agreement (measured).** On the shared benchmark the
+straightened control gives `Z_in = 1.63e-9 + 4.4488j` ohm against the legacy
+short-circuit `Z_sc = 1.63e-9 + 4.5103j` ohm: **1.36%** relative difference
+(CI, PyNEC). The cause was isolated by perturbing the *legacy* geometry:
+directing its return wire far → near (as the bent contract's loop traversal
+does) moves `Im(Z_sc)` by ~1.8% and reproduces this mode's value, while
+giving this mode the legacy's return direction matches the legacy to ~1e-9.
+So the mode's geometry is faithful; the residual is NEC2 orientation
+sensitivity at junctions with a single 40 µm connector next to 5 µm
+segments. The same instability shows in other knobs: changing the legacy
+stub from 1 to 3 segments moves `Z_sc` by ~2.9%, and a last-ulp change in the
+coordinates (`40e-6` vs `40*1e-6`) moves the control by ~0.3%. The control
+test therefore asserts agreement within **3%** (not 1%), a bound NEC's own
+discretisation noise stays under while a wrong connector/stub would not.
+Refining the connectors does not help (thin-wire kernel breaks down once
+segments approach the wire radius), so this is a limit of the oracle, not
+something the mode can tighten.
+
+**Tests.** `tests/test_mom_nec_bent_path.py` pins the translation with a fake
+`PyNEC` (no NEC2++ needed); `tests/test_mom_cross_validation.py` runs a
+straightened control (it must equal the legacy short-circuit `Z_sc`, same
+geometry) and a bent fixture against real NEC2++.
+
+### Winding comparison (issue #2730)
+
+`tests/test_mom_cross_validation.py::test_bent_winding_driving_point_matches_nec_reference`
+validates `klt mom`'s series-path winding sweep against this mode.
+
+**Fixture.** Signal L `(0,0) → (200,0) → (200,100)` and return U
+`(200,120) → (180,120) → (180,20) → (0,20)` µm, 2×2 µm sections on
+`z ∈ [0, 2]` µm, vacuum, 1 GHz, equal-area radius `1.128379 µm`. NEC2++
+(`PyNEC` 2.3.4) closes the loop with the 20 µm far connector and near feed
+stub. `klt mom` models the same four bars as four conductors (signal winding,
+return winding, connector, stub), the connector and stub shortened by 1.5 µm
+at each end so no two conductors touch (17 µm electrical instead of 20 µm),
+and forms `Z_in = sᵀ Z s` from the full impedance matrix, `s = (+1, −1, +1,
+−1)` giving each conductor's current direction against its canonical
+traversal (the return runs from the lexicographically larger terminal; the
+stub carries the NEC source polarity: signal terminal positive).
+
+**Segmentation.** The two solvers are each run at their own valid
+discretisation, not at one shared segment length: `klt mom` at 1 µm cells
+(converged, see `mom-validation.md` §3), NEC2++ at 10 and 20 µm. NEC2's
+thin-wire kernel wants segments ≳ 8 wire radii (≈ 9 µm here); below that its
+answer is not usable on this fixture (`Im Z_in` at 1 GHz for NEC segment
+20/10/8/6/5/4/3/2.5/2 µm: 2.45, 2.26, 2.59, 2.73, 2.81, 3.35, 2.55, −3.27,
+−40.6 Ω — the single-segment connector and stub sit next to ever finer
+neighbours). The agreement is therefore limited by the oracle, and the
+tolerance is set from its spread rather than from `klt mom`'s own
+convergence.
+
+| Quantity | `klt mom` | NEC2++ | rel. diff | Bound |
+|---|---|---|---|---|
+| `Z_in`, NEC segment 10 µm | 1.26e-10 + 2.2033j Ω | 1.54e-10 + 2.2596j Ω | **2.49%** | 15% |
+| `Z_in`, NEC segment 20 µm | 1.26e-10 + 2.2033j Ω | 1.51e-10 + 2.4463j Ω | **9.93%** | 15% |
+| control: return path co-directed (wrong polarity) | 5.0543j Ω | 2.2596j Ω | 124% | must exceed 45% |
+
+The real parts are radiation resistance only (≲1e-9 Ω, both lossless) and are
+asserted merely negligible against the reactance. The static PEEC loop
+reactance of the same request (measured once, not asserted) is 2.388j Ω; `klt mom`'s 2.203j Ω sits 7.7%
+below it for the thin-wire-kernel reason in `mom-validation.md` §3, and NEC2++
+straddles the two. The control shows the comparison is not vacuous: a solver
+that ignored the traversal direction (or mis-signed the antiparallel
+coupling) lands far outside the bound.
+
 ## Reproducing this cross-check
 
 ```bash

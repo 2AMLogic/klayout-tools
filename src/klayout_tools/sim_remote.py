@@ -62,7 +62,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport, sim_staging
+from . import remote_fleet, remote_transport, sim_staging, sim_steps
 from .remote_launcher import RemoteLaunchError
 
 if TYPE_CHECKING:
@@ -192,6 +192,8 @@ def _unrun_corner_report(
             "unit": spec.get("unit"),
             "status": "error",
             "margin": None,
+            # Issue #2482: additive `step`/`derived_from` provenance, as a ran corner.
+            **sim_steps.measurement_provenance(spec),
         }
         for spec in measurements_spec
     ]
@@ -204,6 +206,10 @@ def _unrun_corner_report(
             "process_seed": point.mc_seed["process_seed"],
             "mismatch_seed": point.mc_seed["mismatch_seed"],
         }
+        if "seed_scope" in point.mc_seed:
+            monte_carlo["seed_scope"] = point.mc_seed["seed_scope"]
+        if "seed_mode" in point.mc_seed:
+            monte_carlo["seed_mode"] = point.mc_seed["seed_mode"]
     diagnostic: dict[str, Any] = {
         "severity": "error",
         "code": code,
@@ -218,12 +224,19 @@ def _unrun_corner_report(
         "process": point.process,
         "supply_v": point.supply_v,
         "temperature_c": point.temperature_c,
+        **({"params": dict(point.params)} if point.params else {}),
+        **({"nodeset": dict(point.nodeset)} if point.nodeset else {}),
+        **({"analysis_args": point.analysis_args} if point.analysis_args else {}),
+        **({"options": dict(point.options)} if point.options else {}),
         "status": "error",
         "runtime_s": 0.0,
+        "engine_exit_code": None,
+        "engine_killed_by_signal": None,
         "measurements": measurements,
         "diagnostics": [diagnostic],
         "artifacts": {"log": None, "raw": None, "waveform": None, "deck": None},
         "monte_carlo": monte_carlo,
+        **({"variant": point.variant} if point.variant is not None else {}),
     }
 
 
@@ -246,12 +259,61 @@ def _lost_shard_corner(
     return report
 
 
+def _await_shards(
+    pool: ThreadPoolExecutor,
+    future_to_index: dict[Any, int],
+    results: list[Any],
+    lost_reasons: list[str | None],
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
+) -> None:
+    """Collect shard futures into ``results`` / ``lost_reasons`` as they finish.
+
+    An interrupt while waiting cancels the not-yet-started futures first: with
+    a ``max_concurrent_jobs`` cap, the pool's implicit ``shutdown(wait=True)``
+    would otherwise launch every still-queued shard as a new billable job.
+
+    ``on_interrupt`` (issue #4018) is told the interrupting exception; when it
+    returns a reason string the interrupt is *absorbed*: shards that already
+    finished keep their results, every other shard is reported lost with that
+    reason, and the caller gets a partial merge instead of an exception.
+    Returning ``None`` re-raises, as without a hook.
+    """
+    try:
+        for future in as_completed(future_to_index):
+            _collect_shard(future, future_to_index[future], results, lost_reasons)
+    except BaseException as exc:
+        pool.shutdown(wait=False, cancel_futures=True)
+        reason = None if on_interrupt is None else on_interrupt(exc)
+        if reason is None:
+            raise
+        for future, index in future_to_index.items():
+            if future.done() and not future.cancelled():
+                _collect_shard(future, index, results, lost_reasons)
+            else:
+                lost_reasons[index] = reason
+
+
+def _collect_shard(
+    future: Any,
+    index: int,
+    results: list[Any],
+    lost_reasons: list[str | None],
+) -> None:
+    try:
+        results[index] = future.result()
+        lost_reasons[index] = None
+    except Exception as exc:  # - "shard never returned"
+        lost_reasons[index] = str(exc)
+
+
 def _run_sharded(
     *,
     shard_runner: ShardRunner,
     corner_points: list[CornerPoint],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    max_concurrent: int | None = None,
+    on_interrupt: Callable[[BaseException], str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The fleet shard/merge engine: slice ``corner_points`` into ``hosts``
     contiguous shards (:func:`_shard_corner_points`), run each shard through
@@ -270,6 +332,15 @@ def _run_sharded(
     never aborts a sibling shard, mirroring `local-parallel`'s per-corner
     failure isolation one level up. An empty shard (``hosts`` exceeds the
     unit count) is never handed to ``shard_runner`` at all.
+
+    ``max_concurrent`` (issue #3914) bounds how many shards are in flight at
+    once -- the pool size becomes ``min(hosts, max_concurrent)`` and the
+    remaining shards start as earlier ones finish; ``None`` runs every shard
+    at once, as before.
+
+    ``on_interrupt`` (issue #4018) is :func:`_await_shards`' hook: an
+    interrupt it absorbs yields the partial merge, every unfinished shard
+    reported lost with the hook's reason.
 
     ``engine_version`` is derived the same "last non-``None`` wins, in
     corner-list order" way every backend already computes it -- shards are
@@ -301,16 +372,16 @@ def _run_sharded(
     ] = [None] * len(shards)
     lost_reasons: list[str | None] = [None] * len(shards)
 
-    with ThreadPoolExecutor(max_workers=max(1, hosts)) as pool:
+    workers = max(1, hosts)
+    if max_concurrent is not None:
+        workers = min(workers, max(1, max_concurrent))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_index = {
             pool.submit(_run_one, shard): index for index, shard in enumerate(shards)
         }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                results[index] = future.result()
-            except Exception as exc:  # noqa: BLE001 - "shard never returned"
-                lost_reasons[index] = str(exc)
+        _await_shards(
+            pool, future_to_index, results, lost_reasons, on_interrupt=on_interrupt
+        )
 
     corners: list[dict[str, Any]] = []
     engine_version: str | None = None
@@ -373,6 +444,7 @@ def _run_remote(
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend: provision one EC2 instance sized for the whole
     corner matrix, push the netlist + a request-specific copy of ``request``
@@ -420,6 +492,10 @@ def _run_remote(
     Wiring the remote backend into the same budget/orphan/resume machinery
     is tracked as follow-up work, not silently promised by this signature.
 
+    ``request_dir`` (issue #2668) is the original request file's directory,
+    used only when ``options.stage_model_inputs`` asks for the request's
+    model inputs to be staged (:func:`sim_staging.stage_sim_job`).
+
     ``probe_abort`` (issue #1694) is likewise accepted but never populated
     for this backend today -- ``run_sim`` only runs the calibration probe
     for ``backend in ("local", "local-parallel")`` (see
@@ -449,7 +525,8 @@ def _run_remote(
             "into the provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
-    _preflight_include_closure(request, netlist_path)
+    _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -516,6 +593,7 @@ def _run_remote(
                 # wave is exactly that wide. None (within capacity) keeps
                 # the guest's own default, byte-identical to before.
                 max_workers=info.get("wave_capacity"),
+                request_dir=request_dir,
             )
     except (RemoteLaunchError, remote_transport.RemoteTransportError) as exc:
         raise SimError(f"remote backend failed: {exc}") from exc
@@ -540,6 +618,35 @@ def _run_remote(
     return corners, engine_version, remote_environment
 
 
+def _points_to_push(
+    request: dict[str, Any],
+    corner_points: list[CornerPoint],
+    explicit_points: list[CornerPoint] | None,
+) -> list[CornerPoint] | None:
+    """The explicit point list to push to the job box, or ``None`` to forward
+    ``corners``/``monte_carlo`` for the box to re-expand.
+
+    A non-default ``monte_carlo.seed_scope`` (issue #2899) is resolved
+    client-side: a runner older than the field would silently drop it and
+    re-derive ``per_corner`` seeds, so the already-derived seeds are shipped
+    instead (the same wire a fleet shard uses). A declared
+    ``monte_carlo.mismatch_scale`` (issue #3942) is resolved the same way, so
+    an older runner cannot silently run an unscaled sweep. A non-default
+    ``monte_carlo.seed_mode`` (issue #4173) is shipped the same way. The default
+    forwards the request unchanged.
+    """
+    if explicit_points is not None:
+        return explicit_points
+    mc_spec = request.get("monte_carlo")
+    if isinstance(mc_spec, dict) and (
+        mc_spec.get("seed_scope", "per_corner") != "per_corner"
+        or mc_spec.get("seed_mode", "derived") != "derived"
+        or "mismatch_scale" in mc_spec
+    ):
+        return corner_points
+    return None
+
+
 def _run_remote_dispatch(
     *,
     launcher: RemoteLauncher,
@@ -556,6 +663,7 @@ def _run_remote_dispatch(
     ssh_run_timeout_s: float,
     explicit_points: list[CornerPoint] | None = None,
     max_workers: int | None = None,
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Push, run, and (when ``keep_artifacts``) pull one job's worth of
     corners against an already-provisioned, SSH-reachable remote host --
@@ -583,10 +691,12 @@ def _run_remote_dispatch(
         timeout_s=timeout_s,
         keep_artifacts=keep_artifacts,
         want_waveforms=want_waveforms,
-        explicit_points=explicit_points,
+        explicit_points=_points_to_push(request, corner_points, explicit_points),
         max_workers=max_workers,
     )
-    job = _build_remote_job_description(remote_request, netlist_path)
+    job = _build_remote_job_description(
+        remote_request, netlist_path, request_dir=request_dir
+    )
     remote_transport.push_job(
         host=public_ip,
         user=ssh_user,
@@ -618,6 +728,9 @@ def _run_remote_dispatch(
         remote_job_dir=remote_job_dir,
     )
 
+    from .sim import check_ngspice_options_echo
+
+    check_ngspice_options_echo(request, remote_report)
     corners = remote_report.get("corners", [])
     if keep_artifacts:
         _rewrite_remote_artifact_paths(
@@ -712,6 +825,7 @@ def _run_remote_fleet(
     request: dict[str, Any],
     hosts: int,
     measurements_spec: list[dict[str, Any]],
+    request_dir: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``remote`` backend's ``hosts > 1`` dispatch: provision ``hosts``
     real EC2 instances through :func:`remote_fleet.run_fleet` -- the K-host
@@ -769,7 +883,8 @@ def _run_remote_fleet(
             "into every provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
-    _preflight_include_closure(request, netlist_path)
+    _preflight_include_closure(request, netlist_path, request_dir)
+    _assess_remote_runner_features(request, pdk, remote_spec)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -809,6 +924,7 @@ def _run_remote_fleet(
                 _default_remote_run_timeout_s(len(shard_points), timeout_s),
             ),
             explicit_points=shard_points,
+            request_dir=request_dir,
         )
 
     try:
@@ -871,22 +987,27 @@ def _run_remote_fleet(
 _REMOTE_SIM_SUCCESS_EXIT_CODES: tuple[int, ...] = (0, 3, 4)
 
 
-def _preflight_include_closure(request: dict[str, Any], netlist_path: str) -> None:
-    """Resolve (and discard) the netlist's ``.include``/``.inc`` closure
-    before anything billable is provisioned, so an unstageable include is a
-    submit-time ``SimError`` rather than an EC2 instance launched, SSH'd
-    into, and torn down for a job that could never have run (issue #2485).
+def _preflight_include_closure(
+    request: dict[str, Any], netlist_path: str, request_dir: str | None = None
+) -> None:
+    """Resolve (and discard) the netlist's ``.include``/``.inc`` closure --
+    and, under ``options.stage_model_inputs`` (issue #2668), the request's
+    whole model closure -- before anything billable is provisioned, so an
+    unstageable include or model input is a submit-time ``SimError`` rather
+    than an EC2 instance launched, SSH'd into, and torn down for a job that
+    could never have run (issue #2485).
 
     The same check the job description itself performs later, hoisted to the
     same place :func:`_run_remote`/:func:`_run_remote_fleet` already validate
     ``models.pdk``/``remote.ssh_key_path`` -- the "raise before any billable
     AWS API call" discipline ``remote_launcher.require_cost_config`` applies
-    to cost-relevant fields. It reads only local text files, so running it
+    to cost-relevant fields. It reads only local files, so running it
     twice is cheap.
     """
-    sim_staging.stage_sim_netlist(
+    sim_staging.stage_sim_job(
         request,
         netlist_path,
+        request_dir=request_dir,
         netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
         reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
         backend="remote",
@@ -894,7 +1015,10 @@ def _preflight_include_closure(request: dict[str, Any], netlist_path: str) -> No
 
 
 def _build_remote_job_description(
-    remote_request: dict[str, Any], netlist_path: str
+    remote_request: dict[str, Any],
+    netlist_path: str,
+    *,
+    request_dir: str | None = None,
 ) -> remote_transport.JobDescription:
     """Build the `klt sim` corner-fan-out job as a generic
     :class:`remote_transport.JobDescription` (issue #278, Epic #253 Phase
@@ -906,13 +1030,19 @@ def _build_remote_job_description(
     collected artifacts directory.
 
     The include closure (issue #2485) is resolved by
-    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    :func:`sim_staging.stage_sim_job` -- the *same* call
     ``sim_batch._build_batch_job_spec`` makes, so the two independently
     built input lists cannot drift apart on include handling. Each staged
     file lands beside ``netlist.cir`` in the job directory under a flat
     job-relative name, with the directives naming it rewritten to that name;
     an include that resolves nowhere on this host raises ``SimError`` here,
     before anything is pushed.
+
+    Under ``options.stage_model_inputs`` (issue #2668) the same
+    :func:`sim_staging.stage_sim_job` result also carries the request's
+    staged model closure (resolved against ``request_dir``) and the
+    rewritten worker request that is serialized as ``request.json`` in
+    place of ``remote_request`` -- see that function's docstring.
 
     This is the one and only place `klt sim`'s remote job shape is
     constructed -- :mod:`klayout_tools.remote_transport`'s push/run/collect
@@ -921,9 +1051,10 @@ def _build_remote_job_description(
     :class:`remote_transport.JobDescription` here instead (see
     ``docs/design/remote-job-description.md``).
     """
-    staged = sim_staging.stage_sim_netlist(
+    staged = sim_staging.stage_sim_job(
         remote_request,
         netlist_path,
+        request_dir=request_dir,
         netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
         reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
         backend="remote",
@@ -943,15 +1074,37 @@ def _build_remote_job_description(
             remote_transport.JobInput(
                 remote_name=remote_transport.REMOTE_REQUEST_FILENAME,
                 label="request",
-                content=json.dumps(remote_request),
+                content=json.dumps(staged.request),
             ),
         ),
         command=(
-            f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
+            _remote_feature_preflight(remote_request)
+            + f"klt sim {remote_transport.REMOTE_REQUEST_FILENAME} "
             "--backend local-parallel --format json"
         ),
         success_exit_codes=_REMOTE_SIM_SUCCESS_EXIT_CODES,
         artifacts_relative_dir=remote_transport.DEFAULT_ARTIFACTS_RELATIVE_DIR,
+    )
+
+
+def _remote_feature_preflight(remote_request: dict[str, Any]) -> str:
+    """Host-side refusal prefix for a request using a mandatory runner feature
+    (issue #2924); ``sim_batch`` owns the registry and imports this module,
+    hence the function-local import."""
+    from . import sim_batch
+
+    return sim_batch.remote_feature_preflight(remote_request)
+
+
+def _assess_remote_runner_features(
+    request: dict[str, Any], pdk: str | None, remote_spec: dict[str, Any]
+) -> None:
+    """Pre-launch half of the same gate; see
+    :func:`sim_batch.assess_remote_runner_features`."""
+    from . import sim_batch
+
+    sim_batch.assess_remote_runner_features(
+        request, pdk, remote_spec.get("region"), remote_spec.get("ami_manifest")
     )
 
 

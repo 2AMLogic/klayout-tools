@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import klayout.db as kdb
 
+    from .decks.extraction import LayerExpr
+
 
 def load_layout(path: str, error_cls: type[Exception]) -> kdb.Layout:
     """Validate ``path`` and read it into a fresh ``klayout.db.Layout``.
@@ -215,6 +217,34 @@ def region(
     return kdb.Region(cell.begin_shapes_rec(layer_index))
 
 
+def region_expr(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    operand: tuple[int, int] | LayerExpr | None,
+) -> kdb.Region:
+    """A flattened ``Region`` for a drawn layer *or* a derived
+    :class:`~klayout_tools.decks.LayerExpr` (issue #2860).
+
+    A bare ``(layer, datatype)`` pair (or ``None``) is exactly
+    :func:`region`. An expression is evaluated bottom-up: ``"and"``
+    intersects every operand, ``"not"`` subtracts every later operand from
+    the first. A leaf layer absent from the stream reads as an empty region,
+    as it does for :func:`region` -- so an ``"and"`` over a missing layer is
+    empty and a ``"not"`` of a missing layer removes nothing.
+    """
+    if operand is None or isinstance(operand, tuple):
+        return region(layout, cell, operand)
+    result = region_expr(layout, cell, operand.operands[0])
+    for sub in operand.operands[1:]:
+        if operand.op == "and":
+            result = result & region_expr(layout, cell, sub)
+        elif operand.op == "not":
+            result = result - region_expr(layout, cell, sub)
+        else:  # pragma: no cover - LayerExpr.__post_init__ rejects this
+            raise ValueError(f"unknown LayerExpr op {operand.op!r}")
+    return result
+
+
 def complement_well_tie(
     active: kdb.Region,
     poly: kdb.Region,
@@ -287,6 +317,50 @@ def clip_box(
     )
 
 
+def new_canonical_layout(dbu: float, pcell_values: dict[str, Any]) -> kdb.Layout:
+    """Return a fresh ``dbu``-scaled layout whose layer indices are allocated
+    in canonical ``(layer, datatype, name)`` order (issue #5499).
+
+    ``gen._pcell_library()`` is registered once per process and its layout
+    accumulates layer indices in *first-use* order across every PCell
+    produced in that process. ``Layout.add_pcell_variant`` mirrors the
+    library layout's layers into the fresh target layout in that same order,
+    and KLayout's stream writers emit each cell's elements in layer-index
+    order -- so without this, a ``mos_array`` request produced after a
+    ``bjt_array`` request wrote the same geometry in a different record order
+    than the same request produced first in a fresh process.
+
+    Pre-registering every ``kdb.LayerInfo`` the request carries, before any
+    PCell geometry lands in the layout, pins indices 0..N-1 to a sorted order
+    that depends only on the request -- so the layer table, and therefore the
+    written stream, is a function of the request alone. A param layer the
+    PCell does not end up drawing on costs an empty layer in the table and
+    zero bytes in the stream (GDS2 and OASIS both record geometry, not layer
+    declarations).
+    """
+    # Imported lazily, matching load_layout()'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = dbu
+
+    seen: set[tuple[int, int, str]] = set()
+    infos: list[kdb.LayerInfo] = []
+    for value in pcell_values.values():
+        if not isinstance(value, kdb.LayerInfo):
+            continue
+        key = (value.layer, value.datatype, value.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        infos.append(value)
+
+    for info in sorted(infos, key=lambda i: (i.layer, i.datatype, i.name)):
+        layout.layer(info)
+
+    return layout
+
+
 def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> None:
     """Write ``layout`` to ``path`` with deterministic (reproducible-build) output.
 
@@ -298,6 +372,20 @@ def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> N
     those fields are written as zero -- the usual convention for generated
     GDSII, and a no-op for non-GDS2 output formats (e.g. OASIS).
 
+    It also sets ``write_context_info = False`` (issue #5499). KLayout
+    otherwise appends a ``$$$CONTEXT_INFO$$$`` structure naming the library
+    and PCell behind any proxy cell in ``layout`` (e.g. ``LIB=
+    klt_gen_reference`` / ``PCELL=mos_array`` for a ``klt gen`` block), and a
+    reader that has that library registered -- ``klt gen-compose`` reading a
+    ``klt gen`` block back in the same process, say -- re-links the cell to
+    the *live* library instead of using the geometry in the file. The
+    re-linked cell then re-inherits the library layout's process-global layer
+    order, which depends on what else ran earlier in that process, so the
+    composed stream stops being a function of its own inputs. klt writes
+    product streams, not editable PCell sources: nothing in this repo reads
+    PCell context back out of a klt-written stream, and every caller here
+    wants the geometry it just built, reproducibly.
+
     Raises ``error_cls`` (constructed with a single message string) if the
     write fails (e.g. an unwritable path or unrecognised format).
     """
@@ -306,6 +394,7 @@ def write_layout(layout: kdb.Layout, path: str, error_cls: type[Exception]) -> N
 
     options = kdb.SaveLayoutOptions()
     options.gds2_write_timestamps = False
+    options.write_context_info = False
     try:
         layout.write(path, options)
     except Exception as exc:  # klayout raises RuntimeError for bad formats/paths
