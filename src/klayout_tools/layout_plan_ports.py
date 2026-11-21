@@ -1,13 +1,17 @@
 """Port-name and pin/unrouted-reason helpers for ``layout_plan_execute``
-(#4966): device-owned port lookup, netlist-port pin promotion, and parsing
-of ``compose()``'s unrouted-net notes. Split out to keep
-``layout_plan_execute.py`` under its file-size ceiling.
+(#4966): device-owned port lookup, netlist-port pin promotion, parsing
+of ``compose()``'s unrouted-net notes, the per-group param-resolution
+helpers (netlist-derived size params, #5765) and the ``diff_pair``
+distinct-legs guard (#5765). Split out to keep ``layout_plan_execute.py``
+under its file-size ceiling.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+
+from ._jsonnum import is_number
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -73,6 +77,111 @@ def apply_gate_contact(
     if "gate_contact" in overrides:
         return []
     return [gate_contact_warning(group["id"])]
+
+
+#: Which resolved digest params (MOS/resistor ``L``/``W``) map onto which
+#: ``klt gen`` params field, per generator -- see ``layout_plan_execute``'s
+#: module docstring's scope decision 1. Moved here from
+#: ``layout_plan_execute.py`` with :func:`_netlist_derived_size_params`
+#: (#5765) to keep that module under its file-size ceiling.
+_SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
+    "mos_array": {"L": "l_um", "W": "w_um"},
+    "diff_pair": {"L": "l_um", "W": "w_um"},
+    "esd_device": {"L": "l_um", "W": "finger_width_um"},
+    "res_array": {"L": "length_um", "W": "width_um"},
+}
+
+
+def _netlist_derived_size_params(
+    generator: str, device_params: dict[str, Any]
+) -> dict[str, float]:
+    """Pick the ``L``/``W``-style digest params a given generator's own
+    ``klt gen`` params can absorb, per :data:`_SIZE_PARAM_TARGETS`.
+
+    Only a **positive** digest value counts as "the netlist specified this
+    device's geometry" -- ``NetlistSpiceReader`` reports ``L``/``W`` as
+    ``0.0`` (KLayout's own structural default for an unset device-class
+    param) for a resistor written in the bare, purely-electrical
+    ``R<name> n1 n2 <ohms>`` SPICE form (no ``L=``/``W=`` at all), which is
+    "the netlist did not specify a geometric size for this device," not "the
+    netlist specifies a zero-sized device" -- treating it as the latter
+    would hand a real generator a rejected (``> 0`` required) param instead
+    of falling back to its own documented default.
+    """
+    targets = _SIZE_PARAM_TARGETS.get(generator)
+    if not targets:
+        return {}
+    resolved: dict[str, float] = {}
+    for digest_key, gen_param in targets.items():
+        value = device_params.get(digest_key)
+        value_is_number = is_number(value)
+        if value_is_number and value > 0:
+            resolved[gen_param] = float(value)
+    return resolved
+
+
+def diff_pair_leg_error(
+    group: dict[str, Any],
+    digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+) -> str | None:
+    """Application-error text when a ``diff_pair`` group's declared devices
+    are not two electrically distinct legs (#5765), else ``None``.
+
+    A differential pair's two legs necessarily differ on their gate *and*
+    drain nets; two digest devices that agree on either are parallel
+    fingers of one schematic instance -- typically a folded ``nf > 1`` MOS,
+    which a ``form: "subckt-call"`` digest expands into per-finger devices
+    named ``<instance>_F0``, ``<instance>_F1``, ... (issue #1487) -- or the
+    same device declared twice, and binding both as legs shorts the pair
+    (the k-th-device binding ties the legs' shared net to both legs' ports
+    and leaves the second leg's own nets unmapped). Scoped to ``diff_pair``
+    only: a ``mos_array`` group legitimately declares devices that share a
+    gate net (a bias rail), and every other generator has no ``G``/``D``
+    terminals at all. The caller raises the error with the returned text --
+    this module cannot import
+    :class:`klayout_tools.layout_plan_execute.LayoutPlanExecuteError`
+    without a circular import.
+    """
+    if group["generator"] != "diff_pair" or len(group["devices"]) < 2:
+        return None
+    resolved = [
+        (
+            device_ref["name"],
+            digest_devices_by_key.get((device_ref["name"], device_ref["device_class"])),
+        )
+        for device_ref in group["devices"]
+    ]
+    for index, (name_i, device_i) in enumerate(resolved):
+        for name_j, device_j in resolved[index + 1 :]:
+            if device_i is None or device_j is None:
+                # An unresolvable device reference is Phase B's own
+                # validation error (exit 1, "does not resolve"); skip it
+                # here exactly like derive_gate_contact does.
+                continue
+            shared = [
+                f"terminal {terminal} on net '{device_i['terminals'][terminal]}'"
+                for terminal in ("G", "D")
+                if device_i["terminals"].get(terminal) is not None
+                and device_i["terminals"].get(terminal)
+                == device_j["terminals"].get(terminal)
+            ]
+            if shared:
+                return (
+                    f"device_groups (id '{group['id']}'): declared diff_pair "
+                    f"devices '{name_i}' and '{name_j}' are not electrically "
+                    f"distinct legs -- they share {' and '.join(shared)}. Two "
+                    "devices that agree on their gate or drain net are parallel "
+                    "fingers of one schematic instance (a folded nf>1 MOS "
+                    "digests as per-finger devices '<instance>_F0', "
+                    "'<instance>_F1', ...), not two legs of a differential "
+                    "pair, and binding both shorts the pair. Declare one "
+                    "digest device per leg -- write the reference netlist's "
+                    "matched pair with no nf (or nf=1) and let params.splits "
+                    "do the folding -- or drive klt gen-compose directly with "
+                    "explicit connectivity[] (see "
+                    "docs/cli/layout-plan-execute.md)."
+                )
+    return None
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:
