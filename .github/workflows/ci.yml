@@ -64,6 +64,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        # Issue #6390: one run measured 599s in this step (full-history
+        # clone), tripping the job's 10-minute cap so the eight gates after
+        # it were skipped with no named failing step. A per-step timeout
+        # makes a hung clone fail here, named, without touching the job cap.
+        timeout-minutes: 4
         with:
           # Full history: the per-file size ratchet below (issue #2766)
           # computes a PR's merge-base against its actual target branch,
@@ -118,16 +123,13 @@ jobs:
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
       - name: Per-file size ratchet (merge-base)
-        # scripts/check_file_size_baseline.py (issue #2766). Stricter than
-        # the complexity ratchet above in WHOSE baseline is trusted: that
-        # one reads complexity-baseline.json from the checkout, this one
-        # reads file-size-baseline.json from the COMPARISON REVISION, so a
-        # PR cannot loosen its own gate by editing the baseline. Fails on
-        # growth above a trusted per-file ceiling, a new oversized file, a
-        # proposed ceiling that is not exactly the file's current size, a
-        # surviving entry for a shrunken/deleted file, and new or
-        # byte-mismatched vendor content-hash exemptions. Policy and the
-        # vendor-update path: scripts/README.md.
+        # scripts/check_file_size_baseline.py (issue #2766). It reads
+        # file-size-baseline.json from the comparison revision to
+        # identify allowed debt and caps growth at the sizes measured there.
+        # Existing oversized paths can carry forward a larger trusted entry
+        # after a shrink. Edited entries must match the candidate size. At
+        # or below the hard limit, or after deletion, remove the entry.
+        # Full policy and vendor-update path are in scripts/README.md.
         #
         # Comparison revision (see also fetch-depth: 0 on this job's
         # checkout): PRs use the merge-base with their ACTUAL target
@@ -979,13 +981,20 @@ jobs:
     runs-on: ubuntu-24.04
     # Explicit bound (issue #1009) so a stuck runner or hung step fails
     # outright instead of silently riding the platform default of 360
-    # minutes. A real cold-cache run (Yosys/Icarus Verilog/Verilator all
-    # built from source on a cache miss, not the ~2-3 minute cache-hit path
-    # this job normally takes) measured 23m26s-24m28s across the matrix on
-    # run 31452136100 (2026-08-11, triggered by a cache-key change in #689):
-    # Yosys ~14.5min, Verilator ~6min, Icarus ~1m45s. 45 minutes leaves
-    # ~1.9x margin over that measurement for runner variance.
-    timeout-minutes: 45
+    # minutes. Sized 2026-11-17 (issue #6061) from fresh measurements:
+    # warm-cache pytest alone ran 18.7-35.2 min across the 25 legs of 5
+    # recent main runs (median ~25 min), and a cold-cache run (Yosys/Icarus
+    # Verilog/Verilator all built from source on a cache miss, not the
+    # ~2-3 minute cache-hit path this job normally takes) spent ~26 min of
+    # setup before pytest even started (run 44079621959, PR #6103,
+    # 2026-11-16 — a cold cache hits ordinary PRs too, not only ones that
+    # bust installer cache keys; run 43983075799 / PR #6000 showed the same
+    # 19-26 min cold setup). Worst observed cold case ~26 min setup + ~35
+    # min pytest overflowed the old 45-minute cap, cancelling the slowest
+    # legs with zero test failures. 90 minutes leaves ~1.4x margin over
+    # that worst case for runner variance while still bounding a hang at
+    # well under the 360-minute platform default.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -1033,7 +1042,7 @@ jobs:
         # failed -- confirmed on main and PR #1194 (multiple ~45min hangs on
         # this exact step, 2026-08-19). 5 minutes is generous for a normal
         # `apt-get update && apt-get install` of one package, while still
-        # failing fast relative to the 45-minute job budget.
+        # failing fast well inside the job budget.
         #
         # The timeout alone only converts the stall into a *red check*
         # though (issue #1219): on 2026-08-19 the runner-local
@@ -1353,6 +1362,24 @@ jobs:
         # since `klt-techmap` has no `pyo3` extension surface to build);
         # the cache step above keeps a warm-cache rebuild fast.
         run: cargo build --manifest-path native/techmap/Cargo.toml
+
+      - name: Cache native/wave cargo build (debug)
+        # tests/test_wave.py::test_build_then_query_modexp_canary_counts_done_handshakes
+        # builds `native/wave` from inside pytest (`build_cargo_binary`), which
+        # on a cold cargo registry does a crates.io fetch of `fst-reader` et
+        # al. in every matrix leg; one stalled fetch reds an unrelated PR
+        # (issue #6635, PR #6304's `Tests (Python 3.12)`). Mirrors the
+        # `native/techmap` step above. No separate build step: pytest builds
+        # the crate, and this step's post-job save captures the fetched
+        # registry.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/wave/target
+          key: cargo-wave-debug-${{ runner.os }}-${{ hashFiles('native/wave/Cargo.lock') }}
+          restore-keys: cargo-wave-debug-${{ runner.os }}-
 
       - name: pytest
         # GH_TOKEN backs tests/test_ingest_canary.py's real `gh api`
@@ -1944,9 +1971,9 @@ jobs:
     # parallelised. That makes klayout-tools the one repo where the work
     # itself has to shrink, and so the one repo where a compute regression is
     # worth gating on. Before this job nothing did: the per-job
-    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 45
-    # minutes for a 3-minute job), so a leg could quietly triple and still be
-    # green. See docs/guides/ci-wall-clock-budget.md.
+    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 90
+    # minutes for a job whose median is ~25), so a leg could quietly triple
+    # and still be green. See docs/guides/ci-wall-clock-budget.md.
     #
     # `needs:` every measured job so this runs last and sees their completed
     # timings; `if: always()` so a red run still gets its breakdown (a

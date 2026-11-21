@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-19T14:28:52.275401+00:00",
+  "slug": "gf180-toaster",
+  "name": "Gf180 Toaster",
+  "description": "Toaster controller on gf180mcu \u2014 2AM Logic canary block",
+  "pdk": "gf180mcu",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Supply voltage",
+        "target": "5 V \u00b1 10 %, from an external low-voltage supply"
+      },
+      {
+        "parameter": "Browning time range",
+        "target": "20 s to 240 s, set by one external resistor or potentiometer",
+        "stretch": "10 s to 300 s"
+      },
+      {
+        "parameter": "Timing accuracy",
+        "target": "\u00b1 5 % over \u221210 \u00b0C to 85 \u00b0C and supply range",
+        "stretch": "\u00b1 2 %"
+      },
+      {
+        "parameter": "Temperature compensation",
+        "target": "time shortened from an external NTC input; slope set by one resistor"
+      },
+      {
+        "parameter": "Hold-down output",
+        "target": "low-side driver, \u2265 50 mA sink, for a holding solenoid or an external transistor",
+        "stretch": "\u2265 150 mA"
+      },
+      {
+        "parameter": "Cancel input",
+        "target": "releases the hold-down within 50 ms",
+        "stretch": "10 ms"
+      },
+      {
+        "parameter": "Standby current",
+        "target": "\u2264 100 \u00b5A with the lever up",
+        "stretch": "\u2264 20 \u00b5A"
+      },
+      {
+        "parameter": "Pin count",
+        "target": "\u2264 8 signal and supply pins"
+      },
+      {
+        "parameter": "AREA",
+        "target": "\u2264 0.25 mm\u00b2 core",
+        "stretch": "\u2264 0.10 mm\u00b2"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #1"
+  },
+  "source": {
+    "repo": "2AMLogic/gf180-toaster",
+    "ref": "957e609b8ba7319cbdfe00aca2a8284bf78de7ce",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

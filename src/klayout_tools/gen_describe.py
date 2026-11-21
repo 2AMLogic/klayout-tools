@@ -32,13 +32,9 @@ one-way -- ``gen.py`` imports this module at its own module level, and
 nothing here imports ``gen`` at module level. The layout-math helpers these
 functions call (``_mos_array_layout``, ``_res_array_layout``,
 ``_cap_array_layout``, ``_ring_layout``, ``_diff_pair_layout``,
-``_bjt_array_layout``, ``_esd_device_layout``, ``_grid_snapped``,
-``_box_separation_um``, ``_parse_well_regions``, ``_well_box_um``,
-``_auto_ring_inner_size_um``) and the geometry constants they read stay in
-``gen.py`` and are imported back **lazily, at call time**, exactly the way
-``gen_pcells/*.py`` and ``gen_layer_params.py`` already do it. By the time
-any function here actually runs, ``gen`` has finished importing this module
-and is fully loaded, so the lazy import never raises.
+``_bjt_array_layout``, ``_esd_device_layout``) and the geometry constants
+are exposed by ``gen.py`` and imported **lazily, at call time**, following
+the convention in ``gen_pcells/*.py`` and ``gen_layer_params.py``.
 
 The PDK layer-parameter names below have no such cycle -- ``gen.py`` itself
 re-exports them from :mod:`klayout_tools.gen_layer_params`, so they are
@@ -81,7 +77,6 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
-    _res_end_contact_um,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
@@ -89,10 +84,12 @@ from .gen_layer_params import (
     _role_layer_info,
     _sd_implant_margin_um,
     _tap_pads_wanted,
-    _voltage_flavor_mark_layer,
     mfg_grid_um,
 )
+from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
+from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
 from .gen_ring_ports import _ring_ports
+from .gen_voltage_flavor import _voltage_flavor_hints
 
 
 def _resistor_strip_validate(params: dict[str, Any]) -> None:
@@ -133,9 +130,9 @@ def _resistor_strip_describe(
     )
 
     # Layer name is not resolved against a PDK layer map at phase 1 -- the
-    # drawing layer is a generator implementation detail (see the module
-    # docstring's `_HIDDEN_PARAMS` note); a real per-PDK layer name lookup is
-    # phase 2 scope, alongside the primitive families that actually need one.
+    # drawing layer is a generator implementation detail (hidden, per the
+    # module docstring); a real per-PDK layer name lookup is phase 2 scope,
+    # alongside the primitive families that actually need one.
     layer = {"layer": 67, "datatype": 20, "name": None}
 
     ports = [
@@ -419,32 +416,6 @@ def _mos_array_validate(params: dict[str, Any]) -> None:
         inner_w_um,
         inner_h_um,
     )
-
-
-def _voltage_flavor_hints(
-    family: str, params: dict[str, Any], notes: list[str]
-) -> dict[str, Any]:
-    """``drc_hints`` fields for the optional ``voltage_flavor`` marker (issue
-    #1054), shared by :func:`_mos_array_describe`/:func:`_diff_pair_describe`:
-    echoes the requested flavour (``None`` when omitted) and whether a real
-    marker layer was resolved for it, appending an explanatory entry to
-    ``notes`` (in place) when a non-empty request resolved to no layer --
-    mirrors ``esd_device``'s own ``esd_mark``/``salicide_block`` "notes it,
-    never silently drops it" precedent rather than rejecting the request."""
-    voltage_flavor = params["voltage_flavor"]
-    mark_present = False
-    if voltage_flavor:
-        mark_present = _voltage_flavor_mark_layer(family, voltage_flavor) is not None
-        if not mark_present:
-            notes.append(
-                f"params.voltage_flavor '{voltage_flavor}' has no marker layer "
-                f"resolved for the resolved PDK family ('{family}') -- no marker "
-                "was drawn"
-            )
-    return {
-        "voltage_flavor": voltage_flavor or None,
-        "voltage_flavor_mark_present": mark_present,
-    }
 
 
 def _sd_implant_hints(
@@ -1154,10 +1125,10 @@ def _res_array_describe(
         if metal_level
         else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
     )
-    # Issue #2449: sky130 high/xhigh draw a rectangular precision-poly licon.
-    end_contact = _res_end_contact_um(
-        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-    )
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    # Issues #2449/#5704: sky130 high/xhigh draw a rectangular licon + long head.
+    end_contact = _res_end_contact_um(family, flavor, metal_level)
+    head_len_um = _res_head_len_um(family, flavor, metal_level)
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -1169,9 +1140,8 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
-        _res_sab_geometry_um(
-            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-        )[0],
+        _res_sab_geometry_um(family, flavor, metal_level)[0],
+        head_len_um,
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -1233,6 +1203,7 @@ def _res_array_describe(
             f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
             "contacts (licon.1b/c precision-resistor exception) on "
             f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
+            + _res_head_note(head_len_um)
         )
 
     snapped = _grid_snapped(
@@ -1839,6 +1810,7 @@ def _guard_ring_describe(
 
     family = _pdk_family(pdk_info["variant"])
     contacts_ns, contacts_ew = _guard_ring_axis_contacts(params)
+    contact_layer = _PDK_ROLE_LAYERS[family]["contact"]
     info = _ring_layout(
         params["inner_width_um"],
         params["inner_height_um"],
@@ -1847,6 +1819,10 @@ def _guard_ring_describe(
         params["ring_gap_side"],
         params["ring_gap_um"],
         params["ring_gap_offset_um"],
+        gap_contact_enclosure_um=_guard_ring_gap_contact_enclosure_um(family),
+        dbu=dbu,
+        mfg_grid_um=mfg_grid_um(family, contact_layer),
+        contact_fixed_size_um=_cut_fixed_size_um(family, contact_layer),
     )
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
@@ -1877,6 +1853,9 @@ def _guard_ring_describe(
             "no well layer checked by its curated DRC deck -- no well shape was drawn"
         )
 
+    voltage_flavor_hints = _voltage_flavor_hints(
+        family, params, notes, params["add_well"] and well_supported
+    )
     snapped = _grid_snapped(
         dbu,
         params["inner_width_um"],
@@ -1885,9 +1864,6 @@ def _guard_ring_describe(
     )
 
     return {
-        # The contacts actually drawn -- `2 * (contacts_ns + contacts_ew)`
-        # unless a ring opening (params.ring_gap_side) clipped one or more
-        # of them away.
         "device_count": len(info["contact_boxes_um"]),
         "ports": ports,
         "drc_hints": {
@@ -1895,6 +1871,7 @@ def _guard_ring_describe(
             "matched_group_id": None,
             "snapped_to_grid": snapped,
             "notes": notes,
+            **voltage_flavor_hints,
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
@@ -3100,40 +3077,17 @@ def _diode_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
-    from .gen_diode import _diode_layout
+    from .gen_diode import _diode_layout, diode_notes, diode_ports
 
+    family = _pdk_family(pdk_info["variant"])
     info = _diode_layout(
         params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
     )
-    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     assert metal_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    ports = []
-    for name, box, direction in (
-        ("ANODE", info["anode_li"], 90),
-        ("CATHODE", info["cathode_li"], 90),
-    ):
-        ports.append(
-            {
-                "name": name,
-                "net": None,
-                "layer": metal_layer,
-                "x_um": (box[0] + box[2]) / 2,
-                "y_um": (box[1] + box[3]) / 2,
-                "width_um": box[2] - box[0],
-                "direction_deg": direction,
-            }
-        )
+    ports = diode_ports(info, metal_layer)
     snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
-    notes = [
-        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
-        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
-    ]
-    if params["kind"] == "n_psub":
-        notes.append(
-            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
-            "terminal in the extracted netlist"
-        )
     return {
         "device_count": 1,
         "ports": ports,
@@ -3141,11 +3095,18 @@ def _diode_describe(
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
             "matched_group_id": None,
             "snapped_to_grid": snapped,
-            "notes": notes,
+            "notes": diode_notes(params["kind"], params["voltage_class"]),
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + _mfg_grid_warnings(
+            "diode",
+            family,
+            params,
+            # Both edges are diffusion extents.
+            checks=(("width_um", "active"), ("length_um", "active")),
         ),
     }
