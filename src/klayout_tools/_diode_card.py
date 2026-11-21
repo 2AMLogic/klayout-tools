@@ -119,7 +119,6 @@ def convert_diode_card(
     if has_length_param or has_width_param:
         l_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.length_param,
             params,
             has_length_param,
@@ -128,7 +127,6 @@ def convert_diode_card(
         )
         w_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.width_param,
             params,
             has_width_param,

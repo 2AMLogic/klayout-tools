@@ -110,6 +110,23 @@ verdict still stands without independent confirmation. Mirrors `klt lvs`'s
 `options.netgen_binary`/`$KLT_NETGEN_BINARY`/`environment.netgen_binary`
 (issue #2373).
 
+**Wasm builds have a ~4 GiB memory ceiling (issue #5804).** A
+WASI-sandboxed `yosys` runs inside a wasm32 guest whose linear memory is
+capped at ~4 GiB. A heavy query — `sat -seq <depth>` over a flattened,
+liberty-modelled netlist of tens of thousands of cells, for example —
+allocates roughly with design size × unroll depth and can exceed that
+ceiling: the run dies mid-flight with a bare
+`wasmtime._trap.Trap … thrown Wasm exception` traceback and **no yosys
+`ERROR:` line at all**, and a caller cannot tell a solver limit from a
+broken install. The identical script completes under a native build of the
+same version, which has no such ceiling. `klt equiv` and `klt synthesize`
+detect that trap signature in a failed run that produced no `ERROR:` line
+and append a hint naming the ceiling and the
+`request.yosys_binary`/`$KLT_YOSYS_BINARY` native-build remedy above. No
+numeric cell-count or depth ceiling is claimed — the boundary is
+design-dependent, so pick a native build for large queries rather than
+reasoning from a threshold.
+
 ### `"yosys"` (default) — combinational
 
 Orchestrates Yosys's own built-in equivalence-checking primitives directly
