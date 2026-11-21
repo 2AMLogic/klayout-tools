@@ -230,6 +230,7 @@
       "65/20",
       "66/20",
       "66/44",
+      "67/20",
       "68/20"
     ],
     "layers_in_stream_without_rules": [],
@@ -239,6 +240,11 @@
       "diff.ongrid.1",
       "diff.space.1",
       "diff.width.1",
+      "li1.angle.1",
+      "li1.enclosing.licon1.1",
+      "li1.ongrid.1",
+      "li1.space.1",
+      "li1.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
@@ -275,11 +281,6 @@
       "hvtp.ongrid.1",
       "hvtr.angle.1",
       "hvtr.ongrid.1",
-      "li1.angle.1",
-      "li1.enclosing.licon1.1",
-      "li1.ongrid.1",
-      "li1.space.1",
-      "li1.width.1",
       "lvtn.angle.1",
       "lvtn.ongrid.1",
       "mcon.angle.1",
@@ -775,6 +776,11 @@
       "diff.ongrid.1",
       "diff.space.1",
       "diff.width.1",
+      "li1.angle.1",
+      "li1.enclosing.licon1.1",
+      "li1.ongrid.1",
+      "li1.space.1",
+      "li1.width.1",
       "licon1.angle.1",
       "licon1.ongrid.1",
       "licon1.width.1",
@@ -867,26 +873,6 @@
       },
       {
         "id": "hvtr.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.angle.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.enclosing.licon1.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.ongrid.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.space.1",
-        "reason": "no_applicable_geometry"
-      },
-      {
-        "id": "li1.width.1",
         "reason": "no_applicable_geometry"
       },
       {
