@@ -337,9 +337,7 @@ def _check_head(root: str, directory: str, tips: list[str]) -> list[dict]:
     ]
 
 
-def _check_supersession(
-    loaded: dict[str, Mapping[str, Any]], root: str, evidence_root: str
-) -> list[dict]:
+def _check_supersession(loaded: dict[str, Mapping[str, Any]], root: str) -> list[dict]:
     """``loaded`` maps root-relative record path -> record."""
     out: list[dict] = []
     superseded_by: dict[str, list[str]] = {}
@@ -450,7 +448,7 @@ def lint(
         findings += _check_sidecar(rel, path, record)
         findings += _check_verdict(rel, record)
 
-    findings += _check_supersession(loaded, root, evidence_root)
+    findings += _check_supersession(loaded, root)
 
     if check_append_only:
         try:

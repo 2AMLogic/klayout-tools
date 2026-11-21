@@ -42,6 +42,28 @@ def test_testbench_search_path_list_first_hit_wins_and_returns_all(tmp_path):
     assert module_dirs == [str(a.resolve()), str(b.resolve())]
 
 
+def test_search_path_entries_expand_when_running_and_stay_offline_when_checking(
+    tmp_path, monkeypatch
+):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    _write(shared / "test_gcd.py", _TESTBENCH)
+    monkeypatch.setenv("KLT_BENCH_DIR", str(shared))
+    bench = {"module": "test_gcd", "search_path": ["$KLT_BENCH_DIR", "helpers"]}
+    assert fv._resolve_testbench(bench, str(tmp_path))[1] == [
+        str(shared),
+        str(tmp_path / "helpers"),
+    ]
+
+    monkeypatch.delenv("KLT_BENCH_DIR")
+    assert fv._resolve_testbench(bench, str(tmp_path), require_module=False)[1] == [
+        "$KLT_BENCH_DIR",
+        "helpers",
+    ]
+    with pytest.raises(FunctionalVerificationError, match="KLT_BENCH_DIR"):
+        fv._resolve_testbench(bench, str(tmp_path))
+
+
 def test_testbench_search_path_single_entry_list_equals_string(tmp_path):
     shared = tmp_path / "shared"
     shared.mkdir()

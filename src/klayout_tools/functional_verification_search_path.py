@@ -17,7 +17,7 @@ from typing import Any
 
 
 def resolve_testbench_search_dirs(
-    search_path: Any, request_dir: str, module: str
+    search_path: Any, request_dir: str, module: str, *, require_module: bool = True
 ) -> list[str]:
     """Validate ``testbench.search_path`` -- a string, or a non-empty array
     of non-empty strings -- resolve every entry
@@ -45,8 +45,10 @@ def resolve_testbench_search_dirs(
             or not all(isinstance(e, str) and e for e in entries)
         ):
             raise shape_error
+        if not require_module:
+            return list(dict.fromkeys(entries))
         search_dirs = [
-            os.path.abspath(e if os.path.isabs(e) else os.path.join(request_dir, e))
+            os.path.abspath(_fv._rpath(e, request_dir, "request.testbench.search_path"))
             for e in entries
         ]
     else:
@@ -54,7 +56,9 @@ def resolve_testbench_search_dirs(
     # Collapse resolved duplicates to their first occurrence (order-stable).
     search_dirs = list(dict.fromkeys(search_dirs))
 
-    if not any(os.path.isfile(os.path.join(d, f"{module}.py")) for d in search_dirs):
+    if require_module and not any(
+        os.path.isfile(os.path.join(d, f"{module}.py")) for d in search_dirs
+    ):
         location = (
             "request.testbench.search_path"
             if search_path is not None

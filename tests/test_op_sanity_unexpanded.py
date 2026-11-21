@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 from klayout_tools import op_sanity
+from klayout_tools.cli import main
 from test_op_sanity import (
     _GOOD_NETLIST,
     _SATURATED_NMOS,
@@ -109,3 +110,43 @@ def test_corner_all_count_describes_the_netlist_not_a_corner(tmp_path, monkeypat
 
     assert report["unexpanded_instance_count"] == 2
     assert len(report["corner_margins"]) == 2
+
+
+def test_cli_text_summary_appends_unexpanded_when_nonzero(
+    tmp_path, monkeypatch, capsys
+):
+    """The text summary line surfaces `unexpanded: N` when N > 0 (issue
+    #6318): the JSON field, made visible in the courtesy render where the
+    per-instance diagnostics alone understate coverage."""
+    (tmp_path / "models.lib").write_text("* PDK model library\n")
+    request = _write_request(
+        tmp_path,
+        _RESISTOR_NETLIST,
+        models={"lib": "models.lib"},
+        corners={"process": ["tt"], "supply_v": {"vdd": [1.8]}, "temperature_c": [27]},
+    )
+    _install_fake_ngspice(monkeypatch, {})
+
+    assert main(["sim", "--op-lint", str(request), "--format", "text"]) == 0
+
+    summary = next(
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("devices:")
+    )
+    assert summary == "devices: 0  findings: 0 (errors: 0, warnings: 0)  unexpanded: 2"
+
+
+def test_cli_text_summary_is_unchanged_when_zero(tmp_path, monkeypatch, capsys):
+    """Zero unexpanded instances: the summary line stays byte-identical to
+    the pre-#6318 render -- no `unexpanded: 0` suffix churns existing text
+    consumers."""
+    request = _write_request(tmp_path, _GOOD_NETLIST)
+    _install_fake_ngspice(monkeypatch, {"XM1": _SATURATED_NMOS, "XM2": _SATURATED_PMOS})
+
+    assert main(["sim", "--op-lint", str(request), "--format", "text"]) == 0
+
+    out = capsys.readouterr().out
+    summary = next(line for line in out.splitlines() if line.startswith("devices:"))
+    assert summary == "devices: 2  findings: 0 (errors: 0, warnings: 0)"
+    assert "unexpanded" not in out
