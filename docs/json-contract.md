@@ -2205,11 +2205,13 @@ All eight share one contract:
   `spef_sta.spef_path`/`sdf_path`) to its file name on **both** sides
   before diffing. The identity check stays: a different file *name* drifts,
   and so does an artifact going `null` ↔ path (missing or newly appearing).
-  Message prose that embeds a path (`warnings[]`,
-  `power.placed.unavailable_reason`) is not reduced — scrub-shape drift
-  there remains visible, by design. The other flow verbs (`synthesize`) and
-  the analysis verbs (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed
-  this and are unchanged; a follow-up issue covers them if reproduced.
+  Message prose is not reduced, so it must not carry a path in the first
+  place: the DEF-derived `power.placed.unavailable_reason` strings (and the
+  `warnings[]` that quote them) name the DEF by file name only (issue
+  #6146), so a lint-clean envelope reproduces exactly. The other flow
+  verbs (`synthesize`) and the analysis verbs
+  (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed this and are
+  unchanged; a follow-up issue covers them if reproduced.
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
