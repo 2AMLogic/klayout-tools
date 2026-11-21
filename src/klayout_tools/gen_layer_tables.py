@@ -39,7 +39,7 @@ CONTACT_GAP_SAFE_UM = 0.3
 UNIT_MIN_W_UM = 0.42
 
 #: Smallest gate length (um) `mos_array`/`diff_pair` default their ``l_um``
-#: param to -- comfortably clear of both curated decks' rules with margin, so
+#: param to -- comfortably clear of the curated decks' rules with margin, so
 #: a caller who never touches ``l_um`` gets a device with no DRC risk at all.
 #: A request *below* this is no longer a DRC risk either (see
 #: :data:`SD_PAD_GATE_GAP_MIN_UM` -- issue #1187): :func:`_mos_finger_positions`
@@ -55,18 +55,18 @@ GATE_LENGTH_SAFE_MIN_UM = 0.28
 
 #: Smallest S/D-local-metal-pad-to-pad gap (um) :func:`_mos_finger_positions`
 #: guarantees across every poly gate stripe, regardless of the requested
-#: ``l_um`` (issue #1187). Exceeds both curated decks' same-layer
-#: metal-spacing rule with margin (gf180mcu ``metal1.space.1``: 0.23um is the
-#: binding one; sky130's ``li1.space.1`` is only 0.17um) -- the same pair
-#: :data:`GATE_LENGTH_SAFE_MIN_UM`'s own margin was sized against, but kept as
-#: its own named constant, strictly smaller than that default, so a caller's
-#: existing ``l_um >= GATE_LENGTH_SAFE_MIN_UM`` output never shifts by even a
-#: single dbu: at ``l_um == GATE_LENGTH_SAFE_MIN_UM`` the computed offset
-#: (below) is already zero. Below it, each side of every gate stripe is
+#: ``l_um`` (issue #1187). Exceeds the curated decks' same-layer metal-spacing
+#: rule (gf180mcu ``metal1.space.1``: 0.23um is the binding one; sky130's
+#: ``li1.space.1`` is 0.17um -- the pair :data:`GATE_LENGTH_SAFE_MIN_UM`'s
+#: margin was sized against -- and sg13g2's ``metal1.space.1`` 0.18um), but
+#: kept as its own named constant, strictly smaller than that default, so a
+#: caller's existing ``l_um >= GATE_LENGTH_SAFE_MIN_UM`` output never shifts
+#: by even a single dbu: at ``l_um == GATE_LENGTH_SAFE_MIN_UM`` the computed
+#: offset (below) is already zero. Below it, each side of every gate stripe is
 #: pushed out by ``max(0, (SD_PAD_GATE_GAP_MIN_UM - l_um) / 2)`` -- padding
-#: the unit device's own pitch, never the requested gate length -- so the
-#: S/D pads stay legally spaced even at a PDK's absolute minimum gate length
-#: (e.g. sky130's 0.15um).
+#: the unit device's own pitch, never the requested gate length -- so the S/D
+#: pads stay legally spaced even at a PDK's absolute minimum gate length (e.g.
+#: sky130's 0.15um).
 SD_PAD_GATE_GAP_MIN_UM = 0.25
 
 #: Extra margin (um) `cap_array`'s bottom-plate conductor (sky130's `met3`)
@@ -534,11 +534,11 @@ _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         # library uses for its ESD clamps". Reusing it here gives a
         # grounded-gate ESD MOSFET the same voltage-domain marking its
         # diode-clamp counterparts already carry, distinguishing it from an
-        # ordinary core `mos_array` unit -- no curated *DRC* rule currently
-        # checks `Dualgate` in this deck (`dualgate.drc` is cited but not
-        # transcribed, see the module docstring), so drawing it never affects
-        # `klt drc --deck gf180mcu` status.
+        # ordinary core `mos_array` unit. `diode` (issue #6614) draws it as the
+        # 6V flavour's required `Dualgate`; the deck checks only its width and
+        # spacing (`dualgate.width.1`/`dualgate.space.1`).
         "esd_mark": (55, 0),  # Dualgate
+        "diode_mark": (115, 5),  # diode_mk -- DiodeDevice.marker in decks/gf180mcu.py
         # Salicide-block role, shared with `_PDK_RES_FLAVOR_LAYERS`'s own
         # gf180mcu `"generic"` mask set -- the *same* SAB (49/0) layer, not a
         # second private one: SAB is documented above as a general
