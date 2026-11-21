@@ -281,7 +281,6 @@ def _launch_budget(capacity_wait_s: Any) -> float | None:
 
 def _execute_members(
     paths: list[str],
-    dirs: list[str],
     manifest: _Manifest,
     workers: int,
     launch_budget: float | None,
@@ -397,7 +396,6 @@ def run_sim_set(
     launch_budget = _launch_budget(run_kwargs.get("capacity_wait_s"))
     requests = _execute_members(
         request_paths,
-        dirs,
         manifest,
         workers,
         launch_budget,

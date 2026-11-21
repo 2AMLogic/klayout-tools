@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from . import env_provenance
 from ._provenance import sha256_file
 from ._report_verify import hash_check, resolve_committed_path
 
@@ -26,7 +27,10 @@ def input_not_found_entry(
     report_path: str,
     found_relative_to_report: str | None,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
+    echoed: Any = None,
+    override: str | None = None,
 ) -> dict[str, Any]:
     """The ``input_not_found`` diagnostic for an echoed input path that does
     not name an existing file (issues #2595, #4795).
@@ -37,23 +41,49 @@ def input_not_found_entry(
       the committed report's directory, or ``None``.
     - ``resolved_against`` -- the directory a relative ``path`` was anchored
       to (the cwd); ``None`` for an absolute path, which has no anchor.
+    - ``resolved_repo_root`` -- emitted exactly when the caller opts in
+      with ``include_repo_root``, whatever ``echoed`` is (an absent echo
+      under an override still reports the key, as ``None``). The value is
+      the repo root a repo-scoped ``{path, scope}`` echo (issue #5845) was
+      anchored on; ``None`` for every other echo shape and whenever
+      ``override`` supplied the reported ``path`` (issue #6461: anchored on
+      the cwd, not a repo root).
     - ``hint`` -- when the input sits next to the report, how to reach it;
-      ``None`` otherwise.
+      ``None`` otherwise. ``override_hint=None`` (issue #6840) means no
+      override flag exists for this input, and the remedy names no flag.
     """
     report_dir = os.path.dirname(os.path.abspath(report_path))
+    remedy = (
+        f"run --check from the report's directory, or pass {override_hint}"
+        if override_hint is not None
+        else "run --check from the report's directory"
+    )
     hint = (
         None
         if found_relative_to_report is None
-        else f"run --check from the report's directory, or pass {override_hint}; "
-        f"request-file-relative paths resolve against {report_dir}"
+        else f"{remedy}; request-file-relative paths resolve against {report_dir}"
     )
-    return {
+    entry = {
         "path": path,
         "resolved": os.path.abspath(path),
         "found_relative_to_report": found_relative_to_report,
         "resolved_against": None if os.path.isabs(path) else os.getcwd(),
         "hint": hint,
     }
+    if include_repo_root:
+        # Key presence is the caller's opt-in, never inferred from `echoed`
+        # (a report with no echo + an override still emits it, as `None`).
+        # Issue #6461: the value gates on the override *here* -- an override
+        # supplied the reported `path` (anchored on the cwd), so the echo's
+        # repo root must never name an anchor the path did not use.
+        entry["resolved_repo_root"] = (
+            env_provenance.find_repo_root(report_dir)
+            if not override
+            and isinstance(echoed, Mapping)
+            and echoed.get("scope") == "repo"
+            else None
+        )
+    return entry
 
 
 def input_hash_check(
@@ -64,16 +94,18 @@ def input_hash_check(
     override: str | None = None,
     hasher: Callable[[str | None], str | None] = sha256_file,
     *,
-    override_hint: str = _LVS_OVERRIDE_HINT,
+    override_hint: str | None = _LVS_OVERRIDE_HINT,
+    include_repo_root: bool = False,
 ) -> dict[str, Any]:
     """One :func:`~klayout_tools._report_verify.hash_check` entry for an
     input path the committed report echoes back (``klt lvs``'s ``layout``/
-    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``), with issue
-    #2595's ``input_not_found`` diagnostic attached when that path does not
-    name an existing file.
+    ``reference``/runset ``deck_file``, ``klt drc``'s ``file``, ``klt erc``'s
+    ``file``/``spec``), with issue #2595's ``input_not_found`` diagnostic
+    attached when that path does not name an existing file.
 
-    Shared by ``klt lvs --check`` (issues #2595, #6223) and ``klt drc --check``
-    (issue #6466); ``klt erc --check`` keeps its own smaller copy.
+    Shared by ``klt lvs --check`` (issues #2595, #6223), ``klt drc --check``
+    (issue #6466) and ``klt erc --check`` (issue #6655, which until then kept
+    a smaller local copy).
 
     :func:`~klayout_tools._provenance.sha256_file` returns ``None`` both for
     "the file is not there" and (vacuously) for "no path was recorded", so a
@@ -104,6 +136,13 @@ def input_hash_check(
     (``sha256:``-prefixed; the LVS runset deck, issue #6223, and ``klt drc``'s
     ``provenance.input.content_hash``, issue #6466).
 
+    ``override_hint`` may be ``None`` (issues #6840, #6655): the input then
+    has no override flag on its verb -- the runset ``deck_file`` on ``klt lvs
+    --check``, whose ``--deck-file`` is refused with ``--check``, and every
+    ``klt erc --check`` input, since ``--check`` is mutually exclusive with
+    ERC's positional ``file``/``spec`` -- and the ``input_not_found`` remedy
+    names no flag, only the report directory.
+
     Issue #2659: ``echoed`` is resolved through
     :func:`klayout_tools._report_verify.resolve_committed_path`, so the
     ``{path, scope}`` object ``layout`` carries today is joined to the repo
@@ -125,7 +164,13 @@ def input_hash_check(
         if os.path.isfile(candidate):
             found_relative_to_report = os.path.abspath(candidate)
     check["input_not_found"] = input_not_found_entry(
-        path, report_path, found_relative_to_report, override_hint=override_hint
+        path,
+        report_path,
+        found_relative_to_report,
+        override_hint=override_hint,
+        include_repo_root=include_repo_root,
+        echoed=echoed,
+        override=override,
     )
     return check
 
@@ -163,6 +208,48 @@ def deck_not_found_entry(
     }
 
 
+def _stale_pin_target(
+    resolution: Mapping[str, Any],
+) -> tuple[str, str | list[str] | None, str]:
+    """Return the compared field, its source when known, and the hash to pin."""
+    samples = resolution.get("yield_samples_source")
+    if isinstance(samples, str):
+        if resolution.get("content_hash_basis") == "artifact_manifest":
+            return (
+                "artifact_manifest.entries[].sha256",
+                samples,
+                f"the recorded sha256 for {samples}, prefixed with 'sha256:'",
+            )
+        return (
+            _YIELD_HASH_FIELD,
+            samples,
+            f"the sha256 of the samples document {samples} (samples document)",
+        )
+
+    field = "provenance.input.content_hash"
+    envelope = resolution.get("envelope")
+    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
+    block = provenance.get("input") if isinstance(provenance, Mapping) else None
+    block = block if isinstance(block, Mapping) else {}
+    members = block.get("paths")
+    if isinstance(members, list) and members:
+        names = []
+        for member in members:
+            path = member.get("path") if isinstance(member, Mapping) else None
+            path = path.get("path") if isinstance(path, Mapping) else path
+            if isinstance(path, str):
+                names.append(path)
+        return (
+            field,
+            names,
+            f"the input-set digest over the files in compared_against ({field})",
+        )
+    if isinstance(block.get("path"), str):
+        path = block["path"]
+        return field, path, f"the sha256 of the input artifact {path} ({field})"
+    return field, None, f"the envelope's {field} (the recorded input hash)"
+
+
 def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[str, Any]:
     """``detail`` for a ``stale_evidence`` verdict: names the failed
     comparison (field / expected / actual, the entry shape ``--check`` emits)
@@ -180,56 +267,27 @@ def stale_pin(spec: Mapping[str, Any], resolution: Mapping[str, Any]) -> dict[st
     still flags a pin of the evidence file's own sha256.
     """
     expected = spec.get("content_hash")
-    samples_path = resolution.get("yield_samples_path")
+    actual = resolution["content_hash"]
+    if resolution.get("content_hash_basis") == "evidence_file":
+        path = resolution["file"]
+        return {
+            "content_hash_pin": "stale",
+            "hash_check": hash_check(
+                "evidence_file (sha256 of the cited evidence file)", expected, actual
+            ),
+            "compared_against": path,
+            "hint": (
+                f"content_hash must be the sha256 of the evidence file itself ({path})"
+            ),
+        }
+    field, source, what = _stale_pin_target(resolution)
     detail: dict[str, Any] = {
         "content_hash_pin": "stale",
-        "hash_check": hash_check(
-            _YIELD_HASH_FIELD
-            if samples_path is not None
-            else "provenance.input.content_hash",
-            expected,
-            resolution["content_hash"],
-        ),
+        "hash_check": hash_check(field, expected, actual),
     }
-    envelope = resolution.get("envelope")
-    provenance = envelope.get("provenance") if isinstance(envelope, Mapping) else None
-    block = provenance.get("input") if isinstance(provenance, Mapping) else None
-    block = block if isinstance(block, Mapping) else {}
-    members = block.get("paths")
-    what = None
-    if isinstance(members, list) and members:
-        names = []
-        for member in members:
-            path = member.get("path") if isinstance(member, Mapping) else None
-            path = path.get("path") if isinstance(path, Mapping) else path
-            if isinstance(path, str):
-                names.append(path)
-        detail["compared_against"] = names
-        what = "the input-set digest over the files in compared_against"
-    elif isinstance(block.get("path"), str):
-        detail["compared_against"] = block["path"]
-        what = f"the sha256 of the input artifact {block['path']}"
-    elif isinstance(samples_path, str):
-        # Issue #5392: a yield report has no provenance.input; the hash is
-        # over the samples document the report names.
-        detail["compared_against"] = samples_path
-        what = f"the sha256 of the samples document {samples_path}"
-    if what is None:
-        # Issue #5837: no path to name in compared_against -- either
-        # provenance.input carries only content_hash/role (the
-        # `build_provenance` shape) or there is no input block at all. The
-        # hint and the own-hash check below still apply.
-        hint = (
-            "content_hash must be the envelope's provenance.input.content_hash "
-            "(the recorded input hash), not the hash of the evidence envelope "
-            "file"
-        )
-    else:
-        field = "samples document" if samples_path else "provenance.input.content_hash"
-        hint = (
-            f"content_hash must be {what} ({field}), "
-            "not the hash of the evidence envelope file"
-        )
+    if source is not None:
+        detail["compared_against"] = source
+    hint = f"content_hash must be {what}, not the hash of the evidence envelope file"
     evidence_file = resolution.get("file")
     own = sha256_file(evidence_file) if isinstance(evidence_file, str) else None
     if own is not None and expected == f"sha256:{own}":
