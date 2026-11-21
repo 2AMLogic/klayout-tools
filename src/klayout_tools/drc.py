@@ -2498,6 +2498,21 @@ def _run_curated_negative_control(
     layout is not vacuous. Raises :class:`DrcError` (code
     ``negative_control_failed``) on no violations or a missing category."""
     control = run_drc(control_path, **run_kwargs)
+    return _grade_negative_control(control, control_path, categories)
+
+
+def _grade_negative_control(
+    control: dict[str, Any],
+    control_path: str,
+    categories: list[str] | None,
+) -> dict[str, Any]:
+    """Grade a finished negative-control fixture run (issue #6959): the one
+    verdict shared by the curated and native engines, each of which runs the
+    fixture with its own deck first and passes the finished report here, so
+    the pass/fail decision, diagnostic, and serialized
+    ``negative_control`` block cannot drift between them (#5755 precedent).
+    Raises :class:`DrcError` (code ``negative_control_failed``) on no
+    violations or a missing category."""
     found = sorted({v["rule"] for v in control["violations"]})
     missing = sorted(set(categories or []) - set(found))
     if control["violation_count"] < 1 or missing:

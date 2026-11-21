@@ -33,9 +33,9 @@ from .coverage import (
 )
 from .drc import (
     CODE_MULTIPLE_TOP_CELLS,
-    CODE_NEGATIVE_CONTROL_FAILED,
     SCHEMA_VERSION,
     DrcError,
+    _grade_negative_control,
 )
 from .drc_deck_includes import _deck_script_files
 from .drc_klayout_abort import (
@@ -755,27 +755,7 @@ def _run_negative_control(
     :class:`DrcError` (code ``negative_control_failed``) when the fixture
     yields no violation, or misses an expected rule category."""
     control = run_drc_klayout_engine(control_path, deck_file, **engine_kwargs)
-    found = sorted({v["rule"] for v in control["violations"]})
-    missing = sorted(set(categories or []) - set(found))
-    if control["violation_count"] < 1 or missing:
-        detail = (
-            f"missing expected categories {missing}"
-            if control["violation_count"] and missing
-            else "no violations reported"
-        )
-        raise DrcError(
-            f"negative control {control_path!r} failed on the same deck: "
-            f"{detail} -- the deck may not have executed its rules, so a "
-            "clean verdict on the real layout cannot be trusted",
-            code=CODE_NEGATIVE_CONTROL_FAILED,
-        )
-    return {
-        "file": control_path,
-        "status": "passed",
-        "violation_count": control["violation_count"],
-        "rules_found": found,
-        "expected_categories": sorted(categories or []),
-    }
+    return _grade_negative_control(control, control_path, categories)
 
 
 def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
