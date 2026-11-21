@@ -119,19 +119,16 @@ def runset_block(envelope: dict[str, Any]) -> dict[str, Any]:
     return block if isinstance(block, dict) else {}
 
 
-def _folded_class_counts(counts: Any) -> dict[str, int]:
-    """``counts`` with upper-cased keys -- SPICE names are case-insensitive
-    and the two census sides arrive in different case (a sky130 report run
-    with ``convert_subckts`` reads layout ``sky130_fd_pr__...`` against
-    reference ``SKY130_FD_PR__...``; issue #6902). Non-integer values are
-    skipped, not coerced: a census that does not carry counts is not
-    evidence."""
+def _folded_class_counts(counts: Any) -> dict[str, int] | None:
+    """Combine case-insensitive SPICE names when every count is usable."""
+    if not isinstance(counts, dict):
+        return None
     folded: dict[str, int] = {}
-    if isinstance(counts, dict):
-        for name, count in counts.items():
-            if isinstance(count, int) and not isinstance(count, bool):
-                key = str(name).upper()
-                folded[key] = folded.get(key, 0) + count
+    for name, count in counts.items():
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        key = str(name).upper()
+        folded[key] = folded.get(key, 0) + count
     return folded
 
 
@@ -172,6 +169,12 @@ def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
         return ["report carries no coverage/device_census to prove recognition"]
     layout = _folded_class_counts(census.get("layout"))
     reference = _folded_class_counts(census.get("reference"))
+    if layout is None:
+        return ["device_census.layout must map device classes to non-negative counts"]
+    if reference is None:
+        return [
+            "device_census.reference must map device classes to non-negative counts"
+        ]
     for cls in sorted(set(layout) | set(reference)):
         if layout.get(cls, 0) != reference.get(cls, 0):
             gaps.append(
@@ -188,7 +191,11 @@ def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
             "that emits the field"
         )
         return gaps
-    source_total = sum(_folded_class_counts(source).values())
+    source_counts = _folded_class_counts(source)
+    if source_counts is None:
+        gaps.append("device_census.reference_source carries an invalid device count")
+        return gaps
+    source_total = sum(source_counts.values())
     converted_total = sum(reference.values())
     if converted_total < source_total:
         gaps.append(

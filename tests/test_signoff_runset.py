@@ -209,6 +209,28 @@ def test_report_without_reference_source_evidence_fails_closed(tmp_path, runset)
     ), item["detail"]
 
 
+@pytest.mark.parametrize(
+    ("side", "counts"),
+    [
+        ("layout", []),
+        ("reference", {"NMOS": 2, "CAP": True}),
+        ("reference_source", {"NMOS": 2, "CAP": "3"}),
+        ("layout", {"NMOS": 2, "CAP": -1}),
+    ],
+)
+def test_invalid_census_cannot_prove_device_recognition(tmp_path, runset, side, counts):
+    envelope = _runset_envelope(LVS_MATCH_ENVELOPE, runset)
+    envelope["device_census"][side] = counts
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "runset_unrecognised_device"
+    assert any(
+        f"device_census.{side}" in gap for gap in item["detail"]["runset_device_gaps"]
+    )
+
+
 def test_census_disagreement_fails_even_with_match_status(tmp_path, runset):
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
