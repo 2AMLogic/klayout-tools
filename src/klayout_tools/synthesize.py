@@ -242,12 +242,9 @@ from ._provenance import (
     build_provenance,
     content_hash,
     sha256_file,
-    wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -261,7 +258,10 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
+from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .equiv_verdict import require_equivalence
+from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
 from .request_paths import RequestPaths
@@ -295,6 +295,7 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_driving_cell import first_matching_glob, resolve_dont_use_globs
 from .synthesize_library_hint import (
     library_capability_warnings as _library_capability_warnings,
 )
@@ -1209,7 +1210,13 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
-    abc_constr_request = _resolve_abc_constr_request(constraints, liberty_path)
+    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    resolved_globs = resolve_dont_use_globs(
+        library_defaults, dont_use_requested, dont_use_mode
+    )
+    abc_constr_request = _resolve_abc_constr_request(
+        constraints, liberty_path, resolved_globs=resolved_globs
+    )
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
     # inputs* to this run exactly as the RTL sources and the standard-cell
@@ -1310,7 +1317,8 @@ def run_synthesize(
         requested=dont_use_requested,
         mode=dont_use_mode,
         validated=dont_use_validated,
-        cell_library=cell_library,
+        library_defaults=library_defaults,
+        resolved=resolved_globs,
     )
 
     engine_options = _EngineOptions(
@@ -1869,50 +1877,14 @@ def _verify_synthesis_equivalence(
             f"equivalence check against source RTL could not be completed: {exc}"
         ) from exc
 
-    status = equiv_report["status"]
-    if status != "equivalent":
-        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
-
-    return {
-        "status": status,
-        "engine": equiv_report["engine"],
-        "engine_version": equiv_report["engine_version"],
-        "timeout_s": equiv_report["timeout_s"],
-        "elapsed_s": equiv_report["elapsed_s"],
-        "artifacts": equiv_report["artifacts"],
-    }
-
-
-def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
-    """An actionable :class:`SynthesizeError` message for a non-
-    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
-    -- names the diverging outputs for a proven ``"counterexample"``, or the
-    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
-    log_path = equiv_report.get("artifacts", {}).get("log_path")
-    if status == "counterexample":
-        counterexample = equiv_report.get("counterexample") or {}
-        diverging = counterexample.get("diverging_outputs") or []
-        confirmed = counterexample.get("confirmed_by_simulation")
-        detail = (
-            f"diverging outputs: {', '.join(diverging)}"
-            if diverging
-            else "no diverging outputs reported"
-        )
-        message = (
-            "synthesized netlist is NOT equivalent to its source RTL "
-            f"(klt equiv reported 'counterexample'; {detail}; "
-            f"confirmed_by_simulation={confirmed})"
-        )
-    else:
-        diagnostics = equiv_report.get("diagnostics") or []
-        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
-        message = (
-            "equivalence check against source RTL did not reach a verdict "
-            f"(klt equiv reported '{status}'): {detail}"
-        )
-    if log_path:
-        message += f" -- see {log_path} for the full proof"
-    return message
+    return require_equivalence(
+        equiv_report,
+        error_cls=SynthesizeError,
+        counterexample_prefix=(
+            "synthesized netlist is NOT equivalent to its source RTL"
+        ),
+        no_verdict_prefix="equivalence check against source RTL",
+    )
 
 
 def _run_timing_restructuring(
@@ -2425,7 +2397,10 @@ def _describe_clock_targets(
 
 
 def _resolve_abc_constr_request(
-    constraints: dict[str, Any] | None, liberty_path: str
+    constraints: dict[str, Any] | None,
+    liberty_path: str,
+    *,
+    resolved_globs: tuple[str, ...],
 ) -> tuple[str, float] | None:
     """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
     or ``None`` when the request does not supply one (issue #4662).
@@ -2434,13 +2409,12 @@ def _resolve_abc_constr_request(
     the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
     problem, an unknown key, a ``driving_cell`` absent from the resolved
     liberty (skipped only when the liberty's cell list cannot be established,
-    as for ``dont_use``), or a non-positive/non-finite ``load_ff`` is a
-    :class:`SynthesizeError` naming the field.
+    as for ``dont_use``), an excluded driving cell, or a non-positive/non-finite
+    ``load_ff`` is a :class:`SynthesizeError` naming the field.
     """
     if not constraints or constraints.get("abc_constr") is None:
         return None
-    raw = constraints["abc_constr"]
-    where = "request.constraints.abc_constr"
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
     if not isinstance(raw, dict):
         raise SynthesizeError(f"{where} must be a JSON object")
     unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
@@ -2466,6 +2440,13 @@ def _resolve_abc_constr_request(
             f"{where}.driving_cell '{driving_cell}' is not a cell in the "
             f"resolved liberty '{os.path.basename(liberty_path)}' "
             f"({len(cell_names)} cells)"
+        )
+    pattern = first_matching_glob(driving_cell, resolved_globs)
+    if pattern is not None:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' matches dont_use "
+            f"pattern '{pattern}'. Choose another driving cell or change "
+            "constraints.dont_use or constraints.dont_use_mode."
         )
     return driving_cell, float(load_ff)
 
@@ -2588,7 +2569,7 @@ def _resolve_dont_use_request(
     engine, so it is safe to call before any PDK resolution or run-directory
     creation. The liberty-dependent half (does each pattern actually match a
     cell?) is :func:`_validate_dont_use_against_liberty`; the merge with the
-    built-in per-library table is :func:`_resolve_cell_exclusions`.
+    built-in per-library table is :func:`resolve_dont_use_globs`.
 
     Raises :class:`SynthesizeError` naming the field for a non-array value, a
     non-string/empty entry, an entry containing a character that would corrupt
@@ -2706,44 +2687,18 @@ def _resolve_cell_exclusions(
     requested: tuple[str, ...],
     mode: str,
     validated: bool | None,
-    cell_library: str,
+    library_defaults: tuple[str, ...],
+    resolved: tuple[str, ...],
 ) -> tuple[tuple[str, ...], dict[str, Any]]:
     """``(dont_use_globs, cell_exclusions)`` -- the ``-dont_use`` glob list
     actually passed to ABC, plus the response block disclosing how it was
     arrived at (issue #2382).
 
-    Merges the request's own ``constraints.dont_use`` patterns (already
-    shape-validated by :func:`_resolve_dont_use_request` and liberty-validated
-    by :func:`_validate_dont_use_against_liberty`) with the built-in
-    per-library :data:`_ABC_DONT_USE_GLOBS` table per ``mode`` -- see
-    :data:`_DONT_USE_MODES` for why ``"additive"`` is the default.
-
-    Degradation is shared, never bypassed: the resolved list is passed only
-    when :func:`_abc_supports_dont_use` says the resolved Yosys build's
-    ``abc`` accepts the flag at all, exactly as the built-in table already
-    degraded before this field existed. The probe is still made only when
-    there is something to exclude, so a library with no table entry and a
-    request with no list runs no extra Yosys invocation. Because degrading
-    means a request that asked for an exclusion gets a netlist that still
-    contains those cells, that case is disclosed -- both here (as
-    ``engine_supports_dont_use: false`` alongside a non-empty ``requested``
-    and an empty ``effective``) and, so it cannot be missed, as the
-    ``dont_use_unsupported`` capability warning
-    :func:`_dont_use_unsupported_warning` emits.
-
-    The returned block's ``effective`` is exactly the list handed to ABC, so a
-    committed report records what was excluded instead of leaving it implicit
-    in the tool version that produced it. Additive response field, no
-    ``schema_version`` bump (``docs/json-contract.md``).
+    The resolved patterns have already been checked against the request's
+    driving cell. Probe the engine only if there is something to exclude.
+    If Yosys lacks ``abc -dont_use``, report an empty ``effective`` list.
+    A dropped request pattern also triggers :func:`_dont_use_unsupported_warning`.
     """
-    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
-    if mode == "none":
-        resolved: tuple[str, ...] = ()
-    elif mode == "replace":
-        resolved = requested
-    else:
-        resolved = tuple(dict.fromkeys((*library_defaults, *requested)))
-
     supported: bool | None = None
     if resolved:
         supported = _abc_supports_dont_use()
@@ -3165,70 +3120,6 @@ def _write_yosys_log(
         os.path.splitext(script_path)[0] + ".log",
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
-
-
-_SV_SOURCE_ERROR_RE = re.compile(r"(?:^|[\s/\\])\S*\.svh?:\d+:\s*ERROR:")
-
-
-def _sv_frontend_hint_if_applicable(error_line: str) -> str:
-    """Hint appended when Yosys's native ``-sv`` front end rejects a
-    SystemVerilog construct (issue #4181).
-
-    Yosys prefixes a parse error with ``<file>:<line>:``, so the source
-    extension is read straight off the error line -- a ``.v`` source with
-    the same syntax error gets no hint. Conservative table: only the
-    unpacked-array-port class (``syntax error, unexpected '['`` while a
-    port list is expected) is recognised; anything else returns ``""``.
-    """
-    if not _SV_SOURCE_ERROR_RE.search(error_line):
-        return ""
-    if "syntax error, unexpected '['" not in error_line:
-        return ""
-    return (
-        " -- hint: this looks like an unpacked-array port (e.g. "
-        "`input logic [31:0] a_i[2]`), a SystemVerilog construct Yosys's "
-        "native `read_verilog -sv` front end does not support; rewrite it "
-        "as a packed/flattened port or pre-convert the source"
-    )
-
-
-def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
-    """Build an actionable error message from a failed ``yosys -s`` run.
-
-    Prefers the last ``ERROR:`` line Yosys itself printed (its own error
-    lines go to stderr -- verified live, Yosys survey worked example), on
-    either stream; falls back to a generic exit-code message with a short
-    tail of captured output when no ``ERROR:`` line is found.
-
-    When the error line is the ``Can't open script file `<path>' for
-    reading: No such file or directory`` shape *and* ``<path>`` verifiably
-    exists on the host filesystem, appends a hint that the ``yosys`` on
-    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368; for a path under
-    the host temp dir the hint instead names the sandbox's private ``/tmp``
-    mount and leads with relocating the request (issue #2453). A script path
-    that genuinely does not exist is a different failure and is left
-    unchanged.
-    """
-    for stream in (completed.stderr or "", completed.stdout or ""):
-        error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
-        if error_lines:
-            message = f"yosys synthesis failed: {error_lines[-1]}"
-            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
-            # Issue #2635: `Module `\<cell>' ... is not part of the design`
-            # is what a hard macro with no `request.macros` entry looks
-            # like, and the raw line says nothing about which request field
-            # fixes it. Appended as a further `--` clause, the same
-            # recognized-hint structure the WASI hint above already uses.
-            macro_hint = macro_spec.undeclared_module_hint(error_lines[-1])
-            if macro_hint is not None:
-                message = f"{message} -- {macro_hint}"
-            message += _sv_frontend_hint_if_applicable(error_lines[-1])
-            return message
-
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {completed.returncode}: {snippet}"
 
 
 def _submodule_key(
@@ -4631,11 +4522,4 @@ def rerun_synthesize_report(
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)

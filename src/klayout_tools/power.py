@@ -158,7 +158,7 @@ from ._paths import (
     _reject_unknown_keys,
     _validate_via_entries,
 )
-from ._power_em_sections import em_edge_verdicts
+from ._power_em_sections import em_edge_verdicts, island_section_densities
 from ._provenance import INPUT_ROLE_LAYOUT, build_provenance, content_hash
 from ._unionfind import UnionFind
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
@@ -1654,6 +1654,7 @@ def _solve_ir_drop(
                 else:
                     quiet_no_pad_islands.append(island["island_id"])
 
+            pooled = island_section_densities(island, solution["edge_currents"])
             island_report = {
                 "island_id": island["island_id"],
                 "solved": bool(solved_components),
@@ -1715,14 +1716,13 @@ def _solve_ir_drop(
                         "current_a": _round_or_none(
                             solution["edge_currents"][edge["id"]], 12
                         ),
-                        # Issue #2345: the derived current density on the
-                        # same edge that carries the solved current --
-                        # reported with no pass/fail attached (see
-                        # `_edge_current_density`), so a role whose PDK
-                        # publishes no limit is still gradeable by a human.
+                        # #2345: per-row density, no verdict (see
+                        # `_edge_current_density`). #6525: the pooled drawn-
+                        # section density beside it (null when not pooled).
                         "current_density_a_per_um": _edge_current_density(
                             edge, solution["edge_currents"][edge["id"]]
                         ),
+                        "cross_section_density_a_per_um": pooled.get(edge["id"]),
                     }
                     for edge in island["edges"]
                 ],

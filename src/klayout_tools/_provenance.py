@@ -772,8 +772,14 @@ def _deck_block(
     """
     if name is None:
         return None
-    digest = sha256_file(path) if deck_sha256 is ... else deck_sha256
-    deck_hash = f"sha256:{digest}" if digest is not None else None
+    if deck_sha256 is ...:
+        from ._deck_hash import source_file_hash
+        from .decks import deck_source_path
+
+        builtin = path and os.path.abspath(path) == deck_source_path(name)
+        deck_hash = source_file_hash(path) if builtin else content_hash(path)
+    else:
+        deck_hash = f"sha256:{deck_sha256}" if deck_sha256 is not None else None
     block: dict[str, Any] = {
         "name": name,
         "content_hash": deck_hash,
@@ -841,13 +847,9 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report would carry for ``name``, computed the only way that can
-    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
-    drift from what a real run records.
+    block a report carries for ``name``, computed by :func:`_deck_block`.
 
-    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
-    without which :func:`~klayout_tools.decks.deck_source_path` would happily
-    import and hash any sibling module of the deck package.
+    Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
     from .decks import deck_names, deck_source_path
 
@@ -879,14 +881,12 @@ def build_provenance(
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
-    ``deck_name``/``deck_path`` identify the rule or model deck. Supplying
-    ``deck_sha256`` uses a previously captured digest (including a captured
-    ``None``). Omitting it hashes the file now. ``pdk`` is a ``find_pdk``
-    result or ``None``. ``input_path`` identifies the artifact hashed in
-    ``provenance.input`` alongside its role. Pass ``None``
-    (the default) only when the verb genuinely has no single input stream to
-    pin. A verb that pins its input under a *verb-specific* key of its own is
-    **not** such a case: ``klt lvs`` carries
+    ``deck_name`` and ``deck_path`` identify the rule or model deck. Omit
+    ``deck_sha256`` to hash it now, or supply the captured digest (including
+    ``None``). ``pdk`` is a ``find_pdk`` result or ``None``. ``input_path``
+    designates the artifact in ``provenance.input``. Pass ``None``
+    only when the verb has no single input stream. A verb that pins its
+    input under a *verb-specific* key still has one: ``klt lvs`` carries
     ``environment.layout_sha256``/``reference_sha256`` and was originally
     (issue #331) left with ``input: null`` on exactly that reasoning, but
     ``klt signoff --manifest``'s staleness gate reads
