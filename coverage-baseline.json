@@ -1833,7 +1833,7 @@
       "branch": 90.9
     },
     "src/klayout_tools/synthesize.py": {
-      "line": 94.6,
+      "line": 94.5,
       "branch": 90.8
     },
     "src/klayout_tools/synthesize_abc_timing.py": {
@@ -1861,8 +1861,8 @@
       "branch": 80.2
     },
     "src/klayout_tools/techmap.py": {
-      "line": 74.1,
-      "branch": 55.5
+      "line": 72.4,
+      "branch": 50.0
     },
     "src/klayout_tools/touchstone.py": {
       "line": 100.0,

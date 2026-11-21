@@ -287,6 +287,9 @@ def add_extract_args_part2(
             "cell'). Reuses --pins' own per-net, any-component-label "
             "reconciliation (issue #1687), with the DEF's own PINS section "
             "as the declared set instead of a hand-derived --pins list. "
+            "Without it (and without --pins), whether OpenSTA attaches the "
+            "SPEF's nets is layout-dependent, not a stable signature -- "
+            "assert on the --def-net-connections warning instead. "
             "Off by default -- byte-identical to today's behavior. See "
             "docs/cli/extract.md's 'DEF-derived declared pins' section."
         ),

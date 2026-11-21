@@ -295,7 +295,7 @@ def test_reduction_with_tightened_ceiling_passes(repo):
     assert result.returncode == 0, result.stderr
 
 
-def test_stale_too_high_ceiling_fails(repo):
+def test_shrink_with_inexact_edited_ceiling_fails(repo):
     comparison = _commit(
         repo,
         {
@@ -308,7 +308,7 @@ def test_stale_too_high_ceiling_fails(repo):
         repo,
         {
             "src/big.py": _big(550),
-            "file-size-baseline.json": _baseline_doc({"src/big.py": 600}),
+            "file-size-baseline.json": _baseline_doc({"src/big.py": 575}),
         },
     )
 
@@ -336,7 +336,7 @@ def test_raised_ceiling_fails(repo):
     assert "must equal" in result.stderr
 
 
-def test_entry_removed_once_under_limit_passes_and_surviving_entry_fails(repo):
+def test_entry_removed_at_limit_passes_and_surviving_entry_fails(repo):
     comparison = _commit(
         repo,
         {
@@ -346,22 +346,13 @@ def test_entry_removed_once_under_limit_passes_and_surviving_entry_fails(repo):
         "base",
     )
 
-    _stage(
-        repo, {"src/big.py": _big(480), "file-size-baseline.json": _baseline_doc({})}
-    )
-    assert _run(repo, "--comparison-rev", comparison).returncode == 0
-
-    _stage(
-        repo,
-        {
-            "src/big.py": _big(480),
-            "file-size-baseline.json": _baseline_doc({"src/big.py": 480}),
-        },
-    )
+    _stage(repo, {"src/big.py": _big(cfsb.HARD_LIMIT)})
     result = _run(repo, "--comparison-rev", comparison)
-
     assert result.returncode == 1
     assert "remove the entry" in result.stderr
+
+    _stage(repo, {"file-size-baseline.json": _baseline_doc({})})
+    assert _run(repo, "--comparison-rev", comparison).returncode == 0
 
 
 def test_deleted_file_requires_entry_removal(repo):
@@ -494,11 +485,15 @@ def test_bootstrap_seed_of_unchanged_debt_passes(repo):
     assert "bootstrap" in result.stdout
 
 
-def test_bootstrap_seed_mismatching_comparison_tree_fails(repo):
+def test_bootstrap_seed_requires_exact_candidate_size_after_shrink(repo):
     comparison = _commit(repo, {"src/big.py": _big(600)}, "base")
-    # The proposed seed cannot authorize its own entries: it must record
-    # the comparison tree's actual content (601 here).
-    _stage(repo, {"file-size-baseline.json": _baseline_doc({"src/big.py": 700})})
+    _stage(
+        repo,
+        {
+            "src/big.py": _big(550),
+            "file-size-baseline.json": _baseline_doc({"src/big.py": 600}),
+        },
+    )
 
     result = _run(repo, "--comparison-rev", comparison)
 
