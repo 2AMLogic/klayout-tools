@@ -6,9 +6,10 @@ import argparse
 import json
 
 from klayout_tools import pdk
-from klayout_tools.cli import drc_cmd, main
+from klayout_tools.cli import main
 from klayout_tools.cli._drc_native import resolve_native_deck
 from klayout_tools.pdk_native_drc import native_drc_main_script
+from test_drc_klayout_engine import _stub_klayout_drc_subprocess, _write_gds
 
 
 def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
@@ -75,18 +76,12 @@ def test_user_deck_var_and_floor_override_defaults(tmp_path):
 
 
 def test_cli_klayout_engine_uses_main_script_and_reports_it(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, real_build_identity_git
 ):
     root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
-    seen = {}
-
-    def fake_engine(path, deck_file, **kw):
-        seen.update(deck_file=deck_file, **kw)
-        return {"schema_version": 3, "status": "clean"}
-
-    monkeypatch.setattr(drc_cmd, "run_drc_klayout_engine", fake_engine)
-    gds = tmp_path / "a.gds"
-    gds.write_bytes(b"")
+    commands = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=commands)
+    gds = _write_gds(tmp_path / "a.gds")
     main(
         [
             "drc",
@@ -102,8 +97,9 @@ def test_cli_klayout_engine_uses_main_script_and_reports_it(
         ]
     )
     out = json.loads(capsys.readouterr().out)
-    assert seen["deck_vars"] == {"variant": "gf180mcuD"}
-    assert seen["min_klayout_version"] == "0.30.9"
+    (command,) = commands
+    assert "variant=gf180mcuD" in command
+    assert out["native_deck"]["min_klayout_version"] == "0.30.9"
     assert out["native_deck"]["kind"] == "pdk_main_script"
     assert out["native_deck"]["min_klayout_version_defaulted"] is True
 

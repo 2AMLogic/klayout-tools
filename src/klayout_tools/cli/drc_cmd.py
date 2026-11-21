@@ -436,6 +436,7 @@ def _run_crosscheck(args: argparse.Namespace) -> dict:
         native_kwargs={
             "timeout_s": args.timeout_s,
             "deck_vars": deck_vars,
+            "native_deck": native,
             "allow_deck_errors": args.allow_deck_errors,
             "allow_missing_host_tools": args.allow_missing_host_tools,
             "expected_rule_categories": args.expect_rule_categories,
@@ -463,10 +464,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
             "(see docs/cli/drc.md, 'Waivers')"
         )
     if args.rules is not None:
-        # Issue #2768: a native runset's rules are not the curated
-        # registry `--rules` resolves against (its declared categories are
-        # listed by `--list-rule-categories`, #5444), so the selection is
-        # refused, not ignored.
+        # Native categories have their own --list-rule-categories listing (#2768).
         raise DrcError(
             "--rules is not supported with --engine klayout: a PDK-native "
             "runset does not share the curated rule registry (see "
@@ -475,12 +473,13 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
     deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     if deck_file is None:
         raise DrcError(native_deck.no_deck_message(args))
-    result = run_drc_klayout_engine(
+    return run_drc_klayout_engine(
         args.file,
         deck_file,
         top=args.top,
         timeout_s=args.timeout_s,
         deck_vars=deck_vars,
+        native_deck=native,
         pdk_variant=args.pdk,
         pdk_root=args.pdk_root,
         deck_name=args.deck or None,
@@ -494,7 +493,6 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
-    return native_deck.attach_native_deck(result, native)
 
 
 def _run(args: argparse.Namespace) -> dict:
