@@ -7,7 +7,7 @@ Epic #153, following the layout-vs-schematic pattern
 
 ```
 klt lvs <request> [-o <report.json[.gz]>] [--format text|json]
-klt lvs --check <report.json> [--layout <path>] [--rerun] [--format text|json]
+klt lvs --check <report.json> [--layout <path>] [--reference <path>] [--rerun] [--format text|json]
 ```
 
 This is phase 3 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -242,7 +242,7 @@ Request fields (in addition to `layout.file` [+ `layout.top`] and
 
 | Field | Meaning |
 |---|---|
-| `deck_file` | Required. Path to the runset script (resolved like other request paths). |
+| `deck_file` | Required. Path to the runset script (resolved like other request paths). Echoed as given (issue #5795); a relative `--deck-file` keeps the caller's string in both `deck_file` echoes. |
 | `deck_vars` | Optional `{name: value}` appended as `-rd name=value`. `input`, `schematic`, `report`, `top`, `topcell` are set by the engine and may not be overridden. |
 | `options.runset_timeout_s` | Wall-clock budget (default 600). |
 | `options.klayout_binary` | Binary override; else `$KLT_KLAYOUT_BINARY`, else `klayout` on `PATH`. A missing binary is an actionable error (exit 1); the default engine stays pip-only. |
@@ -392,7 +392,18 @@ CLI: `klt lvs --deck-file PATH` and repeatable `--deck-var NAME=VALUE`
 rule (a flag never silently overrides a request document), giving a flag
 together with the same request field, a flag with any other engine, a
 `--deck-var` without `=`, or either flag with `--check`, is an application
-error (exit 1). A relative `--deck-file` resolves against the current directory.
+error (exit 1). A relative `--deck-file` resolves against the current
+directory and is echoed as the caller wrote it (issue #5795): `deck_file` and
+`provenance.runset.deck_file` preserve the caller-given relative string — the
+same verbatim form the `layout`/`reference` echoes already keep — while an
+absolute `--deck-file`, or a `deck_file` set in the request document, echoes
+the resolved path exactly as before. `--check`/`--check --rerun` of a report
+whose echoes are relative must run from the same directory those paths
+resolve against — the CWD-anchor caveat the relative `layout`/`reference`
+echoes already carry. `environment.klayout_binary` records the binary's
+basename (e.g. `"klayout"`); the version stays in `environment.engine_version`
+and `provenance.runset.klayout_application_version`, and an override remains
+visible in the echoed `options`.
 
 The separate `--deck NAME` flag is unrelated to the runset: it is the
 command-line spelling of the request's `layout.deck` field (issue #5733,
@@ -2489,7 +2500,7 @@ each resolves relative paths inside the document.
 | ----- | ---- | ----------- |
 | `schema` | string | Request contract identifier (not required — `load_request` does not validate it, matching `klt sim`'s convention for user-authored input). |
 | `engine` | string | Engine selector: `"klayout"` (default) or `"netgen"` — see "Engine" above. |
-| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). Default `false`: the response is byte-identical to before this field existed. `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and reports `environment.klayout_binary` as the binary's basename string (e.g. `"klayout"`; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report cannot re-resolve the rewritten input paths and reports `drifted`; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
+| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). Default `false`: the response is byte-identical to before this field existed. `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and `environment.klayout_binary` is the binary's basename string in default mode too (issue #5795; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report cannot re-resolve the rewritten input paths and reports `drifted`; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
 | `layout.deck_options` | object\<string, string\> | Optional `{"<key>": "<value>"}` pairs, the JSON-request-document counterpart of `klt extract --deck-option <key>=<value>` (issue #600/#595) — selects a caller-visible sheet-rho flavour of a shared-geometry resistor family (e.g. gf180mcu's `poly_res`, one of `1k`/`2k`/`3k`). Honored for both `layout` shapes wherever `layout.deck` is given — inline extraction (`layout.file`) and the pre-extracted `layout.netlist` shape (issue #585). Omitting it (or giving `{}`) resolves every deck exactly as before this field existed. An unrecognised key or value is an application error (exit 1), not a silent no-op or a silently-kept default; giving it without `layout.deck` is likewise an application error (there is no deck to apply it to). The fully resolved mapping — every option key the deck declares, including those it applied by default because `deck_options` did not name them (issue #2394) — is recorded under `provenance.deck.options`, alongside `provenance.deck.options_explicit`/`options_hash`; see "`layout` shapes" below and the `provenance` row further down. |
 | `layout.label_layers` | object\<string, [int, int] \| null\> | Optional, issue #2686. The request-document counterpart of `klt extract --label-layer <role>=<layer>/<datatype>` — the same `{"<role>": [layer, datatype] \| null}` shape as `klt extract`'s own `label_layers` request field (issue #2656). Re-points each named label role (`well`, `poly`, `metal<i>` — 0-based, index-aligned with the deck's metal stack) at the GDS purpose this layout actually wrote its net/pin name text on, *replacing* the deck's own pair for that role; `null` reads no label layer for that role. **Inline extraction only**: a non-empty value requires `layout.file` + `layout.deck` and is an application error (exit 1) on the pre-extracted `layout.netlist` shape, whose net names were fixed when it was extracted (unlike `layout.deck_options`, which that shape does honor). Omitting it, `null`, or `{}` extracts exactly as before this field existed. A value that is not an object, a role value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers (no coercion — `true`, `8.0`, `"8/25"` are all rejected), and a role the deck has no slot for are all application errors. An applied override is echoed as the response's top-level `label_layers` field and replayed by `--check --rerun` — see "Reading names off a different label purpose" below. |
@@ -2781,7 +2792,7 @@ section this engine buckets rather than fully structures:
 | `hints_applied` | object\<string, array\<array\<string\>\>\> \| `null` | Issue #1998. Every `hints.equivalent_pins` grouping actually passed to `NetlistComparer.equivalent_pins()` for this run, keyed by the (reference-side) subcircuit name it was declared against, with each group echoed verbatim as the caller wrote it — e.g. `{"ota_5t": [["inp", "inn"]]}`. `null` when the request supplied no `hints.equivalent_pins` (including a request with only a `hints.same_nets` hint, or no `hints` at all) — the same always-present-but-nullable convention `options.compare_parameters` follows for an optional dict-shaped echo, never a spuriously present empty `{}`. This is the only visibility a report gives into an applied `equivalent_pins` hint: unlike `hints.same_nets` (a hard assertion the comparer can refuse, surfaced as a `hints.rejected` mismatch entry — see below), a swappable-pin group has no "rejected" outcome, so without this field a reader could not tell whether — or how broadly — an `equivalent_pins` hint reshaped the verdict. Does not itself change `status`, `mismatch_count`, or any other verdict field; it only discloses that the hint was applied. A request naming an unknown subcircuit or pin fails the run outright (`LvsError`, exit 1, per `hints.equivalent_pins`'s own field description above) before any report is produced, so this field is never populated with a partial or invalid entry from a failed application. |
 | `status` | `"match"` \| `"mismatch"` \| `"inconclusive"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. `"inconclusive"` (issue #1370) is the third outcome: the compare the request asked for could **not** be performed, so this run reached no verdict about the design. It has exactly one cause today — `options.combine_devices` was requested and `combine_devices()` exhausted its retry budget on at least one side, so both sides were rolled back to their uncombined state (the symmetric degrade described under `options.combine_devices`) and the resulting engine `"mismatch"` was downgraded. A `"match"` is never downgraded, and neither is a run carrying a `pin.count` error (`options.strict_top_level_pin_count`, issue #2845): device combining cannot change declared pins, so that mismatch is real regardless. A run carrying a `reference.unresolved_subckt_call` error (issue #2952) is always `"mismatch"`, whatever the engine concluded (and never downgraded to `"inconclusive"`): a reference instance the reader could only satisfy with an empty placeholder circuit means the compare did not see the whole reference. This mirrors `klt equiv`'s own `"inconclusive"` vocabulary and gets its own exit code (`4`, the same value `klt equiv` uses) so an automation gate can tell "the design differs" from "the comparison could not be performed". Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `power_connectivity` | object | Issue #1952. The **power/ground half** of the verdict, reported beside `status` rather than folded into it — see "Power/ground connectivity" above for the full field table, what the check verifies, and the invariant it rests on. Always present, for every `reference.form`: `status` is `"match"`/`"mismatch"` when the check ran, and `"unchecked"` (with a human-readable `reason`) when it did not, so "was power connectivity verified by this run?" is answerable from any `klt lvs` report on its own. **A caller wanting full LVS on a digital block gates on both `status == "match"` and `power_connectivity.status == "match"`** — this field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`, all of which stay exactly the signal-connectivity compare's own results. |
-| `body_verification` | object | Issue #1983. Whether this layout's MOS **body terminals** were resolved from real drawn/derived tap geometry or from a deck-synthesized net — the machine-checkable form of the `device.body_unverified` warning, reported beside `status` rather than folded into it. See "The same condition, machine-checkable" below for the full field table. Always present: `status` is `"verified"`/`"unverified"` when a `layout.deck` was given, and `"unchecked"` (with a human-readable `reason`) for the pre-extracted `layout.netlist` form, so "were the device bodies verified by this run?" is answerable from any `klt lvs` report on its own rather than being inferred from the *absence* of a warning. This field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`. |
+| `body_verification` | object | Issue #1983. Whether this layout's MOS **body terminals** were resolved from real drawn/derived tap geometry or from a deck-synthesized net — the machine-checkable form of the `device.body_unverified` warning, reported beside `status` rather than folded into it. See "The same condition, machine-checkable" below for the full field table. Always present: `status` is `"verified"`/`"unverified"` when a `layout.deck` was given and at least one MOS device was eligible for the check, and `"unchecked"` (with a human-readable `reason`) for the pre-extracted `layout.netlist` form or when no MOS device was eligible at all (issue #5749 — a vacuous run no longer reads `"verified"`), so "were the device bodies verified by this run?" is answerable from any `klt lvs` report on its own rather than being inferred from the *absence* of a warning. `inspected_count` (issue #5749) states how many devices the check examined in every branch. The block does not feed grading: `status`, `error_count` and `category_error_counts` are unchanged. With `compare_mos_flavour: true`, previously skipped `device.body_unverified` warnings now fire for untied flavoured bodies, increasing `mismatch_count` by one per newly inspected unverified class and adding to `category_counts["device.body_unverified"]`. |
 | `device_parameter_coverage` | array \| `null` | Issue #2461; MOS added by issue #5653. Per participating **resistor/capacitor/MOS** device class, which of its declared parameters this compare actually covered — reported beside `status` rather than folded into it. For a resistor/capacitor class this is the machine-checkable form of the `device.geometry_not_compared` warning (see below); a MOS class's `L`/`W` *are* compared, so its entry never raises that warning — the entry exists so the block positively says its sizing took part instead of leaving an empty array ambiguous. One object per class, sorted by class name: `class` (the device class's own name), `device_kind` (`"resistor"` \| `"capacitor"` \| `"mos"`), `layout_devices` / `reference_devices` (how many instances each side contributed), `compared` (the parameters `NetlistComparer` compared, in the class's own declaration order), and `not_compared` (one `{"parameter": <string>, "reason": <string>}` object per parameter that took no part, with `reason` one of `"secondary"` — KLayout's own class definition marks it non-primary, the case with no other disclosure anywhere in the report — `"placeholder_value"` or `"compare_parameters"`, naming the request-side hook that excluded it, each of which also has its own `mismatches[]` entry). `"compare_parameters"` is reserved for a parameter that was **primary, and therefore actually being compared, until that option scoped its class to a subset that does not name it** (issue #2654): since the option can only narrow, it also disables every sibling the caller did not name, and a sibling the class itself declares secondary reads `"secondary"` — the honest reason — rather than crediting the caller's option with an exclusion that was KLayout's own class default. So a resistor class scoped to `["R", "L", "W"]` reports `compared: ["R", "L", "W"]` with the derived `A`/`P` as `"secondary"`, not as `"compare_parameters"`. Issue #5653: a participating **MOS** class (`device_kind: "mos"`) is reported too, so the block positively says its `L`/`W` took part (`compared: ["L", "W"]`, with `AS`/`AD`/`PS`/`PD` as `"secondary"`; `options.compare_parameters: {"nfet": ["W"]}` narrows it to `compared: ["W"]` with `L` as `"compare_parameters"`). The `device.geometry_not_compared` *warning* stays resistor/capacitor-only — a MOS class's `L`/`W` are compared, so a per-run warning would be noise. This is an additive JSON-contract change: a caller asserting `device_parameter_coverage == []` on a MOS design now sees entries. `[]` means no resistor, capacitor or MOS class participated, and `null` for `"engine": "netgen"`, which builds no KLayout device classes to read this from. This field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts` — answering "was this class's sizing verified?" is exactly its purpose, and the answer is routinely "no" on a perfectly good `"match"`. |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report except for the one diagnostic-only `error` category: a `pin.declared_short` entry (issue #2854) names a layout defect against its *declared interface* that the compare's topology-only verdict may legitimately not reflect (a reference modelling the same short), so a `"match"` can carry it. A `reference.unresolved_subckt_call` error (issue #2952) is never on a `"match"` report: it forces `"mismatch"`. |
@@ -3806,6 +3817,7 @@ field:
   "reason": null,
   "device_classes": ["nfet"],
   "device_count": 2,
+  "inspected_count": 4,
   "findings": [{"class": "nfet", "device_count": 2}],
   "finding_count": 1
 }
@@ -3813,10 +3825,11 @@ field:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `status` | string | `"verified"` — a deck was given and every MOS body terminal in the layout's top circuit resolved to a real drawn/derived net. `"unverified"` — at least one did not (the `device.body_unverified` condition above). `"unchecked"` — no `request.layout.deck` was given (the pre-extracted `request.layout.netlist` form), so nothing establishes this layout's tap convention and this run verified nothing about the bodies either way. |
+| `status` | string | `"verified"` — a deck was given, at least one MOS device was eligible for the check, and every inspected MOS body terminal in the layout's top circuit resolved to a real drawn/derived net (`inspected_count` states how many were examined, so a `"verified"` is self-evidencing rather than inferred from the absence of findings). `"unverified"` — at least one inspected terminal did not (the `device.body_unverified` condition above). `"unchecked"` — this run verified nothing about the bodies: either no `request.layout.deck` was given (the pre-extracted `request.layout.netlist` form, so nothing establishes this layout's tap convention), or the layout's top circuit extracted **no** MOS device eligible for the check (issue #5749 — e.g. a passives-only layout, or a `compare_mos_flavour` run whose flavoured classes are the only ones present is now inspected rather than skipped, so this arm fires mainly for genuinely device-less layouts); the `reason` names which. |
 | `reason` | string \| `null` | Why the question could not be answered, for `status: "unchecked"`; `null` otherwise. |
-| `device_classes` | array\<string\> | The deck device-class names with unverified bodies (e.g. `["nfet"]`), sorted. Empty for `"verified"`/`"unchecked"`. |
+| `device_classes` | array\<string\> | The extracted device-class names with unverified bodies (e.g. `["nfet"]`, a flavoured class such as `"nfet__nvt"` when `options.compare_mos_flavour` is on), sorted. Empty for `"verified"`/`"unchecked"`. |
 | `device_count` | integer | Total unverified device count across those classes. `0` for `"verified"`/`"unchecked"`. |
+| `inspected_count` | integer | Issue #5749. How many MOS devices the body check actually examined, across all eligible classes (generic and flavoured). Present in every branch — `0` for `"unchecked"` — so `"verified"` states its own coverage instead of a consumer inferring it from the absence of findings. |
 | `findings` | array\<object\> | One `{"class", "device_count"}` entry per affected device class, class-sorted. |
 | `finding_count` | integer | `len(findings)`. |
 
@@ -3837,12 +3850,25 @@ describe the same devices.
 **`"unchecked"` never means "verified".** Before this block existed, the
 *absence* of a `device.body_unverified` warning meant "checked and clean" on
 an inline extraction and "not checked at all" on a pre-extracted netlist,
-and nothing in the report told those apart.
+and nothing in the report told those apart. Issue #5749 closed the second
+way the same ambiguity arose *within* the inline-extraction form itself: the
+determination counted only the devices that **failed**, so a run in which
+zero devices were eligible (no MOS device extracted at all, or — before the
+same issue — every flavoured device under `options.compare_mos_flavour: true`,
+which the check then did not see) rendered byte-identically to a genuine
+`"verified"`: `status: "verified"`, `device_count: 0`. Zero eligible devices
+now reads `"unchecked"` with a `reason`, and `inspected_count` makes a
+`"verified"` self-evidencing in every branch.
 
-**This changes no verdict.** `status`, `mismatch_count`, `error_count` and
-the category counts are exactly what they were — a layout with unverified
-bodies still reports `status: "match"` when the compare matched, and the
-warnings are still `severity: "warning"`. `klt signoff` surfaces
+**This changes no verdict.** `status`, `error_count` and
+`category_error_counts` are exactly what they were — a layout with
+unverified bodies still reports `status: "match"` when the compare
+matched, and the warnings are still `severity: "warning"`, so the block
+does not feed grading. But the warning is now emitted for flavoured
+classes it previously skipped: on a `compare_mos_flavour: true` run over
+a layout with untied flavoured bodies, `mismatch_count` increases by one
+per newly-seen class and `category_counts` gains a
+`device.body_unverified` key. `klt signoff` surfaces
 `body_verification.status` on an `lvs` check (`detail.body_verification_
 status`) but does not grade on it; see [`signoff.md`](signoff.md) and
 [`../design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 for why
@@ -5156,20 +5182,22 @@ klt lvs --check design.lvs.json --rerun           # full mode
 the layout/reference paths, engine, and (when used) extraction deck are all
 read from `<report.json>` itself, not given again on the command line.
 
-**Explicit input (issue #2699).** When the report cannot locate its own
-input — a `scope: "external"` run, or a grading clone laid out differently
+**Explicit inputs (issues #2699, #5845).** When the report cannot locate its own
+input — a `scope: "external"` run, a committed nested-repo report whose
+recorded relative path is ambiguous, or a grading clone laid out differently
 from the producing one — supply the input yourself alongside `--check`:
-`klt lvs --check design.lvs.json --layout design.spice [--rerun]`. The explicit input **always overrides** the report's recorded
+`klt lvs --check design.lvs.json --layout design.spice --reference ref.spice [--rerun]`. The explicit input **always overrides** the report's recorded
 one (not only when that one is unresolvable), the same rule on `klt drc`,
 `klt extract` and `klt lvs`; its hash is compared against the report's
-recorded `provenance.input.content_hash`, and the reference/deck hashes are unaffected, so a file that disagrees reports
+recorded `environment.layout_sha256`/`environment.reference_sha256`, and the
+deck hashes are unaffected, so a file that disagrees reports
 `status: "drifted"` rather than being silently accepted. A relative path
-resolves against the current directory. Without it nothing changes: the
-`file`/`layout` field is resolved exactly as described above, and an
-external-scope report still reports `actual: null` / the clean "no field to
+resolves against the current directory. Without an override nothing changes:
+the recorded field is resolved exactly as described above, and an
+external-scope side still reports `actual: null` / the clean "no field to
 rerun" error.
-`--layout` without `--check` is a clean error (exit 1). Only the layout can
-be supplied this way — `reference` is still the request's own verbatim echo.
+`--layout`/`--reference` without `--check` are clean errors (exit 1). Note
+`--deck-file` applies to a fresh `klayout-runset` run, never to `--check`.
 
 ### Cheap mode (default)
 
@@ -5306,6 +5334,14 @@ input resolved, its bytes moved):
   report-relative candidate to try). A non-`null` value is the tell for the
   directory-portability trap above: the committed request/report pair is
   intact, `--check` was just invoked from somewhere else.
+- `resolved_against` — the directory a relative recorded path was anchored
+  to (the current working directory); `null` for an absolute path, which
+  has no anchor.
+- `resolved_repo_root` (issue #5845) — when `--check` resolves a repo-scoped
+  input, this names the repo root it discovered from the committed report's
+  directory. On a nested-repo report, use this field to check which tree
+  supplied the anchor for the recorded path. The value is `null` for a bare
+  path or an explicit `--layout` or `--reference` override.
 
 Text output (`--format text`, the default) renders the same information in
 place of the bare `actual: None`:
@@ -5317,6 +5353,16 @@ place of the bare `actual: None`:
       note:     it exists relative to the report's own directory
                 (/work/pair/design.gds); --check resolves relative paths
                 against the current working directory -- re-run from there
+```
+
+A repo-scoped echo additionally renders its anchor (issue #5845), only
+when present:
+
+```
+  [DRIFTED] environment.reference_sha256
+      expected: 9c2d…
+      actual:   None (input not found: /work/outer/repo/ref.spice)
+      repo root: /work/outer/repo
 ```
 
 `klt drc --check` does not (yet) carry this block — its `provenance.input`

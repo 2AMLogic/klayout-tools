@@ -375,12 +375,13 @@
     "body_verification": {
       "type": "object",
       "description": "Whether MOS body terminals were resolved from real tap geometry; reported beside (never folded into) status.",
-      "required": ["status", "reason", "device_classes", "device_count", "findings", "finding_count"],
+      "required": ["status", "reason", "device_classes", "device_count", "inspected_count", "findings", "finding_count"],
       "properties": {
         "status": {"enum": ["verified", "unverified", "unchecked"]},
         "reason": {"type": ["string", "null"]},
         "device_classes": {"type": "array", "items": {"type": "string"}},
         "device_count": {"type": "integer", "minimum": 0},
+        "inspected_count": {"type": "integer", "minimum": 0},
         "findings": {
           "type": "array",
           "items": {
