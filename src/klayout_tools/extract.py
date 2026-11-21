@@ -149,6 +149,7 @@ from typing import TYPE_CHECKING, Any
 # its imports of this module's own helpers to call time.
 from . import extract_dead_metal as _dead_metal
 from . import extract_runset
+from . import extract_split_terminal as _split_terminal
 from ._annotation import is_reserved_annotation_layer
 from ._jsonnum import is_int
 from ._layout import complement_well_tie as _complement_well_tie
@@ -8421,15 +8422,14 @@ def _extract_netlist(
             layer_geometry,
         )
 
-    # Drawn resistors: `R` is the recognised resistive segment, `C` the
-    # terminal (contacted head) region -- the same conductor layer the
-    # segment was cut out of, already part of the connectivity graph below,
-    # so the heads pick up their nets from ordinary contact/metal routing.
-    # The body itself is deliberately never `connect`ed to anything: that is
-    # precisely what stops it being a short.
-    for index, (spec, body, terminal) in enumerate(resistors):
+    # Drawn resistors: `R` the recognised segment, `C` the contacted head
+    # region (the conductor it was cut from, already in the graph below). The
+    # body is never `connect`ed: that is what stops it being a short.
+    for index, (spec, body, terminal, split) in enumerate(resistors):
         l2n.register(body, f"res{index}_body")
-        if spec.bulk_to_substrate:
+        if split is not None:
+            _split_terminal.extract_device(l2n, index, spec, body, terminal, split)
+        elif spec.bulk_to_substrate:
             l2n.extract_devices(
                 kdb.DeviceExtractorResistorWithBulk(spec.name, spec.sheet_rho_ohm_sq),
                 {"R": body, "C": terminal, "W": nfet_body},
@@ -8453,13 +8453,11 @@ def _extract_netlist(
         + capacitor_variant_warnings
     )
 
-    # Connectivity. Deliberately does *not* connect `nwell`/`tap` to
-    # `contact` as a blanket rule -- see `ExtractionDeck`'s docstring: the
-    # well is a background region spanning the whole PMOS area, so a
-    # blanket well<->contact connect would short every terminal inside the
-    # well together. Only a genuinely distinct `tap` region (drawn or
-    # derived -- `tap_declared`, issue #1084) is safe to tie the well to
-    # directly.
+    # Connectivity. Deliberately no blanket `nwell`/`tap` -> `contact`
+    # connect -- see `ExtractionDeck`'s docstring: the well spans the whole
+    # PMOS area, so it would short every terminal inside it. Only a
+    # genuinely distinct `tap` region (drawn or derived -- `tap_declared`,
+    # issue #1084) is safe to tie the well to directly.
     l2n.connect(nfet_sd)
     l2n.connect(pfet_sd)
     l2n.connect(nfet_gate)
@@ -8569,6 +8567,7 @@ def _extract_netlist(
         l2n.connect(f_nfet_sd, contact)
         l2n.connect(f_pfet_sd, contact)
     l2n.connect(poly, contact)
+    _split_terminal.connect_terminals(l2n, resistors, contact)
 
     if metals:
         l2n.connect(contact, metals[0])

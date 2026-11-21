@@ -12491,16 +12491,15 @@ from klayout_tools.decks import (  # noqa: E402
 )
 from klayout_tools.pdk_models import build_device_binding_map  # noqa: E402
 
-#: Device classes a registered deck declares that deliberately have **no**
-#: subcircuit to bind to, so `build_device_binding_map` must not invent one
-#: (see `pdk_models._RESISTOR_MODEL_TABLE`'s own comment): IHP ships
-#: `res_metal1`/`res_metal2` as a bare model-reference `R` card, not a
-#: `.subckt`; sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) are
-#: the same carve-out -- `sky130_fd_pr__model__r+c.model.spice` wraps a
-#: `.subckt` around `res_generic_po` but not around any metal flavour, only
-#: a bare `.model ... r` card. Kept as an explicit allowlist so a *new*
-#: undeclarable class has to be added here consciously rather than silently
-#: skipping the coverage assertion below.
+#: Device classes a registered deck declares that deliberately have **no** subcircuit to
+#: bind to, so `build_device_binding_map` must not invent one (see
+#: `pdk_models._RESISTOR_MODEL_TABLE`'s own comment): IHP ships
+#: `res_metal1`/`res_metal2` as a bare model-reference `R` card, not a `.subckt`;
+#: sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) are the same carve-out --
+#: `sky130_fd_pr__model__r+c.model.spice` wraps a `.subckt` around `res_generic_po` but
+#: not around any metal flavour, only a bare `.model ... r` card; gf180mcu's `efuse`
+#: (#4312) likewise. Kept as an explicit allowlist so a *new* undeclarable class must be
+#: added here consciously, not silently skipped by the coverage assertion below.
 _SUBCKT_LESS_DEVICE_CLASSES = frozenset(
     {
         "res_metal1",
@@ -12510,6 +12509,7 @@ _SUBCKT_LESS_DEVICE_CLASSES = frozenset(
         "res_generic_m3",
         "res_generic_m4",
         "res_generic_m5",
+        "efuse",
     }
 )
 

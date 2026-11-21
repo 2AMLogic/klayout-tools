@@ -3214,8 +3214,8 @@ _GF180MCU_MOS_LVS_SOURCE_PATH = (
 #   `capacitor(...)` area coefficients are 4.4e-15 F/um^2 (03v3) and 2.3e-15
 #   F/um^2 (06v0).
 # - `moscap_exclude` marker set: transcribed below as `_MOS_CAP_EXCLUDES`,
-#   minus `lvs_source` (100/8): this curated deck deliberately reads nothing
-#   else on layer number 100 (its `dummy` convention marker is 100/50, see
+#   minus `lvs_source` (100/8): this deck reads nothing else on layer 100
+#   besides the eFuse anode marker (#4312) and its `dummy` marker (100/50, see
 #   `test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer`), and an
 #   LVS-source annotation over a MOS capacitor is not modelled.
 #
@@ -3314,51 +3314,44 @@ EXTRACTION_DECK = ExtractionDeck(
     # comment and `ExtractionDeck.dummy`'s docstring in `decks/extraction.py`
     # for the extractor-side machinery this field drives, which shipped in
     # #295/#462 and needs no change here). Without it, `klt gen mos_array`/
-    # `res_array`/`bjt_array`'s own `"dummy": N` param drew edge-fill devices
-    # on this family that `klt lvs` could then only report as
-    # `device.unmatched`, with knock-on `topology` conflicts on whichever
-    # supply rail the dummy units tie to.
+    # `res_array`/`bjt_array`'s `"dummy": N` param drew edge-fill devices on
+    # this family that `klt lvs` could only report as `device.unmatched`,
+    # with knock-on `topology` conflicts on the supply rail they tie to.
     #
     # gf180mcu has no *native* per-device dummy-recognition mark either. The
     # only dummy-adjacent purposes in its own layer table are (a) the
     # per-conductor density-fill purposes `<Layer>_Dummy` (datatype 4 on
-    # `COMP`/`Poly2`/`Metal1`..`MetalTop`), which is where generated *fill
-    # shapes themselves* are drawn rather than a marker laid over a real
-    # device, and (b) the fill-*exclusion* region markers `NDMY` (111/5) /
-    # `PMNDMY` (152/5), whose DRM section 10.8 `DE.*` rules ("design rules
-    # for dummy exclude layers") make them a density/DRC concept, not a
-    # device-recognition mark the way `DRC_BJT` (127/5) or `RES_MK` (110/5)
-    # are. That is the identical "no native mark, curated substitute"
+    # `COMP`/`Poly2`/`Metal1`..`MetalTop`), where generated *fill shapes
+    # themselves* are drawn rather than a marker laid over a real device, and
+    # (b) the fill-*exclusion* markers `NDMY` (111/5) / `PMNDMY` (152/5),
+    # whose DRM section 10.8 `DE.*` rules make them a density/DRC concept,
+    # not a device-recognition mark like `DRC_BJT` (127/5) or `RES_MK`
+    # (110/5). That is the identical "no native mark, curated substitute"
     # situation sky130's own `(83, 20)` comment documents.
     #
-    # `(100, 50)` therefore reuses gf180mcu's own *LVS-only annotation*
-    # layer number -- 100, the `LVS_*` family (`LVS_RF` 100/5, `LVS_Drain`
-    # 100/7, `LVS_Source` 100/8): layers that exist purely to annotate
-    # extraction/LVS and that no per-layer design rule keys off, the
-    # structural analogue of the `marker.*` layer number sky130's `(83, 20)`
-    # reuses. Datatype 50 is assigned no purpose at all. Verified against
-    # the same real fetched install this deck's MiM/resistor/diode
-    # provenance already cites (`volare enable gf180mcu
-    # c6d73a35f524070e85faff4a6a9eef49553ebc2b`): across
-    # `libs.tech/klayout/tech/gf180mcu.lyp`,
+    # `(100, 50)` therefore reuses gf180mcu's *LVS-only annotation* layer
+    # number -- 100, the `LVS_*` family (`LVS_RF` 100/5, `LVS_Drain` 100/7,
+    # `LVS_Source` 100/8): layers that exist purely to annotate extraction/LVS
+    # and that no per-layer design rule keys off, the structural analogue of
+    # the `marker.*` number sky130's `(83, 20)` reuses. Datatype 50 is
+    # assigned no purpose at all. Verified against the same real fetched
+    # install this deck's MiM/resistor/diode provenance already cites
+    # (`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+    # across `libs.tech/klayout/tech/gf180mcu.lyp`,
     # `libs.tech/klayout/drc/rule_decks/layers_def.drc` and
     # `libs.tech/klayout/lvs/rule_decks/layers_definitions.lvs`, layer 100
     # carries exactly three assigned datatypes -- 5, 7 and 8 -- and all four
-    # shipped variants (`gf180mcuA`/`B`/`C`/`D`) agree on that set. Datatype
-    # 50 leaves generous headroom above upstream's low, contiguous 5..8
-    # block, so an upstream purpose extension does not immediately collide.
-    # This deck reserves it as an extraction-only, deck-local marker: no
-    # official gf180mcu purpose string, and no rule in this module's own
-    # `DECK` references layer 100 at all, so `klt drc --deck gf180mcu` never
-    # checks it.
+    # shipped variants (`gf180mcuA`/`B`/`C`/`D`) agree. Datatype 50 leaves
+    # headroom above upstream's low, contiguous 5..8 block, so an upstream
+    # purpose extension does not immediately collide. This deck reserves it
+    # as an extraction-only, deck-local marker: no official purpose string,
+    # and no rule in this module's own `DECK` references layer 100, so `klt
+    # drc --deck gf180mcu` never checks it.
     #
-    # Verified non-colliding against every layer this `EXTRACTION_DECK`
-    # otherwise reads (`ExtractionDeck.connectivity_layers` -- the
-    # `active`/`poly`/`nwell`/`contact` core, the `metals`/`vias`/
-    # `metal_labels` stacks, `tap_nplus`/`tap_pplus`/`substrate_isolation`/
-    # `poly_label`, and every `bipolars`/`capacitors`/`resistors`/`diodes`/
-    # `mos_flavours` recognition layer): none of them is on layer 100 at
-    # all. `tests/test_extract.py` asserts that non-collision directly.
+    # Non-colliding with every other layer `EXTRACTION_DECK` reads
+    # (`ExtractionDeck.connectivity_layers`): the only other layer-100 member
+    # is the eFuse anode marker `lvs_source` (100/8, issue #4312), and
+    # `tests/test_extract.py` asserts that directly.
     dummy=(100, 50),
     # Full Metal1-Metal5 routing stack (#220). Before this, `metals` stopped
     # at Metal1, so anything drawn above it was invisible to the connectivity
@@ -3452,23 +3445,21 @@ EXTRACTION_DECK = ExtractionDeck(
             top_plate_via=(41, 0),  # Via4
             top_plate_via_metal=(81, 0),  # Metal5
             # Caller-selectable MiM density (issue #1151), the capacitor
-            # sibling of `ppolyf_u_1k`'s own `flavour_option="poly_res"`
-            # below -- see the module docstring's note above this entry for
-            # the full derivation of the three `flavours` coefficients and
-            # why one drawn geometry has three PDK-offered density
-            # interpretations here. `klt extract --deck-option
+            # sibling of `ppolyf_u_1k`'s `flavour_option="poly_res"` below --
+            # see the module docstring's note above this entry for the three
+            # `flavours` coefficients and why one drawn geometry has three
+            # PDK-offered interpretations. `klt extract --deck-option
             # mim_cap=cap_mim_1f0_m4m5_noshield` (or `...1f5...`) selects a
-            # sibling density explicitly; omitting `--deck-option` keeps
-            # today's `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
-            # `f6eeac7` (issue #3540): `mimcap_extraction.lvs` no longer branches
-            # on `MIM_OPTION`/`METAL_LEVEL` and names its devices `cap_mim_1f0fF`/
-            # `cap_mim_1f5fF`/`cap_mim_2f0fF` (so `provenance.rule_id` below is
-            # `cap_mim_2f0fF`); `MIM_OPTION` now only selects the virtual bottom
-            # plate in `mimcap_derivations.lvs` (default `'B'`, `topmin1_metal`,
-            # which is what this deck models for its Metal5 top). The
-            # `*_m4m5_noshield` names here are this deck's own extracted-netlist
-            # device names (the previous deck's names, kept for netlist
-            # stability); only the citation moved.
+            # sibling explicitly; no option keeps today's
+            # `cap_mim_2f0_m4m5_noshield` default, byte-for-byte.
+            # `f6eeac7` (issue #3540): `mimcap_extraction.lvs` no longer
+            # branches on `MIM_OPTION`/`METAL_LEVEL` and names its devices
+            # `cap_mim_1f0fF`/`cap_mim_1f5fF`/`cap_mim_2f0fF` (so
+            # `provenance.rule_id` below is `cap_mim_2f0fF`); `MIM_OPTION`
+            # now only selects the virtual bottom plate (default `'B'`,
+            # `topmin1_metal`, what this deck models for its Metal5 top).
+            # The `*_m4m5_noshield` names are this deck's own device names
+            # (kept for netlist stability); only the citation moved.
             flavour_option="mim_cap",
             flavours=(
                 CapacitorFlavour(
@@ -3499,10 +3490,9 @@ EXTRACTION_DECK = ExtractionDeck(
     resistors=(
         # `f6eeac7` (issue #3540): `res_derivations.lvs` splits every poly
         # resistor into `*_sub` / `*_nwell` body variants (`W` => `sub` vs.
-        # `nwell_con`; `npolyf_u/s`, `ppolyf_u/s`, ...) under the same device
-        # name and value. This deck keeps ONE entry per device with
-        # `bulk_to_substrate=True`: an acknowledged approximation -- the
-        # resistance value and device name are identical either way, only the
+        # `nwell_con`) under the same device name and value. This deck keeps
+        # ONE entry per device with `bulk_to_substrate=True`: an acknowledged
+        # approximation -- value and name are identical either way; only the
         # bulk terminal of a poly resistor drawn over Nwell differs.
         ResistorDevice(
             name="ppolyf_u",  # gf180mcu_fd_pr__ppolyf_u
@@ -3526,17 +3516,14 @@ EXTRACTION_DECK = ExtractionDeck(
                 "gf180mcu_fd_pr__ppolyf_u",
             ),
         ),
-        # High-sheet-rho flavour (issue #299, made caller-selectable by
-        # #595), see the module docstring's `ppolyf_u_1k` note above for the
-        # full derivation. `sheet_rho_ohm_sq`/`name` below are the PDK's own
-        # '1k' default (used whenever a caller passes no `poly_res`
-        # `deck_options` override); `flavours` additionally declares the
-        # `2k`/`3k` siblings selectable via `flavour_option="poly_res"`
-        # (`klt extract --deck-option poly_res=2k`) -- see
-        # `ResistorDevice.flavour_option`'s own docstring for why this is a
-        # deck-option selection rather than a `requires`/`excludes` split:
-        # all three share *identical* drawn geometry, so there is no layer a
-        # deck could key off to tell them apart on its own.
+        # High-sheet-rho flavour (issue #299, made caller-selectable by #595),
+        # see the module docstring's `ppolyf_u_1k` note for the derivation.
+        # `sheet_rho_ohm_sq`/`name` below are the PDK's own '1k' default (used
+        # when a caller passes no `poly_res` `deck_options` override);
+        # `flavours` also declares the `2k`/`3k` siblings selectable via
+        # `flavour_option="poly_res"` (`klt extract --deck-option
+        # poly_res=2k`) -- all three share *identical* drawn geometry, so this
+        # is a deck-option selection, not a `requires`/`excludes` split.
         ResistorDevice(
             name="ppolyf_u_1k",  # gf180mcu_fd_pr__ppolyf_u_1k (POLY_RES='1k' default)
             body=(30, 0),  # Poly2
@@ -3570,12 +3557,27 @@ EXTRACTION_DECK = ExtractionDeck(
                 "gf180mcu_fd_pr__ppolyf_u_1k",
             ),
         ),
+        # eFuse (issue #4312): `efuse_extraction.lvs` extracts anode, link and
+        # cathode from one poly2 bar inside `efuse_mk` (the split-terminal
+        # `anode_marker` form). Its link `R` is `ignore_parameter`d, so an LVS
+        # request scopes the class with `{"efuse": ["L", "W"]}`.
+        ResistorDevice(
+            name="efuse",  # gf180mcu_fd_pr__efuse (subckt "efuse")
+            body=(30, 0),  # Poly2
+            marker=(125, 5),  # plfuse -- the link
+            sheet_rho_ohm_sq=28.5714,  # efuse_extraction.lvs
+            requires=((80, 5),),  # efuse_mk -- the scope
+            anode_marker=(100, 8),  # lvs_source
+            provenance=_gf180mcu_lvs_provenance(
+                "libs.tech/klayout/tech/lvs/rule_decks/efuse_extraction.lvs",
+                "gf180mcu_fd_pr__efuse",
+            ),
+        ),
         # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring
-        # sky130's `res_generic_m1`..`res_generic_m5`, issue #1621) -- see the
-        # module docstring's derivation note above this section for the full
-        # `res_derivations.lvs`/`res_extraction.lvs` transcription. Each is a
-        # plain 2-terminal `resistor(...)` (no bulk terminal), so
-        # `bulk_to_substrate` stays the default `False`.
+        # sky130's `res_generic_m1`..`res_generic_m5`, issue #1621) -- see
+        # the module docstring's derivation note above for the full
+        # transcription. Plain 2-terminal `resistor(...)` each: no bulk
+        # terminal, so `bulk_to_substrate` stays the default `False`.
         ResistorDevice(
             name="rm1",  # gf180mcu_fd_pr__rm1 (subckt "rm1")
             body=(34, 0),  # Metal1
@@ -3607,14 +3609,12 @@ EXTRACTION_DECK = ExtractionDeck(
             ),
         ),
         # Top-metal thickness flavour set `tm6k`/`tm9k`/`tm11k`/`tm30k`
-        # (issue #1640, mirroring `ppolyf_u_1k`'s own `flavour_option=
-        # "poly_res"` above, issue #595) -- see the module docstring's
-        # derivation note above this section for why this is one
-        # `ResistorDevice` entry with a caller-selectable flavour, not four
-        # always-on entries. `body`/`marker` are this curated deck's own
-        # already-established "top_metal = Metal5" convention (the module
-        # docstring note above explains the 6LM/MetalTop approximation this
-        # makes). Default flavour is `tm9k` (0.04 ohm/sq), matching
+        # (issue #1640, mirroring `ppolyf_u_1k`'s `flavour_option="poly_res"`
+        # above, issue #595) -- see the module docstring's derivation note
+        # for why this is one entry with a caller-selectable flavour, not
+        # four always-on entries. `body`/`marker` follow this deck's
+        # "top_metal = Metal5" convention (see that note for the 6LM/MetalTop
+        # approximation); default flavour `tm9k` (0.04 ohm/sq), matching
         # `gf180mcu.lvs`'s own `METAL_TOP = $metal_top || '9K'` default.
         ResistorDevice(
             name="tm9k",  # gf180mcu_fd_pr__tm9k (subckt "tm9k", METAL_TOP='9K' default)
