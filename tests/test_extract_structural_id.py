@@ -96,6 +96,7 @@ def _assemble_report(
             for entry in nets
         ],
         parasitics_report=None,
+        report_parasitics_shape=None,
         path=str(input_path),
         pdk_info=None,
         pin_renames=None,

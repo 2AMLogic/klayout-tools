@@ -140,6 +140,16 @@ def test_connectivity_is_preserved_through_extraction(tmp_path, pdk_root):
         ({}, "port_request_invalid"),
         ({"z_um": 1.0}, "port_request_invalid"),
         ({"x_um": "10"}, "port_request_invalid"),
+        # A >308-digit JSON int is "finite" to a bare ``abs(v) == inf`` test but
+        # overflows float(): it must be a contract error, not OverflowError.
+        ({"x_um": 10**400}, "port_request_invalid"),
+        ({"x_um": -(10**400)}, "port_request_invalid"),
+        ({"y_um": 10**400}, "port_request_invalid"),
+        ({"y_um": -(10**400)}, "port_request_invalid"),
+        ({"x_um": float("nan")}, "port_request_invalid"),
+        ({"x_um": float("inf")}, "port_request_invalid"),
+        ({"y_um": float("-inf")}, "port_request_invalid"),
+        ({"x_um": True}, "port_request_invalid"),
     ],
 )
 def test_infeasible_requests_fail_with_distinct_codes(tmp_path, pdk_root, req, code):
