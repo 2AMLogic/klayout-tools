@@ -41,6 +41,21 @@ _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 #: note). This is a closed set -- every other header field must agree.
 _IGNORED_HEADER_ATTRS = frozenset({"date", "revision", "comment"})
 
+#: The one header field whose value conflict gets a field-specific
+#: explanation and recovery hint (issue #6933): it is the fallback slew
+#: limit for every output pin without an explicit ``max_transition``.
+_DEFAULT_MAX_TRANSITION = "default_max_transition"
+
+#: Recovery hint appended to a ``default_max_transition`` conflict; the
+#: descriptor resolver prefixes the library and corner around it.
+_TRANSITION_RECOVERY = (
+    "Recovery: supply a single plain .lib that preserves each output's "
+    "original effective limit and set liberty.<cell_library>.<corner> to its "
+    "root-relative path (a prepared cell group can instead carry an explicit "
+    "pin max_transition wherever changing the shared header would change "
+    "that output's limit)"
+)
+
 #: Key carrying header text that is neither an attribute nor a group, so
 #: unrecognised residue still participates in the comparison (fail closed).
 _RESIDUE_KEY = "<other header text>"
@@ -120,7 +135,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            _compare_headers(first_path, header_fields, path, fields)
+            _compare_headers(first_path, header_fields, texts[0], path, fields, text)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -235,17 +250,30 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
 
 
 def _compare_headers(
-    first_path: str, first: dict[str, str], path: str, other: dict[str, str]
+    first_path: str,
+    first: dict[str, str],
+    first_text: str,
+    path: str,
+    other: dict[str, str],
+    other_text: str,
 ) -> None:
     """Raise :class:`LibertyMergeError` on the first header field that
     differs; a field present in one header and absent from the other is
-    reported as missing rather than as a value difference."""
+    reported as missing rather than as a value difference. A differing
+    ``default_max_transition`` instead raises the field-specific
+    explanation of :func:`_transition_conflict` (issue #6933)."""
     for key, value in first.items():
         if key not in other:
             raise LibertyMergeError(
                 f"cannot merge: '{key}' present in '{first_path}', missing in '{path}'"
             )
         if other[key] != value:
+            if key == _DEFAULT_MAX_TRANSITION:
+                raise LibertyMergeError(
+                    _transition_conflict(
+                        first_path, value, first_text, path, other[key], other_text
+                    )
+                )
             raise LibertyMergeError(
                 f"cannot merge: '{key}' differs: {_clip(value)} in "
                 f"'{first_path}', {_clip(other[key])} in '{path}'"
@@ -255,6 +283,97 @@ def _compare_headers(
             raise LibertyMergeError(
                 f"cannot merge: '{key}' missing in '{first_path}', present in '{path}'"
             )
+
+
+def _transition_conflict(
+    first_path: str,
+    first_value: str,
+    first_text: str,
+    other_path: str,
+    other_value: str,
+    other_text: str,
+) -> str:
+    """Message for a differing ``default_max_transition`` (issue #6933).
+
+    An output pin without its own ``max_transition`` is limited by its
+    source library's default, so which header survives changes that pin's
+    effective limit: name one such output when the conflicting members
+    contain one (the later file's first -- the merged header would be the
+    first file's, so its uncovered outputs are the ones that would silently
+    change), else make no claim about any particular pin.
+    """
+    head = (
+        f"cannot merge: 'default_max_transition' differs: {_clip(first_value)} "
+        f"in '{first_path}', {_clip(other_value)} in '{other_path}'"
+        " -- an output pin without its own max_transition uses its source "
+        "library's default_max_transition"
+    )
+    for path, value, text in (
+        (other_path, other_value, other_text),
+        (first_path, first_value, first_text),
+    ):
+        witness = _uncovered_output(text)
+        if witness is not None:
+            cell, pin = witness
+            return (
+                f"{head}: cell '{cell}' output '{pin}' in '{path}' has none "
+                f"and is limited by {value}, so no single shared header "
+                f"preserves both files' effective limits. {_TRANSITION_RECOVERY}"
+            )
+    return (
+        f"{head}, but every output pin in these files carries an explicit "
+        f"one, so neither default changes an output's effective limit. "
+        f"{_TRANSITION_RECOVERY}"
+    )
+
+
+def _uncovered_output(text: str) -> tuple[str, str] | None:
+    """First ``(cell, pin)`` output pin with no ``max_transition`` of its
+    own, or ``None`` when every output pin carries an explicit limit.
+
+    Uses the module's comment-, string- and brace-aware token scanner, so a
+    comment mentioning ``max_transition`` is not an override and one inside
+    a nested group (``timing()``) does not count; only the pin group's own
+    statements do.
+    """
+    cell = ""
+    pending: tuple[str, str] | None = None  # (group keyword, name) awaiting '{'
+    pin: tuple[str, int] | None = None  # (name, depth of the pin group body)
+    direction = ""
+    explicit = False
+    depth = 0
+    for kind, pos, end in _tokens(text):
+        if kind == "{":
+            if pending is not None:
+                if pending[0] == "cell":
+                    cell = pending[1]
+                else:  # a pin group opens; its body sits one level deeper
+                    pin = (pending[1], depth + 1)
+                    direction, explicit = "", False
+                pending = None
+            depth += 1
+        elif kind == "}":
+            depth -= 1
+            if pin is not None and depth == pin[1] - 1:
+                if direction == "output" and not explicit:
+                    return cell, pin[0]
+                pin = None
+        else:
+            word = text[pos:end]
+            nxt, ch = _next_significant(text, end)
+            if ch == "(" and word in ("cell", "pin"):
+                match = _CELL_NAME_RE.match(text, nxt)
+                if match is not None:
+                    _, ch2 = _next_significant(text, match.end())
+                    if ch2 == "{":
+                        pending = (word, match.group(1))
+            elif ch == ":" and pin is not None and depth == pin[1]:
+                semi = _find_terminator(text, nxt + 1)
+                if word == "direction":
+                    direction = _normalize_header(text[nxt + 1 : semi]).strip('"')
+                elif word == "max_transition":
+                    explicit = True
+    return None
 
 
 def _clip(value: str, limit: int = 80) -> str:

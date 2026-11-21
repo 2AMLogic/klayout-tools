@@ -246,7 +246,16 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Matching files are merged into one
+  and both files' values. A differing `default_max_transition` is refused
+  with an explanation: an output pin without its own `max_transition` is
+  limited by its source library's default, so no single shared header
+  preserves both files' effective output limits — the error names one such
+  cell/output from the conflicting files when they contain one. Recovery:
+  supply a single plain `.lib` that preserves each output's original
+  effective limit and set `liberty.<cell_library>.<corner>` to its
+  root-relative path (a prepared cell group can carry an explicit pin
+  `max_transition` wherever changing the shared header would otherwise
+  change that output's limit). Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized
