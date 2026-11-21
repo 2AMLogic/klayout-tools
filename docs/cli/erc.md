@@ -879,9 +879,10 @@ cannot see), the entry can declare the count — `nets[].islands`, issue
 **Substrate continuity between supply nets (issues #4384, #5336, #5343).**
 Two `kind: "supply"` nets that are one conductor through a shared p-substrate
 (or well) are reported by `erc.supply_short` with `via: "substrate"` and a
-`body` (`kind`, `id`, `ties`), found by a derived body-merge pass over the
-`ties[]` graph: only drawn, non-degenerate tap geometry joins anything, and
-the pass only ever *adds* findings. Whether it can be trusted depends on
+`body` (`kind`, `id`, `ties`, and since issue #5745 `joins`), found by a
+derived body-merge pass over the `ties[]` graph: only drawn, non-degenerate
+tap geometry joins anything, and the pass only ever *adds* findings. Whether
+it can be trusted depends on
 isolation (deep n-well / isolated p-well), which is **decidable or
 disclosed**: the substrate check is *evaluated* when isolation is derived
 (the deck declares a `substrate_isolation` layer), asserted
@@ -889,6 +890,19 @@ disclosed**: the substrate check is *evaluated* when isolation is derived
 `{"id": "erc.supply_short", "reason": "substrate_isolation_undecidable",
 "missing": [...]}` and no pass is claimed. The earlier
 `substrate_continuity_not_modelled` reason is retired.
+
+The `body.joins` array names the geometry that performed the merge, so a
+finding can be located without bisecting the asserted boxes: one
+`{net, tie, bbox}` entry (bbox in database units, like the finding's own
+`bbox`) per tap site that welded that `net` to this `body` through `tie` —
+plus `well_box`, the 0-based index into that tie's `ties[].well_boxes`, when
+the site came from an asserted region (lowest index when several boxes
+overlap it). A tap that physically sits inside a *drawn* well taps that well,
+not the substrate, so a substrate assertion (or complement) never claims
+another tie's well taps — an asserted `well_boxes` region reaching over a
+different net's drawn well cannot fabricate a merge (issue #5745). Which
+build graded a given report — and therefore whether it could see this
+attribution at all — is recorded in `provenance.klt_version`.
 
 | PDK family (`--deck`) | Isolation layer | Evaluated when | Otherwise disclosed because |
 |---|---|---|---|
@@ -2737,7 +2751,8 @@ klt erc routed.gds supply.erc.json --findings-only --omit-antenna-tables --forma
   validation, but the per-gate/per-level `skipped` entries become a single
   entry (id `antenna:[]`, reason `findings_only`) and the
   `gate_reference_level` `inapplicable` entries a single entry (id
-  `antenna:["gate_reference_level"]`). A `no_gates` entry is kept as is.
+  `antenna:["gate_reference_level"]`). Each entry's `count` gives the number
+  of units it represents. A `no_gates` entry keeps its unit shape.
   `coverage_state` is unchanged.
 - `status`, `erc_status`, `erc_findings`, `erc_finding_count`,
   `erc_coverage`, `nets`, `provenance` and the exit code are identical to the
@@ -2768,10 +2783,11 @@ null by construction (`gates[].levels[]`, one `coverage.skipped` record per
   floating_gate_checked, skipped_reason}` (`skipped_reason` is
   `"findings_only"`).
 - `coverage.skipped` holds one aggregate record (id `antenna:["levels"]`,
-  reason `findings_only`) and `coverage.inapplicable` one
-  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`)
-  instead of one per gate/level — declined work is still disclosed, never
-  silently empty. A zero-gate cell reports `no_gates` exactly as before.
+  reason `findings_only`) when there are skipped levels. With at least one
+  gate, `coverage.inapplicable` holds one reference-level record
+  (`antenna:["gate_reference_levels"]`, reason `gate_reference_level`).
+  Each `count` records the units the group represents. A zero-gate cell
+  reports the unit `no_gates` entry.
 - `erc_coverage.checked` carries a single `erc.floating_gate:[]` id in place
   of one per gate (present iff a gate exists, so the roll-up is unchanged).
   Every other `erc_coverage` entry — ties, nets, assertions — is untouched.
@@ -2780,7 +2796,7 @@ null by construction (`gates[].levels[]`, one `coverage.skipped` record per
 identical to the non-compact findings-only run. `--compact` without
 `--findings-only` is a clean exit-1 error: a full-antenna run's per-gate rows
 carry real verdicts, so there is nothing null to summarise. Default output
-(no `--compact`) is byte-identical to before; the `compact` key is absent.
+omits the `compact` key.
 
 ## JSON schema (the contract)
 
@@ -3046,6 +3062,11 @@ declined the accumulation, the same shape of caller-side skip as omitting
 (passive-only, issue #2896) records one inapplicable entry, id `antenna:[]`,
 reason `no_gates` -- independent of `--pdk`/`--findings-only`.
 
+When at least one antenna level is graded, `coverage.skipped` groups the
+ungraded gate/level pairs by skip reason and `coverage.inapplicable` groups
+the gate reference levels separately. Each group's `count` gives its units
+of work. Checked IDs and `gates[].levels[]` keep the per-gate results.
+
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
 per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
@@ -3223,7 +3244,17 @@ compares them with `provenance.input.content_hash` and
 run used `--deck`), with no ERC engine run. A report that recorded no hash is
 `drifted`, never a false pass. Relative echoed paths resolve against the
 current working directory; an echoed path that names no file carries an
-`input_not_found` block on its `checks[]` entry, as in `klt lvs --check`.
+`input_not_found` block on its `checks[]` entry, the shared diagnostic `klt
+drc --check` and `klt lvs --check` attach: five keys (`path`, `resolved`,
+`found_relative_to_report`, `resolved_against`, `hint`), exactly `klt drc
+--check`'s set. (`klt lvs --check`'s three entries add a sixth,
+`resolved_repo_root`, which ERC does not emit.) Because `--check` is
+mutually exclusive with the positional inputs, `klt erc` offers no
+input-override flag, so the `hint` names only the report's directory to run
+`--check` from -- no "or pass …" clause, as for `klt lvs --check`'s runset
+deck and unlike its layout and reference or `klt drc --check`'s input. The
+deck line (`provenance.deck.content_hash`, `--deck` runs) carries no such
+block; it resolves packaged decks by name.
 
 ```json
 {
@@ -3262,6 +3293,10 @@ it, or pin the producing version (`uvx --from "klayout-tools==X" klt erc
 `provenance.klt_git_commit`/`klt_reinstall_spec` (an older grader that predates
 their exclusion) or to a new `erc_coverage.inapplicable` entry is a tool-version
 signal, not layout drift.
+
+When rerunning an earlier ERC report with a build that emits counted antenna
+records, the coverage lists may differ in representation. The rerun diff
+reports that change even when the antenna verdicts agree.
 
 **Known limitation:** `--top` is not echoed in the ERC report, so `--rerun`
 cannot replay it and always runs with no top selected. A layout with more than

@@ -110,6 +110,23 @@ verdict still stands without independent confirmation. Mirrors `klt lvs`'s
 `options.netgen_binary`/`$KLT_NETGEN_BINARY`/`environment.netgen_binary`
 (issue #2373).
 
+**Wasm builds have a ~4 GiB memory ceiling (issue #5804).** A
+WASI-sandboxed `yosys` runs inside a wasm32 guest whose linear memory is
+capped at ~4 GiB. A heavy query — `sat -seq <depth>` over a flattened,
+liberty-modelled netlist of tens of thousands of cells, for example —
+allocates roughly with design size × unroll depth and can exceed that
+ceiling: the run dies mid-flight with a bare
+`wasmtime._trap.Trap … thrown Wasm exception` traceback and **no yosys
+`ERROR:` line at all**, and a caller cannot tell a solver limit from a
+broken install. The identical script completes under a native build of the
+same version, which has no such ceiling. `klt equiv` and `klt synthesize`
+detect that trap signature in a failed run that produced no `ERROR:` line
+and append a hint naming the ceiling and the
+`request.yosys_binary`/`$KLT_YOSYS_BINARY` native-build remedy above. No
+numeric cell-count or depth ceiling is claimed — the boundary is
+design-dependent, so pick a native build for large queries rather than
+reasoning from a threshold.
+
 ### `"yosys"` (default) — combinational
 
 Orchestrates Yosys's own built-in equivalence-checking primitives directly
@@ -281,9 +298,9 @@ Nothing is fabricated and nothing silently substitutes for it:
 | Field | Type | Description |
 | --- | --- | --- |
 | `gold` / `gate` | object | The two sides to compare. Required. |
-| `gold.sources` / `gate.sources` | array\<string\> | RTL/gate-level Verilog source file paths (`read_verilog` inputs), resolved relative to the request's own directory. Required, non-empty. `.sv`/`.svh` sources (case-insensitive) are read with `read_verilog -sv`; other extensions use plain `read_verilog`. SystemVerilog coverage is that of Yosys's `-sv` front end (issue #3797). |
+| `gold.sources` / `gate.sources` | array\<string\> | RTL/gate-level Verilog source file paths (`read_verilog` inputs), resolved relative to the request's own directory. `~` and `$VAR` are expanded. An unset `$VAR` is exit 1 naming the variable. Required, non-empty. `.sv`/`.svh` sources (case-insensitive) are read with `read_verilog -sv`; other extensions use plain `read_verilog`. SystemVerilog coverage is that of Yosys's `-sv` front end (issue #3797). |
 | `gold.top` / `gate.top` | string | That side's top module name. The two sides may legally use the *same* top module name (e.g. both `"top"`) — each is elaborated in its own namespace before comparison. Required. |
-| `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. |
+| `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. Resolved like `sources` (relative to the request; `~` and `$VAR` are expanded). |
 | `gold.defines` / `gate.defines` | object \| omitted | Verilog preprocessor defines for that side, `name -> string \| null` (issue #4196): each is passed as `read_verilog -D NAME[=VALUE]` (`null` = bare `-D NAME`), in sorted-name order. Keys must be Verilog identifiers; values may use only letters, digits and `_ . , : / + - = @ %`. `klt synthesize --verify-equivalence` sets it on the gold side so the RTL is preprocessed as it was synthesised. |
 | `port_map` | object\<string,string\> \| null | The **I/O mapping** between the two sides, `{"<gate_port_name>": "<gold_port_name>"}` — only needed when a port was renamed between the two representations (e.g. by a synthesis or netlist-rewriting step that does not preserve top-level port names). Ports not listed are assumed identically named on both sides. Omit (or `null`) when both sides already share the same port names — the common case. |
 | `engine` | string | `"yosys"` (default, combinational) or `"yosys-sequential"` (register-correspondence sequential, #1313). |
