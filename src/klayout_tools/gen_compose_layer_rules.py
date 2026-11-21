@@ -1,6 +1,6 @@
 """Per-PDK layer-rule resolution for ``klt gen-compose`` routing (#5426).
 
-Relocated out of ``gen_compose_routing.py``, which sat exactly at
+Relocated verbatim out of ``gen_compose_routing.py``, which sat exactly at
 its per-file size ratchet ceiling with no headroom for routing work. This
 cluster is a pure leaf: it resolves ``routing.layer_role`` to a
 ``(layer, datatype)`` pair and looks up the width / area / enclosure floors
@@ -13,8 +13,8 @@ Same conventions as the module it came from (and as
 ``gen_compose.py``'s own module-scope names (``GenComposeError``,
 ``_VIA_LANDING_SIZE_UM``, ``_VIA_DROP_SIZE_UM``) are imported *inside* the
 functions that use them, so this module never has a load-time dependency
-back on ``gen_compose.py``. ``gen_compose_routing`` re-imports the original
-names at module scope, so each pre-existing
+back on ``gen_compose.py``. ``gen_compose_routing`` re-imports every name
+below at module scope, so each pre-existing
 ``from klayout_tools.gen_compose_routing import <name>`` path -- and
 ``gen_compose``'s own re-export of it -- keeps resolving unchanged.
 """
@@ -24,6 +24,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from . import gen_compose_top_metal_floors as _top_metal_floors
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
 
@@ -180,11 +181,57 @@ def _min_enclosing_margin_um_for_layer(
     return max(candidates, key=lambda entry: entry[0], default=None)
 
 
+def _top_metal_width_floor_um(
+    variant: str, layer: tuple[int, int] | None
+) -> float | None:
+    """The variant-keyed native top-metal width floor (um) on ``layer``,
+    or ``None`` when the variant has none or ``layer`` is not that
+    family's own ``top_metal`` role layer (#6612).
+
+    The single lookup both pad-size resolvers compose as a ``max``: the
+    drawing-path floor :func:`_landing_pad_floor_um` (whose result
+    :func:`_resolve_landing_pad_sizes` actually draws) and the search
+    predictor :func:`_landing_pad_side_um_for_layer` -- one table, so the
+    drawn pads and the landing search can never disagree on it again.
+    The exact-variant dict lookup gates the (unraisable-for-these-
+    variants) family resolution, so an unknown variant still degrades to
+    ``None``, never raises.
+    """
+    width_floor_um = _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_UM.get(variant)
+    if width_floor_um is None:
+        return None
+    if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
+        return None
+    return width_floor_um
+
+
+def _top_metal_area_floor_side_um(
+    variant: str, layer: tuple[int, int] | None
+) -> float | None:
+    """The variant-keyed native top-metal area floor expressed as the
+    square side (um) it requires on ``layer``, or ``None`` when the
+    variant has none or ``layer`` is not that family's own ``top_metal``
+    role layer (#6645).
+
+    Same exact-variant dict + top-metal role check as
+    :func:`_top_metal_width_floor_um` above -- the native ``MT.4``
+    minimum *area* expressed as the side of the smallest square that
+    clears it (``sqrt``), so both pad-size resolvers can compose it as a
+    plain ``max`` beside every other floor.
+    """
+    area_floor_um2 = _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_UM2.get(variant)
+    if area_floor_um2 is None:
+        return None
+    if layer != _PDK_ROLE_LAYERS[_pdk_family(variant)]["top_metal"]:
+        return None
+    return math.sqrt(area_floor_um2)
+
+
 def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
     """A landing pad's baseline/area side length (um) on ``layer`` (#2072).
 
-    :func:`_landing_pad_side_um_for_pair` additionally applies each hop's
-    via-enclosure floor (#2074).
+    :func:`_resolve_landing_pad_sizes` additionally applies each hop's
+    via-enclosure floor before passing the final size into drawing (#2074).
 
     A via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the PDK's
     contact-enclosure convention) is drawn on *every* hop of a multi-level
@@ -207,54 +254,178 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     regardless of the extra size), or ``_VIA_LANDING_SIZE_UM`` unchanged
     when the layer has no such rule (or the family/deck cannot be
     resolved) -- an unresolvable family degrades to the pre-#2072 fixed
-    size, never blocks routing.
+    size, never blocks routing. A variant's native top-metal width floor
+    (:data:`.gen_compose_top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_UM`,
+    #6612) and area floor
+    (:data:`.gen_compose_top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_UM2`,
+    #6645) additionally raise
+    the result on that variant's own ``top_metal`` layer only, each as a
+    ``max`` -- a larger area-driven side still wins. Those floors are the
+    same :func:`_top_metal_width_floor_um` /
+    :func:`_top_metal_area_floor_side_um` lookups the drawing-path floor
+    :func:`_landing_pad_floor_um` composes, so this search footprint and
+    the pad ``compose()`` actually draws cannot disagree on them.
 
-    Drawing and the own-block self-notch check use the resolved side
-    (#6469). The router's spacing/collision pre-checks still use the fixed
-    baseline, following #1501, so an enlarged pad can still create a
-    spacing violation against a neighbouring shape that ``klt drc`` catches.
+    Drawing and the own-block self-notch check use the resolved side. The
+    router’s other spacing checks retain their search footprint (#6469).
     """
     from .gen_compose import _VIA_LANDING_SIZE_UM
 
     area_floor = _min_area_um2_for_layer(variant, layer)
     if area_floor is None:
-        return _VIA_LANDING_SIZE_UM
-    needed_side_um = math.sqrt(area_floor[0])
-    return max(_VIA_LANDING_SIZE_UM, needed_side_um)
+        side_um = _VIA_LANDING_SIZE_UM
+    else:
+        side_um = max(_VIA_LANDING_SIZE_UM, math.sqrt(area_floor[0]))
+    # #6612: the variant-keyed native top-metal width floor -- the same
+    # lookup the drawing-path floor below composes.
+    top_metal_floor = _top_metal_width_floor_um(variant, layer)
+    if top_metal_floor is not None:
+        side_um = max(side_um, top_metal_floor)
+    # #6645: the variant-keyed native top-metal area floor, expressed as
+    # the square side it requires -- same composition, same layer gate.
+    top_metal_area_side = _top_metal_area_floor_side_um(variant, layer)
+    if top_metal_area_side is not None:
+        side_um = max(side_um, top_metal_area_side)
+    return side_um
+
+
+def _min_enclosing_adjacent_margin_um_for_layer(
+    variant: str,
+    layer: tuple[int, int] | None,
+    other_layer: tuple[int, int] | None,
+) -> tuple[float, str] | None:
+    """Tightest two-adjacent-edges enclosure rule for the layer pair.
+
+    Same shape as :func:`_min_enclosing_margin_um_for_layer` over the
+    ``"enclosing_adjacent"`` check family (sky130's ``via.5a``/``m2.5``
+    rules, #3316): the threshold a *centered* square pad must leave on
+    every side -- a centered square's four margins are equal, so the rule
+    fires (two adjacent edges both under it) unless the margin clears the
+    threshold outright. Used by :func:`_intermediate_landing_pad_floor_um`
+    (issue #6058) to floor a minimal-ladder intermediate pad; terminal
+    pads never shrink below the fixed baseline, so they never need it.
+    """
+    if layer is None or other_layer is None:
+        return None
+    try:
+        family = _pdk_family(variant)
+        deck_rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except (GenError, UnknownDeckError):
+        return None
+    candidates = (
+        (rule.threshold_dbu * nominal_dbu_um, rule.id)
+        for rule in deck_rules
+        if rule.check == "enclosing_adjacent"
+        and rule.layer == layer
+        and rule.other_layer == other_layer
+        and rule.derived_layer is None
+    )
+    return max(candidates, key=lambda entry: entry[0], default=None)
+
+
+def _landing_pad_floor_um(
+    variant: str,
+    pad_layer: tuple[int, int],
+    via_layer: tuple[int, int],
+    via_side_um: float,
+) -> tuple[float, list[tuple[str, float]]]:
+    """The deck floor one ``(landing, via)`` landing-pad pair must clear.
+
+    Returns ``(floor_side_um, floors)``: ``floor_side_um`` is the smallest
+    pad side the resolved deck's own rules permit on this pair -- the larger
+    of the pad layer's minimum-area side (issue #2072) and via side plus
+    twice the pair's minimum enclosing-margin (issue #2074), additionally
+    raised on a 5LM gf180mcu variant's own top metal by the native-runset
+    ``MT.1`` width floor of issue #6612 and ``MT.4`` area floor of issue
+    #6645 (variant-keyed because the curated deck cannot express either) --
+    and ``floors`` is one ``(rule_id, required_side_um)`` entry per rule
+    that shapes it, so a rejection can name the binding rule rather than a
+    bare threshold. Both are empty when
+    the layer carries no such rule (or the family/deck cannot be resolved):
+    anything the caller asks for is then legal.
+
+    Issue #5803: this is the floor ``routing.landing_pad_size_um``'s
+    override is validated against -- a pad the deck forbids is an
+    application error naming the rule, not a silently grown one. The #6612
+    width floor participates in that validation: an override below
+    0.44um on gf180mcuC/D Metal5 is rejected naming ``MT.1``, exactly as
+    a below-deck-floor override on any other layer is. So does the #6645
+    area floor: an override below 0.75um on the same pair is rejected
+    naming ``MT.4`` -- the larger floor, and therefore the binding rule
+    an override there actually violates.
+    """
+    floor_side = 0.0
+    floors: list[tuple[str, float]] = []
+    area_floor = _min_area_um2_for_layer(variant, pad_layer)
+    if area_floor is not None:
+        needed = math.sqrt(area_floor[0])
+        floors.append((area_floor[1], needed))
+        floor_side = max(floor_side, needed)
+    enclosure = _min_enclosing_margin_um_for_layer(variant, pad_layer, via_layer)
+    if enclosure is not None:
+        needed = via_side_um + 2 * enclosure[0]
+        floors.append((enclosure[1], needed))
+        floor_side = max(floor_side, needed)
+    width_floor = _top_metal_width_floor_um(variant, pad_layer)
+    if width_floor is not None:
+        floors.append(
+            (_top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID, width_floor)
+        )
+        floor_side = max(floor_side, width_floor)
+    area_side = _top_metal_area_floor_side_um(variant, pad_layer)
+    if area_side is not None:
+        floors.append(
+            (_top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID, area_side)
+        )
+        floor_side = max(floor_side, area_side)
+    return floor_side, floors
 
 
 def _landing_pad_side_um_for_pair(
     variant: str,
     pad_layer: tuple[int, int],
     via_layer: tuple[int, int],
-    via_side_um: float,
+    via_side: float,
 ) -> float:
-    """Landing-pad side before array growth, including area and enclosure floors."""
-    side = _landing_pad_side_um_for_layer(variant, pad_layer)
-    enclosure = _min_enclosing_margin_um_for_layer(variant, pad_layer, via_layer)
-    if enclosure is not None:
-        side = max(side, via_side_um + 2 * enclosure[0])
-    return side
+    """Default drawn side of one landing pad, before via-array growth."""
+    from .gen_compose import _VIA_LANDING_SIZE_UM
+
+    floor, _ = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
+    return max(_VIA_LANDING_SIZE_UM, floor)
 
 
 def _resolve_landing_pad_sizes(
     routed_geometry: list[dict[str, Any]],
     variant: str,
     via_drop_size_um: dict[tuple[int, int], float],
+    override_um: float | None = None,
 ) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
     """Landing-pad sides keyed by ``(landing_layer, via_layer)`` (#2074).
 
     Each side of each hop independently clears the fixed baseline, its
-    metal's area floor (#2072), and the actual via side plus twice that
-    pair's enclosure margin. Include the via in the key: the same metal
-    can enclose different cuts with different margins on adjacent hops.
-    Missing enclosure rules leave the baseline/area floor unchanged.
+    metal's area floor (#2072), the actual via side plus twice that
+    pair's enclosure margin, and -- on a 5LM gf180mcu variant's own top
+    metal -- the native ``MT.1`` width floor (#6612) and ``MT.4`` area
+    floor (#6645). Include the via in
+    the key: the same metal can enclose different cuts with different
+    margins on adjacent hops. Missing enclosure rules leave the
+    baseline/area floor unchanged.
+
+    ``override_um`` (issue #5803) is ``routing.landing_pad_size_um``: a
+    caller-set pad side replacing the fixed baseline. A pair whose deck
+    floor exceeds it is an application error naming the binding rule --
+    silently growing the pad back would defeat the override's whole purpose
+    (reconciling a generator's terminal pitch with the pad footprint),
+    exactly the #1548 silently-dropped-intent failure mode. A pair with no
+    shaping rule draws at exactly the override; the default (``None``) is
+    byte-for-byte the pre-#5803 resolution.
 
     Resolve once per distinct pair and pass the result into drawing; the
     router's existing spacing pre-checks keep their baseline footprint,
     as with the area and via-width floors described above.
     """
-    from .gen_compose import _VIA_DROP_SIZE_UM
+    from .gen_compose import _VIA_DROP_SIZE_UM, GenComposeError
 
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
@@ -262,13 +433,32 @@ def _resolve_landing_pad_sizes(
             via_layer = drop["via_layer"]
             for pad_layer in drop.get("landing_layers", ()):
                 pair = (pad_layer, via_layer)
-                if pair not in landing_pad_size_um:
+                if pair in landing_pad_size_um:
+                    continue
+                via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
+                if override_um is None:
                     landing_pad_size_um[pair] = _landing_pad_side_um_for_pair(
-                        variant,
-                        pad_layer,
-                        via_layer,
-                        via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM),
+                        variant, pad_layer, via_layer, via_side
                     )
+                    continue
+                floor_side, floors = _landing_pad_floor_um(
+                    variant, pad_layer, via_layer, via_side
+                )
+                if override_um < floor_side - 1e-9:
+                    rule_id, needed = max(floors, key=lambda f: f[1])
+                    raise GenComposeError(
+                        f"request.routing.landing_pad_size_um "
+                        f"({override_um:.4g}um) is below the resolved PDK "
+                        f"deck's own floor for a landing pad on layer "
+                        f"{pad_layer} over via layer {via_layer} -- "
+                        f"'{rule_id}' requires >= {needed:.4g}um. A "
+                        "smaller pad would draw a guaranteed `klt drc` "
+                        "violation; request at least "
+                        f"{floor_side:.4g}um for this deck, or omit "
+                        "routing.landing_pad_size_um to keep the default "
+                        "pads"
+                    )
+                landing_pad_size_um[pair] = override_um
     return landing_pad_size_um
 
 

@@ -38,21 +38,30 @@ pytestmark = pytest.mark.usefixtures(
 
 
 @pytest.mark.parametrize(
-    "options,home_init,source",
+    "options,home_init,source,ambient",
     [
-        ({"ngspice_init": ["set wnflag=1"]}, None, "request"),
-        ({"threads_per_worker": 2}, None, "thread_pin"),
-        ({"threads_per_worker": 1, "ngspice_init": ["set wnflag=1"]}, None, "request"),
-        ({}, "set wnflag=0\n", "home"),
-        ({}, None, "none"),
+        ({"ngspice_init": ["set wnflag=1"]}, None, "request", None),
+        ({"threads_per_worker": 2}, None, "thread_pin", None),
+        (
+            {"threads_per_worker": 2, "ngspice_init": ["set wnflag=1"]},
+            None,
+            "request",
+            "8",
+        ),
+        ({}, "set wnflag=0\n", "home", "4"),
+        ({}, None, "none", None),
     ],
 )
 @pytest.mark.parametrize("attach", [False, True])
 @pytest.mark.parametrize("state,exit_code", [("done", "0"), ("failed", "137")])
-def test_batch_collects_init_from_worker_report(
-    tmp_path, monkeypatch, options, home_init, source, state, exit_code, attach
+def test_batch_collects_init_and_pin_from_worker_report(
+    tmp_path, monkeypatch, options, home_init, source, ambient, state, exit_code, attach
 ):
     with monkeypatch.context() as local_patch:
+        if ambient is None:
+            local_patch.delenv("OMP_NUM_THREADS", raising=False)
+        else:
+            local_patch.setenv("OMP_NUM_THREADS", ambient)
         report = _init_report(
             tmp_path, local_patch, options=options, home_init=home_init
         )
@@ -62,23 +71,30 @@ def test_batch_collects_init_from_worker_report(
     runner.default = fake_completed(_status(state, exit_code=exit_code))
     runner.outputs = {
         "report.json": json.dumps(report),
-        "worker_environment.json": _capture(),
+        "worker_environment.json": _capture(omp_num_threads=ambient),
     }
     _, _, environment = _run_one_job(tmp_path, monkeypatch, runner, attach=attach)
     if attach:
         assert not runner.argvs_matching("launch")
-    assert environment["worker_environment"]["ngspice_init"] == expected
-    assert str(tmp_path) not in json.dumps(
-        environment["worker_environment"]["ngspice_init"]
-    )
+    observed = environment["worker_environment"]
+    assert observed["ngspice_init"] == expected
+    assert observed["threads_per_worker"] == options.get("threads_per_worker")
+    assert observed["omp_num_threads"] == ambient
+    assert str(tmp_path) not in json.dumps(observed["ngspice_init"])
 
 
 @pytest.mark.parametrize("capture", [None, "{bad json"])
-def test_init_is_available_without_preflight_capture(tmp_path, monkeypatch, capture):
+def test_report_observations_survive_missing_preflight(tmp_path, monkeypatch, capture):
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
-    block = {"source": "home", "lines": None, "sha256": _sha("set wnflag=1\n")}
-    runner.outputs = {"report.json": _sim_report(ngspice_init=block)}
+    block = {
+        "source": "thread_pin",
+        "lines": ["set num_threads=2"],
+        "sha256": _sha("set num_threads=2\n"),
+    }
+    runner.outputs = {
+        "report.json": _sim_report(ngspice_init=block, threads_per_worker=2)
+    }
     if capture is not None:
         runner.outputs["worker_environment.json"] = capture
     _, _, environment = _run_one_job(tmp_path, monkeypatch, runner)
@@ -86,16 +102,23 @@ def test_init_is_available_without_preflight_capture(tmp_path, monkeypatch, capt
         "absent" if capture is None else "malformed"
     )
     assert environment["worker_environment"]["ngspice_init"] == block
+    assert environment["worker_environment"]["threads_per_worker"] == 2
 
 
 @pytest.mark.parametrize("report", [None, {}, {"environment": []}, {"environment": {}}])
 def test_legacy_report_is_unknown(report, tmp_path):
-    assert (
-        sb._read_job_identity(str(tmp_path), report=report)["worker_environment"][
-            "ngspice_init"
-        ]
-        is None
-    )
+    env = sb._read_job_identity(
+        str(tmp_path), {"options": {"threads_per_worker": 7}}, report=report
+    )["worker_environment"]
+    assert env["ngspice_init"] is None
+    assert env["threads_per_worker"] is None
+
+
+@pytest.mark.parametrize("value", [None, True, False, 0, -1, "2", 2.0, [2], {}])
+def test_malformed_worker_pin_is_unknown(value, tmp_path):
+    report = {"environment": {"threads_per_worker": value}}
+    observed = sb._read_job_identity(str(tmp_path), report=report)["worker_environment"]
+    assert observed["threads_per_worker"] is None
 
 
 @pytest.mark.parametrize(
@@ -142,15 +165,21 @@ def test_missing_worker_data_never_reads_client_home(tmp_path, monkeypatch):
     assert env["worker_environment"]["ngspice_init"] is None
 
 
-def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
-    blocks = {}
+@pytest.mark.parametrize("pins", [{0: None, 2: None}, {0: 2, 2: 3}])
+def test_each_shard_retains_its_own_worker_observations(tmp_path, monkeypatch, pins):
+    reports = {}
     for first, home_init in [(0, "set wnflag=0\n"), (2, "set wnflag=1\n")]:
         workdir = tmp_path / str(first)
         workdir.mkdir()
         with monkeypatch.context() as local_patch:
-            report = _init_report(workdir, local_patch, home_init=home_init)
-        blocks[first] = report["environment"]["ngspice_init"]
-    assert blocks[0]["sha256"] != blocks[2]["sha256"]
+            report = _init_report(
+                workdir,
+                local_patch,
+                home_init=home_init,
+                options={"threads_per_worker": pins[first]},
+            )
+        reports[first] = report["environment"]
+    assert reports[0]["ngspice_init"]["sha256"] != reports[2]["ngspice_init"]["sha256"]
     _pin_client_version(monkeypatch)
     runner = _FakeRunner()
     runner.default = fake_completed(_status("done"))
@@ -167,7 +196,7 @@ def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
                     corner_ids=tuple(
                         f"tt_1.800_{int(point['temperature_c'])}" for point in points
                     ),
-                    ngspice_init=blocks[first],
+                    **reports[first],
                 ),
                 "worker_environment.json": _capture(),
             }
@@ -194,7 +223,11 @@ def test_each_shard_retains_its_own_worker_home_digest(tmp_path, monkeypatch):
     )
     assert [
         entry["worker_environment"]["ngspice_init"] for entry in environment["fleet"]
-    ] == [blocks[0], blocks[2]]
+    ] == [reports[0]["ngspice_init"], reports[2]["ngspice_init"]]
+    assert [
+        entry["worker_environment"]["threads_per_worker"]
+        for entry in environment["fleet"]
+    ] == [pins[0], pins[2]]
 
 
 def test_total_init_content_is_bounded():

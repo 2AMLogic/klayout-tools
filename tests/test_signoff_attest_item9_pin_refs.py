@@ -117,14 +117,14 @@ def test_no_pdk_form_is_not_treated_as_a_reference(tmp_path):
 
 def test_tools_may_mix_a_literal_and_a_reference(tmp_path):
     _, inventory = _toolchain_repo(
-        tmp_path, {"tools": {"klt": "0.7.0", "ngspice": _NG_REF}}
+        tmp_path, {"tools": {"yosys": "0.48", "ngspice": _NG_REF}}
     )
 
     envelope = build_attestation(9, inventory)
 
     tools = _pin_check(envelope, "tools")
     assert tools["passed"] is True
-    assert tools["value"] == {"klt": "0.7.0", "ngspice": "a1b2c3d4e5f6"}
+    assert tools["value"] == {"yosys": "0.48", "ngspice": "a1b2c3d4e5f6"}
     assert tools["resolved_from"] == {"ngspice": _NG_REF}
 
 
@@ -196,6 +196,9 @@ def test_literal_only_pins_keep_the_envelope_unchanged(tmp_path):
 
     envelope = build_attestation(9, inventory)
 
+    assert [
+        c["role"] for c in envelope["attestation"]["checks"] if c["check"] == "pin"
+    ] == ["pdk", "tools"]
     assert _pin_check(envelope, "pdk") == {
         "check": "pin",
         "role": "pdk",

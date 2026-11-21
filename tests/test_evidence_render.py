@@ -147,6 +147,75 @@ def test_missing_record_and_bad_pointer(repo):
     _fails(repo, "does not resolve")
 
 
+# --------------------------------------------------------------------------- #
+# Issue #6860: cell pointers resolve through the shared RFC 6901 walk
+# (`klayout_tools._json_pointer`): strict array indexes (no `-1`, no `01`),
+# strict `~`-escapes, and the empty pointer vs. the single-slash distinction.
+# --------------------------------------------------------------------------- #
+
+
+def test_pointer_strict_array_indexes(repo):
+    _write_json(repo / "evidence" / "arr.json", {"readings": [12, 34]})
+    _write_json(
+        repo / "spec.json",
+        _spec([["a", {"record": "evidence/arr.json", "pointer": "/readings/1"}, 1]]),
+    )
+    _render(repo)
+    assert "| a | 34 |" in (repo / "docs" / "d.md").read_text()
+    for bad in ("/readings/-1", "/readings/01"):
+        _write_json(
+            repo / "spec.json",
+            _spec([["a", {"record": "evidence/arr.json", "pointer": bad}, 1]]),
+        )
+        _fails(repo, "does not resolve")
+
+
+def test_pointer_escapes_strict(repo):
+    _write_json(repo / "evidence" / "esc.json", {"a/b": 5, "a~b": 6})
+    _write_json(
+        repo / "spec.json",
+        _spec([["a", {"record": "evidence/esc.json", "pointer": "/a~1b"}, 1]]),
+    )
+    _render(repo)
+    assert "| a | 5 |" in (repo / "docs" / "d.md").read_text()
+    _write_json(
+        repo / "spec.json",
+        _spec([["a", {"record": "evidence/esc.json", "pointer": "/a~0b"}, 1]]),
+    )
+    _render(repo)
+    assert "| a | 6 |" in (repo / "docs" / "d.md").read_text()
+    _write_json(
+        repo / "spec.json",
+        _spec([["a", {"record": "evidence/esc.json", "pointer": "/a~2b"}, 1]]),
+    )
+    _fails(repo, "does not resolve")
+
+
+def test_pointer_empty_is_whole_record_slash_is_empty_key(repo):
+    _write_json(repo / "evidence" / "whole.json", [3, 4])
+    _write_json(
+        repo / "spec.json",
+        _spec([[{"record": "evidence/whole.json", "pointer": ""}, 1, 2]]),
+    )
+    _render(repo)
+    assert "| [3, 4] | 1 | 2.00 |" in (repo / "docs" / "d.md").read_text()
+    _write_json(repo / "evidence" / "ekey.json", {"": "empty", "n": 7})
+    _write_json(
+        repo / "spec.json",
+        _spec([[{"record": "evidence/ekey.json", "pointer": "/"}, 1, 2]]),
+    )
+    _render(repo)
+    assert "| empty | 1 | 2.00 |" in (repo / "docs" / "d.md").read_text()
+
+
+def test_pointer_without_leading_slash_keeps_its_own_error(repo):
+    _write_json(
+        repo / "spec.json",
+        _spec([["a", {"record": "evidence/a.json", "pointer": "n"}, 1]]),
+    )
+    _fails(repo, "must start with '/'")
+
+
 def test_record_outside_root_rejected(repo):
     _write_json(
         repo / "spec.json",
