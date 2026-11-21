@@ -1454,9 +1454,12 @@ def _resolve_requires_tools(
     Each entry is ``{"name": str, "version": str|null, "sha256": str|null}``.
     ``name`` is looked up with ``shutil.which`` on ``request.env["PATH"]`` when
     that is set (else the ambient ``PATH``); ``version`` is a substring match on
-    the tool's ``--version`` output; ``sha256`` is compared with the resolved
-    binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
-    Returns the ``environment.tools`` echo (``[]`` when omitted).
+    the first line the tool prints for its version probe (``--version``, or the
+    executable-specific argument in ``_TOOL_VERSION_ARGS`` -- ``-V`` for
+    ``iverilog``, which rejects ``--version``; issue #7094); ``sha256`` is
+    compared with the resolved binary's digest. Every unmet tool is listed in
+    one ``missing_tool`` error. Returns the ``environment.tools`` echo (``[]``
+    when omitted).
     """
     entries = _requires_tool_entries(requires_tools)
     search_path = env.get("PATH")
@@ -1540,7 +1543,8 @@ def _check_required_tool(
             "reason": "not found",
         }
         return None, missing
-    observed = _tool_version_output(resolved, run_env)
+    version_arg = _tool_version_arg(resolved)
+    observed = _tool_version_output(resolved, run_env, version_arg)
     try:
         digest = sha256_file(resolved)
     except OSError:
@@ -1553,7 +1557,7 @@ def _check_required_tool(
     }
     problems = []
     if want_version is not None and (observed is None or want_version not in observed):
-        problems.append(f"version {want_version!r} not in --version output")
+        problems.append(f"version {want_version!r} not in {version_arg} output")
     if want_sha256 is not None and digest != want_sha256.lower():
         problems.append(f"sha256 {want_sha256} != {digest}")
     if not problems:
@@ -1567,12 +1571,28 @@ def _check_required_tool(
     return tool, unmet
 
 
-def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
-    """First non-empty line of ``<path> --version`` (stdout, else stderr);
+#: Version-probe argument for executables that do not accept ``--version``
+#: (issue #7094), keyed by executable basename. ``iverilog`` reuses the ``-V``
+#: the Icarus engine-version probe already uses; every other tool gets
+#: ``--version``.
+_TOOL_VERSION_ARGS = {
+    _ENGINE_VERSION_COMMANDS["icarus"][0][0]: _ENGINE_VERSION_COMMANDS["icarus"][0][1],
+}
+
+
+def _tool_version_arg(path: str) -> str:
+    """The version-probe argument for the executable at ``path``."""
+    return _TOOL_VERSION_ARGS.get(os.path.basename(path), "--version")
+
+
+def _tool_version_output(
+    path: str, env: dict[str, str], version_arg: str = "--version"
+) -> str | None:
+    """First non-empty line of ``<path> <version_arg>`` (stdout, else stderr);
     ``None`` if it cannot run. A non-zero exit still counts when it printed."""
     try:
         proc = subprocess.run(
-            [path, "--version"],
+            [path, version_arg],
             capture_output=True,
             text=True,
             timeout=10,
