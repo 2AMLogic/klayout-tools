@@ -80,9 +80,8 @@ def _reference_source_census(
             # could not resolve becomes a placeholder circuit whose name
             # carries the call's parameters (``NAME(PARAM=..,..)``) -- the
             # callee is the part before the first ``(``.
-            callee = subcircuit.circuit_ref
-            if callable(callee):
-                callee = callee()
+            circuit_ref = subcircuit.circuit_ref
+            callee = circuit_ref() if callable(circuit_ref) else circuit_ref
             name = str(getattr(callee, "name", "") or "")
             name = name.split("(", 1)[0].strip().upper()
             if name in device_list:

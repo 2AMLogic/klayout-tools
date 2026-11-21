@@ -5336,10 +5336,7 @@ def _grade_check_outcome(
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
         if applied is not None:
             return {"foundry_cell_exceptions": applied}, None
-        failure_detail = {
-            **failure_detail,
-            "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
-        }
+        failure_detail["foundry_cell_exceptions"] = {"applied": False, "lapsed": lapsed}
     reason = _non_passing_reason(kind, envelope, allowed_kinds=allowed_kinds)
     if reason == _REASON_RUNSET_UNRECOGNISED_DEVICE:
         # Issue #6902: name the recognition gaps (disclosure only).

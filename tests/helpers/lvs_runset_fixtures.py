@@ -132,3 +132,12 @@ def request(tmp_path, n_dev, spice=SPICE_ONE, **extra):
         **extra,
     }
     return json.dumps(request)
+
+
+def assert_nmos_reference_census(report, *, expected_layout):
+    """The fixture reference contains one plain NMOS card."""
+    assert report["device_census"] == {
+        "layout": expected_layout,
+        "reference": {"NMOS": 1},
+        "reference_source": {"NMOS": 1},
+    }

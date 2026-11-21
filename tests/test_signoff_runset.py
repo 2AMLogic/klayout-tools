@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 from klayout_tools import signoff_runset
-from klayout_tools.signoff import build_tier_report
+from klayout_tools.signoff import build_tier_report, describe_grader
 from test_signoff import (
     LVS_MATCH_ENVELOPE,
     LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
@@ -454,3 +454,13 @@ def test_sky130_pin_digest_is_the_one_committed_reports_record():
     entry must carry exactly it so those reports need no re-run for the pin
     (they do need one for the evidence field, which they predate)."""
     assert SKY130_RUNSET_HASH in signoff_runset.PINNED_RUNSETS
+
+
+def test_describe_grader_lists_pinned_runsets():
+    result = describe_grader()
+    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
+        "ihp-sg13g2",
+        "ihp-sg13cmos5l",
+        "gf180mcu",
+        "sky130",
+    }
