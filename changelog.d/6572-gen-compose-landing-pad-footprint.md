@@ -1,0 +1,1 @@
+- **`klt gen-compose` `ports_from_labels` access search clears the landing pad that compose draws, so a pad exactly at the deck's spacing is no longer rejected for a one-DBU rounding difference** (#6572, 2026-11-18).

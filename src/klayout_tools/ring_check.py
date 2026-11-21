@@ -416,7 +416,7 @@ def _assert_annulus(
     # Exactly one polygon, but not exactly one hole.
     (polygon,) = polygons
     if hole_count == 0:
-        breaks = _locate_gaps(kdb, region)
+        breaks = _locate_gaps(region)
         if breaks:
             return [
                 _violation(
@@ -469,7 +469,7 @@ def _assert_annulus(
     ]
 
 
-def _locate_gaps(kdb: Any, region: Any) -> list[Any]:
+def _locate_gaps(region: Any) -> list[Any]:
     """Locate the break(s) in a single-polygon, hole-less broken ring.
 
     A gap cut into one segment of a ring merges the inner opening into the

@@ -26,7 +26,9 @@ when that section is *eligible*:
   metal exactly (no overlap), and those intervals are **all** the metal the
   polygon has at the cut -- a cell the mesh models as flowing the other way
   leaves metal unmapped, and the cut is then not used;
-- every member has a solved current and a declared limit;
+- every member has a solved current -- and, for a *verdict*, a declared limit
+  (the density in :func:`island_section_densities` needs no limit, issue
+  #6525);
 - the members share one layer and one merged polygon (one connected piece of
   metal edges), so width is never lent across a gap, a layer or a polygon.
 
@@ -42,6 +44,7 @@ and its verdict is byte-identical to what it was before this module.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from typing import Any, NamedTuple
 
 from ._unionfind import UnionFind
@@ -161,13 +164,17 @@ def _same_spans(a: list[tuple[float, float]], b: list[tuple[float, float]]) -> b
 
 def _section(members: list[_Branch]) -> dict[str, Any] | None:
     """One cut interval's section, or ``None`` when a member has no solved
-    current or no declared limit (it then keeps the per-edge comparison)."""
-    if any(m.current is None or m.limit is None for m in members):
+    current (it then keeps the per-edge comparison). ``limit_a`` is ``None``
+    when a member has no declared limit: such a section cannot carry a
+    verdict (:func:`island_sections` drops it) but still has a density
+    (:func:`island_section_densities`)."""
+    if any(m.current is None for m in members):
         return None
+    limited = all(m.limit is not None for m in members)
     return {
         "edge_ids": tuple(sorted(m.edge_id for m in members)),
         "current_a": abs(sum(m.sign * (m.current or 0.0) for m in members)),
-        "limit_a": sum(m.limit or 0.0 for m in members),
+        "limit_a": sum(m.limit or 0.0 for m in members) if limited else None,
         "width_um": sum(m.cross for m in members),
     }
 
@@ -225,6 +232,43 @@ def _axis_sections(group: list[_Branch], axis: int) -> list[dict[str, Any]]:
     return [s for cut in covering for s in _cut_sections(cut, axis)]
 
 
+def _island_sections(
+    island: dict[str, Any], currents: dict[str, float | None]
+) -> Iterator[dict[str, Any]]:
+    """Every eligible section of one island's metal, limit or no limit."""
+    for group in _polygon_groups(_metal_branches(island, currents)):
+        for axis in (0, 1):
+            yield from _axis_sections(group, axis)
+
+
+def island_section_densities(
+    island: dict[str, Any], currents: dict[str, float | None]
+) -> dict[str, float]:
+    """``{edge_id: density}`` in A/um for every metal edge that lies in an
+    eligible section pooling two or more branches (issue #6525).
+
+    The density is ``|sum of the signed branch currents| / sum of the row
+    widths`` -- the drawn-section density a human prices against a limit, as
+    opposed to the per-row ``current_density_a_per_um`` solver diagnostic. An
+    edge in several such sections reports the *highest* density (this is a
+    diagnostic, so it names the hottest cut; the verdict's smallest-margin
+    choice in :func:`island_sections` needs a limit and is unrelated).
+
+    Eligibility is exactly the verdict's -- complete coverage of the metal at
+    the cut, one layer and polygon, every member solved -- except that no
+    declared limit is required, so a role the PDK publishes no limit for
+    still gets a number. An edge in no such section (a single row, a via, an
+    unsolved or shorted edge) is absent: the caller reports ``null``."""
+    peak: dict[str, float] = {}
+    for section in _island_sections(island, currents):
+        if len(section["edge_ids"]) < 2:
+            continue
+        density = section["current_a"] / section["width_um"]
+        for edge_id in section["edge_ids"]:
+            peak[edge_id] = max(density, peak.get(edge_id, density))
+    return {edge_id: round(density, 12) for edge_id, density in peak.items()}
+
+
 def island_sections(
     island: dict[str, Any], currents: dict[str, float | None]
 ) -> dict[str, dict[str, Any]]:
@@ -233,12 +277,12 @@ def island_sections(
 
     A section of one branch is the per-edge comparison under another name, so
     an edge whose worst section is that one keeps its own (unchanged)
-    verdict."""
+    verdict. Only sections whose every member has a declared limit can carry
+    a verdict."""
     sections: dict[tuple[str, ...], dict[str, Any]] = {}
-    for group in _polygon_groups(_metal_branches(island, currents)):
-        for axis in (0, 1):
-            for section in _axis_sections(group, axis):
-                sections[section["edge_ids"]] = section
+    for section in _island_sections(island, currents):
+        if section["limit_a"] is not None:
+            sections[section["edge_ids"]] = section
     worst: dict[str, dict[str, Any]] = {}
     for section in sections.values():
         margin = section["limit_a"] - section["current_a"]

@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 # Data tables live in gen_layer_tables.py (#3722); re-exported here.
+from .gen_layer_mv_ring import apply_mos_array_mv_ring_margins
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
@@ -52,6 +53,7 @@ from .gen_layer_tables import (  # noqa: F401
     SD_PAD_GATE_GAP_MIN_UM,
     UNIT_MIN_W_UM,
 )
+from .gen_res_head import _res_end_contact_um, _res_head_len_um
 from .pdk_families import pdk_variant_family
 
 #: Per-PDK-family clearance (um) the unit device's gate-poly landing pad
@@ -530,8 +532,8 @@ _MAX_CAP_TOP_PLATE_REQUIRES = max(
 )
 
 #: ``cap_array``'s top-plate requires-mask slots (``cap_top_requires_<i>_*``)
-#: are generated from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: are generated from this value, declared with ``hidden=True`` (issue #6757)
+#: in :mod:`klayout_tools.gen_pcells.cap_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 
@@ -796,8 +798,8 @@ _MAX_RES_FLAVOR_LAYERS = max(
 )
 
 #: ``res_array``'s flavour mask slots (``res_flavor_<i>_*``) are generated
-#: from this value and join ``gen.py``'s own
-#: :data:`klayout_tools.gen._HIDDEN_PARAMS` there, since they are
+#: from this value, declared with ``hidden=True`` (issue #6757) in
+#: :mod:`klayout_tools.gen_pcells.res_array`, since they are
 #: harness-computed layer params, never part of the request schema.
 
 #: The default ``res_array`` flavour: the first flavour listed for each family
@@ -867,35 +869,11 @@ _PDK_RES_FLAVOR_MIN_W_UM: dict[str, dict[str, float]] = {
 }
 
 
-#: Context-dependent **rectangular** end-contact size per ``(family, flavor)``
-#: for ``res_array``'s poly-body path (issue #2449), as ``(w_um, h_um)`` --
-#: ``w_um`` along the current-flow axis, ``h_um`` across it.
-#:
-#: sky130's precision poly resistors (``flavor="high"``/``"xhigh"``, the only
-#: ones drawn under ``rpm``/``urpm``) are exempt from the ordinary 0.17um licon
-#: rule: ``sky130.lydrc`` ``licon.1b/c`` ("minimum/maximum width/length of
-#: licon inside poly resistor : 2.0/0.19um") demands every such licon have
-#: edges of exactly 0.19um and 2.0um, i.e. a 0.19um x 2.0um slot. The rule
-#: constrains the edge lengths only, not which axis is long; the generator
-#: draws the 2.0um edge across the current flow (y), so the slot spans the
-#: full resistor head -- matching the foundry's own ``res_high_po``/
-#: ``res_xhigh_po`` dogbone-head cells -- and the pitch to a neighbouring
-#: contact (``licon.2b``/``licon.2c``: 0.35um / 0.51um) stays met by the
-#: unit pitch. An empty/absent entry means the ordinary layer-keyed cut size
-#: applies.
-_PDK_RES_FLAVOR_END_CONTACT_UM: dict[str, dict[str, tuple[float, float]]] = {
-    "sky130": {
-        "high": (0.19, 2.0),
-        "xhigh": (0.19, 2.0),
-    },
-}
-
-
 #: Enclosure (um) of the whole poly resistor -- body *and* contacted end
 #: heads -- by each precision-resistor requires-mask, keyed by family then
 #: mask layer (issue #2449). Only applied when the request draws
-#: :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`'s rectangular contact: upstream
-#: ``sky130A_mr.drc`` exempts a licon from ``licon.1`` only inside
+#: :data:`~.gen_res_head._PDK_RES_FLAVOR_END_CONTACT_UM`'s rectangular contact:
+#: upstream ``sky130A_mr.drc`` exempts a licon from ``licon.1`` only inside
 #: ``(rpm | urpm) & psdm & poly.interacting(poly_rs)``, so the masks must
 #: cover the end-pad licons. Values are the sky130 periphery rules
 #: ``rpm.3`` (rpm/urpm enclosure of the poly resistor, 0.2um) and ``rpm.4``
@@ -959,18 +937,6 @@ def _res_sab_geometry_um(
 #: extraction-deck poly ``ResistorDevice`` entries declare
 #: ``topology="abutting_heads"`` (asserted in ``tests/test_sg13g2_deck.py``).
 _PDK_RES_POLY_HEADS_ONLY: frozenset[str] = frozenset({"sg13g2", "sg13cmos5l"})
-
-
-def _res_end_contact_um(
-    family: str, flavor: str, metal_level: int = 0
-) -> tuple[float, float]:
-    """``(w_um, h_um)`` of ``res_array``'s rectangular precision-poly end
-    contact for this request (see :data:`_PDK_RES_FLAVOR_END_CONTACT_UM`), or
-    ``(0.0, 0.0)`` when the ordinary square cut applies -- always for
-    ``metal_level != 0`` (metal resistors ignore ``flavor``)."""
-    if metal_level:
-        return (0.0, 0.0)
-    return _PDK_RES_FLAVOR_END_CONTACT_UM.get(family, {}).get(flavor, (0.0, 0.0))
 
 
 def _res_flavor_min_width_um(family: str, flavor: str) -> float:
@@ -1401,8 +1367,8 @@ def _metal_res_geometry_min_um(family: str, level: int) -> dict[str, float]:
 #:   0.17um neither introduces nor fixes that case -- it is a context-
 #:   dependent size this layer-keyed table structurally cannot express;
 #:   issue #2449 resolves it per request via
-#:   :data:`_PDK_RES_FLAVOR_END_CONTACT_UM` (and zeroes this clamp for those
-#:   requests in :func:`_resistor_layer_params`).
+#:   :data:`~.gen_res_head._PDK_RES_FLAVOR_END_CONTACT_UM` (and zeroes this
+#:   clamp for those requests in :func:`_resistor_layer_params`).
 #: - ``sky130`` ``mcon`` (67/44) 0.17um -- ``sky130.lydrc`` ``ct.1``
 #:   (``mcon.edges.without_length(0.17)``, "minimum/maximum width of mcon :
 #:   0.17um"), split in ``sky130A_mr.drc`` into ``ct.1_a`` ("minimum width of
@@ -2264,6 +2230,8 @@ def _resistor_layer_params(
             else 0.0
         )
     resolved["res_contact_space_um"] = sab_contact_space_um
+    # Issue #5704: sky130 high/xhigh end-head length (licon.1c + li.5).
+    resolved["res_head_len_um"] = _res_head_len_um(family, flavor)
     return resolved
 
 
@@ -2372,7 +2340,7 @@ def _cap_array_layer_params(
     ``top_plate_via_metal`` being optional fields.
 
     Also resolves, all of them harness-computed from the resolved family and
-    never request-facing (see :data:`_HIDDEN_PARAMS`):
+    never request-facing (each declared ``hidden=True``, issue #6757):
 
     - the :data:`_CAP_GEOMETRY_MIN_KEYS` geometry floors (issues #1455/#1555,
       see :func:`_cap_geometry_min_um`) -- ``0.0`` each for a family that
@@ -2598,15 +2566,14 @@ def _mos_array_layer_params(
     layer_params = _device_layer_params(pdk_info, params)
     # Issue #3648: a family with a tap-distance rule gets tap pads even
     # without a ring, which need the ring role's tap/implant layers.
-    if params.get("add_guard_ring") or _tap_pads_wanted(
-        _pdk_family(pdk_info["variant"])
-    ):
+    family = _pdk_family(pdk_info["variant"])
+    if params.get("add_guard_ring") or _tap_pads_wanted(family):
         layer_params.update(
             _ring_layer_params(pdk_info, params, generator_name="mos_array")
         )
     else:
         layer_params.setdefault("tap_layer", kdb.LayerInfo(0, 0))
-    return layer_params
+    return apply_mos_array_mv_ring_margins(layer_params, family)
 
 
 def _bjt_layer_params(
@@ -2844,30 +2811,26 @@ def _esd_device_layer_params(
 def _diode_layer_params(
     pdk_info: dict[str, Any], params: dict[str, Any]
 ) -> dict[str, Any]:
-    """Hidden layer params for ``diode`` (issue #4300). sky130 only: the
-    ``diode_mark`` (``areaid.diode``) and ``hvi`` roles exist only there, and
-    the other curated decks' diode recognition has not been exercised against
-    this geometry."""
+    """Hidden layer params for ``diode`` (issues #4300, #6614): sky130 and
+    gf180mcu. A role the family has no layer for (sky130's Dualgate, gf180mcu's
+    ``hvi``) gets a placeholder that ``_diode_layout`` never draws; the other
+    curated decks' diode recognition has not been exercised against this
+    geometry."""
+    import klayout.db as kdb
+
     from .gen import GenError
+    from .gen_diode import DIODE_FAMILY_VOLTAGE_CLASSES
+    from .gen_pcells.diode import DIODE_LAYER_ROLES
 
     family = _pdk_family(pdk_info["variant"])
-    if family != "sky130":
+    if family not in DIODE_FAMILY_VOLTAGE_CLASSES:
         raise GenError(
             f"generator 'diode': PDK family '{family}' is not yet supported "
             "by this generator -- see docs/cli/gen.md's 'PDK-family support' "
             "section"
         )
+    infos = {role: _role_layer_info(family, role) for role in DIODE_LAYER_ROLES}
     return {
-        f"{role}_layer": _role_layer_info(family, role)
-        for role in (
-            "active",
-            "tap",
-            "nplus",
-            "pplus",
-            "well",
-            "hvi",
-            "diode_mark",
-            "contact",
-            "metal",
-        )
+        f"{role}_layer": info if info is not None else kdb.LayerInfo(0, 0)
+        for role, info in infos.items()
     }

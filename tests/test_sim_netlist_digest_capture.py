@@ -15,6 +15,7 @@ mid-run, and the collection-only `--attach` case drives `sim.run_sim` against
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -175,6 +176,18 @@ def test_run_sim_attach_reports_client_at_collection_scope(tmp_path, monkeypatch
     assert report["environment"]["netlist_sha256_scope"] == "client-at-collection"
 
 
+def _lost_job_id(artifacts_dir: Path, launches: list[list[str]], hosts: int) -> str:
+    """The job to lose between a run and its resume (#6685): the shard-index-1
+    job of the shard map. A sharded run launches its shards concurrently, so
+    `launches[0]` is whichever thread won -- picking it made the case under
+    test (the lost shard's unit is the one that is re-dispatched alone) depend
+    on launch order. A single job has no map to consult: it is the only launch."""
+    if hosts == 1:
+        return launches[0][3]
+    shards = json.loads((artifacts_dir / sb.BATCH_SHARDS_FILENAME).read_text())
+    return next(entry["job_id"] for entry in shards["shards"] if entry["index"] == 1)
+
+
 @pytest.mark.parametrize("hosts", [1, 2])
 @pytest.mark.parametrize("replace_job", [False, True])
 def test_run_sim_resume_reports_scope_from_batch_dispatch(
@@ -224,7 +237,10 @@ def test_run_sim_resume_reports_scope_from_batch_dispatch(
     launches = _launches(runner)
     assert len(launches) == hosts
     if replace_job:
-        runner.queue(f"{launches[0][3]}/job.json", fake_completed(returncode=1))
+        runner.queue(
+            f"{_lost_job_id(tmp_path / 'artifacts', launches, hosts)}/job.json",
+            fake_completed(returncode=1),
+        )
 
     resumed = _run(path, tmp_path, hosts=hosts, resume=True)
 

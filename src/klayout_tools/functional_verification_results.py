@@ -34,11 +34,9 @@ from typing import Any
 def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     """Parse a cocotb ``results.xml`` into the contract's ``tests[]`` list.
 
-    Structure (spike section 4, captured live): a ``<testcase>`` with no
-    child element is a pass, a ``<failure>`` child is a failure, a
-    ``<skipped>`` child is a skip. ``error_type``/``error_message`` are taken
-    verbatim from the ``<failure>`` element's own attributes and are present
-    only on failing entries.
+    A testcase passes unless it contains a failure or skip. Only failures
+    carry an error type and message. The parser reads the raw diagnostic
+    from the failure attributes or element text.
 
     Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
     *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``

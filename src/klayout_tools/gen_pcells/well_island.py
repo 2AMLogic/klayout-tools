@@ -191,6 +191,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Label layer the net name is drawn on (only used when "
                 "metal_label_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_metal_label_present(self)
             self.param(
@@ -198,6 +199,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeBoolean,
                 "Whether well_layer is a real layer for the resolved PDK",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "well_tap_implant_layer",
@@ -206,6 +208,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring_implant_margin_um of extension beyond every edge of it "
                 "(only used when well_tap_implant_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_tap_implant_present",
@@ -213,6 +216,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the tap ring as a well tie",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "ring_implant_margin_um",
@@ -221,6 +225,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the tap ring's own band on every edge (only used when "
                 "well_tap_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "well_margin_resolved_um",
@@ -228,6 +233,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved well enclosure actually drawn (see "
                 "_well_island_isolation)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:
