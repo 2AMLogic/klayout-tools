@@ -21,6 +21,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from . import _json_pointer
 from . import evidence_lint as el
 from . import evidence_record as er
 from ._jsonnum import is_number
@@ -267,19 +268,15 @@ def _citations(text: str, mapped_paths: list[str]) -> list[tuple[int, str]]:
 
 
 def _pointer(value: Any, pointer: str) -> Any:
-    if pointer in ("", "/"):
-        return value
-    if not pointer.startswith("/"):
+    """Resolve ``pointer`` (RFC 6901) into the record ``value`` via the
+    shared walk (:mod:`._json_pointer`, issue #6860), raising ``KeyError``
+    when it names nothing -- the caller renders that as the
+    ``claim_unresolved`` finding. A resolved JSON ``null`` is a value and
+    comes back as ``None``; only a pointer that names nothing raises."""
+    resolved, ok = _json_pointer.resolve_json_pointer(value, pointer)
+    if not ok:
         raise KeyError(pointer)
-    for token in pointer[1:].split("/"):
-        token = token.replace("~1", "/").replace("~0", "~")
-        if isinstance(value, list):
-            value = value[int(token)]
-        elif isinstance(value, dict):
-            value = value[token]
-        else:
-            raise KeyError(token)
-    return value
+    return resolved
 
 
 def _row_value(row: Mapping[str, Any], record: Any) -> str:
