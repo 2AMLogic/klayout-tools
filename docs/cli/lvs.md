@@ -1154,6 +1154,12 @@ model name* does, under `--pdk`), so a reference netlist naming either
 flavour's subcircuit compares correctly against the extracted layout's
 `nfet`/`pfet` devices.
 
+GF180 standard-cell references can also use `nfet_05v0` and `pfet_05v0`.
+These PDK wrappers connect the same four terminals to the 6 V models and
+pass through explicit W/L. Both spellings resolve to `nfet__06v0` or
+`pfet__06v0` when `options.compare_mos_flavour` is enabled. Extraction
+continues to write `nfet_06v0` and `pfet_06v0` for Dualgate devices.
+
 **Unit suffixes matter.** `NetlistSpiceReader` interprets a bare numeric
 literal for a MOS `W`/`L` parameter as plain SI (metres) per the SPICE
 standard, but an explicit `U` (or `UM`) suffix as micrometres — the

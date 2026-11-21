@@ -272,6 +272,10 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     },
 }
 
+# Input spellings only: gf180mcu's 5 V wrappers instantiate the 6 V model
+# on the same D/G/S/B pins with the caller's W/L. The writer emits 6 V.
+_MOS_SUBCKT_ALIASES = {"nfet_05v0": "nfet_06v0", "pfet_05v0": "pfet_06v0"}
+
 #: Geometry-literal style: write an explicit SPICE unit suffix (``L=0.5U``,
 #: ``AS=0.84P``), i.e. an absolute SI value that does not depend on the
 #: caller's ``.option scale``.
@@ -588,6 +592,9 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     for flavour_table in _MOS_MODEL_FLAVOURS.get((deck_name, deck_name), {}).values():
         for device_class, subckt in flavour_table.items():
             result.setdefault(subckt, device_class)
+    for alias, canonical in _MOS_SUBCKT_ALIASES.items():
+        if canonical in result:
+            result[alias] = result[canonical]
     return result
 
 
@@ -602,6 +609,7 @@ def mos_flavour_for_subckt(subckt_name: str) -> str | None:
     A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
     sg13cmos5l) resolves to the same key in each.
     """
+    subckt_name = _MOS_SUBCKT_ALIASES.get(subckt_name, subckt_name)
     for flavours in _MOS_MODEL_FLAVOURS.values():
         for flavour, table in flavours.items():
             if subckt_name in table.values():
@@ -642,6 +650,8 @@ def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
         for flavour_table in flavours.values():
             for device_class, subckt in flavour_table.items():
                 result.setdefault(subckt, (deck_name, device_class))
+    for alias, canonical in _MOS_SUBCKT_ALIASES.items():
+        result[alias] = result[canonical]
     return result
 
 
