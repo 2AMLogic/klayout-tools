@@ -228,14 +228,16 @@ def read_nets(gds_path: Path, profile: PdkProfile) -> Nets:
     one from the GDS's own label texts, when it carries one."""
     import pya
 
+    from klayout_tools._em_geometry import ConductorLayer
+
     layout = pya.Layout()
     layout.read(str(gds_path))
     top = layout.top_cell()
     if top is None:
         raise GenerateError(f"{gds_path}: no top cell")
 
-    region = pya.Region(top.begin_shapes_rec(layout.layer(*profile.routing_layer)))
-    region.merge()
+    layer = ConductorLayer.read(layout, top, profile.routing_layer, profile.label_layer)
+    region = layer.shapes
     polys = list(region.each())
     if not polys:
         raise GenerateError(
@@ -244,17 +246,10 @@ def read_nets(gds_path: Path, profile: PdkProfile) -> Nets:
         )
 
     names: dict[int, str] = {}
-    label_iter = top.begin_shapes_rec(layout.layer(*profile.label_layer))
-    while not label_iter.at_end():
-        shape = label_iter.shape()
-        if shape.is_text():
-            text = shape.text.transformed(label_iter.trans())
-            point = pya.Point(text.x, text.y)
-            for i, poly in enumerate(polys):
-                if poly.inside(point):
-                    names.setdefault(i, shape.text_string)
-                    break
-        label_iter.next()
+    for i, poly in enumerate(polys):
+        labels = layer.names_on(pya.Region(poly))
+        if labels:
+            names[i] = labels[0]
 
     return Nets(polys=polys, names=names, dbu=layout.dbu, bbox=region.bbox())
 

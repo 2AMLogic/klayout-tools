@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 
 import pytest
 
-from klayout_tools._engine_proc import run_in_group
+from klayout_tools._engine_proc import _kill_group, run_in_group
 
 pytestmark = pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX only")
 
@@ -79,3 +80,49 @@ def test_mocked_run_is_untouched(monkeypatch):
     sentinel = subprocess.CompletedProcess(["x"], 0, "", "")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: sentinel)
     assert run_in_group(["x"]) is sentinel
+
+
+def test_group_kill_failure_never_masks_the_timeout(tmp_path, monkeypatch):
+    """A group kill that fails (``ProcessLookupError``/EPERM surface as
+    ``OSError`` out of ``os.killpg``) must not mask the caller's
+    ``subprocess.TimeoutExpired`` (#5798's test-plan row): ``_kill_group``
+    swallows the ``OSError`` and ``run_in_group`` re-raises the timeout
+    unchanged."""
+    argv, pidfile = _grandchild_script(tmp_path, "wait")
+    attempts: list[int] = []
+
+    def refusing_killpg(pgid, sig):
+        attempts.append(pgid)
+        raise ProcessLookupError(pgid)
+
+    monkeypatch.setattr(os, "killpg", refusing_killpg)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_in_group(argv, capture_output=True, text=True, timeout=1)
+    finally:
+        # The kill was refused, so the stand-in grandchild outlived the
+        # call; end it here instead of leaving a sleeper on the worker.
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (ValueError, ProcessLookupError, PermissionError):
+                pass
+    assert attempts, "the group kill was never attempted"
+    assert all(pgid > 1 and pgid != os.getpgrp() for pgid in attempts)
+
+
+def test_spawn_degrades_to_subprocess_run_without_process_groups(monkeypatch):
+    """Without ``os.killpg`` the group teardown degrades to a no-op (the
+    ``hasattr`` early return fires before any group call) and the caller's
+    ``subprocess.TimeoutExpired`` still surfaces -- the direct child is
+    killed and reaped by ``subprocess.run`` itself, so nothing is orphaned
+    on this path."""
+    monkeypatch.delattr(os, "killpg", raising=False)
+    assert _kill_group(os.getpgrp() + 1) is None
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_in_group(
+            ["sleep", "30"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+        )

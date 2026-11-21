@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import sys
 from pathlib import Path
@@ -10,14 +11,16 @@ import pytest
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_attest import (
+    _REQUIRED_METRICS,
     AttestationError,
-    attach_output_tails,
     build_attestation,
     check_attestation,
     render_envelope,
 )
+from klayout_tools.signoff_attest_command import attach_output_tails
 
 _PASS = {"argv": [sys.executable, "-c", "pass"]}
+_ENV = {"schema_version": 1, "kind": "generic"}
 _FAIL = {"argv": [sys.executable, "-c", "raise SystemExit(1)"]}
 
 
@@ -29,7 +32,11 @@ def _repo(tmp_path) -> Path:
     for name in ("sim_tt", "sim_ss"):
         (repo / "evidence" / f"{name}.json").write_text(
             json.dumps(
-                {"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+                {
+                    **_ENV,
+                    "status": "pass",
+                    "result": {"fmax": 100, "area": 5, "power": 2},
+                }
             )
         )
     return repo
@@ -196,6 +203,66 @@ def test_digital_non_numeric_metric_field_fails(tmp_path):
     assert _failed(envelope) == [("metric", "power")]
 
 
+def test_gzip_cited_metric_envelope_passes_like_the_plain_form(tmp_path):
+    repo = _repo(tmp_path)
+    payload = json.dumps(
+        {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+    )
+    for corner in ("tt", "ss"):
+        (repo / "evidence" / f"sim_{corner}.json.gz").write_bytes(
+            gzip.compress(payload.encode())
+        )
+    inventory = _digital_inventory()
+    inventory["citations"] = {
+        "gain": ["evidence/sim_tt.json.gz"],
+        "bandwidth": ["evidence/sim_tt.json.gz", "evidence/sim_ss.json.gz"],
+    }
+    inventory["envelope_checks"] = {
+        "evidence/sim_tt.json.gz": _PASS,
+        "evidence/sim_ss.json.gz": _PASS,
+    }
+    inventory["metrics"] = {
+        corner: {
+            name: {
+                "envelope": f"evidence/sim_{corner}.json.gz",
+                "field": f"result.{name}",
+            }
+            for name in ("fmax", "area", "power")
+        }
+        for corner in ("tt", "ss")
+    }
+
+    envelope = _attest(repo, inventory)
+
+    assert envelope["status"] == "pass"
+    metrics = [c for c in envelope["attestation"]["checks"] if c["check"] == "metric"]
+    assert len(metrics) == 6
+    assert {c["value"] for c in metrics} == {100, 5, 2}
+
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "1e999"])
+def test_cited_nonfinite_envelope_fails_its_metric(tmp_path, literal):
+    repo = _repo(tmp_path)
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass", "result": {"fmax": 0}}).replace(
+            '"fmax": 0', f'"fmax": {literal}'
+        )
+    )
+
+    envelope = _attest(repo, _digital_inventory())
+
+    assert envelope["status"] == "fail"
+    # The shared reader refuses the nonfinite literal, so the recogniser
+    # (#5688) rejects the cited file, both spec rows citing it, and each
+    # metric bound to it.
+    assert _failed(envelope) == [
+        ("envelope", "evidence"),
+        ("citation", "bandwidth"),
+        ("citation", "gain"),
+        *[("metric", name) for name in _REQUIRED_METRICS],
+    ]
+
+
 def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
     repo = _repo(tmp_path)
     inventory = _digital_inventory()
@@ -205,7 +272,9 @@ def test_mixed_signal_style_inventory_with_duplicate_citation(tmp_path):
 
     assert envelope["status"] == "pass"
     cited_once = [
-        c for c in envelope["attestation"]["checks"] if c["role"] == "evidence"
+        c
+        for c in envelope["attestation"]["checks"]
+        if c["role"] == "evidence" and c["check"] == "present"
     ]
     assert len(cited_once) == 2
 
@@ -244,12 +313,16 @@ def test_check_reports_drift_on_cited_envelope_and_row_map(tmp_path):
     assert clean["status"] == "match"
     assert clean["fresh_status"] == "pass"
 
-    (repo / "evidence" / "sim_tt.json").write_text(json.dumps({"status": "pass"}))
+    (repo / "evidence" / "sim_tt.json").write_text(
+        json.dumps({**_ENV, "status": "pass"})
+    )
     drifted = check_attestation(8, inv_path, str(committed))
     assert drifted["status"] != "match"
 
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 100, "area": 5, "power": 2}}
+        )
     )
     inventory["citations"]["gain"] = ["evidence/sim_ss.json"]
     (repo / "inventory.json").write_text(json.dumps(inventory))
@@ -383,13 +456,20 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
     inventory = _digital_inventory()
     committed = _committed_item8(repo, inventory)
     (repo / "evidence" / "sim_tt.json").write_text(
-        json.dumps({"status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}})
+        json.dumps(
+            {**_ENV, "status": "pass", "result": {"fmax": 120, "area": 5, "power": 2}}
+        )
     )
 
     result = check_attestation(8, str(repo / "inventory.json"), committed)
 
     (value,) = [e for e in result["drift"] if e["field"].endswith(".value")]
-    assert value["check"] == {"role": "digital", "corner": "tt", "metric": "fmax"}
+    assert value["check"] == {
+        "role": "digital",
+        "check": "metric",
+        "corner": "tt",
+        "metric": "fmax",
+    }
     assert (value["committed"], value["fresh"]) == (100, 120)
     # The evidence file's own presence check names the path that moved.
     (hashed,) = [
@@ -398,7 +478,11 @@ def test_check_drift_names_a_metric_check_by_corner_and_metric(tmp_path):
         if e["field"].startswith("attestation.checks.")
         and e["field"].endswith(".content_hash")
     ]
-    assert hashed["check"] == {"role": "evidence", "path": "evidence/sim_tt.json"}
+    assert hashed["check"] == {
+        "role": "evidence",
+        "check": "present",
+        "path": "evidence/sim_tt.json",
+    }
 
 
 def test_check_drift_names_a_citation_check_by_spec_row(tmp_path):
