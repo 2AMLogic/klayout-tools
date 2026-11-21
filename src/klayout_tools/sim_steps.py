@@ -43,7 +43,8 @@ to hand-rolled decks -- a plausible but mis-paired number):
    measurements then find no vectors and come back empty, instead of
    silently reading the *previous* step's solve.
 2. ``echo`` markers around the analysis record the plot name before and
-   after; :func:`step_outcomes` reads them back from the log, so a step that
+   after; :func:`sim_step_evidence.step_outcomes` reads them back from the
+   log, so a step that
    produced no plot is reported as failed (``code: "step_failed"``) rather
    than inferred from its measurements.
 3. The step's plot name is captured into ``klt_plot_<index>``; a
@@ -79,7 +80,12 @@ Failure propagation is decided in Python, not inferred from ngspice output: a
 measurement whose step failed, or any of whose inputs produced no value, is
 reported ``status: "error"`` with a ``derived_input_unavailable`` (or the
 step's ``step_failed``) diagnostic -- never graded -- while every independent
-result in the same corner stays inspectable.
+result in the same corner stays inspectable. The one opt-in exception
+(issue #7072): a step-scoped ``.meas`` card declaring ``on_unreached:
+"null"`` whose target its step's *completed* analysis never reached grades
+``not_reached`` with the scalar ``measurement_not_reached`` info diagnostic,
+on evidence scoped to that step's own log region
+(:mod:`klayout_tools.sim_step_evidence`).
 """
 
 from __future__ import annotations
@@ -87,9 +93,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import sim_step_evidence
 from ._jsonnum import is_finite_number
 from .sim_errors import SimError
 from .sim_op_args import default_op_args
+from .sim_step_evidence import step_outcomes
 from .sim_step_shadow import validate_step_measurement_name
 
 #: The internal ``analysis["kind"]`` a resolved step sequence carries. Never
@@ -155,12 +163,6 @@ _BARE_NAME_RE = re.compile(r"(?<![\w.$}@])([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*[.(])"
 #: ``<step>.<measurement>`` references and is evaluated into a control-scope
 #: scalar the analysis line then reads with ``$&``.
 _ARG_REF_RE = re.compile(r"\$\{([^{}]*)\}")
-
-#: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
-#: unknown1`` / ``klt_step_end 0 op1``.
-_STEP_MARKER_RE = re.compile(
-    r"^\s*klt_step_(begin|end)\s+(\d+)\s+(\S+)\s*$", re.MULTILINE
-)
 
 
 #: Measurement keys the ``analysis_steps`` path refuses by name rather than
@@ -1090,22 +1092,6 @@ def control_lines(
 # --------------------------------------------------------------------------- #
 
 
-def step_outcomes(analysis: dict[str, Any], log_text: str) -> dict[str, bool]:
-    """``{step name: completed}`` from the ``echo`` markers in the log. A
-    step completed iff both markers are present and the analysis made a new
-    plot current; a missing end marker (killed, aborted script) or an
-    unchanged plot (the analysis produced none) is a failed step."""
-    begin: dict[int, str] = {}
-    end: dict[int, str] = {}
-    for match in _STEP_MARKER_RE.finditer(log_text):
-        target = begin if match.group(1) == "begin" else end
-        target[int(match.group(2))] = match.group(3)
-    return {
-        step["name"]: index in begin and index in end and begin[index] != end[index]
-        for index, step in enumerate(analysis["steps"])
-    }
-
-
 def grade_step_measurements(
     measurement_values: dict[str, float],
     measurements_spec: list[dict[str, Any]],
@@ -1113,14 +1099,22 @@ def grade_step_measurements(
     analysis: dict[str, Any],
     log_text: str,
     save_mode: str,
+    engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, Any]]:
     """One corner's step-sequence results: ``(measurement_results,
     diagnostics, extra_corner_fields)``.
 
     ``extra_corner_fields`` is the additive ``{"steps": [...]}`` per-step
     outcome list. Results are graded in flattened order (steps, then derived
-    measurements), so every input a result depends on is decided first."""
+    measurements), so every input a result depends on is decided first.
+    ``engine_diagnostics`` (issue #7072) is the corner's diagnostics so far;
+    an opted-in step ``.meas`` card grades ``not_reached`` only when none of
+    them is error-severity, exactly like the scalar path (#3108)."""
     outcomes = step_outcomes(analysis, log_text)
+    opted_in = any(spec.get("on_unreached") for spec in measurements_spec)
+    unreached = (
+        sim_step_evidence.step_unreached_locals(analysis, log_text) if opted_in else {}
+    )
     unmet = _apply_arg_dependencies(
         analysis, measurements_spec, measurement_values, outcomes
     )
@@ -1134,7 +1128,13 @@ def grade_step_measurements(
     by_name: dict[str, dict[str, Any]] = {}
     for spec in measurements_spec:
         result, spec_diagnostics = _grade_one(
-            spec, measurement_values, outcomes, by_name, save_mode=save_mode
+            spec,
+            measurement_values,
+            outcomes,
+            by_name,
+            save_mode=save_mode,
+            unreached_locals=unreached.get(spec.get("step") or "", set()),
+            engine_diagnostics=engine_diagnostics,
         )
         by_name[spec["name"]] = result
         results.append(result)
@@ -1216,6 +1216,8 @@ def _grade_one(
     by_name: dict[str, dict[str, Any]],
     *,
     save_mode: str,
+    unreached_locals: set[str],
+    engine_diagnostics: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     from .sim import _grade_measurement_value
 
@@ -1255,11 +1257,18 @@ def _grade_one(
         ]
     value = measurement_values.get(spec["log_key"])
     if value is None:
+        unreached = sim_step_evidence.not_reached_result(
+            spec,
+            unreached_locals=unreached_locals,
+            engine_diagnostics=engine_diagnostics,
+        )
+        if unreached is not None:
+            return unreached
         return errored, [
             {
                 "severity": "error",
                 "code": "measurement",
-                "message": _no_value_message(spec, save_mode),
+                "message": sim_step_evidence.no_value_message(spec, save_mode),
             }
         ]
     status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
@@ -1271,31 +1280,3 @@ def _grade_one(
         **measurement_provenance(spec),
     }
     return result, grading_diagnostics
-
-
-def _no_value_message(spec: dict[str, Any], save_mode: str) -> str:
-    from .sim import SAVE_MODE_NETLIST_NO_VALUE_HINT
-
-    if "step" in spec:
-        form = (
-            f"its .meas card ({spec['meas_card']!r})"
-            if "meas_card" in spec
-            else f"its 'expr' ({spec['expr']!r})"
-        )
-        message = (
-            f"measurement {spec['name']!r} produced no value: step "
-            f"{spec['step']!r} completed, but {form} printed no "
-            f"'{spec['log_key']} = <value>' line -- check that it resolves "
-            "against that step's saved vectors and reduces to a single real "
-            "scalar"
-        )
-    else:
-        message = (
-            f"derived measurement {spec['name']!r} produced no value: every "
-            f"input ({', '.join(spec['derived_from'])}) was available, but its "
-            f"expression ({spec['expr']!r}) did not evaluate to a single real "
-            "scalar -- check the expression itself"
-        )
-    if save_mode == "netlist" and "step" in spec:
-        message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-    return message
