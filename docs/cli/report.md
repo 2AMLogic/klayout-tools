@@ -55,6 +55,19 @@ detected from its own JSON structure:
 | `measurements`   | a top-level `measurements` array whose entries carry a graded `status` string, or that is empty (the rollup shape `klt sim` and `klt yield` share) | status + a Measurement/Unit/Limits/Worst/Margin/Corner/Status table, plus per-entry yield columns when any entry carries them — see "Measurements sections" below |
 | `error`          | a top-level `error` object with a `message` (any verb's own `--format json` error output, per `docs/json-contract.md`) | the failed command name and message               |
 
+A `klt drc --engine both` cross-check renders as one DRC section. Its
+`status` comes from the envelope's overall verdict, which can be `clean`,
+`violations`, `not_checked`, `clean_partial`, or `coverage_unknown`.
+The Cross-check line gives each engine's own status and its reported
+`violation_count` when present. A capped report can have more findings than
+serialized rows. If the native result is unavailable, the line says so.
+
+The table shows the curated engine's rows, and `item_count` counts those
+rows. A finding reported by both engines appears once. When only the native
+engine finds violations, the overall verdict is `violations` and the curated
+table is empty. The native findings are available in the input envelope under
+`reports.native`.
+
 A file matching none of these — including one with no `schema_version` at
 all — is a **hard error** (see "Errors" below), not an empty or silently
 skipped section: a typo'd path or a non-`klt` JSON file should fail loudly,
@@ -72,10 +85,10 @@ gallery site's own "omit-absent" convention
 
 ### Empty findings render a clear state, not an empty table
 
-A `drc`/`lvs`-kind envelope with zero violations/mismatches renders "No
-violations found." / "No mismatches found." instead of a table with a
-header row and no data rows. A `measurements`-kind envelope with an empty
-`measurements: []` renders "No measurements found." the same way.
+With zero finding rows, single-engine DRC renders “No violations found.” and
+LVS renders “No mismatches found.” A DRC cross-check with zero curated rows
+renders “No curated violation rows to display.” An empty measurements rollup renders
+“No measurements found.”
 
 ### Measurements sections
 
@@ -199,7 +212,7 @@ rather not parse markdown.
 | `source`      | string              | The input file path (or `"-"`) this section was rendered from, exactly as given.         |
 | `title`       | string              | The section's rendered heading text (without markdown's `## ` prefix).                    |
 | `status`      | string \| null      | The source envelope's own `status` field (`drc`/`lvs`/`layout-metrics`/`measurements` kinds), `"error"` for an `error`-kind section, or `null` if the source envelope had none. |
-| `item_count`  | integer \| null     | Violation/mismatch/measurement count for `drc`/`lvs`/`measurements` kinds; `null` for `layout-metrics`/`error` kinds (a key-metrics or error section has no "item count"). |
+| `item_count`  | integer \| null     | Number of displayed finding rows for DRC or LVS (curated rows for a DRC cross-check), or the number of measurement rows for a measurements rollup. Other kinds return `null`. |
 
 `sections[]` never embeds the underlying `violations[]`/`mismatches[]`
 arrays themselves — a consumer that wants that raw structured detail should

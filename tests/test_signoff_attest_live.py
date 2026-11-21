@@ -210,3 +210,23 @@ def test_text_line_prints_the_hint_under_the_fail_line():
     assert lines[-1] == f"    hint: {RECORD_CHECK_HINT}"
     passing = {**check, "passed": True, "exit_status": 0}
     assert "hint" not in attestation_check_line(passing)
+
+
+def test_attach_live_fields_also_names_the_observed_runtime(tmp_path):
+    from klayout_tools.signoff_attest_live import attach_live_fields
+
+    repo = _repo(tmp_path)
+    inventory = _analog_inventory()
+    inventory["envelope_checks"]["evidence/sim_ss.json"] = {"argv": _RECORD_CHECK}
+    envelope = _attest(repo, inventory)
+
+    attach_live_fields(envelope)
+
+    checks = envelope["attestation"]["checks"]
+    ran = [c for c in checks if c["check"] == "command"]
+    # duration_s attaches to every launched command, failing ones included --
+    # the failing record check keeps both its runtime and its hint (the tail
+    # needs captured output, which `raise SystemExit(3)` does not produce).
+    assert all(isinstance(c["duration_s"], float) for c in ran)
+    failed = next(c for c in ran if c["target"] == "evidence/sim_ss.json")
+    assert "hint" in failed
