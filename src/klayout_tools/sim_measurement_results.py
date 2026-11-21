@@ -101,8 +101,8 @@ def _corner_measurement_results(
     ``engine_diagnostics`` (issue #3108) are the corner's diagnostics so far
     (solver/timeout classification); a ``spice`` measurement declaring
     ``on_unreached: "null"`` is graded :data:`NOT_REACHED_STATUS` instead of
-    ``error`` only when none of them is error-severity. Not applied to an
-    ``analysis_steps[]`` corner.
+    ``error`` only when none of them is error-severity. The same guard
+    reaches ``analysis_steps[]`` corners through the step grader (#7072).
     """
     from . import sim as _sim
 
@@ -113,6 +113,7 @@ def _corner_measurement_results(
             analysis=analysis,
             log_text=log_text,
             save_mode=save_mode,
+            engine_diagnostics=engine_diagnostics,
         )
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
