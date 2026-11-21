@@ -50,8 +50,10 @@ from .artifact_verify import (
 #:
 #: A kind absent here is never re-hashed and reports ``input_verified:
 #: null``: ``yield`` re-hashes its samples document already
-#: (:func:`~.signoff._yield_samples_content_hash` -- that path reports ``True`` on its
-#: own); ``functional-verification``/``power``/``place-and-route``
+#: (:func:`~.signoff._yield_samples_content_hash` -- that path reserves
+#: ``input_verified: true`` for a successful re-hash of the samples bytes;
+#: a digest supplied by the committed store manifest instead (issue #5963)
+#: leaves it ``null``); ``functional-verification``/``power``/``place-and-route``
 #: populate no ``provenance.input`` at all today, or echo no path for
 #: the artifact they hashed (`klt place-and-route` pins the gate-level
 #: netlist it placed but echoes only its *outputs*); ``error`` envelopes

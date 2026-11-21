@@ -1095,16 +1095,21 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: "re-run the check"): here nothing was ever recorded to compare against,
 #: so the remedy is different -- "re-produce this evidence with a producer
 #: that records provenance" (or unpin `content_hash` for this entry), not
-#: "re-run the same producer again". A `klt yield` envelope is unaffected by
-#: this distinction: :func:`_yield_samples_content_hash` supplies a computed
-#: fallback hash whenever its samples document can be found -- resolved
-#: relative to the report file's own directory first, falling back to this
-#: process's own working directory for compatibility (issue #2197) -- so its
-#: ``resolution["content_hash"]`` is ``None`` for that reason alone only when
-#: the named document could not be located in *either* place (see
+#: "re-run the same producer again". A `klt yield` envelope is largely
+#: insulated from this distinction: :func:`_yield_samples_content_hash`
+#: supplies a computed fallback hash whenever its samples document can be
+#: found on disk -- resolved relative to the report file's own directory
+#: first, falling back to this process's own working directory for
+#: compatibility (issue #2197) -- and that disk lookup takes precedence
+#: over every other source. When it fails, a declared store manifest can
+#: still supply the digest as a committed pin (issue #5963), so
+#: ``resolution["content_hash"]`` is ``None`` only when the named document
+#: could be located in *neither* place *and* no declared pin resolved (see
 #: ``resolution["content_hash_unresolved"]``, which then names what was
-#: named and where this looked, so that case stays distinguishable from an
-#: envelope that recorded no samples document at all).
+#: named and where this looked -- and, when a declared pin also failed to
+#: resolve, the manifest path and a ``reason`` -- so that case stays
+#: distinguishable from an envelope that recorded no samples document at
+#: all).
 #:
 #: Issue #2496 adds a third route to both of these two reasons, item 11
 #: only: :func:`_erc_supply_spec_hash_reason` re-hashes the **spec**
