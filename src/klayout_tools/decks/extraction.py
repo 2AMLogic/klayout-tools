@@ -183,24 +183,21 @@ class ResistorDevice:
 
     ``anode_marker`` (issue #4312) declares a **split-terminal** resistor: two
     terminals carved from one conductor shape by marker layers (the gf180mcu
-    eFuse). ``requires`` is then the scope, and a shape missing its segment,
-    anode or cathode is left as ordinary conductor. ``None`` (the default) is
-    every other entry. Derivation: ``klayout_tools.extract_split_terminal``.
+    eFuse). ``requires`` is then the scope; a shape missing its segment, anode
+    or cathode stays ordinary conductor. See ``extract_split_terminal``.
 
-    ``name`` is the extracted device-class name (``devices[].class`` in the
-    JSON response, and the model token on the written ``R`` card -- a
-    consumer simulating the netlist supplies a matching ``.model``, exactly
-    as it already must for the ``nfet``/``pfet`` ``M`` cards).
+    ``name`` is the extracted device-class name (``devices[].class`` and the
+    model token on the written ``R`` card; a consumer supplies a matching
+    ``.model``, as it already must for the ``nfet``/``pfet`` ``M`` cards).
 
     ``bulk_to_substrate`` selects ``DeviceExtractorResistorWithBulk`` (a
     third ``W`` terminal tied to the deck's ``substrate_net`` global)
     instead of the plain two-terminal ``DeviceExtractorResistor``, for a
     device whose PDK LVS deck models a bulk terminal (e.g. gf180mcu's
-    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the
-    NMOS body's ``W`` terminal region and behaviour: on a deck with a
-    distinct ``tap`` layer (issue #490) a substrate-tie ring contacted to a
-    named net resolves the bulk terminal to that net; otherwise it falls
-    back to the synthesized ``substrate_net`` global.
+    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the NMOS
+    body's ``W`` terminal region: with a distinct ``tap`` layer (issue #490) a
+    contacted substrate-tie ring names the bulk net, else the synthesized
+    ``substrate_net`` global is used.
 
     ``flavour_option``/``flavours`` (issue #595) declare an optional,
     caller-selectable **sheet-rho flavour set** for a resistor family whose
@@ -233,13 +230,15 @@ class ResistorDevice:
     ``deck_options`` key no entry declares is itself an
     :class:`InvalidDeckOptionError`, not a silent no-op.
 
-    ``provenance`` (issue #868) is a machine-readable citation of the exact
-    upstream PDK-LVS-deck source this entry's ``sheet_rho_ohm_sq`` (and, when
-    set, ``fixed_offset_ohm``) was transcribed/measured from -- the
-    device-recognition analogue of :class:`DrcRule.provenance` (see
-    :class:`RuleProvenance` for the shared type). ``None`` (the default)
-    means none has been backfilled yet -- the deck module's inline prose
-    citation remains the only record.
+    ``ignored_parameters`` (issue #4312): parameters the PDK's own LVS deck
+    leaves out of its compare (``ignore_parameter``), the eFuse's ``R``. ``klt
+    lvs`` excludes them by default and discloses it; naming the class in
+    ``options.compare_parameters`` compares it as asked.
+
+    ``provenance`` (issue #868) cites the upstream PDK-LVS-deck source this
+    entry's ``sheet_rho_ohm_sq`` (and ``fixed_offset_ohm``) came from, as
+    :class:`DrcRule.provenance` does (see :class:`RuleProvenance`); ``None``
+    leaves only the deck module's inline prose citation.
     """
 
     name: str
@@ -259,6 +258,7 @@ class ResistorDevice:
     topology: str = "overlap"
     terminal_enclosure_um: float = 0.0
     anode_marker: tuple[int, int] | None = None
+    ignored_parameters: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.topology not in RESISTOR_TOPOLOGIES:

@@ -8691,17 +8691,18 @@ def _extract_netlist(
         ) from exc
     netlist = l2n.netlist()
 
-    # Asymmetric-MOS orientation (issue #4570): KLayout's MOS4 extractor
-    # orders S/D by geometry and ignores `tS`/`tD` roles (the PDK's own
-    # `gf180mcu.lvs` does the same), so re-point each LDMOS's S/D onto the
-    # source/drain-marked diffusion it actually touches.
+    # Asymmetric-MOS orientation (issue #4570): KLayout's MOS4 extractor orders
+    # S/D by geometry and ignores `tS`/`tD` (as the PDK's own `gf180mcu.lvs`
+    # does), so re-point each LDMOS's S/D onto the marked diffusion it touches.
+    top_circuit = netlist.circuit_by_name(top_cell.name)
     orient_asymmetric_mos(
         l2n,
-        netlist.circuit_by_name(top_cell.name),
+        top_circuit,
         deck,
         flavour_terminals,
         (flavour_nfet_gate, flavour_pfet_gate),
     )
+    _split_terminal.orient_terminals(l2n, top_circuit, resistors, contact)  # #4312
     # Issue #5311: re-divide S/D shared across the per-gate flavour split.
     apportion_shared_sd(
         l2n,

@@ -3559,8 +3559,8 @@ EXTRACTION_DECK = ExtractionDeck(
         ),
         # eFuse (issue #4312): `efuse_extraction.lvs` extracts anode, link and
         # cathode from one poly2 bar inside `efuse_mk` (the split-terminal
-        # `anode_marker` form). Its link `R` is `ignore_parameter`d, so an LVS
-        # request scopes the class with `{"efuse": ["L", "W"]}`.
+        # `anode_marker` form) and `ignore_parameter`s the link's `R`, so `klt
+        # lvs` leaves it out of the compare by default (`ignored_parameters`).
         ResistorDevice(
             name="efuse",  # gf180mcu_fd_pr__efuse (subckt "efuse")
             body=(30, 0),  # Poly2
@@ -3568,16 +3568,16 @@ EXTRACTION_DECK = ExtractionDeck(
             sheet_rho_ohm_sq=28.5714,  # efuse_extraction.lvs
             requires=((80, 5),),  # efuse_mk -- the scope
             anode_marker=(100, 8),  # lvs_source
+            ignored_parameters=("R",),
             provenance=_gf180mcu_lvs_provenance(
                 "libs.tech/klayout/tech/lvs/rule_decks/efuse_extraction.lvs",
                 "gf180mcu_fd_pr__efuse",
             ),
         ),
-        # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring
-        # sky130's `res_generic_m1`..`res_generic_m5`, issue #1621) -- see
-        # the module docstring's derivation note above for the full
-        # transcription. Plain 2-terminal `resistor(...)` each: no bulk
-        # terminal, so `bulk_to_substrate` stays the default `False`.
+        # Drawn metal resistors `rm1`/`rm2`/`rm3` (issue #1640, mirroring sky130's
+        # `res_generic_m1`..`m5`, #1621) -- see the module docstring's derivation
+        # note above. Plain 2-terminal `resistor(...)` each: no bulk terminal, so
+        # `bulk_to_substrate` stays `False`.
         ResistorDevice(
             name="rm1",  # gf180mcu_fd_pr__rm1 (subckt "rm1")
             body=(34, 0),  # Metal1

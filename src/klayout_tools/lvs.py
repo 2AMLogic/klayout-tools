@@ -178,6 +178,7 @@ from .lvs_coverage import (
     _coverage_kind,
     _geometry_disclosure_kind,
 )
+from .lvs_deck_defaults import apply_deck_ignored_parameters
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
@@ -1635,16 +1636,12 @@ def run_lvs(
 
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
-        # trim) reference's behavioural option construct to one concrete
-        # drawn state *before* anything else below -- every other reference-
-        # side normalisation in this block (`device_bulk`, placeholder
-        # values, `compare_parameters`, the parameter-coverage summary)
-        # should see the already-resolved device/net set, exactly as it
-        # would for a reference hand-authored at that one option code to
-        # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
-        # immediately) for every request that does not declare it, so a
-        # reference with no option construct present stays byte-identical to
-        # before this hook existed.
+        # trim) reference's behavioural option construct to one concrete drawn
+        # state *before* anything else below -- every other reference-side
+        # normalisation here (`device_bulk`, placeholder values,
+        # `compare_parameters`, the coverage summary) should see the resolved
+        # device/net set. Opt-in via `hints.short_nets`; a no-op (returns `[]`)
+        # without it, so a reference with no option construct is unchanged.
         short_nets_warnings = _apply_short_nets_hint(
             request.get("hints") or {},
             reference_netlist,
@@ -1653,13 +1650,11 @@ def run_lvs(
 
         # Issue #506: normalise the reference side's device classes up to the
         # layout side's terminal list *before* the comparer is constructed, so
-        # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
-        # resistor's three-terminal `RES_X`) can be compared against a
-        # schematic-derived reference that does not model that terminal at
-        # all. Runs after the `combine_devices()` step above so combining
-        # still sees each side's own, unmodified device classes (the
-        # status-quo behaviour), and returns the `severity: "warning"`
-        # disclosure entries appended to `mismatches[]` further down.
+        # a deck's bulk-terminal flavour (e.g. a `bulk_to_substrate` resistor's
+        # three-terminal `RES_X`) can be compared against a schematic-derived
+        # reference that does not model that terminal. Runs after the
+        # `combine_devices()` step so combining still sees each side's own
+        # classes, and returns the `warning` disclosures appended further down.
         bulk_warnings = _apply_reference_device_bulk(
             reference_device_bulk,
             layout_netlist,
@@ -1667,13 +1662,11 @@ def run_lvs(
         )
 
         # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
-        # just above -- a `form: "subckt-call"` conversion's placeholder `0`
-        # value has to be taken out of the comparison *before* the comparer is
-        # constructed, since `NetlistComparer` reads each device class's
-        # `equal_parameters` when it builds its device-equivalence seeding.
-        # Runs after `combine_devices()` for the same reason too (combining
-        # still sees each side's unmodified classes), and returns the
-        # `severity: "warning"` disclosure entries appended further down.
+        # -- a `form: "subckt-call"` conversion's placeholder `0` value has to
+        # leave the comparison *before* the comparer is constructed, since
+        # `NetlistComparer` reads each class's `equal_parameters` when it seeds
+        # device equivalence. Runs after `combine_devices()` for the same
+        # reason, and returns the `warning` disclosures appended further down.
         placeholder_warnings = _apply_reference_placeholder_values(
             reference_placeholder_classes,
             layout_netlist,
@@ -1681,12 +1674,19 @@ def run_lvs(
             placeholder_excluded,
         )
 
-        # Issue #1928: same placement rationale once more -- `enable_parameter`
-        # has to run before the comparer is constructed for the same reason
-        # `equal_parameters` does just above, and after `combine_devices()`
-        # so combining still sees each side's unmodified classes. Returns
-        # the `severity: "warning"` disclosure entries appended further down.
-        compare_parameter_warnings = _apply_compare_parameters(
+        # Issues #1928, #4312: same placement rationale -- `enable_parameter` has
+        # to run before the comparer is built, after `combine_devices()`. The
+        # deck's own ignored parameters go first and skip any class
+        # `compare_parameters` names. Returns the disclosures appended below.
+        compare_parameter_warnings = apply_deck_ignored_parameters(
+            layout_deck,
+            opts.compare_parameters,
+            layout_netlist,
+            reference_netlist,
+            placeholder_excluded,
+            compare_scoped_excluded,
+            compare_scoped_narrowed,
+        ) + _apply_compare_parameters(
             opts.compare_parameters,
             layout_netlist,
             reference_netlist,

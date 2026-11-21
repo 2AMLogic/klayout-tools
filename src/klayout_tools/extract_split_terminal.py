@@ -8,10 +8,10 @@ of one conductor shape, told apart by marker layers -- the gf180mcu eFuse.
 decides per conductor shape, so a shape lacking its link, anode or cathode is
 not a device.
 
-This is a move, not a rewrite: every function body is unchanged. Dependencies
-are imported from their defining modules, never back through
-``extract_passive_regions.py`` (which re-exports :func:`resistor_body_region`
-as ``_resistor_body_region``), so the import graph stays one-directional.
+:func:`resistor_body_region` is a move, not a rewrite. Dependencies are
+imported from their defining modules, never back through
+``extract_passive_regions.py`` (which re-exports it as
+``_resistor_body_region``), so the import graph stays one-directional.
 """
 
 from __future__ import annotations
@@ -120,6 +120,34 @@ def split_terminal_regions(
     return scope, link, anode, cathode
 
 
+def subtract_dummy(
+    body: kdb.Region,
+    split: tuple[kdb.Region, kdb.Region, kdb.Region] | None,
+    dummy: kdb.Region,
+) -> tuple[kdb.Region, tuple[kdb.Region, kdb.Region, kdb.Region] | None]:
+    """``(body - dummy, split)`` with the dummy marker applied (issue #462).
+
+    For a split-terminal device (``split`` is ``(scope, anode, cathode)``) a
+    shape whose link lies wholly under ``dummy`` is no device, so it leaves
+    scope, anode and cathode alike and stays ordinary conductor; filtering only
+    the link would leave its scope cut out and its terminals registered, so its
+    connectivity would change with an unrelated live fuse drawn beside it
+    (issue #4312). Any other entry (``split`` is ``None``) is just
+    ``body - dummy``.
+    """
+    import klayout.db as kdb
+
+    if split is None:
+        return body - dummy, None
+    scope, anode, cathode = split
+    dead = kdb.Region()
+    for polygon in scope.each():
+        shape = kdb.Region(polygon)
+        if ((body & shape) - dummy).is_empty():
+            dead += shape
+    return (body - dead) - dummy, (scope - dead, anode - dead, cathode - dead)
+
+
 def extract_device(
     l2n: kdb.LayoutToNetlist,
     index: int,
@@ -131,8 +159,10 @@ def extract_device(
     """Register and extract one split-terminal resistor (issue #4312).
 
     Anode and cathode abut around the link, so each is registered as its own
-    layer (and tied to ``contact`` separately by :func:`connect_terminals`),
-    while the extractor's ``tA``/``tB`` pick out which is which.
+    layer (and tied to ``contact`` separately by :func:`connect_terminals`).
+    ``tA``/``tB`` only name the output layers: KLayout hands ``A``/``B`` to the
+    two contacts in geometric order, which turns with the layout's orientation,
+    so :func:`orient_terminals` re-points them once the netlist exists.
     """
     import klayout.db as kdb
 
@@ -144,6 +174,90 @@ def extract_device(
         kdb.DeviceExtractorResistor(spec.name, spec.sheet_rho_ohm_sq),
         {"R": body, "C": terminal, "tA": anode, "tB": cathode},
     )
+
+
+def _anode_net(
+    l2n: kdb.LayoutToNetlist,
+    device: kdb.Device,
+    entries: list[tuple[kdb.Region, kdb.Region]],
+    contact: kdb.Region,
+) -> kdb.Net | None:
+    """The net of the anode polygon abutting ``device``'s link, or ``None``.
+
+    KLayout places a resistor device at the centre of its ``R`` polygon, which
+    selects the link component, and from it the anode polygon that touches it.
+    ``probe_net`` only resolves where a shape meets a connected layer, so the
+    probe point is a contact inside that polygon; an uncontacted anode is
+    ``None``.
+
+    ``extract_devices`` writes each device's terminal shapes back into the
+    ``tA``/``tB`` regions, tagged with a ``TERMINAL_ID`` property, so the anode
+    region also holds whichever block was handed ``A``. Only the polygons that
+    carry no property come from the marker, and only those are considered.
+    """
+    import klayout.db as kdb
+
+    dbu = l2n.internal_layout().dbu
+    x, y = round(device.trans.disp.x / dbu), round(device.trans.disp.y / dbu)
+    probe = kdb.Region(kdb.Box(x - 1, y - 1, x + 1, y + 1))
+    for link, anode in entries:
+        here = link.interacting(probe)
+        for polygon in anode.each():
+            shape = kdb.Region(polygon)
+            if polygon.properties() or shape.interacting(here).is_empty():
+                continue
+            for piece in (shape & contact).each():
+                centre = piece.bbox().center()
+                return l2n.probe_net(anode, kdb.DPoint(centre.x * dbu, centre.y * dbu))
+    return None
+
+
+def orient_terminals(
+    l2n: kdb.LayoutToNetlist,
+    circuit: kdb.Circuit | None,
+    resistors: Iterable[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            kdb.Region,
+            tuple[kdb.Region, kdb.Region] | None,
+        ]
+    ],
+    contact: kdb.Region,
+) -> None:
+    """Make ``A`` the anode net and ``B`` the cathode net of every
+    split-terminal device, whatever the layout's orientation (issue #4312).
+
+    KLayout's resistor extractor assigns ``A``/``B`` to the two contacts in
+    geometric order, so the same fuse reports ``anode cathode`` at one rotation
+    and ``cathode anode`` at another. The marker defines which terminal is
+    which; this re-points the two terminals onto the nets of the marker-defined
+    anode and cathode, so the report and the written card are orientation
+    independent. ``A``/``B`` stay equivalent for LVS, so no verdict changes.
+    """
+    if circuit is None:
+        return
+    by_class: dict[str, list[tuple[kdb.Region, kdb.Region]]] = {}
+    for spec, body, _terminal, split in resistors:
+        if split is not None:
+            by_class.setdefault(spec.name, []).append((body, split[0]))
+    for device in circuit.each_device():
+        entries = by_class.get(device.device_class().name)
+        anode_net = _anode_net(l2n, device, entries, contact) if entries else None
+        if anode_net is None:
+            continue
+        ids = {td.name: td.id() for td in device.device_class().terminal_definitions()}
+        a_net = device.net_for_terminal(ids["A"])
+        b_net = device.net_for_terminal(ids["B"])
+        if b_net is None or b_net.cluster_id != anode_net.cluster_id:
+            continue  # the anode is not on B: A already holds it
+        if a_net is not None and a_net.cluster_id == anode_net.cluster_id:
+            continue  # both terminals on one net: nothing to swap
+        device.disconnect_terminal(ids["A"])
+        device.disconnect_terminal(ids["B"])
+        device.connect_terminal(ids["A"], anode_net)
+        if a_net is not None:
+            device.connect_terminal(ids["B"], a_net)
 
 
 def connect_terminals(

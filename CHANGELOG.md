@@ -1866,9 +1866,18 @@ not `klt --version`, if you need to detect this kind of drift. See
   `poly2 & plfuse` inside `efuse_mk`, anode `lvs_source` 100/8, cathode the rest
   of the shape), via a new optional `ResistorDevice.anode_marker` field. A fuse
   with no `lvs_source` is not a device and its `plfuse` is reported as
-  unclaimed. The PDK ignores the link's `R`, so scope it out with
-  `options.compare_parameters` (`{"efuse": ["L", "W"]}`). The `gf180mcu` deck
-  content hash changes.
+  unclaimed, and a fuse wholly under the `dummy` marker stays ordinary
+  conductor whatever is drawn beside it. `A` is always the anode net and `B` the
+  cathode net, at any rotation or mirror. The PDK ignores the link's `R`, so the
+  deck now carries that (new optional `ResistorDevice.ignored_parameters`) and
+  `klt lvs` leaves it out of the compare by default, disclosed as a
+  `device.parameter_excluded` entry with `details.source: "deck"`; naming the
+  class in `options.compare_parameters` compares it. The PDK's own `efuse.gds`
+  matches its shipped `efuse.cdl`, and a `reference.form: "subckt-call"`
+  schematic calling `.subckt efuse in out pblow=0` resolves (read-only: `klt
+  extract --pdk` still writes the bare `R` card). `klt deck devices --class
+  efuse` lists a third `anode` terminal, so the 100/8 marker is in
+  `required_layers`. The `gf180mcu` deck content hash changes.
 - **`gen-compose` `ports_from_labels` handles long thin nets** (issue #4201).
   Landing candidates are now enumerated per merged net polygon rather than over
   the whole net bbox, so a 0.4 um x 1.4 mm wire no longer fails with "spans too

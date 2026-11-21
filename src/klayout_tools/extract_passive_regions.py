@@ -35,7 +35,7 @@ from .decks import CapacitorDevice, ExtractionDeck, ResistorDevice
 from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
 from .extract_split_terminal import resistor_body_region as _resistor_body_region
-from .extract_split_terminal import split_terminal_regions
+from .extract_split_terminal import split_terminal_regions, subtract_dummy
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -173,7 +173,7 @@ def _resolve_resistors(
             for component in body.merged().each():
                 if (kdb.Region(component) - dummy).is_empty():
                     dummy_devices_dropped += 1
-            body = body - dummy
+            body, split = subtract_dummy(body, split, dummy)
         if body.is_empty():
             continue
         recognised.append((spec, body, terminal_layer, split))
