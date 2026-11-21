@@ -358,11 +358,25 @@ error, as is a crashed runset. Additive; no `schema_version` bump.
 
 **Coverage honesty.** Additive fields:
 
-- `device_census` — `{layout: {class: n}, reference: {class: n}}`.
+- `device_census` — `{layout: {class: n}, reference: {class: n}}`, plus
+  `reference_source` (issue #6902): `{NAME: n}` — instance counts, keyed by
+  upper-cased name, over the reference *source* netlist re-read with the
+  plain SPICE reader (hierarchy intact, no deck delegate), one count per
+  card per circuit definition. In scope are exactly the cards the runset's
+  reader delegate is responsible for keeping: subcircuit calls whose callee
+  is in the deck's `DEVICE_LIST` (the ones the delegate converts to devices,
+  including the ones it renames), plus every device card the plain reader
+  keeps (`M`/`Q`/`D`/`C`/`R`/`L`..., keyed by the model name the plain
+  reader gives the class). `null` when the reference cannot be re-read.
+  This is the positive reference-side evidence `klt signoff` grades item 4
+  on (see `docs/cli/signoff.md`, `runset_unrecognised_device`): a report
+  without it fails closed, so re-run `klt lvs` rather than hand-editing.
 - `coverage` — the common v1 block (`checked` = classes with instances),
   plus `declared_device_classes`/`recognized_device_classes` (per side) and
   `declared_not_recognized` (declared by the runset, zero instances; also
-  listed under `skipped` with reason `declared_not_recognized`). Device
+  listed under `skipped` with reason `declared_not_recognized`). **Disclosure
+  only, not graded** (issue #6902): no real block instantiates every class a
+  PDK runset declares. Device
   instances whose class has an empty name are excluded from all class lists,
   counted in `unnamed_device_instances`, and reported as one `skipped` entry
   (`id: "<unnamed>"`, reason `unnamed_device_class`).

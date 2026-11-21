@@ -17,11 +17,18 @@ engine's own envelope cannot assert about itself, all decided here:
   report gets from ``klt lvs --check``. A drifted file is
   :data:`REASON_RUNSET_HASH_MISMATCH`. If the digest is unavailable, an
   otherwise passing citation discloses that the re-hash was unverifiable.
-- **Full device recognition.** The engine reports ``status: "match"`` when the
-  devices it *did* recognise agree, so a class it declared but never
-  recognised (``coverage.declared_not_recognized``), or a per-class device count
-  that differs between layout and reference, must still fail
-  (:func:`unrecognised_device_gaps`).
+- **Full device recognition.** The engine reports ``status: "match"`` when
+  the devices it *did* recognise agree, so a per-class device count that
+  differs between layout and reference must still fail, and so must a
+  reference device the runset's reader dropped on both sides -- a card in
+  the reference source that survives in neither census reads ``match``
+  while proving nothing (issue #6902). :func:`unrecognised_device_gaps`
+  measures exactly that: case-folded per-class census equality plus the
+  report's own ``device_census.reference_source`` evidence, read by the
+  engine from the reference source with the plain SPICE reader. Classes the
+  runset declares with zero instances anywhere are **not** graded -- no
+  real block instantiates every class a PDK runset declares -- but stay in
+  the report as disclosure (``coverage.declared_not_recognized``).
 
 An entry is only added after someone has fetched the PDK's published runset
 at a named commit and recorded its digest here (one entry, one reviewed
@@ -46,11 +53,15 @@ REASON_RUNSET_UNRECOGNISED_DEVICE = "runset_unrecognised_device"
 
 _IHP_REPO = "IHP-GmbH/IHP-Open-PDK"
 _GF_PV_REPO = "fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+_SKY130_REPO = "efabless/sky130_klayout_pdk"
 _REVIEW = (
     "klayout-tools#4309: fetched at the commit and hashed; digest reviewed in that PR"
 )
 _REVIEW_GF180 = (
     "klayout-tools#4395: fetched at the commit and hashed; digest reviewed in that PR"
+)
+_REVIEW_SKY130 = (
+    "klayout-tools#6902: fetched at the commit and hashed; digest reviewed in that PR"
 )
 
 #: ``sha256:<hex>`` of a PDK-published LVS runset file -> ``{"pdk", "revision",
@@ -84,6 +95,18 @@ PINNED_RUNSETS: dict[str, dict[str, str]] = {
         "path": "klayout/lvs/gf180mcu.lvs",
         "reviewed_by": _REVIEW_GF180,
     },
+    # Issue #6902. open_pdks installs this file byte-identically (KLAYOUT_URL
+    # in its sky130 Makefile) into sky130A/libs.tech/klayout/lvs/sky130.lvs;
+    # the digest equals the one the committed 2AMLogic/sky130-usb2-phy
+    # reports record, so those reports need no re-run for the pin.
+    "sha256:5b4ede4bdb4744b60e42c9b29baa93f40bb24430fb8f3a48a276a712a492ac38": {
+        "pdk": "sky130",
+        "revision": "main@13d2572",
+        "repo": _SKY130_REPO,
+        "commit": "13d2572144450daba6a9f3508ae4c6e93e852466",
+        "path": "tech/sky130/lvs/sky130.lvs",
+        "reviewed_by": _REVIEW_SKY130,
+    },
 }
 
 
@@ -96,25 +119,84 @@ def runset_block(envelope: dict[str, Any]) -> dict[str, Any]:
     return block if isinstance(block, dict) else {}
 
 
+def _folded_class_counts(counts: Any) -> dict[str, int]:
+    """``counts`` with upper-cased keys -- SPICE names are case-insensitive
+    and the two census sides arrive in different case (a sky130 report run
+    with ``convert_subckts`` reads layout ``sky130_fd_pr__...`` against
+    reference ``SKY130_FD_PR__...``; issue #6902). Non-integer values are
+    skipped, not coerced: a census that does not carry counts is not
+    evidence."""
+    folded: dict[str, int] = {}
+    if isinstance(counts, dict):
+        for name, count in counts.items():
+            if isinstance(count, int) and not isinstance(count, bool):
+                key = str(name).upper()
+                folded[key] = folded.get(key, 0) + count
+    return folded
+
+
 def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
     """Why a runset report does not prove every device was recognised -- an
     empty list when it does. Entries are human-readable and stable enough to
-    quote in a check's ``detail``."""
+    quote in a check's ``detail``.
+
+    Three measurements, all against the 2026-10-08 ruling's condition (4)
+    ("every device in the layout is recognised; an unrecognised or dropped
+    device is a failure") as corrected by issue #6902:
+
+    - per-class census equality, case-folded -- a class with instances on
+      one side only is an unrecognised device;
+    - the report must carry ``device_census.reference_source`` (the engine's
+      own evidence, read from the reference source with the plain SPICE
+      reader); a report without it cannot prove the runset's reader kept
+      every reference device and fails closed -- re-run ``klt lvs`` with a
+      klt that emits the field;
+    - the converted reference must account for every in-scope source card:
+      the runset's reader renames some callees (sky130
+      ``special_nfet_01v8`` -> ``nfet_01v8``), so per-name equality between
+      source and converted census does not hold and the **totals** are
+      compared instead -- rename-proof, and still zero-miss for the
+      both-sides-drop case the old ``declared_not_recognized``-non-empty
+      proxy guarded: a card present in the source but dropped by the reader
+      survives in neither census and shows up as converted < source.
+
+    ``coverage.declared_not_recognized`` is disclosure, not graded: a class
+    the runset declares with zero instances in the layout, the converted
+    reference *and* the reference source is absent from all three counts and
+    fails nothing (no real block instantiates every class a PDK runset
+    declares)."""
     gaps: list[str] = []
     coverage = envelope.get("coverage")
     census = envelope.get("device_census")
     if not isinstance(coverage, dict) or not isinstance(census, dict):
         return ["report carries no coverage/device_census to prove recognition"]
-    for cls in coverage.get("declared_not_recognized") or []:
-        gaps.append(f"device class '{cls}' declared but not recognised")
-    layout = census.get("layout") or {}
-    reference = census.get("reference") or {}
+    layout = _folded_class_counts(census.get("layout"))
+    reference = _folded_class_counts(census.get("reference"))
     for cls in sorted(set(layout) | set(reference)):
         if layout.get(cls, 0) != reference.get(cls, 0):
             gaps.append(
                 f"device class '{cls}': {layout.get(cls, 0)} in layout vs "
                 f"{reference.get(cls, 0)} in reference"
             )
+    source = census.get("reference_source")
+    if not isinstance(source, dict):
+        gaps.append(
+            "report carries no device_census.reference_source -- it predates "
+            "the reference-source device evidence of issue #6902 (or its "
+            "reference could not be re-read) and cannot prove the runset's "
+            "reader kept every reference device; re-run 'klt lvs' with a klt "
+            "that emits the field"
+        )
+        return gaps
+    source_total = sum(_folded_class_counts(source).values())
+    converted_total = sum(reference.values())
+    if converted_total < source_total:
+        gaps.append(
+            f"reference source holds {source_total} device cards the runset's "
+            f"reader is responsible for but the converted reference census "
+            f"accounts for {converted_total} -- devices were dropped on both "
+            "sides (issue #6902)"
+        )
     return gaps
 
 
