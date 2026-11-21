@@ -3607,8 +3607,11 @@ Each entry contains:
 | `retention_errors` | Secondary write failures, each with `artifact` and `error`; empty when all logs were written. |
 
 New path fields use the shared `{path, scope}` convention: `repo` paths are
-relative to the invoking repository root; `external` paths are withheld;
-`absent` means no successfully retained artifact at that field. For an
+relative to the repository containing the request file (#6764) — never the
+invoking directory, so one request yields one committed report from any cwd;
+`external` paths are withheld; `absent` means no successfully retained
+artifact at that field. An `outputs.dir` outside the request's repository
+(even one holding the invoking cwd) makes every log field `external`. For an
 external request, locate the directory beside its generated script using
 the invocation ID and the fixed `openroad-logs/<invocation_id>/` suffix.
 The transcripts themselves contain the engine's unredacted captured text.
