@@ -1,1 +1,0 @@
-- **MCP tool and argument descriptions and standalone artifact verifier help link to CLI documentation on GitHub** (#6660, 2026-11-18).

@@ -1,1 +1,0 @@
-- **Gen-compose accepts sky130A 2×2 via arrays at the minimum cut spacing** on layers 69/44 and 70/44 (#6780, 2026-11-19).

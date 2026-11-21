@@ -1,1 +1,0 @@
-- **`klt lvs --check` suggests `--reference` when it finds the missing reference beside the report** (#6802, 2026-11-19).

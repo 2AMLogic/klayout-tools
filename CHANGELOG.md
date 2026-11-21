@@ -14,6 +14,8 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+## 0.10.0 (2026-11-20)
+
 - **`klt extract --deck gf180mcu` resolves marker-scoped MOS capacitors ~2x
   faster on marker-rich layouts** (#6527, 2026-11-20): the bulk-algebra
   resolver #5807 introduced memoized its layer *read* (`region_of`) but not
@@ -216,6 +218,9 @@ not `klt --version`, if you need to detect this kind of drift. See
   (exact-body markers, the pre-#5889 fixture style) extracts bit-for-bit as
   before; a halo that is itself a conductor path around the body still
   forms no device. Other decks are untouched (the field defaults to `0.0`).
+  The gf180mcu deck hash changes (the two poly entries gain the new field),
+  so a consumer pinning `provenance.deck.content_hash` for gf180mcu re-pins
+  to the value `klt deck resolve --deck gf180mcu` reports for this release.
   No JSON field added or removed; `schema_version` unchanged.
 
 - **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
@@ -1274,6 +1279,556 @@ not `klt --version`, if you need to detect this kind of drift. See
   `--rerun` reads, so the two cannot diverge. `--format` defaults to `json`
   for this sub-verb (the payload *is* the document); `--rerun` behavior and
   every report's own fields are unchanged, and no `schema_version` moves.
+
+- **`klt extract --engine klayout-runset` can carry measured device
+  parameters onto its `X` calls** (#5513, 2026-11-17): the new repeatable
+  `--device-param CLASS:PARAM=NAME[:SUFFIX]` (request field `device_params`)
+  appends `NAME=<value><SUFFIX>` to every call of `CLASS`, where `<value>` is
+  the measured KLayout parameter, unscaled. The caller states the name and the
+  SPICE suffix; there is no built-in per-PDK table. Before, every call was
+  parameter-free, so a MOS or resistor drawn at a non-default size simulated at
+  its subcircuit's default (an `sg13_hv_nmos` measured at 1.0 µm × 1.0 µm ran at
+  0.35 µm × 0.34 µm). An unknown `PARAM` for its class is an error (exit 1), and
+  the flag is refused under the default engine. `warnings[]` and the netlist
+  header now name only what is *still* uncarried: a class with every parameter
+  declared gets no dropped-parameter warning. The report gains a top-level
+  `device_params` echo, **absent** (not `null`) without the flag. Additive; with
+  no `--device-param` the netlist, header, `warnings[]` and report are
+  byte-identical to before. `docs/cli/extract.md` also corrects the implication
+  that the class terminal order always matches the subcircuit's pin order
+  (true for `pnpMPA`, false for MOS: `S G D B` against `d g s b`), and gives
+  the MOS recipe that cross-declares `AS`/`AD`/`PS`/`PD`. No
+  `schema_version` change.
+
+- **`klt gen` draws the sky130 low-Vt marker** (#5607, 2026-11-17).
+  `mos_array` and `diff_pair` draw `lvtn.drawing` (125/44) alone over the
+  device footprint when `params.voltage_flavor="lvt"` on `sky130`, for both
+  `flavor="nfet"` and `"pfet"`. `klt extract --deck sky130` classifies the
+  resulting devices as `sky130_fd_pr__nfet_01v8_lvt` and
+  `sky130_fd_pr__pfet_01v8_lvt`, respectively. Previously this value resolved
+  to no layer and produced a `drc_hints.notes` entry. No JSON fields changed.
+
+- **`klt gen-compose` now reports composed-frame mirrors on every
+  `blocks[].derived_ports[]` entry** (#5609, 2026-11-17): the entry's
+  `label_um` and `landing.x_um`/`y_um` were the only per-block coordinates
+  still in the **source cell's own** frame — un-oriented, un-translated —
+  so a caller driving its own router or via-drop from them placed geometry
+  at the wrong coordinates for any block not placed at the origin. Each
+  entry now additionally carries `label_composed_um: {x, y}` and, when
+  `landing` is non-null, `landing.x_composed_um`/`y_composed_um`, oriented
+  by the block's `orientation` and translated by its `offset_um` (the same
+  transform as `bbox_um` and the composed `ports[]`). The source-frame
+  fields keep their exact values, so no JSON field changes meaning or moves
+  — additive only, no `schema_version` bump.
+
+- **`klt em` extracts capacitance from labelled GDS regions using the PDK stackup and Geode/Gmsh** (#5617, 2026-11-18).
+
+- **`klt signoff --attest 8` now requires recognised evidence for every citation** (#5688, 2026-11-19).
+  A spec row’s `citation` check passes only if the row cites at least one path
+  and the classifier shared with `--manifest` grading recognises every cited
+  file as an evidence envelope. Citing prose or schema-less JSON can therefore
+  turn a previous `pass` into a `fail`. Recognition requires no particular
+  envelope kind or verdict and does not verify hashes.
+  Item 8 emits one `envelope` check (role `evidence`) per distinct cited path.
+  Its `kind` is the recognised kind on success and `null` on failure.
+  Item 9 adds a `reason` to the failed `pin` check (role `pdk`) when
+  `pins.pdk` is present with a value other than a JSON object. These JSON
+  additions use the existing `schema_version`.
+
+- **`klt signoff --manifest` renders a per-spec-row table** (#5691,
+  2026-11-17): a block manifest citing many `klt sim`/`klt yield` envelopes
+  against a declared row set had no verb that produced the one artifact a
+  pre-silicon reader wants — each spec row's limit, worst value, binding
+  corner, verdict, yield estimate and the cited file behind each number — so
+  every consuming repo wrote its own aggregator and re-derived the same joins
+  (binding instance by *relative* margin, row attribution, cross-campaign
+  reduce). When the manifest declares a top-level `spec_rows` map, the tier
+  report now gains one additive top-level `spec_rows[]` block: one record per
+  declared row, in declaration order, with `state` (`graded`/`gap`/
+  `no_evidence`/`unattributable`), `worst` and `yield` quoted byte-equal off
+  the cited envelopes, the binding measurement picked by minimum **relative**
+  margin (`margin / |active bound|`; absolute-margin fallback with
+  `relative_margin: null` when the bound is `0` or `limits` is absent;
+  `error > inconclusive > fail > insufficient_evidence > pass` precedence),
+  declared gaps carried as explicit no-evidence records, disagreement in
+  limits listed under `limit_disagreement[]` instead of reconciled, and
+  `sources[]` naming the file and measurement behind every number.
+  `--format text` renders the same records as a table. A manifest that
+  declares nothing omits the key entirely — no item verdict, `tier`,
+  `row_coverage` or grading rule moves, and `--check` reports no drift on an
+  upgrade alone. Additive: no `schema_version` bump.
+
+- **Changed** (#5704, 2026-11-20, `klt gen res_array` on sky130A `flavor`
+  `high`/`xhigh`; drawn-geometry change, no JSON field changes,
+  `schema_version` unchanged): the contacted end heads are now drawn
+  **2.16 µm** long along the current-flow axis instead of the
+  enclosure-derived 0.39 µm, meeting open_pdks `sky130A.tech`'s
+  precision-resistor contact-extension rule (`extend xpc/a xhrpoly,uhrpoly
+  2160`, "poly contact extends poly resistor by < 2.16um", `licon.1c +
+  li.5`) that the PDK's own Magic DRC reported once per head under both
+  `drc(fast)` (its default style) and `drc(full)`; verified live
+  (2026-11-17, Magic 8.3.683, open_pdks `c6d73a35f524`) that the reproducer
+  cell reports `No errors found.` in both styles after the change. The
+  2.16 µm value is the foundry's own (`sky130A.tcl`'s `res_to_endcont
+  1.985` + `end_contact_size/2` 0.095 + `poly_surround` 0.08), resolved
+  from a new per-(PDK, flavor) table with no new request parameter, so a
+  unit's total length grows 2 × (2.16 − 0.39) = **3.54 µm** per
+  `high`/`xhigh` unit and the unit pitch moves accordingly. The recognised
+  body segment (`poly.res` span, so the extracted `L`/`R`), the 0.19 ×
+  2.0 µm licon slots and the 2.2 µm pad height are unchanged; every other
+  family/flavour (sky130 `generic`, gf180mcu, sg13g2) and every
+  `metal_level` request draws identical geometry to before.
+
+- **sky130 now reports a fully orphan via/contact cut** (#5737, 2026-11-18). Eight
+  single-population `enclosing` rules opt in to `require_containment`
+  (`li1.enclosing.licon1.1`, `met1.enclosing.mcon.1`, `met1.`/`met2.enclosing.via.1`,
+  `met2.`/`met3.enclosing.via2.1`, `met4.enclosing.via3.1`, `met5.enclosing.via4.1`),
+  so a cut sitting entirely off its conductor -- previously `clean` because the
+  enclosure term only sees cuts that touch the metal -- now reports on its rule id.
+  The seven multi-population sides (`diff.`/`tap.`/`poly.enclosing.licon.1`,
+  `met3.`/`capm.enclosing.via3.1`, `met4.`/`capm2.enclosing.via4.1`) keep the legacy
+  behaviour. A `licon1` with no `li1` above it is now itself reported, so a bare
+  contact placed at a `klt gen` gate port needs an `li1` landing (0.08 um enclosure
+  clears every generator case; generator output itself is unchanged and still
+  clean). The off-grid rule block moved to `decks/sky130_offgrid.py` (re-exported
+  from `decks/sky130.py`). No rule id, `DrcRule` field or schema change.
+
+- **`klt lvs` `body_verification` reports what it inspected, and never reads
+  `"verified"` when it inspected nothing** (#5749, 2026-11-16): the block
+  gains an `inspected_count` integer (present in every branch, `0` for
+  `"unchecked"`) and two dishonest `"verified"` renders are closed. (1) The
+  check selected devices by exact equality with the deck's generic
+  `nfet_class`/`pfet_class` only, so under `options.compare_mos_flavour:
+  true` — where `split_layout_mos_flavours` has already renamed every
+  flavoured device to `{base}__{flavour}` (e.g. `nfet__nvt`) before the body
+  check runs — it inspected nothing yet reported
+  `status: "verified"`, `device_count: 0`, indistinguishable from a block
+  whose every body tie was drawn. Flavoured classes are now inspected like
+  the generic ones: the same layout that used to read vacuously `"verified"`
+  under `compare_mos_flavour: true` reads `"unverified"` with a non-zero
+  `device_count`, agreeing with the `compare_mos_flavour: false` run of the
+  identical GDS and deck, and `device_classes` names the extracted class
+  (`nfet__nvt`). The `device.body_unverified` warnings and the block still
+  come from one determination and now agree per flavoured class too. (2) A
+  passives-only layout (no MOS device at all) also read the vacuous
+  `"verified"`; zero eligible devices now reads `"unchecked"` with a `reason`
+  naming the deck's MOS class names. Genuinely verified layouts are
+  unchanged apart from the new field (e.g. `inspected_count: 2` on the
+  gf180mcu drawn-tie inverter). The block remains a disclosure field: no
+  `status` value is added or removed, and the block does not feed grading —
+  `status`, `error_count` and `category_error_counts` are untouched. But
+  the previously-skipped flavoured warning now fires, so on a
+  `compare_mos_flavour: true` run over a layout with untied flavoured
+  bodies `mismatch_count` increases by one per newly-seen class and
+  `category_counts` gains a `device.body_unverified` key. A consumer that
+  read `body_verification.status: "verified"` as "this run inspected
+  bodies" must now also read `inspected_count`, because a pre-#5749
+  `"verified"` may have inspected nothing. No `schema_version` change (`docs/schemas/lvs-response.schema.json`
+  describes the new field). The determination moved from `lvs_mismatch.py`/
+  `lvs_power.py` into the new `klayout_tools/lvs_body.py` with no behavior
+  change beyond the above.
+
+- **`klt sim` names device instances whose vendor `mult` and acting `m=`
+  disagree** (#5779, 2026-11-17): sky130's device subcircuits declare a
+  vendor `mult` parameter and never forward it to the inner primitive as a
+  device multiplier, so a netlist carrying `mult=6` and no `m=` simulates a
+  **1x** device with no signal from any step of the flow. After the corners
+  run, `klt sim` lints the netlist's instance cards against the device
+  subcircuit texts of the scanned `.include` closure (text-driven — a body
+  `m=` referencing `mult` is forwarding; a mismatch expression like
+  `sqrt(l*w*mult)` is not) and reports three verdicts: `mult=N` (N>1) with
+  no `m=` → finding `drive_1x` (simulates 1x); `m=M` with `mult` absent (M≠1) or
+  unequal → finding `drive_mismatch_disagreement` (the drive and vendor
+  multiplier settings differ); `mult=N m=N` → clean. Findings are **warning-only**
+  in a new additive `environment.device_multiplier` (`findings`, plus
+  `note` when the closure cannot verify an instance, `unevaluated` for
+  non-numeric `m=`/`mult=` values, `not_scanned` for unread closure parts):
+  the exit code and every existing field are unchanged. Keep `m=N` and
+  `mult=N` for an N-times device. The effect of `mult` on Monte Carlo
+  mismatch depends on the model. For example, the sky130 `nfet_01v8`
+  uses `sqrt(l*w*mult)` in its mismatch sigma denominator. Non-numeric
+  values and subcircuits absent from the closure are disclosed, never guessed. See
+  [`docs/cli/sim.md`](https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/sim.md)'s "Device multiplier warnings" and
+  [`docs/json-contract.md`](https://github.com/2AMLogic/klayout-tools/blob/main/docs/json-contract.md).
+
+- **`klt lvs --engine klayout-runset` now echoes the caller's own
+  `--deck-file` form, and `environment.klayout_binary` records a basename**
+  (#5795, 2026-11-17): a *relative* `--deck-file` used to come back
+  absolutized in both `deck_file` and `provenance.runset.deck_file` — the
+  only path echoes in that envelope that discarded the caller's form — so a
+  report built from repo-relative inputs still failed
+  `klt env-provenance lint-envelope` unless the caller also knew to declare
+  `--allow-prefix`. Both echoes now preserve the caller-given relative string
+  (resolution is unchanged: the flag still resolves against the current
+  directory, and `--check`/`--check --rerun` of such a report must run from
+  that same directory — the anchor caveat the relative `layout`/`reference`
+  echoes already carry). An absolute `--deck-file`, or a `deck_file` set in
+  the request document, echoes byte-identically to before.
+  `environment.klayout_binary` now records the binary's basename (e.g.
+  `"klayout"`) in default mode — the form portable mode already chose in
+  #3991 — so the portable-only special case is gone; the version stays in
+  `environment.engine_version` and
+  `provenance.runset.klayout_application_version`, and an override remains
+  visible in the echoed `options`. A default-mode runset report built from
+  repo-relative inputs now lints clean with no declarations, and
+  `lint-envelope`'s recommendation names `request.portable_paths: true` as
+  the first-choice remedy for a `klt`-produced envelope. No field is added,
+  removed or retyped; no `schema_version` bump.
+
+- **`klt equiv` / `klt synthesize`: a WASI yosys dying as a bare wasm trap
+  now names the ~4 GiB memory ceiling and the native-build remedy**
+  (#5804, 2026-11-17): when the resolved `yosys` is a WASI/wasm build
+  (e.g. `yowasp-yosys`), a heavy query — `sat -seq <depth>` over a large
+  flattened netlist — can exceed the wasm32 guest's ~4 GiB linear-memory
+  ceiling and die mid-run with a bare `wasmtime._trap.Trap … thrown Wasm
+  exception` traceback: exit 1, no yosys `ERROR:` line, so both verbs'
+  error formatters fell through to the generic tail-of-output branch and
+  the caller was handed `yosys exited with code 1:  Caused by:     thrown
+  Wasm exception`, naming no cause, no engine, and no remedy. The new
+  shared `wasm_trap_hint_if_applicable` helper (in the new
+  `_yosys_error_messages` module, which now co-hosts both verbs'
+  formatters `_yosys_error_message` and `_synthesis_error_message` so the
+  detection cannot diverge between the verbs — the #1755 lesson; the
+  extraction keeps `equiv.py`, `synthesize.py`, and `_provenance.py`
+  within the per-file size ratchet) is appended by the no-`ERROR:`
+  tail branch of both formatters when the captured output carries the trap
+  signature: the hint names the WASI build, the ~4 GiB ceiling, and
+  `request.yosys_binary`/`$KLT_YOSYS_BINARY` as the native-build remedy.
+  A run that *does* carry a yosys `ERROR:` line is unchanged (the
+  `ERROR:` line still wins), as is output with neither a trap signature
+  nor an `ERROR:` line. Error-message text only; no JSON field changes and
+  no `schema_version` bump.
+
+- **Added** (#5817, 2026-11-19): every `klt signoff --attest` command check that actually
+  launched -- passing, failing and timed-out alike -- now carries an additive
+  `duration_s` number (observed wall time in seconds, one decimal) in the
+  live `--format json` result, and `--format text` names it on the check's
+  line (`... (exit 0) in 99.6s`), so a check drifting toward its declared
+  `timeout_s` budget is visible before the timeout fires. Live-only, exactly
+  like `output_tail` (#4698): never written to an `--output` envelope, never
+  in the `--check` diff, so the committed bytes and their content hash stay
+  reproducible across runs; a command that never launched
+  (`error: "launch_failed"`) and a skipped or carried `local_only` command
+  omit the field. Additive, so no `schema_version` bump.
+
+- **`klt functional-verification --check` verifies a committed report's request, sources, synthesized netlist, and original SDF without running a simulator** (#5855, 2026-11-18).
+
+- **`klt signoff` accepts repeatable `--artifact-manifest PATH` with `--manifest` or `--fleet`** (#5882, 2026-11-19).
+  If signoff cannot fetch or verify the bytes for a cited `artifact:<key>`, it
+  grades the item `unmet` with reason `artifact_unavailable`. The report records
+  the artifact URI in `detail.artifact` and the diagnostic in `detail.problem`.
+  The new reason is additive within the existing `schema_version`. Grading is
+  unchanged when both the flag and an `artifact:` citation are absent.
+
+- **`klt signoff --manifest`: a `yield` evidence entry can pin its samples
+  companion through a committed artifact-store manifest, offline
+  (#5963, 2026-11-18)**: a file-backed entry may now carry
+  `artifact_manifest` (repo-relative path to a committed
+  `*.manifest.json`) plus optional `artifact_member`. When the samples
+  document the `klt yield` report names is not on disk, the grader reads
+  the named member's recorded `sha256` from the committed manifest — the
+  same manifest reader `klt artifact verify` uses — and compares it
+  against the entry's `content_hash` pin: `verified` or `stale_evidence`
+  exactly as a disk re-hash would, with no broker, no environment and no
+  network at grade time. The citation discloses
+  `content_hash_basis: "artifact_manifest"` and `input_verified: null`
+  (the bytes were not re-hashed; `klt artifact get`/`verify` remain the
+  byte-level check). A store-resolved hash never supplies a verdict: the
+  envelope itself stays committed and file-backed (operator ruling
+  2026-11-17, option `a`). An unreadable/invalid manifest, or a missing,
+  duplicate-named or basename-ambiguous member, leaves the hash unresolved
+  with a named `content_hash_unresolved` reason (`manifest_unreadable`,
+  `manifest_invalid`, `member_missing`, `duplicate_member`,
+  `ambiguous_member`); a non-string key value renders that one item
+  `invalid_evidence`. Entries without the new keys, and samples files
+  present on disk, grade byte-identically to before.
+
+- **A 400-digit JSON integer is a documented error envelope, not an
+  `OverflowError` traceback, across every request-JSON number guard**
+  (#5994, 2026-11-17): `math.isfinite` raises `OverflowError` when handed the
+  `int` the stdlib JSON parser produces for a huge integer literal, so any
+  request field guarded by the hand-rolled
+  `isinstance(..., bool) or not isinstance(..., (int, float)) or not
+  math.isfinite(...)` chain crashed with a traceback instead of the verb's
+  documented error (the same defect class #5891 fixed in five validators).
+  All 28 raw-JSON guard sites now route through
+  `_jsonnum.is_finite_number`, which catches the overflow: the eight curated
+  sites (`sim_corners` nodeset volts, `sim_passes` alter values,
+  `sim_batch`'s `max_job_seconds` / `capacity_wait_s` / `interrupted_grace_s`,
+  `keepout_check --margin`, `sim_settled` `tol_pct`,
+  `constraints.power_activity`) plus the same-shaped guards found by
+  re-reviewing every `math.isfinite` hit (`clock_uncertainty_ns`,
+  corner-matrix measurements, ERC antenna ratios, place-and-route request
+  numbers, resistance-graph resistors, attestation timeouts, ngspice options,
+  nodeset matches, `mismatch_scale`, corner-point params, crossings levels,
+  step alters/pwl vectors, supply-relative fractions, Tian starts, abc_constr
+  loads, yosys timeouts, yield target sigmas). Exception types and wording
+  are unchanged for ordinary input. Engine-float `isfinite` uses are
+  untouched; no output-shape change; no `schema_version` bump.
+
+- **The `klt gen-compose` reference explains how its declared placement envelopes can understate drawn geometry and how to measure the output GDS with `klt cells --top`** (#5998, 2026-11-18).
+
+- **`klt gen-compose`'s new `routing.minimal_ladder` sizes a via-drop ladder's
+  intermediate pads at their own deck floors** (#6058, 2026-11-19): a
+  multi-hop ladder draws a landing pad on every plane it crosses, each at
+  least the fixed contact-derived 0.42 µm baseline even where the resolved
+  deck's own rules for that `(landing, via)` pair allow less. With
+  `routing.minimal_ladder: true` (default `false`), every *intermediate* hop
+  pad — the levels between the backbone's plane and the pin's own layer —
+  resolves to its per-pair floors (minimum area, minimum width, plain
+  enclosure, and two-adjacent-edges enclosure), dropping the baseline; the
+  two terminal pads per endpoint keep today's sizing. On sky130A a met1
+  intermediate pad over via1 shrinks from 0.42 µm to 0.32 µm
+  (`met1.enclosing_adjacent.via.1`), enough to route a neighbouring net past
+  the ladder where the default pads violate `met1.space.1`, with the full
+  curated deck still clean on the composed GDS. The route-vs-route collision
+  checks measure the same shrunk footprints drawing inserts; a pair whose
+  deck declares no enclosure rule keeps the baseline (never shrunk on
+  missing information). `nets[].legs[].via_drops[]` entries gain an additive
+  `terminal_landing_layers` field naming the subset of each hop's
+  `landing_layers` that are terminal planes. The flag cannot be combined
+  with `routing.landing_pad_size_um` (application error naming both fields),
+  and a request with it omitted or `false` composes byte-for-byte today's
+  output.
+
+- **`klt drc --check --deck-file` on a curated report is now an error** (#6070,
+  2026-11-17): `--check` silently ignored `--deck-file` for a single-engine
+  curated report while `--check --rerun` rejected it, so the same input had two
+  contracts. `--check` now exits `1` with the standard error envelope
+  (`--deck-file cannot be combined with --check on a curated report`), matching
+  `--rerun`. A `klayout`-engine report and an `--engine both` report (the
+  override still reaches the native side only) behave as before. No JSON field
+  changed.
+
+- **A met item-8 citation echoes the attestation's scope `description`** (#6111, `klt signoff`; additive — no `schema_version` bump, 2026-11-19): `citation.attestation` on a met item-8 generic citation now carries `description` when the cited `klt signoff --attest 8` envelope has a non-empty `attestation.description`, so the claimant's scope disclosure reaches the tier record as it already does for items 1, 2, 9 and 10 via `artifact_binding`. The key is omitted otherwise, and a `tool_produced: false` block is unchanged.
+
+- **`klt gen mos_array --mos_cap` on gf180mcu now draws DRC-clean MOS
+  capacitors (`DF.1c`)** (#6170, 2026-11-17). The `MOS_CAP_MK` marker covered
+  the array's whole `voltage_flavor` margin box, which reached the 0.42 um
+  guard-ring `COMP` and made every array report four ring-wide
+  `comp.width.moscap.1` violations; it now covers only the unit devices (the
+  device `COMP` itself was already >= 1 um at `w_um` >= 1.0). Because the
+  channel is `w_um` wide, no S/D geometry can pass a 1 um width rule below
+  that, so `mos_cap` now rejects `w_um` < 1.0 with a `GenError` naming
+  `comp.width.moscap.1` (previously 0.22 um LV / 0.30 um MV were accepted and
+  emitted a violating device). Non-`mos_cap` output is unchanged. No JSON field
+  added or removed; `schema_version` unchanged.
+
+- **The `.meas` signal-position refusal's suggested card now replaces an
+  existing `{...}` / `'...'` / `par("...")` wrapper instead of nesting
+  `par('...')` inside it** (#6335, 2026-11-18): `klt sim` refuses these cards
+  (none of the three works in ngspice) and still does, but the rewrite it
+  offered kept the author's wrapper -- `{v(a)-v(b)}` suggested
+  `{par('v(a)-v(b)')}`, `'v(a)-v(b)'` suggested `'par('v(a)-v(b)')'`, and
+  `par("v(a)-v(b)")` suggested `par('par("v(a)-v(b)")')` -- each a card that
+  aborts the deck. All three now suggest `par('v(a)-v(b)')`, with spaces
+  inside the wrapper dropped. The quoted expression is the bare one, and in a
+  `.control` block the `let` helper line and the `expr` measurement no longer
+  carry the `par("...")` wrapper text. Message text only: the set of refused
+  cards is unchanged, and no JSON field or `schema_version` changes.
+
+- **`.meas` signal-position refusal now suggests a rewrite the lint accepts, and
+  one that computes the author's number** (#6444, 2026-11-18): for a group of
+  references, a call, or a two-node `v(a,b)` with an outer operator beside it
+  (`2*abs(v(a)-v(b))`, `v(a)-v(b)*2`, `2*(v(a)-v(b))`, `(v(a)-v(b))*2`,
+  `-v(a)+v(b)`), the first suggested `par('...')` span left the operator
+  outside, so the suggestion was itself refused and only the second pass
+  converged. The span now holds the whole local expression on the first pass.
+  The second pass also lost parentheses (`2*v(a,b)` became
+  `par('2*v(a)-v(b)')`, a lint-clean card that ngspice evaluates to a different
+  crossing time); a two-node reference or inner `par('...')` span bound to an
+  outer operator is now quoted parenthesised (`par('2*(v(a)-v(b))')`) where the
+  operator would otherwise rebind it. The set of refused cards is unchanged and
+  no JSON field changed; only the text of the refusal message differs.
+
+- **`klt extract` severs SB.10 enclosure bands in time linear-ish in
+  recognised resistor bodies** (#6493, 2026-11-18): `_sever_terminal_enclosure_bands`
+  (`src/klayout_tools/extract_passive_regions.py`) now judges each recognised
+  body's cut against the **whole** terminal-layer conductor polygons
+  interacting with that body's ring grown by two enclosure widths — a window
+  that provably contains every polygon whose `outer.sized(enc_dbu)` dilation
+  can reach the band (`sized` offsets by the square metric, whose
+  convex-corner reach is at most sqrt(2)x the offset) — instead of running a
+  full-layer subtraction and a full-layer sizing per component. Selecting
+  whole polygons rather than clipping them keeps the polygon decomposition
+  the full-layer loop sizes, so the cuts are geometrically identical for
+  conductor at any angle, 45-degree routing included (#6688 review: the
+  earlier clip-to-`ring.sized(enc_dbu)` window could leave a corner patch
+  that bridged two conductor components the reference keeps apart).
+  Regression-gated by an empty-symmetric-difference equivalence test against
+  the previous full-layer loop over randomised Manhattan, 45-degree and
+  off-axis staircase fixtures
+  (`tests/test_extract_sever_enclosure_local_window.py`),
+  while the helper-level cost stays ~flat per body: median 5-repeat timings
+  on synthetic separated halo+lead structures (Python 3.14.9, KLayout
+  0.30.12, `scripts/sever_enclosure_bench.py`) went from 2.83 s total at 500
+  bodies (5.66 ms/body, rising ~80x from the 1-body figure) to 0.025 s
+  (0.050 ms/body, flat within noise) — ~113x at 500 bodies, ~48x at 200. No
+  schema, CLI, deck, or connectivity change; behaviour for every existing
+  fixture (ordinary, wide-lead, exact-body, flavour, shared-halo) is
+  unchanged.
+
+- **`klt power` reports the drawn cross-section density beside the per-row
+  one** (#6525, 2026-11-18): each `ir_drop_map.nets[].islands[].edges[]`
+  entry gains `cross_section_density_a_per_um` — `abs(Σ signed branch
+  currents) / Σ row widths` of the highest-density eligible multi-branch
+  section the edge lies in, `null` for an edge in no such section (a single
+  row, a via, an ineligible cut, a member with no solved current, an unsolved
+  island) and `0.0` for an eligible section with zero net current. #6475
+  fixed the EM *verdict* on a lengthwise-split arm but left
+  `current_density_a_per_um` — the per-mesh-row solver diagnostic — reading
+  2× the drawn density on the stair-step case (0.0014 against 0.0007 A/µm;
+  that is an example, not a bound); that field is unchanged, and the new one
+  needs no declared limit, so a role the PDK publishes no limit for gets the
+  drawn-section number too.
+  Additive: no `schema_version` bump, and `em_verdict`, `coverage` and exit
+  codes are byte-identical for identical inputs.
+
+- **`klt signoff` identifies the file or store manifest used to check an evidence pin** (#6558, 2026-11-20). A stale evidence-file pin names the file to re-hash. An empty `artifact_manifest` path marks the affected item as `invalid_evidence`.
+
+- **`klt gen-compose` `ports_from_labels` access search clears the landing pad that compose draws, so a pad exactly at the deck's spacing is no longer rejected for a one-DBU rounding difference** (#6572, 2026-11-18).
+
+- **`klt functional-verification` labels combined request and proposal errors as `--mutations input`** (#6577, 2026-11-18).
+
+- **`klt drc --check` names the positional `<file>` override in its JSON hint for a missing layout** (#6582, 2026-11-18).
+
+- **`klt --help` and subcommand help point to the installed CLI reference pages in wheel installations** (#6624, 2026-11-18).
+
+- **Clarified gf180mcu native DRC coverage.** The CLI can run the PDK's DRC deck. The golden-pair manifest fixtures still await a native-engine cross-check (#6632, 2026-11-18).
+
+- **`klt draw` can patch a hierarchical layout in place.** Set `params.keep_hierarchy` to `true` with `base_gds` to preserve child instances when adding shapes and labels to the top cell (#6640, 2026-11-18).
+
+- **`klt gen diode` now warns when `width_um`/`length_um` is off the
+  manufacturing grid** (#6643, 2026-11-18): an off-grid size such as
+  `width_um=2.003` drew `*.ongrid.*`-dirty geometry (`klt drc` →
+  `violations`: `diff.ongrid.1`, `li1.ongrid.1`, `licon1.ongrid.1`, ...) with
+  an empty `warnings[]`, while `mos_array`, `res_array` and `diff_pair` already
+  warned for the same mistake. `warnings[]` now carries one `manufacturing
+  grid` entry per off-grid edge, naming the grid (0.005 µm on sky130) and the
+  nearest representable values below/above, read from the curated deck's own
+  `ongrid` rule via the shared `_mfg_grid_warnings` helper. **Additive, but
+  visible on sky130:** a request that previously returned `warnings: []` for an
+  off-grid size now returns a non-empty list. Advisory only — the geometry is
+  drawn exactly as requested and `klt drc` stays the authority; on-grid sizes
+  are unchanged.
+
+- **`klt erc --check`'s `input_not_found` block now carries five keys, the
+  same set as `klt drc --check`** (#6655, 2026-11-18): an echoed `file` or
+  `spec` that names no existing file now attaches `path`, `resolved`,
+  `found_relative_to_report`, `resolved_against` and `hint` — the shape
+  `_report_verify_hints.input_hash_check` already gives `klt drc --check`
+  and, as its first five keys, `klt lvs --check` (whose three entries add a
+  sixth, `resolved_repo_root`, that ERC does not emit) — instead of ERC's own
+  three-key copy (`path`, `resolved`, `found_relative_to_report`). The local
+  copy is deleted; `erc.py` calls the
+  shared helper. Because `--check` is mutually exclusive with `klt erc`'s
+  positional inputs, the verb offers no input-override flag, so the `hint`
+  names only the report's directory to run from — no "or pass …" clause for
+  a flag that does not exist. Additive: the three existing keys are
+  unchanged, `expected`/`actual`/`match`/`status` are untouched, and `klt
+  lvs`/`klt drc --check` output is byte-identical. The deck line
+  (`provenance.deck.content_hash`) still carries no such block. No
+  `schema_version` change.
+
+- **MCP tool and argument descriptions and standalone artifact verifier help link to CLI documentation on GitHub** (#6660, 2026-11-18).
+
+- **The signoff guide shows how to re-attest evidence with CI’s pinned Git commit when `uvx` hangs** (#6663, 2026-11-18).
+
+- **`klt sim` checks device multipliers inside included DUT files**
+  (#6684, 2026-11-19). An `X` instance with `mult=6` and no `m=` can now
+  produce a `drive_1x` warning when it appears in an included subcircuit.
+  A finding from an include carries a `file` field to identify its source.
+  Calls and definitions inherit the scope of their include site. Calls in
+  parameterized DUTs are checked, including calls to sky130 primitives.
+  Included calls between sky130 primitive-library members are omitted.
+  The top-level netlist retains the #5779 findings and disclosures. See [Device multiplier warnings](https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/sim.md)
+  and the [JSON contract](https://github.com/2AMLogic/klayout-tools/blob/main/docs/json-contract.md).
+
+- **`klt report` shows each DRC engine’s status and violation total in cross-check reports** (#6700, 2026-11-20). When only the native engine finds violations, the report explains why the curated table is empty.
+
+- **`klt synthesize` rejects a request-supplied ABC driving cell that matches a resolved `dont_use` pattern before running Yosys** (#6716, 2026-11-18).
+
+- **Named deck pins include sibling rule sources** (#6741, 2026-11-18). Regenerate `sky130` and `sg13g2` pins when upgrading. Historical release hashes still resolve.
+
+- **Item 9 verifies the pinned klt version** (#6758, 2026-11-19).
+  `klt signoff --attest 9` and `--check` compare a declared `pins.tools.klt`
+  with the running build, including development suffixes. A stale pin exits
+  3 and reports both versions. A running build with an unknown identity
+  records the comparison as unverifiable. Re-attest older envelopes that
+  declare the pin to record the new `tool_version` check.
+
+- **Functional-verification reports use portable RTL source locations in cocotb failure messages.** The raw JUnit XML retains the simulator’s original diagnostic (#6760, 2026-11-19).
+
+- **`klt functional-verification` uses the request's base directory to select the
+  repo for its `{path, scope}` envelopes** (#6762, 2026-11-19).
+  `environment.sources[]`, `environment.{results_xml,test_log,build_log}`,
+  per-seed `environment.initial_state.runs[].results_xml` and mutation
+  `mutation_testing.results[].log_path` previously used the repo containing
+  the invoking directory. They now use the repo containing the request file's
+  directory by default. For stdin and inline JSON without `--base-dir`, the
+  invoking directory is the base for relative request paths, so envelopes can
+  differ between working directories. A fixed absolute `--base-dir` pins the
+  classification repo for every request form. A relative `-o/--outdir` still
+  follows the invoking directory, so output paths and scopes can change even
+  with a fixed base. Present paths outside the selected repo have scope
+  `external`, as do all present paths if the base lies outside every repo.
+  The schema version, fields and digest calculation are unchanged.
+  `klt em` and the OpenROAD engine logs keep their cwd anchor.
+
+- **Gen-compose accepts sky130A 2×2 via arrays at the minimum cut spacing** on layers 69/44 and 70/44 (#6780, 2026-11-19).
+
+- **`gen-compose` `ports_from_labels` lands correctly on a pin pad that lives
+  in a translated child cell** (#6788, 2026-11-19): the label's net was
+  resolved by a hierarchical connectivity probe, so a net that exists only
+  inside a child cell came back in that child's own frame while the label and
+  the clearance obstacles are in the macro's. On gf180mcuA the search then
+  either returned a landing *off the pad* (`(1.21, 1.21)` µm for a pad
+  centred at `(4, 3)`) or, with disconnected metal near that spot, rejected
+  every candidate for clearance (`7225 candidate(s) rejected`); the same
+  geometry flattened was always right. Connectivity now runs flat, so each
+  occurrence of a child cell is its own net in the macro's frame and a
+  hierarchical macro gives the same landing as its flattened copy. One
+  consequence: the same label text on two *disconnected* instances of one
+  child cell is now reported as ambiguous (two nets), exactly as it already was
+  for flat geometry, instead of silently resolving to the first instance. No
+  field is added, removed or retyped; no `schema_version` bump. The original
+  host incident in #6572 is not attributed by this change (its GDS was never
+  available).
+
+- **`klt lvs --check` suggests `--reference` when it finds the missing reference beside the report** (#6802, 2026-11-19).
+
+- **`klt sim`'s device-multiplier lint reads the subcircuit's declared
+  `mult` default instead of assuming 1** (#6812, 2026-11-19): on a
+  declaring-not-forwarding subcircuit, an instance that omits `mult=` now
+  compares its `m=` against the header's declared default, matching how
+  ngspice resolves the parameter (confirmed on ngspice 47 against a header
+  `mult=4`: `m=4` with no `mult=` is the clean pair, `m=1` the
+  disagreement). Before, the lint hard-coded an effective `mult` of 1,
+  flagging the first as a false positive and missing the second as a false
+  negative on any subcircuit whose default is not unity. No supported PDK
+  ships one today (all 55 declaring subckts in sky130A/B declare `mult=1`;
+  gf180mcuD declares none), so current closures lint exactly as before. An
+  explicit instance `mult=` still wins over the header, a nonnumeric
+  declared default (an `{expression}`) keeps the unity assumption, and the
+  finding kinds, fields and raw instance echo are unchanged.
+  `docs/cli/sim.md`'s "Device multiplier warnings" rule table now states
+  the omitted-`mult=` cases in terms of the declared default.
+
+- **MCP schema-resource descriptions link to CLI documentation on GitHub** (#6819, 2026-11-19).
+
+- **Batch corner reports retain each worker's simulator launch thread pin alongside its preflight OpenMP setting** (#6857, 2026-11-20).
+
+- **`klt signoff --format text` now discloses `content_hash_basis` on the
+  `cite:` line** (#6861, 2026-11-20). A citation carrying
+  `content_hash_basis` (issue #4893's `evidence_file`; any future token,
+  e.g. a store-manifest pin, alike) rendered in text exactly like a digest
+  the grader re-hashed off disk, because only the JSON format carried the
+  basis. The text `cite:` line now renders `content_hash_basis=<token>`
+  inside the existing parentheses, right after the `content_hash=` it
+  qualifies, verbatim for any token and with no allow-list. A citation
+  without the key (absent or `null`) renders the same line as before,
+  byte-for-byte. Disclosure only: no verdict, JSON field or
+  `schema_version` changes.
 
 ## 0.9.2 (2026-11-14)
 

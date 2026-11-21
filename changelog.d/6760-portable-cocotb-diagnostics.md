@@ -1,1 +1,0 @@
-- **Functional-verification reports use portable RTL source locations in cocotb failure messages.** The raw JUnit XML retains the simulator’s original diagnostic (#6760, 2026-11-19).
