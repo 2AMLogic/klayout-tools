@@ -4,23 +4,41 @@ Unit tests run with no ``geode`` binary: a stub script replays a report
 fixture whose engine-side keys (``kind``, ``status``, ``terminals``,
 ``c_farad``, ...) are the keys of geode-fem's released ``CapacitanceReport``
 (``crates/geode-cli/src/report.rs``, read over ``gh api``). The fixture is
-hand-written but not invented: only its *numbers* are synthetic. Only
+hand-written but not invented: only its *numbers* are synthetic, and its
+shape is pinned to geode's published report schema, vendored verbatim
+under ``fixtures/em/`` (see
+:func:`test_fixture_is_valid_against_geode_report_schema`). Only
 :func:`test_live_geode` exercises the real binary, and it is *skipped*
 (never passed) when ``geode`` is absent.
 """
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 from pathlib import Path
 
+import jsonschema
 import pytest
 
 from klayout_tools.cli.parser import create_parser
 from klayout_tools.em import EmError, parse_capacitance_report, run_em
 
 FIXTURE = Path(__file__).parent / "fixtures" / "em" / "geode_capacitance_report.json"
+GEODE_REPORT_SCHEMA = (
+    Path(__file__).parent / "fixtures" / "em" / "geode_report.schema.json"
+)
+#: geode-fem commit the vendored report schema was copied verbatim from
+#: (``crates/geode-cli/schemas/report.schema.json``). Do not read the
+#: geode-fem checkout at test time: the path is not portable to CI.
+GEODE_REPORT_SCHEMA_COMMIT = "592e8898"
+#: sha256 of the vendored schema's raw bytes (issue #6667): the
+#: load-bearing pin that keeps the copy upstream's verbatim bytes.
+GEODE_REPORT_SCHEMA_SHA256 = (
+    "d18a8aa542dc7c66a521a4c550e05d05edf9fc250259b9d75de9cc99b6ff06a1"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +103,43 @@ def _request(tmp_path: Path, stub: Path | None, **extra) -> Path:
 def _main(*argv: str):
     args = create_parser().parse_args(argv)
     return args.func(args)
+
+
+def test_fixture_is_valid_against_geode_report_schema():
+    """Issue #6514: the engine-side fixture is pinned to geode's published
+    report schema (vendored verbatim from geode-fem ``GEODE_REPORT_SCHEMA_COMMIT``),
+    so the suite asserts the envelope ``geode`` emits, not the adapter's
+    guess at it. ``backend``'s documented value set and ``mesh.sha256``'s
+    documented shape (hex SHA-256 of the mesh bytes) are asserted separately
+    because the schema types both as bare strings. ``git_sha: "fixture"`` is
+    deliberately *not* a documented value (``<sha>[-dirty]`` / ``unknown``):
+    it is the one marker that this report is hand-authored, not a real run."""
+    schema = json.loads(GEODE_REPORT_SCHEMA.read_text(encoding="utf-8"))
+    report = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    jsonschema.validate(report, schema)
+    assert report["backend"] in ("ndarray", "wgpu", "cuda", "metal")
+    assert re.fullmatch(r"[0-9a-f]{64}", report["mesh"]["sha256"])
+    # Negative control: the validation bites on this fixture, so a future
+    # edit that drops a required field fails here rather than silently
+    # re-diverging from the engine's contract.
+    report.pop("c_flux_diag_farad")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(report, schema)
+
+
+def test_vendored_geode_report_schema_is_upstream_bytes():
+    """Issue #6667: the vendored schema is an independent oracle only while
+    it is upstream's bytes; ``GEODE_REPORT_SCHEMA_COMMIT`` alone documents
+    the pin without checking it. Raw bytes, not text, so a line-ending
+    normalizing checkout cannot change the digest."""
+    digest = hashlib.sha256(GEODE_REPORT_SCHEMA.read_bytes()).hexdigest()
+    assert digest == GEODE_REPORT_SCHEMA_SHA256, (
+        "tests/fixtures/em/geode_report.schema.json no longer matches the "
+        "pinned geode-fem bytes. To refresh it, copy "
+        "crates/geode-cli/schemas/report.schema.json from the new geode-fem "
+        "commit and update GEODE_REPORT_SCHEMA_COMMIT and "
+        "GEODE_REPORT_SCHEMA_SHA256 together."
+    )
 
 
 def test_success_payload(tmp_path):
