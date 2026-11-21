@@ -20,8 +20,11 @@ requires actually running `scripts/aws/build-remote-sim-ami.sh` against a
 real AWS account (billable — it launches a build instance, bakes ngspice +
 the PDK decks, and calls `create-image`) — that is an operator action
 against a real account, not something this repo's CI or a checked-in
-fixture can produce. The checked-in copy currently carries one such entry
-(sky130A / us-west-2, built 2026-08-03).
+fixture can produce. The checked-in copy carries real operator-built
+entries accrued from such runs. The `batch` fleet's image is separate: it
+is baked by 2am's `infra/aws/batch-image-provision.sh` (its identity lives
+on-image in `/etc/eda-batch-image.json`) and is not published into this
+manifest.
 An operator who wants to use the `remote` backend runs that script once per
 `(pdk, region)` combination they need and commits the resulting manifest
 entries (or keeps a private copy — nothing requires publishing your own

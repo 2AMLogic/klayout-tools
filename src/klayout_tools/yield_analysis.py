@@ -49,7 +49,7 @@ import os
 from typing import Any
 from zlib import error as zerror
 
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._native import _load_native_extension, native_provenance
 from .yield_provenance import (
     _attach_spec_rows,
@@ -166,7 +166,7 @@ def _read_qualification_keys(
     if k is not None:
         if not is_number(k):
             raise YieldError(f"{prefix}target_sigma must be a number")
-        if not math.isfinite(k) or k <= 0:
+        if not is_finite_number(k) or k <= 0:
             raise YieldError(f"{prefix}target_sigma must be > 0 (got {k})")
         out["target_sigma"] = float(k)
     n = raw.get("min_converged_samples")

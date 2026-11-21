@@ -5,13 +5,8 @@ import os
 import threading
 import time
 
-from klayout_tools import sim_set, sim_set_runtime
+from klayout_tools import sim_set
 from klayout_tools.sim_batch_observer import current_job_observer
-from klayout_tools.sim_set_runtime import (
-    _Manifest,
-    _MemberScheduler,
-    _ShardTracker,
-)
 from test_sim_batch import _fake_report, _write_set
 
 
@@ -196,6 +191,116 @@ def test_interrupt_while_gate_held_still_terminates(tmp_path, monkeypatch):
     assert report["status"] == "error"
 
 
+def test_held_job_spares_pending_members_while_a_worker_is_live(tmp_path, monkeypatch):
+    """Issue #6278: with ``max_in_flight=2``, one member's job held ``pending``
+    past the window must not convert the unstarted members to ``not_launched``
+    while the other worker is still live -- that worker keeps draining them
+    (each outlasting the window) instead of being cut."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            release.wait(30)
+        else:
+            time.sleep(0.25)  # outlast the abandonment + grace window
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert by_index[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    assert by_index[0]["job_ids"] == ["job-held"]
+    for i in (1, 2, 3, 4):
+        assert by_index[i]["status"] == "pass", by_index[i]
+    assert report["status"] == "error"  # member 0 still errored
+
+
+def test_held_job_with_one_healthy_drainer_still_terminates(tmp_path, monkeypatch):
+    """Issue #6278 starvation shape: the held job never leaves ``pending`` and
+    one long-running healthy member outlasts the window. The set must still
+    terminate with an entry per member: the healthy member and whatever it
+    drained pass; nothing hangs behind the never-freeing job."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        if "req0" in path:
+            observer.on_job("job-held")
+            observer.on_state("job-held", "pending")
+            release.wait(30)
+        elif "req1" in path:
+            time.sleep(0.25)  # the long-running healthy member
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert len(by_index) == 5
+    assert by_index[0]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+    for i in (1, 2, 3, 4):
+        assert by_index[i]["status"] == "pass", by_index[i]
+
+
+def test_all_started_members_stall_pending_tail_still_terminates(tmp_path, monkeypatch):
+    """Issue #6278 edge: with every started member stalled ``pending``
+    simultaneously there is no live worker to drain ``pending``, so the
+    termination arm still fires and the unstarted tail ends as ``not_launched``
+    naming a held job."""
+    _fast_poll(monkeypatch)
+    paths = _write_set(tmp_path, 5)
+    release = threading.Event()
+
+    def fake_run(path, **kwargs):
+        observer = current_job_observer()
+        name = "job-" + os.path.basename(path).removesuffix(".json")
+        observer.on_job(name)
+        observer.on_state(name, "pending")
+        release.wait(30)
+        return _fake_report()
+
+    try:
+        report = sim_set.run_sim_set(
+            paths,
+            outdir=str(tmp_path / "out"),
+            max_in_flight=2,
+            run=fake_run,
+            capacity_wait_s=0.05,
+        )
+    finally:
+        release.set()
+    by_index = {e["index"]: e for e in report["requests"]}
+    assert len(by_index) == 5
+    for i in (0, 1):
+        assert by_index[i]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert by_index[i]["job_ids"] == [f"job-req{i}"]
+    for i in (2, 3, 4):
+        assert by_index[i]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
+        assert by_index[i]["job_ids"] == []
+
+
 def test_single_member_set_stuck(tmp_path, monkeypatch):
     _fast_poll(monkeypatch)
     paths = _write_set(tmp_path, 1)
@@ -272,124 +377,3 @@ def test_manifest_ignores_writes_after_member_finalized(tmp_path):
     assert manifest._entries[0]["status"] == "error"
     assert manifest._entries[0]["error_code"] == "not_launched"
     assert manifest.job_ids(0) == []
-
-
-class _FakeClock:
-    """Injectable monotonic clock for scheduler unit tests (issue #6324)."""
-
-    def __init__(self, start: float = 1000.0) -> None:
-        self.now = start
-
-    def __call__(self) -> float:
-        return self.now
-
-
-def _scheduler(tmp_path, clock):
-    manifest = _Manifest(
-        str(tmp_path / "set-manifest.json"),
-        ["/fake/a.json", "/fake/b.json"],
-        ["/fake/a.json", "/fake/b.json"],
-    )
-    sched = _MemberScheduler(
-        ["/fake/a.json", "/fake/b.json"],
-        manifest,
-        launch_budget=10.0,
-        poll_interval_s=0.01,
-        run_member=lambda index, tracker: {},
-    )
-    sched.trackers = [_ShardTracker(clock=clock) for _ in sched.paths]
-    return sched
-
-
-def _abandon_first(sched, clock, job_id):
-    """Scan-abandon member 0 the way ``_scan_stalled`` does at the first scan
-    past its budget: the held job has been ``pending`` one full window."""
-    tracker = sched.trackers[0]
-    tracker.on_job(job_id)  # accepted at the clock's start
-    clock.now += 10.5
-    sched.abandoned.add(0)
-    sched.abandoned_at[0] = clock.now
-    sched.results[0] = {"index": 0}
-    sched.pending = [1]
-
-
-def test_termination_keeps_one_window_after_the_abandonment(tmp_path, monkeypatch):
-    """Issue #6324: the job already held when its member is abandoned is
-    stalled by its own ``since`` at that very moment, so the termination test
-    must floor its window at the abandonment -- otherwise the documented one
-    more ``--wait-for-capacity`` window after the abandonment collapses to
-    zero and the remaining members are dropped on the abandonment scan."""
-    clock = _FakeClock()
-    monkeypatch.setattr(sim_set_runtime.time, "monotonic", clock)
-    sched = _scheduler(tmp_path, clock)
-    _abandon_first(sched, clock, "job-held")
-
-    def admit():
-        with sched.cond:
-            sched._admit_replacements(10.0)
-
-    admit()
-    assert sched.pending == [1]  # inside the window: nothing terminated
-    clock.now += 10.5  # one budget past the abandonment
-    admit()
-    assert sched.pending == []
-    assert sched.results[1]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
-    assert "job-held" in sched.results[1]["error"]["message"]
-    assert sched.results[1]["job_ids"] == []
-
-
-def test_new_shard_of_abandoned_member_gets_its_own_grace_window(tmp_path, monkeypatch):
-    """Issue #6324 case 1: an abandoned multi-shard member's worker keeps
-    submitting shards and each registers as ``pending``. A shard accepted long
-    after the abandonment must not satisfy the termination test by inheritance
-    -- it gets a full grace window from its own acceptance."""
-    clock = _FakeClock()
-    monkeypatch.setattr(sim_set_runtime.time, "monotonic", clock)
-    sched = _scheduler(tmp_path, clock)
-    tracker = sched.trackers[0]
-    _abandon_first(sched, clock, "job-s1")
-    tracker.on_state("job-s1", "running")  # the fleet eventually launched it
-    clock.now = 1100.0  # long past the abandonment
-    tracker.on_job("job-s2")  # the worker submitted the next shard
-
-    def admit():
-        with sched.cond:
-            sched._admit_replacements(10.0)
-
-    admit()
-    assert sched.pending == [1]  # transient shard: no termination
-    clock.now = 1110.5  # job-s2 pending past its own window
-    admit()
-    assert sched.pending == []
-    assert sched.results[1]["error"]["code"] == sim_set.NOT_LAUNCHED_CODE
-    assert "job-s2" in sched.results[1]["error"]["message"]
-
-
-def test_termination_rearms_for_a_shard_accepted_after_the_gate_reopens(
-    tmp_path, monkeypatch
-):
-    """Issue #6324 case 2: once the held job launches, a later shard of the
-    long-abandoned member going ``pending`` must get a full grace window
-    instead of inheriting the already-expired one (zero grace)."""
-    clock = _FakeClock()
-    monkeypatch.setattr(sim_set_runtime.time, "monotonic", clock)
-    sched = _scheduler(tmp_path, clock)
-    tracker = sched.trackers[0]
-    _abandon_first(sched, clock, "job-held")
-
-    def admit():
-        with sched.cond:
-            sched._admit_replacements(10.0)
-
-    clock.now = 1015.0  # halfway into the held job's post-abandonment window
-    admit()
-    assert sched.pending == [1]
-    tracker.on_state("job-held", "running")  # launched: the gate reopens
-    clock.now = 1200.0  # much later, a new shard of the abandoned member
-    tracker.on_job("job-s2")
-    admit()
-    assert sched.pending == [1]  # full grace from 1200: nothing terminated
-    clock.now = 1210.5
-    admit()
-    assert sched.pending == []
-    assert "job-s2" in sched.results[1]["error"]["message"]

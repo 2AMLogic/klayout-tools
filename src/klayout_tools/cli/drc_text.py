@@ -2,6 +2,7 @@
 to keep that module under its file-size ceiling). Pure formatting: each
 function prints one section of the human-readable report."""
 
+from ..coverage_work import coverage_work_count
 from ..drc import SKIP_REASON_NOT_SELECTED
 from ..env_provenance import render_path_field
 
@@ -30,7 +31,8 @@ def _print_coverage_gaps(coverage: dict) -> None:
         if record.get("reason") != SKIP_REASON_NOT_SELECTED
     ]
     if skipped_requested:
-        print(f"skipped requested rules: {len(skipped_requested)}")
+        skipped_count = sum(map(coverage_work_count, skipped_requested))
+        print(f"skipped requested rules: {skipped_count}")
         for record in skipped_requested:
             print(f"  {record['id']}: {record['reason']}")
 
