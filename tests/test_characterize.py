@@ -919,9 +919,7 @@ def test_settle_check_refuses_a_window_the_slowest_point_outgrew(tmp_path):
     with pytest.raises(
         characterize.CharacterizeError, match="transient window too short"
     ):
-        characterize._check_settle_margin(
-            plan, resolved["grid"], tables, resolved["options"]
-        )
+        characterize._check_settle_margin(resolved["grid"], tables, resolved["options"])
 
 
 def test_settle_check_accepts_a_comfortable_window(tmp_path):
@@ -932,9 +930,7 @@ def test_settle_check_accepts_a_comfortable_window(tmp_path):
         plan, resolved["grid"], values, liberty_writer.Thresholds()
     )
 
-    characterize._check_settle_margin(
-        plan, resolved["grid"], tables, resolved["options"]
-    )
+    characterize._check_settle_margin(resolved["grid"], tables, resolved["options"])
 
 
 def test_extract_measurements_refuses_a_failed_sim_corner(tmp_path):
