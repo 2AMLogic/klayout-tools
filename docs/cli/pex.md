@@ -331,13 +331,17 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   finite and `>= 0`, `0` = ideal via), surfaced as `PexError`. Unlike `klt
   extract`, which keeps the legacy per-level series sum in its netlist, `klt
   pex` writes each net's terminal-aware `selected_resistance_ohm` as that net's
-  lumped R wherever `resistance_source` is `graph`; `legacy` nets (no per-cut
-  resistance given, three or more terminals, ...) keep the legacy value, as do
-  nets overridden with `--mom-rlc-resistance-ohm`. This removes the
-  double-counting of strapped / via-stitched conductors from the re-simulated
-  extracted side (#2458). Cannot be combined with `--distributed-rc` (the
-  ladder stays on the legacy scalar, so a critical net would mix sources):
-  `PexError`. Off by default -- the netlist and JSON report are byte-identical
+  lumped R wherever `resistance_source` is `graph`; `legacy` nets (a landing
+  type the deck does not curate, three or more terminals, ...) keep the legacy
+  value, as do nets overridden with `--mom-rlc-resistance-ohm`. Without
+  `--resistance-graph-r-cut`, each landing's per-cut resistance resolves from
+  the deck's nominal tables (issue #6917; see
+  [`extract.md`](extract.md)'s "`--resistance-graph`" section). This removes
+  the double-counting of strapped / via-stitched conductors from the
+  re-simulated extracted side (#2458). Cannot be combined with
+  `--distributed-rc` (the ladder stays on the legacy scalar, so a critical net
+  would mix sources): `PexError`. Off by default -- the netlist and JSON
+  report are byte-identical
   to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`
   (issue #977, Epic #709 Phase 2b); requires `--critical-net`. Replaces the

@@ -6750,19 +6750,6 @@ def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
     assert graph["extraction"]["netlist_sha256"] != base["extraction"]["netlist_sha256"]
 
 
-def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
-    """Without a per-cut resistance the strapped net is `unsupported`: the
-    source stays `legacy` and the written netlist is unchanged."""
-    base, _ = _pex_strapped(tmp_path, "strapped", "base")
-    graph, _ = _pex_strapped(tmp_path, "strapped", "graph", resistance_graph=True)
-
-    (net,) = graph["extraction"]["resistance_graph"]["nets"]
-    assert net["resistance_source"] == "legacy"
-    assert net["fallback_reason"] == "via_resistance_unknown"
-    assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
-    assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
-
-
 def test_run_pex_resistance_graph_default_passes_no_graph_request(
     tmp_path, monkeypatch
 ):
