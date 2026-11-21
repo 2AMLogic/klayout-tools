@@ -271,7 +271,10 @@ block.
 `models.pdk_root = DIR`: the flag wins over the request field, a relative `DIR`
 resolves against the CWD (not the request directory), and the resolution takes
 that root without the first-match-wins search, so the PDK ambiguity warning does
-not fire. The pinned root shows in `provenance.pdk`. Corner requests only:
+not fire. The pinned root shows in `provenance.pdk`. For a local ngspice
+corner, klt expands `$PDK_ROOT` in the body’s include paths with the selected
+install root and passes the same `PDK_ROOT` to the child process. This also
+applies to a store selected by discovery. Corner requests only:
 `decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
 refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
 
