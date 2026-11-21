@@ -24,6 +24,26 @@ from .decks import deck_source_path
 from .evidence_canonicalize import rerun_result_for
 
 
+def recorded_negative_control_kwargs(committed: dict[str, Any]) -> dict[str, Any]:
+    """Read the inputs needed to run the saved report's control again."""
+    control = committed.get("negative_control")
+    if control is None:
+        return {}
+    from .drc import DrcError
+
+    path = get_path(control, ("file",))
+    categories = get_path(control, ("expected_categories",))
+    if not isinstance(path, str) or not path:
+        raise DrcError("recorded negative_control.file must be a non-empty path")
+    if not isinstance(categories, list) or not all(
+        isinstance(c, str) for c in categories
+    ):
+        raise DrcError(
+            "recorded negative_control.expected_categories must be a list of names"
+        )
+    return {"negative_control": path, "negative_control_categories": categories}
+
+
 def _packaged_deck_path(name: Any) -> str | None:
     """The packaged ``klayout_tools.decks`` script a recorded deck *basename*
     names (issue #5709), or ``None``.

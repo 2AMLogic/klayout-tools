@@ -98,7 +98,12 @@ from .drc_layer_selection import (
     select_other_region,
     selection_empties_every_top_cell,
 )
-from .drc_report_check import drc_rerun_result, report_checks, resolve_report_deck
+from .drc_report_check import (
+    drc_rerun_result,
+    recorded_negative_control_kwargs,
+    report_checks,
+    resolve_report_deck,
+)
 from .drc_text_exempt import text_exempt
 from .layers import layers_report
 from .metrics import is_registered
@@ -2629,9 +2634,8 @@ def rerun_drc_report(
     ``committed["engine"] == "klayout"``, :func:`run_drc` (the curated
     engine) otherwise -- replaying a curated ``--rules`` subset's recorded
     ``rule_selection.selectors`` (issue #2768, :func:`_recorded_rule_selectors`).
-    **Known limitation**: neither the curated nor the
-    ``klayout`` engine's report records which ``--top`` (if any) the
-    original run used, so ``--rerun`` always re-checks every top cell
+    Native runs also replay the recorded negative control and its expected categories.
+    Neither engine records the original ``--top``, so reruns re-check every top cell
     (``top=None``) -- a report originally scoped to one top cell via
     ``--top`` will legitimately drift under ``--rerun`` if the stream has
     others. Use ``--check`` (cheap mode) to avoid this if that matters.
@@ -2687,7 +2691,6 @@ def rerun_drc_report(
         from ._drc_gf180_3lm import replay_prelude_kwargs
         from .drc_klayout_engine import _rerun_assertion_kwargs, run_drc_klayout_engine
 
-        prelude_kwargs = replay_prelude_kwargs(committed, deck)
         fresh = run_drc_klayout_engine(
             file_path,
             deck,
@@ -2695,10 +2698,9 @@ def rerun_drc_report(
             # Replay the original error tolerance and caller-vouched coverage.
             allow_deck_errors=bool(committed.get("engine_deck_errors")),
             **_rerun_assertion_kwargs(committed),
-            **prelude_kwargs,
+            **replay_prelude_kwargs(committed, deck),
+            **recorded_negative_control_kwargs(committed),
         )
-        if prelude_kwargs:
-            fresh["native_deck"] = prelude_kwargs["native_deck"]
     else:
         # Issue #2768: a committed `--rules` subset replays its own recorded
         # selectors (so a deck change that alters what a glob matches shows

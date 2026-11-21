@@ -55,7 +55,6 @@ def replay_prelude_kwargs(committed: dict, deck_file: str) -> dict:
         return {}
 
     from .drc import DrcError
-    from .pdk import tree_of
 
     options = get_path(committed, ("provenance", "deck", "options"))
     native = committed.get("native_deck")
@@ -75,14 +74,32 @@ def replay_prelude_kwargs(committed: dict, deck_file: str) -> dict:
             "recorded prelude requires the native gf180mcu 3LM family script"
         )
 
-    root = None
-    if get_path(committed, ("provenance", "pdk", "source")) == "--pdk-root flag":
-        tree = tree_of(deck_file)
-        root = str(Path(tree).parent) if tree else None
+    variant = get_path(committed, ("provenance", "pdk", "name"))
     return {
         "native_deck": native,
         "deck_vars": options,
         "min_klayout_version": native.get("min_klayout_version"),
-        "pdk_variant": get_path(committed, ("provenance", "pdk", "name")),
-        "pdk_root": root,
+        "pdk_variant": variant,
+        "pdk_root": _replay_pdk_root(committed, deck_file, variant),
     }
+
+
+def _replay_pdk_root(
+    committed: dict, deck_file: str, variant: str | None
+) -> str | None:
+    """Recover an explicitly selected install, including one sharing its deck."""
+    if get_path(committed, ("provenance", "pdk", "source")) != "--pdk-root flag":
+        return None
+    from .drc import DrcError
+    from .pdk import tree_of
+
+    # A standalone --deck-file override need not sit inside a PDK. Use the
+    # original install when available, or the override's install after relocation.
+    for path in (committed.get("deck"), deck_file):
+        if isinstance(path, str):
+            tree = tree_of(path, follow_symlinks=False)
+            if tree is not None:
+                # Flat descriptor installs can have a variant alias.
+                directory = Path(tree)
+                return str(directory.parent) if directory.name == variant else tree
+    raise DrcError(f"cannot locate the explicit PDK install for {deck_file!r}")

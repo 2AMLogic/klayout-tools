@@ -473,7 +473,7 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
     deck_file, deck_vars, min_version, native = native_deck.resolve_native_deck(args)
     if deck_file is None:
         raise DrcError(native_deck.no_deck_message(args))
-    result = run_drc_klayout_engine(
+    return run_drc_klayout_engine(
         args.file,
         deck_file,
         top=args.top,
@@ -493,7 +493,6 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         negative_control_categories=_negative_control_categories(args),
         max_violations=args.max_violations,
     )
-    return native_deck.attach_native_deck(result, native)
 
 
 def _run(args: argparse.Namespace) -> dict:

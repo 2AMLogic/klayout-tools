@@ -1560,6 +1560,7 @@ def run_drc_klayout_engine(
             path, repo_root=env_provenance.repo_root_for(path)
         ),
         "deck": deck_file,
+        **({"native_deck": native_deck} if native_deck is not None else {}),
         "engine": "klayout",
         "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
