@@ -113,3 +113,13 @@ def _snap_span(lo: int, hi: int, grid_dbu: int) -> tuple[int, int]:
         shift = _snap(lo) - lo
         return lo + shift, hi + shift
     return _snap(lo), _snap(hi)
+
+
+def _snap_cut_box_dbu(
+    box: tuple[int, int, int, int], fixed_dbu: int, grid_dbu: int
+) -> tuple[int, int, int, int]:
+    """Apply the fixed cut size and manufacturing grid to one drawn box."""
+    x0, y0, x1, y1 = box
+    left, right = _snap_span(*_clamp_span(x0, x1, fixed_dbu), grid_dbu)
+    bottom, top = _snap_span(*_clamp_span(y0, y1, fixed_dbu), grid_dbu)
+    return left, bottom, right, top

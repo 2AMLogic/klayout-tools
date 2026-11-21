@@ -471,7 +471,7 @@ def _parse_escaped_connection_expr(expr: str) -> str:
     )
 
 
-def _parse_connection_expr(expr: str, aliases: dict[str, str] | None = None) -> str:
+def _parse_connection_expr(expr: str) -> str:
     """Resolve one single-net expression to a net name, or raise
     :class:`VerilogNetlistError` for anything this narrow grammar does not
     model (a range slice, concatenation, a non-constant expression).
@@ -1230,7 +1230,7 @@ def parse_subckt_pin_orders(text: str) -> dict[str, list[str]]:
     join-continuations convention :mod:`klayout_tools.netlist_normalize`
     already uses.
     """
-    from ._paths import fold_spice_continuations
+    from ._spice_text import fold_spice_continuations
 
     pin_orders: dict[str, list[str]] = {}
     for line in fold_spice_continuations(text.splitlines()):
