@@ -36,13 +36,14 @@ from typing import Any, cast
 
 from ._jsonnum import is_int, is_number
 from ._provenance import content_hash
+from .signoff_artifact import report_artifact_unavailable
 from .signoff_power_delivery_substrate import (
     REASON_SUBSTRATE_ISOLATION_UNDECIDABLE,
     add_substrate_continuity,
     erc_ties_checked_by_assertion,
     substrate_undecidable_gate,
 )
-from .signoff_runset import runset_disclosure, runset_refusal
+from .signoff_runset import check_runset, runset_disclosure
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason
@@ -1077,24 +1078,24 @@ def _resolve_erc_supply_spec(
 
 def _lvs_half_verdict(
     envelope: dict[str, Any], supply_spec: dict[str, Any] | None
-) -> tuple[str, str, None, dict[str, Any]] | None:
-    """The ``"unmet"`` verdict for an LVS citation that cannot be item 11's
-    LVS half, or ``None`` when it can (issue #2870 added the runset gate).
+) -> tuple[tuple[str, str, None, dict[str, Any]] | None, bool]:
+    """Return item 11's LVS refusal, if any, and the re-hash disclosure flag.
 
-    A report that did not pass renders :func:`_failed_lvs_verdict`'s reason. A
-    passing PDK-runset report must also be pinned and re-hash clean
-    (:func:`~klayout_tools.signoff_runset.runset_refusal`); a curated-deck
-    report is never refused here.
+    A report that did not pass renders :func:`_failed_lvs_verdict`'s reason.
+    A passing PDK-runset report goes through
+    :func:`~klayout_tools.signoff_runset.check_runset`.
+    If the digest is unavailable, the flag discloses that outcome on the
+    LVS citation when the rest of item 11 is met.
     """
     from .signoff import _check_passed
 
     if not _check_passed("lvs", cast(Any, envelope)):
         reason, detail = _failed_lvs_verdict(envelope, supply_spec)
-        return "unmet", reason, None, detail
-    runset_reason = runset_refusal(envelope)
+        return ("unmet", reason, None, detail), False
+    runset_reason, rehash_unverifiable = check_runset(envelope)
     if runset_reason is not None:
-        return "unmet", runset_reason, None, runset_disclosure(envelope) or {}
-    return None
+        return ("unmet", runset_reason, None, runset_disclosure(envelope) or {}), False
+    return None, rehash_unverifiable
 
 
 def _failed_lvs_verdict(
@@ -1653,6 +1654,7 @@ def _par_tapless_field(par: dict[str, Any] | None) -> dict[str, Any]:
     return {"tapless": True} if tapless else {}
 
 
+@report_artifact_unavailable
 def _grade_power_delivery(
     specs: list[dict[str, Any]],
     *,
@@ -1784,9 +1786,7 @@ def _grade_power_delivery(
     ``parts`` (and nothing more -- ``power_delivery`` states facts about a
     proven grid, and an unmet group has none), so a grouped report accounts
     for every cited envelope even when a group's own rules failed. The
-    default keeps today's shape exactly: a failing single-group citation
-    renders ``citation: null``, as it always has.
-    """
+    default keeps a failing single-group citation at ``citation: null``."""
     from .signoff import _citation
     from .signoff_grouped_citations import (
         missing_parts_verdict as _missing_parts_verdict,
@@ -1813,7 +1813,7 @@ def _grade_power_delivery(
     # the already-resolved ERC part plus the spec document it names, so
     # doing it unconditionally changes nothing but the reason rendered.
     supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
-    lvs_verdict = _lvs_half_verdict(lvs["envelope"], supply_spec)
+    lvs_verdict, rehash_unverifiable = _lvs_half_verdict(lvs["envelope"], supply_spec)
     if lvs_verdict is not None:
         status, reason, _, verdict_detail = lvs_verdict
         return status, reason, parts_citation, verdict_detail
@@ -1849,7 +1849,7 @@ def _grade_power_delivery(
     # through the leading part.
     citation = _citation(erc)
     citation["parts"] = [
-        _citation(by_kind[kind])
+        _citation(by_kind[kind], runset_rehash_unverifiable=rehash_unverifiable)
         for kind in _POWER_DELIVERY_PART_ORDER
         if kind in by_kind
     ]

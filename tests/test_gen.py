@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from helpers.drc_known_findings import GF180MCU_OFFGRID_RULES
+from helpers.sky130_drc_landings import insert_licon_with_li1_landing
 from klayout_tools import gen, pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import run_drc
@@ -2044,8 +2045,12 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     """#461: the gate poly must extend past the diffusion's gate-side edge so a
     contact can land on the gate outside the channel. Verify the drawn poly
     (66/20) extends past the diff (65/20) by the landing-pad margin, that the
-    reported gate port sits in that extension, and that a licon placed at the
-    port is DRC-clean (no `poly.enclosing.licon.1`/`diff.enclosing.licon.1`)."""
+    reported gate port sits in that extension, and that a contact stack placed
+    at the port is DRC-clean (no `poly.enclosing.licon.1`/
+    `diff.enclosing.licon.1`). The stack carries an li1 landing pad at li.5's
+    own 0.08 um enclosure (see the helper): since #5737 flipped
+    `li1.enclosing.licon1.1` to required containment, a bare cut with no li1
+    above it is itself a reported defect, not a legal contact."""
     import klayout.db as kdb
 
     from klayout_tools.gen import CONTACT_SIZE_UM, ENCLOSURE_MARGIN_UM
@@ -2081,15 +2086,10 @@ def test_mos_gate_poly_extends_past_diff_and_contact_is_drc_clean(
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
+    li1 = layout.layer(67, 20)
     half = CONTACT_SIZE_UM / 2.0
-    gx, gy = gate["x_um"], gate["y_um"]
-    top.shapes(licon).insert(
-        kdb.Box(
-            round((gx - half) / dbu),
-            round((gy - half) / dbu),
-            round((gx + half) / dbu),
-            round((gy + half) / dbu),
-        )
+    insert_licon_with_li1_landing(
+        layout, top, licon, li1, gate["x_um"], gate["y_um"], half, dbu
     )
     contacted = tmp_path / f"{generator}_gate_contacted.gds"
     layout.write(str(contacted))
@@ -2427,7 +2427,10 @@ def test_mos_array_series_fingers_gate_conductors_are_distinct(tmp_path, pdk_roo
 def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root):
     """#781's acceptance bar: a contact placed at *any* reported gate port
     (not just the first finger's, as before) is DRC-clean -- every finger
-    is padded per #461, not just the first."""
+    is padded per #461, not just the first. Each contact carries an li1
+    landing pad at li.5's 0.08 um enclosure (see the helper): since #5737
+    flipped `li1.enclosing.licon1.1` to required containment, a bare cut is
+    itself a reported defect, not a legal contact."""
     import klayout.db as kdb
 
     gds_path, report = _mos_unit_gds(
@@ -2438,19 +2441,13 @@ def test_mos_array_series_fingers_gate_contacts_are_drc_clean(tmp_path, pdk_root
     top = layout.top_cell()
     dbu = layout.dbu
     licon = layout.layer(66, 44)
+    li1 = layout.layer(67, 20)
     half = gen.CONTACT_SIZE_UM / 2.0
     for port in report["ports"]:
-        if not port["name"].startswith("U0_G"):
-            continue
-        gx, gy = port["x_um"], port["y_um"]
-        top.shapes(licon).insert(
-            kdb.Box(
-                round((gx - half) / dbu),
-                round((gy - half) / dbu),
-                round((gx + half) / dbu),
-                round((gy + half) / dbu),
+        if port["name"].startswith("U0_G"):
+            insert_licon_with_li1_landing(
+                layout, top, licon, li1, port["x_um"], port["y_um"], half, dbu
             )
-        )
     contacted = tmp_path / "series3_contacted.gds"
     layout.write(str(contacted))
 
@@ -11963,15 +11960,15 @@ def _gds_layers(path):
 @pytest.mark.parametrize(
     "params",
     (
-        {"w_um": 1.0},
-        {"w_um": 0.22},  # LV COMP min width (DF.1a_LV)
-        {"w_um": 0.30, "voltage_flavor": "medium_voltage"},  # MV min (DF.1a_MV)
+        {"w_um": 1.0},  # DF.1c floor: the narrowest legal MOSCAP
+        {"w_um": 2.0},
+        {"w_um": 1.0, "voltage_flavor": "medium_voltage"},
         {"w_um": 1.0, "fingers": 3},
         {"w_um": 1.0, "rows": 2, "cols": 2, "dummy": 1},
         {"w_um": 1.0, "flavor": "pfet"},
     ),
 )
-def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
+def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean(
     params, tmp_path, both_pdk_root
 ):
     output, report = _gen_mos_cap(tmp_path, both_pdk_root, **params)
@@ -11980,8 +11977,9 @@ def test_mos_cap_gf180mcu_is_marked_ported_and_drc_clean_apart_from_df1c(
     assert {"U0_SD", "U0_G"} <= names
     assert "U0_S" not in names and "U0_D" not in names
     assert any(n.startswith("TAP_") for n in names)
-    counts = run_drc(str(output), "gf180mcu")["rule_counts"]
-    assert set(counts) == {"comp.width.moscap.1"}  # genuine DF.1c (#6170)
+    # Clean incl. DF.1c `comp.width.moscap.1` (#6170): the marker covers the
+    # unit devices only, so the 0.42 um guard ring is not under it.
+    assert run_drc(str(output), "gf180mcu")["rule_counts"] == {}
 
 
 def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
@@ -12012,12 +12010,11 @@ def test_mos_cap_ties_every_source_drain_segment(tmp_path, both_pdk_root):
 
 
 def test_mos_cap_rejects_width_below_deck_comp_rule(tmp_path, both_pdk_root):
-    with pytest.raises(GenError, match=r"comp\.width\.1"):
-        _gen_mos_cap(tmp_path, both_pdk_root, w_um=0.2)
-    with pytest.raises(GenError, match=r"comp\.width\.mv\.1"):
-        _gen_mos_cap(
-            tmp_path, both_pdk_root, w_um=0.25, voltage_flavor="medium_voltage"
-        )
+    """The channel is `w_um` wide, so DF.1c (1 um under the marker, #6170) is the
+    floor -- above DF.1a's 0.22 (LV) / 0.30 (MV)."""
+    for p in ({"w_um": 0.99}, {"w_um": 0.3, "voltage_flavor": "medium_voltage"}):
+        with pytest.raises(GenError, match=r"comp\.width\.moscap\.1"):
+            _gen_mos_cap(tmp_path, both_pdk_root, **p)
 
 
 def test_mos_cap_unsupported_pdk_family_is_a_clear_generror(tmp_path, both_pdk_root):

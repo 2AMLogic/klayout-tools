@@ -205,6 +205,11 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
+      "function": "_resolve_mos_capacitors",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
       "function": "run_extract",
       "complexity": 16
     },
@@ -711,7 +716,7 @@
     {
       "file": "src/klayout_tools/power.py",
       "function": "_compute_em_verdict",
-      "complexity": 20
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/power.py",

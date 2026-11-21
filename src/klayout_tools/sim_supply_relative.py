@@ -18,8 +18,9 @@ rewrite ``.meas`` cards (ngspice requires a literal there).
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._jsonnum import is_finite_number
 
 #: Keys the object form may carry.
 FORM_KEYS = frozenset({"frac_of", "fraction"})
@@ -49,12 +50,7 @@ def validate(value: Any, field: str) -> None:
             f"{field}.frac_of must name a corners.supply_v key (got {rail!r})"
         )
     fraction = value.get("fraction")
-    if (
-        isinstance(fraction, bool)
-        or not isinstance(fraction, (int, float))
-        or not math.isfinite(fraction)
-        or fraction < 0
-    ):
+    if not is_finite_number(fraction) or fraction < 0:
         raise SupplyRelativeError(
             f"{field}.fraction must be a finite number >= 0 (got {fraction!r})"
         )
