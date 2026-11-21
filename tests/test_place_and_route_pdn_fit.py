@@ -259,7 +259,6 @@ def test_fit_error_names_both_request_fields():
     `pdngen`'s own PDN-0185 text."""
     message = pdn_fit.pdn_fit_error(
         _GF180_STRAPS,
-        {},
         core=_square_core(_REPORTED_CORE_UM),
         tech=pdn_fit.TechContext({"Metal5": "HORIZONTAL"}, 0.005),
     )
@@ -276,7 +275,6 @@ def test_no_error_when_every_strap_fits():
     assert (
         pdn_fit.pdn_fit_error(
             _GF180_STRAPS,
-            {},
             core=_square_core(200.0),
             tech=pdn_fit.TechContext({"Metal5": "HORIZONTAL"}, 0.005),
         )
@@ -302,7 +300,7 @@ def test_followpins_row_rail_is_exempt():
     }
     assert (
         pdn_fit.pdn_fit_error(
-            power, {}, core=_square_core(20.0), tech=pdn_fit.TechContext({}, None)
+            power, core=_square_core(20.0), tech=pdn_fit.TechContext({}, None)
         )
         is None
     )
@@ -324,8 +322,8 @@ def test_layer_direction_selects_which_core_dimension_is_measured():
     power = {"straps": [strap]}
     horizontal = pdn_fit.TechContext({"metX": "HORIZONTAL"}, None)
     vertical = pdn_fit.TechContext({"metX": "VERTICAL"}, None)
-    assert pdn_fit.pdn_fit_error(power, {}, core=core, tech=horizontal) is None
-    message = pdn_fit.pdn_fit_error(power, {}, core=core, tech=vertical)
+    assert pdn_fit.pdn_fit_error(power, core=core, tech=horizontal) is None
+    message = pdn_fit.pdn_fit_error(power, core=core, tech=vertical)
     assert message is not None and "core width" in message
 
 
@@ -347,7 +345,7 @@ def test_unknown_layer_direction_uses_the_larger_core_dimension():
         ]
     }
     assert (
-        pdn_fit.pdn_fit_error(power, {}, core=core, tech=pdn_fit.TechContext({}, None))
+        pdn_fit.pdn_fit_error(power, core=core, tech=pdn_fit.TechContext({}, None))
         is None
     )
 

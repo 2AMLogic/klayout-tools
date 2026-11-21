@@ -31,7 +31,7 @@ def _default_output_path(path: str) -> str:
     return f"{stem}.spice"
 
 
-def _resolve_netlist_target(
+def resolve_netlist_target(
     path: str, output: str | None, no_netlist: bool
 ) -> tuple[str, str | None]:
     """Where the netlist is written, plus the scratch dir to delete after (or
@@ -48,6 +48,10 @@ def _resolve_netlist_target(
     except OSError as exc:
         raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
     return netlist_path, None
+
+
+# Preserve the original extract helper import as well as the shared entry point.
+_resolve_netlist_target = resolve_netlist_target
 
 
 def _finish_netlist_write(
