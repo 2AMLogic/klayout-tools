@@ -300,7 +300,7 @@ def _compare_sdc_delays(commands, cmd, scalar, per_port, out):
     return seen
 
 
-def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
+def _compare_delays(commands, cmd, scalar, per_port, out):
     seen = _compare_sdc_delays(commands, cmd, scalar, per_port, out)
     for side in ("min", "max"):
         if scalar is not None and (None, side) not in seen:
@@ -376,7 +376,6 @@ def sdc_drift_block(
         "set_input_delay",
         input_delay_ns,
         input_delays,
-        clock_port,
         mismatches,
     )
     _compare_delays(
@@ -384,7 +383,6 @@ def sdc_drift_block(
         "set_output_delay",
         output_delay_ns,
         output_delays,
-        clock_port,
         mismatches,
     )
     _compare_uncertainty(commands, clock_uncertainty, clock_port, mismatches)

@@ -97,12 +97,14 @@ def _build_bond_pad_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Pad opening (passivation) drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "top_metal_layer",
                 self.TypeLayer,
                 "Top-metal strap drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
 
         def display_text_impl(self) -> str:

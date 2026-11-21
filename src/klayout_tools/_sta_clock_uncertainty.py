@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._jsonnum import is_finite_number
 
 CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
 
@@ -34,11 +35,7 @@ def validate_clock_uncertainty(
         return None
 
     def _number(number: Any, name: str) -> float:
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
+        if not is_finite_number(number):
             raise _error(f"{name} must be a finite number")
         if number < 0:
             raise _error(f"{name} must be >= 0, got {number}")

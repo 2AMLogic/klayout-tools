@@ -25,15 +25,19 @@ from pathlib import Path
 
 import pytest
 
-from helpers.fake_s3_batch import FakeS3BatchRunner as _FakeRunner
+from helpers.netlist_batch_fakes import (
+    CLIENT_VERSION,
+    _FakeRunner,
+    _git,
+    _make_fake,
+    _make_repo,
+)
 from helpers.subprocess_fakes import fake_completed
-from klayout_tools import _provenance, sim_batch
+from klayout_tools import _batch_collect, sim_batch
 from klayout_tools import netlist as netlist_module
 from klayout_tools import netlist_batch as nb
 from klayout_tools.cli import main, netlist_cmd
 
-FAKE_BUCKET = "fake-batch-jobs-000000000000"
-CLIENT_VERSION = "0.7.0"
 RUNNER_TREE = "/tmp/tmp.Runner01"
 
 #: The device lines of the fake schematic's netlist.
@@ -108,53 +112,18 @@ def _runner_outputs(netlist_text: str, *, block: dict | None = None) -> dict[str
     }
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-
-
 @pytest.fixture
 def repo(tmp_path) -> Path:
-    """A git repo holding a tracked schematic, symbol and xschemrc, plus one
-    untracked file."""
-    root = tmp_path / "repo"
-    design = root / "design"
-    design.mkdir(parents=True)
-    (design / "block.sch").write_text("v {xschem version=3.4.7}\n", encoding="utf-8")
-    (design / "block.sym").write_text("v {xschem version=3.4.7}\n", encoding="utf-8")
-    (design / "xschemrc").write_text("set XSCHEM_LIBRARY_PATH .\n", encoding="utf-8")
-    (root / "README.md").write_text("fixture\n", encoding="utf-8")
-    _git(root, "init", "-q")
-    _git(
-        root,
-        "add",
-        "design/block.sch",
-        "design/block.sym",
-        "design/xschemrc",
-        "README.md",
-    )
-    (design / "scratch.sch").write_text("untracked\n", encoding="utf-8")
-    return root
+    """See ``_make_repo`` in ``helpers.netlist_batch_fakes`` (plain helper: the
+    batch-backend tests in ``test_netlist_instances.py`` call it directly)."""
+    return _make_repo(tmp_path)
 
 
 @pytest.fixture
 def fake(tmp_path, monkeypatch) -> _FakeRunner:
-    """Batch config resolvable from the environment, a fake runner in place
-    of every transport subprocess, and a pinned client version."""
-    script = tmp_path / "batch-fleet-provision.sh"
-    script.write_text("#!/usr/bin/env bash\nexit 0\n")
-    script.chmod(0o755)
-    monkeypatch.setenv(sim_batch.PROVISION_SCRIPT_ENV, str(script))
-    monkeypatch.setenv(sim_batch.BUCKET_ENV, FAKE_BUCKET)
-    monkeypatch.setenv(sim_batch.REGION_ENV, "us-east-1")
-    monkeypatch.delenv(nb.BACKEND_ENV, raising=False)
-    monkeypatch.delenv(sim_batch.PROFILE_ENV, raising=False)
-    monkeypatch.delenv(sim_batch.MAX_JOB_SECONDS_ENV, raising=False)
-    monkeypatch.setattr(_provenance, "_klt_version", lambda: CLIENT_VERSION)
-    keep = tmp_path / "uploads"
-    keep.mkdir()
-    runner = _FakeRunner(keep)
-    monkeypatch.setattr(sim_batch, "_run_subprocess", runner)
-    return runner
+    """See ``_make_fake`` in ``helpers.netlist_batch_fakes`` (plain helper: the
+    batch-backend tests in ``test_netlist_instances.py`` call it directly)."""
+    return _make_fake(tmp_path, monkeypatch)
 
 
 @pytest.fixture
@@ -858,7 +827,7 @@ def test_failed_job_without_envelope_carries_the_stderr_tail(
     tail = error["remote_stderr_tail"]
     assert "tar: design/missing.sym: Cannot open" in tail
     assert "\x1b" not in tail and "\x07" not in tail
-    assert len(tail.encode("utf-8")) <= nb.REMOTE_STDERR_TAIL_BYTES
+    assert len(tail.encode("utf-8")) <= _batch_collect.REMOTE_STDERR_TAIL_BYTES
     assert error["remote_exit_code"] == 2
     assert error["harness_log"].endswith(f"/{_job_id(fake)}/harness.log")
     assert "tar: design/missing.sym" in error["message"]
