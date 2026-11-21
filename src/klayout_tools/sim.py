@@ -215,6 +215,7 @@ from .sim_convergence_retry import is_retryable_convergence_failure, note_not_re
 #: under its per-file size ratchet; re-exported here -- self-aliased where
 #: nothing below calls them -- so ``klayout_tools.sim.<name>`` keeps working.
 from .sim_corner_axes import CORNER_OPTION_NAMES as CORNER_OPTION_NAMES
+from .sim_corner_axes import NGSPICE_SOLVER_OPTIONS as NGSPICE_SOLVER_OPTIONS
 from .sim_corner_axes import _matches_exclude
 from .sim_corner_axes import _parse_process_entry as _parse_process_entry
 from .sim_corner_keys import unknown_key_warnings
@@ -2141,25 +2142,6 @@ def _required_save_vectors(
                             vectors.append(vector)
     return vectors
 
-
-#: ``options.ngspice_options`` (issue #3111): the solver/convergence
-#: ``.options`` names a request may set. ngspice silently ignores an unknown
-#: ``.options`` name, so a free-form map would hide a typo as "no effect";
-#: the allowlist turns it into a named error instead.
-NGSPICE_SOLVER_OPTIONS = (
-    "abstol",
-    "gmin",
-    "gminsteps",
-    "itl1",
-    "itl2",
-    "itl4",
-    "method",
-    "noopiter",
-    "pivtol",
-    "reltol",
-    "srcsteps",
-    "vntol",
-)
 
 #: A string option value lands verbatim in a deck card, so it is limited to
 #: a bare token (``method=gear``) -- no whitespace, quotes or newlines.
