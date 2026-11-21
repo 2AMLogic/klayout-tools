@@ -14,7 +14,11 @@ def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mar
     """MOS-capacitor marker ``LayerInfo`` (issue #3283), or ``None``.
 
     Raises ``GenError`` when the family declares no marker layer or ``w_um``
-    is below the deck's COMP min width for the selected oxide.
+    is below the binding COMP min-width floor. Two floors apply and the larger
+    binds: the deck's COMP min width for the selected oxide
+    (``_mos_cap_min_width_um``) and the width rule scoped to COMP under the
+    MOS-capacitor marker (``_moscap_marker_min_width_um``; gf180mcu
+    ``comp.width.moscap.1`` / ``DF.1c``, 1.0 um, issue #6170).
     """
     if not params.get("mos_cap"):
         return None
@@ -32,6 +36,10 @@ def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mar
         )
     floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
     marker_floor = _moscap_marker_min_width_um(family, pair)
+    # Take the larger floor. Today the marker floor wins on every declared
+    # family (gf180mcu: 1.0 um vs. 0.22/0.30 um), so the oxide floor never
+    # binds; it is kept deliberately for a future family whose marker rule is
+    # looser than its oxide rule -- do not drop it as dead code.
     if marker_floor is not None and (floor is None or marker_floor[0] > floor[0]):
         floor = marker_floor
     if floor is not None and params["w_um"] < floor[0]:

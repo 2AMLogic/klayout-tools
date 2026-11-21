@@ -67,13 +67,17 @@ reporting S8's exit criteria met, especially at S11 (signoff).
 checking, so a violation's `"cell"` field still names the *top* cell —
 including on a mixed sky130_fd_sc_hd + analog-macro layout produced via `klt
 place-and-route`'s `request.macros` field (Epic #393 phase 3, issue #456).
-Each violation additionally carries `source_cell`/`source_path`, naming the
-innermost placed instance whose bounding box fully contains it; both are
-`null` for top-level geometry or a violation straddling an instance boundary
-(and always `null` under `--engine klayout`, which reports through an
-RDB). Use those fields, not `"cell"`, to find the originating instance —
-see `docs/cli/drc.md` →
-"Per-instance attribution (`source_cell` / `source_path`)".
+Each violation additionally carries `source_cell`/`source_path`, naming
+the placement it is attributed to; either engine fills them (`--engine
+klayout` runs the same instance-tree walk, so an RDB marker wholly inside
+one placed instance carries that instance). Both are `null` when no single
+placement is attributed. Most rule kinds attribute by bounding-box
+containment, but a native physical-layer `ongrid` marker is attributed
+from the source edges at the marker point (issue #6447), so a marker inside
+a child's bounding box is not necessarily that child's. The full rule and
+its `null` cases are `docs/cli/drc.md` →
+"Per-instance attribution (`source_cell` / `source_path`)" — use those
+fields, not `"cell"`, to find the originating instance.
 
 ## LVS half — fully specified, shipped
 
@@ -144,6 +148,10 @@ tradeoff (the stuck criteria above).
 - A curated DRC deck subset passing while the full foundry deck would not.
 - Reading a `klt drc` violation's `"cell"` field (always the top cell) as
   the originating instance on a hierarchical/mixed layout — use
-  `source_cell`/`source_path` (#451, fixed) instead, and when those are
-  `null` (top-level or boundary-straddling geometry) re-check geometry
-  against the actual placed instance positions.
+  `source_cell`/`source_path` (#451, fixed) instead. Treat a `null` pair as
+  "no placement attributed", never as evidence about any one instance: a
+  native `ongrid` marker inside a child's bounding box can be `null`
+  because the source edges prove that child is not the owner (#6447). Read
+  the attribution rule in `docs/cli/drc.md` →
+  "Per-instance attribution (`source_cell` / `source_path`)" before
+  inferring anything from the box.

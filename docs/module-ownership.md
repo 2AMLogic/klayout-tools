@@ -121,6 +121,7 @@ The `signoff` verb grades digital RTL-flow blocks and coordinates multi-stage ve
 - **signoff** (`signoff.py`): Core digital RTL-flow grading, multi-stage verification coordination (STA/functional verification per kind)
 - **signoff_envelopes** (`signoff_envelopes.py`): Typed evidence-envelope shapes the ingestion boundary validates against — one `TypedDict` per `_classify` kind, the `_EvidenceEnvelope` union they narrow to, and the `_ENVELOPE_SHAPES`/`_SCALAR_CHECKS`/`_UNION_ORIGINS` lookup tables `signoff.py`'s validator walks them with (issue #2313). Pure declarations, no runtime logic
 - **signoff_power_delivery** (`signoff_power_delivery.py`): T1 item 11's ("Power delivery (structural)") grading subsystem — reading and hash-verifying a cited `klt erc` supply spec, the LVS and place-and-route halves of the item's two branches, and rendering the item's report entry (issue #2626)
+- **signoff_store_pin** (`signoff_store_pin.py`): Store-pinned evidence companions (issue #5963) — resolving a `yield` citation's samples-document hash offline from a committed artifact-store manifest, plus the report-relative companion-path resolvers shared by the yield/erc lookups (issues #2197, #2608; moved out of `signoff.py` for its size-ratchet ceiling)
 
 ### sim
 

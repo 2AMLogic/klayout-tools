@@ -9,15 +9,11 @@ netlist bytes. What it can do is offer a faithful, structured view of what it
 just wrote, so a reviewer or a downstream tool reads resolved per-instance
 attributes instead of re-deriving them from wrapped text (issue #5687).
 
-The two multiplier forms are **not** redundant: ``m=`` is SPICE's own
-subcircuit-instance multiplier and carries the drive, while sky130's device
-subcircuits declare ``mult`` without forwarding it to the inner primitive --
-``mult`` instead de-rates the Monte Carlo mismatch sigma
-(``AGAUSS(0,1.0,1)/sqrt(l*w*mult)`` under ``MC_MM_SWITCH``). Dropping either
-silently corrupts a simulation (1x drive, or mismatch overstated by
-``sqrt(N)``), so this module only reports the pair -- and whether the two
-agree -- and never suggests a form is removable (that judgement, and the PDK
-model text it needs, is issue #5779's lint).
+``m=`` is SPICE's subcircuit-instance drive multiplier. The vendor ``mult``
+parameter can also affect Monte Carlo mismatch. For example, sky130's
+``nfet_01v8`` uses ``AGAUSS(0,1.0,1)/sqrt(l*w*mult)`` under ``MC_MM_SWITCH``.
+This module reports the pair and whether the two agree. Issue #5779's lint
+checks the device model text.
 
 Kept out of :mod:`klayout_tools.netlist` to hold that file at its size
 ceiling (the same reason :mod:`klayout_tools.netlist_diagnostics` exists).
@@ -27,7 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._spice_tokens import split_spice_tokens
+from ._spice_text import circuit_lines
+from ._spice_tokens import split_card_assignments, split_spice_tokens
 from .netlist_paths import fold_continuations
 
 #: How many instance entries the payload's ``instances`` array keeps. Above
@@ -74,18 +71,7 @@ def parse_instance_cards(text: str) -> list[dict[str, Any]]:
     """
     folded = fold_continuations(text.encode("utf-8", errors="replace"))
     entries: list[dict[str, Any]] = []
-    in_control = False
-    for raw in folded.split(b"\n"):
-        card = raw.decode("utf-8", errors="replace").strip()
-        if not card:
-            continue
-        keyword = card.split(None, 1)[0].lower()
-        if in_control:
-            in_control = keyword != ".endc"
-            continue
-        if keyword == ".control":
-            in_control = True
-            continue
+    for card in circuit_lines(folded.decode("utf-8", errors="replace").split("\n")):
         if card.startswith(("*", "+", ".")):
             continue
         entry = _parse_card(card)
@@ -98,9 +84,8 @@ def _parse_card(card: str) -> dict[str, Any] | None:
     """One instance card -> its payload entry; ``None`` for a non-instance.
 
     ``name`` is the first token; ``model`` is the token immediately before
-    the first ``key=value`` token (SPICE's positional prefix -- nodes -- ends
-    where named parameters begin, which is how xschem's ``format=`` output
-    shapes every device card); ``params`` is every ``key=value`` on the
+    the optional ``PARAMS:`` separator or first ``key=value`` token;
+    ``params`` is every ``key=value`` on the
     folded card, verbatim strings, last one winning on a duplicate key. A
     card with no ``key=value`` token (a bare resistor, a source) yields an
     empty ``params`` and a ``null`` ``model`` -- it is still an instance.
@@ -116,39 +101,18 @@ def _parse_card(card: str) -> dict[str, Any] | None:
     name = tokens[0]
     if not name[0].isalpha():
         return None
-    params, model = _split_params(tokens[1:])
+    assignments, model = split_card_assignments(tokens[1:])
+    multipliers = {
+        key.lower(): value for key, value in assignments if key.lower() in ("m", "mult")
+    }
+    m, mult = multipliers.get("m"), multipliers.get("mult")
     return {
         "name": name,
         "card": card,
         "model": model,
-        "params": params,
-        "multiplier": {
-            "m": params.get("m"),
-            "mult": params.get("mult"),
-            "agree": _agree(params.get("m"), params.get("mult")),
-        },
+        "params": dict(assignments),
+        "multiplier": {"m": m, "mult": mult, "agree": _agree(m, mult)},
     }
-
-
-def _split_params(tokens: list[str]) -> tuple[dict[str, str], str | None]:
-    """Split a card's positional prefix from its ``key=value`` tail.
-
-    Returns ``(params, model)``: ``params`` maps every token from the first
-    one containing ``=`` (tokens after it without ``=`` are skipped -- they
-    are positional stragglers, not values of a named parameter); ``model`` is
-    the token immediately before that first one, or ``None`` when the whole
-    card is positional.
-    """
-    for index, token in enumerate(tokens):
-        if "=" not in token:
-            continue
-        params: dict[str, str] = {}
-        for tail in tokens[index:]:
-            key, sep, value = tail.partition("=")
-            if sep and key:
-                params[key] = value
-        return params, tokens[index - 1] if index >= 1 else None
-    return {}, None
 
 
 def _agree(m: str | None, mult: str | None) -> bool | None:
