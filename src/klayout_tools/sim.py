@@ -6120,6 +6120,7 @@ def _expand_monte_carlo(
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    supply_waveforms=base.supply_waveforms,
                     mc_injected=(
                         sim_injected.draw(injected[0], mismatch_seed, injected[1])
                         if injected
