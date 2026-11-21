@@ -1219,8 +1219,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   result also prints a one-line warning to stderr, so the drift is visible
   even without inspecting the JSON — for `--engine klayout` runs the warning
   names the standalone application and its remedy, not `--with klayout==`
-  (issue #5660: pinning the wheel does not pin that engine). See "Pinning
-  the KLayout engine version" below.
+  (issue #5660: pinning the wheel does not pin that engine). Under
+  `--format json` that warning follows the "Error shape" delivery rule
+  above (issue #6935): still on stderr ahead of a report — any report,
+  including a violations report's exit `3` — but dropped when the
+  invocation ends in the error envelope, which keeps that stderr one
+  parseable JSON document. See "Pinning the KLayout engine version" below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it
@@ -2530,6 +2534,17 @@ Under `--format json`, errors are also JSON — not a plain-text line — writte
 to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
+
+**Warning delivery (issue #6935).** That error stderr carries the envelope
+*alone*: klt's human-readable `klt: warning:` lines (e.g. the engine-version
+mismatch advisory in the [shared `provenance` block](#shared-provenance-block))
+are deferred for the invocation and dropped when it ends in this envelope —
+whatever their wording or count — so a consumer that saves stderr as the
+error document parses it as exactly one JSON value, with no leading
+non-JSON lines to skip. Report-producing runs are unaffected: their
+warnings still go to stderr (stdout stays the pure payload) whatever the
+exit code — including a violations report's exit `3`. Under `--format
+text`, warnings print as they happen, ahead of the plain-text error line.
 
 ```json
 {
