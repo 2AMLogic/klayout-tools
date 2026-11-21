@@ -1484,38 +1484,6 @@ def _timed(func: Callable[..., dict[str, Any]]) -> Callable[..., dict[str, Any]]
     return wrapper
 
 
-def _require_parasitics_for_resistance_graph(
-    resistance_graph: bool, parasitics: bool
-) -> None:
-    if resistance_graph and not parasitics:
-        raise ExtractError("--resistance-graph requires --parasitics")
-
-
-def _require_resistance_graph_for_emit(
-    emit_selected_resistance: bool, resistance_graph: bool
-) -> None:
-    """``emit_selected_resistance`` (issue #4037) reads the graph result."""
-    if emit_selected_resistance and not resistance_graph:
-        raise ExtractError("emit_selected_resistance requires resistance_graph")
-
-
-def _validate_resistance_graph_r_cut(
-    resistance_graph: bool, r_cut_ohm: float | None
-) -> None:
-    if r_cut_ohm is None:
-        return
-    if not resistance_graph:
-        raise ExtractError("--resistance-graph-r-cut requires --resistance-graph")
-    if isinstance(r_cut_ohm, bool) or not (
-        isinstance(r_cut_ohm, (int, float))
-        and math.isfinite(r_cut_ohm)
-        and r_cut_ohm >= 0
-    ):
-        raise ExtractError(
-            "--resistance-graph-r-cut must be a finite number >= 0 (0 = ideal via)"
-        )
-
-
 def _model_delegate_factory(
     model_bindings: Any, global_nets: Any, sink: list[Any]
 ) -> Callable[[], Any]:
@@ -1589,6 +1557,7 @@ def run_extract(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     emit_selected_resistance: bool = False,
     distributed_rc: bool = False,
     resistance_paths: Sequence[tuple[int, str, str]] | None = None,
@@ -2077,6 +2046,17 @@ def run_extract(
     curate (``ParasiticsDeck.cuts``) but ``klt extract`` does not consume yet
     (#3053). ``None`` (the default) keeps a cross-level landing
     ``unsupported`` and on the legacy scalar; needs ``resistance_graph=True``.
+
+    ``resistance_graph_caps`` (``--resistance-graph-max-terminals`` /
+    ``--resistance-graph-max-cells`` / ``--resistance-graph-max-nodes`` /
+    ``--resistance-graph-max-edges``, issue #6964) raises the builder's own
+    per-net size caps, as ``{builder keyword: positive integer}`` holding
+    only the caps that were given (``None``/empty: none). A cap the builder
+    would exceed is reported ``graph_too_large`` naming the value applied,
+    so a net stays on the legacy scalar until its cap is raised. Defaults
+    come from :mod:`~klayout_tools.extract_resistance_graph`'s constants
+    (64 terminals, 4096 mesh cells, 5000 nodes, 20000 edges); needs
+    ``resistance_graph=True``.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
@@ -2992,6 +2972,7 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         emit_selected_resistance=emit_selected_resistance,
         critical_net_patterns=critical_net_patterns,
         critical_net_all=critical_net_all,
@@ -3072,6 +3053,7 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         # Issue #2854: rename each surviving promoted pin net to its
@@ -4304,6 +4286,7 @@ def extract_netlist_from_layout(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -4732,6 +4715,7 @@ def extract_netlist_from_layout(
         parasitics_top_cell_only=parasitics_top_cell_only,
         resistance_graph=resistance_graph,
         resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+        resistance_graph_caps=resistance_graph_caps,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
         rename_declared_pins=rename_declared_pins,
@@ -7087,6 +7071,7 @@ def _extract_netlist(
     parasitics_top_cell_only: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
     rename_declared_pins: bool = False,
@@ -9263,6 +9248,7 @@ def _extract_netlist(
                 parasitics_top_cell_only=parasitics_top_cell_only,
                 resistance_graph=resistance_graph,
                 resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
+                resistance_graph_caps=resistance_graph_caps,
                 # Per-fragment square counting (issue #2359): `via_index` lets
                 # the parasitics pass read each net's own via landings back
                 # through `polygons_of_net`, so it can tell where current enters

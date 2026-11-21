@@ -57,6 +57,7 @@ from ..extract import (
     run_extract,
 )
 from ..extract_runset import DEFAULT_ENGINE, RUNSET_ENGINE, parse_device_params
+from ..extract_runset_flags import refuse_batch_for_runset_engine
 from . import _request_document as reqdoc
 from ._parsing import (
     parse_deck_options,
@@ -64,6 +65,7 @@ from ._parsing import (
     parse_device_models,
     parse_label_layers,
     parse_probes,
+    parse_resistance_graph_caps,
 )
 from .extract_text import _print_text
 from .output import (
@@ -374,6 +376,10 @@ _REQUEST_FIELD_DESTS = {
             "parasitics_top_cell_only",
             "resistance_graph",
             "resistance_graph_r_cut",
+            "resistance_graph_max_terminals",
+            "resistance_graph_max_cells",
+            "resistance_graph_max_nodes",
+            "resistance_graph_max_edges",
             "distributed_rc",
             "substrate_tie_ohms",
             "resistance_paths",
@@ -512,6 +518,11 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
             "resistance_graph": _bool("resistance_graph"),
             "resistance_graph_r_cut": _number("resistance_graph_r_cut"),
+            **{
+                key: _request_int(request, key)
+                for key in request
+                if key.startswith("resistance_graph_max_")
+            },
             "distributed_rc": _bool("distributed_rc"),
             "substrate_tie_ohms": _number("substrate_tie_ohms"),
             "resistance_paths": _request_resistance_paths(request),
@@ -574,27 +585,6 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
     )
 
 
-def _refuse_batch_for_runset_engine(engine: str) -> None:
-    """Issue #5481: the runset engine needs the standalone ``klayout``
-    application and the PDK install on the *executing* host, and the batch
-    runner's request can ship neither -- so refuse rather than submit a job
-    that cannot honour the engine that was asked for.
-
-    Called twice with different engines: once with the argv ``--engine``
-    before the request document is applied (it has not been read yet), and
-    once inside :func:`_run_batch` with the request's own ``engine`` -- a
-    request document carrying ``"engine": "klayout-runset"`` never reaches
-    the argv form, and must be refused with this same message rather than
-    failing later on a missing ``deck`` or en route to a submit."""
-    if engine != RUNSET_ENGINE:
-        return
-    raise ExtractError(
-        f"--backend batch cannot run engine '{RUNSET_ENGINE}' -- the runset "
-        "needs the standalone klayout application and the PDK install on the "
-        "executing host. Run it locally (--backend local)"
-    )
-
-
 def run(args: argparse.Namespace) -> int:
     # `file` or `--check` is required -- omitting both is a usage error
     # (exit 2) enforced by `parser._require_one_input` before `run()` is ever
@@ -617,7 +607,7 @@ def run(args: argparse.Namespace) -> int:
         # `--backend` > $KLT_EXTRACT_BACKEND > local (issue #4613). `batch`
         # never falls back to a local run: every batch failure is exit 1.
         if extract_batch.resolve_backend(getattr(args, "backend", None)) == "batch":
-            _refuse_batch_for_runset_engine(getattr(args, "engine", DEFAULT_ENGINE))
+            refuse_batch_for_runset_engine(getattr(args, "engine", DEFAULT_ENGINE))
             report = _run_batch(args)
             emit_success(report, args.format, _print_text)
             return EXIT_OK
@@ -754,6 +744,9 @@ def run(args: argparse.Namespace) -> int:
             # `--resistance-graph-r-cut` (issue #2983): per-cut via
             # resistance for the graph; `None` when never given.
             resistance_graph_r_cut_ohm=args.resistance_graph_r_cut,
+            # `--resistance-graph-max-*` (issue #6964): explicit build caps as
+            # `{builder keyword: value}`; `None` when never given.
+            resistance_graph_caps=parse_resistance_graph_caps(args),
             # `--distributed-rc` (issue #977, Epic #709 Phase 2b): replaces
             # the star/Gamma-shunt R/C model with a distributed ladder for
             # every `--critical-net`-named net. `False` when the flag was
@@ -885,7 +878,7 @@ def _run_batch(args: argparse.Namespace) -> dict[str, Any]:
     # The request document was not read when `run()` checked the argv engine,
     # so re-check the engine the request itself declares -- the one a
     # `--backend batch` run actually honours.
-    _refuse_batch_for_runset_engine(request.get("engine", DEFAULT_ENGINE))
+    refuse_batch_for_runset_engine(request.get("engine", DEFAULT_ENGINE))
     if not request.get("deck"):
         raise ExtractError("argument --deck is required")
     return extract_batch.run_extract_batch(

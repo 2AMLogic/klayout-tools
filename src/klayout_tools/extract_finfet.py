@@ -945,8 +945,7 @@ def refuse_run_options(
     ``--parasitics`` is supported (issue #4558) and not refused."""
     if is_finfet_deck_name(deck_name):
         reject_unsupported_options(
-            deck_name,
-            **{"--pdk": pdk_variant is not None or pdk_root is not None},
+            deck_name, **{"--pdk": pdk_variant is not None or pdk_root is not None}
         )
 
 
@@ -977,6 +976,7 @@ def extract_netlist_tuple(
             "parasitics_top_cell_only",
             "resistance_graph",
             "resistance_graph_r_cut_ohm",
+            "resistance_graph_caps",
         )
         if key in options
     }
