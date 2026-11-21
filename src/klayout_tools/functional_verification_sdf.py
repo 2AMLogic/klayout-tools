@@ -1214,7 +1214,7 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     would silently take over that documented case without evidence that
     dropping is the right answer there. (Issue #2363 supplies that evidence
     for one strictly narrower subset of shape (b) -- a bit-selected-port
-    source feeding a *physical-only*, modpath-free destination instance --
+    source feeding a timing-empty *physical-only* destination instance --
     and handles it in its own separate pass,
     :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
     the general shape (b) case here stays untouched and still fails loudly.
@@ -1245,11 +1245,10 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # This is shape (b) of the #1619/#1857 spike (`docs/design/sdf-annotate-
 # feasibility-spike.md` §3.7) -- a bit-selected top-level input port as the
 # entry's *source* -- so neither #1619's deferral nor #2285's alias-map
-# rewrite resolves it. It costs an `SDF ERROR: <file>:<line>: Could not find
-# intermodpath!`, and the diagnostic gate (correctly) treats an unapplied
-# annotation as a hard failure, so a real post-route SDF whose router
-# inserted antenna diodes on top-level input bits could not pass the gate at
-# all.
+# rewrite resolves it. A non-survivor costs an `SDF ERROR: <file>:<line>:
+# Could not find intermodpath!`. The diagnostic gate treats that unapplied
+# annotation as a hard failure, including for router-inserted antenna
+# diodes on top-level input bits.
 #
 # Reproduced live against Icarus 13.0 through this module, re-measured
 # with one-variable controls in issue #5705: the deciding variables are
@@ -1289,8 +1288,8 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # an entry is dropped only when *every* delay member it carries (all three
 # `min:typ:max` members of every rvalue, not just the `-T`-selected one) is
 # zero, so dropping it cannot change any simulated timing at any corner. A
-# non-zero-delay entry onto the identical physical-only pin is left in
-# place, fails to annotate, and still raises -- loud, not silently retimed.
+# non-zero-delay entry stays in the SDF. In the two-diodes fixture, the
+# first-declared diode's entry then still fails the diagnostic gate.
 #
 # "Physical-only" is decided *structurally*, from the elaborated Verilog the
 # run is already compiling (:func:`_collect_sdf_physical_only_instances`),
@@ -1311,10 +1310,9 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 _VERILOG_MODULE_CHUNK_TEMPLATE = r"\bmodule\s+{name}\b.*?\bendmodule\b"
 
 #: Any declaration that disqualifies a model from being "physical-only".
-#: ``specify`` is the direct test (no ``specify`` block, no modpath -- which
-#: is the whole justification for the drop); ``output``/``inout`` are the
-#: conservative belt-and-braces half, since a cell with a driven pin is one
-#: whose annotation could conceivably be observed even without a modpath.
+#: ``specify`` identifies timing declared by the cell model. An
+#: ``output``/``inout`` declaration also disqualifies the model because
+#: a driven pin could expose the effects of annotating the cell's input.
 _VERILOG_TIMING_CAPABLE_RE = re.compile(r"\b(?:specify|output|inout)\b")
 
 #: Verilog comments, stripped before :data:`_VERILOG_TIMING_CAPABLE_RE` is
@@ -1326,8 +1324,8 @@ _VERILOG_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 def _sdf_cell_model_is_physical_only(cell: str, source_texts: list[str]) -> bool:
     """``True`` when every definition of Verilog module ``cell`` found in
     ``source_texts`` declares no ``specify`` block, no ``output`` port, and
-    no ``inout`` port -- a cell that is structurally incapable of carrying a
-    modpath (issue #2363).
+    no ``inout`` port. These declarations identify a timing-empty model
+    for the physical-only drop (issue #2363).
 
     ``False`` when no definition is found at all, and ``False`` the moment
     any definition is timing-capable. Both defaults are deliberate: this
@@ -1406,11 +1404,9 @@ def _collect_sdf_physical_only_instances(
     source_paths: list[str], hdl_toplevel: str
 ) -> set[str]:
     """Every instance name in ``hdl_toplevel`` whose cell model is
-    physical-only -- no ``specify`` block, no ``output``/``inout`` pin, so no
-    modpath an ``INTERCONNECT`` entry onto one of its pins could ever
-    annotate (issue #2363). Antenna-effect diodes are the case this exists
-    for; a filler/tapcell with a timing-empty model qualifies by the same
-    construction.
+    physical-only, with no ``specify`` block or ``output``/``inout`` pin
+    (issue #2363). Antenna-effect diodes are the usual case. A filler/tapcell
+    with a timing-empty model qualifies by the same rules.
 
     Reuses :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s
     instance list -- the same parser
@@ -1498,11 +1494,10 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
     -- or ``None`` when there is nothing to remove, in which case the caller
     keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
 
-    See the module-level comment above for issue #2363's findings: why this
-    subset of the spike's shape (b) is structurally un-annotatable rather
-    than merely order-dependent, why the general shape (b) case is
-    deliberately left failing, and why "physical-only" is decided from the
-    elaborated model rather than from a cell-name pattern.
+    Icarus can annotate only the last-declared load on the input port bit's net
+    (#5705). This pass removes entries that carry zero delay at every corner,
+    including an entry Icarus could have applied. The module-level comment
+    above describes the model-based classification and Icarus behavior.
 
     Either empty set makes this a no-op that returns ``None`` immediately
     without reading the file -- the overwhelmingly common case (no bus
@@ -1634,14 +1629,12 @@ def _drop_sdf_zero_delay_bus_port_source_interconnects(
 #   one Icarus edge-sensitive modpath can carry only one (rise, fall) pair --
 #   whichever entry landed last would silently time the other sense too.
 #
-# So this is a counted, honestly-reported drop (the issue's direction 3),
-# with the same justification #2363's physical-only drop rests on: the
-# entry's target modpath does not exist in the elaborated design, so there is
-# nothing the entry could ever annotate, and removing it cannot change
-# simulated timing relative to what Icarus does with it anyway. What the
-# caller loses is real, though, and it is reported as such: those arcs run
-# with **no** module-path delay at all (Icarus discarded the model's own
-# placeholder delay along with the path), and `environment.sdf.dropped`
+# This is a counted drop (the issue's direction 3). Icarus discards the
+# target modpath at elaboration, so removing the entry preserves its
+# simulated timing. In #2363, Icarus can annotate only the last-declared load
+# and the drop is timing-neutral because every delay value is zero. The
+# `ifnone` arcs run with **no** module-path delay because Icarus discards
+# the model's placeholder delay along with the path. `environment.sdf.dropped`
 # names every dropped arc by cell type so a consumer can see exactly which
 # cells were not timed.
 #

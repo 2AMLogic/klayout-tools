@@ -4493,7 +4493,7 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # non-last-declared entry fails too; the old "more than one entry"
 # reading is superseded. That is also why the pinned no-fix case
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-# unresolvable`, where the second load is a `specify`-bearing cell) keeps
+# unresolvable`, where the first load is a `specify`-bearing cell) keeps
 # failing: dropping the diode entry there leaves the ordinary shape (b) entry
 # behind, still unresolvable.
 #
@@ -4502,10 +4502,10 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 # output pin at all, no logic observes the pin, the entry can still be
 # the cap's survivor -- the drop rests on timing emptiness, not "no
 # modpath exists". `_drop_sdf_zero_delay_physical_only_interconnects`
-# removes exactly those entries and reports the count as its own
-# `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
-# identical pin, and *any* entry onto a `specify`-bearing destination, are
-# left in place and still fail loudly (both verified live).
+# removes those zero-delay entries and reports its own count in
+# `environment.sdf.dropped`. In the live non-zero cases, the first diode's
+# entry and the `specify`-bearing load's entry in the mixed-fanout case
+# stay in the SDF and still fail loudly.
 # --------------------------------------------------------------------------- #
 
 #: Gate-level netlist in the shape a real post-route `write_verilog` emits (a
@@ -4651,9 +4651,8 @@ def test_collect_sdf_physical_only_instances_skips_a_specify_bearing_lookalike(
 
 
 def test_collect_sdf_physical_only_instances_is_empty_without_the_model(tmp_path):
-    """A cell whose model is not among the run's own sources cannot be shown
-    to be modpath-free, so it is not treated as one -- every uncertainty on
-    this path has to resolve toward leaving the SDF entry in place."""
+    """A missing model leaves the cell unclassified and its SDF entry in
+    place. This preserves the entry whenever the model is uncertain."""
     source = _write(
         tmp_path / "diode_top.v",
         _PHYSICAL_ONLY_DIODE_DUT_V.replace(
@@ -5041,11 +5040,10 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
 def test_integration_real_icarus_sdf_nonzero_physical_only_interconnect_fails_loud(
     tmp_path,
 ):
-    """Acceptance criterion #2 against the real toolchain: the identical
-    physical-only destination carrying a **non**-zero delay is left in place,
-    hits the same `Could not find intermodpath!` inside Icarus, and still
-    raises. The #2363 exemption is bounded by the delay value, not by the
-    diagnostic text -- so it can never silently retime a run."""
+    """Non-zero entries for both diodes stay in the SDF. Icarus rejects the
+    first-declared diode with `Could not find intermodpath!`, so the
+    diagnostic gate still raises. The #2363 exemption is bounded by the
+    delay value to preserve the timing of any entry Icarus can apply."""
     _stage_physical_only_diode_design(tmp_path, diode_delay="1.000:1.000:1.000")
     annotated = _physical_only_diode_request(
         tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
