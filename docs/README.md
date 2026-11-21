@@ -30,6 +30,7 @@ docs/
   cli/                   # per-verb CLI reference
     arith-gen.md
     artifact.md
+    cell-hash.md
     cells.md
     characterize.md
     clip.md
