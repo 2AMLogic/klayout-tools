@@ -48,10 +48,19 @@ from .lvs_mismatch_tolerance import (  # noqa: F401  (re-exported)
     _apply_tolerance_snaps,
     _collect_tolerance_snaps,
     _parse_parameter_tolerance,
-    _relative_delta,
     _tolerance_disclosure,
-    _tolerated_device_pair,
-    _ToleratedParam,
+)
+from .lvs_net_identity import (
+    lookup,
+    name_key,
+    new_registry,
+    pair,
+    record_circuit_nets,
+)
+from .lvs_supply_universe import (  # noqa: F401  (re-exported)
+    _is_unverified_supply_correspondence,
+    _net_name_aliases,
+    _SupplyPinUniverse,
 )
 
 #: Issue #2461: the ``(device-class name, parameter name)`` pairs -- both
@@ -80,67 +89,6 @@ from .lvs_mismatch_tolerance import (  # noqa: F401  (re-exported)
 ExcludedParameters = AbstractSet[tuple[str, str]]
 
 
-class _SupplyPinUniverse(NamedTuple):
-    """The two library-derived name sets :func:`_build_net_correspondence`
-    needs to mark a supply-net correspondence as unverified (issue #2136).
-
-    ``power_pin_names`` is the standard-cell library's own power/ground pin
-    universe (``lvs.py``'s ``_gate_level_power_pin_names``);
-    ``layout_supply_nets`` is the set of layout net names one of those pins
-    demonstrably lands on (``lvs.py``'s ``_layout_supply_net_names``). Both
-    are upper-cased, and both are derived -- never a hardcoded per-PDK name
-    table or a ``V*`` glob. Built only for a ``reference.form:
-    "gate-level-verilog"`` run with resolvable library pin orders; ``None``
-    everywhere else.
-    """
-
-    power_pin_names: frozenset[str]
-    layout_supply_nets: frozenset[str]
-
-
-def _net_name_aliases(name: str | None) -> frozenset[str]:
-    """``name`` upper-cased, plus each of its ``|``-separated aliases.
-
-    A label-merged net is reported as ``VPWR|VDD`` (see ``_name_or_none``),
-    and which alias a given lookup table happens to hold is not something
-    either side controls -- so membership tests in this module consider the
-    joined spelling *and* every alias it joins.
-    """
-    if not name:
-        return frozenset()
-    return frozenset(
-        {name.upper(), *(alias.upper() for alias in name.split("|") if alias)}
-    )
-
-
-def _is_unverified_supply_correspondence(
-    layout_name: str | None,
-    reference_name: str | None,
-    universe: _SupplyPinUniverse | None,
-) -> bool:
-    """True when this pairing puts a layout **supply** net opposite a
-    reference net that is not itself a supply pin (issue #2136).
-
-    A ``reference.form: "gate-level-verilog"`` reference carries no
-    power/ground pins at all (see ``verilog_netlist.py``'s own "No
-    power/ground pins" note), so the comparer never has a same-named
-    candidate for the layout's ``VGND``/``VPWR`` and pairs it with whatever
-    its graph heuristics reach first -- routinely an unrelated signal net.
-    That pairing is reported as an ordinary match today, indistinguishable
-    from one the compare actually verified.
-
-    The reference-side half of the test is not redundant: it is what keeps
-    a genuine supply-to-supply pairing (a reference that *does* declare the
-    supply pin -- possible for a hand-written stub, and the shape every
-    non-``gate-level-verilog`` form has) out of the flag.
-    """
-    if universe is None:
-        return False
-    if not (_net_name_aliases(layout_name) & universe.layout_supply_nets):
-        return False
-    return not (_net_name_aliases(reference_name) & universe.power_pin_names)
-
-
 def _build_net_correspondence(
     logger: Any, supply_universe: _SupplyPinUniverse | None = None
 ) -> list[dict[str, Any]]:
@@ -153,7 +101,11 @@ def _build_net_correspondence(
     ``mismatches[].net`` already uses -- so a label-merged net's ``A|B``
     alias join is represented identically here), plus a ``pin`` boolean:
     whether the *layout* net is one of the circuit's declared pins
-    (``Net.pin_count() > 0``). ``same_circuits`` pins the layout/reference
+    (``Net.pin_count() > 0``). Issue #5833 adds each side's per-report
+    stable net id as ``layout_id``/``reference_id`` (``None`` where that
+    side has no net) -- see ``lvs_net_identity``; unique within one report
+    and side, so cross-circuit display-name collisions stay joinable.
+    ``same_circuits`` pins the layout/reference
     top circuits together before the compare runs (see ``run_lvs``), so a
     matched pair's declared-pin status agrees on both sides by
     construction -- reading it off the layout side is not a side/bias
@@ -186,6 +138,7 @@ def _build_net_correspondence(
     """
     from .lvs import _name_or_none
 
+    net_ids = getattr(logger, "net_ids", None)
     seen: dict[tuple[int, str | None, str | None], dict[str, Any]] = {}
     for scope, layout_net, reference_net in logger.net_matches:
         layout_name = _name_or_none(layout_net)
@@ -193,11 +146,13 @@ def _build_net_correspondence(
         key = (scope, layout_name, reference_name)
         if key in seen:
             continue
-        entry: dict[str, Any] = {
-            "layout": layout_name,
-            "reference": reference_name,
-            "pin": bool(layout_net is not None and layout_net.pin_count() > 0),
-        }
+        entry = pair(
+            net_ids,
+            layout_net,
+            reference_net,
+            (name_key(scope, layout_net), name_key(scope, reference_net)),
+        )
+        entry["pin"] = bool(layout_net is not None and layout_net.pin_count() > 0)
         if supply_universe is not None:
             entry["heuristic"] = _is_unverified_supply_correspondence(
                 layout_name, reference_name, supply_universe
@@ -250,6 +205,10 @@ def _make_compare_logger(
             self.subcircuit_mismatches: list[tuple[Any, Any]] = []
             self.device_class_mismatches: list[tuple[Any, Any]] = []
             self.ambiguous_net_matches: list[tuple[Any, Any]] = []
+            #: Parallel to ``ambiguous_net_matches``: the compare scope
+            #: each was seen in, so the ambiguous-pairing ``topology``
+            #: entries can resolve their nets' stable ids (issue #5833).
+            self.ambiguous_net_scopes: list[int] = []
             #: Every successful net pairing (unambiguous *and* ambiguous), as
             #: ``(scope, layout net, reference net)`` -- the raw net objects
             #: the comparer handed the logger, tagged with the ``scope`` they
@@ -261,6 +220,14 @@ def _make_compare_logger(
             #: merge/split and issue #282 heuristics, not the objects
             #: themselves.
             self.net_matches: list[tuple[int, Any, Any]] = []
+            #: Per-report stable net ids (issue #5833): ``(side, scope, raw
+            #: expanded name)`` -> 0-based id, unique per side across the
+            #: whole compare -- the id source ``mismatches[].net``'s and
+            #: ``net_correspondence[]``'s ``layout_id``/``reference_id``
+            #: fields report. Populated by ``begin_circuit`` (see
+            #: ``lvs_net_identity.record_circuit_nets``); empty for the
+            #: fake-logger stand-ins, whose lookups all report ``None``.
+            self.net_ids, self._net_id_counters = new_registry()
             # Scope counter: `begin_circuit` opens one compare scope per
             # circuit pair, and every event until `end_circuit` belongs to
             # it. Net/device names are unique within a circuit, so
@@ -291,6 +258,14 @@ def _make_compare_logger(
 
         def begin_circuit(self, a: Any, b: Any) -> None:
             self.scope += 1
+            # Issue #5833: pin every net of this circuit pair to its
+            # per-report stable id before any scope event can reference it.
+            record_circuit_nets(
+                self.net_ids, self._net_id_counters, "layout", self.scope, a
+            )
+            record_circuit_nets(
+                self.net_ids, self._net_id_counters, "reference", self.scope, b
+            )
             if (
                 layout_circuit is not None
                 and reference_circuit is not None
@@ -314,6 +289,7 @@ def _make_compare_logger(
             if key_a is not None and key_b is not None:
                 self.matched_net_keys.append((key_a, key_b))
             self.ambiguous_net_matches.append((a, b))
+            self.ambiguous_net_scopes.append(self.scope)
             self.net_matches.append((self.scope, a, b))
 
         def net_mismatch(self, a: Any, b: Any, msg: str) -> None:
@@ -421,7 +397,7 @@ def _mismatch(
 def _terminal_names(device_class: Any) -> list[str]:
     """The ordered terminal names ``device_class`` declares (e.g. ``["A",
     "B", "W"]`` for KLayout's ``DeviceClassResistorWithBulk``) -- the same
-    ``terminal_definitions()`` walk ``_device_body_net_name`` and
+    ``terminal_definitions()`` walk ``lvs_body._device_body_net_name`` and
     ``_degraded_param_pair`` already use, factored out for
     :func:`_device_class_arity_mismatch`."""
     return [terminal.name for terminal in device_class.terminal_definitions()]
@@ -491,219 +467,6 @@ def _count_devices_of_class(netlist: Any, device_class: Any) -> int:
             if device.device_class() is device_class:
                 count += 1
     return count
-
-
-def _device_body_net_name(device: Any) -> str | None:
-    """The expanded name of ``device``'s body/bulk terminal net (KLayout's
-    ``DeviceExtractorMOS4Transistor`` names it ``"B"`` -- the same
-    ``terminal.name.lower()`` convention ``extract.py``'s ``nets[]`` uses),
-    or ``None`` if the device class declares no such terminal, or the
-    terminal reaches no net at all."""
-    device_class = device.device_class()
-    for terminal in device_class.terminal_definitions():
-        if terminal.name.lower() == "b":
-            net = device.net_for_terminal(terminal.id())
-            return net.expanded_name() if net is not None else None
-    return None
-
-
-#: KLayout's own placeholder spelling for a net that carries no drawn label:
-#: ``Net.expanded_name()`` returns ``"$<n>"`` (``"$0"``, ``"$5"``, ...).
-#:
-#: **Raw, not backslash-escaped -- the two spellings are not interchangeable
-#: (issue #2048).** ``extract_report.py``'s ``_ANONYMOUS_NET_PREFIX`` is
-#: ``"\\$"`` because every net name *that* module reports has already
-#: passed through :func:`~klayout_tools.extract.spice_safe_net_name`, which
-#: escapes the leading ``$`` to match the written netlist's own node
-#: spelling (issue #1162). Nothing on *this* module's path does that
-#: escaping: :func:`_device_body_net_name` reads ``Net.expanded_name()``
-#: straight off the in-memory netlist, so the prefix to match here is the
-#: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
-#: silently never match any real body net.
-#:
-#: **A netlist read back from disk spells it escaped (issue #3177).** For the
-#: ``layout.netlist`` + ``layout.deck`` shape the circuit comes from
-#: ``NetlistSpiceReader`` over a ``klt extract -o`` file, whose anonymous nodes
-#: are written ``\\$<n>`` -- so :func:`_is_unresolved_body_net` accepts that
-#: spelling too (:data:`_ESCAPED_ANONYMOUS_NET_PREFIX`).
-_RAW_ANONYMOUS_NET_PREFIX = "$"
-_ESCAPED_ANONYMOUS_NET_PREFIX = "\\$"
-
-
-def _is_unresolved_body_net(name: str | None) -> bool:
-    """Whether a body terminal's net name (as returned by
-    :func:`_device_body_net_name`) fails to identify a real, drawn- or
-    derived-tap net: either KLayout synthesized an anonymous placeholder for
-    it (``"$<n>"`` -- no label reached the net, so nothing biases the body),
-    or the terminal reached no net at all (``None``).
-
-    The in-memory counterpart of ``extract.py``'s
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, which
-    makes the same per-device determination against the already-escaped
-    ``"\\$<n>"`` spelling it reports in ``klt extract``/``klt pex`` JSON --
-    see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
-    the two paths even though the condition is identical.
-    """
-    return name is None or name.startswith(
-        (_RAW_ANONYMOUS_NET_PREFIX, _ESCAPED_ANONYMOUS_NET_PREFIX)
-    )
-
-
-def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
-    """``{device-class name: unverified device count}`` for every MOS device
-    class in ``layout_circuit`` whose body terminals were compared against a
-    deck-synthesized net rather than a real schematic one (issue #281).
-
-    The single source of truth for that determination: :func:`_body_net_warnings`
-    renders these counts as its ``device.body_unverified`` ``mismatches[]``
-    prose, and :func:`~klayout_tools.lvs_power._body_verification_report` renders the
-    same counts as the machine-checkable ``body_verification`` block (issue
-    #1983) -- so the warning a reader sees and the field a grader reads can
-    never disagree. See :func:`_body_net_warnings` for the full rationale on
-    *which* devices count as unverified on which decks.
-
-    Empty when every MOS body terminal resolved to a real net (a layout that
-    drew its substrate/well ties on a deck that has a tap mechanism), which is
-    exactly the "verified" case.
-    """
-    counts: dict[str, int] = {}
-
-    # Issue #3177: a netlist read back from disk (``layout.netlist`` +
-    # ``layout.deck``) presents class and net names upper-cased
-    # (``NFET``/``VSUBS``), so every name compare is case-insensitive.
-    substrate_net = deck.substrate_net.casefold()
-    nfet_count = 0
-    for device in layout_circuit.each_device():
-        if device.device_class().name.casefold() != deck.nfet_class.casefold():
-            continue
-        body = _device_body_net_name(device)
-        if body is None or body.casefold() == substrate_net:
-            nfet_count += 1
-    if nfet_count:
-        counts[deck.nfet_class] = nfet_count
-
-    # Issue #2048: per-device, not deck-structural. A deck that merely
-    # *declares* a tap mechanism does not guarantee any individual PMOS body
-    # reached a real net -- so ask each device, exactly as `klt extract`'s
-    # `_detect_unbiased_pmos_body_nets` already does.
-    pfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name.casefold() == deck.pfet_class.casefold()
-        and _is_unresolved_body_net(_device_body_net_name(device))
-    )
-    if pfet_count:
-        counts[deck.pfet_class] = pfet_count
-
-    return counts
-
-
-def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
-    """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
-    non-blocking ``severity: "warning"`` entries, the MOS body terminals
-    that ``extract.py``'s inline extraction ties to a deck-synthesized net
-    rather than deriving from real drawn tap/well-label geometry -- so a
-    caller recording a clean ``klt lvs`` verdict can also record that this
-    dimension went structurally unverified (see this module's own docstring
-    reference, ``extract.py``'s ``nfet_body``/``connect_global`` handling,
-    and ``docs/cli/extract.md`` -> "Coverage").
-
-    Per-device, not deck-structural (#490): a deck that declares a distinct
-    ``tap`` layer (e.g. sky130's ``tap=(65, 44)``) resolves an NMOS body
-    terminal to a real, named net when a layout draws a substrate-tie ring
-    outside every ``nwell`` and contacts it up to that net -- only a device
-    whose body terminal *still* reaches the deck's synthesized
-    ``substrate_net`` global (no ring drawn, or no tap mechanism at all,
-    e.g. gf180mcu before issue #1084) is structurally unverified. The NMOS
-    warning therefore counts only devices whose body net name equals
-    ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
-    device.
-
-    **The PMOS arm is per-device too, since issue #2048.** It used to be
-    deck-structural: it fired only when the deck had no tap mechanism at all
-    (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``, gf180mcu before
-    issue #1084), treating a deck that merely *declares* one as sufficient
-    for every PMOS in every layout it extracts. It is not: a gf180mcu layout
-    whose declared ``tap_nplus``/``tap_pplus`` implant layers draw no real
-    well-tie shape still resolves each such PMOS body to an anonymous,
-    KLayout-synthesized ``"$<n>"`` net with no DC bias path -- and that went
-    unflagged here while ``klt pex``'s ``body_bias`` block, built from
-    ``extract.py``'s per-device
-    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, reported
-    the very same layout as ``"unbiased"``. The PMOS warning now counts
-    exactly the devices whose body terminal reached such a placeholder net
-    (or no net at all); see :func:`_is_unresolved_body_net`, and
-    :data:`_RAW_ANONYMOUS_NET_PREFIX` for why this in-memory path matches a
-    raw ``$`` where ``extract.py`` matches an escaped ``\\$``. A deck with a
-    real well-tap mechanism (sky130's drawn ``tap``/``well_label``) still
-    emits no PMOS warning on a well-labelled layout -- but now because each
-    PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
-    the deck declared a mechanism.
-
-    Neither warning fires for the pre-extracted ``layout.netlist`` request
-    form *without* a ``layout.deck`` -- callers only reach this helper when a
-    deck was resolved, mirroring how ``device_classes``/``provenance.deck``
-    are conditioned on that same distinction in ``run_lvs``. With
-    ``layout.netlist`` + ``layout.deck`` it does run, against the SPICE read
-    back from disk: names there are upper-cased and anonymous nets are
-    spelled ``\\$<n>``, so the compares are case-insensitive and accept both
-    anonymous spellings (issue #3177).
-
-    Counts only the layout's top circuit's own devices (``each_device()``,
-    not recursive), matching ``run_lvs``'s own ``counts.devices.layout``
-    convention -- curated-deck extraction never nests MOS devices inside a
-    subcircuit.
-    """
-    from .lvs import CATEGORY_DEVICE_BODY_UNVERIFIED
-
-    entries: list[dict[str, Any]] = []
-
-    # Issue #1983: both this prose warning and the machine-checkable
-    # `body_verification` block are rendered from one determination, so a
-    # reader and a grader can never see different answers.
-    counts = _body_unverified_counts(layout_circuit, deck)
-
-    nfet_count = counts.get(deck.nfet_class, 0)
-    if nfet_count:
-        entries.append(
-            _mismatch(
-                CATEGORY_DEVICE_BODY_UNVERIFIED,
-                "warning",
-                f"{nfet_count} NMOS device body terminal(s) were compared "
-                f"against the '{deck.substrate_net}' deck-synthesized "
-                "substrate net, not a real schematic net -- either no "
-                "substrate-tap geometry is drawn, or the drawn tap's net "
-                "carries no name label (a body resolves only to a *named* "
-                "net; label the tap-connected conductor, e.g. VSS, to "
-                'resolve it; see docs/cli/extract.md, "Coverage")',
-                "layout",
-                device={"layout": None, "reference": None, "class": deck.nfet_class},
-            )
-        )
-
-    pfet_count = counts.get(deck.pfet_class, 0)
-    if pfet_count:
-        entries.append(
-            _mismatch(
-                CATEGORY_DEVICE_BODY_UNVERIFIED,
-                "warning",
-                f"{pfet_count} PMOS device body terminal(s) were "
-                "compared against an anonymous, KLayout-synthesized well "
-                "net, not a real schematic net -- either no drawn or "
-                "derived well-tap geometry exists, or the tap-connected net "
-                "carries no name label (a body resolves only to a *named* "
-                "net; label the tap-connected conductor, e.g. VDD, to "
-                'resolve it; see docs/cli/extract.md, "Coverage")',
-                "layout",
-                device={
-                    "layout": None,
-                    "reference": None,
-                    "class": deck.pfet_class,
-                },
-            )
-        )
-
-    return entries
 
 
 def _flavour_families(deck: Any) -> list[tuple[str, str, list[str]]]:
@@ -1097,6 +860,11 @@ def _build_mismatches(
     dangling = _split_dangling_output_ambiguity(logger)
     mismatches.extend(dangling.entries)
 
+    # Issue #5833: the compare logger's stable net-id registry, for the
+    # net dicts built below (None for the fake-logger classification
+    # stand-ins, whose net dicts then carry null ids).
+    net_ids = getattr(logger, "net_ids", None)
+
     # Issue #1622 deliberately does NOT filter the `circuit_mismatches`/
     # `subcircuit_mismatches` loops below for power-only (filler/tap)
     # circuits. Two reasons: (a) a report-level filter cannot help anyway --
@@ -1123,6 +891,7 @@ def _build_mismatches(
             ),
             hint_reported_pairs=hint_outcomes.refused_after_pairing,
             matched_net_keys=getattr(logger, "matched_net_keys", ()) or (),
+            net_ids=net_ids,
         )
     )
 
@@ -1310,7 +1079,8 @@ def _build_mismatches(
                 )
             )
 
-    for a, b in logger.ambiguous_net_matches:
+    scopes = getattr(logger, "ambiguous_net_scopes", ()) or ()
+    for i, (a, b) in enumerate(logger.ambiguous_net_matches):
         # Issue #596: an ambiguous pairing where *both* sides are a
         # single-device-terminal, non-pin net is not a routine naming nit --
         # it is a real finding (a net with no other connectivity, most often
@@ -1344,16 +1114,14 @@ def _build_mismatches(
                 "nets were paired ambiguously; the comparer resolved it "
                 "structurally (consider a hints.same_nets entry to pin this down)"
             )
+        scope = scopes[i] if i < len(scopes) else None
         mismatches.append(
             _mismatch(
                 CATEGORY_TOPOLOGY,
                 "warning",
                 description,
                 "both",
-                net={
-                    "layout": _name_or_none(a),
-                    "reference": _name_or_none(b),
-                },
+                net=pair(net_ids, a, b, (name_key(scope, a), name_key(scope, b))),
             )
         )
 
@@ -1497,23 +1265,37 @@ def _same_nets_rejections(
     """
     from .lvs import CATEGORY_HINTS_REJECTED
 
+    net_ids = getattr(logger, "net_ids", None)
     top_scope = getattr(logger, "top_scope", None)
     entries: list[dict[str, Any]] = []
     for layout_name, reference_name, provenance in _same_nets_assertions(
         same_nets_hints, anchored_pins, constant_bindings
     ):
-        pair = ((top_scope, layout_name), (top_scope, reference_name))
-        if pair in hint_outcomes.confirmed:
+        declared_pair = ((top_scope, layout_name), (top_scope, reference_name))
+        if declared_pair in hint_outcomes.confirmed:
             continue
         entries.append(
             _mismatch(
                 CATEGORY_HINTS_REJECTED,
                 "error",
                 _same_nets_rejection_description(
-                    provenance, pair in hint_outcomes.refused_after_pairing
+                    provenance, declared_pair in hint_outcomes.refused_after_pairing
                 ),
                 "both",
-                net={"layout": layout_name, "reference": reference_name},
+                net={
+                    "layout": layout_name,
+                    "layout_id": lookup(
+                        net_ids,
+                        "layout",
+                        None if top_scope is None else (top_scope, layout_name),
+                    ),
+                    "reference": reference_name,
+                    "reference_id": lookup(
+                        net_ids,
+                        "reference",
+                        None if top_scope is None else (top_scope, reference_name),
+                    ),
+                },
                 details=provenance,
             )
         )
@@ -2211,6 +1993,7 @@ def _classify_net_mismatches(
     explained_reference_nets: frozenset[_NetKey] = frozenset(),
     hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]] = frozenset(),
     matched_net_keys: Sequence[tuple[_NetKey, _NetKey]] = (),
+    net_ids: dict[tuple[str, int, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Classify raw ``net_mismatch`` events into ``net.unmatched``/
     ``net.merged``/``net.split``/``topology`` entries -- see this module's
@@ -2260,6 +2043,7 @@ def _classify_net_mismatches(
                 explained_layout_nets=explained_layout_nets,
                 explained_reference_nets=explained_reference_nets,
                 hint_reported_pairs=hint_reported_pairs,
+                net_ids=net_ids,
             )
         )
     return entries
@@ -2271,6 +2055,7 @@ def _classify_net_mismatch_pool(
     explained_layout_nets: frozenset[_NetKey],
     explained_reference_nets: frozenset[_NetKey],
     hint_reported_pairs: frozenset[tuple[_NetKey, _NetKey]],
+    net_ids: dict[tuple[str, int, str], int] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply the merge/split pattern match to one pool of co-located
     ``net_mismatch`` events (see :func:`_net_mismatch_pools`)."""
@@ -2280,7 +2065,6 @@ def _classify_net_mismatch_pool(
         CATEGORY_NET_SPLIT,
         CATEGORY_NET_UNMATCHED,
         CATEGORY_TOPOLOGY,
-        _name_or_none,
     )
 
     one_sided_layout = [
@@ -2298,14 +2082,14 @@ def _classify_net_mismatch_pool(
     entries: list[dict[str, Any]] = []
 
     if one_sided_layout and both_sided_renamed:
-        for a, _key in one_sided_layout:
+        for a, key in one_sided_layout:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_SPLIT,
                     "error",
                     "a reference net's role is divided across multiple layout nets",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net=pair(net_ids, a, None, key),
                 )
             )
     elif one_sided_layout:
@@ -2319,19 +2103,19 @@ def _classify_net_mismatch_pool(
                     if explained
                     else "layout net has no reference counterpart",
                     "layout",
-                    net={"layout": _name_or_none(a), "reference": None},
+                    net=pair(net_ids, a, None, key),
                 )
             )
 
     if one_sided_reference and both_sided_renamed:
-        for b, _key in one_sided_reference:
+        for b, key in one_sided_reference:
             entries.append(
                 _mismatch(
                     CATEGORY_NET_MERGED,
                     "error",
                     "multiple reference nets were collapsed into one layout net",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net=pair(net_ids, None, b, key),
                 )
             )
     elif one_sided_reference:
@@ -2345,7 +2129,7 @@ def _classify_net_mismatch_pool(
                     if explained
                     else "reference net has no layout counterpart",
                     "reference",
-                    net={"layout": None, "reference": _name_or_none(b)},
+                    net=pair(net_ids, None, b, key),
                 )
             )
 
@@ -2366,7 +2150,7 @@ def _classify_net_mismatch_pool(
                     "error",
                     "nets were paired despite a name/identity conflict",
                     "both",
-                    net={"layout": _name_or_none(a), "reference": _name_or_none(b)},
+                    net=pair(net_ids, a, b, key),
                 )
             )
 

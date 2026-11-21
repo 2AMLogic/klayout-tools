@@ -43,12 +43,12 @@ function makeFakeGL(): WebGL2RenderingContext {
 /**
  * Installs `makeFakeGL()` as the result of `HTMLCanvasElement.getContext()`
  * for the duration of the current test. This is the wiring every
- * `makeFakeGL`-consuming suite needs verbatim; the `eslint-disable` and
- * `as any` exist solely to satisfy `getContext`'s overloaded signature.
+ * `makeFakeGL`-consuming suite needs verbatim.
  */
 export function installFakeGLContext() {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // The cast lets this implementation, which always returns the fake WebGL
+    // context, stand in for `getContext`'s overloaded signature.
     ((..._args: unknown[]) => makeFakeGL()) as any,
   );
 }

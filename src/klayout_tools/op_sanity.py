@@ -43,31 +43,17 @@ comes from. An optional ``op_lint`` block tunes thresholds, declares extra
 I/O nodes, and overrides per-model conventions; see ``docs/cli/sim.md``'s
 "Operating-point lint" section for the full field reference.
 
-Reading per-device values: ``print @m...[param]``, not ``.meas``
------------------------------------------------------------------
-ngspice has no ``.MEASURE OP`` statement (an operating point has no sweep
-variable to search over -- see ``sim.py``'s ``_validate_meas_card`` and
-issue #205), so per-device operating-point values can only be read with
-``print @<element>[<param>]`` inside a ``.control`` block. That is exactly
-the path ``klt size`` already uses for the single device it is sizing
-(``size.py``'s ``_OP_PARAMS``/``_write_sweep_deck``/``_parse_sweep_log``);
-this module generalises it from "the one sized device" to "every MOS
-instance in an arbitrary netlist". No new SPICE-interaction pattern, and no
-new dependency.
-
-Instance-path resolution is the one wrinkle: a PDK device instantiated as
-``X1 d g s b <model>`` exposes its op-point vectors at
-``@m.<instance>.<inner element>[param]``, and the inner element name is a
-*PDK convention*, not a standard -- sky130 names it ``m`` + the subcircuit
-name (``msky130_fd_pr__nfet_01v8``), gf180mcu names it ``m0`` (both verified
-against the installed PDKs with ngspice 46 while building this module).
-Rather than guess one and silently report nothing, the generated deck
-``print``s *every* candidate path for each device; an unknown vector name is
-a non-fatal ``Error: no such device or model name`` log line in ngspice's
-batch mode (also verified), so the run costs one process either way and the
-candidate that actually answered is recorded per device in
-``devices[].op_point_element``. ``op_lint.models.<model>.op_point_element``
-overrides the candidate list for a PDK that follows neither convention.
+Reading per-device operating points
+-----------------------------------
+Like ``klt size``, the lint uses ``print @<element>[param]`` in a ``.control``
+block because ngspice has no ``.MEASURE OP``. For PDK subcircuits, sky130
+names the inner MOS element ``m<subcircuit name>`` and gf180mcu uses ``m0``.
+An OSDI (Verilog-A) instance uses the ``n.`` prefix, and PSP103 models
+report saturation voltage as ``vdss``. The deck tries each inner name under
+``m.`` then ``n.`` in one run. Unanswered probes are nonfatal in batch mode.
+The responding path is recorded in ``devices[].op_point_element``. To supply
+an inner name, set ``op_lint.models.<model>.op_point_element``. A prefix on
+the override (e.g. ``n.nsg13_hv_pmos``) also selects the element type.
 
 Sign conventions: compare magnitudes
 -------------------------------------
@@ -114,15 +100,15 @@ from collections.abc import Callable
 from typing import Any
 
 from . import _spice_number as spice_number
-from . import env_provenance, sim_osdi_pin
-from ._jsonnum import is_number
+from . import env_provenance, op_sanity_diagnostics, sim_osdi_pin
+from ._jsonnum import is_finite_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
-    fold_spice_continuations,
     validate_request_shape,
 )
 from ._provenance import build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .pdk import PdkNotFoundError, find_pdk
 from .sim import (
     _SIMULATION_ABORTED_RE,
@@ -146,17 +132,18 @@ from .sim import (
 #: JSON shape -- see docs/json-contract.md.
 SCHEMA_VERSION = 1
 
-#: Op-point vectors requested per device. Deliberately the same names
-#: ``size.py``'s ``_OP_PARAMS`` uses (minus ``gm``, which no check here
-#: needs), so both modules read one vocabulary out of ngspice.
-_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "id")
+_OP_PREFIXES = ("m", "n")
 
-#: Response-field name each :data:`_OP_PARAMS` entry parses into.
+#: Unlike ``klt size``, op-lint supports OSDI and probes ``vdss`` for PSP103.
+#: Deck order gives ``vdss`` the final say when both saturation aliases answer.
+_OP_PARAMS = ("vgs", "vth", "vds", "vdsat", "vdss", "id")
+
 _OP_PARAM_KEYS = {
     "vgs": "vgs_v",
     "vth": "vth_v",
     "vds": "vds_v",
     "vdsat": "vdsat_v",
+    "vdss": "vdsat_v",
     "id": "id_a",
 }
 
@@ -336,18 +323,10 @@ class ParsedNetlist:
 ALL_CORNERS = "all"
 
 
-def _strip_comment(line: str) -> str:
-    """Drop a trailing ``;``/``$`` SPICE inline comment."""
-    for marker in (";", "$ "):
-        index = line.find(marker)
-        if index >= 0:
-            line = line[:index]
-    return line.rstrip()
-
-
 def _logical_lines(text: str) -> list[str]:
     """Join ``+`` continuation lines onto their parent, dropping blank and
-    ``*`` comment lines.
+    ``*`` comment lines, with inline ``;``/``$`` comments removed by the
+    shared :func:`strip_spice_inline_comment`.
 
     A leading ``+`` line with nothing preceding it to fold onto (e.g. the
     very first non-blank/non-comment line of ``text`` starts with ``+``) is
@@ -359,7 +338,7 @@ def _logical_lines(text: str) -> list[str]:
     """
     lines: list[str] = []
     for raw in text.splitlines():
-        line = _strip_comment(raw.strip())
+        line = strip_spice_inline_comment(raw.strip())
         if not line or line.startswith("*"):
             continue
         lines.append(line)
@@ -400,18 +379,21 @@ def _op_candidates(instance: str, model: str, override: str | None) -> list[str]
     """ngspice op-point instance paths to probe for one device, most likely
     first. See this module's docstring for why more than one is probed."""
     lowered = instance.lower()
-    # A device inside a user subcircuit carries its instance path
-    # (`xdut.m1`); ngspice names its vectors `m.<path>` and, for a PDK cell,
-    # `m.<path>.<inner element>`.
     leaf = lowered.rsplit(".", 1)[-1]
     if leaf.startswith("x"):
-        inner = (
-            [override]
-            if override
-            else [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
-        )
-        return [f"m.{lowered}.{name}" for name in inner]
-    # A plain `M` element's vectors live directly under its own name.
+        if override:
+            prefix, sep, rest = override.partition(".")
+            if sep and rest and prefix in _OP_PREFIXES:
+                return [f"{prefix}.{lowered}.{rest}"]
+            elements = [override]
+        else:
+            elements = [f"m{model.lower()}", "m0", f"m{model.lower()}_0"]
+        return [
+            f"{prefix}.{lowered}.{element}"
+            for prefix in _OP_PREFIXES
+            for element in elements
+        ]
+    # A plain M element uses its own name, including any enclosing hierarchy.
     if override:
         return [override]
     return [f"m.{lowered}" if "." in lowered else lowered]
@@ -980,10 +962,10 @@ def _triode_margin_v(temperature_c: float, thresholds: dict[str, Any]) -> float:
     comment for why the thermal voltage is the right scale.
     """
     explicit = thresholds.get("triode_margin_v")
-    if is_number(explicit):
+    if is_finite_number(explicit):
         return float(explicit)
     multiple = thresholds.get("triode_margin_kt", _DEFAULT_TRIODE_MARGIN_KT)
-    if not isinstance(multiple, (int, float)) or isinstance(multiple, bool):
+    if not is_finite_number(multiple):
         multiple = _DEFAULT_TRIODE_MARGIN_KT
     kelvin = float(temperature_c) + 273.15
     return float(multiple) * _KT_OVER_Q_V_PER_K * kelvin
@@ -1043,7 +1025,6 @@ def _classify_region(device: MosInstance, off_current_a: float, margin_v: float)
 def _operating_point_findings(
     devices: list[MosInstance],
     regions: dict[str, str],
-    off_current_a: float,
     margin_v: float,
 ) -> list[dict[str, Any]]:
     """``off``/``triode`` findings, one device at a time, in netlist order."""
@@ -1598,7 +1579,9 @@ def run_op_sanity(
                     f"{', '.join('@' + path for path in device.op_candidates)}. "
                     "Set request.op_lint.models."
                     f"{device.model}.op_point_element to this PDK's inner "
-                    "element name to enable the off/triode checks for it."
+                    "element name -- it may carry an m. or n. prefix to pin "
+                    "the element type the PDK device subcircuit wraps -- to "
+                    "enable the off/triode checks for it."
                 ),
             }
         )
@@ -1616,19 +1599,14 @@ def run_op_sanity(
             }
         )
 
-    for name in parsed.unexpanded:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "unsupported_hierarchy",
-                "message": (
-                    f"could not expand subcircuit instance {name}: its "
-                    "definition was not found in the netlist or its "
-                    "`.include`d files and it is not a recognised MOS model, "
-                    "so any devices inside it were not linted."
-                ),
-            }
+    # Issue #5644: the construction (and its model-library-aware wording)
+    # lives in `op_sanity_diagnostics` -- a pure move that keeps this file
+    # under its `file-size-baseline.json` ceiling.
+    diagnostics.extend(
+        op_sanity_diagnostics.unexpanded_instance_diagnostics(
+            parsed.unexpanded, models_lib
         )
+    )
 
     if parsed.expansion_truncated:
         diagnostics.append(
@@ -1655,9 +1633,7 @@ def run_op_sanity(
         for device in parsed.devices
     }
 
-    findings = _operating_point_findings(
-        parsed.devices, regions, off_current_a, margin_v
-    )
+    findings = _operating_point_findings(parsed.devices, regions, margin_v)
     findings.extend(_wiring_findings(parsed.devices, ground, supply))
     findings.extend(
         _hygiene_findings(parsed, _declared_nodes(request, op_lint), ground, supply)
@@ -1710,6 +1686,7 @@ def run_op_sanity(
         },
         "corner_margins": corner_margins,
         "device_count": len(parsed.devices),
+        "unexpanded_instance_count": len(parsed.unexpanded),
         "finding_count": len(findings),
         "error_count": error_count,
         "warning_count": warning_count,
