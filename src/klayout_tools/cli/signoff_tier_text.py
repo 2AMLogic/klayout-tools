@@ -1,4 +1,4 @@
-"""Text renderers for a tier report's summary dispositions.
+"""Text renderers for a tier report's citations and summary dispositions.
 
 Moved out of :mod:`.cli.signoff_cmd` to keep that module under its size
 ratchet, following the same precedent as the ``signoff_*`` module splits:
@@ -10,7 +10,35 @@ item that is still ``unmet``; neither ever reads as ``met``.
 
 from __future__ import annotations
 
+from ..signoff_evidence_pin import CONTENT_HASH_BASIS_EVIDENCE_FILE
 from ..signoff_justified_gap import FINDING_JUSTIFIED_GAP_WITHOUT_ISSUE_LINK
+from ..signoff_store_pin import CONTENT_HASH_BASIS_ARTIFACT_MANIFEST
+
+
+def input_verified_statement(citation: dict) -> str | None:
+    """Describe the hash source and whether the grader read its bytes."""
+    verified = citation.get("input_verified")
+    if verified is None and citation.get("content_hash") is None:
+        return None
+    basis = citation.get("content_hash_basis")
+    if basis == CONTENT_HASH_BASIS_ARTIFACT_MANIFEST:
+        return (
+            "used the sha256 recorded for the member in the committed store manifest "
+            "-- the artifact itself was not read"
+        )
+    if basis == CONTENT_HASH_BASIS_EVIDENCE_FILE:
+        return "re-hashed the evidence file itself -- matches"
+    if verified is True:
+        return "re-hashed the artifact this envelope names -- matches"
+    if verified is False:
+        return (
+            "CHANGED -- the artifact this envelope names no longer matches "
+            "the content_hash it recorded"
+        )
+    return (
+        "not re-hashed (content_hash compared against this envelope's own "
+        "claim only -- the artifact itself was not read)"
+    )
 
 
 def _not_applicable_suffix(report: dict) -> str:

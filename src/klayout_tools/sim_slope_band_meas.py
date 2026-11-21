@@ -39,7 +39,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_slope_band
+from . import sim_measurement_kind, sim_raw, sim_slope_band
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
 
@@ -212,22 +212,16 @@ def validate_slope_band_context(
     declared = slope_band_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'slope_band', which "
-            f"reduces a swept transfer curve and so requires analysis.kind "
-            f'"dc" (got {analysis.get("kind")!r})'
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a slope_band entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="slope_band",
+        required="dc",
+        explanation="reduces a swept transfer curve",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a slope_band entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
