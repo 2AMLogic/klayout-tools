@@ -415,6 +415,21 @@ def _print_deck_text(report: dict) -> None:
             print(f"    missing outputs: {', '.join(unit['missing_outputs'])}")
 
 
+def _print_population_limits(mc: dict[str, Any]) -> None:
+    """The dispersion-bound verdict, one line next to the sigma-window line
+    (issue #6967) -- a courtesy; the JSON contract is the API. A no-op when
+    the measurement declared no ``population_limits``."""
+    population = mc.get("population_limits")
+    if population is None:
+        return
+    print(
+        f"    mc: population {population['k']:g}*sigma <= "
+        f"{population['max']!r} [{population['status']}] "
+        f"(margin={population['margin']!r}, "
+        f"worst_corner={population['worst_corner']!r})"
+    )
+
+
 def _print_text(report: dict) -> None:
     # Issue #1261: `netlist` is the `{path, scope}` shape
     # `env_provenance.repo_relative_path` defines -- `render_path_field` is
@@ -499,6 +514,7 @@ def _print_text(report: dict) -> None:
                         f"[{window['low']!r}, {window['high']!r}] "
                         f"[{window['status']}] (margin={window['margin']!r})"
                     )
+                _print_population_limits(mc)
 
     corners = report["corners"]
     if not corners:

@@ -8893,6 +8893,7 @@ block — the block is present only for a measurement that actually ran under
 | `quantiles`     | object              | One key per requested percentile, `p<percentile>` (`p5`, `p50`, `p2.5`, …), in `monte_carlo.quantiles` order. Values are linearly interpolated between order statistics (numpy's default / `statistics.quantiles(method="inclusive")`); `p0`/`p100` degenerate to `min`/`max`. Each value is `null` when `n == 0`. |
 | `sigma_window`  | object \| null      | The `mean ± k*stddev` limit-window check — `null` unless a `k_sigma` was declared *and* `mean`/`stddev` both exist. See below.        |
 | `by_corner`     | array\<object\>     | The same statistics recomputed per originating (pre-sampling) corner, in corner order, each with its own `corner_id`. One entry for the common single-corner request. |
+| `population_limits` | object \| null  | The declared dispersion bound (issue #6967) — present only when the measurement declared one. See below.                                                  |
 
 **The limit window.** With a `k_sigma` declared (run-wide on `monte_carlo`,
 or per measurement — the per-measurement value wins), `sigma_window` reports
@@ -8935,6 +8936,45 @@ responses are unchanged. `error` and `inconclusive` still outrank a window
 `fail`, and a corner with no window (`sigma_window: null`, e.g. no `k_sigma`
 declared) never fails the measurement. For a single-corner request both
 scopes agree.
+
+**Population limits.** `measurements[].population_limits` (issue #6967)
+bounds the **dispersion itself** — a bound on `k·σ` alone, independent of the
+mean and of per-sample `limits`:
+
+```json
+{ "name": "noise_sigma", "k_sigma": 3,
+  "population_limits": { "max_k_sigma": 0.004, "quantization_variance": 1.0e-6 } }
+```
+
+- **Statistic**: `S = k · σ_net` for each `by_corner[]` population, where `k`
+  is the measurement's resolved `k_sigma` (per-measurement override, else
+  `monte_carlo.k_sigma`) and
+  `σ_net = sqrt(max(σ² − quantization_variance, 0))`. The optional
+  `quantization_variance` (in measurement-unit², default `0`, so `σ_net = σ`)
+  is declared as a **variance**, not a step, so no distribution assumption is
+  baked into the tool — the caller already knows the number they trust; for a
+  uniformly binned/LSB-quantized `.meas` pass `step²/12`.
+- **Grading**: a corner passes iff `S <= max_k_sigma`; its margin is
+  `max_k_sigma − S`. A corner with `stddev: null` (`n < 2` trusted samples) is
+  not graded, and the pooled population is **never** graded (it is not a
+  distribution anyone sampled). For a single-corner request the one corner is
+  the whole population.
+- **Aggregation**: worst-first — the measurement fails if any graded corner
+  fails, and the worst corner (smallest margin, first in corner order on ties)
+  is named. `error` and `inconclusive` outrank a population `fail`, exactly as
+  they outrank a window `fail`. `window_scope` and per-sample `limits` keep
+  their meaning unchanged when a bound is declared alongside them.
+- **Output** (additive, present only when declared): the measurement's
+  `monte_carlo` block carries a `population_limits` object —
+  `{statistic: "k_sigma", k, max[, quantization_variance], status, margin,
+  worst_corner, by_corner: [{corner_id, value, margin, status}]}` — where
+  `status`/`margin`/`worst_corner` are `null` when no corner could be graded,
+  and each ungraded corner's `value`/`margin`/`status` are `null`.
+- Declaring the bound requires `request.monte_carlo` and a resolvable
+  `k_sigma` (per-measurement or run-wide); anything else — a non-object, a
+  missing/negative/non-numeric `max_k_sigma`, a bad `quantization_variance`,
+  an unknown key — is a `SimError` naming the field, raised before any corner
+  is dispatched.
 
 ## Model library resolution (via `klt pdk`)
 
@@ -10068,7 +10108,7 @@ the *response* echoes back.
 | `monte_carlo.window_scope` | string          | `"pooled"` (default) or `"per_corner"`: which `mean ± k*stddev` window gates status. `"per_corner"` fails a measurement if any `by_corner[]` window fails and adds `failing_corners` to its `monte_carlo` block; see "Pooled vs. per corner". |
 | `analysis`               | object            | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per corner. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card; measure an operating-point quantity with `measurements[].expr` instead. Required unless the request declares `analysis_steps` instead; declaring both is an application error (exit 1). |
 | `analysis_steps[]`       | array\<object\>   | Issue #2482. Additive alternative to `analysis`: an ordered, non-empty sequence of named solves run inside each corner's one deck — each step `{name, analysis: {kind, args}, alter?, reset?, measurements?}` (`alter` values are a finite number, or `{"pwl": [t0, v0, ...]}` for a `pwl`-declared source). With it, the top-level `measurements[]` are **derived** `expr`s over `<step>.<measurement>` results. ngspice only (refused for `engine: "xyce"`); refuses `options.waveforms`/`--plot`. See "Several solves per corner (`analysis_steps[]`)" above for the full rules. |
-| `measurements[]`         | array\<object\>   | Each entry requires a `name` (stable response key) and **exactly one measurement form**. Declaring two or more forms, or none, is an application error (exit 1). See [Measurements that are not `.meas` cards](#measurements-that-are-not-meas-cards-measurementsexpr) and the form-specific sections that follow for accepted forms and their fields. Optional fields include `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see [Optional measurements](#optional-measurements-measurementsoptional)), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached)). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see [Measurement templates over a case list](#measurement-templates-over-a-case-list-optionsmeasurement_cases-issue-5731). |
+| `measurements[]`         | array\<object\>   | Each entry requires a `name` (stable response key) and **exactly one measurement form**. Declaring two or more forms, or none, is an application error (exit 1). See [Measurements that are not `.meas` cards](#measurements-that-are-not-meas-cards-measurementsexpr) and the form-specific sections that follow for accepted forms and their fields. Optional fields include `unit`, `optional` (issue #2925 — boolean, default `false`; `true` grades a value-less result `status: "absent"` instead of `error`, `spice`/`expr` on the scalar `analysis` only — see [Optional measurements](#optional-measurements-measurementsoptional)), `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), `population_limits` (issue #6967 — `{max_k_sigma, [quantization_variance]}`, a bound on each `by_corner[]` population's `k·σ` dispersion with worst-corner aggregation; requires `monte_carlo` and a resolvable `k_sigma`; see [Population limits](#monte-carlo-statistics) under "Monte Carlo statistics"), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply), and `spec_row` (issue #3778 — non-empty string, the spec row this measurement grades, echoed on the rollup entry only when declared; `klt signoff` item 5 derives a citation's row coverage from it, see `docs/cli/signoff.md` "Derived coverage". Same meaning as `spec_row` in `klt pex` delta rows). Optional `on_unreached` (issue #3108 — `"error"` (default) or `"null"`, `spice` only; see [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached)). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. `expr` must reduce to a single real scalar, must be one line, must have a name matching `[A-Za-z_][A-Za-z0-9_]*` unique across `measurements[]`, and is refused for `engine: "xyce"`. An entry may also be a **template**: write `{case}` where a copy's own names go and declare the scopes under `options.measurement_cases`, and `klt sim` expands the entry into one ordinary measurement per case before any of the rules above run — see [Measurement templates over a case list](#measurement-templates-over-a-case-list-optionsmeasurement_cases-issue-5731). |
 | `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
