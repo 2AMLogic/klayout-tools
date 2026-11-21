@@ -204,7 +204,7 @@ def test_comment_reorder_and_reflow_edits_stay_at_match_with_a_note(tmp_path):
     assert result["fresh_status"] == "pass"
     assert result["notes"] == [
         {
-            "check": {"role": "hygiene", "path": _CI},
+            "check": {"role": "hygiene", "check": "present", "path": _CI},
             "path": _CI,
             "note": 'raw bytes differ; canonical yaml hash unchanged (attest: "yaml")',
         }
@@ -263,7 +263,7 @@ def test_key_reorder_inside_a_list_element_stays_at_match(tmp_path):
         assert result["fresh_status"] == "pass"
         assert result["notes"] == [
             {
-                "check": {"role": "hygiene", "path": _CI},
+                "check": {"role": "hygiene", "check": "present", "path": _CI},
                 "path": _CI,
                 "note": "raw bytes differ; canonical yaml hash unchanged "
                 '(attest: "yaml")',
