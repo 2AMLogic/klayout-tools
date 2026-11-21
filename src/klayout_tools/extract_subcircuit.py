@@ -118,7 +118,7 @@ def _device_nets(device: kdb.Device) -> list[kdb.Net]:
     return nets
 
 
-def _is_substrate_dc_tie(device: kdb.Device, nets: list[kdb.Net]) -> bool:
+def _is_substrate_dc_tie(nets: list[kdb.Net]) -> bool:
     """``True`` for the 1 Tohm substrate DC-tie shunt ``_tie_substrate_nets_
     to_ground`` writes (issue #1263).
 
@@ -322,7 +322,7 @@ class _Selection:
                 if device_id in selected_ids:
                     self.kept_ids.add(device_id)
                 continue
-            if _is_substrate_dc_tie(device, device_nets):
+            if _is_substrate_dc_tie(device_nets):
                 self.substrate_tie_ids.add(device_id)
                 continue
             device_keys = {index.key_of(net) for net in device_nets}
