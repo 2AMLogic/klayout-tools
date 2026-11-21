@@ -163,6 +163,7 @@ The optional `sdc_check` field (see "SDC drift check") compares a committed
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
 | `constraints.power_activity` | object \| omitted | Additive field (issue #3744). `{"activity": <number >= 0>, "duty": <number in [0, 1]>}`, each key optional but at least one required. Emits `set_power_activity -global -activity <a> -duty <d>` before `report_power_metric` in every analyzed corner (`def` and `verilog` mode), so `estimated_power_mw` reflects that switching activity instead of OpenSTA's built-in default. Omitted (the default) emits nothing — the generated script and every number are unchanged. A boolean, negative or non-finite value, `duty` outside `[0, 1]`, an empty object, an unknown key or a non-object is a request error (exit 1) raised before the engine runs. Not VCD/SAIF input; the response's `power_basis` records what was applied. |
 | `constraints.clock_uncertainty_ns` | number \| object \| omitted | Additive field (issue #4240). A number `>= 0` applies the same uncertainty to setup and hold; or `{"setup_ns": <number >= 0>, "hold_ns": <number >= 0>}`, each key optional but at least one required. Emits `set_clock_uncertainty -setup <ns> [get_clocks <clock_port>]` and/or `-hold <ns> ...` right after `create_clock` in every analyzed corner (`def` and `verilog` mode); orthogonal to `propagated_clock` (both may be set). Omitted or `null` (the default) emits nothing — the generated script and every number are unchanged. A boolean, negative or non-finite value, an empty object, an unknown key or any other type is a request error (exit 1) raised before the engine runs. Values are ns, not a fraction of the period. The response's `clock_uncertainty` records what was applied. |
+| `constraints.timing_derate` | object \| omitted | Additive field (issue #7014). The `set_timing_derate -early/-late` equivalent: `{"early": <number > 0>, "late": <number > 0>}`, each key optional but at least one required; dimensionless factors, `1.0` neutral. Emits one global `set_timing_derate -early <factor>` and/or `set_timing_derate -late <factor>` (no object list, every clock) in every analyzed corner of both `def` and `verilog` mode, before any timing is reported; an omitted side emits nothing. Omitted or `null` (the default) emits nothing — the generated script is byte-for-byte unchanged. An empty object, an unknown key, a non-object value, or a factor that is zero, negative, boolean, a string, `null`, non-finite or too large for a float is a request error (exit 1) naming the offending field, raised before the engine runs. Per-object, per-corner and per-clock derates are not supported. The response's `timing_derate` records what was applied. |
 | `spef` | string \| object \| omitted | A caller-supplied SPEF (e.g. from `klt extract --parasitics`) to annotate real parasitics via `read_spef`, in place of OpenSTA's own default (unannotated, LEF-capacitance-only) timing. **Only valid in `def` mode** — rejected together with `verilog` (no routed/placement geometry in that mode for a SPEF to annotate onto). Resolved relative to the request file's own directory. Omitted (the default) times the design with whatever parasitics OpenSTA derives from the loaded LEF/DEF alone. An **object** mapping a non-empty subset of `min`/`nom`/`max` to SPEF paths (same resolution rule) requests the liberty × interconnect matrix — see "Liberty × interconnect matrix" below (issue #3228). An unknown key, an empty object, or a missing/invalid path is a request error naming the offending key; the object form together with `verilog` is a request error. |
 | `sdf` | boolean \| omitted | Additive field (issue #2886). **`def` mode only, and requires `spef`.** `true` writes one post-route IEEE-1497 SDF per analyzed corner (`write_sdf -divider . -include_typ`, immediately after `read_spef`) to `.klt/sta/<def stem>.<corner>.sdf`, reported per corner as the response's `sdf` field. Omitted or `false` (the default) writes nothing and leaves the generated Tcl byte-identical. Any non-boolean value, `true` with `verilog`, and `true` without `spef`, and `true` with the map form of `spef` (one SDF per liberty corner is ambiguous across the interconnect axis) are each a request error (exit 1). See "Post-route SDF per corner" below. |
 | `geometry_source` | string \| omitted | In `def` mode (issue #1826): `"routed"` (the default, when omitted) declares `def` a fully-implemented, detailed-SPEF-eligible signoff geometry — this command's original and only behaviour. `"placement_estimate"` declares `def` a pre-route DEF from `klt place-and-route`'s `"place"`/`"cts"` stages (its own `unrouted_def_path` output) — nothing about this command's OpenSTA session construction actually changes (it is a plain `read_def` either way), but a placement-/CTS-stage DEF's parasitics come from `estimate_parasitics -placement` (a placement/bounding-box estimate, not routing-derived RC), so the resulting slack numbers are real but less accurate than the same fields on a routed DEF. Purely a caller-supplied label — a bare DEF file carries no stage provenance, so this command cannot infer it — echoed back verbatim as the response's own `geometry_source` field (see "Pre-route DEFs" below). Any other value is a request error in `def` mode. In `verilog` mode (issue #1825): this field is forced to `"netlist_estimate"` regardless of whether the request supplies it — omit it, or set it explicitly to `"netlist_estimate"`; any other explicit value is a request error. |
@@ -311,6 +312,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `power_basis` | object | Additive field (issue #3744), present on the single-corner response and on every `corners[]` entry. What `estimated_power_mw` was computed under: `activity_source` (`"engine_default"` — no `constraints.power_activity`, OpenSTA's built-in default applied — or `"global"`), `activity` / `duty` (the requested numbers, `null` when not given — never a guessed engine default), and `parasitics` (`"spef_annotated"` when that session read a SPEF, else `"estimate_only"`). |
 | `clock_uncertainty` | object | Additive field (issue #4240), always present (hoisted to the top level on a `corners` response). `{"applied": false}` when `constraints.clock_uncertainty_ns` was omitted; otherwise `{"applied": true, "setup_ns": <number or null>, "hold_ns": <number or null>}` — a side the request did not give is `null` (unconstrained), never copied from the other. Check it before comparing slack against a spec that assumes clock uncertainty. |
+| `timing_derate` | object | Additive field (issue #7014), always present (hoisted to the top level on a `corners` response, never repeated per corner). `{"applied": false}` when `constraints.timing_derate` was omitted or `null`; otherwise `{"applied": true, "early": <number or null>, "late": <number or null>}` — a side the request did not give is `null` (not derated), never copied from the other. Check it before comparing slack against a flow whose SDC applies `set_timing_derate`. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
 | `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition, max-capacitance, min-pulse-width and min-period checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
@@ -1678,6 +1680,46 @@ hold value. The response's `clock_uncertainty` block says whether any
 uncertainty was applied, so a slack computed with the assumption is
 distinguishable from one computed without it. Not supported: inter-clock
 uncertainty, multiple clocks, per-corner values.
+
+## Timing derate (`constraints.timing_derate`, issue #7014)
+
+A flow whose constraints of record apply `set_timing_derate -early/-late`
+(on-chip-variation margin) mirrors those two factors into the request, so
+`klt sta` is not silently less pessimistic than the SDC it reproduces:
+
+```json
+"constraints": {"clock_port": "clk", "clock_period_ns": 2.0,
+                "timing_derate": {"early": 0.95, "late": 1.05}}
+```
+
+emits, in every analyzed corner and in both input modes, before any timing is
+reported:
+
+```tcl
+set_timing_derate -early 0.95
+set_timing_derate -late 1.05
+```
+
+Each factor is a dimensionless JSON number `> 0` (`1.0` is neutral and
+reproduces the un-derated numbers); either key may be omitted, and an omitted
+side emits no command. The derate is global: OpenSTA applies it to cell and
+net delays on every clock and data path. Late scales the latest arrivals
+(setup data, hold capture clock), early the earliest. On the sky130A
+`tt_025C_1v80` corner, the propagated-clock buffered fixture under
+`tests/fixtures/sta_clock_propagation/` moved worst setup slack from
+`2.1076` to `2.09728` ns and worst hold slack from `-0.61469` to `-0.63031`
+ns with the factors above (OpenROAD `26Q3-1510-g6cb3f2b704`). A path with no
+cell or net delay to scale (a port wired straight to a flop under an ideal
+clock) does not move. The response echo is:
+
+```json
+"timing_derate": {"applied": true, "early": 0.95, "late": 1.05}
+```
+
+with `null` on a side the request did not give, and `{"applied": false}` when
+no derate was requested. Not supported: per-object, per-corner or per-clock
+derates, `-cell_delay`/`-net_delay`/`-cell_check` splits, and SDC passthrough.
+`sdc_check` does not compare `set_timing_derate`.
 
 ## SDC drift check (`sdc_check`, issue #5236)
 
