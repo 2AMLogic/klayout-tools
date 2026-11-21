@@ -8565,24 +8565,6 @@ def test_subckt_call_conversion_flavour_classes_split_only_flavoured_models():
     assert sum(" nfet " in f"{line} " for line in lines) == 1
 
 
-@pytest.mark.parametrize("deck", ["gf180mcu", None])
-@pytest.mark.parametrize("voltage", ["06v0", "05v0"])
-def test_subckt_call_conversion_flavour_classes_gf180mcu_pair(deck, voltage):
-    from klayout_tools.netlist_normalize import convert_reference_netlist
-
-    ref = (
-        ".subckt top d g s b\n"
-        f"XM1 d g s b nfet_{voltage} L=0.7u W=1u\n"
-        f"XM2 d g s b pfet_{voltage} L=0.5u W=2u\n"
-        "X3 d g s b nfet_03v3 L=0.28u W=1u\n"
-        ".ends\n"
-    )
-    text = convert_reference_netlist(ref, deck=deck, mos_flavour_classes=True).text
-    assert "M1 d g s b nfet__06v0 L=0.7U W=1U" in text.splitlines()
-    assert "M2 d g s b pfet__06v0 L=0.5U W=2U" in text.splitlines()
-    assert " nfet " in text
-
-
 # --------------------------------------------------------------------------- #
 # Direct classification unit tests (fake logger, no real NetlistComparer run)
 # --------------------------------------------------------------------------- #

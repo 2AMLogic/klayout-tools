@@ -564,26 +564,13 @@ def resolve_mos_model_table_for_deck(deck_name: str) -> dict[str, str]:
 
 
 def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
-    """Reverse of :func:`resolve_mos_model_table_for_deck`: a
-    ``<subckt-name> -> <device-class>`` map (e.g.
-    ``"sky130_fd_pr__nfet_01v8" -> "nfet"``) for turning a PDK schematic
-    flow's subcircuit-call device cards *back* into the curated deck's
-    plain-element device form (the ``klt lvs`` reference-netlist direction,
-    issue #280) -- the mirror of the writer delegate's plain-element ->
-    subckt-call direction (:func:`create_model_binding_delegate`).
+    """Map reference subcircuit names to the deck's base MOS device classes.
 
-    Every ``_MOS_MODEL_FLAVOURS`` subcircuit name (issue #1111, e.g.
-    gf180mcu's ``nfet_06v0``/``pfet_06v0``) resolves to the *same* base
-    ``"nfet"``/``"pfet"`` device class its default-flavour sibling does, not
-    a separate class of its own: a reference netlist that instantiates a
-    flavour subcircuit directly is still structurally an ordinary MOS device
-    for ``klt lvs`` comparison purposes (the extracted layout side reports
-    every MOS device -- flavoured or not -- under the same base class too,
-    see ``MOSFlavour``'s own docstring in ``decks/__init__.py`` for why), so
-    this reverse direction deliberately does not distinguish them.
+    For example, ``nfet_05v0`` and ``nfet_06v0`` both map to ``nfet`` in
+    gf180mcu. This matches the layout classes used for structural comparison.
+    Flavour-sensitive comparisons use :func:`mos_flavour_for_subckt` as well.
 
-    Raises :class:`ModelBindingError` (via
-    :func:`resolve_mos_model_table_for_deck`) for an unknown deck.
+    Raises :class:`ModelBindingError` for an unknown deck.
     """
     result = {
         subckt: device_class
