@@ -268,6 +268,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
+from . import sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_results import (
     MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE as MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
@@ -2219,32 +2220,12 @@ def _ngspice_options_card(ngspice_options: dict[str, Any] | None) -> str | None:
     return ".options " + " ".join(terms) if terms else None
 
 
-def check_ngspice_options_echo(request: dict[str, Any], report: dict[str, Any]) -> None:
-    """Fail loudly when an off-host report did not honour
-    ``options.ngspice_options`` (issue #3111).
-
-    A runner that predates the field drops it silently; its report then
-    omits ``environment.ngspice_options``. Comparing the echo with the
-    declared map turns that into a named :class:`SimError`.
-    """
-    declared = (request.get("options") or {}).get("ngspice_options") or {}
-    if not declared:
-        return
-    echoed = (report.get("environment") or {}).get("ngspice_options") or {}
-    for name in declared:
-        if echoed.get(name) != declared[name] or name not in echoed:
-            raise SimError(
-                f"off-host runner did not honour options.ngspice_options."
-                f"{name}: declared {json.dumps(declared[name])}, runner "
-                f"echoed {json.dumps(echoed.get(name))} (the runner is "
-                "likely older than this client and dropped the option)"
-            )
-    if set(echoed) != set(declared):
-        raise SimError(
-            "off-host runner echoed options.ngspice_options "
-            f"{json.dumps(echoed, sort_keys=True)}, which differs from the "
-            f"declared {json.dumps(declared, sort_keys=True)}"
-        )
+# Moved verbatim to `sim_options_echo.py` (issue #6778's size-ratchet
+# release valve); re-exported so `sim.check_ngspice_options_echo` and
+# `sim_batch`'s lazy import keep working.
+from .sim_options_echo import (  # noqa: E402 -- re-export
+    check_ngspice_options_echo as check_ngspice_options_echo,
+)
 
 
 def _own_persistent_roots(
@@ -3400,6 +3381,15 @@ def _prepare_sim_request(
             monte_carlo_info["k_sigma"] = k_sigma
         monte_carlo_info.update(_mc_window_scope_echo(monte_carlo_spec, window_scope))
 
+    # Issue #6778: a `--regrade` second pass rides this same request -- the
+    # internal `_regrade` field selects the re-run units (after this
+    # module's own expansion, so corner identities and Monte Carlo seeds are
+    # preserved), `options.tightened_rerun` is validated on every run, and a
+    # request without either returns the expansion unchanged.
+    corner_points = sim_regrade.prepare_regrade(
+        corner_points, request, analysis, engine
+    )
+
     # Issue #2995: per-instance mismatch gating. Validated before any probe or
     # backend dispatch; the gated netlist copy is what local backends run.
     dispatch_netlist_path, monte_carlo_info = _maybe_gate_instances(
@@ -4148,6 +4138,9 @@ def _run_sim_corners(
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
+    # Issue #6778: a runner that predates `--regrade` ignores the request's
+    # selection field and runs the whole matrix -- refuse that by id.
+    sim_regrade.require_regrade_echo(request, dispatch_points, corners_new, backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
     remote_environment = sim_batch_resume.merge_resume_environment(
         harvested_env, remote_environment
@@ -4420,6 +4413,11 @@ def _run_sim_corners(
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
+    # Issue #6778: the declared tightened-rerun settings (present in both
+    # passes) and, for a regrade run itself, the applied selection.
+    environment.update(
+        sim_regrade.regrade_environment_entries(request, analysis, engine)
+    )
     environment.update(
         sim_env_report.budget_environment(
             budget_s,
@@ -4754,7 +4752,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         " confidence corners decks engine engine_version exclude"
         " expect_netlist_identity measurements models monte_carlo netlist"
         " netlist_overrides netlist_source options remote schema"
-        " schema_version target_ci_halfwidth _explicit_points"
+        " schema_version target_ci_halfwidth _explicit_points _regrade"
     ).split()
     + [sim_staging.STAGED_MODEL_INPUTS_FIELD, sim_stimulus.REQUEST_KEY]
 )
