@@ -1,9 +1,7 @@
 """Electrical-check (``report_check_types``) markers and parsers for ``klt sta``.
 
 Split out of :mod:`klayout_tools.post_route_sta` (issues #3005, #5241) to keep
-that module under its file-size ceiling. ``post_route_sta`` re-imports every
-name here, so existing ``post_route_sta._parse_electrical_check`` etc.
-references keep working.
+that module under its file-size ceiling.
 """
 
 from __future__ import annotations
@@ -11,17 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when either
-    marker is absent (same contract as ``post_route_sta._extract_block``)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
-
+from ._sta_request_diag import extract_block as _extract_block
 
 #: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
 #: (issue #3005): one ``report_check_types -violators`` region per limit class.

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-11-19T14:28:53.253056+00:00",
+  "slug": "sky130-tiny-mcu",
+  "name": "Sky130 Tiny Mcu",
+  "description": "Tiny RISC-V microcontroller on sky130 \u2014 2AM Logic canary block",
+  "pdk": "sky130",
+  "spec_summary": {
+    "rows": [
+      {
+        "parameter": "Instruction set",
+        "target": "RV32E base integer, bit-serial datapath",
+        "stretch": "RV32I"
+      },
+      {
+        "parameter": "Core supply",
+        "target": "1.8 V"
+      },
+      {
+        "parameter": "Clock",
+        "target": "\u2265 16 MHz system clock",
+        "stretch": "\u2265 32 MHz"
+      },
+      {
+        "parameter": "RAM",
+        "target": "256 bytes",
+        "stretch": "1 KB"
+      },
+      {
+        "parameter": "Program storage",
+        "target": "boot from external SPI flash",
+        "stretch": "optional mask ROM"
+      },
+      {
+        "parameter": "GPIO",
+        "target": "6 pins, each input or output"
+      },
+      {
+        "parameter": "Peripherals",
+        "target": "one timer, one UART"
+      },
+      {
+        "parameter": "Compliance",
+        "target": "passes the RISC-V architectural tests for the implemented base"
+      },
+      {
+        "parameter": "Pin count",
+        "target": "8"
+      },
+      {
+        "parameter": "AREA",
+        "target": "\u2264 0.10 mm\u00b2 core, RAM included",
+        "stretch": "\u2264 0.05 mm\u00b2"
+      }
+    ],
+    "status_note": "DRAFT \u2014 engineering to ratify, see issue #1"
+  },
+  "source": {
+    "repo": "2AMLogic/sky130-tiny-mcu",
+    "ref": "9e887d102d6b3c0d936221074504de7bf96c6809",
+    "path": "."
+  },
+  "downloadable": true,
+  "status": "in design \u2014 simulation evidence"
+}

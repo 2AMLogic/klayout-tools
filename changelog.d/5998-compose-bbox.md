@@ -1,0 +1,1 @@
+- **The `klt gen-compose` reference explains how its declared placement envelopes can understate drawn geometry and how to measure the output GDS with `klt cells --top`** (#5998, 2026-11-18).

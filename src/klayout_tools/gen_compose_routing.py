@@ -62,7 +62,7 @@ import functools
 import math
 from typing import Any
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from ._unionfind import UnionFind
 from .decks import (
     ExtractionDeck,
@@ -79,6 +79,18 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 # re-export form for the names only used through this module -- so every
 # pre-existing ``from klayout_tools.gen_compose_routing import <name>``
 # path, and ``gen_compose.py``'s re-export of it, resolves unchanged.
+# Relocated verbatim to gen_compose_landing_pads.py (issue #5803 -- this
+# file sat exactly at its per-file size ratchet ceiling; see that module's
+# docstring for the same move gen_compose_layer_rules.py made in #5426).
+# Re-imported at module scope so every pre-existing
+# ``from .gen_compose_routing import _drawn_leg_intermediate_pad_regions``
+# path keeps resolving unchanged.
+from .gen_compose_landing_pads import (
+    _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
+)
+from .gen_compose_landing_pads import (
+    _marked_via_drop_entry as _marked_via_drop_entry,
+)
 from .gen_compose_layer_rules import (
     _landing_pad_side_um_for_layer as _landing_pad_side_um_for_layer,
 )
@@ -157,7 +169,7 @@ def _endpoint_stub_widen_um(
     if route_layer is None or _port_own_layer(port) != route_layer:
         return None
     pad_width_um = port.get("width_um")
-    if not isinstance(pad_width_um, (int, float)) or isinstance(pad_width_um, bool):
+    if not is_finite_number(pad_width_um):
         return None
     pad_width_um = float(pad_width_um)
     if pad_width_um <= width_um:
@@ -309,7 +321,7 @@ def _resolve_via_drop_layer(
                     "land a contact on"
                 )
             contact_hop: _ViaDropHop = (deck.contact, port_layer, deck.metals[0])
-            ladder = [contact_hop]
+            contact_ladder = [contact_hop]
             for via_index in range(0, route_idx):
                 if via_index >= len(deck.vias):
                     return None, (
@@ -320,14 +332,14 @@ def _resolve_via_drop_layer(
                         f"metals[{route_idx}]) and this pin's own diffusion "
                         "layer (reached via deck.contact)"
                     )
-                ladder.append(
+                contact_ladder.append(
                     (
                         deck.vias[via_index],
                         deck.metals[via_index],
                         deck.metals[via_index + 1],
                     )
                 )
-            return tuple(ladder), None
+            return tuple(contact_ladder), None
         # Any other non-metals-stack, non-diffusion-class role (no current
         # `klt gen` generator reports a port this way, but a deck may model
         # such a layer) keeps the pre-#454 behavior: drawn directly on
@@ -1094,7 +1106,7 @@ def _ring_gap_ports(block: dict[str, Any]) -> dict[str, dict[str, float]]:
         values: list[float] = []
         for key in ("x_um", "y_um", "width_um"):
             value = port.get(key)
-            if not is_number(value):
+            if not is_finite_number(value):
                 break
             values.append(float(value))
         if len(values) != 3 or values[2] <= 0.0:
@@ -1120,7 +1132,7 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
         if side is None or not isinstance(port, dict):
             continue
         value = port.get("x_um" if side in ("E", "W") else "y_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         lines[side] = float(value)
     return lines
@@ -1185,7 +1197,7 @@ def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
         if _ring_port_side(name) is None:
             continue
         value = port.get("width_um")
-        if not is_number(value):
+        if not is_finite_number(value):
             continue
         if value > 0.0:
             widths.append(float(value))
@@ -1750,6 +1762,7 @@ def _drawn_leg_footprint_region(
     stub_widen: list[dict[str, Any]],
     dbu: float,
     route_layer: tuple[int, int] | None = None,
+    side_for_pair: Any = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
@@ -1810,8 +1823,14 @@ def _drawn_leg_footprint_region(
     region = _drawn_route_region(points_um, width_um, dbu)
 
     for drop in via_drops:
+        if side_for_pair is not None and route_layer is not None:
+            # The drop rides along (#6058): the resolver, not the caller,
+            # classifies this landing from the drop's own marking.
+            side_um = side_for_pair(route_layer, drop["via_layer"], drop)
+        else:
+            side_um = _VIA_LANDING_SIZE_UM
         landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
+            round((side_um + _drop_array_extra_um(drop)) / 2.0 / dbu)
         )
         landing_layers = drop.get("landing_layers")
         if (
@@ -1842,74 +1861,6 @@ def _drawn_leg_footprint_region(
             region.insert(kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy))
 
     return region
-
-
-def _drawn_leg_intermediate_pad_regions(
-    via_drops: list[dict[str, Any]],
-    dbu: float,
-    route_layer: tuple[int, int] | None,
-) -> dict[tuple[int, int], Any]:
-    """Every via-drop landing-pad box this leg draws on a physical layer
-    *other than* its own primary ``route_layer``, grouped by that pad's own
-    layer (issue #1913).
-
-    :func:`_drawn_leg_footprint_region` deliberately excludes a multi-hop
-    via-drop ladder's intermediate/far landing pads -- they are not part of
-    the leg's footprint *on route_layer* -- and the module docstring for
-    that function pointed at `klt drc` as the backstop for a cross-net short
-    that lives entirely on one of those excluded planes. That pointer is
-    wrong: two shapes that overlap on one layer *merge* into a single
-    polygon in the composed GDS, which is a short, not a spacing violation,
-    so no rule deck has anything to flag.
-
-    This is the complement of :func:`_drawn_leg_footprint_region`: the
-    landing-pad geometry it leaves out, keyed by the pad's own layer so the
-    route-vs-route collision check in :func:`compose` can compare it against
-    another already-accepted net's footprint on that *same* plane -- even
-    though neither net's own primary routing layer names it.
-
-    Returns ``{}`` when ``route_layer`` is ``None`` -- a caller that
-    genuinely does not know its own leg's layer already gets every via-drop
-    pad folded into the single conservative region
-    :func:`_drawn_leg_footprint_region` returns for that case, so there is
-    nothing left here to separate out.
-    """
-    import klayout.db as kdb
-
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
-    regions: dict[tuple[int, int], Any] = {}
-    if route_layer is None:
-        return regions
-
-    for drop in via_drops:
-        landing_layers = drop.get("landing_layers")
-        if not landing_layers:
-            continue
-        landing_half_dbu = int(
-            round((_VIA_LANDING_SIZE_UM + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
-        box = kdb.Box(
-            cx - landing_half_dbu,
-            cy - landing_half_dbu,
-            cx + landing_half_dbu,
-            cy + landing_half_dbu,
-        )
-        # dict.fromkeys dedupes the common case where both layers of a hop
-        # happen to be identical (mirrors the same idiom in
-        # `_leg_conflict`'s own-block pad self-notch loop).
-        for pad_layer in dict.fromkeys(landing_layers):
-            if pad_layer == route_layer:
-                continue  # already part of _drawn_leg_footprint_region
-            region = regions.get(pad_layer)
-            if region is None:
-                region = kdb.Region()
-                regions[pad_layer] = region
-            region.insert(box)
-
-    return regions
 
 
 def _pad_self_notch_violation_um(
@@ -2321,11 +2272,7 @@ def _same_layer_short_reason(
                     )
 
             pad_w = other_port.get("width_um")
-            if (
-                not isinstance(pad_w, (int, float))
-                or isinstance(pad_w, bool)
-                or (pad_w <= 0)
-            ):
+            if not is_finite_number(pad_w) or pad_w <= 0:
                 # no reported pad size -- fall back to trace width
                 pad_w = effective_width_um
             half = float(pad_w) / 2.0 + route_half_um
@@ -3273,24 +3220,17 @@ def _resolve_via_drops(
                 # (``landing_layers``) -- :func:`_write_composed_gds` draws a
                 # via square plus a landing pad on each of those two layers
                 # per entry, so a multi-level drop is just N single-level
-                # drops stacked at the identical (x, y).
-                for via_layer, metal_a, metal_b in ladder:
-                    drop_array = _drop_array(port, via_layer)
+                # drops stacked at the identical (x, y). Since #6058 each
+                # entry also records its terminal landings.
+                for hop in ladder:
                     via_drops.append(
-                        {
-                            "x_um": pos[0],
-                            "y_um": pos[1],
-                            "via_layer": via_layer,
-                            "landing_layers": (metal_a, metal_b),
-                            **({"array": drop_array} if drop_array else {}),
-                            # block_id (#1520): which endpoint's own block
-                            # this drop's landing pad lands on -- lets a
-                            # caller-side conflict check (compose()'s own
-                            # _leg_conflict) test the pad against *that*
-                            # block's own drawn geometry, not just against
-                            # other already-accepted nets.
-                            "block_id": pin["block"],
-                        }
+                        _marked_via_drop_entry(
+                            pos,
+                            (port_layer, effective_route_layer),
+                            hop,
+                            _drop_array(port, hop[0]),
+                            pin["block"],
+                        )
                     )
     return via_drops, None
 
@@ -3779,9 +3719,11 @@ def route_two_pin(
     "channel_track": int, "reason": str | None}`` (a rejected leg omits
     ``width_um``/``channel_track``, nothing having been drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "landing_layers", "block_id"}`` entries (empty unless a drop was
-    resolved; one entry per via *hop* since #1567), consumed by
-    :func:`_write_composed_gds`. ``stub_widen`` (#496, see
+    "landing_layers", "terminal_landing_layers", "block_id"}`` entries
+    (empty unless a drop was resolved; one entry per via *hop* since
+    #1567; ``terminal_landing_layers`` since #6058 -- the subset of that
+    hop's ``landing_layers`` that are terminal planes for this endpoint),
+    consumed by :func:`_write_composed_gds`. ``stub_widen`` (#496, see
     :func:`_endpoint_stub_widen_um`) is a list of ``{"x_um", "y_um",
     "direction_deg", "length_um", "width_um"}`` entries -- one per endpoint
     whose own pad is wider than ``width_um`` and faces north/south.
@@ -3802,21 +3744,15 @@ def route_two_pin(
     port_a = block_a["ports"].get(pin_a["port"])
     port_b = block_b["ports"].get(pin_b["port"])
 
-    # A block with no reported ports[] (a hand-crafted generator_report) can't
-    # supply a routable position -- treat as unroutable rather than crashing.
-    if not isinstance(port_a, dict) or not isinstance(port_b, dict):
+    # A block with no reported ports[] (a hand-crafted generator_report), or a
+    # port whose x_um/y_um is not a finite number (a 400-digit int overflows
+    # float(), #6565), can't supply a routable position -- treat as
+    # unroutable rather than crashing. Same resolver route_bundle orders by.
+    a = _pin_position_um(pin_a, blocks, offsets_um)
+    b = _pin_position_um(pin_b, blocks, offsets_um)
+    if a is None or b is None:
         return _unroutable("one or both ports report no position (empty ports[])")
 
-    off_a = offsets_um[pin_a["block"]]
-    off_b = offsets_um[pin_b["block"]]
-    a = (
-        float(port_a["x_um"]) + off_a["x"],
-        float(port_a["y_um"]) + off_a["y"],
-    )
-    b = (
-        float(port_b["x_um"]) + off_b["x"],
-        float(port_b["y_um"]) + off_b["y"],
-    )
     dir_a = int(port_a.get("direction_deg", 0)) % 360
     dir_b = int(port_b.get("direction_deg", 0)) % 360
     if dir_a not in _DIRECTION_VECTORS or dir_b not in _DIRECTION_VECTORS:

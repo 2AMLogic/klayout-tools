@@ -112,16 +112,25 @@ jobs:
         uses: ./.github/actions/setup-sky130a-pdk
 
       - name: Recheck kb/ measured figures against a fresh klt sim
-        # GitHub Actions' default bash shell runs with `-eo pipefail`, so
+        # This step has no `shell:` key, so GitHub Actions runs it as
+        # `bash -e {0}` -- which does NOT enable `pipefail` (only an explicit
+        # `shell: bash` selects `bash --noprofile --norc -eo pipefail`). Without
+        # the `set -o pipefail` below, the pipeline's status is `tee`'s (0), so
         # `klt kb validate`'s own nonzero exit (exit 3 -- "ran successfully
         # but found one or more invalid entries", per docs/cli/kb.md's exit
-        # code table) fails this step -- and therefore the job -- through
-        # the `tee` pipe below, exactly as it would running the bare command.
-        # No separate "check the JSON and fail" step needed.
+        # code table) would be swallowed and a drifted figure would leave the
+        # job green (issue #6678). With it, that exit fails this step -- and
+        # therefore the job -- through the `tee` pipe, exactly as it would
+        # running the bare command, while `tee` still writes the JSON report
+        # the always-run upload step below collects. No separate "check the
+        # JSON and fail" step needed. The `set -o` line is load-bearing:
+        # tests/test_kb_drift_canary_pipefail.py runs this block under
+        # `bash -e` with a failing stub to pin it.
         env:
           PDK: sky130A
           PDK_ROOT: /home/runner/.ciel
         run: |
+          set -o pipefail
           uv run --frozen --extra dev klt kb validate --recheck-measured \
             --format json | tee kb-drift-canary.json
 

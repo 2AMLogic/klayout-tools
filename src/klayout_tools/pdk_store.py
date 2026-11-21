@@ -121,17 +121,31 @@ def client_pdk_stamp(variant: Any, root: Any = None) -> dict[str, Any] | None:
     ``.pdk-store.json``): under ``root`` when one is pinned, otherwise from
     the install the PDK search order resolves (issue #5474).
 
-    ``None`` when ``variant`` is not a non-empty string, no install holds it,
-    or the resolved install has neither stamp source.
+    A pinned root resolves layout-aware through
+    :func:`klayout_tools.pdk.variant_dir_of`: a nested store's variant is
+    ``root/<variant>``, a flat single-PDK install (issue #522) *is* the root
+    itself. A ``root/<variant>`` that is a plain directory but not a variant
+    tree (a bundle symlink, issue #5318) still stamps through the join, as
+    before. ``None`` when ``variant`` is not a non-empty string, no install
+    holds it, or the resolved install has neither stamp source.
     """
     if not (isinstance(variant, str) and variant):
         return None
     if isinstance(root, str) and root:
-        variant_dir: str | None = os.path.join(root, variant)
+        # Lazy for the same circular-import reason as ``resolved_variant_dir``.
+        from .pdk import variant_dir_of
+
+        primary: str | None = variant_dir_of({"root": root, "variant": variant})
+        nested = os.path.join(root, variant)
+        candidates = [primary, nested] if nested != primary else [primary]
     else:
-        variant_dir = resolved_variant_dir(variant)
-    if variant_dir is None:
-        return None
-    return sources_pdk_stamp(variant, variant_dir) or store_pdk_stamp(
-        variant, variant_dir
-    )
+        candidates = [resolved_variant_dir(variant)]
+    for variant_dir in candidates:
+        if variant_dir is None:
+            continue
+        stamp = sources_pdk_stamp(variant, variant_dir) or store_pdk_stamp(
+            variant, variant_dir
+        )
+        if stamp is not None:
+            return stamp
+    return None

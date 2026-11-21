@@ -153,103 +153,21 @@ def run_lef_abstract(
     pdk_root: str | None = None,
     obs_mode: str = "detailed",
 ) -> dict[str, Any]:
-    """Emit a LEF abstract for the block at ``layout_path`` per its socket
-    descriptor at ``socket_path``, writing it to ``output_path``.
+    """Write a LEF abstract to ``output_path`` and return a report dictionary.
 
-    Returns a dict matching the documented JSON schema (see
-    ``docs/cli/socket-check.md``'s LEF translation section)::
+    Use the layout at ``layout_path`` and the socket descriptor at ``socket_path``.
+    For a descriptor-only black box, pass ``layout_path=None`` and omit ``top``.
 
-        {
-            "schema_version": 1,
-            "file": {"path", "scope"},  # layout_path, issue #2703
-            "socket": <socket_path>,
-            "output": <output_path>,
-            "macro_name": <macro_name>,
-            "class": <macro_class>,
-            "site": None,
-            "symmetry": [...],
-            "size_um": {"width": <float>, "height": <float>},
-            "cell_library": <cell_library>,
-            "tech_lef": <resolved tech LEF path>,
-            "pins": [
-                {"name", "direction", "use", "layer", "geometry_source",
-                 "rects_um": [[x0, y0, x1, y1], ...]},
-                ...
-            ],
-            "pin_count": <int>,
-            "unroutable_pins": [
-                {"name": <str>, "layer": [<gds_layer>, <gds_datatype>]}, ...
-            ],
-            "obs_mode": "detailed" | "coarse",
-            "obs": [{"layer": str, "shape_count": int}, ...],
-            "obs_shape_count": <int>,
-            "routing_resource": [  # issue #5677, additive
-                {"layer": <lef layer name>, "direction": str | None,
-                 "pitch_um": float | None, "obstructed_fraction": float,
-                 "free_tracks": int | None}, ...
-            ],
-            "warnings": [...],
-            "self_check": {
-                "status": "pass" | "fail",
-                "findings": [{"code", "message", "line", "macro", "pin"}, ...],
-                "missing_macros": [...],
-                "unexpected_macros": [...],
-            },
-            "power_pins": {...},   # issue #2839, see check_power_pins
-            "provenance": {...},
-        }
+    The structural self-check reads the written LEF back from disk. Check
+    ``report["self_check"]["status"] == "pass"`` before using the file. On
+    structural failure, the function returns the report and leaves the LEF
+    on disk for diagnosis. See the Response section of
+    ``docs/cli/lef-abstract.md#response`` for the report fields and an example.
 
-    ``power_pins`` (issue #2839) is :func:`check_power_pins`'s supply-pin
-    verdict over the same read-back bytes. It never changes the exit code
-    unless the CLI's ``--require-power-pins`` asks it to.
-
-    ``self_check`` (issue #2769) is :func:`check_lef_structure` run on the
-    file read back from ``output_path`` after writing -- the on-disk bytes,
-    not this function's in-memory pin data -- against the expected macro
-    ``{macro_name}`` and the descriptor's own declared pins. A ``"fail"``
-    still returns the report (the file is left on disk for diagnosis); a
-    caller must gate consumption of the LEF on ``self_check.status``. A
-    structural pass says nothing about routability or P&R acceptance, and a
-    PORT-less (``geometry_source: "none"``) or synthesized pin is not a
-    structural failure.
-
-    ``unroutable_pins`` (issue #464) is a programmatically-checkable echo of
-    every ``pins[]`` entry emitted with ``geometry_source: "none"`` -- a pin
-    whose declared ``layer`` did not resolve to a ``TYPE ROUTING`` tech-LEF
-    layer, so no ``PORT`` at all was written for it (see the "Pins" section
-    of this module's own docstring). ``[]`` on a run with no such pins. This
-    is purely a *promotion* of information already present per-pin in
-    ``pins[].geometry_source``/``warnings[]`` -- a caller composing this
-    command's output into ``klt place-and-route``'s own ``request.macros``
-    field can check this array directly instead of grepping ``warnings[]``
-    strings, or rely on ``klt place-and-route`` itself, which independently
-    cross-checks the emitted LEF's own ``PIN`` blocks against the netlist's
-    actual wiring before invoking OpenROAD (see that command's "Hard-macro
-    placement" docs section) -- either signal reflects the same underlying
-    condition.
-
-    ``obs_mode`` (issue #4283) selects the obstruction granularity:
-    ``"detailed"`` (default) emits every merged routing-layer region;
-    ``"coarse"`` emits, per routing LEF layer, the merged region's bounding
-    rectangle minus the declared pin ports, so the OBS size is O(pins)
-    rather than O(shapes). Echoed as the additive ``obs_mode`` report field.
-
-    ``routing_resource`` (issue #5677, additive -- no schema bump) reads the
-    same final OBS regions the abstract writes and reports, per routing
-    layer of the tech LEF, the fraction of the macro outline the OBS blocks
-    (after pin-port subtraction) and the count of preferred-direction
-    tracks whose full-length strip across the macro stays unobstructed --
-    the static figure a hierarchical floorplan needs to decide whether
-    over-macro feedthrough fits, in either ``obs_mode``. ``coarse``'s
-    whole-macro bounding rectangle normally leaves no free track on an
-    obstructed layer; ``detailed`` reports the real remainder. A layer
-    missing ``DIRECTION``/``PITCH``/``WIDTH`` reports ``free_tracks: null``
-    plus a ``warnings[]`` entry -- never a guessed track grid.
-
-    Raises :class:`LefAbstractError` for a missing/unreadable layout or
-    socket descriptor, an invalid ``obs_mode``, an ambiguous/missing top cell,
-    an unresolvable PDK or tech LEF for ``cell_library``, a write failure, or
-    a failure to read the written file back for its self-check.
+    Raises ``LefAbstractError`` if the layout or socket descriptor cannot be
+    read, the descriptor or an option such as ``obs_mode`` is invalid, the
+    top cell is missing or ambiguous, the PDK or tech LEF cannot be
+    resolved, or the output file cannot be written or read back.
     """
     # Issue #5714: ``layout_path=None`` is the layout-free (``--no-layout``)
     # mode -- a black-box abstract emitted from the socket descriptor alone.
