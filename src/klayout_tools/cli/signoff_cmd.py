@@ -780,9 +780,28 @@ def _print_coverage_undisclosed(item: dict) -> None:
     print(f"        coverage undisclosed: {format_undisclosed(refusal)}")
 
 
+def _print_upstream_source(result: dict) -> None:
+    """Print a manifest's declared ``upstream_source`` pin (issue #6972)
+    under the ``block:``/``kind:`` header, or nothing when it declared none.
+
+    One line naming the repository and the full commit, exactly as the JSON
+    carries them -- a reviewer of the text report must be able to tell where
+    the block's design sources live (and that they are not in the graded
+    repo) without opening the JSON. Absent entirely when nothing was
+    declared, so "no statement" cannot read as "designed here" -- exactly as
+    an undeclared ``partition_boundary`` prints no line rather than an
+    empty one.
+    """
+    upstream = result.get("upstream_source")
+    if not upstream:
+        return
+    print(f"upstream source: {upstream['repository']} @ {upstream['commit']}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
+    _print_upstream_source(result)
     _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
     print(
@@ -923,6 +942,14 @@ def _print_fleet_report_text(result: dict, palette: Palette) -> None:
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
             f"{_not_applicable_suffix(block)}{_justified_gap_suffix(block)}"
         )
+        # Issue #6972: the row's declared upstream pin, when the block's
+        # manifest made one -- the repository and full commit its design
+        # sources were consumed at, beside the block name it qualifies. The
+        # row's JSON `source` (the local manifest path) stays what it was;
+        # this is the other locator, for the sources themselves.
+        upstream = block.get("upstream_source")
+        if upstream:
+            print(f"        upstream: {upstream['repository']} @ {upstream['commit']}")
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render
         # what that count is short of. `source_doc` is the roll-up's one
