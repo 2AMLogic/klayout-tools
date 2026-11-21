@@ -31,9 +31,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._artifact_envelope import ANCHOR_CWD, RepoRoot
+from ._artifact_envelope import path_envelope as _log_path
 from ._provenance import sha256_file
 from ._tcl import tcl_literal as _tcl_literal
-from .env_provenance import find_repo_root, repo_relative_path
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 
@@ -307,13 +308,6 @@ def _captured_text(value: str | bytes | None) -> str:
     return value or ""
 
 
-def _log_path(path: Path | None) -> dict[str, Any]:
-    root = find_repo_root()
-    if path is not None and root is None:
-        return {"path": None, "scope": "external"}
-    return repo_relative_path(path, repo_root=root)
-
-
 def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
     # str(exc) can include an absolute filename; keep the new diagnostic
     # paths subject to the same privacy rule as successful artifact paths.
@@ -324,7 +318,7 @@ def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> Non
 
 def _write_log_artifact(
     directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
-) -> dict[str, Any]:
+) -> Path | None:
     path = directory / name
     data = content.encode("utf-8") if isinstance(content, str) else content or b""
     try:
@@ -332,8 +326,8 @@ def _write_log_artifact(
             handle.write(data)
     except OSError as exc:
         _retention_error(record, name, exc)
-        return _log_path(None)
-    return _log_path(path)
+        return None
+    return path
 
 
 class _LiveLogs:
@@ -352,22 +346,24 @@ class _LiveLogs:
         *,
         invocation_id: str,
         script_hash: str | None,
+        repo_root: RepoRoot = ANCHOR_CWD,
     ) -> None:
+        self.repo_root = repo_root
         self.directory = (
             Path(script_path).absolute().parent / "openroad-logs" / invocation_id
         )
         self.record: dict[str, Any] = {
             "invocation_id": invocation_id,
             "script_name": Path(script_path).name,
-            "script_path": _log_path(Path(script_path)),
+            "script_path": _log_path(Path(script_path), repo_root=repo_root),
             "script_sha256": script_hash,
-            "metrics_path": _log_path(Path(metrics_path)),
+            "metrics_path": _log_path(Path(metrics_path), repo_root=repo_root),
             "outcome": None,
             "returncode": None,
-            "directory": _log_path(None),
-            "stdout_path": _log_path(None),
-            "stderr_path": _log_path(None),
-            "metadata_path": _log_path(None),
+            "directory": _log_path(None, repo_root=repo_root),
+            "stdout_path": _log_path(None, repo_root=repo_root),
+            "stderr_path": _log_path(None, repo_root=repo_root),
+            "metadata_path": _log_path(None, repo_root=repo_root),
             "retention_errors": [],
         }
         self.handles: dict[str, Any] = dict.fromkeys(self._STREAMS)
@@ -377,7 +373,7 @@ class _LiveLogs:
             _retention_error(self.record, "directory", exc)
             self.directory = None  # type: ignore[assignment]
             return
-        self.record["directory"] = _log_path(self.directory)
+        self.record["directory"] = _log_path(self.directory, repo_root=self.repo_root)
         for stream in self._STREAMS:
             try:
                 # Unbuffered: the child writes through the shared descriptor.
@@ -422,7 +418,7 @@ class _LiveLogs:
             finally:
                 handle.close()
             path = self.directory / f"{stream}.log"
-            self.record[f"{stream}_path"] = _log_path(path)
+            self.record[f"{stream}_path"] = _log_path(path, repo_root=self.repo_root)
             try:
                 data[stream] = path.read_bytes()
             except OSError as exc:
@@ -431,13 +427,15 @@ class _LiveLogs:
         self.record["outcome"] = outcome
         self.record["returncode"] = returncode
         if self.directory is not None:
-            self.record["metadata_path"] = _log_path(self.directory / "invocation.json")
-            self.record["metadata_path"] = _write_log_artifact(
+            metadata = self.directory / "invocation.json"
+            self.record["metadata_path"] = _log_path(metadata, repo_root=self.repo_root)
+            written = _write_log_artifact(
                 self.directory,
                 "invocation.json",
                 json.dumps(self.record, indent=2) + "\n",
                 self.record,
             )
+            self.record["metadata_path"] = _log_path(written, repo_root=self.repo_root)
         return data, self.record
 
 
@@ -447,20 +445,21 @@ def _run_openroad(
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    repo_root: RepoRoot = ANCHOR_CWD,
 ) -> _OpenRoadResult:
     """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    streaming raw stdout/stderr into separately retained log files *while the
-    process runs* (``tail -f`` shows progress; an interrupted run keeps
+    streaming raw stdout/stderr into separately retained log files *while
+    the process runs* (``tail -f`` shows progress; an interrupted run keeps
     whatever OpenROAD had flushed). The result exposes UTF-8 text
     (replacement decoding) for existing parsers; an invalid output byte
-    cannot mask the engine failure or lose its logs.
-    Raises ``error_cls`` if the ``openroad``
-    binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
-    from a successfully-launched run is left for the caller to inspect via
-    returned result's ``returncode``. No timeout is introduced. If a runner
-    supplies a timeout exception, its available partial streams are retained;
-    KeyboardInterrupt retains available data and keeps its interruption type.
-    Logs are local debugging evidence, not a successful-stage signal."""
+    cannot mask the engine failure or lose its logs. Raises ``error_cls``
+    if the ``openroad`` binary itself cannot be launched; a non-zero exit
+    from a launched run is the caller's to inspect via ``returncode``. No
+    timeout is introduced; a runner-supplied timeout retains its partial
+    streams, as does KeyboardInterrupt (keeping its type). Logs are local
+    debugging evidence, not a success signal. ``repo_root`` (issue #6764)
+    anchors the record's ``{path, scope}`` fields on the request repo: one
+    request, one report from any directory (default cwd; ``None`` = no repo)."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -468,6 +467,7 @@ def _run_openroad(
         metrics_path,
         invocation_id=invocation_id,
         script_hash=script_hash,
+        repo_root=repo_root,
     )
 
     def retain(outcome, returncode, stdout, stderr):
