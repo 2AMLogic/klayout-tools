@@ -226,7 +226,9 @@ export function WaveformViewer({ slug, signals, liveWaveform, cursorX, onCursorX
       const missing = nodeNames(liveWaveform.data).filter((n) => !base.has(n));
       return missing.length === 0 ? prev : new Set([...base, ...missing]);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Keyed to `liveWaveform` alone: a new live waveform seeds the overlay
+    // and selects its nodes. `allNodes` is only read as the fallback base
+    // when no node selection exists yet, so it does not retrigger this effect.
   }, [liveWaveform]);
 
   // Fetch any selected corner's waveform artifact that isn't cached yet.
@@ -254,7 +256,11 @@ export function WaveformViewer({ slug, signals, liveWaveform, cursorX, onCursorX
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Keyed to `selectedCorners` and `slug`: a change to either fetches the
+    // artifacts that are not cached yet. `waveforms` is read only to skip
+    // cached and in-flight entries. It is not a dependency because this
+    // effect's own cache writes ("loading", then the data) must not restart
+    // it: the cleanup would cancel the requests it just started.
   }, [selectedCorners, slug]);
 
   const loadedWaveforms = useMemo(

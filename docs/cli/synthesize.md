@@ -110,7 +110,13 @@ into your checkout or under `$HOME`), which keeps a deliberately pinned
 engine; ensuring a native `yosys` build precedes the WASI-sandboxed one on
 `$PATH` (e.g. `PATH=/usr/bin:$PATH klt synthesize ...`) is only the fallback,
 since it swaps out the engine build. For a script outside the host temp dir
-the hint keeps the generic native-`yosys` advice.
+the hint keeps the generic native-`yosys` advice. The same WASI builds have
+a separate, second failure mode: a query that exhausts the wasm32 guest's
+~4 GiB linear-memory ceiling dies with an unlabelled
+`thrown Wasm exception` trap and no `ERROR:` line — `klt synthesize` and
+`klt equiv` append a hint for that shape too, and
+[`docs/cli/equiv.md`](equiv.md) ("Which binaries are run") documents it
+(issue #5804).
 
 One post-processing stage is **not** Yosys: after `write_verilog` produces
 the mapped netlist, `klt-statime-native` (a compiled Rust extension, called
@@ -438,6 +444,16 @@ off. `constraints.dont_use_mode` is the explicit override:
 | `"additive"` (default) | The built-in table's globs, then the request's, deduplicated and order-preserved. |
 | `"replace"` | **Only** the request's globs; the built-in table is suppressed for this run. Requires a non-empty `dont_use` (otherwise it is indistinguishable from `"none"`, and must be spelled that way instead). |
 | `"none"` | No `-dont_use` flag at all, not even the built-in table's — the pre-#807 mapping, for one run. Rejects a non-empty `dont_use`, so "exclude nothing" can never be spelled the same way as "exclude only these". |
+
+If a request supplies `constraints.abc_constr.driving_cell`, its name must
+fall outside the exclusion patterns selected by `dont_use_mode`. A match
+is a request error that names the cell and the matching pattern before
+Yosys runs, even on builds without `abc -dont_use`. Choose a different
+driving cell or adjust the exclusion list or mode.
+
+`dont_use` supports exclusions only. ABC chooses among the remaining cells.
+The request has no substitution mapping from an excluded master to a named
+replacement.
 
 **A pattern that matches zero cells is an error**, naming the offending
 pattern — checked against the resolved liberty's own `cell (...)` group names
@@ -1351,7 +1367,7 @@ separately if it turns out to matter for evidence-record committing.
 | `constraints.clocks` | array\<{port, period_ns}\> \| null | Per-clock periods for a multi-clock design (issue #2883). Each entry needs a unique non-empty `port` and a positive `period_ns`; unknown keys, an empty list, or a malformed entry are errors. `abc -D` takes a single global number, so per-clock periods are **not** individually enforced: when `clock_period_ns` is omitted the **smallest** listed `period_ns` becomes the ABC delay target (and the `--restructure-timing` target); an explicit `clock_period_ns` always takes precedence. The response's `clock_targets` states exactly what was applied. |
 | `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
 | `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
-| `constraints.abc_constr` | object \| omitted | The `abc -constr` inputs `{driving_cell, load_ff}` (issue #4662): `driving_cell` is a cell that must exist in the resolved liberty, `load_ff` the output load in femtofarads (finite, > 0). Supplies `-constr` — and with it ABC's load-driven sizing/buffering and `stime` timing — for any `pdk.cell_library`, including ones with no built-in entry (e.g. `asap7sc7p5t_rvt`), and **overrides** the built-in entry when there is one. Omitted, behaviour is unchanged. Missing/unknown keys, an unknown `driving_cell`, or a non-positive/non-finite `load_ff` are errors naming the field. |
+| `constraints.abc_constr` | object \| omitted | The `abc -constr` inputs `{driving_cell, load_ff}` (issue #4662): `driving_cell` must exist in the resolved liberty and match none of the exclusion patterns selected by `dont_use_mode`. A conflict is an error naming the cell and pattern. `load_ff` is the output load in femtofarads (finite, > 0). Supplies `-constr` — and with it ABC's load-driven sizing/buffering and `stime` timing — for any `pdk.cell_library`, including ones with no built-in entry (e.g. `asap7sc7p5t_rvt`), and **overrides** the built-in entry when there is one. Omitted, behaviour is unchanged. Missing/unknown keys, an unknown `driving_cell`, or a non-positive/non-finite `load_ff` are errors naming the field. |
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
 | `latch_map.positive` \| `latch_map.negative` | object \| omitted | Map inferred latches onto a library latch cell (issue #4458) — see "`latch_map`" below. Each is `{cell, enable, data, q}`: the library cell and the names of its enable, data and output pins. `positive` rewrites `$_DLATCH_P_` (transparent while enable is high), `negative` rewrites `$_DLATCH_N_`; an omitted polarity stays unmapped. `cell` must exist in the resolved liberty; unknown keys, missing or non-identifier names, and an empty object are errors. Omitted entirely, the script and outputs are unchanged. |
 | `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`; `~` and `$VAR` are expanded). |
@@ -2310,6 +2326,8 @@ the RTL `$readmemh`s its ROM tables relative to the synthesis cwd, which
 
 ## Out of scope
 
+- **Named cell substitutions.** `dont_use` leaves the choice of replacement
+  to ABC. Mapping an excluded master to a specific replacement is unsupported.
 - **Switching/dynamic power.** `leakage_power_nw`/`leakage_by_type_nw`
   (issue #1626) are static leakage only. Dynamic power needs an activity
   factor — a testbench, vectors, or a toggle-rate estimate — this command
