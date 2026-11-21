@@ -14,7 +14,7 @@ import pytest
 
 from klayout_tools.cli import main, pex_cmd
 from klayout_tools.cli.parser import create_parser
-from klayout_tools.pex_runset import runset_from_args
+from klayout_tools.pex_runset import extraction_fields, runset_from_args
 from test_extract_runset import _inputs
 from test_extract_runset import fake_klayout as fake_klayout
 
@@ -78,6 +78,71 @@ def test_cli_text_output_names_the_engine(tmp_path, fake_klayout, capsys):
 
     assert code == 4
     assert "engine: klayout-runset  parasitics: none" in capsys.readouterr().out
+
+
+def _runset_text_line(capsys, report):
+    """The `engine:` line(s) `klt pex --format text` prints for ``report``'s
+    extract report, through the real `extraction_fields` producer."""
+    from klayout_tools.cli.pex_text import _print_runset_engine
+
+    _print_runset_engine(extraction_fields(report))
+    return capsys.readouterr().out
+
+
+def _runset_report(**extra):
+    return {
+        "engine": "klayout-runset",
+        "device_counts": {"NMOS": 2},
+        "params_not_carried": {},
+        "extra_circuits": [],
+        **extra,
+    }
+
+
+def test_text_output_for_a_plain_runset_leg_still_says_parasitics_none(capsys):
+    out = _runset_text_line(capsys, _runset_report())
+
+    assert out == "engine: klayout-runset  parasitics: none  params_not_carried: none\n"
+
+
+def test_text_output_for_a_merged_leg_states_what_the_envelope_carries(capsys):
+    """Issue #6606: a merged leg sets `engine` *and* `parasitics_carried:
+    true`; the default (text) format must not print the plain route's
+    constant `parasitics: none` beside an envelope saying the opposite."""
+    out = _runset_text_line(
+        capsys,
+        _runset_report(
+            net_correspondence={
+                "deck": "sg13cmos5l",
+                "attached_card_count": 11,
+                "matched": [{"runset": f"n{i}", "curated": "A"} for i in range(5)],
+                "substrate_return": {
+                    "curated": "vsubs",
+                    "runset": None,
+                    "node": "vsubs",
+                    "tie_resistance_ohm": 1e12,
+                },
+            }
+        ),
+    )
+
+    assert "parasitics: none" not in out
+    assert "parasitics: carried (11 cards, 5 nets matched)" in out
+    assert "substrate_return: vsubs (runset unmatched)" in out
+
+
+def test_text_output_for_a_merged_leg_that_attached_nothing_says_none(capsys):
+    """The correspondence ran but matched nothing (`attached_card_count` 0):
+    `parasitics_carried` is false, and the line must agree with it."""
+    out = _runset_text_line(
+        capsys,
+        _runset_report(
+            net_correspondence={"deck": "sg13cmos5l", "attached_card_count": 0}
+        ),
+    )
+
+    assert "parasitics: none" in out
+    assert "parasitics: carried" not in out
 
 
 def test_cli_device_param_reaches_the_cards_and_the_disclosure(
@@ -181,10 +246,13 @@ def test_cli_default_engine_still_requires_a_deck(tmp_path, fake_klayout, capsys
     assert "--deck" in err["error"]["message"]
 
 
-def test_cli_curated_deck_is_refused_by_name_under_the_runset_engine(
+def test_cli_curated_deck_under_the_runset_engine_runs_the_merged_route(
     tmp_path, fake_klayout, capsys
 ):
-    code, _out, err = _cli(
+    """Issue #6606: `--deck` under the runset engine selects the merged
+    route instead of exiting 1 -- the CLI envelope carries the
+    correspondence even when (as on this fixture) nothing matches."""
+    code, out, _err = _cli(
         tmp_path,
         "--engine",
         "klayout-runset",
@@ -192,12 +260,91 @@ def test_cli_curated_deck_is_refused_by_name_under_the_runset_engine(
         "DECKFILE",
         "--deck",
         "sky130",
+        "--label-layer",
+        "metal0=none",
         "--extract-only",
         capsys=capsys,
     )
 
+    assert code == 4  # extract-only's own `not_checked`, not a refusal
+    extraction = json.loads(out)["extraction"]
+    assert extraction["deck"] == "sky130"
+    assert extraction["net_correspondence"]["deck"] == "sky130"
+    assert extraction["label_layers"] == {"metal0": None}
+
+
+@pytest.mark.parametrize(
+    "options,needle",
+    [
+        (["--deck", "misspelled"], "misspelled"),
+        (["--deck", "sky130", "--label-layer", "bogus=1/0"], "bogus"),
+        (["--deck", "sky130"], "merge interrupted"),
+    ],
+)
+def test_merged_failure_preserves_output_and_writes_error_envelope(
+    tmp_path, fake_klayout, capsys, monkeypatch, options, needle
+):
+    from klayout_tools import pex_merged_leg
+    from klayout_tools.pex import PexError
+
+    target = tmp_path / "out.spice"
+    target.write_bytes(b"* previous extraction\n")
+    envelope = tmp_path / "error.json"
+
+    def fail_after_device_extraction(staged, **kwargs):
+        assert target.read_bytes() == b"* previous extraction\n"
+        assert staged != str(target)
+        raise PexError("merge interrupted")
+
+    monkeypatch.setattr(
+        pex_merged_leg, "merge_parasitics", fail_after_device_extraction
+    )
+    code, _, err = _cli(
+        tmp_path,
+        "--engine",
+        "klayout-runset",
+        "--deck-file",
+        "DECKFILE",
+        *options,
+        "--extract-only",
+        "--envelope-out",
+        str(envelope),
+        capsys=capsys,
+    )
     assert code == 1
-    assert "cannot honour --deck" in err["error"]["message"]
+    assert needle in err["error"]["message"]
+    assert json.loads(envelope.read_text()) == err
+    assert target.read_bytes() == b"* previous extraction\n"
+    assert not list(tmp_path.glob(".klt-pex-*"))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--resistance-graph-r-cut",
+        "--substrate-tie-ohms",
+        "--mom-rlc-resistance-ohm",
+        "--mom-rlc-capacitance-ff",
+        "--mom-rlc-inductance-nh",
+    ],
+)
+def test_merged_route_refuses_explicit_zero(tmp_path, fake_klayout, capsys, flag):
+    code, _, err = _cli(
+        tmp_path,
+        "--engine",
+        "klayout-runset",
+        "--deck-file",
+        "DECKFILE",
+        "--deck",
+        "sky130",
+        flag,
+        "0",
+        "--extract-only",
+        capsys=capsys,
+    )
+    assert code == 1
+    assert flag in err["error"]["message"]
+    assert "cmd" not in fake_klayout
 
 
 def test_cli_parasitic_only_flag_is_refused_by_name_under_the_runset_engine(

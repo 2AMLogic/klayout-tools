@@ -699,16 +699,19 @@ rather than silently ignored.
 
 **No parasitics.** The result is a device-level netlist with
 `parasitics: null`. Combining runset devices with curated-deck parasitics
-would need a geometric net correspondence between two independent extractions
+needs a geometric net correspondence between two independent extractions
 that number their unlabelled nets independently (`\$1` above; see "Anonymous
-net numbering" below) — nothing in this repo provides that today
-([#6606](https://github.com/2AMLogic/klayout-tools/issues/6606)).
-[`klt pex --engine klayout-runset`](pex.md) (issue #6559) does use this engine
-for its extracted leg, as a **device-level, parasitic-free** leg whose envelope
-says so (`extraction.parasitics_carried: false`, `extraction.params_not_carried`).
-That route does **not** by itself make `docs/design-evidence-tiers.md` T1 item
-7 citable for such a block: item 7 is parasitic verification, and a runset leg
-carries none. #6606 is what closes that.
+net numbering" below) — this engine stays device-only, and `klt extract
+--engine klayout-runset --deck` is refused as ever.
+[`klt pex --engine klayout-runset --deck <curated>`](pex.md) (issues #6559,
+#6606) is where that correspondence lives: it runs this engine for devices,
+a curated deck for parasitics, joins the two by measured geometric rules
+([`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)),
+and merges the parasitic network into the leg it re-simulates. A `klt pex`
+report from that route can satisfy `docs/design-evidence-tiers.md` T1 item
+7's intent when its envelope says `extraction.parasitics_carried: true`;
+a parasitic-free leg (either runset shape) is refused by `klt signoff`
+(`no_parasitics`, issue #6606).
 
 **Report.** Additive fields only, so `SCHEMA_VERSION` is unchanged (4): the
 report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
