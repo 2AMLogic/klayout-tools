@@ -9,17 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when either
-    marker is absent (same contract as ``post_route_sta._extract_block``)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
-
+from ._sta_request_diag import extract_block as _extract_block
 
 #: Marker pairs and sentinels for the per-corner ``electrical_checks`` block
 #: (issue #3005): one ``report_check_types -violators`` region per limit class.

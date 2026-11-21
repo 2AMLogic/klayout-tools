@@ -36,9 +36,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._sta_request_diag import extract_block as _extract_block
 from .post_route_sta_path_groups import (
     _empty_path_record,
-    _extract_block,
     _worst_path_record,
 )
 
