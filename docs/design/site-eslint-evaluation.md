@@ -71,7 +71,8 @@ If the decision is to adopt anyway, the minimal change set is in §7.
 | `oxlint` (probe, §8) | 1.94.0 |
 
 The trial used the versions npm resolved on 2026-11-18. The block below pins
-them so a later run resolves the same tree.
+the direct trial packages. npm resolves their transitive dependencies at install
+time, so the package count can vary on a later run.
 
 ```bash
 SHA=94950eeee19e4219d938b81cf742065bd333d750
@@ -225,8 +226,8 @@ CI minutes are not the objection. The maintenance cost is:
 
 - **Dependency churn.** Dependabot already covers `/site` npm weekly with the
   `npm-minor-patch` group and a 14-day cooldown (`.github/dependabot.yml`).
-  No config change is needed, but five more direct dependencies (and the
-  alias) join that group. Whether Dependabot updates an `npm:`-aliased
+  No config change is needed. The trial added four direct dependencies and
+  changed the existing `typescript` entry to an alias. Whether Dependabot updates an `npm:`-aliased
   `typescript` entry correctly was **not verified** here.
 - **The deploy path installs it too.** `scripts/deploy-site.sh` runs `npm ci`,
   so the linter packages would also be installed on every deploy.
@@ -252,8 +253,8 @@ CI minutes are not the objection. The maintenance cost is:
 3. `.github/workflows/ci.yml`, `site` job: one step after "Type check",
    `npm --prefix site run lint`, under the existing
    `steps.filter.outputs.site_changed == 'true'` condition. No new job, no
-   change to Node setup, and the cache key is unchanged because the lockfile
-   is the same file.
+   change to Node setup. The existing cache configuration uses the same
+   lockfile path and picks up its new content hash.
 4. Before the gate goes on: fix or explain finding 3, and note that
    `exhaustive-deps` is `warn` and does not fail a run unless the script
    passes `--max-warnings 0` (run A exited 0 with two warnings).
