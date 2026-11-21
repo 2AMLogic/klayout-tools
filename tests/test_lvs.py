@@ -12687,8 +12687,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rhigh",
     }
     # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
-    # (issue #5491), with the two antenna-diode keys that binding added.
-    # Both fully-curated decks are unchanged: no derived entry is added.
+    # (issue #5491, antenna-diode keys); both curated decks: no derived entry.
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
@@ -12714,6 +12713,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
+        # Their PDK fF/ff spellings (issue #7031) -- read-side aliases.
+        *(f"cap_mim_{d}{s}" for d in ("1f0", "1f5", "2f0") for s in ("fF", "ff")),
         # MOS capacitors (issue #2919) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_nmos_03v3",
         "cap_pmos_03v3",
@@ -12736,9 +12737,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
-        # Fixed-width wrapper family (issue #2459) -- curated, not derived,
-        # same discipline as gf180mcu's metal-resistor flavours above (see
-        # `_RESISTOR_FIXED_WIDTH_TABLE`).
+        # Fixed-width wrapper family (issue #2459) -- curated, not derived
+        # (see `_RESISTOR_FIXED_WIDTH_TABLE`), like the flavours above.
         "sky130_fd_pr__res_high_po_0p35",
         "sky130_fd_pr__res_high_po_0p69",
         "sky130_fd_pr__res_high_po_1p41",

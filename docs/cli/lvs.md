@@ -865,7 +865,9 @@ A foundry-style `C` card with no value token, such as
 `C_X1 n1 n2 cap_nmos_03v3 W=50u L=50u M=2`, is read the same way (issue
 #4729): when its model names one of the deck's curated capacitor classes it is
 routed through the `X`-call capacitor conversion, so `M=2` expands to two
-parallel devices exactly as for `X_X1 ...`. Valued `C` cards and other models
+parallel devices exactly as for `X_X1 ...`. A model naming one of the deck's
+read-side subcircuit aliases (gf180mcu's `fF` MiM spellings, issue #7031) is
+routed the same way. Valued `C` cards and other models
 pass through unchanged.
 
 Device subcircuit names resolve through the same curated table `klt extract
@@ -1062,6 +1064,16 @@ perimeter the extractor measured. Both dimensions must be given together; a
 call stating neither leaves `A`/`P` at the class default rather than assuming
 the subcircuit's own `l=780n w=780n` defaults. `mult`/`m` > 1 is rejected as
 above. Other decks' diodes are not mapped.
+
+**gf180mcu MiM capacitor spellings** (issue #7031). The deck's curated MiM
+classes keep the previous PDK revision's `cap_mim_{1f0,1f5,2f0}_m4m5_noshield`
+names, while the current PDK's own LVS deck and foundry CDLs write
+`cap_mim_{1f0,1f5,2f0}fF`, and its ngspice models define the case-folded
+`…ff` `.subckt` names. Both spellings of a density resolve to the same curated
+class — `X` calls and valueless `C` cards alike — so a reference written
+against either PDK revision converts with no `device_map` entry. The aliases
+(`klayout_tools.pdk_model_aliases`) are read-side only: `klt extract --pdk`
+still emits exactly the `*_m4m5_noshield` subcircuit names.
 
 Anything outside that union — including a subcircuit whose real upstream
 name differs from the deck's device-class label and has no curated entry yet

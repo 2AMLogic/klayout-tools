@@ -65,6 +65,7 @@ from .pdk_diode_models import (
     diode_write_bindings,
 )
 from .pdk_families import pdk_variant_family
+from .pdk_model_aliases import capacitor_lookup_bindings
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -823,15 +824,12 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
             ),
         )
     for (deck_name, family), table in _CAPACITOR_MODEL_TABLE.items():
-        length_param, width_param = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
-        for device_class, subckt in table.items():
-            result.setdefault(
-                subckt,
-                (
-                    deck_name,
-                    DeviceLookup("capacitor", device_class, length_param, width_param),
-                ),
-            )
+        _setdefault_bindings(
+            result,
+            _tagged_bindings(
+                deck_name, capacitor_lookup_bindings(table, deck_name, family)
+            ),
+        )
     for deck_name, family in _BIPOLAR_MODEL_TABLE:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
@@ -965,12 +963,10 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
             subckt, DeviceLookup("resistor", device_class, res_len, res_wid)
         )
     _setdefault_bindings(result, _fixed_width_resistor_bindings(deck_name, family))
-    cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family))
-    for device_class, subckt in (cap_table or {}).items():
-        result.setdefault(
-            subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
-        )
+    _setdefault_bindings(
+        result, capacitor_lookup_bindings(cap_table, deck_name, family)
+    )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
     _setdefault_bindings(result, diode_lookup_bindings(deck_name, family))
     if res_table is None or cap_table is None:
@@ -982,6 +978,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
                     DeviceLookup("resistor", device_class, res_len, res_wid),
                 )
         if cap_table is None:
+            cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
             for device_class in declared_capacitors:
                 result.setdefault(
                     device_class,
