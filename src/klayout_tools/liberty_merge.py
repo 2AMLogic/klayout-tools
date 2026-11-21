@@ -11,11 +11,16 @@ file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
 (units, operating conditions, ``default_*``, ...) is an error naming the
-conflicting field and both values. Top-level ``lu_table_template`` and
-``power_lut_template`` groups are the exception: they are unioned by name
-(same name with different content is an error) and the ones the first file
-lacks are appended after its header. Each file's cell groups are appended in
-listed order; a duplicate cell name is an error. The
+conflicting field and both values, with one exception (issue #6940): when
+each file declares a single ``operating_conditions`` group that its own
+``default_operating_conditions`` selects and the group bodies agree, the
+group's *name* alone may differ -- the merged header keeps the first
+file's spelling, and a renamed file whose retained text still references
+its local name refuses instead of dangling. Top-level ``lu_table_template``
+and ``power_lut_template`` groups are a second exception: they are unioned
+by name (same name with different content is an error) and the ones the
+first file lacks are appended after its header. Each file's cell groups are
+appended in listed order; a duplicate cell name is an error. The
 result is written content-addressed under a klt cache directory -- never into
 the PDK tree -- so repeated runs reuse it and its path (and hash) is stable.
 """
@@ -27,11 +32,18 @@ import os
 import re
 import tempfile
 
+from .liberty_scan import (
+    _find_matching,
+    _find_terminator,
+    _next_significant,
+    _skip_ws,
+    _tokens,
+)
+
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
 
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.$]*")
 _LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
 _CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
@@ -120,7 +132,11 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            _compare_headers(first_path, header_fields, path, fields)
+            retained = "".join(raw for _, raw in file_templates) + body
+            first_fields, other_fields = _reconcile_conditions(
+                first_path, header_fields, path, fields, retained
+            )
+            _compare_headers(first_path, first_fields, path, other_fields)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -232,6 +248,76 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
         return
     prior = fields.get(_RESIDUE_KEY)
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
+
+
+def _unquote(value: str) -> str:
+    """``value`` without one pair of surrounding double quotes."""
+    return value[1:-1] if value[:1] == '"' and value[-1:] == '"' else value
+
+
+def _local_condition(fields: dict[str, str]) -> tuple[str, str, str] | None:
+    """``(group key, name, body)`` when the header declares exactly one
+    ``operating_conditions`` group whose name the
+    ``default_operating_conditions`` attribute selects; ``None`` otherwise
+    (no group, several groups, or a default pointing elsewhere -- none of
+    those is an unambiguous local rename, so the normal field comparison
+    decides)."""
+    groups = {k: v for k, v in fields.items() if k.startswith("operating_conditions(")}
+    if len(groups) != 1:
+        return None
+    key, body = next(iter(groups.items()))
+    name = _unquote(key[len("operating_conditions(") : -1])
+    if not name or name != _unquote(fields.get("default_operating_conditions", "")):
+        return None
+    return key, name, body
+
+
+def _references_identifier(text: str, name: str) -> bool:
+    """Whether ``name`` occurs in ``text`` as a whole Liberty identifier,
+    not as a substring of a longer one."""
+    return (
+        re.search(rf"(?<![A-Za-z0-9_.$]){re.escape(name)}(?![A-Za-z0-9_.$])", text)
+        is not None
+    )
+
+
+def _reconcile_conditions(
+    first_path: str,
+    first: dict[str, str],
+    path: str,
+    other: dict[str, str],
+    retained: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """The header field maps with the operating-condition pair removed when
+    the two headers differ only by its local name (issue #6940).
+
+    Each header must declare exactly one ``operating_conditions`` group its
+    own default selects and the group bodies must agree; the merged header
+    then keeps the first file's spelling, so the second file must not
+    reference its local name in ``retained`` (its body and template text --
+    a reference would dangle in the output). Anything else about the pair
+    (content, count, a foreign or missing default) is left in place for the
+    normal field-by-field comparison to refuse."""
+    a = _local_condition(first)
+    b = _local_condition(other)
+    if a is None or b is None or a[1] == b[1]:
+        return first, other
+    if a[2] != b[2]:
+        raise LibertyMergeError(
+            f"cannot merge: 'operating_conditions({a[1]})' differs: {_clip(a[2])} "
+            f"in '{first_path}', {_clip(b[2])} in '{path}'"
+        )
+    if _references_identifier(retained, b[1]):
+        raise LibertyMergeError(
+            f"cannot merge: '{path}' references operating condition '{b[1]}' "
+            f"outside its header, but the merged header keeps only "
+            f"'{first_path}' spelling '{a[1]}'"
+        )
+    drop = {a[0], b[0], "default_operating_conditions"}
+    return (
+        {k: v for k, v in first.items() if k not in drop},
+        {k: v for k, v in other.items() if k not in drop},
+    )
 
 
 def _compare_headers(
@@ -370,116 +456,3 @@ def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
                 if first_cell is None:
                     first_cell = pos
     return first_cell, cells, None
-
-
-def _skip_ws(text: str, index: int) -> int:
-    while index < len(text) and text[index].isspace():
-        index += 1
-    return index
-
-
-def _next_significant(text: str, start: int) -> tuple[int, str]:
-    """``(index, char)`` of the next char that is neither whitespace nor a
-    comment; ``(len(text), "")`` at end of text."""
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch.isspace():
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        else:
-            return i, ch
-    return n, ""
-
-
-def _find_matching(text: str, start: int, open_ch: str, close_ch: str) -> int:
-    """Index of the ``close_ch`` matching the ``open_ch`` at ``start`` (strings
-    and comments skipped), or ``len(text)`` when it never closes."""
-    depth = 0
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch == open_ch:
-            depth += 1
-            i += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-            i += 1
-        else:
-            i += 1
-    return n
-
-
-def _find_terminator(text: str, start: int) -> int:
-    """Index of the ``;`` ending the statement whose value begins at ``start``
-    (strings and comments skipped), or ``len(text)`` when it never ends.
-
-    Unlike :func:`_find_matching` this does not nest: a ``:`` inside the value
-    is ordinary text, so the first unquoted ``;`` always ends the statement.
-    """
-    i, n = start, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch == ";":
-            return i
-        else:
-            i += 1
-    return n
-
-
-def _tokens(text: str):
-    """Yield ``(kind, start, end)`` for identifiers and braces, skipping
-    strings and comments."""
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-        elif text.startswith("/*", i):
-            stop = text.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-        elif text.startswith("//", i):
-            stop = text.find("\n", i)
-            i = n if stop < 0 else stop
-        elif ch in "{}":
-            yield ch, i, i + 1
-            i += 1
-        else:
-            match = _IDENT_RE.match(text, i)
-            if match:
-                yield "ident", i, match.end()
-                i = match.end()
-            else:
-                i += 1
