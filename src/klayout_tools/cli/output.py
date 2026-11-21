@@ -33,11 +33,12 @@ Design notes (additive envelope, not a wrapping one):
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import io
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
@@ -47,6 +48,29 @@ ERROR_EXIT_CODE = 1
 #: Pass it to :func:`emit_error` as ``exit_code`` when a command detects a
 #: usage error itself, inside ``run()``, after argparse has accepted the argv.
 EXIT_USAGE_ERROR = 2
+
+
+@contextlib.contextmanager
+def _printable_stdout() -> Iterator[None]:
+    """Let a text render survive characters stdout cannot encode (issue #5573).
+
+    A strict legacy stdout (``PYTHONIOENCODING=cp1252``, a Windows console)
+    raises ``UnicodeEncodeError`` on a claimant's free text such as the
+    ``--attest`` ``description`` -- after the envelope was written, turning a
+    passing result into a traceback and exit 1 with a partial report. For the
+    render, an unencodable character prints as a ``\\uXXXX`` escape instead
+    (the JSON, ASCII-escaped, keeps the original string). A handler the caller
+    or runtime already chose (``replace``, ``surrogateescape``) is left alone,
+    and the stream's own handler is restored afterwards."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None or getattr(sys.stdout, "errors", None) != "strict":
+        yield
+        return
+    reconfigure(errors="backslashreplace")
+    try:
+        yield
+    finally:
+        reconfigure(errors="strict")
 
 
 def emit_success(
@@ -59,13 +83,16 @@ def emit_success(
     ``format == "json"`` writes ``payload`` as indented JSON to stdout (plus a
     trailing newline). ``format == "text"`` delegates to ``text_renderer``,
     which is responsible for printing whatever human-readable rendering the
-    command defines; ``text_renderer`` is not part of the JSON contract.
+    command defines; ``text_renderer`` is not part of the JSON contract. A
+    character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
+    aborting the render (:func:`_printable_stdout`).
     """
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
     else:
-        text_renderer(payload)
+        with _printable_stdout():
+            text_renderer(payload)
 
 
 def write_json_file(payload: dict, path: str) -> None:
@@ -136,12 +163,14 @@ def _drift_check_label(entry: dict) -> str:
 
     ``klt signoff --attest ... --check`` annotates every ``drift[]`` entry
     that points at one ``attestation.checks[<i>]`` entry with an additive
-    ``check`` object holding that check's identity -- its ``role`` plus
-    whichever of ``path``/``target``/``name``/``testbench``/``row``/
+    ``check`` object holding that check's identity -- its ``role``, then the
+    check's own kind (its ``check`` value, e.g. ``present``/``command``),
+    then whichever of ``path``/``target``/``name``/``testbench``/``row``/
     ``corner``/``metric`` the check kind carries (see
     ``signoff_attest_drift.check_identity``, which owns both the key set and
-    the order). Rendering it is a plain join of those values in that order, so
-    this module -- a leaf that every ``klt`` verb and two library modules
+    the order). Rendering it is a plain join of those values in that order,
+    so the label reads ``[evidence present evidence/sim_tt.json]``; this
+    module -- a leaf that every ``klt`` verb and two library modules
     import -- stays free of a dependency on the signoff stack, and the
     producer stays the single place that decides what identifies a check.
 
@@ -170,12 +199,12 @@ def render_rerun_drift(result: dict) -> None:
     ``doc_drift_fields`` (issue #2526) -- fields that moved but do not bear
     on the verdict, so ``status`` can stay ``"match"`` while the caller is
     still told the checklist's wording moved. It also carries ``build_skew``
-    (issue #5868): one line when the excluded ``build`` block
-    differs. Rendered only when present, so
-    every other verb's output is byte-identical to what it was, and rendered
-    as field *names* only: the values are whole paragraphs of checklist
-    prose, which is precisely what a consumer asked not to have dumped into
-    its gate output.
+    (issues #5868, #5852): one line when the excluded ``build`` block
+    differs -- or when its identity cannot be verified at all -- rendered
+    only when present, so every other verb's output is byte-identical to
+    what it was, and rendered as field *names* only: the values are whole
+    paragraphs of checklist prose, which is precisely what a consumer asked
+    not to have dumped into its gate output.
 
     ``klt signoff --attest ... --check`` additionally annotates a ``drift[]``
     entry that points at one ``attestation.checks[<i>]`` entry with an
@@ -210,20 +239,36 @@ def render_rerun_drift(result: dict) -> None:
         print("not compared (provenance fields absent from the fresh report):")
         for entry in not_compared:
             print(f"  {entry['field']}")
-    skew = result.get("build_skew")
-    if isinstance(skew, dict) and skew.get("state") in ("build_only", "ruleset"):
-        names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
-        if skew["state"] == "ruleset":
-            what = "graded under a different ruleset (build.grading_ruleset_id moved)"
-        else:
-            what = "rendered by a different klt build (grading ruleset unchanged)"
-        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    _print_build_skew(result.get("build_skew"))
     doc_drift_fields = result.get("doc_drift_fields") or []
     if doc_drift_fields:
         print()
         print("doc drift (checklist wording -- excluded from the verdict):")
         for entry in doc_drift_fields:
             print(f"  {entry['field']}")
+
+
+def _print_build_skew(skew: dict | None) -> None:
+    """The one ``build_skew:`` line of a signoff ``--check`` text render
+    (issues #5868, #5852), only when the excluded ``build`` block actually
+    differs -- or its identity cannot be verified at all."""
+    if not isinstance(skew, dict) or skew.get("state") not in (
+        "build_only",
+        "ruleset",
+        "unverifiable",
+    ):
+        return
+    names = ", ".join(entry["field"] for entry in skew.get("fields") or [])
+    if skew["state"] == "ruleset":
+        what = "graded under a different ruleset (build.grading_ruleset_id moved)"
+    elif skew["state"] == "build_only":
+        what = "rendered by a different klt build (grading ruleset unchanged)"
+    else:
+        what = "build identity unverifiable (a +unknown install records no git facts)"
+    if names:
+        print(f"build_skew: {what} -- excluded from the verdict: {names}")
+    else:
+        print(f"build_skew: {what} -- excluded from the verdict")
 
 
 def render_check_text(result: dict) -> None:
@@ -270,6 +315,11 @@ def render_check_text(result: dict) -> None:
                         "--check resolves relative paths against the current "
                         "working directory -- re-run from there"
                     )
+                # Issue #5845: a repo-scoped echo names the repo root --check
+                # anchored its recorded path on (absent for a cwd-anchored or
+                # absolute echo, so every other output is unchanged).
+                if missing.get("resolved_repo_root") is not None:
+                    print(f"      repo root: {missing['resolved_repo_root']}")
     for skipped in result.get("skipped", ()):
         print(f"  [SKIPPED] {skipped['field']}: {skipped['reason']}")
     # Issue #1373: engine-version drift is a non-fatal advisory, never folded

@@ -280,8 +280,8 @@ def drc_coverage_disclosure(
     - ``kind != "drc"``. No other envelope kind carries a ``coverage`` block
       of this shape, and item 3 is the only item whose doc text names these
       fields. (`klt lvs`'s own coverage-shaped disclosures are deliberately
-      out of scope -- see `signoff.py`'s "DRC coverage surfacing" docstring
-      section.)
+      out of scope -- see `docs/cli/signoff.md`'s "DRC coverage is reported,
+      not graded" section.)
     - The envelope has no ``coverage`` key at all, or a non-object one:
       evidence committed before `klt drc` reported coverage. Back-compat is
       the whole reason this is ``None`` rather than a dict of empty lists --
