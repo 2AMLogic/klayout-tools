@@ -53,11 +53,7 @@ from ._openroad_engine import (
     container_runtime_hint,
 )
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
-from ._paths import (
-    _load_request_json,
-    _reject_unknown_keys,
-    validate_request_shape,
-)
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._paths import _tcl_net_list as _tcl_net_list
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
@@ -249,7 +245,7 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
-from .place_and_route_route_overflow import grt_overflow
+from .place_and_route_route_overflow import grt_overflow, route_failure_congestion
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -711,10 +707,7 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("ground", "^VSSC$", False),
         ("ground", "^VPW$", False),
     ),
-    "sg13g2_stdcell": (
-        ("power", "^VDD$", True),
-        ("ground", "^VSS$", True),
-    ),
+    "sg13g2_stdcell": (("power", "^VDD$", True), ("ground", "^VSS$", True)),
 }
 
 #: Per-cell-library `tapcell` call arguments for the optional
@@ -886,10 +879,7 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
         "gf180mcu_fd_sc_mcu7t5v0__fill_2",
         "gf180mcu_fd_sc_mcu7t5v0__fill_1",
     ),
-    "sg13g2_stdcell": (
-        "sg13g2_fill_1",
-        "sg13g2_fill_2",
-    ),
+    "sg13g2_stdcell": ("sg13g2_fill_1", "sg13g2_fill_2"),
 }
 
 
@@ -1977,7 +1967,14 @@ def _run_single_corner(
                         pdk_info=pdk_info,
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
-                    )
+                    ),
+                    details=route_failure_congestion(
+                        stage,
+                        completed,
+                        output_dir,
+                        hdl_toplevel,
+                        macros,
+                    ),
                 )
 
             metrics = _read_metrics(metrics_path, stage)

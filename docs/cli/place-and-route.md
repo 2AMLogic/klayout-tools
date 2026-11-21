@@ -1434,6 +1434,22 @@ Observed on `gcd` (sky130_fd_sc_hd, OpenROAD 26Q3-1510): 38% utilization gave
 was `0` in both — usage and weighted congestion are the early signal on a
 design this small.
 
+#### Congestion on a failed route (`error.congestion`, issue #6952)
+
+A route stage that exits nonzero — the `GRT-0116` global-routing congestion
+failure above all — exits `1` with empty stdout and its JSON error envelope
+on stderr like every application failure, but the error object additionally
+carries `congestion.global_route` with the evidence **that attempt**
+produced: the same fields and `null_reasons` shape as the success block
+above, built by the same assembler. `congestion_report_path` (failure-path
+only) names the raw `*_route_congestion.rpt` location. The `GRT-0096` table
+(from the captured stdout) and the region report are independent inputs:
+each is `null` with a field-specific reason when that attempt did not
+produce it, and the other's data is still returned. A report file left by a
+*prior* attempt in a reused output directory is never named — only a report
+this invocation wrote (fenced by the retained invocation record's
+`started_at`) counts as evidence.
+
 #### Library-only counterpart (`max_transition_violation_count_vs_library`, `max_capacitance_violation_count_vs_library`, issue #2357)
 
 A caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` is
