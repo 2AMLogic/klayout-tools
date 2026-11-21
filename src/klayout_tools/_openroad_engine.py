@@ -24,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -58,9 +59,7 @@ def _is_unconstrained_slack(value: float | None) -> bool:
     :data:`_UNCONSTRAINED_SLACK_NS`. ``None`` (a metric the run never
     populated at all) is **not** the sentinel: absence is a different thing
     from "reported, but not a measurement"."""
-    if value is None:
-        return False
-    return abs(value) >= _UNCONSTRAINED_SLACK_NS
+    return value is not None and abs(value) >= _UNCONSTRAINED_SLACK_NS
 
 
 def _timing_status(values: Iterable[float | None]) -> str | None:
@@ -103,7 +102,9 @@ class _OpenRoadResult:
         try:
             yield
         except error_cls as exc:
-            raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
+            wrapped = error_cls(_log_error_context(str(exc), self.engine_log))
+            wrapped.__dict__.update(exc.__dict__)  # keep fields (#6952)
+            raise wrapped from exc
 
 
 #: The version-independent shape of "the Docker daemon is not reachable"
@@ -193,10 +194,9 @@ def container_runtime_hint(completed: _OpenRoadResult) -> str | None:
         for stream in (completed.stdout or "", completed.stderr or "")
         for line in stream.splitlines()
     ]
-    matchers = [_runtime_unreachable_hint]
+    matchers = [_runtime_unreachable_hint, _image_missing_hint]
     if completed.returncode == 127:
-        matchers.append(_docker_missing_hint)
-    matchers.append(_image_missing_hint)
+        matchers.insert(1, _docker_missing_hint)
     for matcher in matchers:
         for lowered in lines:
             hint = matcher(lowered, batch_host)
@@ -357,6 +357,8 @@ class _LiveLogs:
             Path(script_path).absolute().parent / "openroad-logs" / invocation_id
         )
         self.record: dict[str, Any] = {
+            # Launch wall clock, fencing prior-attempt files (#6952).
+            "started_at": time.time(),
             "invocation_id": invocation_id,
             "script_name": Path(script_path).name,
             "script_path": _log_path(Path(script_path)),
@@ -389,8 +391,7 @@ class _LiveLogs:
 
     def popen_streams(self) -> dict[str, Any]:
         return {
-            stream: handle if handle is not None else subprocess.PIPE
-            for stream, handle in self.handles.items()
+            s: h if h is not None else subprocess.PIPE for s, h in self.handles.items()
         }
 
     def finish(
@@ -539,9 +540,7 @@ def _openroad_version() -> str | None:
     if not stdout:
         return None
     banner_match = _OPENROAD_VERSION_RE.search(stdout)
-    if banner_match:
-        return banner_match.group(1)
-    return stdout.split()[0]
+    return banner_match.group(1) if banner_match else stdout.split()[0]
 
 
 #: ``report_check_types`` flags whose union is the **setup-side** timing-check
@@ -597,16 +596,16 @@ def _timing_violation_report_lines(
     prints one row per failing endpoint per path group, so the count unit is
     *violating endpoints*, not enumerated timing paths.
     """
+
+    def report_line(flags: tuple[str, ...]) -> str:
+        return f"report_check_types {' '.join(flags)} -violators -format end"
+
     return [
         f'puts "{setup_begin}"',
-        "report_check_types "
-        + " ".join(_SETUP_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_SETUP_CHECK_FAMILY_FLAGS),
         f'puts "{setup_end}"',
         f'puts "{hold_begin}"',
-        "report_check_types "
-        + " ".join(_HOLD_CHECK_FAMILY_FLAGS)
-        + " -violators -format end",
+        report_line(_HOLD_CHECK_FAMILY_FLAGS),
         f'puts "{hold_end}"',
     ]
 
