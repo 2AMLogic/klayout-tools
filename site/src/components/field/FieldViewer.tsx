@@ -275,7 +275,10 @@ export function FieldViewer({ data, parameterIndex, onParameterIndexChange, widt
     if (indexData.length > 0) {
       gl.drawElements(gl.TRIANGLES, indexData.length, indexType, 0);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The redraw follows the mesh, the displayed frame, the triangle
+    // indices, the orbit camera, the bounds and the viewport size. The WebGL
+    // resources are read through `glStateRef` (set once by the init effect
+    // above), so they are not dependencies.
   }, [mesh, frame, triangleIndices, orbit, bounds, width, height]);
 
   function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {

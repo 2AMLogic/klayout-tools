@@ -17,6 +17,7 @@ use std::io::BufReader;
 use fst_reader::{FstFilter, FstHierarchyEntry, FstReader, FstSignalValue, FstVarType};
 use rustc_hash::FxHashSet;
 
+use crate::fst_convert::RealFrameFill;
 use crate::store_writer::StoreWriter;
 
 pub struct FstSourceSignal {
@@ -158,6 +159,7 @@ pub fn stream_body(
         .collect();
     let filter = FstFilter::filter_signals(include);
 
+    let real_frame_fill = RealFrameFill::from_header(&source.reader.get_header());
     let mut real_buf = String::new();
     source
         .reader
@@ -177,6 +179,7 @@ pub fn stream_body(
                     let lower: Vec<u8> = bits.iter().map(|b| b.to_ascii_lowercase()).collect();
                     store.record_change(&id, &lower);
                 }
+                FstSignalValue::Real(v) if real_frame_fill.matches(tick, v) => {}
                 FstSignalValue::Real(v) => {
                     real_buf.clear();
                     real_buf.push_str(&v.to_string());

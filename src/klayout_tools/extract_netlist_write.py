@@ -13,8 +13,114 @@ body: ``extract.py`` imports this module at its top level, so a module-level
 
 from __future__ import annotations
 
+import re
 import shutil
 from typing import Any
+
+#: KLayout's stock ``NetlistSpiceWriter`` (``use_net_names`` on; reported on
+#: 0.30.12, reproduced on 0.30.10, issue #6732) throws from inside ``Netlist.write`` --
+#: before it calls any delegate hook, so no delegate can intercept it -- for a
+#: net whose name *starts with* lowercase ``nc_`` unless the rest is a number
+#: (``nc_a``, ``nc_ab``, ``nc_a,vss`` fail; ``nc_1``, ``NC_a``, ``nca``,
+#: ``a_nc`` and ``vss,nc_a`` write fine). Only net names are scanned: a pin or
+#: circuit named ``nc_a`` is accepted.
+_NC_NET_PREFIX = "nc_"
+_NC_WRITE_ERROR = "Unexpected text after numeric value"
+
+#: Stem of the placeholder that stands in for ``nc_`` while the writer runs.
+_NC_PLACEHOLDER_STEM = "klt_nc"
+
+
+def _nc_prefixed_nets(netlist: Any) -> list[Any]:
+    return [
+        net
+        for circuit in netlist.each_circuit()
+        for net in circuit.each_net()
+        if net.name.startswith(_NC_NET_PREFIX)
+    ]
+
+
+def _unused_placeholder_prefix(netlist: Any) -> str:
+    """A ``klt_nc<n>_`` prefix no existing name in ``netlist`` starts with.
+
+    The restore rewrites *every* token that starts with the prefix, so a net,
+    pin, circuit, device or device-class name that already did would be
+    corrupted along with the placeholders."""
+    names = [
+        name.casefold()
+        for name in (
+            *(cls.name for cls in netlist.each_device_class()),
+            *(
+                name
+                for circuit in netlist.each_circuit()
+                for name in (
+                    circuit.name,
+                    *(net.name for net in circuit.each_net()),
+                    *(pin.name() for pin in circuit.each_pin()),
+                    *(device.expanded_name() for device in circuit.each_device()),
+                )
+            ),
+        )
+        if name
+    ]
+    index = 0
+    while any(name.startswith(f"{_NC_PLACEHOLDER_STEM}{index}_") for name in names):
+        index += 1
+    return f"{_NC_PLACEHOLDER_STEM}{index}_"
+
+
+def _restore_nc_prefix(netlist_path: str, placeholder: str) -> None:
+    """Rewrite the placeholder back to ``nc_`` in the written SPICE.
+
+    Only the *prefix* was swapped, so the writer has already applied its own
+    escaping to the rest of the name (``nc_a-b`` is spelled ``nc_a\\x2db``
+    exactly as ``nc-a`` would be). A placeholder the pattern cannot reach (not
+    at the start of a token) is an error, never a silently corrupted deck."""
+    with open(netlist_path, encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    restored = re.sub(rf"(?<!\S){re.escape(placeholder)}", _NC_NET_PREFIX, text)
+    if placeholder in restored:
+        raise RuntimeError(
+            f"internal net-name placeholder '{placeholder}' remained in the "
+            "written netlist after restoring net names that start with "
+            f"'{_NC_NET_PREFIX}'"
+        )
+    with open(netlist_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(restored)
+
+
+def write_spice_netlist(
+    netlist: Any, netlist_path: str, writer: Any, description: str
+) -> None:
+    """``netlist.write(netlist_path, writer, description)``, tolerating the
+    stock writer's rejection of a net name starting with lowercase ``nc_``
+    (issue #6732).
+
+    The plain write is tried first, so every netlist that wrote before is
+    written exactly as before. Only that one confirmed error -- with a net
+    whose name starts with ``nc_`` present -- takes the fallback: those nets are
+    renamed to an unused placeholder prefix, written, and the placeholder is put
+    back in the written text. The real net names are restored in ``netlist``
+    whether or not the write succeeds, so the report and every later pass still
+    see the layout's own label. Any other write error propagates unchanged."""
+    try:
+        netlist.write(netlist_path, writer, description)
+        return
+    except Exception as exc:
+        nc_nets = _nc_prefixed_nets(netlist)
+        if _NC_WRITE_ERROR not in str(exc) or not nc_nets:
+            raise
+
+    placeholder = _unused_placeholder_prefix(netlist)
+    originals = [(net, net.name) for net in nc_nets]
+    for net, name in originals:
+        net.name = placeholder + name[len(_NC_NET_PREFIX) :]
+    try:
+        netlist.write(netlist_path, writer, description)
+    finally:
+        for net, name in originals:
+            net.name = name
+    _restore_nc_prefix(netlist_path, placeholder)
 
 
 def write_flat_netlist(
@@ -72,7 +178,7 @@ def write_flat_netlist(
         )
     try:
         with stage("netlist_write"):
-            netlist.write(netlist_path, writer, netlist_description)
+            write_spice_netlist(netlist, netlist_path, writer, netlist_description)
     except Exception as exc:
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
