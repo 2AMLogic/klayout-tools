@@ -231,10 +231,10 @@ from .signoff_na import (
     _na_statistical_detail,
 )
 
-# The cited `klt pex` envelope's extraction disclosures (issues #1983, #6559),
-# split out of this file for its size-ratchet ceiling and re-imported by name so
-# `signoff.<name>` keeps resolving.
+# The cited `klt pex` envelope's extraction disclosures (issues #1983/#6559)
+# and its item-7 parasitics gate (#6606), split out for the size-ratchet ceiling.
 from .signoff_pex_disclosure import _pex_body_bias_disclosure, _pex_engine_disclosure
+from .signoff_pex_disclosure import parasitic_free_refusal as _parasitic_free
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
@@ -3212,6 +3212,7 @@ def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
 
 
 def _kind_gated_check(
+    item_id: int | None,
     check_kind: str,
     envelope: dict[str, Any],
     *,
@@ -3220,28 +3221,26 @@ def _kind_gated_check(
 ) -> tuple[str | None, bool]:
     """Return ``(refusal, runset_rehash_unverifiable)`` for a passing envelope.
 
-    These checks apply only to kinds the item accepts
-    (:func:`_kind_is_accepted`):
+    Checks on accepted kinds (:func:`_kind_is_accepted`) run in this order:
 
-    - :data:`_REASON_NOTHING_CHECKED` (issue #1996) -- the envelope's own
-      ``coverage`` block reports ``nothing_checked: true``, so its passing
-      ``status`` was measured over nothing at all.
+    - :data:`_REASON_NOTHING_CHECKED` for vacuous coverage (issue #1996).
+    - Item 7 refuses a pex leg that carried no parasitics.
     - :func:`check_runset` -- the pinned-runset check for LVS evidence.
-    - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
-      the item requires.
+    - :data:`_REASON_NOT_POST_LAYOUT` when the item requires a post-layout run.
     - :data:`_REASON_UNDERSIZED_SAMPLE` /
       :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED` (issue #2467) -- the
       cited `klt yield` campaign's own ``sample_size.verdict`` says its
       estimate is not sized, or its own declared negative control did not
       detect the seeded degradation. See :func:`_yield_campaign_refusal`.
 
-    :func:`_check_passed` runs before these checks. Within this gate,
-    ``nothing_checked`` comes first and the yield campaign check comes last.
+    :func:`_check_passed` precedes this gate. Coverage is first and yield is last.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None, False
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
+        return refusal, False
+    if item_id == 7 and check_kind == "pex" and (refusal := _parasitic_free(envelope)):
         return refusal, False
     rehash_unverifiable = False
     if check_kind == "lvs":
@@ -5243,6 +5242,7 @@ def _grade_evidence(
         return sta_refusal
 
     kind_gated, rehash_unverifiable = _kind_gated_check(
+        item_id,
         check_kind,
         envelope,
         allowed_kinds=allowed_kinds,
