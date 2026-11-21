@@ -219,7 +219,7 @@ def _parse_lvs_run_options(
         anchor_top_level_pins_requested,
         anchor_top_level_pins_echo,
     ) = _parse_anchor_top_level_pins(options, engine)
-    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options, engine)
+    strict_top_level_pin_count = _parse_strict_top_level_pin_count(options)
     compare_mos_flavour = _parse_compare_mos_flavour(
         options, engine, layout_spec, reference_spec
     )
