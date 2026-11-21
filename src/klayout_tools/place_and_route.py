@@ -2101,6 +2101,7 @@ def _run_single_corner(
     def_net_names_info: dict[str, Any] | None = None
     min_area_repair_info: dict[str, Any] | None = None
     via_pad_trim_info: dict[str, Any] | None = None
+    power_stack_repair_info: dict[str, Any] | None = None
     pin_conductor_info: dict[str, Any] | None = None
     gds_dbu_um: float | None = None
     if target_stage == "route":
@@ -2130,6 +2131,7 @@ def _run_single_corner(
         def_net_names_info = merge_info["def_net_names"]
         min_area_repair_info = merge_info["min_area_repair"]
         via_pad_trim_info = merge_info.get("via_pad_trim")
+        power_stack_repair_info = merge_info.get("power_stack_repair")
         pin_conductor_info = merge_info.get("pin_conductor")
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
@@ -2520,6 +2522,15 @@ def _run_single_corner(
         # `"skipped"` and its GDS is untouched). `null` unless
         # `stage_reached` is `"route"`.
         "via_pad_trim": via_pad_trim_info,
+        # Additive field (issue #6909): what the DEF->GDS merge's ASAP7-only
+        # power-stack repair pass did to the pdngen M2 -> M5 grid. `status`
+        # is `"repaired"`, `"clean"` or `"skipped"` (with a `reason`; every
+        # non-ASAP7 PDK reports `"skipped"` and its GDS is byte-identical
+        # to before). `patches` counts the rectangles drawn; one
+        # `targets`/`repaired`/`left` triple per deck rule family
+        # (`v4_m4_enclosure`, `v4_m5_enclosure`, `m3_stub_spacing`). `null`
+        # unless `stage_reached` is `"route"`.
+        "power_stack_repair": power_stack_repair_info,
         # Derived-map pin coverage on conductor; null before route (#5700).
         # Status/layers/reason are documented in docs/cli/place-and-route.md.
         "pin_conductor": pin_conductor_info,
