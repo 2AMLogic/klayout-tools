@@ -809,7 +809,9 @@
       "description": "`klt signoff` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.parsers.signoff",
+        "klayout_tools.cli.signoff_attest_cmd",
         "klayout_tools.cli.signoff_cmd",
+        "klayout_tools.cli.signoff_diff_cmd",
         "klayout_tools.cli.signoff_flags",
         "klayout_tools.cli.signoff_repin_cmd",
         "klayout_tools.cli.signoff_tier_text",
@@ -856,6 +858,7 @@
         "klayout_tools.signoff_power_delivery",
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_report_diff",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
