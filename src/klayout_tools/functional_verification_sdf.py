@@ -60,6 +60,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
+from .request_paths import resolve_request_path
 
 
 def _reject_sdf_with_functional_models(
@@ -170,10 +171,8 @@ def _resolve_sdf_file(file_value: Any, request_dir: str) -> str:
         raise FunctionalVerificationError(
             "request.options.sdf.file must be a non-empty string"
         )
-    path = (
-        file_value
-        if os.path.isabs(file_value)
-        else os.path.join(request_dir, file_value)
+    path = resolve_request_path(
+        file_value, request_dir, FunctionalVerificationError, "request.options.sdf.file"
     )
     if not os.path.isfile(path):
         raise FunctionalVerificationError(f"SDF file not found: {file_value}")
@@ -537,54 +536,50 @@ def _write_sdf_dut_wrapper(
 # u1.in`, `INTERCONNECT u2.out b`) by nesting the DUT under a transparent
 # wrapper. Issue #1619 reports a *sibling*-entry failure that appeared once
 # that fix let a bit-selected *vector* port endpoint (`y[0]`, `a[0]` -- what
-# any real post-route netlist's bus ports produce) resolve too. The issue
-# body's own hypothesis was that the wrapper "loses track of (or
-# double-binds)" a net's identity once it resolves one entry against it.
-# Live testing (raw `iverilog`/`vvp` 13.0, not just through this module, the
-# same methodology #1069's own spike section used -- see
-# `docs/design/sdf-annotate-feasibility-spike.md` §3.7) **refutes that
-# hypothesis** and finds two distinct mechanisms instead, depending on which
-# side of the entry carries the bit-selected port:
+# any real post-route netlist's bus ports produce) resolve too; the issue's
+# own hypothesis was that the wrapper "loses track of (or double-binds)" a
+# net's identity. Live testing (raw `iverilog`/`vvp` 13.0, the same
+# methodology as #1069's spike section -- `sdf-annotate-feasibility-spike.md`
+# §3.7) **refutes that** and finds two distinct mechanisms instead,
+# depending on which side of the entry carries the bit-selected port:
 #
 # Shape (a) -- bit-selected port as a *destination* (an output net fanning
-# out to a vector output-port bit *and* an internal pin, or any entry sharing
-# a source with one): **order-dependent, and fixed here.** Once an entry
-# touching a bit-selected port is annotated, every *later* `INTERCONNECT`
-# entry sharing that entry's physical net fails with "Could not find
-# intermodpath!" regardless of its own shape (a purely internal
-# instance-pin-to-instance-pin entry is equally affected) -- which refutes
-# the "identity double-bind" hypothesis on its own: reordering the entries
-# (bit-selected-port entry *last* instead of first) makes every entry
-# resolve, which a genuine net-identity double-bind would not fix (the same
-# physical net is still touched twice either way, just in a different
-# order). The workaround, verified live end-to-end through real cocotb +
-# Icarus 13.0: defer every bit-selected-top-level-port-touching entry to its
-# own, later `$sdf_annotate` call, after every other entry has already been
-# annotated. Nothing in the deferred call's own entries runs *after* a
-# poisoning entry on that entry's own net (each vector port bit is its own
-# physically distinct net), so nothing is left to fail.
+# out to a vector output-port bit *and* an internal pin, or any entry
+# sharing a source with one): **order-dependent, and fixed here.** Once an
+# entry touching a bit-selected port is annotated, every *later*
+# `INTERCONNECT` entry sharing that entry's physical net fails with "Could
+# not find intermodpath!" regardless of its own shape (even a purely
+# internal pin-to-pin entry) -- and reordering the entries
+# (bit-selected-port entry *last*) makes every entry resolve, which a
+# genuine net-identity double-bind would not fix, refuting that
+# hypothesis. The workaround, verified live end-to-end through real
+# cocotb + Icarus 13.0: defer every bit-selected-port-touching entry to
+# its own, later `$sdf_annotate` call, after every other entry has
+# already been annotated. Nothing in the deferred call's entries runs
+# *after* a poisoning entry on that entry's own net (each vector port
+# bit is its own physically distinct net), so nothing is left to fail.
 #
 # Shape (b) -- bit-selected port as a *source* (an input net fanning out to
 # an ordinary cell input *and* a single-pin antenna/diode-style load):
-# **not order-dependent, and not fixable from here.** A single such entry,
-# entirely alone with no sibling at all, already fails whenever its
-# destination pin declares its own `specify`/`IOPATH` block (an ordinary
-# standard cell always does) -- reordering or deferring it to its own call
-# changes nothing, ruling out the same workaround shape (a) uses. It is also
-# unexpectedly sensitive to the *testbench*: the identical fixture resolves
-# cleanly with a no-op cocotb test (one that returns without ever `await`ing
-# a trigger) but deterministically fails once the testbench actually drives
-# the DUT and awaits a `Timer` -- reproduced identically across a clean
-# `.klt/` build directory, a fresh Python interpreter, and a fresh `klt` CLI
-# process, so it is not this module's own build-directory or process-state
-# reuse. That points at a genuine Icarus-internal race between
-# `$sdf_annotate`'s own intermodpath insertion and VPI callback scheduling
-# once the simulator advances past time 0 -- outside what a generated
-# wrapper, shim, or SDF split can control. Left unfixed and documented
+# **not order-dependent, and not fixable from here.** Re-measured in
+# issue #5705 (2026-11-14) on raw `iverilog`/`vvp` 13.0 (plain-Verilog
+# bench, one variable per control case, verdicts read from an
+# un-annotated waveform baseline): `$sdf_annotate` creates **at most
+# one** interconnect modpath per bit-selected top-level port net -- on
+# physical fanout N it annotates only the **last-declared instance's**
+# destination and rejects the other N-1 (`VPI error: Could not insert
+# intermodpath!`). The precondition is **physical fanout above 1**, not
+# the entry count; the destination's own `specify`/`IOPATH` block is
+# neither trigger nor protection; verdicts are deterministic across
+# plain-Verilog benches and entry orders, and reordering the *netlist* declarations
+# moves the survivor -- which a race would not do (an earlier revision
+# blamed a `$sdf_annotate`/VPI-callback race; superseded -- full
+# narrative, control table and the buffered-output-pin workaround in the
+# spike doc's #5705 section). Reordering or deferring entries therefore
+# cannot help; left unfixed and documented
 # (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
-# unresolvable` pins the realistic, driven-testbench outcome down so it is
-# never silently "fixed" by an unrelated future change without the
-# mechanism actually being understood).
+# unresolvable` pins this fixture's outcome so it is never silently
+# "fixed" without the mechanism being understood).
 # --------------------------------------------------------------------------- #
 
 #: A bare top-level-port reference to one bit of a vector port, e.g. ``y[0]``
@@ -651,19 +646,17 @@ def _split_sdf_bus_port_interconnects(
     untouched by this function).
 
     See the module-level comment above this function for both confirmed
-    Icarus 13.0 mechanisms (issue #1619) and which one this actually fixes:
-    it reliably resolves shape (a) (bit-selected port as an
-    ``INTERCONNECT`` *destination*, order-dependent poisoning of later
-    same-net entries) but does **not** fix shape (b) (bit-selected port as
-    an ``INTERCONNECT`` *source* feeding a ``specify``-bearing destination,
-    which fails even in total isolation, unaffected by this split). This
-    function still applies the same split to *any* bit-selected-port-
-    touching entry regardless of which shape it is, since doing so never
-    makes a shape (b) entry *worse* (it already fails standing alone) and
-    fully fixes every shape (a) entry -- there is no cheap way to tell the
-    two shapes apart from the SDF text alone (both are just "port token as
-    one of the two endpoints"), and splitting is a no-op safety margin for
-    the shape this function cannot help.
+    Icarus 13.0 mechanisms (issue #1619; shape (b) re-measured in #5705)
+    and which one this fixes: shape (a) (port as an ``INTERCONNECT``
+    *destination*, order-dependent poisoning) is reliably resolved, but
+    not shape (b) (port as an ``INTERCONNECT`` *source*: the
+    one-modpath-per-port-net cap rejects every non-survivor entry,
+    whichever call annotates it). The split is still applied to *any*
+    bit-selected-port-touching entry: it never makes a shape (b) entry
+    *worse* (it reorders SDF entries, never netlist declarations, so it
+    cannot move the cap's survivor) and fully fixes every shape (a)
+    entry -- the two shapes are indistinguishable from SDF text alone,
+    so splitting is a no-op safety margin for the shape it cannot help.
 
     The first returned text is ``sdf_path``'s own content with every
     bit-selected-port-touching entry *removed* (annotated in the caller's
@@ -1258,26 +1251,31 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
 # inserted antenna diodes on top-level input bits could not pass the gate at
 # all.
 #
-# Reproduced live against Icarus 13.0 through this module, which pinned down
-# a condition the issue's own write-up does not state: the failure needs the
-# port bit's net to carry **more than one** `INTERCONNECT` entry. A bus-port
-# net whose only entry is the diode's own annotates cleanly even without this
-# pass (#1619's deferral is enough, since each port bit is its own net), but
-# the moment that net carries a second entry one of them fails -- exactly the
-# same-net poisoning #1619 shape (a) describes, which the deferral cannot
-# undo because both entries are on the one net it deferred. A real router
-# inserts one diode per violating pin, so a multi-load input bit collects
-# several of these.
+# Reproduced live against Icarus 13.0 through this module, re-measured
+# with one-variable controls in issue #5705: the deciding variables are
+# the port bit's net's *physical fanout* and the netlist's declaration
+# order, not the `INTERCONNECT` entry count -- `$sdf_annotate` creates
+# at most one interconnect modpath per bit-selected top-level port net
+# (the **last-declared instance**'s destination) and rejects every
+# other load's entry, lone non-last-declared ones included. A bus-port
+# net whose only load is the diode annotates cleanly (fanout 1; #1619's
+# deferral is enough there), but a real router inserts one diode per
+# violating pin, so a multi-load input bit collects several. The cap is
+# deterministic across entry orders, unlike the same-net entry-order
+# poisoning #1619 shape (a) describes: the *netlist* declaration order
+# picks the survivor.
 #
 # What makes *this* subset of shape (b) different -- and what #2285's
 # docstring said was missing before the drop could be widened to a source-
-# side match at all -- is that the destination here is structurally
-# incapable of carrying a modpath: the diode model has no `specify` block
-# and no output port whatsoever (the no-`USE_POWER_PINS` variant is a module
-# with a single `input` and an empty body). There is no modpath the entry
-# could ever annotate, and no logic anywhere that observes the annotated
-# pin. The general shape (b) case -- a bit-selected-port source feeding an
-# ordinary `specify`-bearing standard cell -- is emphatically *not* covered
+# side match at all -- is the destination: the diode model has no
+# `specify` block and no output port whatsoever (the no-`USE_POWER_PINS`
+# variant is a module with a single `input` and an empty body), so it
+# has no timing content and no logic anywhere observes the pin --
+# whether the cap makes this entry the annotated survivor (in #2363's
+# two-diodes fixture the last-declared diode's entry is the one Icarus
+# accepts) or a rejected non-survivor. The general shape (b) case -- a
+# bit-selected-port source feeding an ordinary `specify`-bearing standard
+# cell -- is emphatically *not* covered
 # here: that destination has real modpaths, so dropping a NON-zero entry
 # would change simulated timing and it must keep failing loudly exactly as
 # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
@@ -1462,8 +1460,8 @@ def _sdf_interconnect_is_physical_only_droppable(
     removes an entry on (issue #2363).
 
     All three halves are load-bearing. The destination match is the
-    justification (no ``specify`` block and no output pin means no modpath
-    the entry could annotate and no logic that observes the pin); the
+    justification (a ``specify``-free, output-free cell has no timing content
+    and no logic observing the pin, survivor or not); the
     zero-delay test is what makes removing it provably unable to change
     simulated timing at any corner; and the bit-selected-input-port source
     match is what keeps the exemption pinned to the one shape #2363 actually
@@ -1538,15 +1536,16 @@ def _drop_sdf_zero_delay_physical_only_interconnects(
 #
 # A real post-route SDF can carry such entries and Icarus fails the run with
 # `SDF ERROR: ... Could not find intermodpath!` on some of them (the
-# order/race behaviour characterised above for shape (b)). The failure
-# mechanism is not what this pass depends on: it removes only entries whose
-# every `min:typ:max` member is zero, which model no delay at any corner, so
-# dropping one cannot change simulated timing -- the same bound #2285 and
-# #2363 use. The "dropping its entry would change simulated timing" argument
-# for leaving shape (b) failing therefore holds only for NON-zero entries,
-# and those are still left in place (and still raise), as
-# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable`
-# pins with its non-zero delays.
+# one-modpath-per-port-net cap characterised above for shape (b), issue
+# #5705). This pass removes only entries whose every `min:typ:max` member
+# is zero -- no delay at any corner, so dropping one cannot change
+# simulated timing, the same bound #2285 and #2363 use. NON-zero entries
+# therefore stay and keep failing the run, deliberately (issue #5769's
+# recorded decision, round 20261116-r15): every `dropped` class is bounded
+# to zero-delay entries, an opt-in or automatic drop of real delay would
+# silently change simulated timing, and a caller needing that trade files
+# a new request. The refusal instead names the rejected arcs and
+# the buffer workaround (`_sdf_intermodpath_rejected_arcs`).
 # --------------------------------------------------------------------------- #
 
 
