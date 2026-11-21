@@ -1158,7 +1158,8 @@
       "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.yield_threshold_cmd",
-        "klayout_tools.probit"
+        "klayout_tools.probit",
+        "klayout_tools.probit_document"
       ]
     }
   },
