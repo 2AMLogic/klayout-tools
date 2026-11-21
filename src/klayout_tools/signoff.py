@@ -113,8 +113,10 @@ from .signoff_derived_rows import (
     _maybe_record_failed_sim,
     _record_envelope,
     _remember_envelope,
+    _sim_coverage_counts,
+    _sim_no_limits_applied,
     asserted_rows,
-    credited_rows,
+    member_credits,
     multi_row_info,
     read_require_derived_rows,
 )
@@ -2761,27 +2763,6 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     if refusal is None or kind != "erc":
         return refusal
     return None if _erc_connectivity_state(envelope) is not None else refusal
-
-
-def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
-    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
-    envelope's ``coverage`` block, or ``None`` when absent or non-integer
-    (pre-coverage evidence keeps grading exactly as before)."""
-    block = envelope.get("coverage")
-    if not isinstance(block, dict):
-        return None
-    declared = block.get("measurements_declared")
-    limited = block.get("measurements_with_limits")
-    if type(declared) is not int or type(limited) is not int:
-        return None
-    return declared, limited
-
-
-def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
-    """Whether a `klt sim` envelope declares measurements yet none carry a
-    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
-    counts = _sim_coverage_counts(envelope)
-    return counts is not None and counts[0] > 0 and counts[1] == 0
 
 
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
@@ -6714,10 +6695,7 @@ def _grade_multi_citation(
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
     # Rows each member is credited with, and whether that was machine-derived.
-    credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): credited_rows(rows, (met_envelopes or {}).get(id(spec)))
-        for spec, rows, _ in graded
-    }
+    credited = member_credits(graded, met_envelopes)
     row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [

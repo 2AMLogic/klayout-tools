@@ -561,7 +561,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7019
+      "lines": 6997
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",

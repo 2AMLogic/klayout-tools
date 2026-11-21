@@ -30,8 +30,19 @@ Row-scoped credit from a failing envelope (issue #6027)
     coverage (and leave ``failed_rows``) instead of being mis-reported as
     failed. Only derived rows are credited -- a failed citation never covers
     a row on the manifest's word alone, and an envelope that a stale-pin,
-    binding, kind or provenance refusal would reject is not captured at all
+    binding, kind, provenance or vacuous-verdict (``no_limits_checked``
+    included) refusal would reject is not captured at all
     (:func:`_maybe_record_failed_sim` decides).
+
+    A failed envelope's ``status: pass`` is only an *aggregate*: `klt sim`
+    rolls a measurement up as ``pass`` while a bound was skipped
+    (unrecognised key, ``null`` value, ``not_reached`` at one corner). So the
+    credit is stricter than the ``met`` derivation: the tagged measurement
+    needs a recognised, non-null ``min``/``max``, and -- when the envelope
+    carries the producer's checked-work ``coverage`` record -- a checked
+    ``limit`` for it and none skipped at any corner
+    (:func:`_failed_envelope_rows`). A tagged, limit-declaring measurement
+    that does not qualify also keeps its row out of the credit.
 
 The envelope-capture plumbing (:func:`_record_envelope` /
 :func:`_remember_envelope`) lives here too, moved out of :mod:`.signoff` for
@@ -40,6 +51,8 @@ the same ceiling: it exists to feed the derived-row check.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from .coverage import coverage_refusal_reason
@@ -81,16 +94,133 @@ def asserted_rows(row_info: dict[str, Any]) -> list[str]:
     return sorted(row for row, source in sources.items() if source == "asserted")
 
 
-def envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
+#: Mirrors ``sim._RECOGNISED_LIMIT_KEYS`` -- the only ``limits`` keys `klt sim`
+#: applies; any other key is silently inert there. Not importable from here
+#: (``sim`` is far too heavy for the signoff layer), so a test pins the two.
+_RECOGNISED_LIMIT_KEYS = ("min", "max")
+
+
+def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
+    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
+    envelope's ``coverage`` block, or ``None`` when absent or non-integer
+    (pre-coverage evidence keeps grading exactly as before)."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict):
+        return None
+    declared = block.get("measurements_declared")
+    limited = block.get("measurements_with_limits")
+    if type(declared) is not int or type(limited) is not int:
+        return None
+    return declared, limited
+
+
+def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
+    """Whether a `klt sim` envelope declares measurements yet none carry a
+    ``limits`` bound (issue #3769). ``capture_only`` runs declare none.
+
+    Moved here from :mod:`.signoff` (issue #6027) so the failed-citation
+    capture applies exactly the refusal the ``met`` path does, from one
+    definition, without :mod:`.signoff` growing past its size ceiling."""
+    counts = _sim_coverage_counts(envelope)
+    return counts is not None and counts[0] > 0 and counts[1] == 0
+
+
+def _limit_work_names(ids: Iterable[Any]) -> set[str]:
+    """Measurement names behind the ``limit`` work ids in ``ids`` -- the
+    identities :func:`~.coverage.work_id` gives `klt sim`'s per-corner bound
+    checks (``limit:[corner_index, corner_id, name, key]``)."""
+    names: set[str] = set()
+    for raw in ids:
+        if not (isinstance(raw, str) and raw.startswith("limit:")):
+            continue
+        try:
+            parts = json.loads(raw[len("limit:") :])
+        except ValueError:
+            continue
+        if isinstance(parts, list) and len(parts) == 4 and isinstance(parts[2], str):
+            names.add(parts[2])
+    return names
+
+
+def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] | None:
+    """``(checked, skipped)`` measurement names off the envelope's own
+    checked-work ``coverage`` record: those with at least one bound the
+    producer applied at some corner, and those with at least one bound it
+    skipped at some corner (``unrecognized_limit_key``, ``missing_limit_value``,
+    ``not_reached``, ``unavailable_measurement``, ...). ``None`` for an
+    envelope with no such record (``coverage`` absent, or counters only), which
+    leaves the measurement's own bound as the only evidence."""
+    block = envelope.get("coverage")
+    if not isinstance(block, dict) or "checked" not in block:
+        return None
+    checked, skipped = block.get("checked"), block.get("skipped")
+    return (
+        _limit_work_names(checked if isinstance(checked, list) else []),
+        _limit_work_names(
+            r.get("id")
+            for r in (skipped if isinstance(skipped, list) else [])
+            if isinstance(r, dict)
+        ),
+    )
+
+
+def _has_applicable_bound(measurement: dict[str, Any]) -> bool:
+    """Whether ``measurement.limits`` holds a bound `klt sim` can apply: a
+    recognised key with a non-``null`` value. A bare non-empty ``limits``
+    object (``{"minimum": 20}``, ``{"min": null}``) is not one."""
+    limits = measurement.get("limits")
+    return isinstance(limits, dict) and any(
+        limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS
+    )
+
+
+def _failed_envelope_rows(
+    tagged: list[dict[str, Any]], envelope: dict[str, Any]
+) -> set[str]:
+    """The rows a ``check_failed`` ``sim`` envelope may credit (issue #6027).
+
+    A measurement grades its row only when it passed *and* its bound was
+    really applied: a recognised, non-null ``min``/``max``
+    (:func:`_has_applicable_bound`) that the envelope's checked-work record
+    (:func:`_bound_check_record`) shows checked and never skipped, at every
+    corner it was reported for. The aggregate ``status: pass`` alone proves
+    neither -- `klt sim` rolls up ``pass`` over a skipped bound, and over one
+    corner ``not_reached`` beside a passing one.
+
+    A tagged measurement that declares ``limits`` yet does not qualify keeps
+    its row out of the credit: the row's own bound failed or went unchecked,
+    so a sibling measurement's pass must not stand in for it. A tag without
+    ``limits`` is inert, as on the ``met`` path."""
+    record = _bound_check_record(envelope)
+    graded: set[str] = set()
+    ungraded: set[str] = set()
+    for m in tagged:
+        if not m.get("limits"):
+            continue
+        name = m.get("name")
+        applied = record is None or (name in record[0] and name not in record[1])
+        passed = m.get("status") == "pass" and _has_applicable_bound(m) and applied
+        (graded if passed else ungraded).add(m["spec_row"])
+    return graded - ungraded
+
+
+def envelope_tagged_rows(
+    envelope: dict[str, Any], *, failed: bool = False
+) -> tuple[bool, set[str]]:
     """``(has_tags, covering)`` for a ``klt sim`` envelope (issue #3778):
     whether any ``measurements[]`` entry declares a ``spec_row``, and the
     rows with a passing measurement that is tagged with them and has
-    ``limits`` (a tag without limits grades nothing)."""
+    ``limits`` (a tag without limits grades nothing).
+
+    ``failed`` (issue #6027) is for an envelope whose citation did not pass:
+    its aggregate ``pass`` is then not enough, see :func:`_failed_envelope_rows`."""
     raw = envelope.get("measurements")
     entries = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
     tagged = [
         m for m in entries if isinstance(m.get("spec_row"), str) and m["spec_row"]
     ]
+    if failed:
+        return bool(tagged), _failed_envelope_rows(tagged, envelope)
     covering = {
         m["spec_row"] for m in tagged if m.get("status") == "pass" and m.get("limits")
     }
@@ -98,20 +228,36 @@ def envelope_tagged_rows(envelope: dict[str, Any]) -> tuple[bool, set[str]]:
 
 
 def credited_rows(
-    rows: list[str] | None, envelope: dict[str, Any] | None
+    rows: list[str] | None, envelope: dict[str, Any] | None, *, failed: bool = False
 ) -> tuple[list[str] | None, bool]:
     """The rows a member is credited with and whether they were ``derived``
     from its envelope's ``spec_row`` tags (issue #3778). Untagged (or
     unavailable) envelopes keep the manifest-asserted ``rows``. Since issue
-    #6027 the envelope may also come from a ``check_failed`` ``sim`` grading;
-    :func:`multi_row_info` credits the result only when it is derived.
+    #6027 the envelope may also come from a ``check_failed`` ``sim`` grading
+    (``failed=True``); :func:`multi_row_info` credits the result only when it
+    is derived.
     """
     if not rows or envelope is None:
         return rows, False
-    has_tags, covering = envelope_tagged_rows(envelope)
+    has_tags, covering = envelope_tagged_rows(envelope, failed=failed)
     if not has_tags:
         return rows, False
     return [r for r in rows if r in covering], True
+
+
+def member_credits(
+    graded: list[Any], envelopes: dict[int, dict[str, Any]] | None
+) -> dict[int, tuple[list[str] | None, bool]]:
+    """Rows each graded member is credited with, and whether that credit was
+    machine-derived, keyed by the member spec's identity -- the ``credited``
+    argument of :func:`multi_row_info`. A member that did not grade ``met``
+    (issue #6027) is credited by the stricter failed-envelope rule."""
+    return {
+        id(spec): credited_rows(
+            rows, (envelopes or {}).get(id(spec)), failed=g[0] != "met"
+        )
+        for spec, rows, g in graded
+    }
 
 
 def _record_envelope(
@@ -161,16 +307,20 @@ def _maybe_record_failed_sim(
     and item 7 accepts no ``sim`` citation, and the runset/yield gates are
     kind-matched -- leaving the kind acceptance (a citation the item
     rejects as ``wrong_kind`` must not credit rows), the vacuous-verdict
-    gate -- :func:`~.coverage.coverage_refusal_reason`, exactly what
-    ``sim`` sees of ``signoff._coverage_refusal`` -- and the
-    ``content_hash`` pin state: the same trio the ``met`` path applies to
-    a ``sim`` envelope.
+    gate -- exactly what ``sim`` sees of ``signoff._coverage_refusal``:
+    :func:`~.coverage.coverage_refusal_reason` *and* the sim-specific
+    ``no_limits_checked`` refusal (:func:`_sim_no_limits_applied`), so a run
+    that declared measurements but applied no bound anywhere credits no row
+    -- and the ``content_hash`` pin state: the same trio the ``met`` path
+    applies to a ``sim`` envelope.
     """
     if unmet is None or unmet[1] != _CHECK_FAILED or check_kind != "sim":
         return
     if allowed_kinds is not None and check_kind not in allowed_kinds:
         return
     if coverage_refusal_reason(envelope) is not None:
+        return
+    if _sim_no_limits_applied(envelope):
         return
     pin = content_hash_pin_state(spec.get("content_hash"), resolution["content_hash"])
     if pin in (PIN_UNVERIFIABLE, PIN_STALE):

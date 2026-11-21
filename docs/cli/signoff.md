@@ -4475,7 +4475,15 @@ new. Outcomes:
   carries. A row whose tagged measurement fails — or that the failing
   envelope does not tag — stays in `failed_rows`, and a failing envelope of a
   kind that carries no `spec_row` tags (or one refused on a stale pin,
-  binding or provenance) credits nothing;
+  binding, provenance or `no_limits_checked`) credits nothing. The credit is
+  stricter than a passing envelope's, because a failing envelope's aggregate
+  `status: "pass"` also covers a bound `klt sim` skipped: a measurement
+  credits its row only when it carries a recognised, non-null `min`/`max`
+  and, where the envelope has the producer's `coverage` record, that bound
+  was checked and never skipped at any corner (an unrecognised key, a `null`
+  bound, or a corner `not_reached` withholds the row). A limited measurement
+  tagged with the same row that fails or goes unchecked also keeps the row in
+  `failed_rows`;
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
@@ -4574,9 +4582,10 @@ the manifest-asserted `rows`, so existing manifests grade identically.
 `row_coverage.row_sources` maps each covered row to `"derived"` (checked
 against the envelope) or `"asserted"` (the manifest's word only). The same
 derivation credits a row from a *failing* `klt sim` citation when the envelope
-tags a passing, limited measurement with it (issue #6027) — visible in
-`detail.row_sources`, since `row_coverage` itself is only emitted on `met`.
-The change is
+tags a passing, limited measurement with it whose bound `klt sim` actually
+applied at every corner (issue #6027; the stricter rule is in the
+`failed_rows` bullet above) — visible in `detail.row_sources`, since
+`row_coverage` itself is only emitted on `met`. The change is
 additive: `schema_version` is not bumped.
 
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by
