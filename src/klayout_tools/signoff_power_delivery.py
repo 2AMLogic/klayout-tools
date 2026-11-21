@@ -136,16 +136,10 @@ from .signoff_runset import check_runset, runset_disclosure
 #:   **unavailable** rather than answered. Still ``"unmet"`` -- an
 #:   unavailable half is not a proven one -- but distinct from the plain
 #:   :data:`~klayout_tools.signoff._REASON_CHECK_FAILED` a failing LVS
-#:   citation renders when the ERC
-#:   half proves nothing either (issue #2495). The distinction is what the
-#:   item's own scope note asks for: ``net_correspondence`` lists only
-#:   *matched* nets, so the supply-pairing predicate
-#:   (:func:`_lvs_reference_carries_supplies`) is destroyed by **any**
-#:   mismatch -- including a device-parameter delta or a signal-net
-#:   reconnection that cannot make or break a supply connection. Without this
-#:   reason, "this block's rails are proven continuous and tied; its compare
-#:   has one disclosed, supply-irrelevant defect" and "this block cited no
-#:   supply evidence at all" render identically. Fix: the LVS defect (item 4
+#:   citation renders when the ERC half proves nothing either (issue #2495):
+#:   ``net_correspondence`` lists only *matched* nets, so the
+#:   supply-pairing predicate is destroyed by **any** mismatch (see
+#:   :func:`_failed_lvs_verdict` for the full distinction). Fix: the LVS
 #:   is blocked on it too) -- never the ERC spec, which already asked and
 #:   answered.
 _REASON_NO_PDN = "no_pdn"
@@ -1103,49 +1097,54 @@ def _failed_lvs_verdict(
 ) -> tuple[str, dict[str, Any]]:
     """The ``(reason, detail)`` T1 item 11 reports for a cited LVS report
     that did not pass on its own terms
-    (:func:`~klayout_tools.signoff._check_passed`), given the
-    ERC half's already-resolved ``supply_spec`` (issue #2495).
-
-    A failing LVS citation can never carry item 11 to ``"met"`` -- both
-    branches' LVS half rests on the same compare, and an unavailable half is
-    not a proven one. What this decides is *which* ``"unmet"`` the report
-    states, because the two states behind it call for opposite actions:
+    (:func:`~klayout_tools.signoff._check_passed`), given the ERC half's
+    already-resolved ``supply_spec`` (issue #2495). A failing LVS citation
+    can never carry item 11 to ``"met"``; this decides *which* ``"unmet"``:
 
     - ``supply_spec is None`` -- the ERC half proved nothing about power
-      delivery either (no supply declared, no computed tie, or a supply-side
-      finding), so nothing here is established at all. Plain
-      :data:`~klayout_tools.signoff._REASON_CHECK_FAILED`, exactly as before
-      this split existed.
+      delivery either (no supply declared, no computed tie, or a
+      supply-side finding), so nothing here is established at all. Plain
+      :data:`~klayout_tools.signoff._REASON_CHECK_FAILED`, exactly as
+      before this split existed.
     - a resolved ``supply_spec`` -- the ERC half *is* complete: every
       declared supply resolved to its declared island count, every declared
-      tie was computed and found, and no supply-side finding was reported.
-      Only the LVS half is unavailable, which
-      :data:`_REASON_LVS_DID_NOT_PASS` says and ``check_failed`` cannot.
+      tie was computed and found, no supply-side finding. Only the LVS half
+      is unavailable, which :data:`_REASON_LVS_DID_NOT_PASS` says and
+      ``check_failed`` cannot.
 
     The distinction matters because item 11's analog branch reads its LVS
     half out of ``net_correspondence``, which lists only *matched* nets
-    (``_build_net_correspondence`` in ``lvs_mismatch.py``) -- so the
+    (``_build_net_correspondence`` in ``lvs_mismatch.py``): the
     supply-pairing predicate is destroyed by **any** mismatch, including a
-    restated device parameter or a moved signal-net connection that cannot
-    make or break a supply connection. Collapsing that into the same
-    ``check_failed`` a block with zero supply evidence renders would read as
-    "power delivery unverified" when the actual state is "power delivery
-    verified structurally; the item's second half is unavailable for an
-    unrelated reason".
+    restated device parameter that cannot make or break a supply
+    connection, and collapsing that into the ``check_failed`` a block with
+    zero supply evidence renders would read "power delivery unverified"
+    when the actual state is "rails proven; the second half unavailable for
+    an unrelated reason".
 
-    The detail keeps the LVS part's declared-critical-metric blockers (issue
-    #2094) either way -- they are the reader's pointer to *why* the report
-    did not pass -- and, for the distinct reason, adds a ``power_delivery``
-    block naming what the ERC half actually proved (its supply nets) beside
-    the two verdict tokens that made the LVS half unavailable, so the claim
-    the reason makes stays falsifiable against the cited artifacts.
+    The detail keeps the LVS part's declared-critical-metric blockers
+    (issue #2094) either way, and for the distinct reason adds a
+    ``power_delivery`` block naming what the ERC half proved beside the
+    verdict tokens, so the claim stays falsifiable against the artifacts.
+    Issue #6903: a failing report carrying the pinned IHP runset's
+    mirrored-``inductor2`` terminal-order limitation instead renders that
+    named reason (both branches), its details under
+    ``detail.inductor_terminal_order``.
     """
     from .signoff import _REASON_CHECK_FAILED, _critical_metric_detail
+    from .signoff_runset import (
+        REASON_RUNSET_INDUCTOR_TERMINAL_ORDER,
+        mirrored_inductor_limitation,
+    )
 
     detail = _critical_metric_detail(envelope)
+    limit = mirrored_inductor_limitation(envelope)
+    named = REASON_RUNSET_INDUCTOR_TERMINAL_ORDER if limit is not None else None
+    if limit is not None:
+        detail["inductor_terminal_order"] = limit.get("details") or {}
     if supply_spec is None:
-        return _REASON_CHECK_FAILED, detail
-    return _REASON_LVS_DID_NOT_PASS, {
+        return named or _REASON_CHECK_FAILED, detail
+    return named or _REASON_LVS_DID_NOT_PASS, {
         **detail,
         "power_delivery": {
             "supply_nets": list(supply_spec["supply_nets"]),
