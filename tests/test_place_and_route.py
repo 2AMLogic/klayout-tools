@@ -8696,6 +8696,7 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
         "pin_conductor": {
             "status": "skipped",
             "reason": "no layer map resolved",
@@ -8715,6 +8716,19 @@ def _skipped_via_pad_trim(variant: str) -> dict:
     tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
     tip |= {"router_fill_violations": 0, "router_fill_scan": None}
     return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
+
+
+def _skipped_power_stack_repair(variant: str) -> dict:
+    """Issue #6909: off ASAP7 the power-stack repair is a *named* no-op,
+    with the same shape `repair_power_stack` returns everywhere."""
+    return {
+        "status": "skipped",
+        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
+        "patches": 0,
+        "v4_m4_enclosure": {"targets": 0, "repaired": 0, "left": 0},
+        "v4_m5_enclosure": {"targets": 0, "repaired": 0, "left": 0},
+        "m3_stub_spacing": {"targets": 0, "repaired": 0, "left": 0},
+    }
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8830,6 +8844,7 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
         # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
         "pin_conductor": {"status": "unchanged", "layers": []},
     }
