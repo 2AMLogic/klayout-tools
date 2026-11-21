@@ -40,8 +40,19 @@ from .drc import (
     DrcError,
 )
 from .drc_deck_includes import _deck_script_files
-from .drc_klayout_abort import deck_abort_info, deck_aborted_error
-from .drc_klayout_app import _preflight_klayout_version, _resolve_klayout_executable
+from .drc_klayout_abort import (
+    _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES,
+    _klayout_deck_error_detail,
+    deck_abort_info,
+    deck_aborted_error,
+)
+from .drc_klayout_app import (
+    _preflight_klayout_version,
+    _recorded_klayout_binary,
+    _resolve_klayout_executable,
+    _warn_binary_mismatch,
+)
+from .drc_klayout_attribution import _attribute_violations_to_instances
 from .drc_klayout_launch import launch_klayout_deck
 from .pdk import PdkNotFoundError, find_pdk_for_deck
 
@@ -132,10 +143,8 @@ def _parse_klayout_rdb_report(
     ``"external"`` (this module cannot recover a `width`/`space`/... kind
     from RDB XML alone), and ``violations[].layer`` echoes the same rule id
     (an external deck's own category naming is the only per-violation layer
-    identity available). ``source_cell``/``source_path`` are always ``None``
-    -- per-instance attribution (see :func:`_attribute_to_instance`) needs
-    this module's own instance-tree walk against the *input* layout, which an
-    RDB report does not carry.
+    identity available). ``source_cell``/``source_path`` are left ``None``
+    here; the caller fills them (``drc_klayout_attribution``).
 
     ``bbox``/``polygon`` are derived from every coordinate pair embedded in
     an item's ``<values><value>`` text (see :data:`_RDB_COORD_RE`), converted
@@ -311,65 +320,24 @@ def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
     return lines
 
 
-#: Cap on how many lines of klayout's own output a deck-abort error message
-#: carries (issue #2333). The whole captured stdout/stderr is surfaced below
-#: this size -- the point of the change is that a *non*-``ERROR``-prefixed
-#: line (``sh: pmap: command not found``) is usually the causal one -- but a
-#: deck that prints a per-rule progress line for thousands of rules should
-#: not turn a single error into a multi-megabyte message. When the cap trips,
-#: the **tail** is what survives (the abort is at the end of the run) and any
-#: ``ERROR`` line from the omitted head is repeated so the detection signal is
-#: never lost to truncation.
-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES = 500
+_DECK_OUTPUT_WORKDIR_PLACEHOLDER = "<klt-drc-klayout-workdir>"
 
 
-def _klayout_deck_error_detail(
-    stdout: str | None, stderr: str | None, error_lines: list[str]
-) -> str:
-    """The klayout output to quote in a deck-abort :class:`DrcError` (issue
-    #2333), stdout before stderr.
+def _klayout_deck_output(stdout: str | None, work_dir: str) -> dict[str, Any]:
+    """Keep the deck's stdout as evidence, replacing the temporary work path.
 
-    Deliberately **not** ``error_lines`` alone. ``_klayout_deck_error_lines``
-    keeps only lines starting with ``ERROR`` -- correct for *detecting* a
-    failed deck (a rule named ``ERROR_CHECK.1`` must not be misread as one),
-    but wrong for *explaining* it: the line that says why is routinely not
-    ``ERROR``-prefixed. The motivating case is a PDK driver that shells out
-    to a host utility the machine does not have, where klayout's captured
-    output is::
-
-        sh: pmap: command not found
-        ERROR: In main.drc: undefined method 'strip' for nil
-        ERROR: NoMethodError: undefined method 'strip' for nil in ...
-
-    Quoting only the ``ERROR`` lines drops the one line that identifies the
-    real cause and leaves a nil-dereference that reads like a broken rule
-    deck. So the full captured output is surfaced (subject to
-    :data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`), and ``error_lines`` is
-    used only as the fallback for the impossible-in-practice case of an empty
-    capture.
+    Preserve short logs verbatim after scrubbing. For longer logs, retain the
+    tail (including any final summary) and report the original line count.
     """
-    chunks = [
-        stream.strip() for stream in (stdout, stderr) if stream and stream.strip()
-    ]
-    combined = "\n".join(chunks)
-    if not combined:
-        return "\n".join(error_lines)
-
-    lines = combined.splitlines()
+    text = (stdout or "").replace(work_dir, _DECK_OUTPUT_WORKDIR_PLACEHOLDER)
+    lines = text.splitlines()
     if len(lines) <= _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:
-        return combined
-
-    kept = lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]
-    kept_set = {line.rstrip() for line in kept}
-    dropped_errors = [line for line in error_lines if line.rstrip() not in kept_set]
-    head = [
-        f"... ({len(lines) - len(kept)} earlier lines omitted; "
-        "klt kept the tail, where the abort is)"
-    ]
-    if dropped_errors:
-        head.extend(dropped_errors)
-        head.append("... (end of ERROR lines recovered from the omitted section)")
-    return "\n".join(head + kept)
+        return {"stdout": text, "truncated": False, "line_count": len(lines)}
+    return {
+        "stdout": "\n".join(lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]),
+        "truncated": True,
+        "line_count": len(lines),
+    }
 
 
 def _check_klayout_run(
@@ -1324,8 +1292,12 @@ def run_drc_klayout_engine(
     on a run that actually tolerated deck errors via ``allow_deck_errors``,
     a second additive ``engine_deck_errors`` field (issue #1941):
     ``{"exit_status": <int>, "error_lines": [<klayout's own ERROR lines>]}``.
-    That key is omitted entirely otherwise, so an ordinary run's payload is
-    byte-identical to previous releases'. ``deck`` is
+    That key is omitted entirely otherwise. Since issue #6613, every run
+    that produced a report also carries the additive ``deck_output``
+    field: ``{"stdout": <deck's captured stdout, tail-capped and
+    work-dir-scrubbed>, "truncated": <bool>, "line_count": <int>}`` --
+    execution evidence to cite, never a verdict change (see
+    :func:`_klayout_deck_output`). ``deck`` is
     ``deck_file`` itself (there is no separate short deck *name* the way the
     curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
     arbitrary PDK-native script is identified by its own path).
@@ -1434,10 +1406,9 @@ def run_drc_klayout_engine(
     # names the wrong thing. Fail before the subprocess, naming the utility.
     _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
 
-    # Issue #2689: opt-in application-version floor, probed on the very
-    # executable launched below, before any deck work.
     klayout_exe, klayout_override = _resolve_klayout_executable(klayout_binary)
-    _preflight_klayout_version(klayout_exe, min_klayout_version)
+    klayout_app_version = _preflight_klayout_version(klayout_exe, min_klayout_version)
+    recorded_binary = _recorded_klayout_binary(klayout_exe, klayout_override)
 
     negative_control_result = None
     if negative_control is not None:
@@ -1504,9 +1475,13 @@ def run_drc_klayout_engine(
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
             report_path, dbu
         )
+        _attribute_violations_to_instances(violations, top_cells[0])  # issue #5661
         coverage_assertion = _evaluate_category_assertion(
             expected_rule_categories, rule_categories, deck_errored, expected_names
         )
+        # Issue #6613: built inside the `try` so the `work_dir` path can be
+        # scrubbed from the captured stdout before the temp dir goes away.
+        deck_output = _klayout_deck_output(completed.stdout, work_dir)
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -1537,6 +1512,18 @@ def run_drc_klayout_engine(
     )
     deck_global_warnings = _missing_deck_globals_warning(deck_file, deck_vars)
     rollup = coverage_rollup({"coverage": coverage}, failed=bool(violation_count))
+    provenance = build_provenance(
+        deck_name=os.path.basename(deck_file),
+        deck_path=deck_file,
+        pdk=pdk_info,
+        input_path=path,
+        deck_options=deck_vars,
+        include_klayout_version_mismatch=True,
+        klayout_version_override=klayout_app_version,
+        klayout_version_override_active=True,
+    )
+    _with_deck_tree(provenance, deck_file)  # adds deck.tree, in place
+    _warn_binary_mismatch(provenance)
     return {
         "schema_version": SCHEMA_VERSION,
         # Issue #2659: same `{path, scope}` normalization the curated engine's
@@ -1546,13 +1533,7 @@ def run_drc_klayout_engine(
         ),
         "deck": deck_file,
         "engine": "klayout",
-        # Additive (issue #4950): present only when a binary override
-        # (--klayout-binary / $KLT_KLAYOUT_BINARY) was in force.
-        **(
-            {"environment": {"klayout_binary": klayout_override}}
-            if klayout_override is not None
-            else {}
-        ),
+        "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
         # tolerated a failed deck run (issue #1941) -- an ordinary run's
         # payload is unchanged, and a tolerated one is self-describing
@@ -1568,6 +1549,11 @@ def run_drc_klayout_engine(
             if deck_errored
             else {}
         ),
+        # Additive (issue #6613): the deck's own captured stdout, kept as
+        # citable execution evidence on every successful run (tolerated
+        # deck errors included) -- bounded, work-dir-scrubbed, and never a
+        # status upgrade. See `_klayout_deck_output`.
+        "deck_output": deck_output,
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": violation_count,
@@ -1594,17 +1580,7 @@ def run_drc_klayout_engine(
             if negative_control_result is not None
             else {}
         ),
-        "provenance": _with_deck_tree(
-            build_provenance(
-                deck_name=os.path.basename(deck_file),
-                deck_path=deck_file,
-                pdk=pdk_info,
-                input_path=path,
-                deck_options=deck_vars,
-                include_klayout_version_mismatch=True,
-            ),
-            deck_file,
-        ),
+        "provenance": provenance,
     }
 
 

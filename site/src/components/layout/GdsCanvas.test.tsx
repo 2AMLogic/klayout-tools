@@ -216,7 +216,8 @@ describe("GdsCanvas", () => {
   beforeEach(() => {
     recording = recordingContext();
     getContextSpy = vi.spyOn(HTMLCanvasElement.prototype, "getContext");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // The cast lets this test double, which returns the recording 2D
+    // context, stand in for `getContext`'s overloaded signature.
     getContextSpy.mockImplementation(((..._args: unknown[]) => recording.ctx) as any);
     // jsdom reports a zero-sized layout for everything; give the viewer a
     // surface so its fit-to-view math has something to work with.
