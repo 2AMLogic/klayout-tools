@@ -7,7 +7,6 @@ keeps, issue #2766); the local fixtures mirror that module's helpers.
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
 
@@ -137,17 +136,8 @@ def test_cli_deck_flag_parser_and_check_guard(capsys):
     assert excinfo.value.code == 2
     capsys.readouterr()  # drop the usage text the probe wrote to stderr
 
-    check_args = argparse.Namespace(
-        request=None,
-        format="json",
-        check="report.json",
-        rerun=False,
-        deck="sky130",
-        deck_file=None,
-        deck_var=None,
-        layout=None,
-        progress=None,
-        output=None,
+    check_args = parser.parse_args(
+        ["lvs", "--check", "report.json", "--deck", "sky130", "--format", "json"]
     )
     assert lvs_run(check_args) == 1
     payload = json.loads(capsys.readouterr().err)
