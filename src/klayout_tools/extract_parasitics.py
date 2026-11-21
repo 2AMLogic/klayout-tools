@@ -76,7 +76,7 @@ from .parasitic_integrity import (
 from .pdk_models import equivalent_rectangle_um
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import klayout.db as kdb
 
@@ -769,9 +769,15 @@ class _ResistanceGraphCollector:
     method is a no-op when ``enabled`` is false, so the caller stays
     branch-free and the default path does no graph work and adds no key."""
 
-    def __init__(self, enabled: bool, r_cut_ohm: float | None = None) -> None:
+    def __init__(
+        self,
+        enabled: bool,
+        r_cut_ohm: float | None = None,
+        caps: Mapping[str, int] | None = None,
+    ) -> None:
         self._enabled = enabled
         self._r_cut_ohm = r_cut_ohm
+        self._caps = caps
         self._roles: dict[
             Any, list[tuple[str, float | None, kdb.Region, kdb.Region | None]]
         ] = {}
@@ -804,6 +810,7 @@ class _ResistanceGraphCollector:
                 dbu,
                 entry["resistance_ohm"],
                 self._r_cut_ohm,
+                self._caps,
             )
 
 
@@ -814,14 +821,12 @@ def _copy_resistance_graph(entry: dict[str, Any], report_net: dict[str, Any]) ->
 
 
 def _with_selected_resistance(report: dict[str, Any]) -> dict[str, Any]:
-    """Add the additive scalar-selection provenance (issue #2983).
-
-    The graph result is selected only when the net has exactly two terminals,
-    the solve is ``ok`` and the pair resistance is a number. Anything else
-    (``unsupported``, ``skipped``, three or more terminals, a disconnected
-    pair) keeps the legacy scalar, and ``resistance_source_reason`` says why.
-    ``resistance_ohm`` itself is never changed; this only reports which value
-    a caller that wants the topology-aware scalar should read."""
+    """Add the additive scalar-selection provenance (issue #2983). The graph
+    value is selected only for exactly two terminals, an ``ok`` solve and a
+    numeric pair resistance; anything else (``unsupported``, ``skipped``, a
+    disconnected pair) keeps the legacy scalar and ``resistance_source_reason``
+    says why. ``resistance_ohm`` itself never changes -- this only reports
+    which value a caller wanting the topology-aware scalar should read."""
     terminals = report["terminals"]
     pair = report["pair_resistance_ohm"]
     selected: float | None = None
@@ -851,23 +856,19 @@ def _resistance_graph_report(
     dbu: float,
     legacy_resistance_ohm: float,
     r_cut_ohm: float | None = None,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """The additive ``parasitics.nets[].resistance_graph`` object for one net
-    (issue #2982, Stage 3.D5 increment 3).
-
-    ``roles`` is ``(role name, sheet resistance, net region, drawn region)``
-    per conductor role the net has geometry on. This only converts the
-    per-net geometry :func:`_compute_parasitics` already holds into the graph
-    builder's inputs and renders the builder's and solver's results; it adds
-    no geometry or solving logic. ``status``, ``terminals``,
-    ``pair_resistance_ohm`` and the diagnostics are taken from
-    :class:`~klayout_tools.extract_resistance_graph.TerminalResistanceMatrix`
-    as-is; ``legacy_resistance_ohm`` is the unchanged series-sum scalar.
+    (issue #2982): ``roles`` converted into the builder's inputs, the builder's
+    and the solver's results rendered as-is and ``legacy_resistance_ohm`` the
+    unchanged series sum. It adds no geometry or solving logic.
 
     ``r_cut_ohm`` is the caller's per-cut via/contact resistance, forwarded
     from ``--resistance-graph-r-cut`` and ``None`` only without it, as ``klt
     extract`` does not read the decks' ``ParasiticsDeck.cuts`` yet (#3053); a
-    landing then reports ``via_resistance_unknown`` (``unsupported``)."""
+    landing then reports ``via_resistance_unknown`` (``unsupported``). ``caps``
+    are the explicit ``--resistance-graph-max-*`` values by builder keyword
+    (issue #6964); a cap left out keeps the builder's default."""
     from .extract_resistance_graph import (
         RoleInput,
         build_resistance_graph,
@@ -879,7 +880,7 @@ def _resistance_graph_report(
         RoleInput(name, sheet_res, tuple(region.merged().each()))
         for name, sheet_res, region, _drawn in roles
     ]
-    graph = build_resistance_graph(role_inputs, ports, landings, dbu)
+    graph = build_resistance_graph(role_inputs, ports, landings, dbu, **(caps or {}))
     matrix = terminal_resistance_matrix(graph, dbu=dbu)
     # An unsupported graph's matrix just repeats the graph's diagnostics.
     reported = (
@@ -1086,6 +1087,7 @@ def _compute_parasitics(
     capacitor_top_regions: dict[str, kdb.Region] | None = None,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compute one first-order lumped ``(R, C)`` per net, plus net-to-net
     vertical-overlap coupling capacitance, from the extracted per-net/
@@ -1526,10 +1528,8 @@ def _compute_parasitics(
         num_metals,
     )
     contact_layer_index = layer_index.get("contact")
-    # `resistance_graph` (issue #2982): each net's per-role geometry and
-    # landings, kept only when the opt-in flag is on.
     graph_collector = _ResistanceGraphCollector(
-        resistance_graph, resistance_graph_r_cut_ohm
+        resistance_graph, resistance_graph_r_cut_ohm, resistance_graph_caps
     )
 
     for net in nets:

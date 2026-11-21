@@ -112,6 +112,9 @@ from .extract_runset_flags import (
     provenance_hash_check as provenance_hash_check,
 )
 from .extract_runset_flags import (
+    refuse_batch_for_runset_engine as refuse_batch_for_runset_engine,
+)
+from .extract_runset_flags import (
     refuse_unsupported as refuse_unsupported,
 )
 from .extract_runset_flags import (
