@@ -1274,6 +1274,8 @@ def test_stubbed_run_reports_the_full_contract_shape(tmp_path, monkeypatch):
         "env": {},
         # Additive (issue #5697): `{}` without `request.parameters`.
         "parameters": {},
+        # Additive (issue #6906): `[]` without `testbench.plusargs`.
+        "plusargs": [],
         # Additive (issue #1002): `null` on any run without `options.sdf`,
         # so an unannotated verdict is never mistakable for an annotated one.
         "sdf": None,

@@ -227,13 +227,10 @@ def test_plusargs_validation(tmp_path, value, match):
         run_functional_verification(request)
 
 
-def test_plusargs_with_cocotb_module_is_unknown_field(tmp_path):
-    request_path = _stage(tmp_path)
-    doc = json.loads(request_path.read_text())
-    doc["testbench"] = {"module": "test_x", "plusargs": ["+a"]}
-    request_path.write_text(json.dumps(doc))
-    with pytest.raises(FunctionalVerificationError, match="plusargs"):
-        run_functional_verification(str(request_path))
+# `testbench.plusargs` with `testbench.module` is no longer an unknown
+# field: issue #6906 accepts and forwards it on the cocotb path. Its
+# validation, reservation, forwarding, and echo are covered by
+# tests/test_functional_verification_plusargs.py.
 
 
 @needs_icarus
