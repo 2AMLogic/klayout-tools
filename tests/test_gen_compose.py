@@ -3254,6 +3254,7 @@ def test_compose_reports_per_leg_reasons_when_a_bundle_pin_cannot_be_reached(
             "connectivity": [
                 {
                     "net": "BUS",
+                    "layer_role": "metal",  # no #6920 climb: keep the rejection
                     "pins": [
                         {"block": "b1", "port": "P1"},
                         {"block": "b1", "port": "P2"},
@@ -4663,10 +4664,8 @@ def _diffpair_request(dp, mir, *, dp_port, mir_port, pdk_root, spacing_um=1.0):
 
 def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
     # #199 case 1's minimal repro: two _D ports (both direction_deg: 0) on
-    # adjacent blocks. The backbone would have to cross the *destination*
-    # block's full width to reach its far-side _D pin, plowing straight
-    # through that device's own _S pin on the way -- a device-level short
-    # `klt extract` would otherwise catch only after the fact.
+    # adjacent blocks -- the backbone crosses the destination block's full
+    # width through its own _S pin: a device-level short.
     dp = _gen_block(
         tmp_path,
         pdk_root,
@@ -4689,6 +4688,8 @@ def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
     request = _diffpair_request(
         dp, mir, dp_port="Q1_1_D", mir_port="M1_1_D", pdk_root=pdk_root
     )
+    # The net names its own plane: no #6920 climb, single-plane rejection.
+    request["connectivity"][0]["layer_role"] = "metal"
     request["options"] = {"cell_name": "test4", "output": str(output)}
     report = compose(request)
 
@@ -4703,11 +4704,8 @@ def test_compose_rejects_same_facing_port_pair(tmp_path, pdk_root):
 
 
 def test_compose_rejects_same_facing_port_pair_across_a_third_block(tmp_path, pdk_root):
-    # The same same-facing short, but with the two same-facing blocks not
-    # adjacent -- the backbone also has to cross clean through the
-    # in-between block's bbox, exercising the third-party-block branch of
-    # the obstacle-overlap check (not just "the two connected blocks'"
-    # own-block branch).
+    # The same short, blocks not adjacent -- also crossing the in-between
+    # block: the third-party-block branch of the obstacle-overlap check.
     dp = _gen_block(
         tmp_path,
         pdk_root,
@@ -4744,6 +4742,7 @@ def test_compose_rejects_same_facing_port_pair_across_a_third_block(tmp_path, pd
             "connectivity": [
                 {
                     "net": "N1",
+                    "layer_role": "metal",  # single-plane verdict (#6920 climb off)
                     "pins": [
                         {"block": "diffpair", "port": "Q1_1_D"},
                         {"block": "mirror", "port": "M1_1_D"},
@@ -6198,6 +6197,8 @@ def test_compose_routes_same_facing_port_pair_when_waypoints_um_clears_it(
             "connectivity": [
                 {
                     "net": "N1",
+                    # No-waypoints control: no #6920 climb, rejection stays.
+                    **({"layer_role": "metal"} if waypoints_um is None else {}),
                     "pins": [
                         {"block": "b1", "port": "P1"},
                         {"block": "b2", "port": "P1"},
@@ -6717,13 +6718,16 @@ def test_compose_rejects_route_that_crosses_an_already_routed_net(tmp_path, pdk_
 
 
 def test_compose_route_vs_route_collision_is_order_dependent(tmp_path, pdk_root):
-    # Consistent with every other route_two_pin() check: a net is compared
-    # only against whatever geometry already exists at the time it is
-    # processed. Reversing connectivity[] order flips which net "wins" --
-    # NET_V (now first) routes, NET_H (now second) is rejected instead.
+    # A net is compared only against whatever geometry already exists when
+    # it is processed: reversing connectivity[] order flips the winner.
+    # NET_H names its own plane so the #6920 climb stays out; NET_V's own
+    # waypoints already suppress its climb.
     output = tmp_path / "cross_reversed.gds"
     request = _crossing_routes_fixture(tmp_path, pdk_root)
     request["connectivity"] = list(reversed(request["connectivity"]))
+    next(e for e in request["connectivity"] if e["net"] == "NET_H")["layer_role"] = (
+        "metal"
+    )
     request["options"] = {"cell_name": "cross_reversed", "output": str(output)}
     report = compose(request)
 
@@ -8958,15 +8962,10 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
     # self-net across `n2`'s two source straps (the documented
     # `routing.cross_block_layer_role` case -- it falls back to met1), and
     # `FAN` is an unrelated net reaching `n2`'s north-facing gate pad from
-    # `n1` in the west, i.e. from *below* the gate, across the Q1_1_S strap
-    # `BUS` itself lands on.
-    #
-    # Before the fix both nets reported `routed: true`, `unrouted_nets == []`
-    # and `warnings == []`, while `klt extract` recovered them as one
-    # `BUS|FAN` node carrying 6 device terminals. The composed GDS is the
-    # ground truth here, so this test asserts against `klt extract` directly:
-    # whatever `gen-compose` reports, the two labels must never end up on one
-    # extracted net.
+    # *below* the gate, across the Q1_1_S strap `BUS` itself lands on.
+    # Before the fix both nets reported `routed: true` while `klt extract`
+    # recovered them as one `BUS|FAN` node -- the composed GDS is the ground
+    # truth here: the two labels must never end up on one extracted net.
     n1 = _gen_block(
         tmp_path, pdk_root, "diff_pair", "n1", add_guard_ring=False, gate_contact=True
     )
@@ -8996,6 +8995,8 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
                 },
                 {
                     "net": "FAN",
+                    # No #6920 climb: the far-side rejection stays asserted.
+                    "layer_role": "metal",
                     "pins": [
                         {"block": "n1", "port": "Q1_1_D"},
                         {"block": "n2", "port": "Q1_1_G"},
@@ -9217,10 +9218,8 @@ def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
     tmp_path, pdk_root, monkeypatch
 ):
     # Regression guard for #1057/#1386: the retry proposes lanes, it never
-    # waives the collision check. With the lane generator yielding nothing to
-    # try, the identical request must fall straight back to the pre-#1393
-    # rejection -- `routed: false` naming the already-routed net, not a
-    # silently-accepted short.
+    # waives the collision check -- with none to try, the request falls
+    # back to the pre-#1393 rejection, not a silently-accepted short.
     monkeypatch.setattr(
         gen_compose, "_self_net_cross_layer_lane_waypoints_um", lambda *a, **k: []
     )
@@ -9234,11 +9233,14 @@ def test_compose_two_same_block_self_nets_still_rejected_when_no_lane_clears(
         gate_contact=True,
     )
     output = tmp_path / "dp_split_gates_no_lane.gds"
-    report = compose(
-        _diff_pair_split_gate_request(
-            pdk_root, dp, output, "dp_split_gates_no_lane", ("GA", "GB")
-        )
+    request = _diff_pair_split_gate_request(
+        pdk_root, dp, output, "dp_split_gates_no_lane", ("GA", "GB")
     )
+    # GB's own named plane: no #6920 climb off its met2 collision plane.
+    next(e for e in request["connectivity"] if e["net"] == "GB")["layer_role"] = (
+        "metal2"
+    )
+    report = compose(request)
 
     assert report["unrouted_nets"] == ["GB"]
     blocker = next(
@@ -9898,6 +9900,8 @@ def test_cli_gen_compose_partial_success_exit_3(tmp_path, pdk_root, capsys):
                 "connectivity": [
                     {
                         "net": "BUS",
+                        # No #6920 climb: unroutable exit-3 vehicle.
+                        "layer_role": "metal",
                         "pins": [
                             {"block": "b1", "port": "P1"},
                             {"block": "b1", "port": "P2"},
@@ -12128,20 +12132,19 @@ def _same_facing_drain_request(m1, m2, pdk_root, output, p_orientation=None):
     }
 
 
-def test_compose_same_facing_drain_net_is_unrouted_without_orientation(
+def test_compose_same_facing_drain_net_routes_via_plane_climb_without_orientation(
     tmp_path, pdk_root
 ):
-    # Baseline (pre-#1166, reproducing #1164's root cause #1): "p"'s own D is
-    # on p's *far* side from "n" -- wiring n.D to p.D forces the backbone
-    # through p's own body, which route_two_pin's obstacle-overlap check
-    # (check 5) rejects.
+    # Pre-#1166 baseline: p's own D is on its far side, so the fixed shape
+    # is rejected on the net's plane -- #6920's climb lifts it by default;
+    # the mirrored companion below still exercises orientation itself.
     m1 = _gen_block(tmp_path, pdk_root, "mos_array", "nfet_like", rows=1, cols=1)
     m2 = _gen_block(tmp_path, pdk_root, "mos_array", "pfet_like", rows=1, cols=1)
     output = tmp_path / "inverter_unrouted.gds"
     report = compose(_same_facing_drain_request(m1, m2, pdk_root, output))
 
-    assert report["unrouted_nets"] == ["VOUT"]
-    assert report["nets"][0]["routed"] is False
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
 
 
 def test_compose_mirrored_block_routes_same_facing_drain_net_and_is_drc_clean(
@@ -15490,16 +15493,13 @@ def test_compose_per_leg_layer_role_routes_one_leg_of_a_bundle_on_a_second_plane
 
 
 def test_compose_per_leg_layer_role_defaults_to_the_nets_own_plane(tmp_path, pdk_root):
-    # Control for the test above: the identical request with `layer_role`
-    # dropped from the first leg leaves that leg on the net's own plane (li1),
-    # where the same-facing drain pair it names has no drawable path -- the
-    # backbone would have to reach u1's pad through u1's own body. So the
-    # bundle only partially routes, and the *only* difference between the two
-    # tests is the one field. (This is also why the leg-level tier exists at
-    # all: the net's other leg is perfectly routable on li1, so moving the
-    # whole net to met1 would be a bigger hammer than the problem.)
+    # Control for the test above: with `layer_role` dropped from the first
+    # leg, it stays on the net's own plane (li1), where the same-facing pair
+    # has no drawable path -- the bundle only partially routes. The net names
+    # its own plane, so the #6920 climb stays off.
     output = tmp_path / "per_leg_default.gds"
     request = _drain_bus_request(tmp_path, pdk_root, output, "per_leg_default")
+    request["connectivity"][0]["layer_role"] = "metal"
     request["connectivity"][0]["legs"] = [
         {
             "from_pin": {"block": "u0", "port": "U0_D"},

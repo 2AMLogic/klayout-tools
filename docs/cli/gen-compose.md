@@ -1138,6 +1138,27 @@ into the circuit.)
   colliding net) — this is a bounded, one-level retry, not a general router,
   and a genuine same-layer short with no `routing.cross_block_layer_role`
   configured is entirely unaffected, rejecting exactly as before this issue.
+- **A rejected leg now climbs the PDK's own metals stack automatically
+  (#6920, fixed).** The bounded retries above all live on the planes the
+  request named: the one-jog backbone plus its detour lanes and channel
+  tracks on `routing.layer_role`, the one configured
+  `routing.cross_block_layer_role` hop. A leg the fixed shape can never
+  route on its own plane — most visibly a same-facing port pair in a row
+  placement, whose connecting run reaches a pin from behind (#1895), or a
+  leg colliding with an earlier net's route once several nets share the row —
+  used to leave the net in `unrouted_nets[]` with nothing left to try, even
+  though every such rejection text already pointed at the escape ("route to
+  a layer_role with a metal2/via stack instead"). `route_bundle()` now
+  retries such a leg on each higher metal of the resolved PDK's own
+  `metals` stack before reporting it unroutable: each attempt is a full
+  `route_two_pin()` pass (every routability check, via-drop ladder included)
+  against that plane's own drawn-block geometry, gated by the same
+  route-vs-route check, and drawing at the plane's own deck-minimum width
+  when `routing.width_um` is narrower. The climb is off for a net that
+  named its own plane (`connectivity[].layer_role`, #1655 "explicit wins")
+  and for caller-supplied `waypoints_um` paths; a request that configured
+  `routing.cross_block_layer_role` keeps that retry first, the climb
+  continuing past it only when the configured hop also fails.
 - **A via-drop landing pad (or stub-widen box) is checked against its *own*
   block's other drawn geometry, not just against `bbox_um`/`ports[]` (#1520,
   fixed).** The two checks above only ever compare a candidate leg's own
