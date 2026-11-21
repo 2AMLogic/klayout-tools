@@ -1,6 +1,7 @@
 """Public SDF observation gates, with a controlled simulator boundary (#2130)."""
 
 import builtins
+import hashlib
 import io
 import json
 import subprocess
@@ -141,6 +142,14 @@ def test_captured_readable_sdf_logs_preserve_coverage(
         assert annotation["dropped"]["timingcheck"]["count"] == 2
     else:
         assert annotation["dropped"] == {}
+    # Issue #5550: the provenance digest covers the user's RTL only -- not
+    # the SDF file, and not the generated wrapper/shim this annotated build
+    # substituted into the build list.
+    assert report["provenance"]["input"] == {
+        "content_hash": "sha256:"
+        + hashlib.sha256((tmp_path / "gcd.v").read_bytes()).hexdigest(),
+        "role": "source",
+    }
     assert _tier_item(report, tmp_path, 7)["status"] == "met"
 
 

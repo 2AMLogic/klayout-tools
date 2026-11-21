@@ -34,7 +34,7 @@
     "timeout_seconds": {
       "type": "integer",
       "minimum": 1,
-      "description": "Per-job wall-clock cap, clamped *down* (never up) by the instance watchdog. Derived as the fully-serial worst case (`options.timeout_s` * corner count) plus startup slack -- see sim_batch._default_batch_job_timeout_s. A real run finishes far inside it; it exists so a wedged job is killed rather than billing until the watchdog fires."
+      "description": "Per-job wall-clock cap, clamped *down* (never up) by the instance watchdog. Derived as the fully-serial worst case (`options.timeout_s` * corner count) plus startup slack -- see sim_batch._default_batch_job_timeout_s -- or, when the request states `batch.job_timeout_s` (issue #5544), that stated bound itself (see sim_batch_job_timeout.resolve_job_timeout_s); every shard of a split run carries the same value either way. A real run finishes far inside the serial bound (its units run concurrently); it exists so a wedged job is killed rather than billing until the watchdog fires."
     }
   }
 }

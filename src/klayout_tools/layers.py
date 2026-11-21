@@ -207,10 +207,9 @@ def layers_report(
     deck_names: dict[tuple[int, int], str] = {}
     deck_info: dict[str, Any] | None = None
     if deck is not None:
-        from ._provenance import sha256_file
         from .decks import (
             UnknownDeckError,
-            deck_source_path,
+            deck_content_hash,
             get_deck,
             get_layer_names,
         )
@@ -220,10 +219,9 @@ def layers_report(
         except UnknownDeckError as exc:
             raise LayersError(str(exc)) from exc
         deck_names = get_layer_names(deck)
-        digest = sha256_file(deck_source_path(deck))
         deck_info = {
             "name": deck,
-            "content_hash": f"sha256:{digest}" if digest is not None else None,
+            "content_hash": deck_content_hash(deck),
         }
 
     layout = load_layout(path, LayersError)
