@@ -42,6 +42,7 @@ disclosed, and a netlist that drops nothing carries no disclosure at all.
 
 from __future__ import annotations
 
+import re
 import shutil
 from collections.abc import Mapping
 from typing import Any
@@ -121,6 +122,37 @@ def _uncarried_parameters(
     return uncarried
 
 
+def _instantiated_device_counts(circuit: Any) -> dict[str, int]:
+    """Per device class, the devices *instantiated from* ``circuit``: its own
+    plus, once per call, whatever each subcircuit it calls instantiates
+    (issue #6559).
+
+    ``device_counts`` describes the selected circuit alone, which is ``{}`` for
+    a hierarchical runset's top whose devices all sit in called cells; this is
+    the count that tells a reader a family *was* recognised. Equal to
+    ``device_counts`` for a flat extraction. Keys are the class names the
+    ``X`` cards are written onto, as in ``device_counts``."""
+    memo: dict[str, dict[str, int]] = {}
+
+    def count(node: Any, trail: tuple[str, ...]) -> dict[str, int]:
+        if node.name in memo:
+            return memo[node.name]
+        out: dict[str, int] = {}
+        for device in node.each_device():
+            name = device.device_class().name
+            out[name] = out.get(name, 0) + 1
+        for call in node.each_subcircuit():
+            called = call.circuit_ref()
+            if called is None or called.name in trail:
+                continue
+            for name, n in count(called, (*trail, called.name)).items():
+                out[name] = out.get(name, 0) + n
+        memo[node.name] = out
+        return out
+
+    return dict(sorted(count(circuit, (circuit.name,)).items()))
+
+
 def _check_device_params(netlist: Any, device_params: DeviceParams) -> list[str]:
     """Validate ``--device-param`` against the classes the runset actually
     extracted. A parameter its class does not define is an
@@ -196,6 +228,53 @@ def _netlist_description(
             "warnings[] names them per class"
         )
     return description
+
+
+def _prepare_merged_node_names(circuit: Any) -> list[dict[str, Any]]:
+    """Give the SPICE writer and the appended R/C cards one node namespace.
+
+    KLayout prints a comma as a pipe but escapes a literal pipe. Dots in
+    reports become underscores. Resolve these differences on the actual nets
+    before writing and reserve names case-insensitively, including duplicates.
+    The saved LVS database keeps the original labels and cluster IDs.
+    """
+    from .extract_parasitics import spice_safe_net_name
+
+    candidates = []
+    for net in circuit.each_net():
+        raw = net.expanded_name()
+        candidate = re.sub(
+            r"[^a-zA-Z0-9_$,]",
+            lambda match: f"_{ord(match[0]):x}_",
+            raw.replace(".", "_").replace("|", ","),
+        )
+        if candidate.startswith(","):
+            candidate = "n_" + candidate
+        candidates.append((net, raw, candidate))
+    # An existing spelling has priority over a label that normalizes onto it.
+    candidates.sort(key=lambda row: (row[1] != row[2], row[0].cluster_id))
+    reserved = {candidate.casefold() for _, _, candidate in candidates}
+    used = set()
+    aliases = []
+    for net, raw, candidate in candidates:
+        node = candidate
+        if candidate.casefold() in used:
+            suffix = 1
+            while f"{candidate}_{suffix}".casefold() in reserved:
+                suffix += 1
+            node = f"{candidate}_{suffix}"
+            reserved.add(node.casefold())
+        used.add(node.casefold())
+        if node != raw:
+            net.name = node
+            aliases.append(
+                {
+                    "runset_cluster_id": net.cluster_id,
+                    "original": raw,
+                    "node": spice_safe_net_name(node),
+                }
+            )
+    return aliases
 
 
 def _write_netlist(

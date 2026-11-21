@@ -49,7 +49,6 @@ def _build_batch_job_spec(
     *,
     corner_count: int,
     timeout_s: float,
-    keep_artifacts: bool,
     job_timeout_s: float | None = None,
     request_dir: str | None = None,
     client_version: str | None = None,
