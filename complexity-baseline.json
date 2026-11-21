@@ -785,7 +785,7 @@
     },
     {
       "file": "src/klayout_tools/sim.py",
-      "function": "_run_local_parallel",
+      "function": "_run_local_corners_pooled",
       "complexity": 14
     },
     {

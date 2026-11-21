@@ -87,7 +87,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import IO, Any, NamedTuple
@@ -6609,34 +6609,99 @@ def _run_local(
     portable_roots: sim_portable.Roots | None = None,
     stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
+    parallel: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The ``local`` backend: run each expanded corner sequentially in-process.
+    """The ``local`` backend -- and, since issue #6896, the one shared local
+    entry point both local backends bind their corner runner at.
 
-    This is the unit a backend implements -- given the expanded corner list
-    plus the already-resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. For the
-    default case (no ``deadline``/``initial_ppid``/``checkpoint``/
-    ``probe_abort``) this intentionally reproduces the original in-line loop
-    byte-for-byte (same ordering, same ``engine_version`` last-writer-wins
-    tracking) so the report JSON and on-disk artifacts are unchanged from
-    before the backend seam existed. ``max_workers``/``request`` are
-    accepted for signature parity with the other backends (every entry in
-    :data:`_BACKENDS` is called with the same keyword set) but are
-    meaningless for a sequential local runner, so both are ignored here; the
-    third return value is always ``None`` (only ``remote`` populates it).
+    The per-sweep values are bound **once** here, into ``run_corner(point)``
+    -- the single keyword forwarding into :func:`_run_corner_with_retry`, so
+    adding a simulator option is one forwarding change for both local
+    modes. ``parallel=False`` (the default) runs each corner sequentially
+    on the calling thread via :func:`_run_local_corners_sequentially`;
+    ``parallel=True`` (forwarded by :func:`_run_local_parallel`) fans them
+    across a bounded local pool via :func:`_run_local_corners_pooled`.
+
+    This is the unit a backend implements: given the expanded corner list
+    plus the resolved netlist/model paths and run options, return
+    ``(per_corner_reports, engine_version, remote_environment)``. Each
+    scheduler reproduces the original in-line loop byte-for-byte (same
+    ordering, same ``engine_version`` last-writer-wins tracking);
+    ``request`` and (unless ``parallel=True``) ``max_workers`` are
+    parity-only (see :data:`_BACKENDS`) and ignored.
+    """
+    del request  # unused by either local scheduling strategy, see docstring
+
+    def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
+        return _run_corner_with_retry(
+            point=point,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+            engine=engine,
+            ngspice_binary=ngspice_binary,
+            fail_on_diagnostic=fail_on_diagnostic,
+            ngspice_init=ngspice_init,
+            osdi_preload=osdi_preload,
+            save_mode=save_mode,
+            save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
+            waveform_max_bytes=waveform_max_bytes,
+            waveform_decimate=waveform_decimate,
+            ngspice_options=ngspice_options,
+            convergence_retry=convergence_retry,
+            portable_roots=portable_roots,
+            stimulus_lines=stimulus_lines,
+            threads_per_worker=threads_per_worker,
+        )
+
+    schedule = (
+        _run_local_corners_pooled if parallel else _run_local_corners_sequentially
+    )
+    corners, engine_version = schedule(
+        run_corner,
+        corner_points=corner_points,
+        measurements_spec=measurements_spec,
+        max_workers=max_workers,
+        deadline=deadline,
+        initial_ppid=initial_ppid,
+        checkpoint=checkpoint,
+        probe_abort=probe_abort,
+    )
+    return corners, engine_version, None
+
+
+def _run_local_corners_sequentially(
+    run_corner: Callable[[CornerPoint], tuple[dict[str, Any], str | None]],
+    *,
+    corner_points: list[CornerPoint],
+    measurements_spec: list[dict[str, Any]],
+    max_workers: int | None,
+    deadline: float | None,
+    initial_ppid: int | None,
+    checkpoint: _Checkpoint | None,
+    probe_abort: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local`` scheduling strategy: call ``run_corner`` (the runner
+    :func:`_run_local` bound once for the whole sweep, issue #6896) with
+    each corner in list order, on the calling thread.
 
     ``deadline``/``initial_ppid`` (issue #473) are checked before *starting*
     each corner: once either fires, every remaining corner is reported via
     :func:`_unrun_corner_report` (``budget_exceeded``/``orphaned``) instead
     of being run -- a corner already in flight is never interrupted (there
     is only ever one, for this sequential backend). ``checkpoint``, when
-    given, records each corner as it completes so a later ``--resume`` run
-    does not recompute it.
+    given, records each corner as it completes for a later ``--resume``.
 
     ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
     -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
     is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
-    already made *before* calling this backend at all: when given, **every**
+    already made *before* calling the backend at all: when given, **every**
     corner in ``corner_points`` is reported unrun via
     :func:`_unrun_corner_report` with that code/message/estimate, and no
     ``ngspice`` process is ever spawned for this sweep -- the whole point of
@@ -6644,7 +6709,7 @@ def _run_local(
     real corner (not just the ones after some in-flight budget/orphan check)
     burns its own ``options.timeout_s``.
     """
-    del max_workers, request  # unused: sequential local run, see docstring
+    del max_workers  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
@@ -6674,38 +6739,13 @@ def _run_local(
                 )
             )
             continue
-        result, version = _run_corner_with_retry(
-            point=point,
-            netlist_path=netlist_path,
-            models_lib=models_lib,
-            analysis=analysis,
-            measurements_spec=measurements_spec,
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            artifacts_dir=artifacts_dir,
-            engine=engine,
-            ngspice_binary=ngspice_binary,
-            fail_on_diagnostic=fail_on_diagnostic,
-            ngspice_init=ngspice_init,
-            osdi_preload=osdi_preload,
-            save_mode=save_mode,
-            save_vectors=save_vectors,
-            complex_vectors=complex_vectors,
-            waveform_max_bytes=waveform_max_bytes,
-            waveform_decimate=waveform_decimate,
-            ngspice_options=ngspice_options,
-            convergence_retry=convergence_retry,
-            portable_roots=portable_roots,
-            stimulus_lines=stimulus_lines,
-            threads_per_worker=threads_per_worker,
-        )
+        result, version = run_corner(point)
         corners.append(result)
         if version is not None:
             engine_version = version
         if checkpoint is not None:
             checkpoint.record(point.corner_id, result, version)
-    return corners, engine_version, None
+    return corners, engine_version
 
 
 def _host_max_workers_cap() -> int | None:
@@ -6819,45 +6859,25 @@ def _resolve_max_workers(max_workers: int | None) -> int:
     return max_workers
 
 
-def _run_local_parallel(
+def _run_local_corners_pooled(
+    run_corner: Callable[[CornerPoint], tuple[dict[str, Any], str | None]],
     *,
     corner_points: list[CornerPoint],
-    netlist_path: str,
-    models_lib: str | None,
-    analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
-    timeout_s: float,
-    keep_artifacts: bool,
-    want_waveforms: bool,
-    artifacts_dir: str,
     max_workers: int | None,
-    request: dict[str, Any],
-    deadline: float | None = None,
-    initial_ppid: int | None = None,
-    checkpoint: _Checkpoint | None = None,
-    probe_abort: dict[str, Any] | None = None,
-    engine: str = "ngspice",
-    ngspice_binary: str | None = None,
-    fail_on_diagnostic: tuple[str, ...] = (),
-    ngspice_init: tuple[str, ...] = (),
-    osdi_preload: tuple[str, ...] = (),
-    save_mode: str = DEFAULT_SAVE_MODE,
-    save_vectors: tuple[str, ...] = (),
-    complex_vectors: tuple[str, ...] = (),
-    waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
-    waveform_decimate: int | None = None,
-    ngspice_options: dict[str, Any] | None = None,
-    convergence_retry: dict[str, Any] | None = None,
-    portable_roots: sim_portable.Roots | None = None,
-    stimulus_lines: tuple[str, ...] = (),
-    threads_per_worker: int | None = None,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The ``local-parallel`` backend: fan the expanded corner list across a
-    bounded local worker pool.
+    deadline: float | None,
+    initial_ppid: int | None,
+    checkpoint: _Checkpoint | None,
+    probe_abort: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local-parallel`` scheduling strategy: fan the expanded corner
+    list across a bounded local worker pool, submitting ``run_corner`` (the
+    runner :func:`_run_local` bound once for the whole sweep, issue #6896)
+    and the corner's point to the pool.
 
     Corners share nothing -- each is a pure function of netlist + models +
     corner (see this module's docstring and #253/#168) -- so this is a
-    :class:`~concurrent.futures.ThreadPoolExecutor` pool over :func:`_run_corner`
+    :class:`~concurrent.futures.ThreadPoolExecutor` pool over ``run_corner``
     (a thread, not a process, pool: the actual work is the ``ngspice``
     subprocess call, which releases the GIL for the duration of the wait, so
     threads give the same concurrency as processes here without the
@@ -6866,17 +6886,12 @@ def _run_local_parallel(
     same order after every future completes, regardless of completion order
     -- the acceptance criterion that this backend's report is order-identical
     to ``local`` for the same request. ``engine_version`` is derived the same
-    "last non-``None`` wins, in corner-list order" way ``local`` computes it,
-    for the same reason: deterministic given a deterministic corner list,
-    independent of which corner's process happened to finish last.
-
-    A failing/erroring corner is reported exactly as :func:`_run_corner`
-    reports it (that function never raises) and does not abort any sibling
-    corner -- each future is independent.
-
-    ``request`` is accepted for signature parity with the other backends
-    (only ``remote`` reads it) and ignored; the third return value is always
-    ``None`` here.
+    "last non-``None`` wins, in corner-list order" way the sequential
+    scheduler computes it, for the same reason: deterministic given a
+    deterministic corner list, independent of which corner's process
+    happened to finish last. A failing/erroring corner is reported exactly
+    as ``run_corner`` reports it (:func:`_run_corner` never raises) and
+    does not abort any sibling corner -- each future is independent.
 
     **Pool size and the host cap.** ``max_workers`` (the request's
     ``options.max_workers``, or ``--max-workers``) sizes the pool; when it is
@@ -6903,12 +6918,11 @@ def _run_local_parallel(
     still in flight at that moment.
 
     ``probe_abort`` (issue #1694): identical contract to
-    :func:`_run_local`'s own ``probe_abort`` -- when given, ``stop_reason``
-    starts pre-set to its code, so ``_fill`` never submits a single corner
-    to the pool and every corner in ``corner_points`` comes back through
-    :func:`_unrun_corner_report` with that code/message/estimate.
+    :func:`_run_local_corners_sequentially`'s own -- when given,
+    ``stop_reason`` starts pre-set to its code, so ``_fill`` never
+    submits a single corner to the pool and every corner comes back
+    through :func:`_unrun_corner_report` with that code/message/estimate.
     """
-    del request  # unused: local-parallel needs no request-level context
     resolved_workers = _resolve_max_workers(max_workers)
 
     total = len(corner_points)
@@ -6944,33 +6958,7 @@ def _run_local_parallel(
                 and _stopped() is None
             ):
                 point = corner_points[next_index]
-                future = pool.submit(
-                    _run_corner_with_retry,
-                    point=point,
-                    netlist_path=netlist_path,
-                    models_lib=models_lib,
-                    analysis=analysis,
-                    measurements_spec=measurements_spec,
-                    timeout_s=timeout_s,
-                    keep_artifacts=keep_artifacts,
-                    want_waveforms=want_waveforms,
-                    artifacts_dir=artifacts_dir,
-                    engine=engine,
-                    ngspice_binary=ngspice_binary,
-                    fail_on_diagnostic=fail_on_diagnostic,
-                    ngspice_init=ngspice_init,
-                    osdi_preload=osdi_preload,
-                    save_mode=save_mode,
-                    save_vectors=save_vectors,
-                    complex_vectors=complex_vectors,
-                    waveform_max_bytes=waveform_max_bytes,
-                    waveform_decimate=waveform_decimate,
-                    ngspice_options=ngspice_options,
-                    convergence_retry=convergence_retry,
-                    portable_roots=portable_roots,
-                    stimulus_lines=stimulus_lines,
-                    threads_per_worker=threads_per_worker,
-                )
+                future = pool.submit(run_corner, point)
                 in_flight[future] = next_index
                 next_index += 1
 
@@ -7009,7 +6997,18 @@ def _run_local_parallel(
         corners.append(corner)
         if version is not None:
             engine_version = version
-    return corners, engine_version, None
+    return corners, engine_version
+
+
+def _run_local_parallel(
+    **kwargs: Any,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The ``local-parallel`` backend: :func:`_run_local` with
+    ``parallel=True`` (issue #6896 hoisted the shared signature and
+    corner-argument binding there); the pool itself is
+    :func:`_run_local_corners_pooled`.
+    """
+    return _run_local(parallel=True, **kwargs)
 
 
 #: Backend registry: name -> implementation. Membership is validated against
