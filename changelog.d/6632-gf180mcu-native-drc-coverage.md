@@ -1,0 +1,1 @@
+- **Clarified gf180mcu native DRC coverage.** The CLI can run the PDK's DRC deck. The golden-pair manifest fixtures still await a native-engine cross-check (#6632, 2026-11-18).
