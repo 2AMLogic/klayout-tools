@@ -8955,8 +8955,9 @@ def test_route_two_pin_allows_a_normal_approach_along_the_ports_own_facing():
     assert result["points_um"] == [(10.0, 2.0), (12.2, 2.0)]
 
 
+@pytest.mark.parametrize("pin_plane", [False, True])
 def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
-    tmp_path, pdk_root
+    tmp_path, pdk_root, pin_plane
 ):
     # #1895's reproduction, distilled to two blocks: `BUS` is a same-block
     # self-net across `n2`'s two source straps (the documented
@@ -8995,8 +8996,7 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
                 },
                 {
                     "net": "FAN",
-                    # No #6920 climb: the far-side rejection stays asserted.
-                    "layer_role": "metal",
+                    **({"layer_role": "metal"} if pin_plane else {}),
                     "pins": [
                         {"block": "n1", "port": "Q1_1_D"},
                         {"block": "n2", "port": "Q1_1_G"},
@@ -9016,26 +9016,26 @@ def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
         }
     )
 
-    # The documented cross-block bus still routes -- the fix must not cost
-    # `routing.cross_block_layer_role` its own intended use case (#1168).
+    # The configured cross-block bus still routes (#1168).
     bus = next(net for net in report["nets"] if net["net"] == "BUS")
     assert bus["routed"] is True, bus
-    # The offending leg is now reported, not drawn -- and says why.
     fan = next(net for net in report["nets"] if net["net"] == "FAN")
-    assert fan["routed"] is False
-    assert "FAN" in report["unrouted_nets"]
-    assert "on the side *away* from its own pin 'Q1_1_G'" in fan["legs"][0]["reason"]
+    assert fan["routed"] == (not pin_plane)
+    if pin_plane:
+        assert (
+            "on the side *away* from its own pin 'Q1_1_G'" in fan["legs"][0]["reason"]
+        )
 
-    # The composed GDS agrees: two labels, two nets, no silent merge.
     result = extract.run_extract(str(output), "sky130", top="cross_block_short_1895")
     assert result["merged_net_labels"] == []
     net_names = {net["name"] for net in result["nets"] if net.get("name")}
     assert "BUS|FAN" not in net_names
+    if not pin_plane:
+        assert "FAN" in net_names
     assert "BUS" in net_names
-    # BUS reaches exactly the two source terminals it declared -- not the
-    # gate/drain terminals it absorbed through the short before the fix.
-    bus_net = next(net for net in result["nets"] if net["name"] == "BUS")
-    assert bus_net["device_count"] == 2
+    assert (
+        next(net for net in result["nets"] if net["name"] == "BUS")["device_count"] == 2
+    )
 
 
 # --------------------------------------------------------------------------- #

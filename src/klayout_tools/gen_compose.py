@@ -3854,6 +3854,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             via_drops: list[dict[str, Any]],
             stub_widen: list[dict[str, Any]],
             layer: tuple[int, int] | None,
+            *,
+            candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
@@ -3950,14 +3952,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             this check could not see. A layer with no known ``"space"`` rule
             keeps the overlap-only test.
             """
-            # candidate_width_um (#1620): this candidate's own drawn width --
-            # cross_block_width_um when it resolved on cross_route_layer,
-            # this net's own width otherwise -- so the compared footprint
-            # matches what _write_composed_gds actually draws for it, not the
-            # primary plane's width for a leg that never drew on that plane.
-            # `net_layer_widths` (#1655) generalises that to whichever plane
-            # this net (or one of its own legs) actually named.
-            candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
+            # An automatic retry supplies the width it will draw on this plane.
+            if candidate_width_um is None:
+                candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
             region = _drawn_leg_footprint_region(
                 points_um,
                 candidate_width_um,
@@ -4184,6 +4181,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 grid_um=net_grid_um,
                 pdk_variant=pdk_info["variant"],
                 auto_plane_climb=net_auto_climb,
+                width_aware_conflict=_leg_conflict,
             )
             notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the

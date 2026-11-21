@@ -1,9 +1,9 @@
-# The glitch_filter subckt of 2AMLogic/sky130-droop-detector design/glitch_filter.spice
-# (netlist export of design/glitch_filter.sch @ main, klt-netlist-inputs
-# header preserved below) -- copied for tests/test_layout_plan_mixed_sky130_block.py
-# per issue #6920: a mixed-device block (xhigh res + MIM cap + four 5V hvi
-# FETs) whose default routing is that issue's acceptance case.
-#
+* The glitch_filter subckt of 2AMLogic/sky130-droop-detector design/glitch_filter.spice
+* (netlist export of design/glitch_filter.sch @ main, klt-netlist-inputs
+* header preserved below) -- copied for tests/test_layout_plan_mixed_sky130_block.py
+* per issue #6920: a mixed-device block (xhigh res + MIM cap + four 5V hvi
+* FETs) whose default routing is that issue's acceptance case.
+*
 ** klt-netlist-inputs: {"pdk_variant": "sky130A", "rcfile": "xschemrc", "xschem_version": "3.4.7"}
 ** sch_path: /home/ubuntu/GitHub/sky130-droop-detector/.loom/worktrees/issue-77/design/glitch_filter.sch
 .subckt glitch_filter flag_in vdd33 gnd flag_f

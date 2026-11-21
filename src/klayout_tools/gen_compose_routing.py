@@ -4035,6 +4035,7 @@ def route_bundle(
     grid_um: float = 0.0,
     pdk_variant: str | None = None,
     auto_plane_climb: bool = True,
+    width_aware_conflict: Any = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4394,6 +4395,7 @@ def route_bundle(
         leg_conflict=leg_conflict,
         grid_um=grid_um,
         auto=auto_plane_climb,
+        width_aware_conflict=width_aware_conflict,
     )
 
     legs: list[dict[str, Any]] = []
@@ -4541,24 +4543,14 @@ def route_bundle(
                 grid_um=grid_um,
             )
             reason = _leg_conflict_reason(result, leg_conflict)
-            if (
-                result["routed"]
-                and leg_conflict is not None
-                and reason is not None
-                and result.get("route_layer") != cross_block_route_layer
-            ):
-                retry = climb_ctx.retry_leg_on_cross_layer(
-                    i, j, cross_geometry, leg_spec.get("waypoints_um")
-                )
-                if retry is not None:
-                    result = retry
-                    reason = None
             if reason is not None:
-                retry = climb_ctx.climb_leg(
+                retry = climb_ctx.retry_rejected_leg(
                     i,
                     j,
                     leg_spec.get("waypoints_um"),
                     leg_effective_width_um,
+                    cross_geometry,
+                    result,
                     reason,
                 )
                 if retry is not None:
@@ -4642,26 +4634,11 @@ def route_bundle(
             cross_block_geometry_for=cross_block_geometry_for,
             grid_um=grid_um,
         )
-        reason = None if result["routed"] else result["reason"]
-        if result["routed"] and leg_conflict is not None:
-            reason = leg_conflict(
-                result["points_um"],
-                result.get("via_drops", []),
-                result.get("stub_widen", []),
-                result.get("route_layer"),
-            )
-            if (
-                reason is not None
-                and result.get("route_layer") != cross_block_route_layer
-            ):
-                retry = climb_ctx.retry_leg_on_cross_layer(
-                    i, j, cross_geometry, waypoints_um
-                )
-                if retry is not None:
-                    result = retry
-                    reason = None
+        reason = _leg_conflict_reason(result, leg_conflict)
         if reason is not None:
-            retry = climb_ctx.climb_leg(i, j, waypoints_um, width_um, reason)
+            retry = climb_ctx.retry_rejected_leg(
+                i, j, waypoints_um, width_um, cross_geometry, result, reason
+            )
             if retry is not None:
                 result = retry
                 reason = None

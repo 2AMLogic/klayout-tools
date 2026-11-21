@@ -273,11 +273,9 @@ its tie to route on a metal above the primary plane to get out past the gate
 pad, and so does a sg13cmos5l `WELL_TAP` tie (#5948): the tap sits just past
 the array's outermost diffusion on the same metal1 line as the source/drain
 pads, so a same-layer route from a source pad to it crosses that drain pad
-and the behind-the-pin guard (#1895) refuses. Since #6920 the router's
-automatic plane climb retries such a leg on each higher metal of the PDK's
-own stack by default, so these ties route without any request knob; name the
-net's own `routing.nets[<net>].layer_role` (#1655, "explicit wins") to keep
-a leg on one plane instead.
+and the behind-the-pin guard (#1895) refuses. For the sg13cmos5l well
+tie, configure a metal2/via stack with `routing.cross_block_layer_role`
+to clear the same-block crossing (#5948).
 
 A BJT `C`/collector terminal is still **deliberately** unmapped — it
 conventionally ties to a shared substrate tap a `guard_ring`/collector ring

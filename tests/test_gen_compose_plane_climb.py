@@ -24,7 +24,7 @@ MET1 = (68, 20)
 DBU = 0.001
 
 
-def _same_facing_row_fixture():
+def _same_facing_row_fixture(port_layer=LI1):
     """Three blocks in a row; the two port blocks carry east-facing ports on
     their *east* edges -- a same-facing pair, the one shape
     ``manhattan_backbone`` documents it can never route (the connecting run
@@ -44,6 +44,11 @@ def _same_facing_row_fixture():
         },
         "m": {"id": "m", "port_names": set(), "ports": {}},
     }
+    for block_id, port_name in (("a", "Y"), ("b", "A")):
+        blocks[block_id]["ports"][port_name]["layer"] = {
+            "layer": port_layer[0],
+            "datatype": port_layer[1],
+        }
     bboxes = {
         "a": {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 10.0},
         "b": {"x0": 24.0, "y0": 0.0, "x1": 34.0, "y1": 10.0},
@@ -54,7 +59,7 @@ def _same_facing_row_fixture():
     return blocks, offsets, bboxes, pins
 
 
-def _geometry_for_layer(bboxes):
+def _geometry_for_layer(bboxes, occupied=(LI1,)):
     """``geometry_for_layer(layer)``-shaped factory: every block draws its own
     bbox on li1 (so the primary-plane obstacle/far-side checks fire against
     real drawn metal) and nothing on any higher plane (so the #1656/#1681
@@ -66,7 +71,7 @@ def _geometry_for_layer(bboxes):
         def fetch(block_id, _cache=cache, _layer=layer):
             if block_id in _cache:
                 return _cache
-            if _layer == LI1:
+            if _layer in occupied:
                 bb = bboxes[block_id]
                 _cache[block_id] = {
                     "region": kdb.Region(
@@ -88,7 +93,7 @@ def _geometry_for_layer(bboxes):
     return factory
 
 
-def _climb_bundle(fixture, **overrides):
+def _climb_bundle(fixture, route_layer=LI1, **overrides):
     blocks, offsets, bboxes, pins = fixture
     kwargs = dict(
         block_geometry_for=_geometry_for_layer(bboxes)(LI1),
@@ -97,7 +102,9 @@ def _climb_bundle(fixture, **overrides):
         pdk_variant="sky130A",
     )
     kwargs.update(overrides)
-    return gen_compose.route_bundle(pins, blocks, offsets, bboxes, 0.17, LI1, **kwargs)
+    return gen_compose.route_bundle(
+        pins, blocks, offsets, bboxes, 0.17, route_layer, **kwargs
+    )
 
 
 def test_rejected_leg_climbs_to_the_next_metals_plane():
@@ -108,6 +115,8 @@ def test_rejected_leg_climbs_to_the_next_metals_plane():
     assert result["routed"] is True, result["reason"]
     drawn = [leg for leg in result["legs"] if leg["routed"]]
     assert len(drawn) == 1
+    assert {drop["block_id"] for drop in drawn[0]["via_drops"]} == {"a", "b"}
+    assert all(tuple(drop["via_layer"]) == (67, 44) for drop in drawn[0]["via_drops"])
     assert drawn[0]["route_layer"] == MET1
     assert drawn[0]["width_um"] == pytest.approx(0.17)  # >= met1's own floor
 
@@ -140,3 +149,90 @@ def test_climb_width_floors_up_to_the_planes_own_deck_minimum():
     drawn = [leg for leg in result["legs"] if leg["routed"]][0]
     assert drawn["route_layer"] == (70, 20)  # met3: first plane past all three
     assert drawn["width_um"] >= 0.3
+
+
+@pytest.mark.parametrize("missing", ["a", "b", "both"])
+def test_automatic_climb_requires_a_layer_at_each_endpoint(missing):
+    fixture = _same_facing_row_fixture()
+    for block_id, port in (("a", "Y"), ("b", "A")):
+        if missing in (block_id, "both"):
+            del fixture[0][block_id]["ports"][port]["layer"]
+    assert not _climb_bundle(fixture)["routed"]
+
+
+@pytest.mark.parametrize("variant,depth", [("gf180mcuA", 3), ("gf180mcuB", 4)])
+def test_gf180_climb_stops_at_the_selected_variant_upper_metal(variant, depth):
+    deck = get_extraction_deck("gf180mcu")
+    first = deck.metals[0]
+    fixture = _same_facing_row_fixture(first)
+    geometry = _geometry_for_layer(fixture[2], deck.metals[:depth])
+
+    def route(selected):
+        return _climb_bundle(
+            fixture,
+            first,
+            pdk_variant=selected,
+            extraction_deck=deck,
+            block_geometry_for=geometry(first),
+            geometry_for_layer=geometry,
+        )
+
+    assert not route(variant)["routed"]
+    full_stack = route("gf180mcuD")
+    assert full_stack["routed"]
+    assert full_stack["legs"][0]["route_layer"] == deck.metals[depth]
+
+
+def test_automatic_climb_tries_configured_plane_after_primary_fails():
+    result = _climb_bundle(_same_facing_row_fixture(), cross_block_route_layer=MET1)
+    assert result["routed"]
+    assert result["legs"][0]["route_layer"] == MET1
+
+
+def test_spacing_rejection_climbs_and_uses_actual_width_for_parallel_net():
+    from klayout_tools.gen_compose_pad_conflicts import _leg_conflict_message
+    from klayout_tools.gen_compose_routing import _drawn_leg_footprint_region
+
+    met3 = (70, 20)
+    fixture = _same_facing_row_fixture()
+    fixture[0]["b"]["ports"]["A"]["direction_deg"] = 180
+    fixture[0]["b"]["ports"]["A"]["x_um"] = 24.0
+    # A 0.30 um-wide metal3 route centred 0.55 um above the candidate.
+    neighbour = kdb.Region(kdb.Box(14000, 5400, 19000, 5700))
+    rejected_widths = []
+
+    def spacing(points, drops, stub, layer, *, candidate_width_um=0.17):
+        if layer not in (met3, (71, 20)):
+            return "comes within 0.17um of already-routed net 'PRE'"
+        if layer != met3:
+            return None
+        region = _drawn_leg_footprint_region(
+            points, candidate_width_um, drops, stub, DBU, layer
+        )
+        reason = _leg_conflict_message(
+            "sky130A",
+            [],
+            layer,
+            "PRE",
+            region,
+            neighbour,
+            DBU,
+            None,
+            lambda _: (0.30, "met3.space.1"),
+            True,
+        )
+        if reason is not None:
+            rejected_widths.append(candidate_width_um)
+        return reason
+
+    empty = _geometry_for_layer(fixture[2], ())
+    result = _climb_bundle(
+        fixture,
+        block_geometry_for=empty(LI1),
+        geometry_for_layer=empty,
+        leg_conflict=spacing,
+        width_aware_conflict=spacing,
+    )
+    assert result["routed"], result["reason"]
+    assert rejected_widths and set(rejected_widths) == {0.30}
+    assert result["legs"][0]["route_layer"] == (71, 20)

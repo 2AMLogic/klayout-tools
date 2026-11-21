@@ -37,10 +37,11 @@ context, so a module-scope import back would be a load-time cycle.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any, NamedTuple
 
 from .decks import ExtractionDeck
-from .gen_compose_layer_rules import _min_width_um_for_layer
+from .gen_compose_layer_rules import _min_width_um_for_layer, _port_own_layer
 
 #: Rejection-reason fragments a higher plane can lift. The #1895 far-side
 #: ("from behind") family and the block-interior crossings come from
@@ -60,7 +61,11 @@ _CLIMBABLE_REASON_MARKERS = (
 
 
 def _climbable(reason: str | None) -> bool:
-    return any(marker in (reason or "") for marker in _CLIMBABLE_REASON_MARKERS)
+    if not reason:
+        return False
+    return any(marker in reason for marker in _CLIMBABLE_REASON_MARKERS) or (
+        "comes within " in reason and "of already-routed net" in reason
+    )
 
 
 def _endpoint_geometry_for(
@@ -103,6 +108,7 @@ class PlaneClimbContext(NamedTuple):
     leg_conflict: Any
     grid_um: float
     auto: bool
+    width_aware_conflict: Any
 
     def retry_leg_on_cross_layer(
         self,
@@ -164,7 +170,29 @@ class PlaneClimbContext(NamedTuple):
         ):
             return ()
         start = self.extraction_deck.metals.index(self.route_layer)
-        return self.extraction_deck.metals[start + 1 :]
+        # The family deck describes the five-metal C/D stack. A and B
+        # ship only three and four routing metals respectively.
+        limit = {"gf180mcuA": 3, "gf180mcuB": 4}.get(self.pdk_variant or "")
+        return self.extraction_deck.metals[start + 1 : limit]
+
+    def retry_rejected_leg(
+        self,
+        i: int,
+        j: int,
+        waypoints: Any,
+        width_um: float,
+        cross_geometry: Any,
+        result: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Try the configured collision fallback, then eligible higher metals."""
+        tried_cross = self.cross_block_route_layer == result.get("route_layer")
+        if result["routed"] and self.leg_conflict is not None and not tried_cross:
+            retry = self.retry_leg_on_cross_layer(i, j, cross_geometry, waypoints)
+            if retry is not None:
+                return retry
+            tried_cross = True
+        return self.climb_leg(i, j, waypoints, width_um, reason, tried_cross)
 
     def climb_leg(
         self,
@@ -173,6 +201,7 @@ class PlaneClimbContext(NamedTuple):
         leg_waypoints_um: list[tuple[float, float]] | None,
         leg_width_um: float,
         reason: str | None,
+        tried_cross: bool,
     ) -> dict[str, Any] | None:
         """Automatic metals-stack plane climb (issue #6920): retry the
         rejected leg on each higher plane, first clean win is the leg's
@@ -181,7 +210,7 @@ class PlaneClimbContext(NamedTuple):
         higher plane cannot lift, and when no per-plane geometry fetcher is
         available (the #1656/#1681 exemptions the climb depends on read
         drawn geometry per plane). The configured ``cross_block_route_layer``
-        is skipped -- ``retry_leg_on_cross_layer`` already tried it."""
+        is skipped only if the preceding route already tried it."""
         if (
             not self.auto
             or leg_waypoints_um is not None
@@ -190,12 +219,26 @@ class PlaneClimbContext(NamedTuple):
         ):
             return None
         for plane in self.planes_above():
-            if plane == self.cross_block_route_layer:
+            if tried_cross and plane == self.cross_block_route_layer:
                 continue
             retry = self._attempt_on(i, j, plane, leg_width_um)
             if retry is not None:
                 return retry
         return None
+
+    def _can_land(self, index: int, plane: tuple[int, int]) -> bool:
+        """A climb needs either a same-plane port or a physical via ladder."""
+        from .gen_compose_routing import _resolve_via_drop_layer
+
+        pin = self.pins[index]
+        port = self.blocks[pin["block"]]["ports"][pin["port"]]
+        source = _port_own_layer(port)
+        if source is None or self.extraction_deck is None:
+            return False
+        if source == plane:
+            return True
+        ladder, _ = _resolve_via_drop_layer(self.extraction_deck, plane, source)
+        return bool(ladder)
 
     def _attempt_on(
         self, i: int, j: int, plane: tuple[int, int], leg_width_um: float
@@ -208,11 +251,23 @@ class PlaneClimbContext(NamedTuple):
         whose floor is wider than the primary's."""
         from .gen_compose_routing import route_two_pin
 
+        if not all(self._can_land(index, plane) for index in (i, j)):
+            return None
         width_um = leg_width_um
+        if (
+            plane == self.cross_block_route_layer
+            and self.cross_block_width_um is not None
+        ):
+            width_um = self.cross_block_width_um
         if self.pdk_variant is not None:
             floor = _min_width_um_for_layer(self.pdk_variant, plane)
             if floor is not None and width_um < floor[0]:
                 width_um = floor[0]
+        conflict_check = (
+            partial(self.width_aware_conflict, candidate_width_um=width_um)
+            if self.width_aware_conflict is not None
+            else self.leg_conflict
+        )
         fetch = self.geometry_for_layer(plane)
         retry = route_two_pin(
             self.pins[i],
@@ -225,14 +280,14 @@ class PlaneClimbContext(NamedTuple):
             self.extraction_deck,
             _endpoint_geometry_for(self.pins, self.blocks, i, j, fetch),
             waypoints_um=None,
-            leg_conflict=self.leg_conflict,
+            leg_conflict=conflict_check,
             block_geometry_for=fetch,
             grid_um=self.grid_um,
         )
         if not retry["routed"]:
             return None
-        if self.leg_conflict is not None:
-            conflict = self.leg_conflict(
+        if conflict_check is not None:
+            conflict = conflict_check(
                 retry["points_um"],
                 retry.get("via_drops", []),
                 retry.get("stub_widen", []),
