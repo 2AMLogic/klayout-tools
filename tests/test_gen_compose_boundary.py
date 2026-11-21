@@ -108,6 +108,13 @@ def test_boundary_absent_or_null_draws_nothing(tmp_path, pdk_root):
         {"bbox_um": {"x0": 0, "y0": 0, "x1": "a", "y1": 10}},
         {"bbox_um": {"x0": 0, "y0": 0, "x1": 0, "y1": 10}},
         {"bbox_um": {"x0": 0, "y0": 5, "x1": 10, "y1": -5}},
+        # >308-digit JSON ints must be a validation error, not OverflowError.
+        {"bbox_um": {"x0": 0, "y0": 0, "x1": 10**400, "y1": 10}},
+        {"bbox_um": {"x0": -(10**400), "y0": 0, "x1": 10, "y1": 10}},
+        {"bbox_um": {"x0": 0, "y0": 0, "x1": 10, "y1": 10**400}},
+        {"bbox_um": {"x0": 0, "y0": -(10**400), "x1": 10, "y1": 10}},
+        {"bbox_um": {"x0": 0, "y0": 0, "x1": float("inf"), "y1": 10}},
+        {"bbox_um": {"x0": 0, "y0": 0, "x1": float("nan"), "y1": 10}},
     ],
 )
 def test_boundary_rejects_invalid(tmp_path, pdk_root, boundary):

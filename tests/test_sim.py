@@ -44,7 +44,9 @@ from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote, sim_steps
 from klayout_tools import remote_launcher as rl
+from klayout_tools import sim_batch_hints as sbh
 from klayout_tools import sim_measurement_results as smr
+from klayout_tools import sim_noise_mechanism as snm
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures(
@@ -934,16 +936,16 @@ def test_validate_measurement_forms_rejects_expr_colliding_with_a_later_card():
         )
 
 
-def test_validate_measurement_forms_ignores_duplicate_spice_only_names():
-    """Two `.meas` cards sharing a name is ngspice's own business, exactly as
-    before this issue -- the new uniqueness rule is scoped to `expr` so no
-    previously-accepted request starts failing."""
-    sim._validate_measurement_forms(
-        [
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
-            {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
-        ]
-    )  # must not raise
+def test_validate_measurement_forms_rejects_duplicate_spice_only_names():
+    """Issue #6289: two `.meas` cards sharing a byte-identical name are refused
+    up front -- before that issue they crashed coverage as a bare `ValueError`."""
+    with pytest.raises(sim.SimError, match="'vout' is declared more than once"):
+        sim._validate_measurement_forms(
+            [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"},
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=2u"},
+            ]
+        )
 
 
 def test_validate_measurement_forms_rejects_case_insensitive_duplicate_expr_name():
@@ -10821,15 +10823,12 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 # --------------------------------------------------------------------------- #
 # options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
 # --------------------------------------------------------------------------- #
-
-
 #: The modules that can put a `diagnostics[].code` into a `klt sim` report.
-_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sim_steps, smr)
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch, sbh, sim_steps, smr, snm)
 
-#: Emission sites where the code is supplied by the site's *caller* or by a
-#: table it iterates, so the literal cannot be read off the site itself --
-#: each is a fan-in whose vocabulary this test derives by a separate rule
-#: (the pattern tables; the `_unrun_corner_report` call-site scan).
+#: Emission sites whose code comes from the site's *caller* or a table it
+#: iterates, so no literal can be read off the site; each fan-in's vocabulary
+#: is derived by a separate rule (pattern tables; `_unrun_corner_report` calls).
 #:
 #: This is a list of **mechanisms**, not of codes: adding a new diagnostic
 #: code never changes it, which is the whole point. Adding a new *way* to
@@ -12911,7 +12910,6 @@ def test_staged_worker_directory_reproduces_model_cards_and_provenance(
         str(src / "body.spice"),
         corner_count=len(points),
         timeout_s=30.0,
-        keep_artifacts=False,
         request_dir=str(src),
     )
     # Both transports ship the same assets, in the same order, with the same

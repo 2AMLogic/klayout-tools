@@ -83,7 +83,64 @@ def add_extract_parser(
             "positional 'file' is an application error, exit 1, not an "
             "argparse usage error -- see docs/cli/extract.md's exit-code "
             "contract). Not validated by argparse -- an unknown deck name "
-            "also exits 1 with a clean error."
+            "also exits 1 with a clean error. Belongs to --engine klayout "
+            "(the default); a clean error (exit 1) under --engine "
+            "klayout-runset, which is selected by --deck-file instead."
+        ),
+    )
+    extract_parser.add_argument(
+        "--engine",
+        default="klayout",
+        choices=("klayout", "klayout-runset"),
+        help=(
+            "which extractor runs (issue #5481). 'klayout' (the default) "
+            "runs the curated --deck through the pip klayout module and is "
+            "unchanged by this flag's existence. 'klayout-runset' instead "
+            "runs the PDK's own KLayout LVS runset (--deck-file) through the "
+            "standalone klayout application and takes the extracted netlist "
+            "out of the .lvsdb it writes -- the only way to reach a device "
+            "family the curated deck declares no class for (IHP's pnpMPA on "
+            "sg13cmos5l). It extracts devices and connectivity only: no "
+            "parasitics, and every flag only the curated engine can honour "
+            "is refused by name with exit 1. See docs/cli/extract.md, "
+            "'Engine'"
+        ),
+    )
+    extract_parser.add_argument(
+        "--deck-file",
+        dest="deck_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to the PDK's KLayout LVS runset for --engine "
+            "klayout-runset (issue #5481), spelled as on `klt lvs`. Required "
+            "under that engine, and a clean error (exit 1) under any other. "
+            "A relative PATH resolves against the current directory"
+        ),
+    )
+    extract_parser.add_argument(
+        "--deck-var",
+        dest="deck_var",
+        action="append",
+        metavar="NAME=VALUE",
+        default=None,
+        help=(
+            "extra '-rd NAME=VALUE' global passed to the runset (--engine "
+            "klayout-runset only; issue #5481). Repeatable. A clean error "
+            "(exit 1) under any other engine, or for a name the engine sets "
+            "itself (input, schematic, report, top, topcell)"
+        ),
+    )
+    extract_parser.add_argument(
+        "--runset-timeout",
+        dest="runset_timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "wall-clock budget for the runset subprocess (--engine "
+            "klayout-runset only; default 600). A runset that exceeds it is "
+            "a clean error (exit 1), never a partial netlist"
         ),
     )
     extract_parser.add_argument(
@@ -208,6 +265,28 @@ def add_extract_parser(
             "Requires --parasitics. Off by default -- byte-identical to "
             "today's behavior. See docs/cli/extract.md's 'SPEF export' "
             "section."
+        ),
+    )
+    extract_parser.add_argument(
+        "--report-parasitics",
+        dest="report_parasitics",
+        choices=("full", "slim"),
+        default="full",
+        help=(
+            "the shape of the JSON `parasitics` block (issue #5816): "
+            "'full' (the default, byte-identical to today) reports every "
+            "per-net field; 'slim' -- meaningful only with --spef -- drops "
+            "from each `parasitics.nets[]` entry the data the SPEF beside "
+            "it already carries (the per-net RC network, `coupled[]`'s "
+            "two-sided copy of every coupling capacitor), the constant "
+            "lumped-model `integrity` sub-keys, and the empty "
+            "`terminals`/`segments`/`pin_order`/`hub_net` fields, and adds "
+            "one global `parasitics.coupling_by_layer_pair` histogram plus "
+            'a `report_shape: "slim"` marker so a reader can tell the '
+            "shapes apart. Requires --spef. A slim run's SPEF and written "
+            "SPICE are byte-identical to a full run's -- only the JSON "
+            "changes. See docs/cli/extract.md's 'Slimming the parasitics "
+            "report' section."
         ),
     )
     extract_parser.add_argument(
