@@ -2201,6 +2201,7 @@ exit codes).
 | `routing.minimal_ladder` | boolean | Optional (issue #6058), default `false`. Shrinks a multi-hop via-drop ladder's **intermediate** hop pads — the pads on metal levels the ladder merely passes through, neither the backbone's own plane nor the pin's own layer — from the fixed 0.42 µm baseline to each pair's own deck floor: the pad layer's minimum-area side, its minimum-width rule, and the via side plus twice *both* the pair's plain enclosure margin and its two-adjacent-edges enclosure margin. On sky130A that floors a met1 pad over via1 at 0.32 µm (`met1.enclosing_adjacent.via.1`: 0.15 µm cut + 2×0.085 µm) where the baseline drew 0.42 µm. The two **terminal** pads of each endpoint (its port's own layer and the leg's route layer) keep today's sizing, and a pair whose deck declares no enclosure rule keeps the baseline (no information justifies shrinking). The route-vs-route collision checks measure the same shrunk footprints drawing inserts (checks and drawn output cannot disagree), and `klt drc` on the composed output stays clean: the floors are read from the same curated deck. **Minimum compatible terminal pitch**: for two equal square pads of side *s* on a layer whose same-layer spacing rule is *d* (axis-aligned, edge to edge), the layer-local pitch is *s + d* — e.g. two 0.320 µm met1 squares against sky130A's `met1.space.1` (0.140 µm) need ≥ 0.460 µm centre-to-centre. A ladder deposits pads on *every* plane it crosses, so derive a route's real bound from the largest `pad side + spacing` on any plane the two routes share — intermediate pads at their minimal-ladder floors, terminal pads at the (unchanged) baseline or override, arrays adding `(max(rows, cols) − 1) × pitch`. Assumptions behind the quoted numbers: sky130A curated deck, single cuts (no `access.via_array`), sky130's li1→met5 metals stack. Cannot be combined with `routing.landing_pad_size_um` (they select two different pad-sizing policies; setting both is an application error, exit 1, naming both fields). `false`/omitted is byte-for-byte today's output. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
+| `options.check_placement` | boolean | Optional (#6942), default `false`. The opt-in **hard placement gate** — the fail-fast counterpart to the advisory checks above. With `true`, the request fails (exit 1, before any routing is drawn and before `options.output` is created or replaced) when any two blocks' declared placed footprints intersect with positive width **and** height, or when any block's real, stream-measured footprint extends past its own declared `bbox_um` beyond the containment tolerance — even with no other block nearby. Edge and corner contact passes (abut-by-design flows are not penalized); a `blocks[].abuts` declaration suppresses only the *clearance* advisory and never exempts a positive-area intersection. Under `strategy: "array"` the growth rule compares the base tile's measured footprint against that tile's own declaration (the array union can hide one tile's growth). A non-boolean value is an application error (exit 1). `false`/omitted: today's behavior byte-for-byte. The same rules are exposed as a library function, `klayout_tools.gen_compose.check_placement_overlap(declared_um, measured_um=None)`, so a hand-rolled merge (`Layout.read` + `Cell.copy_tree` + `CellInstArray`) can run the identical gate as a preflight with no request document, PDK, or second CLI — see "Opt-in placement gate (`options.check_placement`, #6942)" below. |
 
 ### Response
 
@@ -2388,7 +2389,7 @@ matched_groups:
 | Exit code | Meaning |
 | --------- | ------- |
 | `0` | Every block placed and every net routed; `gds_path` was written and the report above is on stdout. |
-| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, or the `options.output` directory does not exist. |
+| `1` | Application error — unresolvable PDK, an unrecognised `pdk` key (anything other than `variant`/`root`), malformed request (missing/invalid `blocks[]`, an unsupported `blocks[].orientation` value (#1166), a `blocks[].abuts` entry that is not an array of non-empty strings, names this block's own `id`, or names an `id` the request never declares (#2638), `placement.order` not matching `blocks[]`, negative `spacing_um`, a missing/mismatched/non-numeric `placement.origins_um` when `strategy: "explicit"` (#321), more than one `blocks[]` entry or a missing/non-positive `rows`/`cols`/`row_pitch_um`/`col_pitch_um`/non-numeric `origin_um` when `strategy: "array"` (#1053), or a missing/invalid `routing.layer_role`/`routing.width_um` when `connectivity[]` is non-empty), an unsupported `placement.strategy`, a `connectivity[]` or `pins[]` entry referencing a nonexistent block `id`/port, a `pins[]` entry naming a `(block, port)` already used by a `connectivity[]` net, an infeasible `pins[].request` (distinct `error.code`s, see "Requested port coordinates" #3971), a block's `generator_report`/GDS could not be read, the `options.output` directory does not exist, or — only with `options.check_placement: true` (#6942) — a failed placement gate: a positive-area pairwise footprint intersection or a measured footprint that outgrew its own declaration (see "Opt-in placement gate (`options.check_placement`, #6942)" below), refused before any routing is drawn or the output is written. |
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
@@ -2600,6 +2601,80 @@ externally-produced `generator_report`), treat this warning as a signal that
 the block's own `bbox_um` needs correcting at the source, not merely that the
 two blocks named here should be moved apart — the same undeclared excess
 geometry can overlap a *different* neighbour the next time placement changes.
+
+### Opt-in placement gate (`options.check_placement`, #6942)
+
+Every check above is advisory by stated philosophy: a caller-declared
+overlap is legal input, and `klt drc` remains the rule-compliance authority
+on the composed output. The cost of that stance is the failure shape this
+gate exists for: a block whose generator outgrew its declared footprint (an
+added enclosure overhang, a reworked trunk — any legitimate geometry change)
+composes without a word, and the resulting positive-area pairwise overlap
+only surfaces *hours* later as N chip-level DRC/extract/LVS findings
+attributed to blocks that are each clean standalone, with no pointer back to
+placement.
+
+`"options": {"check_placement": true}` opts into the hard counterpart. With
+the option on, compose refuses the request (application error, exit 1 —
+before any routing is drawn and before `options.output` is created or
+replaced) on either rule, both implemented by
+`klayout_tools.gen_compose.check_placement_overlap`:
+
+1. **Pairwise declared-footprint intersection** — any two distinct blocks
+   whose declared placed footprints intersect with positive width *and*
+   height. The error names both ids and the intersection rectangle in the
+   composed coordinate frame, in µm; a participant whose measured footprint
+   outgrew its declaration gets its growth deltas folded in. Edge and corner
+   contact passes (zero width or height is not a positive-area overlap), so
+   flows that abut by design are not penalized. A `blocks[].abuts`
+   declaration can suppress the clearance *advisory* above — it can never
+   exempt a positive-area intersection here.
+2. **Footprint growth** — a block whose real, stream-measured placed
+   footprint extends past its own declared `bbox_um` beyond the containment
+   tolerance (#1679's check, hardened from warning to opt-in failure) fails
+   even with no other block anywhere near. The error names the block, the
+   declared and measured rectangles, and which sides grew by how much; a
+   declaration that encloses the geometry passes. Under
+   `strategy: "array"`, the growth rule compares the base tile's measured
+   footprint against *that tile's* declaration — the array union describes
+   the whole placement and can hide the growth of one tile.
+
+For example, two blocks whose declared footprints overlap from (9, 2) to
+(10, 5):
+
+```json
+{ "schema_version": 1, "error": { "command": "gen-compose", "message": "options.check_placement failed: blocks 'a' and 'b' overlap: declared footprints intersect over (9.000, 2.000)-(10.000, 5.000) um" } }
+```
+
+The option is off by default and changes nothing when off — every advisory
+above keeps its exact behavior, and a caller-declared overlap remains legal
+input.
+
+**Hand-rolled merges.** The same gate is a plain library function, so a
+merge script this command cannot express today (PDK library cells,
+cross-repo blocks, bespoke generator output — see the `Layout.read()` /
+`Cell.copy_tree()` / `CellInstArray` recipe above) can run the identical
+check as a preflight, with no request document, PDK, or second CLI:
+
+```python
+from klayout_tools.gen_compose import check_placement_overlap
+
+failures = check_placement_overlap(
+    # declared placed footprints, um, in the merged frame
+    {
+        "analog": {"x0": 0.0, "y0": 0.0, "x1": 210.0, "y1": 180.0},
+        "digital": {"x0": 205.0, "y0": 0.0, "x1": 900.0, "y1": 180.0},
+    },
+    # optional: real measured footprints (e.g. kdb.Cell.dbbox() per
+    # placed source), same frame -- omit a block you did not measure
+)
+if failures:
+    raise SystemExit("; ".join(failures))
+```
+
+The function returns a list of failure strings (empty when the placement
+passes) and raises `ValueError` on a malformed box or a measured footprint
+for an id with no declared entry — merge it into your own error path.
 
 ## Array placement (a repeated-block regular tiling, #1053)
 
