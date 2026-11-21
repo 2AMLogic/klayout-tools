@@ -152,3 +152,70 @@ def test_dry_run_check_refuses_op_check_on_an_all_predating_manifest(
         )
     assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
     assert "analysis.op_check" in str(raised.value)
+
+
+# --- measurements[].crossings.value_from (issue #6913) ---------------------
+
+_CROSSINGS_VALUE_FROM_REQUEST = {
+    "models": {"pdk": "sky130A"},
+    "options": {},
+    "measurements": [
+        {
+            "name": "f_ro1",
+            "crossings": {
+                "signal": "v(ro1)",
+                "level": 0.9,
+                "value_from": "frequency",
+            },
+        }
+    ],
+}
+
+
+def test_crossings_value_from_is_a_registered_mandatory_runner_feature():
+    """#6913: `crossings.value_from` is detected pre-launch and mandatory --
+    an older runner would reject the unknown key (at best) or grade the raw
+    crossing count, so a fleet runner older than v0.9.3 never sees the job.
+    First release segment 0.9.3: the field is not in the v0.9.2 tag."""
+    assert sb._request_features(_CROSSINGS_VALUE_FROM_REQUEST) == [
+        "crossings_value_from"
+    ]
+    quiet = {
+        "models": {"pdk": "sky130A"},
+        "options": {},
+        "measurements": [
+            {"name": "t", "crossings": {"signal": "v(x)", "level": 0.5}},
+            {
+                "name": "u",
+                "crossings": {"signal": "v(x)", "level": 0.5, "value_from": None},
+            },
+        ],
+    }
+    assert sb._request_features(quiet) == []
+    assert "crossings_value_from" in sb._MANDATORY_RUNNER_FEATURES
+    assert sb._missing_runner_features(["crossings_value_from"], "0.9.2") == [
+        "crossings_value_from"
+    ]
+    assert sb._missing_runner_features(["crossings_value_from"], "0.9.3") == []
+    assert sb._missing_runner_features(["crossings_value_from"], None) is None
+
+
+def test_prelaunch_refuses_crossings_value_from_on_an_old_image(tmp_path, monkeypatch):
+    """#6913: a v0.9.2 runner image predates `crossings_value_from` (first
+    release segment 0.9.3), and the feature is mandatory -- so the submit
+    path refuses before any S3 write or launch, `warn` included, with the
+    nothing-was-submitted text."""
+    _pin_client_version(monkeypatch, _PRELAUNCH_CLIENT)
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.9.2")])
+    for check in ("enforce", "warn"):
+        assessment = sb._assess_published_runner(
+            _CROSSINGS_VALUE_FROM_REQUEST, _config(tmp_path, runner_version_check=check)
+        )
+        with pytest.raises(sim.SimError) as raised:
+            sb._enforce_published_runner_features(
+                _CROSSINGS_VALUE_FROM_REQUEST, assessment
+            )
+        assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
+        message = str(raised.value)
+        assert "crossings_value_from" in message
+        assert "the request was not submitted and no instance was launched" in message

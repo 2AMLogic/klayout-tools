@@ -479,6 +479,7 @@ def check_meas_signal_position(
         'supply-relative level ({"frac_of": "vdd", "fraction": 0.5}) that '
         "`klt sim` resolves per corner, a measurements[].crossings entry "
         "also fits -- but a crossings entry's value is the *count* of "
-        "crossings, not a time (the crossing times are reported on its "
-        "crossings.times[] array)"
+        "crossings, not a time, unless crossings.value_from grades the "
+        "period.mean / frequency reduction instead (the crossing times are "
+        "reported on its crossings.times[] array)"
     )

@@ -8908,11 +8908,11 @@ def _crossings_measurement_result(
     """One ``crossings`` measurement's response entry (issue #2868).
 
     ``value`` is the number of window crossings (on ``dc``, the first
-    crossing's sweep abscissa), graded through :func:`_grade_measurement_value`
-    like any scalar -- and the series itself rides the additive ``crossings`` sibling.
-    No series (signal did not resolve, rawfile unreadable) is an ordinary
-    ``status: "error"`` entry with a ``code: "measurement"`` diagnostic and
-    no ``crossings`` member, like any other measurement with no value."""
+    crossing's sweep abscissa; with ``value_from``, the selected reduction,
+    #6913), graded through :func:`_grade_measurement_value` like any
+    scalar; the series rides the additive ``crossings`` sibling. No series
+    (unresolved signal, unreadable rawfile, too few edges for a selected
+    reduction) is an ordinary ``status: "error"`` entry with no value."""
     name = spec["name"]
     unit = spec.get("unit")
     if outcome is None or outcome.error is not None:
