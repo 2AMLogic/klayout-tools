@@ -163,9 +163,11 @@ Documented in the same field-table style as `klt sim`
 versioned per command, not the string-typed `"schema"` field the SPICE
 spike originally proposed before that convention existed — `klt sim` itself
 notes this deviation, and this spike adopts the settled convention directly
-rather than repeating the now-corrected mistake). **This is a proposed
-shape for review, not a shipped contract**, and no `klt` verb, dependency,
-or line of solver-invoking code exists yet.
+rather than repeating the now-corrected mistake). **Shipped in #5616 and #5617.** `klt em` computes quasi-static capacitance
+on a supplied mesh or a labelled layout region with a PDK stackup. Driven
+and eigenmode solves, ports, frequency sweeps and other outputs remain
+proposals. The CLI reference gives the current request, response and exit
+codes. [CLI reference](../cli/em.md)
 
 ### Request
 

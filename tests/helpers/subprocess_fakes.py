@@ -24,7 +24,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from klayout_tools import sim
+from klayout_tools import sim, synthesize
 
 
 def fake_completed(
@@ -71,6 +71,42 @@ def _stub_subprocess_run(
         return fake_completed(stdout, returncode=returncode)
 
     monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+_COVERAGE_SUMMARY = """\
+Coverage Summary:
+  line      : 100.0% (  6/  6)
+  toggle    : 60.0% (102/170)
+  branch    : 100.0% (  4/  4)
+  expr      : 100.0% (  5/  5)
+  fsm_state : 0.0% (  0/  0)
+  fsm_arc   : 0.0% (  0/  0)
+"""
+
+
+def _stub_verilator_coverage(monkeypatch, *, summary=_COVERAGE_SUMMARY, returncode=0):
+    """Patch `subprocess.run` so a `klt functional-verification` run reads a
+    canned `verilator_coverage` summary without the binary.
+
+    Moved verbatim from `test_functional_verification.py` (size-ratchet
+    baseline) with one addition (issue #5550): anything that is not
+    `verilator_coverage` goes to the real `subprocess.run` untouched, as
+    `_stub_subprocess_run` does -- the response's `provenance` block runs a
+    build-identity `git` probe on a dev checkout through the same patched
+    module attribute.
+    """
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] != "verilator_coverage":
+            return real_run(cmd, **kwargs)
+        if cmd[1] == "--write-info":
+            with open(cmd[2], "w", encoding="utf-8") as handle:
+                handle.write("TN:verilator_coverage\nSF:gcd.v\nDA:15,538\n")
+            return fake_completed(returncode=returncode)
+        return fake_completed(returncode=returncode, stdout=summary)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
 
 
 def _upload_objects(
@@ -175,3 +211,20 @@ def uploaded_request_of(argv: list[str]) -> tuple[dict, str] | None:
         return None
     job_id = destination.partition("/jobs/")[2].split("/")[0]
     return json.loads(document.read_text()), job_id
+
+
+def _patch_yosys_run(monkeypatch, fake) -> None:
+    """Install a ``subprocess.run``-shaped fake across the Yosys spawns.
+
+    Every Yosys invocation -- the ``yosys -s`` script run and the ``yosys
+    -V`` / ``help abc`` capability probes -- spawns through
+    ``_engine_proc.run_in_group``, which delegates to ``subprocess.run``
+    (start_new_session + group kill, issue #5871). Patching ``run`` on the
+    shared stdlib module intercepts all of them; a mocked ``run`` spawns
+    nothing, so ``run_in_group`` records no pid and kills nothing.
+
+    Tests exercising the REAL spawn path (the process-group regression
+    tests in ``test_synthesize_timeout.py``) patch nothing and put a stub
+    ``yosys`` binary on ``PATH`` instead.
+    """
+    monkeypatch.setattr(synthesize.subprocess, "run", fake)

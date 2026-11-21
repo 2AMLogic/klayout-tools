@@ -21,6 +21,7 @@ import os
 import re
 from typing import Any
 
+from . import _json_pointer
 from ._jsonnum import is_number
 
 CODE_BAD_INPUT = "bad_input"
@@ -104,22 +105,19 @@ def _check_format(fmt: Any, where: str) -> None:
 
 
 def _pointer(doc: Any, pointer: str, where: str) -> Any:
-    if pointer == "":
-        return doc
-    if not pointer.startswith("/"):
+    """Resolve ``pointer`` (RFC 6901) into ``doc`` via the shared walk
+    (:mod:`._json_pointer`, issue #6860), keeping render's own contextual
+    errors: a pointer without a leading ``'/'`` and one that names no value
+    are different mistakes with different remedies, so they stay different
+    messages. The empty pointer renders the whole record."""
+    if pointer and not pointer.startswith("/"):
         raise EvidenceRenderError(
             f"{where}: JSON pointer {pointer!r} must start with '/'"
         )
-    cur = doc
-    for raw in pointer[1:].split("/"):
-        tok = raw.replace("~1", "/").replace("~0", "~")
-        if isinstance(cur, dict) and tok in cur:
-            cur = cur[tok]
-        elif isinstance(cur, list) and tok.isdigit() and int(tok) < len(cur):
-            cur = cur[int(tok)]
-        else:
-            raise EvidenceRenderError(f"{where}: pointer {pointer!r} does not resolve")
-    return cur
+    value, ok = _json_pointer.resolve_json_pointer(doc, pointer)
+    if not ok:
+        raise EvidenceRenderError(f"{where}: pointer {pointer!r} does not resolve")
+    return value
 
 
 def _format(value: Any, fmt: str, where: str) -> str:
