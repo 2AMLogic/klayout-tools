@@ -22,8 +22,8 @@ def add_em_parser(
         help="field-solver wrapper (geode-fem quasi-static capacitance)",
         description=(
             "Run a field-solver request: engine geode_fem, solve_mode "
-            "quasi_static, outputs [c], on a caller-supplied mesh. Needs the "
-            "geode binary (options.geode_binary, $KLT_GEODE_BINARY, or PATH). "
+            "quasi_static, outputs [c]. Supply a mesh or a layout region and "
+            "PDK stackup. Layout meshing requires Gmsh. Both paths require geode. "
             "See docs/cli/em.md."
         ),
     )

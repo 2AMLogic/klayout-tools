@@ -1,25 +1,16 @@
 """Item 9 (testbenches shipped) inventory extensions (issue #4848).
 
-Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Three
-additive pieces on top of the original ``testbenches`` path list plus one
-top-level ``cold_start``:
+Split out of :mod:`klayout_tools.signoff_attest` (file-size ratchet). Extends
+the ``testbenches`` path list and top-level ``cold_start`` with per-bench
+``{"path", "cold_start"}`` entries, ``unbenched_rows`` with owner issues,
+and command start/finish progress on stderr.
 
-* a ``testbenches`` entry may be ``{"path", "cold_start"}`` so a failure
-  names the bench it belongs to;
-* ``unbenched_rows`` declares spec rows that have no bench, with an owner issue;
-* a start/finish progress line per command run, written to stderr only.
-
-Plus (issue #5463) the ``documented_argv`` disclosure on a cold start and the
-item's reproducibility-pin checks, which live here for the same reason. Plus
-(issue #5641) a ``cold_start`` accepting a list: several named cold starts
-over one inventoried file, so a shared implementation module can carry every
-graded cold start without minting hollow wrapper files. Plus (issue #5701) a
-bench entry's ``sources`` -- the implementation modules the bench is spread
-across -- hashed as ``role: "source"`` ``present`` checks attributed to the
-bench(es) that declared them.
-
-Plus (issue #5850) a bench entry's ``depends_on`` declarations, which live in
-:mod:`klayout_tools.signoff_attest_item9_depends_on` for the same reason.
+Also handles reproducibility pins, ``documented_argv`` disclosure (#5463),
+and named cold-start lists over one inventoried file (#5641), avoiding hollow
+wrapper files. A bench's ``sources`` (#5701) are hashed as ``role: "source"``
+``present`` checks attributed to every bench that declares them.
+The ``depends_on`` declarations (#5850) live in
+:mod:`klayout_tools.signoff_attest_item9_depends_on`.
 
 The validators take the command/path helpers as arguments so this module need
 not import :mod:`signoff_attest` (which imports it).
@@ -121,6 +112,13 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
     it just does not yet say how to reproduce the run."""
     pins = pins if isinstance(pins, Mapping) else {}
     pdk_value = pdk_pin(pins.get("pdk"))
+    pdk_extra: dict[str, Any] = {}
+    if "pdk" in pins and not isinstance(pins["pdk"], Mapping):
+        # Present but the wrong shape (issue #5688): say so, not "missing".
+        pdk_extra["reason"] = (
+            "wrong type: expected {name, revision} or {none, reason}, "
+            f"got {type(pins['pdk']).__name__}"
+        )
     tools = pins.get("tools")
     tools_value = None
     if (
@@ -138,6 +136,7 @@ def pin_checks(pins: Any) -> list[dict[str, Any]]:
             "role": "pdk",
             "passed": pdk_value is not None,
             "value": pdk_value,
+            **pdk_extra,
         },
         {
             "check": "pin",
@@ -401,8 +400,8 @@ def unbenched_row_checks(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, An
 def with_progress(
     run: Callable[..., dict[str, Any]], label_of: Callable[..., str]
 ) -> Callable[..., dict[str, Any]]:
-    """Wrap a command-check runner so each run writes a start and finish line
-    to stderr. Timing stays out of the returned check (reproducible envelope)."""
+    """Write start and finish lines to stderr. The CLI reports elapsed time
+    in live output and omits it from committed checks and drift comparisons."""
 
     def wrapped(spec: Mapping[str, Any], role: str, **identity: Any) -> dict[str, Any]:
         label = label_of(role, identity)

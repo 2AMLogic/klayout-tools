@@ -15,6 +15,7 @@ from typing import Any
 from ...signoff import describe_opt_in_kinds_text
 from ...signoff_attest_carry import add_skip_local_only_argument
 from .. import signoff_cmd
+from .._doc_paths import RawDescriptionDocHelpFormatter
 from ..color import add_color_args
 
 
@@ -29,7 +30,7 @@ def add_signoff_parser(
     """
     signoff_parser = subparsers.add_parser(
         "signoff",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=RawDescriptionDocHelpFormatter,
         epilog=(
             "Opt-in evidence kinds (non-native envelopes) and the T1 "
             "checklist items each may satisfy; any other item rejects them "
@@ -107,6 +108,20 @@ def add_signoff_parser(
             "existing directory. Only meaningful with --manifest/--fleet. "
             "See docs/cli/signoff.md's 'Grading outside a git checkout' "
             "section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--artifact-manifest",
+        metavar="PATH",
+        action="append",
+        help=(
+            "an artifact-store manifest (`klt artifact`) to resolve "
+            "`artifact:<key>` citations against; repeatable. A cited "
+            "`artifact:` evidence path, or an envelope input path of that form, "
+            "is looked up by URI, fetched through the broker "
+            "($KLT_ARTIFACT_BROKER) and sha256-verified before it is read. "
+            "An unresolvable one grades `unmet`/`artifact_unavailable`. Only "
+            "meaningful with --manifest/--fleet. See docs/cli/signoff.md."
         ),
     )
     signoff_parser.add_argument(

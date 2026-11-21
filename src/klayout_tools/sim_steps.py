@@ -255,7 +255,7 @@ def resolve_analysis_steps(
     known: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(raw_steps):
         step = _resolve_step(raw, index, known)
-        step_specs = _resolve_step_measurements(raw, step, index, known)
+        step_specs = _resolve_step_measurements(raw, step, known)
         known[step["name"].lower()] = {
             "index": index,
             "name": step["name"],
@@ -475,15 +475,12 @@ def _resolve_alter(alter: Any, step: str) -> list[list[Any]]:
 def _resolve_step_measurements(
     raw: dict[str, Any],
     step: dict[str, Any],
-    index: int,
     known: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One step's measurements, flattened and named ``<step>.<name>``."""
     from .sim_validate import _validate_measurement_form
 
-    specs = raw.get("measurements")
-    if specs is None:
-        return []
+    specs = raw.get("measurements", [])  # an explicit null is refused too (#6412)
     if not isinstance(specs, list) or not all(isinstance(s, dict) for s in specs):
         raise SimError(
             f"step {step['name']!r}: measurements must be an array of objects"
@@ -500,7 +497,7 @@ def _resolve_step_measurements(
         local = spec["name"]
         validate_step_measurement_name(spec, local, local_names, step)
         local_names[local.lower()] = local
-        resolved.append(_flatten_step_measurement(spec, step, index, known))
+        resolved.append(_flatten_step_measurement(spec, step, known))
     return resolved
 
 
@@ -545,7 +542,6 @@ def refuse_scalar_intermediate(measurements_spec: list[dict[str, Any]]) -> None:
 def _flatten_step_measurement(
     spec: dict[str, Any],
     step: dict[str, Any],
-    index: int,
     known: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     local = spec["name"]
@@ -748,7 +744,8 @@ def _resolve_derived_measurements(
     entries evaluated after every step, in declared order."""
     from .sim_validate import _validate_measurement_forms
 
-    specs = request.get("measurements") or []
+    # Only an absent key defaults (#6412); `or []` read null/{}/""/false/0 as absent.
+    specs = request.get("measurements", [])
     _validate_measurement_forms(specs)
     derived_names = [str(spec["name"]) for spec in specs]
     resolved: list[dict[str, Any]] = []
