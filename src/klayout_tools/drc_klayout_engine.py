@@ -521,7 +521,7 @@ _DECK_GLOBAL_IGNORED = frozenset(
 
 
 def scan_deck_globals(
-    deck_file: str, extra_ignored: Iterable[str] = ()
+    deck_file: str, extra_ignored: Iterable[str] = (), *, runset_idioms: bool = False
 ) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
     consumes (issue #3816), following literal Ruby and ``# %include``
@@ -529,14 +529,12 @@ def scan_deck_globals(
 
     Returns a name-sorted list of ``{"name", "required_by_caller",
     "default"}``. A global whose first assignment is guarded by ``defined?``
-    (block, trailing modifier, or ``||=``), read through a
-    ``<helper>?($x[, default: V])`` call (default ``false`` / ``V``), or read
-    as ``CONST = $x || '<literal>'`` is ``required_by_caller: False`` with
-    that literal as ``default`` (issue #5827); every other ``$name``
+    (block, trailing modifier, or ``||=``) is ``required_by_caller: False``
+    with that assignment's literal as ``default``; every other ``$name``
     mentioned outside a comment is ``required_by_caller: True`` with
-    ``default: None``. See :data:`_DECK_GLOBAL_IGNORED` for what is skipped;
-    ``extra_ignored`` names more (``klt pdk decks`` passes the variables the
-    LVS runset engine sets itself).
+    ``default: None``. See :data:`_DECK_GLOBAL_IGNORED` for what is skipped.
+    ``extra_ignored`` names more; ``runset_idioms`` (LVS runsets, issue #5827)
+    adds the ``<helper>?($x)`` and ``$x || '<literal>'`` defaults (DRC: off).
 
     A heuristic, not a Ruby parser: a missing entry is not proof the deck
     ignores a variable, and an unreadable file contributes nothing.
@@ -553,7 +551,9 @@ def scan_deck_globals(
         for line in lines:
             if line.lstrip().startswith("#"):
                 continue
-            guarded = _record_deck_default(line, guarded, defaults)
+            guarded = _record_deck_default(
+                line, guarded, defaults, runset_idioms=runset_idioms
+            )
             seen.update(_DECK_GLOBAL_RE.findall(line))
     ignored = _DECK_GLOBAL_IGNORED | frozenset(extra_ignored)
     names = {n for n in seen | set(defaults) if n not in ignored}

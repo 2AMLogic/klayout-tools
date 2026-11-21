@@ -2,9 +2,14 @@
 
 import json
 
+import pytest
+
 from klayout_tools import pdk
 from klayout_tools.cli import main
-from klayout_tools.drc_klayout_engine import scan_deck_globals
+from klayout_tools.drc_klayout_engine import (
+    _missing_deck_globals_warning,
+    scan_deck_globals,
+)
 
 _GATED_DECK = """\
 # $commented is ignored
@@ -162,7 +167,7 @@ def test_scan_helper_and_or_literal_defaults(tmp_path):
     deck = tmp_path / "r.lvs"
     deck.write_text(_LVS_RUNSET, encoding="utf-8")
 
-    found = _by_name(scan_deck_globals(str(deck)))
+    found = _by_name(scan_deck_globals(str(deck), runset_idioms=True))
 
     def pair(name):
         return found[name]["required_by_caller"], found[name]["default"]
@@ -291,3 +296,111 @@ def test_cli_decks_text_renders_lvs_rows(tmp_path, capsys):
     text = capsys.readouterr().out
     assert code == 0
     assert "sky130.lvs" in text and "lvs" in text and "needed*" in text
+
+
+# --- review fixes: DRC scan unchanged, qualified calls, comments, aliases ---
+
+_DRC_SHAPED = (
+    "MASK = $mask || 'metal1'\nENABLED = bool_check?($enabled, default: true)\n"
+)
+
+
+def test_drc_scan_keeps_helper_and_or_idioms_required(tmp_path):
+    # The #5827 idioms are LVS-runset-only: a DRC deck using them keeps its
+    # pre-#5827 rows (required, no default) and its missing-globals warning.
+    root = _make_drc_install(tmp_path, {"sky130A.drc": _DRC_SHAPED})
+    lvs_dir = tmp_path / "sky130A" / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir()
+    (lvs_dir / "sky130.lvs").write_text(_DRC_SHAPED, encoding="utf-8")
+
+    by_name = {d["name"]: d for d in pdk.drc_decks(root=root)["decks"]}
+
+    assert _by_name(by_name["sky130A.drc"]["globals"]) == {
+        "mask": {"name": "mask", "required_by_caller": True, "default": None},
+        "enabled": {"name": "enabled", "required_by_caller": True, "default": None},
+    }
+    lvs = _by_name(by_name["sky130.lvs"]["globals"])
+    assert (lvs["mask"]["required_by_caller"], lvs["mask"]["default"]) == (
+        False,
+        "metal1",
+    )
+    assert (lvs["enabled"]["required_by_caller"], lvs["enabled"]["default"]) == (
+        False,
+        "true",
+    )
+    deck = by_name["sky130A.drc"]["path"]
+    assert _by_name(scan_deck_globals(deck)) == _by_name(
+        by_name["sky130A.drc"]["globals"]
+    )
+    warnings = _missing_deck_globals_warning(deck, {})
+    assert [w["category"] for w in warnings] == ["deck_globals_not_supplied"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "abort unless File.exist?($reference_file)",
+        "ok = File.exist?($reference_file)",
+        "ok = Foo::exist?($reference_file)",
+        "ok = obj&.exist?($reference_file)",
+    ],
+)
+def test_runset_receiver_qualified_predicate_stays_required(tmp_path, line):
+    deck = tmp_path / "r.lvs"
+    deck.write_text(line + "\n", encoding="utf-8")
+
+    found = _by_name(scan_deck_globals(str(deck), runset_idioms=True))
+
+    assert found["reference_file"] == {
+        "name": "reference_file",
+        "required_by_caller": True,
+        "default": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("line", "name", "expected"),
+    [
+        # A trailing comment must not hide a real default ...
+        ("METAL = $metal || '9K' # top metal fallback", "metal", (False, "9K")),
+        ("LAYERS = $layers || 6 # six metals", "layers", (False, "6")),
+        ("SIMPLIFY = bool_check?($simplify) # off", "simplify", (False, "false")),
+        (
+            "NAMES = bool_check?($names, default: true) # keep",
+            "names",
+            (False, "true"),
+        ),
+        # ... nor invent one from commented-out code.
+        ("puts $verbose # formerly bool_check?($verbose)", "verbose", (True, None)),
+        (
+            "puts $metal # METAL = $metal || '9K'",
+            "metal",
+            (True, None),
+        ),
+        # A `#` inside a quoted string is code, not a comment.
+        ("METAL = $metal || '9K#1' # note", "metal", (False, "9K#1")),
+        ('TAG = $tag || "a#b" # note', "tag", (False, "a#b")),
+    ],
+)
+def test_runset_idioms_ignore_trailing_ruby_comments(tmp_path, line, name, expected):
+    deck = tmp_path / "r.lvs"
+    deck.write_text(line + "\n", encoding="utf-8")
+
+    found = _by_name(scan_deck_globals(str(deck), runset_idioms=True))
+
+    assert (found[name]["required_by_caller"], found[name]["default"]) == expected
+
+
+def test_decks_lvs_alias_symlink_is_listed_but_not_default(tmp_path):
+    root = _make_lvs_install(tmp_path, {"sky130.lvs": _LVS_RUNSET})
+    lvs = tmp_path / "sky130A" / "libs.tech" / "klayout" / "lvs"
+    (lvs / "alias.lvs").symlink_to(lvs / "sky130.lvs")
+    resolved = pdk.lvs_deck_file(root=root)
+    assert resolved is not None and resolved.endswith("sky130.lvs")
+
+    entries = {d["name"]: d for d in pdk.drc_decks(root=root)["decks"]}
+
+    assert set(entries) == {"alias.lvs", "sky130.lvs"}
+    assert entries["sky130.lvs"]["is_default"] is True
+    assert entries["alias.lvs"]["is_default"] is False
+    assert [d["name"] for d in entries.values() if d["is_default"]] == ["sky130.lvs"]

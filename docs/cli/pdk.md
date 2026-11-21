@@ -1166,7 +1166,9 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 - **LVS entries.** `decks[]` lists the DRC entries first, then one `kind:
   "lvs"` entry per runset; `is_default` on an LVS entry marks the runset
   `klt lvs --engine klayout-runset --pdk <variant>` runs, and is independent of
-  the DRC `is_default` (a variant can have an LVS default and no DRC one). A
+  the DRC `is_default` (a variant can have an LVS default and no DRC one).
+  Exactly one entry carries it: it is the path the resolver returns, so an
+  alias symlink to that runset is listed but not flagged. A
   caller that only wants DRC decks must filter on `kind`. `schema_version`
   stays `1`: no existing field changed, and `kind` gained one member. LVS
   globals are verdict-affecting (an unset `simplify`/`combine`/
@@ -1176,11 +1178,14 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 - `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
   `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
   globals. A global assigned under `if not defined? $x`, `... unless defined?
-  $x` or `||=`, read through a `<helper>?($x)` /
-  `<helper>?($x, default: V)` call (default `false` / `V`), or read as
-  `CONST = $x || '<literal>'` is `required_by_caller: false` with its
-  literal `default`; any other `$name` mentioned outside a comment is `required_by_caller: true`.
-  Literal `require`/`load` includes are followed.
+  $x` or `||=` is `required_by_caller: false` with its literal `default`; any
+  other `$name` mentioned outside a comment is `required_by_caller: true`.
+  **LVS entries only** also detect a global read through a deck-level
+  `<helper>?($x)` / `<helper>?($x, default: V)` call (default `false` / `V`;
+  a receiver-qualified call such as `File.exist?($f)` is not a helper) or as
+  `CONST = $x || '<literal>'`, matched on the code before any trailing `#`
+  comment. DRC entries keep reporting those globals as required. Literal
+  `require`/`load` includes are followed.
 - **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
   proof a deck ignores a variable, and a defaulted global (e.g. `feol`
   defaulting to `"false"`) can still silently disable whole rule groups —

@@ -41,11 +41,13 @@ def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, 
 
     The directly-runnable ``*.lvs`` runsets under ``libs.tech/klayout/lvs/``
     (or the flat-install ``tech/lvs/``) follow the DRC entries with
-    ``kind: "lvs"``; ``is_default`` marks the one :func:`lvs_deck_file`
-    resolves (what ``klt lvs --engine klayout-runset --pdk`` runs). Their
-    ``globals`` omit the variables that engine sets itself
-    (``lvs_runset.RESERVED_RUNSET_VARS``). ``*.lylvs`` wrappers, drivers and
-    sub-directories are not listed. A caller that only wants DRC decks
+    ``kind: "lvs"``; ``is_default`` marks the one path :func:`lvs_deck_file`
+    returns (what ``klt lvs --engine klayout-runset --pdk`` runs) -- an alias
+    symlink to it is listed but not flagged. Their ``globals`` omit the
+    variables that engine sets itself (``lvs_runset.RESERVED_RUNSET_VARS``)
+    and also detect the ``<helper>?($x)`` / ``$x || 'literal'`` defaults;
+    DRC entries are scanned exactly as before. ``*.lylvs`` wrappers, drivers
+    and sub-directories are not listed. A caller that only wants DRC decks
     filters on ``kind``.
     ``globals`` is the best-effort static scan of
     :func:`klayout_tools.drc_klayout_engine.scan_deck_globals` -- a heuristic;
@@ -108,9 +110,14 @@ def drc_decks(variant: str | None = None, root: str | None = None) -> dict[str, 
                 "path": path,
                 "name": name,
                 "kind": "lvs",
+                # By path, not `samefile`: an alias symlink to the resolved
+                # runset is listed too, but only the path `lvs_deck_file`
+                # returned is the default (exactly one entry carries it).
                 "is_default": lvs_default is not None
-                and os.path.samefile(path, lvs_default),
-                "globals": scan_deck_globals(path, extra_ignored=RESERVED_RUNSET_VARS),
+                and os.path.abspath(path) == os.path.abspath(lvs_default),
+                "globals": scan_deck_globals(
+                    path, extra_ignored=RESERVED_RUNSET_VARS, runset_idioms=True
+                ),
             }
         )
 

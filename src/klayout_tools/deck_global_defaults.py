@@ -25,13 +25,17 @@ _DECK_DEFAULT_INLINE_RE = re.compile(
 #: (gf180mcu.lvs' ``bool_check?``) that reads the global and applies its own
 #: default, ``false`` unless the keyword form names one (issue #5827). The
 #: idiom is matched, not the spelling; ``defined?`` is excluded because it
-#: tests for presence and supplies no default.
+#: tests for presence and supplies no default. A receiver-qualified call
+#: (``File.exist?($f)``, ``Foo::bar?($f)``) is a method on some object, not
+#: the deck's own helper, and does not default its argument: the lookbehind
+#: rejects it.
 _DECK_HELPER_DEFAULT_RE = re.compile(
-    r"\b(?P<helper>\w+)\?\(\s*\$(?P<name>\w+)\s*"
+    r"(?<![.:])\b(?P<helper>\w+)\?\(\s*\$(?P<name>\w+)\s*"
     r"(?:,\s*default:\s*(?P<value>[^,)]+?)\s*)?\)"
 )
 #: ``CONST = $x || '<literal>'`` (note ``||``, not ``||=``): the literal is the
 #: default of ``$x`` (issue #5827). Only a quoted-string or numeric operand.
+#: Matched against the line with its trailing comment already stripped.
 _DECK_OR_LITERAL_RE = re.compile(
     r"^\s*\w+\s*=\s*\$(?P<name>\w+)\s*\|\|\s*"
     r"(?P<value>\"[^\"]*\"|'[^']*'|-?\d+(?:\.\d+)?)\s*$"
@@ -48,11 +52,62 @@ def _ruby_literal(value: str) -> str:
     return value
 
 
+def _strip_ruby_comment(line: str) -> str:
+    """``line`` without a trailing ``# ...`` comment. A ``#`` inside a quoted
+    string (``'9K#1'``, ``"#{x}"``) is code, so the cut is made at the first
+    ``#`` outside quotes; a backslash escapes the next character."""
+    quote = ""
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            if char == "\\":
+                i += 1
+            elif char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == "#":
+            return line[:i]
+        i += 1
+    return line
+
+
+def _record_runset_default(line: str, defaults: dict[str, str | None]) -> bool:
+    """Fold the LVS-runset-only idioms (``CONST = $x || <literal>`` and the
+    ``<helper>?($x)`` call) of one line into ``defaults``; ``True`` when the
+    line was a ``||`` fallback. Matched on the code before any trailing
+    comment, so a comment can neither hide a default nor supply one."""
+    code = _strip_ruby_comment(line)
+    or_literal = _DECK_OR_LITERAL_RE.match(code)
+    if or_literal:
+        defaults.setdefault(
+            or_literal.group("name"), _ruby_literal(or_literal.group("value"))
+        )
+        return True
+    for helper in _DECK_HELPER_DEFAULT_RE.finditer(code):
+        if helper.group("helper") == "defined":
+            continue
+        value = helper.group("value")
+        defaults.setdefault(
+            helper.group("name"), "false" if value is None else _ruby_literal(value)
+        )
+    return False
+
+
 def _record_deck_default(
-    line: str, guarded: str | None, defaults: dict[str, str | None]
+    line: str,
+    guarded: str | None,
+    defaults: dict[str, str | None],
+    *,
+    runset_idioms: bool = False,
 ) -> str | None:
     """Fold one deck line into ``defaults`` (see :func:`scan_deck_globals`);
-    returns the ``defined?``-guarded global whose block is still open."""
+    returns the ``defined?``-guarded global whose block is still open.
+
+    ``runset_idioms`` adds the issue #5827 LVS-runset idioms
+    (:func:`_record_runset_default`). It is off for DRC decks, whose scan must
+    keep reporting ``$x || 'v'`` / ``helper?($x)`` globals as required."""
     block = _DECK_DEFAULT_BLOCK_RE.match(line)
     if block:
         guarded = block.group(1) or block.group(2)
@@ -62,19 +117,8 @@ def _record_deck_default(
     if inline:
         defaults.setdefault(inline.group(1), _ruby_literal(inline.group("value")))
         return guarded
-    or_literal = _DECK_OR_LITERAL_RE.match(line)
-    if or_literal:
-        defaults.setdefault(
-            or_literal.group("name"), _ruby_literal(or_literal.group("value"))
-        )
+    if runset_idioms and _record_runset_default(line, defaults):
         return guarded
-    for helper in _DECK_HELPER_DEFAULT_RE.finditer(line):
-        if helper.group("helper") == "defined":
-            continue
-        value = helper.group("value")
-        defaults.setdefault(
-            helper.group("name"), "false" if value is None else _ruby_literal(value)
-        )
     assign = _DECK_ASSIGN_RE.match(line)
     if guarded and assign and assign.group(1) == guarded:
         if defaults.get(guarded) is None:
