@@ -101,7 +101,7 @@ _SETTABLE_PARAM_TYPES = frozenset({0, 1, 2, 3, 4, 6})
 
 #: ``TypeLayer``. Held as its own constant because it is the one settable type
 #: :func:`klayout_tools.gen._coerce_param` does not handle (no built-in
-#: generator exposes a layer parameter -- they are all in ``_HIDDEN_PARAMS``).
+#: generator exposes a request-facing layer parameter -- all hidden, #6757).
 _TYPE_LAYER = 4
 
 

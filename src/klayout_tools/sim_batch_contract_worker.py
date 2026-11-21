@@ -113,6 +113,15 @@ def runner_ngspice_init(report: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"source": source, "lines": lines, "sha256": digest}
 
 
+def runner_threads_per_worker(report: dict[str, Any] | None) -> int | None:
+    """The launch pin recorded by the worker's simulation report, when known."""
+    env = report.get("environment") if isinstance(report, dict) else None
+    pin = env.get("threads_per_worker") if isinstance(env, dict) else None
+    if isinstance(pin, int) and not isinstance(pin, bool) and pin > 0:
+        return pin
+    return None
+
+
 #: The worker-side capture program. It is passed to ``python3 -I -c`` as one
 #: shell-quoted argument (never interpolated with untrusted text); request
 #: values arrive as ``sys.argv`` and everything it observes is serialised with
@@ -179,6 +188,7 @@ def pdk():
         if staged != "1":
             diag.append("pdk root or variant unknown on worker")
         return p
+    # root/<variant> only, deliberately: this standalone payload cannot import klayout_tools, so a flat install (#522) degrades to the "pdk stamp unreadable" diagnostic below, never a wrong stamp (#6445).
     stamp = os.path.join(root, variant, "SOURCES")
     try:
         text = read(stamp, 16384)
