@@ -1094,6 +1094,56 @@ def _lef_port_access_points(
     return points
 
 
+#: One bus-bit suffix group of a pin name: an opening bracket, a purely
+#: numeric index, and a closing bracket. LEF and Verilog spell a bus bit
+#: ``DATA[0]``; KLayout GDS label text (and DEF, and SPICE) just as routinely
+#: spells the same bit ``DATA<0>`` -- the bracket style is the only
+#: difference. Any of the four bracket pairs is accepted on either side, and
+#: several groups may stack (``A[1][0]``/``A<1><0>``), so the canonical key
+#: below never depends on which style a given source chose. The index is
+#: captured so :func:`_bus_bit_alias_key`'s ``findall`` reads the digits
+#: alone.
+_BUS_BIT_GROUP_RE = re.compile(r"[<(\[{](\d+)[>)\]}]")
+
+#: A pin name that is *all* bus-bit suffix groups after a bracket-free,
+#: non-empty base -- ``A[1]x[0]``/``A<B>``/``A[0]B`` (brackets anywhere but
+#: trailing numeric groups on a clean base) do not match, so they compare
+#: literally, exactly as before #6843: they are not two spellings of one
+#: indexed bit, they are genuinely distinct names.
+_ALL_BUS_BIT_GROUPS_RE = re.compile(r"^([^<(\[{]+?)(?:[<(\[{]\d+[>)\]}])+$")
+
+
+def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
+    """The key under which two spellings of one bus bit's pin name compare
+    equal (issue #6843).
+
+    Hard-macro LEF declares an indexed pin ``DATA[0]`` while the macro's own
+    GDS label text spells the same bit ``DATA<0>`` (and vice versa on other
+    PDKs) -- one electrical terminal in two bracket styles, which
+    :func:`_merge_lef_pins`' pre-#6843 exact ``in`` comparison treated as two
+    different pins, appending the LEF spelling as a *second* pin whose own
+    PORT rectangle then wired wherever it happened to land (the emulator
+    SRAM's 96 duplicated ``NAME[i]`` copies, every one tied to ``VPWR``).
+
+    The key is ``(base name, indices)`` with each index normalised to its
+    integer value, so the comparison is per *bit*: ``DATA<0>`` and
+    ``DATA[0]`` share the key ``("DATA", (0,))``, while ``DATA<1>``'s
+    ``("DATA", (1,))`` stays distinct and a name with no trailing numeric
+    bracket groups maps to ``(itself, ())`` and still compares exactly as
+    before. A tuple (rather than a joined string) means no real pin name --
+    whatever separators it contains -- can ever collide with a canonical
+    key: a name that does not parse as ``base + numeric groups`` keeps its
+    literal self in the base slot and an empty index tuple.
+    """
+    match = _ALL_BUS_BIT_GROUPS_RE.match(pin_name)
+    if match is None:
+        return (pin_name, ())
+    return (
+        match.group(1),
+        tuple(int(index) for index in _BUS_BIT_GROUP_RE.findall(pin_name)),
+    )
+
+
 def _merge_lef_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -1104,15 +1154,23 @@ def _merge_lef_pins(
 ) -> tuple[str | None, set[str], list[str]]:
     """Append the LEF ``MACRO``'s pins the labels did not supply to ``pins``
     (issue #3749). Returns ``(lef_path or None if nothing merged, merged pin
-    names, warnings)``."""
+    names, warnings)``.
+
+    "Did not supply" compares through :func:`_bus_bit_alias_key`, not
+    literally (issue #6843): a LEF ``PIN DATA[0]`` whose bit the labels
+    already spell ``DATA<0>`` *was* supplied, so the label's own pin name and
+    access points win and the LEF spelling is never appended as a second
+    pin. Distinct indices and genuinely LEF-only ports are unaffected: their
+    keys match no label, and they merge exactly as before."""
     entry = lef_macros.get(cell.name)
     if entry is None:
         return None, set(), []
     lef_path, lef_pins = entry
+    labelled_keys = {_bus_bit_alias_key(name) for name in labelled}
     merged: set[str] = set()
     warnings: list[str] = []
     for pin_name in sorted(lef_pins):
-        if pin_name in labelled:
+        if _bus_bit_alias_key(pin_name) in labelled_keys:
             continue
         boxes = lef_pins[pin_name]
         if not boxes:
@@ -1196,7 +1254,9 @@ def _resolve_abstract_cell_pins(
       **LEF merge (issue #3749):** when a ``--abstract-cell-lef`` LEF also
       declares a ``MACRO`` of this cell's name, every LEF pin whose name the
       labels did not supply is appended (labels win on any name present in
-      both), and ``lef_path`` names that LEF. A standard cell routinely
+      both -- compared through :func:`_bus_bit_alias_key` so that a LEF
+      ``DATA[0]`` and a label ``DATA<0>`` count as the same bit, issue
+      #6843), and ``lef_path`` names that LEF. A standard cell routinely
       draws its substrate/well pin (``VNB``) on a label layer the deck does
       not read (sky130 ``pwell.label``), so the labels alone silently lose
       it; the LEF is the only place it is declared. ``lef_merged`` is the
