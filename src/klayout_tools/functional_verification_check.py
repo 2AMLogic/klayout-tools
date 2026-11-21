@@ -8,6 +8,7 @@ from typing import Any
 from . import functional_verification as fv
 from ._provenance import INPUT_ROLE_SOURCE
 from ._report_verify import build_check_result, hash_check, load_committed_report
+from .functional_verification_initial_state import resolve_module_plusargs
 from .functional_verification_run_inputs import resolve_run_inputs
 
 
@@ -95,6 +96,10 @@ def _current_pins(
     verilog_tb = fv._resolve_verilog_top(testbench, None, engine, options)
     if verilog_tb is None:
         fv._resolve_testbench(testbench, request_dir, require_module=False)
+        # Issue #6906: `testbench.plusargs` is validated offline too, so a
+        # committed request with a malformed or klt-reserved entry fails the
+        # check (exit 1) rather than passing as an unread field.
+        resolve_module_plusargs(testbench, fv.FunctionalVerificationError)
     _, _, _, _, _, _, sdf, _ = fv._resolve_options(
         options, engine, request_dir, require_include_dirs=False
     )
