@@ -63,10 +63,10 @@ def _stub_klayout(
     write_report: bool = True,
     returncode: int = 0,
     stderr: str = "",
+    version_stdout: str = "KLayout 0.30.12\n",
     calls: list | None = None,
 ):
     """Stand in for the ``klayout -b -r <deck>`` launch.
-
     Writes the report at whatever path the module chose (located by scanning
     argv for the ``report=`` token, as the engine's own stub does -- the work
     dir is private to :func:`list_klayout_deck_rule_categories`).
@@ -77,9 +77,9 @@ def _stub_klayout(
             calls.append(list(cmd))
         report_arg = next((a for a in cmd if a.startswith("report=")), None)
         if report_arg is None:
-            # Not the deck launch -- `subprocess` is one module object, so
-            # this stub also intercepts the `klayout -v` version probe.
-            return fake_completed()
+            # Not the deck launch: the `klayout -v` probe (issue #5660),
+            # intercepted because `subprocess` is one module object.
+            return fake_completed(stdout=version_stdout)
         if write_report:
             with open(report_arg.split("=", 1)[1], "w", encoding="utf-8") as handle:
                 handle.write(_categories_rdb(*categories))
@@ -90,8 +90,7 @@ def _stub_klayout(
 
 
 def _deck_launches(calls):
-    """The `klayout -b -r <deck>` launches among `calls`, dropping the
-    `klayout -v` version probe."""
+    """Deck launches among `calls` (the `-v` probe carries no report=)."""
     return [c for c in calls if any(a.startswith("report=") for a in c)]
 
 
@@ -110,6 +109,8 @@ def test_deck_runs_against_a_single_cell_geometry_free_layout(tmp_path, monkeypa
     saved: dict[str, str] = {}
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         input_path = next(a for a in cmd if a.startswith("input=")).split("=", 1)[1]
         saved["bytes"] = open(input_path, "rb").read()
         report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
@@ -155,6 +156,8 @@ def test_private_work_dir_is_removed_even_though_the_listing_succeeded(
     seen: dict[str, str] = {}
 
     def fake_run(cmd, capture_output, text, timeout):
+        if cmd[1:] == ["-v"]:
+            return fake_completed(stdout="KLayout 0.30.12\n")
         report_path = next(a for a in cmd if a.startswith("report=")).split("=", 1)[1]
         seen["work_dir"] = os.path.dirname(report_path)
         with open(report_path, "w", encoding="utf-8") as handle:
@@ -228,11 +231,14 @@ def test_klayout_binary_override_is_recorded_and_used(tmp_path, monkeypatch):
     assert _deck_launches(calls)[0][0] == str(exe)
 
 
-def test_no_override_leaves_the_environment_block_off(tmp_path, monkeypatch):
+def test_no_override_records_the_path_resolved_binary(tmp_path, monkeypatch):
     monkeypatch.delenv("KLT_KLAYOUT_BINARY", raising=False)
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/klayout")
     _stub_klayout(monkeypatch)
 
-    assert "environment" not in list_klayout_deck_rule_categories(_deck(tmp_path))
+    listing = list_klayout_deck_rule_categories(_deck(tmp_path))
+    assert listing["environment"] == {"klayout_binary": "/usr/bin/klayout"}
+    assert listing["provenance"]["klayout_version"] == "0.30.12"
 
 
 def test_deck_globals_warning_is_surfaced_on_the_listing(tmp_path, monkeypatch):
@@ -314,7 +320,7 @@ def test_missing_deck_file_is_refused_before_anything_is_launched(
 
 
 def _unrunnable(tmp_path):
-    """A `klayout` that exists but answers nothing useful to `-v`."""
+    """A `klayout` that exists but answers `-v` uselessly."""
     path = tmp_path / "not-a-klayout"
     path.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
     path.chmod(0o755)
@@ -327,7 +333,7 @@ def test_version_floor_is_preflighted_before_the_deck_is_launched(
     """The application-version floor aborts a listing as surely as a run
     (issue #2689), and does so before anything is launched."""
     monkeypatch.delenv("KLT_KLAYOUT_BINARY", raising=False)
-    calls = _stub_klayout(monkeypatch, calls=[])
+    calls = _stub_klayout(monkeypatch, calls=[], version_stdout="")
 
     with pytest.raises(DrcError):
         list_klayout_deck_rule_categories(

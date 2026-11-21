@@ -4,8 +4,8 @@
     "version": "0.9.2",
     "date": "2026-11-14"
   },
-  "verb_count": 68,
-  "mcp_tool_count": 95,
+  "verb_count": 69,
+  "mcp_tool_count": 98,
   "decks": [
     "asap7",
     "gf180mcu",
@@ -357,7 +357,7 @@
         },
         {
           "name": "evidence",
-          "summary": "write an evidence-record/1 file around a finished klt sim / klt pex report",
+          "summary": "evidence records around finished klt sim / klt pex runs",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/evidence.md"
         },
         {
@@ -388,7 +388,7 @@
         },
         {
           "name": "deck",
-          "summary": "identify a built-in rule deck, resolve one to its release, report the installed build's own deck coverage, or list the rule values a deck enforces",
+          "summary": "identify a built-in rule deck, resolve one to its release, report the installed build's own deck coverage, list the rule values a deck enforces, or diff two deck revisions",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/deck.md"
         },
         {
@@ -417,6 +417,11 @@
           "name": "fill",
           "summary": "insert density fill shapes on a PDK's fill layers",
           "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/fill.md"
+        },
+        {
+          "name": "em",
+          "summary": "field-solver wrapper (geode-fem quasi-static capacitance)",
+          "doc": "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/em.md"
         }
       ]
     }

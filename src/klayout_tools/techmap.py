@@ -48,6 +48,7 @@ from typing import Any
 from ._native import find_cargo_binary
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from .equiv import EquivError, run_equiv
+from .equiv_verdict import require_equivalence
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md. Mirrors the Rust binary's own
@@ -281,47 +282,11 @@ def _verify_techmap_equivalence(
             f"not be completed: {exc}"
         ) from exc
 
-    status = equiv_report["status"]
-    if status != "equivalent":
-        raise TechmapError(_equivalence_failure_message(status, equiv_report))
-
-    return {
-        "status": status,
-        "engine": equiv_report["engine"],
-        "engine_version": equiv_report["engine_version"],
-        "timeout_s": equiv_report["timeout_s"],
-        "elapsed_s": equiv_report["elapsed_s"],
-        "artifacts": equiv_report["artifacts"],
-    }
-
-
-def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
-    """An actionable :class:`TechmapError` message for a non-``"equivalent"``
-    ``klt equiv`` verdict against a just-mapped netlist -- mirrors
-    ``synthesize.py``'s own ``_equivalence_failure_message`` exactly, one
-    stage later in the pipeline."""
-    log_path = equiv_report.get("artifacts", {}).get("log_path")
-    if status == "counterexample":
-        counterexample = equiv_report.get("counterexample") or {}
-        diverging = counterexample.get("diverging_outputs") or []
-        confirmed = counterexample.get("confirmed_by_simulation")
-        detail = (
-            f"diverging outputs: {', '.join(diverging)}"
-            if diverging
-            else "no diverging outputs reported"
-        )
-        message = (
-            "mapped netlist is NOT equivalent to its pre-mapping generic "
-            f"netlist (klt equiv reported 'counterexample'; {detail}; "
-            f"confirmed_by_simulation={confirmed})"
-        )
-    else:
-        diagnostics = equiv_report.get("diagnostics") or []
-        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
-        message = (
-            "equivalence check against the pre-mapping generic netlist did "
-            f"not reach a verdict (klt equiv reported '{status}'): {detail}"
-        )
-    if log_path:
-        message += f" -- see {log_path} for the full proof"
-    return message
+    return require_equivalence(
+        equiv_report,
+        error_cls=TechmapError,
+        counterexample_prefix=(
+            "mapped netlist is NOT equivalent to its pre-mapping generic netlist"
+        ),
+        no_verdict_prefix=("equivalence check against the pre-mapping generic netlist"),
+    )
