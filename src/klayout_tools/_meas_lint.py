@@ -23,6 +23,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from ._meas_lint_wrapper import widen_over_wrapper
 from .sim_errors import SimError
 
 #: A ``par('...')`` expression span in a `.meas` card (issue #5651). ngspice
@@ -467,7 +468,7 @@ def check_meas_signal_position(
     found = _find_meas_signal_expression(spice)
     if found is None:
         return
-    start, end, expression = found
+    start, end, expression = widen_over_wrapper(spice, found[0], found[1])
     inner = _quoted_expression(expression)
     rewrite = _splice_replacement(spice, start, end, f"par('{inner}')")
     if control_scope:

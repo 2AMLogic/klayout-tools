@@ -142,6 +142,32 @@ def test_build_entries_hash_matches_streamed_sha256_of_raw_bytes(
     assert entry["content_hash"] == expected
 
 
+def test_release_uses_its_own_rule_sources(_tagged_repo, monkeypatch):
+    repo = _tagged_repo
+    decks = repo / "src/klayout_tools/decks"
+    primary = b'DRC_RULE_SOURCES = ("sky130_extra",)\n'
+    (decks / "sky130.py").write_bytes(primary)
+    (decks / "sky130_extra.py").write_bytes(b"grid = 1\n")
+    _commit(repo, "v0.3.0")
+    (decks / "sky130_extra.py").write_bytes(b"grid = 2\n")
+    _commit(repo, "v0.4.0")
+    monkeypatch.setattr(gdh, "REPO_ROOT", repo)
+    pins = {
+        row["git_tag"]: row["content_hash"]
+        for row in gdh.build_entries()
+        if row["deck"] == "sky130"
+    }
+    assert pins["v0.2.0"] == "sha256:" + hashlib.sha256(b"DECK_B = 2\n").hexdigest()
+    for tag, sibling in [("v0.3.0", b"grid = 1\n"), ("v0.4.0", b"grid = 2\n")]:
+        records = (
+            b"sky130.py\0"
+            + hashlib.sha256(primary).digest()
+            + b"sky130_extra.py\0"
+            + hashlib.sha256(sibling).digest()
+        )
+        assert pins[tag] == "sha256:" + hashlib.sha256(records).hexdigest()
+
+
 def test_build_entries_records_commit_and_tag(_tagged_repo, monkeypatch):
     monkeypatch.setattr(gdh, "REPO_ROOT", _tagged_repo)
 

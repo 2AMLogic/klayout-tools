@@ -218,7 +218,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from . import env_provenance, output_lock, pex_async, pex_sim_evidence
+from . import env_provenance, output_lock, pex_async, pex_runset, pex_sim_evidence
 from ._jsonnum import is_number
 from ._paths import _resolve_relative
 from ._provenance import content_hash, sha256_file
@@ -236,11 +236,19 @@ from .pex_asap7 import (
     netlist_adaptation_for_deck,
     with_fidelity_warnings,
 )
+from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
+    BODY_BIAS_BIASED,
+    BODY_BIAS_TIED,
+    BODY_BIAS_UNBIASED,
+    TIE_SOURCE_DECLARED,
+    _body_bias_report,
+)
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
     _expand_reference_includes,
     _has_include_card,
+    _instantiated_model_counts,
     _logical_cards,
     _reference_is_hierarchical,
     _subckt_interfaces,
@@ -290,31 +298,6 @@ _PIN_COUNT_MISMATCH_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Issue #1983: ``body_bias.status`` values -- whether the extracted netlist
-#: this run re-simulated has a DC bias path for every device body.
-#:
-#: - ``"biased"``: every PMOS body terminal resolved to a real, named net, so
-#:   both legs' operating points are comparable.
-#: - ``"unbiased"``: at least one PMOS body landed on an anonymous,
-#:   KLayout-synthesized net with **no DC bias path at all** (``klt
-#:   extract``'s own ``unbiased_pmos_body_nets[]``, issue #555). Per
-#:   ``docs/cli/extract.md`` -> "Coverage", that makes a full-circuit
-#:   resimulation of the extracted netlist "physically wrong, not merely
-#:   imprecise" -- the run converges and produces numbers, and those numbers
-#:   are not comparable to the schematic leg's.
-#:
-#: Deliberately a *separate* verdict from this command's top-level
-#: ``status``, which stays exactly what it has always been (every graded
-#: ``delta[]`` row met its tolerance). See :func:`_body_bias_report`.
-BODY_BIAS_BIASED = "biased"
-BODY_BIAS_UNBIASED = "unbiased"
-#: Issue #4245: every reported-unbiased net was merged into a schematic net by
-#: a caller's ``--tie-net`` declaration. Deliberately not ``"biased"``: that
-#: means the *layout* drew the bias path.
-BODY_BIAS_TIED = "tied"
-#: ``body_bias.tied[].source`` for a ``--tie-net`` tie.
-TIE_SOURCE_DECLARED = "declared"
-
 #: Issue #2478: ``measurement.mode`` values -- how this run's two legs were
 #: measured.
 #:
@@ -363,72 +346,6 @@ class PexError(Exception):
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _body_bias_report(
-    extract_report: Mapping[str, Any],
-    ties: Sequence[tuple[str, str]] | None = None,
-) -> dict[str, Any]:
-    """The ``body_bias`` block (issue #1983): whether the extracted netlist
-    this run re-simulated actually has a DC bias path for every device body.
-
-    Built from the extraction this command drove itself -- ``klt extract``
-    already detects the condition and reports it as
-    ``unbiased_pmos_body_nets[]`` (issue #555), so nothing here re-derives
-    it; this reduces that array to a verdict plus its counts and carries the
-    entries through into `klt pex`'s own envelope.
-
-    **Why this belongs in the `klt pex` report and not only in the
-    extraction's.** ``docs/cli/extract.md`` states that a PMOS body on an
-    anonymous, synthesized net has no DC bias path at all, which makes a
-    full-circuit resimulation of that netlist *physically wrong, not merely
-    imprecise*. `klt pex`'s entire output is such a resimulation, compared
-    row-by-row against a schematic leg -- so this condition does not merely
-    reduce the precision of a ``delta[]`` row, it invalidates the comparison
-    the row reports. A `klt pex` record is also the artifact
-    ``docs/design-evidence-tiers.md`` item 7 is cited from, and that record
-    never carried the extraction's own JSON: a reader of the evidence had no
-    way to tell a post-layout number measured on a properly-biased netlist
-    from one measured on a floating-body netlist. That is the gap issue
-    #1983 reported.
-
-    **Reported, not enforced.** ``status`` is untouched: a run whose deltas
-    all met tolerance still reports ``status: "pass"`` with
-    ``body_bias.status: "unbiased"``. Whether an unbiased body should
-    invalidate the verdict is a policy question for the consumer of the
-    evidence (see ``docs/cli/signoff.md`` and
-    ``docs/design-evidence-tiers.md`` item 7), not one this command answers
-    on the caller's behalf -- and answering it here would retroactively fail
-    every design on a PDK whose deck has no well-tap mechanism, which is a
-    separate decision from making the condition visible.
-
-    ``unbiased_pmos_body_nets`` is carried verbatim (same field name, same
-    ``{"device", "net"}`` entry shape as ``klt extract``'s own) rather than
-    re-spelled, so a reader who knows one artifact already knows the other.
-    """
-    entries = list(extract_report.get("unbiased_pmos_body_nets") or [])
-    unbiased_nets = sorted({entry["net"] for entry in entries})
-    report: dict[str, Any] = {
-        "status": BODY_BIAS_UNBIASED if entries else BODY_BIAS_BIASED,
-        "unbiased_device_count": len(entries),
-        "unbiased_nets": unbiased_nets,
-        "unbiased_pmos_body_nets": entries,
-    }
-    if ties:
-        # Issue #4245: additive. `unbiased_*` above keep reporting what the
-        # layout drew; the caller's declared ties are stated beside them, so
-        # "tied by declaration" never reads as a drawn tap.
-        report["tied"] = [
-            {
-                "extracted_net": extracted,
-                "schematic_net": schematic,
-                "source": TIE_SOURCE_DECLARED,
-            }
-            for extracted, schematic in ties
-        ]
-        if {extracted for extracted, _ in ties} >= set(unbiased_nets):
-            report["status"] = BODY_BIAS_TIED
-    return report
 
 
 def _validate_tie_nets(
@@ -978,7 +895,7 @@ def _flat_dut_mismatch(
 
 
 def _model_mismatch(
-    *, reference_netlist: str, extracted_netlist: str
+    *, reference_netlist: str, extracted_netlist: str, extracted_top: str | None = None
 ) -> dict[str, Any] | None:
     """The structured ``model_mismatch`` diagnostic (issue #2402), or
     ``None`` when the reference (schematic) and extracted netlists'
@@ -1018,6 +935,12 @@ def _model_mismatch(
     should not be blocked; the point is only that the divergence must be
     *visible* rather than silently folded into an ordinary, gradeable delta.
 
+    **A hierarchical extraction is expanded, not scanned** (issue #6559): the
+    runset engine writes every circuit it produced, so the extracted side is
+    counted as the devices instantiated from ``extracted_top``
+    (:func:`_instantiated_model_counts`) -- a local cell name is never a
+    device family. A flat extraction counts exactly as before.
+
     The comparison is a multiset (instance *count* per model name, not just
     which names appear): a run whose two sides name the same models but a
     different number of each still reports the divergence, since that
@@ -1033,7 +956,9 @@ def _model_mismatch(
     reference_counts = _device_model_counts(
         _expand_reference_includes(reference_text, reference_netlist)
     )
-    extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
+    extracted_counts = _instantiated_model_counts(
+        _read_text(extracted_netlist) or "", extracted_top
+    )
 
     reference_multiset = {
         key: count for key, (_name, count) in reference_counts.items()
@@ -1067,20 +992,19 @@ def _model_mismatch(
         )
     elif hierarchical_reference:
         unrelated_clause = (
-            "the reference netlist is hierarchical (it instantiates at "
-            "least one locally-defined `.subckt`), while `klt extract`'s "
-            "output is always flat -- see docs/cli/extract.md's "
-            '"Extraction is flat, not hierarchical" note and issue #1085 '
-            "(the same shape `klt lvs`'s `options.flatten_reference` "
-            "exists for). This divergence may simply be a "
-            "hierarchy-representation artifact -- a device nested inside a "
-            "locally-defined `.subckt` is counted once per definition here, "
-            "not once per physical instance -- rather than a genuine "
-            "device-flavour mismatch; re-run with `klt pex "
-            "--flatten-schematic` (issue #2889), which flattens the "
-            "schematic DUT to PDK leaf devices before the schematic-side "
-            "run, before treating this as evidence the two sides are "
-            "unrelated. "
+            "the reference netlist is hierarchical (it instantiates at least one "
+            "locally-defined `.subckt`), while `klt extract`'s curated engine "
+            "writes a flat netlist (`--engine klayout-runset` may write a "
+            "hierarchical one) -- see docs/cli/extract.md's \"Extraction is flat, "
+            "not hierarchical\" note and issue #1085 (the same shape `klt lvs`'s "
+            "`options.flatten_reference` exists for). This divergence may simply "
+            "be a hierarchy-representation artifact -- a device nested inside a "
+            "locally-defined `.subckt` is counted once per definition here, not "
+            "once per physical instance -- rather than a genuine device-flavour "
+            "mismatch; re-run with `klt pex --flatten-schematic` (issue #2889), "
+            "which flattens the schematic DUT to PDK leaf devices before the "
+            "schematic-side run, before treating this as evidence the two sides "
+            "are unrelated. "
         )
     elif kind == "count_only":
         unrelated_clause = (
@@ -2453,7 +2377,7 @@ def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
     layout_path: str,
-    deck_name: str,
+    deck_name: str | None,
     *,
     top: str | None,
     pdk_variant: str | None,
@@ -2571,7 +2495,7 @@ def _require_single_dut(dut_paths: Sequence[str]) -> None:
 def run_pex(
     layout_path: str,
     testbench_paths: Sequence[str],
-    deck_name: str,
+    deck_name: str | None,
     *,
     output: str | None = None,
     top: str | None = None,
@@ -2613,6 +2537,7 @@ def run_pex(
     submit_only: bool = False,
     attach: str | None = None,
     submit_request: Mapping[str, Any] | None = None,
+    runset: pex_runset.PexRunset | None = None,
     _ownership: contextlib.ExitStack | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
@@ -2805,9 +2730,10 @@ def run_pex(
 
 
     **``flatten_schematic`` (issue #2889) flattens the schematic leg.**
-    ``klt extract``'s output is always flat while a schematic DUT is
-    normally hierarchical, which makes ``model_mismatch`` fire on hierarchy
-    alone and can leave the two legs incomparable. With ``flatten_schematic``
+    ``klt extract``'s curated-engine output is flat while a schematic DUT
+    is normally hierarchical (a ``--engine klayout-runset`` extraction may
+    not be), which makes ``model_mismatch`` fire on hierarchy alone and can
+    leave the two legs incomparable. With ``flatten_schematic``
     (``klt pex --flatten-schematic``) the one resolved schematic DUT is
     flattened to PDK leaf devices once (:func:`_flatten_schematic_dut`,
     written to ``<artifacts root>/schematic-dut.flat.spice``), every
@@ -2867,6 +2793,12 @@ def run_pex(
     ``device_cards_match``. Without it the report is byte-identical.
     Incompatible with ``measure_command`` (:class:`PexError`).
 
+    **``runset`` (issue #6559)** swaps the curated-deck extraction for ``klt
+    extract --engine klayout-runset`` (``deck_name`` is then ``None``): a
+    device-level leg with **no parasitics**, reported in ``extraction.engine``/
+    ``parasitics_carried``/``params_not_carried`` (see :mod:`.pex_runset`).
+    ``None`` -- the curated route -- leaves the envelope byte-identical.
+
     **Output-directory ownership (issue #2770).** The run owns its artifact
     root (``artifacts_dir``, default ``.klt/pex/`` beside the layout) for its
     whole lifetime through :func:`klayout_tools.output_lock.hold_output_dir`,
@@ -2905,6 +2837,9 @@ def run_pex(
     )
     command_mode = command is not None
     _reject_resistance_graph_with_distributed_rc(resistance_graph, distributed_rc)
+    pex_runset.refuse_unsupported(
+        runset, device_only_leg=device_only_leg, tie_nets=tie_nets
+    )
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -2924,7 +2859,9 @@ def run_pex(
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
-            parasitics=True,
+            # Issue #6559: the runset engine has no parasitics; every other
+            # option passes through and is refused by name by `run_extract`.
+            parasitics=runset is None,
             # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
             # both whenever the flags were never given, which is the exact
             # `run_extract` call this module made before they existed.
@@ -2955,6 +2892,7 @@ def run_pex(
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=mom_rlc_inductance_nh,
+            **pex_runset.extract_options(runset),
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -3195,6 +3133,7 @@ def run_pex(
         else _model_mismatch(
             reference_netlist=schematic_netlist_path,
             extracted_netlist=extracted_netlist_path,
+            extracted_top=extract_report["top"],
         )
     )
 
@@ -3585,6 +3524,8 @@ def run_pex(
             # actually read -- `klt extract`'s own `pdk` block (`variant`,
             # `root` as `{path, scope}`, `version`), `None` without `--pdk`.
             "pdk": extract_report.get("pdk"),
+            # Additive fields (issue #6559): present only for a runset leg.
+            **pex_runset.extraction_fields(extract_report),
             # Additive field (issue #2764): the extraction's own
             # per-net parasitic RC network integrity diagnostics --
             # threshold/tolerances, aggregate counts, and one entry per net
