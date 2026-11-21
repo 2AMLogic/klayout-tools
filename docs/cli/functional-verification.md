@@ -9,7 +9,7 @@ flow"), and the hard gate behind
 [`klt eval`](eval.md)'s `valid` field (issue #387).
 
 ```
-klt functional-verification <request> [--base-dir <dir>] [--mutations <proposals>]
+klt functional-verification <request> [--base-dir <dir>] [--check <report> | --mutations <proposals>]
                                 [--pdk <variant>] [--pdk-root <root>] [--format text|json]
 ```
 
@@ -58,6 +58,8 @@ args.
   instead of the request file's own directory. See
   "[Archived requests: `--base-dir`](#archived-requests---base-dir)" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+- `--check <report>` compares a committed report's input hashes with the
+  current request and files. See [Checking a committed report](#checking-a-committed-report).
 - `--mutations <proposals>` — optional, issue #1592: run mutation testing
   against the same `<request>` — see "Mutation testing: `--mutations`"
   below.
@@ -66,6 +68,36 @@ args.
   see "Gate-level cell models: `request.pdk`" below. Each flag overrides the
   corresponding `request.pdk` member (`variant`/`root`); the request block
   itself supplies the required `cell_library`.
+
+## Checking a committed report
+
+```sh
+klt functional-verification request.json --check fv-report.json --format json
+```
+
+This command checks the inputs of either a passing or a failing run. It reads
+files from the current request using the usual file, stdin, inline JSON,
+`--base-dir` and PDK resolution rules. It needs no simulator and writes no
+run artifacts.
+
+| Report field | Input checked |
+| --- | --- |
+| `provenance.request_sha256` | SHA-256 of the complete parsed request serialized as compact JSON with sorted object keys. Formatting and object key order can change. Array order is significant. |
+| `environment.sources[i].sha256` | Bytes of each resolved source in build order, including any resolved PDK cell models. |
+| `provenance.input.content_hash` | The shared source-role hash for an RTL run. |
+| `from_synthesize.netlist_sha256` | Bytes of the current synthesized netlist against the digest captured by the FV run, even if synthesis has since produced a new report. |
+| `provenance.sdf_sha256` | Bytes of the original `options.sdf.file` before simulator-specific rewrites. Present on SDF runs. |
+
+The JSON result has `mode: "check"` and a `checks` array. Each entry contains
+`field`, `expected` (committed), `actual` (current), and `match`. A complete
+match exits **0** (`status: "match"`). Drift exits **3** (`status: "drifted"`).
+Malformed requests or reports, unreadable inputs, and legacy reports missing
+a required hash exit **1**. Regenerate a legacy report to record the pins.
+Text output names each changed field and shows both values.
+
+This check covers input freshness. Tool binaries, cocotb module contents,
+transitive includes, mutation proposals, seed replay, and simulation outputs
+are outside its scope.
 
 ## Archived requests: `--base-dir`
 
@@ -348,6 +380,10 @@ entry named after `verilog_top` (a failure carries
 `error_type: "VerilogBenchFailure"`). `environment.cocotb_version` is `null` and
 `environment.results_xml` is the absent envelope (`{path: null, scope: "absent"}`); `environment.test_log`/`build_log`
 name the transcripts and `environment.sdf` is populated as on the cocotb path.
+`provenance.input.content_hash` covers the resolved `request.sources`,
+including the Verilog bench file listed there — so a Verilog-top report cannot
+be bundled with a `source`-role synthesize citation in one `klt signoff`
+run; see [`signoff.md`](signoff.md) → Provenance consistency.
 `environment.parameters` is `{}` — the field is carried for shape parity with
 the cocotb path, but a non-empty `request.parameters` is a request error here.
 The SDF diagnostic gate is unchanged: a partial annotation is still exit 1.
@@ -377,7 +413,22 @@ verified netlist when `options.from_synthesize` is used:
 `path`/`scope` is the repo-relative `{path, scope}` shape
 ([`docs/json-contract.md`](../json-contract.md)): a source outside the repo
 reads `{"path": null, "scope": "external", "sha256": "…"}` — the absolute host
-path is never emitted. `sha256` is the digest of the file's bytes at run time,
+path is never emitted.
+
+To classify sources and artifacts, `klt` uses the repo containing the directory
+used to resolve relative paths in the request (issue #6762). A request file
+uses its parent directory by default. A `-` (stdin) or inline JSON request
+uses the invoking directory by default, so its envelopes can differ between
+working directories.
+`--base-dir` overrides the default for all three forms. The same request file
+with its default base, or any request with a fixed absolute `--base-dir`,
+selects the same repo across invocations.
+
+A relative `-o/--outdir` resolves against the invoking directory, so an
+artifact can move outside that repo and change from `repo` to `external`.
+If the base directory is outside every repo, all present paths are `external`.
+
+`sha256` is the digest of the file's bytes at run time,
 so two runs of one testbench against different sources (an RTL run and a
 gate-level run) produce reports that differ in-band, and a source edited after
 the run can be detected by re-hashing it. The list names the caller's own
@@ -1828,17 +1879,30 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `hdl_toplevel` / `testbench` | string | Echo of the request's DUT / testbench-module identifiers. |
 | `status` | string | `"pass"` (`passed_count > 0` and `failed_count == 0`) or `"fail"` (`failed_count > 0`). Skips alongside executed tests are allowed. Never `"error"` in-band — a run that failed to *run*, including zero executed tests, emits no envelope at all (see "Exit codes"). |
 | `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Nonnegative counts derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure, matching the individual `tests` records. `test_count` includes skipped tests, so `passed + failed + skipped == test_count == len(tests)`. |
-| `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
+| `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `sim_time_ns` is read from whichever shape the installed cocotb writes into `results.xml` — the `<testcase sim_time_ns="...">` attribute cocotb 2.0.x emitted, or the `<properties>` block (`sim_time_duration` scaled by the reported `sim_time_unit`, never assumed to be `ns`) cocotb 2.1.0 replaced it with (issue #2592) — so the field carries the same nanosecond value either way. `error_type` and `error_message` appear only on `"failed"` entries. The message comes from the JUnit `error_msg` attribute, then `message`, then the failure element’s text. If all are empty, the value is `null`. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
+| `provenance` | object | The shared [`provenance`](../json-contract.md) block (issue #5550): `klt_version`/`klt_git_commit`/`klt_reinstall_spec`/`klayout_version`, with `pdk` and `deck` always `null` (this verb resolves neither). `input.content_hash` digests the RTL `request.sources` as resolved **before** the SDF/initial-state shims, escaped-divider renames, and scoped-define wrappers are substituted, under the `source` role and the same content-only combined scheme `klt synthesize`/`klt equiv` use — so the digest is byte-identical for the same RTL contents under a different checkout path or `-o` directory, excludes the cocotb testbench, the SDF file, `options.initial_state.netlist`, and every generated wrapper written into `output_dir`, and a `klt signoff` manifest can bind an FV citation to the very sources a cited synthesis run checked. A run whose sources cannot all be hashed records `content_hash: null`, never a crash. An `options.from_synthesize` run records `input: null` instead: its design input is the synthesized netlist, already pinned by the `from_synthesize.netlist_sha256` block. |
 | `from_synthesize` | object | Additive (issue #5684); present only when `options.from_synthesize` was used: the report and netlist `{path, scope}` envelopes, the verified `netlist_sha256`, and the `hash_check` entry (`{field, expected, actual, match}`, always `match: true` here — a mismatch is exit 1 before any build). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `tools` (issue #4473; additive) — one `{name, path, version, sha256}` per `request.requires_tools` entry as resolved (`version` is the first line of `--version`, `null` if it printed nothing; `[]` when the field is omitted), `cocotb_version`, `results_xml` — the `{path, scope}` envelope of the raw evidence this report was derived from, so a stored verdict can be re-checked against it — `test_log` and `build_log` (issue #3013), the envelopes of the simulator/cocotb console transcript and the build transcript the run wrote (paths only, never inlined; see [`docs/json-contract.md`](../json-contract.md); `--format text` prints `test_log:` and, on a failed run, its tail) — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `parameters` (issue #5697; additive) — the resolved `request.parameters` map the run elaborated with, `{}` when absent, so a stored envelope states which parameterization it is evidence for, plus `initial_state` (issue #2998; additive) — `null` unless `options.initial_state` was requested, else the echo described in "Gate-level power-up state" (`mode`, effective `seeds`, `netlist`, `clock`, `state_elements`, `d_nets`, per-seed `runs`) — plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` whenever `dropped` is nonempty. `dropped` maps each counted class to `{count, reason}` and includes `arcs` for classes that record affected cell arcs, including `iopath_cond_expression` (issue #5296). The `sdf` object also carries `renamed` (issue #2897, additive, present only when non-empty) — `[{from, to}]`, each escaped-divider instance renamed to a plain identifier for annotation. See [SDF back-annotation](#sdf-back-annotation-optionssdf) for the class list and report shape. |
 
-There is no shared `provenance` block: this verb's verdict depends on no PDK
-and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
-block"), and `environment` is the contract's own reproducibility surface.
+In cocotb failure messages, an absolute RTL input filename such as
+`/work/chip/rtl/gcd.v:17` appears as `rtl/gcd.v:17` when the request is in
+the `chip` checkout. Outside a Git checkout, the request directory serves as
+the root. A known input outside that root appears as `environment.sources[N]`,
+where `N` is its zero-based position in the report’s source list. The original
+diagnostic is available in the cocotb XML identified by `environment.results_xml`.
+
+The shared `provenance` block is covered above (issue #5550): it pins the
+RTL the run was built from so a committed report is hash-pinnable in a
+`klt signoff` manifest. This verb's verdict still depends on no PDK and no
+rule deck — `provenance.pdk`/`provenance.deck` are always `null` (see
+`docs/json-contract.md` → "Shared `provenance` block") — and `environment`
+remains the contract's own reproducibility surface.
 
 ## Exit codes
+
+For `--check` exit codes, see [Checking a committed report](#checking-a-committed-report).
 
 | Code | Meaning |
 | --- | --- |

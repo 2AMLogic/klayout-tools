@@ -1,12 +1,12 @@
 """SPICE-text -> SPICE-text subcircuit flattener (issue #2889).
 
-``klt extract``'s output is always flat -- one `.SUBCKT` wrapper around PDK
-leaf devices only -- while a design's schematic netlist is normally
-hierarchical: user subcircuits instantiated from the top subcircuit. ``klt
-pex --flatten-schematic`` uses :func:`flatten_spice` to inline every
-*locally defined* user subcircuit down to leaf device cards before the
-schematic-side simulation, so both legs (and the ``model_mismatch``
-diagnostic) compare like with like.
+``klt extract``'s curated-deck output is flat -- one `.SUBCKT` wrapper
+around PDK leaf devices only -- while a design's schematic netlist is
+normally hierarchical: user subcircuits instantiated from the top
+subcircuit. ``klt pex --flatten-schematic`` uses :func:`flatten_spice`
+to inline every *locally defined* user subcircuit down to leaf device
+cards before the schematic-side simulation, so both legs (and the
+``model_mismatch`` diagnostic) compare like with like.
 
 This is deliberately a *text* flattener, not KLayout's in-process
 ``Netlist.flatten()`` (what ``klt lvs``'s ``options.flatten_reference``

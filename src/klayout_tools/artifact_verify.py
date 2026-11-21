@@ -715,9 +715,9 @@ def main(argv: list[str] | None = None) -> int:
     the standalone verify run (see the module docstring)."""
     parser = argparse.ArgumentParser(
         prog="artifact_verify.py",
-        description="Verify an artifact manifest against the store through "
-        "its broker (the standalone twin of `klt artifact verify`; see "
-        "docs/cli/artifact.md)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Verify an artifact manifest against the store through a broker.\n"
+        "https://github.com/2AMLogic/klayout-tools/blob/main/docs/cli/artifact.md",
     )
     parser.add_argument("manifest", metavar="MANIFEST")
     parser.add_argument(
