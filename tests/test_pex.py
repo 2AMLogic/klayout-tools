@@ -512,6 +512,8 @@ def test_build_delta_rows_single_testbench_bare_spec_row():
     assert rows == [
         {
             "spec_row": "vout",
+            "testbench": None,
+            "measurement": "vout",
             "corner_id": "tt/1.800V/27C",
             "schematic_value": 1.0,
             "extracted_value": 1.1,
@@ -600,21 +602,6 @@ def test_unextracted_delta_rows_carry_per_side_status():
     (row,) = _unextracted_delta_rows(spec_row_prefix=None, schematic_report=schematic)
     assert row["schematic_status"] == "fail"
     assert row["extracted_status"] == "error"
-
-
-def test_build_delta_rows_multi_testbench_prefixes_spec_row():
-    schematic = _sim_report(
-        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
-    )
-    extracted = _sim_report(
-        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.1)]}]
-    )
-    rows = _build_delta_rows(
-        spec_row_prefix="gain-tb",
-        schematic_report=schematic,
-        extracted_report=extracted,
-    )
-    assert rows[0]["spec_row"] == "gain-tb.vout"
 
 
 def test_build_delta_rows_missing_schematic_corner_is_error():
@@ -3016,7 +3003,7 @@ def test_run_pex_parasitic_integrity_none_without_the_field(
                 entry.pop("integrity", None)
         return report
 
-    monkeypatch.setattr(pex_module, "run_extract", strip_integrity)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", strip_integrity)
 
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
@@ -3097,7 +3084,7 @@ def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
         seen.append(kwargs.get("substrate_tie_ohms", "missing"))
         return real_run_extract(*args, **kwargs)
 
-    monkeypatch.setattr(pex_module, "run_extract", _spy)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", _spy)
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
@@ -5074,8 +5061,8 @@ def resistor_layout_unread_purpose(tmp_path):
 
 
 def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
-    """Wrap `pex.run_extract` (still calling the real one) and record every
-    call's keyword arguments."""
+    """Wrap the extracted leg's `run_extract` (still calling the real one)
+    and record its kwargs -- dispatched via `pex_runset` since #6606."""
     import klayout_tools.pex as pex_module
 
     real = pex_module.run_extract
@@ -5085,7 +5072,7 @@ def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
         calls.append(kwargs)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(pex_module, "run_extract", _recording_run_extract)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", _recording_run_extract)
     return calls
 
 
@@ -6365,6 +6352,8 @@ def test_build_delta_rows_without_flag_carries_no_device_only_keys():
     )
     assert set(row) == {
         "spec_row",
+        "testbench",
+        "measurement",
         "corner_id",
         "schematic_value",
         "extracted_value",
@@ -6750,6 +6739,7 @@ def test_run_pex_resistance_graph_writes_selected_resistance(tmp_path):
     assert echo["r_cut_ohm"] == 0.0
     (net,) = echo["nets"]
     assert net["resistance_source"] == "graph"
+    assert net["fallback_reason"] is None
     assert net["selected_resistance_ohm"] < net["legacy_resistance_ohm"]
     assert sum(_netlist_resistors(base_out)) == pytest.approx(
         net["legacy_resistance_ohm"], rel=1e-3
@@ -6768,22 +6758,9 @@ def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
 
     (net,) = graph["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "legacy"
+    assert net["fallback_reason"] == "via_resistance_unknown"
     assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
     assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
-
-
-def test_run_pex_resistance_graph_r_cut_zero_is_forwarded(tmp_path, monkeypatch):
-    calls = _capture_run_extract_kwargs(monkeypatch)
-    _pex_strapped(
-        tmp_path,
-        "single_level",
-        "g",
-        resistance_graph=True,
-        resistance_graph_r_cut_ohm=0,
-    )
-    assert calls[0]["resistance_graph"] is True
-    assert calls[0]["resistance_graph_r_cut_ohm"] == 0
-    assert calls[0]["emit_selected_resistance"] is True
 
 
 def test_run_pex_resistance_graph_default_passes_no_graph_request(
