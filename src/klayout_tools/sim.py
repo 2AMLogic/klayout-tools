@@ -4019,6 +4019,7 @@ def _run_sim_corners(
             request=request,
             corner_points=dispatch_points,
             netlist_path=netlist_path,
+            netlist_sha256=netlist_digests.sha256,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
@@ -4034,12 +4035,6 @@ def _run_sim_corners(
         # fans out" single-job path authoritative for every attach.)
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
-        # The exact pre-#376 call for the default case (no budget, no
-        # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
-        # new-since kwargs are identity no-ops then (`dispatch_points is
-        # corner_points`, `deadline`/`checkpoint`/`probe_abort` all `None`),
-        # so this path stays byte-identical for every existing
-        # request/response.
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
             corner_points=dispatch_points,
             netlist_path=dispatch_netlist_path,
@@ -4060,7 +4055,10 @@ def _run_sim_corners(
             # Issue #3896: a `max_units_per_job` split reroute keeps its shard
             # map even without --resume (no checkpoint to take it from).
             **(
-                {"shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs)}
+                {
+                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "netlist_sha256": netlist_digests.sha256,
+                }
                 if backend == "batch"
                 else {}
             ),
