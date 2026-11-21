@@ -314,6 +314,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
 | `sdf` | object \| null | Additive field (issue #2886). `null` unless `request.sdf: true`. Otherwise `{path, scope, content_hash}`: the `{path, scope}` identity of the SDF this corner's session wrote (the same envelope `spef_path` uses — never an absolute host path) plus the `sha256:`-prefixed digest of its bytes, so it can be cited as an input. On a `corners` response the field is not hoisted — one per `corners[]` entry. See "Post-route SDF per corner" below. |
 | `electrical_checks` | object \| null | Additive field (issue #3005). **`def` mode only** (`null` with `verilog`). Max-transition, max-capacitance, min-pulse-width and min-period checks from the same OpenSTA session as the timing numbers, so with a `spef` they are against the extracted parasitics. Per `corners[]` entry on a multi-corner response. See "Electrical limit checks" below. |
+| `blackboxed_cells` | array | Additive field (issue #5707), always present (hoisted to the top level on a `corners` response). `[{"cell": "<name>"}]` for every `macros[]` entry declared as an untimed black box (`cell` with no `lef`/`lib`, `verilog` mode only); `[]` when none. Numbers in this response exclude those cells' delay and power, and timing paths that start or end at them are absent from the report entirely. See "Untimed black boxes" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
 
 ## Hard macros (`request.macros`)
@@ -341,6 +342,40 @@ analysed** (and no `"default"` key) is a request error naming the macro,
 the corner, and the keys that are available — never a silent fallback to
 another corner's timing, which matters most in a `pdk.corners` sweep, where
 one corner's macro liberty is the wrong answer for the next.
+
+### Untimed black boxes: a macro with no LEF (issue #5707)
+
+In `verilog` mode an entry may carry **only `cell`** — neither `lef` nor
+`lib` — to declare that master an explicit, untimed black box:
+
+```json
+"macros": [{"cell": "vendor_ip_stub"}]
+```
+
+Without it, a netlist instantiating a cell with no physical view fails at
+`link_design` with `ORD-2013`. With it, this command writes a pin-less stub
+`MACRO` LEF into the run directory and reads it with the other macro LEFs, so
+the design links and the instance is carried as an untimed cell (OpenROAD
+logs `STA-0201`/`ORD-2011` warnings for it; verified against OpenROAD 26Q3).
+**Reported slack, `fmax_mhz` and `estimated_power_mw` exclude the black-boxed
+cells' delay and power** — they are numbers for the rest of the design only.
+Nets on the black box's pins are not connected to anything in the engine, so
+a timing path that starts or ends at the black box is absent from the report
+entirely — the reported worst slack is the worst over paths that never touch
+the black box, not a worst slack with only the macro's own arcs omitted — and
+a cell whose net's only sink was the black box loses that pin capacitance, so
+its own delay is optimistic.
+
+The declaration is opt-in on purpose: a forgotten LEF on an ordinary entry is
+still a loud request error (and the `ORD-2013` hint now names this form).
+Rejected with a request error naming the field: a LEF-less entry in `def` mode
+(a DEF carries placed geometry), and a LEF-less entry that also gives `lib`,
+`gds` or `verilog_blackbox` (supply the `lef` to use those).
+
+The response lists every black-boxed cell in `blackboxed_cells`
+(`[{"cell": "<name>"}]` in request order; always present, `[]` when none;
+hoisted to the top level on a `pdk.corners` response). Such an entry echoes in
+`macros[]` with `lef: null`.
 
 `gds`/`verilog_blackbox` are accepted (for shape-compatibility with the
 other two verbs) but unused by this command — it reads physical/timing
@@ -515,25 +550,69 @@ request clock, and the block is `"complete"`. Without those delays the outputs
 are unconstrained, so the block is `"incomplete"` and `timing_status` is
 `"unconstrained"`.
 
-**Timing exceptions.** The only exception a `klt sta` request can express is
-`constraints.false_path_from` (issue #2968): a list of input ports whose
-outgoing paths are excluded with `set_false_path -from`, for example
-`"false_path_from": ["cfg_mode", "cfg[3]"]`. Everything below applies to those
-exclusions. The pinned engine behaves as follows, from captured sessions with
-`set_false_path` added to the generated script:
+### Timing exceptions
 
-- An endpoint that has a constraint keeps it under a false path. For example,
-  an output with an output delay is still not counted as unconstrained, even
-  when `find_timing_paths -to` it returns no path. An intentionally excepted
-  endpoint is not a constraint gap.
-- A false path does not remove an endpoint that never had a constraint. The
-  endpoint stays in the list.
+The current request accepts `constraints.false_path_from`. For example,
+`"false_path_from": ["cfg_mode", "cfg[3]"]` excludes paths starting at the
+scalar input `cfg_mode` or bit 3 of `cfg`, to **every** destination. Each name
+must identify one literal input or bidirectional port. The primary clock port
+and duplicate names are errors. Each corner applies `set_false_path -from`
+after the I/O delays. Omitting the list or passing `[]` emits no cut. The
+top-level `false_path_from` echo identifies the selected startpoints. To check
+whether a cut removed a timed path, compare the same path query with and
+without the cut in the same corner.
 
-`complete` therefore means "no endpoint or register lacks a constraint". It
-does not mean "every endpoint is timed with no exceptions". An excluded port
-is not a constraint gap, and excluding it does not constrain anything it did
-not already constrain; check the echoed `false_path_from` to see which
-startpoints were removed from the slack numbers.
+Read `constraint_completeness` separately in each corner. In the captured
+engine sessions, a path query to the delayed output `y` found one path before
+the cut and zero afterward. The output retained its delay and stayed off the
+unconstrained list. In the control without I/O delays, both `y` and
+`ff_unclk/D` remained in `unconstrained_endpoints` after a cut. Review the
+counts and pin samples for both `unconstrained_endpoints` and
+`unclocked_registers` to find gaps, even when the reported slack is finite.
+
+#### Proposed destination-pin cut
+
+The Arty A7 XDC cuts paths from `uart_rxd` to the D pin of the **first**
+UART synchronizer register. It pairs three SPI inputs with their own first
+stages in the same way. Other fanout of each input and the path from the
+first register to the second still need timing. The XDC selects Vivado
+hierarchical names with a regular expression. A mapped OpenSTA design needs
+its own pin names. [Arty A7 constraints, lines 47–50](https://github.com/2AMLogic/gf180-parasynth/blob/d3341b315331b6d24a2f08d85855594aebf08ba1/fpga/boards/arty-a7-100.xdc#L47-L50)
+
+The proposed entry pairs a literal source port with a destination pin. In
+`{"from_port": "uart_rxd", "to_pin": "u_uart/rx_q[0]/D"}`, the mapped pin
+name is illustrative. This syntax is outside the current request schema.
+
+- Match `from_port` by the existing literal input-port rules. Match `to_pin`
+  against the full hierarchical name of a register data pin. Use `/` between
+  nonempty components. Within a component, ASCII letters, digits, underscores,
+  dots and square brackets match literally. The wildcards are `*` for zero or
+  more characters and `?` for one. Reject other characters and treat the
+  selector as data.
+- After linking or loading the mapped design in each corner, resolve both
+  selectors before applying the cut. Require exactly one object of each
+  specified role. On zero matches, multiple matches or a wrong-role match,
+  return a request error identifying the corner, entry index and selector.
+- For each entry and corner, report its index, original selectors, match
+  counts and resolved names. Probe setup and hold for that source/destination
+  pair with and without the entry, keeping all other constraints fixed.
+  Identify which checks lost a timed path. If neither had a path before the
+  cut, report that the entry matched but excluded no timed path. A failed
+  probe leaves the effect unknown. Report the corner's completeness checks
+  independently, including any unconstrained endpoints and unclocked registers.
+
+#### Deferred forms
+
+The TorchSynth report identifies four-phase enables as a multicycle timing
+requirement. It lists case analysis and wider false paths as missing forms.
+[TorchSynth friction report, F5](https://github.com/2AMLogic/gf180-torchsynth/blob/53605e125810dcb6cb5a45cbbd1267dc9674e001/asic/klt-friction.md#f5-klt-sta-cannot-express-exceptions-generated-clocks-or-uncertainty)
+
+- **Fixing a mode value (`set_case_analysis`)** is deferred until a consumer
+  names a scenario, a mode pin held at 0 or 1 throughout it, and the timing
+  path that stays active while the other branch is inactive.
+- **Cutting through an intermediate pin (`set_false_path -through`)** is
+  deferred until a consumer identifies the intermediate pin on the path to
+  exclude and a path that bypasses it to the same endpoint and must still be timed.
 
 ### Unavailable, never zero
 
@@ -1567,13 +1646,13 @@ data hold path and is what `into.hold` reports, under its own
   default stays unconstrained, and a `min_ns`-only entry leaves the setup
   side unconstrained. Neither produces a path record, so a clean
   `worst_*_path` does not mean every port was constrained.
-- **Not SDC.** Only one clock and only `set_input_delay`/`set_output_delay`
-  are supported, plus `set_false_path -from` for the ports named in
-  `constraints.false_path_from`: there are no multicycle paths, no
-  `-to`/`-through` false paths, and no `read_sdc`. Clock uncertainty is
-  supported (`constraints.clock_uncertainty_ns`, issue #4240). A committed
-  `.sdc` can be *compared* with the request (never executed): see "SDC drift
-  check".
+- **Exception limits.** The request supports literal input-port exclusions.
+  Mode values, destination pins, through pins and pin patterns are outside
+  that contract. Multicycle paths are also unsupported. When `sdc_check`
+  reads `set_case_analysis`, `set_false_path -to` or `set_false_path -through`,
+  it lists each command and its source line in `sdc_drift.unchecked`. The
+  supplied SDC is comparison data only. The JSON request supplies the timing
+  constraints. See [Timing exceptions](#timing-exceptions).
 
 ## Clock uncertainty (`constraints.clock_uncertainty_ns`, issue #4240)
 
