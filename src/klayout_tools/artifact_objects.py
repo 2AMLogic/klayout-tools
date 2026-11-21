@@ -86,6 +86,7 @@ from typing import IO, Any
 from . import build_identity
 from .artifact_verify import (
     _CHUNK,
+    _SHA256_RE,
     CLIENT_KINDS,
     MANIFEST_SCHEMA_VERSION,
     ArtifactError,
@@ -95,8 +96,11 @@ from .artifact_verify import (
     _integrity_problem,
     _transfer,
     check_repo,
+    key_digest,
     load_manifest,
+    repo_from_key,
     uri_for_key,
+    uri_key,
 )
 
 # Re-exported (`X as X`) because importers reach them through this module:
@@ -111,6 +115,7 @@ from .artifact_verify import PRODUCER_FIELDS as PRODUCER_FIELDS
 from .artifact_verify import RATE_LIMIT_ATTEMPTS as RATE_LIMIT_ATTEMPTS
 from .artifact_verify import RATE_LIMIT_MAX_SLEEP_S as RATE_LIMIT_MAX_SLEEP_S
 from .artifact_verify import RATE_LIMIT_TOTAL_WAIT_S as RATE_LIMIT_TOTAL_WAIT_S
+from .artifact_verify import URI_SCHEME as URI_SCHEME
 from .artifact_verify import Presigned as Presigned
 from .artifact_verify import entry_problems as entry_problems
 from .artifact_verify import resolve_broker as resolve_broker
@@ -189,6 +194,28 @@ def resolve_repo(explicit: str | None, cwd: str | None = None) -> str:
             )
         repo = f"{match.group(1)}/{match.group(2)}"
     return check_repo(repo)
+
+
+def target_for_uri(uri: str, repo: str | None) -> FetchTarget:
+    """Fetch target for an ``artifact:<key>`` REF, the form a manifest entry's
+    ``uri`` takes. The digest, and the repo of an ``evidence/<owner>__<name>/``
+    key, come from the key; ``repo`` is only the fallback for any other shape.
+    A URI carries no size, so ``size`` stays unset: the fetch is still re-hashed
+    against the digest and checked against the key."""
+    key = uri_key(uri)
+    sha256 = key_digest(key)
+    if not _SHA256_RE.match(sha256):
+        raise ArtifactError(
+            f"uri {uri!r} key does not end in a sha256 (64 lowercase hex digits)",
+            "invalid_manifest",
+        )
+    in_key = repo_from_key(key)
+    return FetchTarget(
+        kind="evidence",
+        repo=check_repo(in_key) if in_key else resolve_repo(repo),
+        sha256=sha256,
+        key=key,
+    )
 
 
 def producer_block(
