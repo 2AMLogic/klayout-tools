@@ -3729,13 +3729,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # net that names no layer_role of its own routes byte-identically to
         # how it did before this field existed -- including keeping the
         # `routing.cross_block_layer_role` fallback. A net that *does* name
-        # one routes on that plane instead, and the automatic cross-block
-        # fallback no longer applies to it: the caller has taken explicit
-        # control of this net's plane, and silently retrying it on a second,
-        # request-level plane it never asked for would make the drawn layer
-        # unpredictable (and is ill-defined when the two name one metal).
-        # The per-leg escape hatch (`legs[].layer_role`) is how a net that
-        # genuinely needs two planes says so explicitly.
+        # one routes on that plane instead, and no automatic fallback applies
+        # to it (cross-block, or the #6920 plane climb): the caller took
+        # explicit control of the plane (`legs[].layer_role` says two).
         net_where = f"request.connectivity[{net_index}] (net '{net_label}')"
         net_layer_role = entry.get("layer_role")
         net_route_layer = route_layer
@@ -3744,6 +3740,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         net_cross_geometry_for = _cross_block_geometry_for
         net_cross_width_um = cross_block_width_um
         net_width_um = width_um
+        # #6920 plane climb: off when this net named its own plane (#1655).
+        net_auto_climb = net_layer_role is None
         if not declare_only:
             if net_layer_role is not None:
                 net_route_layer = _resolve_override_layer(
@@ -4184,6 +4182,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
                 grid_um=net_grid_um,
+                pdk_variant=pdk_info["variant"],
+                auto_plane_climb=net_auto_climb,
             )
             notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the

@@ -407,6 +407,7 @@
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_pad_conflicts",
         "klayout_tools.gen_compose_plane_change",
+        "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing",

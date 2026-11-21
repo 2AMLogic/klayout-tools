@@ -269,12 +269,15 @@ bulk net, which the router has to reach. A plan that exited `0` before can
 exit `3` with the bulk net in `unrouted_nets[]` and a reason in
 `unrouted_reasons[]` — an honest report of a tie that was previously missing,
 not a regression. A group whose own ring encloses its devices usually needs
-`routing.cross_block_layer_role` (a metal2/via stack) for the tie to route
-out past the gate pad, and so does a sg13cmos5l `WELL_TAP` tie (#5948): the
-tap sits just past the array's outermost diffusion on the same metal1 line as
-the source/drain pads, so a same-layer route from a source pad to it crosses
-that drain pad and the behind-the-pin guard (#1895) refuses — route the plan
-on a metal2/via stack instead.
+its tie to route on a metal above the primary plane to get out past the gate
+pad, and so does a sg13cmos5l `WELL_TAP` tie (#5948): the tap sits just past
+the array's outermost diffusion on the same metal1 line as the source/drain
+pads, so a same-layer route from a source pad to it crosses that drain pad
+and the behind-the-pin guard (#1895) refuses. Since #6920 the router's
+automatic plane climb retries such a leg on each higher metal of the PDK's
+own stack by default, so these ties route without any request knob; name the
+net's own `routing.nets[<net>].layer_role` (#1655, "explicit wins") to keep
+a leg on one plane instead.
 
 A BJT `C`/collector terminal is still **deliberately** unmapped — it
 conventionally ties to a shared substrate tap a `guard_ring`/collector ring
@@ -435,15 +438,37 @@ wins. The derived choice shows in the group's `resolved_params` and as one
 `gen-compose`; there is no "row of unlike devices" topology, and each
 single-device `mos_array`/`res_array`/`cap_array` group is one unit.
 
+**Automatic plane climb (#6920).** A leg the fixed one-jog backbone cannot
+route on the plan's routing plane — the behind-the-pin (#1895) class a
+same-facing port pair in a row always produces, a crossing of a placed
+block's drawn metal, or a collision with an already-routed net — is retried
+on each higher metal of the PDK's own stack before the net is reported
+unroutable. The higher planes are empty for row-of-generators blocks (each
+generator draws its pads on local interconnect), every routability check and
+the route-vs-route gate re-run in full against the candidate plane, and a
+leg draws at that plane's own deck-minimum width when the plan's
+`routing.width_um` is narrower. Nets that name their own plane
+(`routing.nets[<net>].layer_role`, #1655) and caller-supplied `waypoints_um`
+paths are never climbed — "explicit wins". Still-unavailable levers: a
+per-group port-side hint (placing a group's supply pins on the side that
+faces the channel rather than the generator's fixed side) and a general
+mixed-device row topology — e.g. parallel unit groups whose S and D pads sit
+collinearly in one row still contend on the shared row line, which the climb
+does not untangle.
+
 *Largest block known to route end to end* (recorded 2026-11-06, base commit
 `3d2c74e`): the three-NFET shared-gate rail in
 `tests/test_layout_plan_gate_contact.py` (`_GATE_RAIL_NETLIST`, three one-unit
 `mos_array` groups in one row, shared gate net `VBIAS`) routes every net with
 the derived `gate_contact`; with `gate_contact: false` forced, `VBIAS` stays
-unrouted ("bare-poly gate"). No mixed-device sky130 block (`hvi` FETs plus
-`res_array` and `cap_array`) is verified to route fully: the #5093 report
-still showed self-net backbone crossings, "crosses the block's interior on the
-side away from its own pin", and cross-layer detour conflicts. MOS bulk is
+unrouted ("bare-poly gate"). The #5093-era self-net backbone crossings and
+"crosses the block's interior on the side away from its own pin" rejections
+that used to keep mixed-device sky130 blocks unroutable are lifted by the
+plane climb above (verified by `tests/test_layout_plan_mixed_sky130_block.py`,
+issue #6920: an xhigh `res_array` + MIM `cap_array` + four `hvi` `mos_array`
+units + two `guard_ring` tie rows route fully under default routing);
+end-to-end LVS/DRC verification of that block is tracked separately (#6912).
+MOS bulk is
 no longer part of that gap (#5546) on a family that draws taps — but sky130
 arrays draw none, so a sky130 block's LVS bulk compare still fails unless a
 `guard_ring` group with `net` supplies the tie.

@@ -120,6 +120,7 @@ from .gen_compose_plane_change import (
     _route_plane_change_leg,
     _segments_field,
 )
+from .gen_compose_plane_climb import PlaneClimbContext
 
 #: ``direction_deg`` values a *stub-widen* (#496) applies to -- a port's own
 #: outward-facing north/south stub, never an east/west one. Scoped this
@@ -4032,6 +4033,8 @@ def route_bundle(
     explicit_legs: list[dict[str, Any]] | None = None,
     geometry_for_layer: Any = None,
     grid_um: float = 0.0,
+    pdk_variant: str | None = None,
+    auto_plane_climb: bool = True,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4062,6 +4065,15 @@ def route_bundle(
     accepted, and the *next* candidate that would join the same two components
     is tried -- so an N-pin net routes around an individually unroutable pair
     whenever another spanning tree exists, rather than failing outright.
+
+    **Automatic plane climb (issue #6920).** Before a rejected leg gives up,
+    ``PlaneClimbContext.climb_leg``
+    (:mod:`klayout_tools.gen_compose_plane_climb`) retries it, plane by plane
+    up the resolved PDK's own metals stack, on the obstacle- and
+    conflict-class rejections a higher plane can lift; each attempt is a full
+    :func:`route_two_pin` pass plus the ``leg_conflict`` gate on that plane's
+    own geometry. Off for a net whose plane the caller named (#1655) and for
+    caller-supplied ``waypoints_um`` paths.
 
     **Partial routing when no spanning tree exists (issue #1169).** A net
     whose pins cannot all be joined into one component still gets every leg
@@ -4361,61 +4373,28 @@ def route_bundle(
             _endpoint_geometry(i, j, cross_block_geometry_for),
         )
 
-    # Route-vs-route cross-layer retry (issue #1680): `leg_conflict` (#1057)
-    # only ever runs *after* `route_two_pin()` has already returned
-    # `routed: True` on the primary `route_layer` -- so, unlike checks 3/4's
-    # own same-layer-short retry inside that function (#1168/#1393), a
-    # rejection here never got a chance to try `cross_block_route_layer`
-    # before failing the whole net. This closure re-runs the identical pin
-    # pair with the primary/cross layer roles swapped -- `cross_geometry`
-    # (this leg's own drawn-geometry cache for `cross_block_route_layer`,
-    # the same one checks 3/4's own retry already uses) standing in for
-    # `block_geometry`, `cross_block_geometry_for` standing in for
-    # `block_geometry_for` -- so every one of `route_two_pin`'s own checks
-    # (including its own via-drop resolution for a port whose reported
-    # layer differs from this new "primary") runs exactly as they would for
-    # a leg drawn on `cross_block_route_layer` from the start, not only the
-    # narrower same-block short case #1393 already covers. No further
-    # fallback layer is offered to this retried call (`cross_block_route_
-    # layer=None`) -- one level of retry, mirroring the bound every other
-    # detour search in this module already enforces (#1167/#1393).
-    def _retry_leg_on_cross_layer(
-        i: int,
-        j: int,
-        cross_geometry: Any,
-        leg_waypoints_um: list[tuple[float, float]] | None,
-    ) -> dict[str, Any] | None:
-        if cross_block_route_layer is None or leg_conflict is None:
-            return None
-        retry_width_um = (
-            cross_block_width_um if cross_block_width_um is not None else width_um
-        )
-        retry = route_two_pin(
-            pins[i],
-            pins[j],
-            blocks,
-            offsets_um,
-            placed_bboxes_um,
-            retry_width_um,
-            cross_block_route_layer,
-            extraction_deck,
-            cross_geometry,
-            waypoints_um=leg_waypoints_um,
-            leg_conflict=leg_conflict,
-            block_geometry_for=cross_block_geometry_for,
-            grid_um=grid_um,
-        )
-        if not retry["routed"]:
-            return None
-        retry_reason = leg_conflict(
-            retry["points_um"],
-            retry.get("via_drops", []),
-            retry.get("stub_widen", []),
-            retry.get("route_layer"),
-        )
-        if retry_reason is not None:
-            return None
-        return retry
+    # Cross-plane leg retries: the request-configured cross_block_route_layer
+    # retry (#1680) and the automatic metals-stack plane climb (#6920) live in
+    # gen_compose_plane_climb.PlaneClimbContext (relocated out of this module
+    # at its size-ratchet ceiling) -- every attempt is a full route_two_pin()
+    # pass plus the leg_conflict gate, never a waived check.
+    climb_ctx = PlaneClimbContext(
+        pins=pins,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        width_um=width_um,
+        route_layer=route_layer,
+        pdk_variant=pdk_variant,
+        extraction_deck=extraction_deck,
+        cross_block_route_layer=cross_block_route_layer,
+        cross_block_width_um=cross_block_width_um,
+        cross_block_geometry_for=cross_block_geometry_for,
+        geometry_for_layer=geometry_for_layer,
+        leg_conflict=leg_conflict,
+        grid_um=grid_um,
+        auto=auto_plane_climb,
+    )
 
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
@@ -4568,8 +4547,19 @@ def route_bundle(
                 and reason is not None
                 and result.get("route_layer") != cross_block_route_layer
             ):
-                retry = _retry_leg_on_cross_layer(
+                retry = climb_ctx.retry_leg_on_cross_layer(
                     i, j, cross_geometry, leg_spec.get("waypoints_um")
+                )
+                if retry is not None:
+                    result = retry
+                    reason = None
+            if reason is not None:
+                retry = climb_ctx.climb_leg(
+                    i,
+                    j,
+                    leg_spec.get("waypoints_um"),
+                    leg_effective_width_um,
+                    reason,
                 )
                 if retry is not None:
                     result = retry
@@ -4664,10 +4654,17 @@ def route_bundle(
                 reason is not None
                 and result.get("route_layer") != cross_block_route_layer
             ):
-                retry = _retry_leg_on_cross_layer(i, j, cross_geometry, waypoints_um)
+                retry = climb_ctx.retry_leg_on_cross_layer(
+                    i, j, cross_geometry, waypoints_um
+                )
                 if retry is not None:
                     result = retry
                     reason = None
+        if reason is not None:
+            retry = climb_ctx.climb_leg(i, j, waypoints_um, width_um, reason)
+            if retry is not None:
+                result = retry
+                reason = None
 
         if reason is None and result["routed"]:
             uf.union(i, j)
