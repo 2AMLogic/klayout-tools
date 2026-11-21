@@ -1,0 +1,1 @@
+- **Batch corner reports retain each worker's simulator launch thread pin alongside its preflight OpenMP setting** (#6857, 2026-11-20).

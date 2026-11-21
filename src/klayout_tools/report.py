@@ -19,10 +19,10 @@ produced it:
   an *error* envelope -- typically a verb's own ``--format json`` failure
   output, captured to a file and handed to this command for rendering
   alongside the rest of a CI run's evidence.
-- an object with a top-level ``violations`` list is a *violations-style*
-  report (``klt drc``'s shape today; any future verb reusing the same
-  ``violations[]``/``status: "clean"|"violations"`` convention is picked up
-  automatically, with no code change here).
+- an object with a top-level ``violations`` list is a DRC-style report.
+  For ``klt drc --engine both``, the section uses the cross-check verdict
+  and curated rows from the signoff projection. It also displays each
+  engine's own status and reported total.
 - an object with a top-level ``mismatches`` list is a *mismatches-style*
   report (``klt lvs``'s shape today), rendered the same way as
   violations-style reports (a table of structured findings) under a
@@ -49,6 +49,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env_provenance import render_path_field
+from .signoff_drc_crosscheck import crosscheck_project
 
 __all__ = ["ReportError", "build_report"]
 
@@ -123,8 +124,7 @@ def build_report(sources: list[str]) -> dict[str, Any]:
                 f"envelope '{source}' must be a JSON object, got "
                 f"{type(envelope).__name__}"
             )
-        kind = _classify(envelope, source)
-        sections.append(_build_section(kind, envelope, source))
+        sections.append(_build_section(envelope, source))
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -200,14 +200,19 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _build_section(kind: str, envelope: dict[str, Any], source: str) -> dict[str, Any]:
+def _build_section(envelope: dict[str, Any], source: str) -> dict[str, Any]:
+    projected = crosscheck_project(envelope)
+    report = projected or envelope
+    kind = _classify(report, source)
+    if kind == "drc":
+        reports = envelope["reports"] if projected is not None else None
+        return _section_drc(report, source, reports)
     builder = {
-        "drc": _section_drc,
         "lvs": _section_lvs,
         "layout-metrics": _section_layout_metrics,
         "error": _section_error,
     }[kind]
-    return builder(envelope, source)
+    return builder(report, source)
 
 
 def _rendered_input_path(value: Any) -> str | None:
@@ -231,7 +236,17 @@ def _rendered_input_path(value: Any) -> str | None:
     return None
 
 
-def _section_drc(envelope: dict[str, Any], source: str) -> dict[str, Any]:
+def _engine_result(report: Any) -> str:
+    if not isinstance(report, dict) or not isinstance(report.get("status"), str):
+        return "unavailable"
+    status = report["status"]
+    count = report.get("violation_count")
+    return f"{status} ({count})" if count is not None else status
+
+
+def _section_drc(
+    envelope: dict[str, Any], source: str, reports: dict[str, Any] | None
+) -> dict[str, Any]:
     violations = envelope.get("violations") or []
     title = "DRC Report"
     file_ = _rendered_input_path(envelope.get("file"))
@@ -243,6 +258,13 @@ def _section_drc(envelope: dict[str, Any], source: str) -> dict[str, Any]:
         info_lines.append(f"Deck: {envelope['deck']}")
     if file_:
         info_lines.append(f"File: {file_}")
+
+    empty_message = "No violations found."
+    if reports is not None:
+        curated = _engine_result(reports["curated"])
+        native = _engine_result(reports.get("native"))
+        info_lines.append(f"Cross-check: curated {curated}, native {native}")
+        empty_message = "No curated violation rows to display."
 
     rows = []
     for violation in violations:
@@ -272,7 +294,7 @@ def _section_drc(envelope: dict[str, Any], source: str) -> dict[str, Any]:
         "info_lines": info_lines,
         "table_headers": ("Rule", "Cell", "Layer", "BBox", "Description"),
         "table_rows": rows,
-        "empty_message": "No violations found.",
+        "empty_message": empty_message,
     }
 
 

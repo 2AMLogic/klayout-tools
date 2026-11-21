@@ -477,8 +477,8 @@ def test_deck_flags_refused_for_other_engines(tmp_path):
 
 def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
     default = run_lvs(_request(tmp_path, 1))
-    assert find_absolute_path_fields(default)
-    assert os.path.isabs(default["environment"]["klayout_binary"])
+    assert find_absolute_path_fields(default)  # absolute inputs still echo
+    assert default["environment"]["klayout_binary"] == "klayout"
 
     portable = run_lvs(_request(tmp_path, 1, portable_paths=True))
     assert find_absolute_path_fields(portable) == []
