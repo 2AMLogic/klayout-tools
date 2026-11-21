@@ -9,7 +9,11 @@ import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.drc import DrcError, run_drc_klayout_engine
-from klayout_tools.drc_klayout_abort import deck_abort_info
+from klayout_tools.drc_klayout_abort import (
+    _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES,
+    _klayout_deck_error_detail,
+    deck_abort_info,
+)
 from klayout_tools.drc_klayout_engine import _klayout_deck_error_lines
 from test_drc_klayout_engine import (
     _EMPTY_RDB,
@@ -57,6 +61,43 @@ def test_deck_abort_info_scans_full_output_beyond_detail_cap():
     out = "Executing deck first from /a/first.rb\n" + noise + _GF180_3LM_ABORT_STDERR
     info = deck_abort_info(out, None, _klayout_deck_error_lines(out))
     assert info["decks_executed"] == ["first", "mslot1"]
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr"),
+    [(None, None), ("", ""), ("", "   \n")],
+    ids=["none", "empty", "whitespace-only"],
+)
+def test_deck_error_detail_empty_capture_falls_back_to_error_lines(stdout, stderr):
+    """No captured output at all: quote the detected ``ERROR`` lines rather
+    than an empty message (the helper's documented last-resort fallback)."""
+    detail = _klayout_deck_error_detail(stdout, stderr, ["ERROR: boom"])
+    assert detail == "ERROR: boom"
+
+
+def test_deck_error_detail_truncation_without_dropped_errors_adds_no_recovery_block():
+    """A log past the cap whose ``ERROR`` line is already inside the kept tail
+    has nothing to recover from the omitted head: the omission header is
+    present, the 'ERROR lines recovered' block is not."""
+    overflow = 101
+    noise = "".join(
+        f"rule {i}\n"
+        for i in range(_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1 + overflow)
+    )
+    out = noise + "ERROR: boom\n"
+    assert len(out.splitlines()) == _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES + overflow
+
+    detail = _klayout_deck_error_detail(out, None, ["ERROR: boom"])
+
+    lines = detail.splitlines()
+    assert lines[0] == (
+        f"... ({overflow} earlier lines omitted; klt kept the tail, where the abort is)"
+    )
+    assert lines[-1] == "ERROR: boom"
+    assert len(lines) == _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES + 1
+    assert "end of ERROR lines recovered" not in detail
+    # The omitted head is gone; only the tail survives.
+    assert "rule 0" not in lines
 
 
 def test_klayout_engine_deck_abort_raises_coded_error_with_details(

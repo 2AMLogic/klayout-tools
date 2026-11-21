@@ -40,10 +40,9 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _clamp_cut_boxes,
         _insert_bjt_unit_implants,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
-        _shift_box,
     )
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _BjtArrayPCell(kdb.PCellDeclarationHelper):
         """Matched vertical-bipolar (PNP/BJT) array (Epic #152 phase 4): a
@@ -138,6 +137,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Emitter/base/collector diffusion (COMP) drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_cut_and_metal_params(self, kdb)
             self.param(
@@ -146,12 +146,14 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Base-tie tap drawing layer, covering each unit's base-tie "
                 "contact so the base terminal resolves to a real net",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Shared base well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_well_present(self)
             self.param(
@@ -162,6 +164,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "extension beyond every edge of it (only used when "
                 "add_collector_ring and ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "ring_implant_present",
@@ -169,6 +172,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the collector ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "ring_implant_margin_um",
@@ -177,6 +181,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "ring's own band on every edge (only used when "
                 "ring_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "bjt_mark_layer",
@@ -184,6 +189,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Per-unit bipolar device-mark drawing layer, enclosing only "
                 "the emitter pad (only used when bjt_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "bjt_mark_present",
@@ -191,6 +197,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether bjt_mark_layer is a real layer this PDK's extraction "
                 "deck (and, on some families, its DRC deck too) keys off",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "unit_emitter_implant_layer",
@@ -198,6 +205,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Implant drawn over each unit's emitter pad (P+; only used "
                 "when unit_implant_margin_um > 0)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "unit_base_implant_layer",
@@ -205,6 +213,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Implant drawn over each unit's base-tie pad (N+; only used "
                 "when unit_implant_margin_um > 0)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "unit_implant_margin_um",
@@ -212,6 +221,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Harness-resolved margin each unit emitter/base-tie implant extends "
                 "beyond its pad (0.0 = no unit implants drawn)",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "dummy_layer",
@@ -220,6 +230,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "unit device's recognised base-mark footprint (only used "
                 "when dummy_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_dummy_marker_params(self)
 
@@ -271,13 +282,6 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 _insert_boxes(self.cell, li_well, dbu, [info["well_box_um"]])
 
             if info["ring"] is not None and self.add_collector_ring:
-                ring = info["ring"]
-                ox, oy = info["ring_offset_um"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
                 # The ring's own diffusion-role shape goes on the deck's
                 # *tap* role, not its `active` role (issue #2312). A
                 # collector/substrate guard ring is a substrate *tie*, and a
@@ -298,46 +302,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # mechanism is now one mechanism rather than two. On a
                 # family whose `tap` role *is* its `active` role (gf180mcu,
                 # both `(22, 0)`) this is byte-identical geometry.
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
-                if self.ring_implant_present:
-                    # Tracks the collector ring's own tap-layer shape,
-                    # extended `ring_implant_margin_um` past every edge of
-                    # it (issue #2369's NP.5b/PP.5b extension-beyond-COMP
-                    # fix to #1580's originally coincident implant) -- still
-                    # a ring, never a blanket over the enclosed base
-                    # well/array (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
-                    )
+                _draw_composed_guard_ring(self, li_tap, li_metal, li_contact, dbu, info)
 
             # Per-unit bipolar device-mark, drawn on every unit (dummies
             # included -- they are structurally real unit devices too,

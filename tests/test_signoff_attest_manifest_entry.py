@@ -12,7 +12,9 @@ def _inventory(tmp_path):
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     (repo / "report.md").write_text("# characterization\n")
-    (repo / "sim.json").write_text(json.dumps({"status": "pass"}))
+    (repo / "sim.json").write_text(
+        json.dumps({"schema_version": 1, "kind": "generic", "status": "pass"})
+    )
     inventory = {
         "schema_version": 1,
         "kind": "t1-attestation-inventory",

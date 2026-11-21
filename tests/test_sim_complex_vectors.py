@@ -75,7 +75,14 @@ def test_save_mode_netlist_is_rejected_before_launch(tmp_path):
     request = _request(
         tmp_path, {"complex_vectors": ["v(out)"], "save_mode": "netlist"}
     )
-    with pytest.raises(sim.SimError, match="save_mode"):
+    with pytest.raises(
+        sim.SimError,
+        match=(
+            r"omit options\.save_mode\..*options\.save_vectors.*"
+            r'\{"complex_vectors": \["v\(out\)"\], "save_vectors": '
+            r'\["v\(out\)"\]\}'
+        ),
+    ):
         sim.run_sim(str(request))
 
 

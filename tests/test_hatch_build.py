@@ -385,6 +385,14 @@ def test_deck_hashes_records_each_deck_module(tmp_path):
     assert module.deck_hashes(str(tmp_path / "missing")) is None
 
 
+def test_build_pins_match_installed_decks():
+    from klayout_tools.decks import deck_content_hash, deck_names
+
+    recorded = _load_hatch_build().deck_hashes(str(_ROOT))
+    for name in deck_names():
+        assert recorded[name] == deck_content_hash(name)
+
+
 def test_render_build_info_includes_deck_hashes(tmp_path):
     module = _load_hatch_build()
     generated = tmp_path / "_build_info.py"
