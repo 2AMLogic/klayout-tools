@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 from klayout_tools.signoff import build_signoff, build_tier_report
 from test_signoff import (
@@ -88,14 +89,32 @@ def test_legacy_file_backed_pin_matches_evidence_bytes(tmp_path):
     assert item_7["status"] == "met"
     assert item_7["citation"]["content_hash"] == pin
     assert item_7["citation"]["content_hash_basis"] == "evidence_file"
+    assert item_7["citation"]["input_verified"] is True
 
 
 def test_legacy_file_backed_pin_goes_stale_on_edit(tmp_path):
     """A pin that no longer matches the evidence bytes is stale."""
-    _, item_7 = _fv_item7(tmp_path, "sha256:" + "0" * 64)
+    other = tmp_path / "other.json"
+    other.write_text("{}")
+    pin = "sha256:" + hashlib.sha256(other.read_bytes()).hexdigest()
+    fv_path, item_7 = _fv_item7(tmp_path, pin)
+    digest = hashlib.sha256(Path(fv_path).read_bytes()).hexdigest()
 
     assert item_7["status"] == "unmet"
     assert item_7["reason"] == "stale_evidence"
+    assert item_7["detail"] == {
+        "content_hash_pin": "stale",
+        "hash_check": {
+            "field": "evidence_file (sha256 of the cited evidence file)",
+            "expected": pin,
+            "actual": f"sha256:{digest}",
+            "match": False,
+        },
+        "compared_against": fv_path,
+        "hint": (
+            f"content_hash must be the sha256 of the evidence file itself ({fv_path})"
+        ),
+    }
 
 
 def test_legacy_command_backed_pin_stays_unverifiable(tmp_path):

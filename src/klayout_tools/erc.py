@@ -42,7 +42,6 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Any
 
@@ -64,15 +63,20 @@ from ._paths import (
 from ._provenance import build_provenance, content_hash
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_hash_check
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .coverage_work import coverage_work_count
-from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
+from .decks import (
+    ExtractionDeck,
+    UnknownExtractionDeckError,
+    deck_content_hash,
+    deck_source_path,
+)
 from .decks import get_extraction_deck as _get_extraction_deck
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
@@ -111,6 +115,7 @@ from .erc_well_regions import (  # noqa: F401 -- _cells_region is re-exported fo
     _tie_well_region,
     _well_assertion_coverage_entry,
 )
+from .evidence_canonicalize import rerun_result_for
 from .extract import (
     _capacitor_plate_regions,
     _capacitor_top_via_overlap_region,
@@ -3388,36 +3393,6 @@ def run_erc(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str, expected: str | None, echoed: Any, report_path: str
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
-    path the committed report echoes back (``file``/``spec``).
-
-    Hashes via :func:`~klayout_tools._provenance.content_hash` (the recorded
-    ``provenance.*.content_hash`` values are ``sha256:``-prefixed). That form is
-    not why this stays local: the shared ``input_hash_check`` takes it as
-    ``hasher``. This copy takes the caller-resolved path (no ``override``) and
-    attaches the original three-key ``input_not_found`` (``path``, ``resolved``,
-    ``found_relative_to_report``; issue #2595), not ``resolved_against``/``hint``.
-    """
-    path = echoed if isinstance(echoed, str) and echoed else None
-    check = hash_check(field, expected, content_hash(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-    }
-    return check
-
-
 def check_erc_report(report_path: str) -> dict[str, Any]:
     """``klt erc --check`` (cheap mode, issue #3060): verify a previously
     committed ``klt erc --format json`` report at ``report_path`` still
@@ -3427,14 +3402,18 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     (``committed["spec"]``) exactly as echoed back by the original run and
     compares each against ``provenance.input.content_hash`` /
     ``provenance.spec.content_hash``; when the report used ``--deck``, also
-    re-hashes that deck's source against ``provenance.deck.content_hash``.
-    Each mismatch names which input moved. A report with no recorded hash
-    never counts as a match
-    (:func:`klayout_tools._report_verify.hash_check`).
+    re-hashes its rule sources against ``provenance.deck.content_hash``. A
+    missing recorded hash fails the check.
 
     Relative echoed paths are re-hashed relative to the current working
-    directory -- the same convention (and the same ``input_not_found``
-    diagnostic) ``klt lvs --check`` uses.
+    directory -- the same convention ``klt lvs --check`` uses -- and an
+    echoed path that names no existing file carries the additive
+    ``input_not_found`` block ``klt drc``/``klt lvs`` attach (issue #6655):
+    the five keys ``path``/``resolved``/``found_relative_to_report``/
+    ``resolved_against``/``hint`` (``klt lvs`` adds a sixth,
+    ``resolved_repo_root``, which ERC does not emit), with the hint naming
+    only the report's directory, because ``--check`` is mutually exclusive
+    with the positional inputs and so offers no override flag to name.
 
     The result additionally carries the informational ``advisories`` list
     (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
@@ -3447,27 +3426,34 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
     committed = _load_committed_report(report_path, ErcError)
     checks = [
-        _input_hash_check(
+        # Issue #6655: the shared input_hash_check, so an echoed `file`/`spec`
+        # naming no existing file carries the five-key `input_not_found`
+        # block `klt drc` attaches (`klt lvs`'s adds `resolved_repo_root`,
+        # via `include_repo_root`, which ERC leaves off). `override_hint=None`:
+        # `--check` is mutually exclusive with the positional inputs, so
+        # there is no override flag for the hint to name.
+        input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            resolve_committed_path(committed.get("file"), report_path=report_path),
+            committed.get("file"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
-        _input_hash_check(
+        input_hash_check(
             "provenance.spec.content_hash",
             get_path(committed, ("provenance", "spec", "content_hash")),
             committed.get("spec"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))
     if isinstance(deck, dict) and deck.get("name") is not None:
+        actual = deck_content_hash(deck["name"])
         checks.append(
-            hash_check(
-                "provenance.deck.content_hash",
-                deck.get("content_hash"),
-                content_hash(deck_source_path(deck["name"])),
-            )
+            hash_check("provenance.deck.content_hash", deck.get("content_hash"), actual)
         )
     result = build_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
@@ -3510,4 +3496,4 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return build_rerun_result(report_path=report_path, committed=committed, fresh=fresh)
+    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)
