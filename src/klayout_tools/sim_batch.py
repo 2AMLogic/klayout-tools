@@ -3865,13 +3865,13 @@ class _BatchFleetRun:
 
     def start_retry_pass(self) -> list[int]:
         """Begin a ``--capacity-retries`` pass (issue #5567): hand back the
-        shards the last pass lost to a capacity refusal, in shard order, and
-        give the pass a fresh ``--wait-for-capacity`` budget (the run-wide
-        one is long spent, which would make every retry a single no-wait
-        attempt)."""
+        shards the last pass lost to a capacity refusal, in shard order, with
+        a fresh ``--wait-for-capacity`` budget (the run-wide one is long
+        spent) and the watch's pending count re-based to them (#6535)."""
         refused = sorted(self.capacity_refused)
         self.started = time.monotonic()
         self.budget_spent.clear()
+        self.watch.start_retry_pass(refused)
         return refused
 
     def run_shard_points(self, shard_points: list[CornerPoint]) -> _ShardResult:
