@@ -782,6 +782,7 @@
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
         "klayout_tools._verilog_top",
+        "klayout_tools._warn",
         "klayout_tools._yosys_error_messages",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
