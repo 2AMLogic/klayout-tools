@@ -297,3 +297,141 @@ def _stage_verilog_tb(tmp_path: Path, request_name: str) -> Path:
     for entry in VERILOG_TB_EXAMPLE_DIR.iterdir():
         shutil.copy(entry, tmp_path / entry.name)
     return tmp_path / request_name
+
+
+# -- issue #5769: naming the confirmed-rejected non-zero arcs ------------------
+#
+# The refusal hint resolves each `SDF ERROR: <file>:<line>: Could not find
+# intermodpath!` locator against the files the run actually handed to
+# `$sdf_annotate`. Icarus's line counter is cumulative across calls (a
+# 16-line safe file plus line 10 of the deferred file is reported as 26),
+# so the fixtures below state their line arithmetic in the comments.
+
+_FAN_DUT_V = "module fan (input wire [1:0] a, output wire b);\nendmodule\n"
+
+_FAN_SDF = """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "fan")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "fan")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT a[0] u1.in (1.000:5.000:9.000) (1.000:5.000:9.000))
+      (INTERCONNECT a[0] u_d.in (1.000:5.000:9.000) (1.000:5.000:9.000))
+    ))
+  )
+)
+"""
+
+#: The request SDF above is 14 lines and both entries touch bus port `a`,
+#: so the #1619 split defers both: a 14-line safe file (entries cut in
+#: place, line count unchanged) then a 14-line deferred file whose first
+#: entry sits on its line 10. Icarus reports that rejection as
+#: 14 (safe lines) + 10 = line 24 of the deferred file.
+_FAN_DEFERRED_LINE = 24
+
+
+def _intermodpath_line(path: Path, line: int) -> str:
+    return f"SDF ERROR: {path}:{line}: Could not find intermodpath!\n"
+
+
+def test_cocotb_refusal_names_rejected_arcs_and_workaround(tmp_path, monkeypatch):
+    """End to end on the stubbed-runner tier (the real-Icarus twin is
+    `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+    unresolvable`): the injected rejection of the non-survivor `a[0]
+    u1.in` entry is attributed through the run's own deferred SDF, and
+    the message names that arc and the buffer workaround -- never the
+    surviving `u_d.in` destination, which annotated and emitted nothing."""
+    _write(tmp_path / "fan.v", _FAN_DUT_V)
+    _write(tmp_path / "test_fan.py", _TESTBENCH)
+    _write(tmp_path / "route.sdf", _FAN_SDF)
+    request = {
+        "engine": "icarus",
+        "sources": ["fan.v"],
+        "hdl_toplevel": "fan",
+        "testbench": {"module": "test_fan", "testcase": None},
+        "options": {
+            "coverage": False,
+            "timescale": ["1ns", "1ps"],
+            "sdf": {"file": "route.sdf"},
+        },
+    }
+    request_path = _write(tmp_path / "request.json", json.dumps(request))
+    deferred = (
+        tmp_path
+        / ".klt"
+        / "functional-verification"
+        / ("klt_sdf_deferred_bus_ports.sdf")
+    )
+    _stub_runner(
+        monkeypatch,
+        _FakeRunner(
+            _RESULTS_XML,
+            extra_test_log=_intermodpath_line(deferred, _FAN_DEFERRED_LINE),
+        ),
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
+        run_functional_verification(request_path)
+
+    message = str(excinfo.value)
+    assert "a[0] → u1.in" in message
+    assert "insert a buffer" in message
+    assert "u_d.in" not in message
+    assert getattr(excinfo.value, "details", None) is None  # no new drop class
+
+
+def test_refusal_without_resolvable_locator_keeps_the_plain_message(
+    tmp_path, monkeypatch
+):
+    """A diagnostic whose locator names the request's own SDF path (not a
+    file the run annotated) attributes nothing: the message keeps its
+    exact pre-#5769 text."""
+    request_path = _request(tmp_path, _MINIMAL_SDF)
+    unresolved = "SDF ERROR: route.sdf:2976: Could not find intermodpath!\n"
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML, extra_test_log=unresolved))
+
+    with pytest.raises(
+        FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
+        run_functional_verification(request_path)
+
+    message = str(excinfo.value)
+    assert "Confirmed rejected" not in message
+    assert "→" not in message
+
+
+def test_verilog_top_gate_names_rejected_arcs(tmp_path):
+    """The verilog-top refusal site attributes through the same stashed
+    annotation context (hand-built here as a real run would stash it)."""
+    from klayout_tools import functional_verification_sdf_steps as steps
+
+    annotate_path = tmp_path / "klt_sdf_deferred_bus_ports.sdf"
+    _write(annotate_path, _FAN_SDF)
+    build_log = _write(tmp_path / "build_icarus.log", "")
+    test_log = _write(
+        tmp_path / "test_icarus.log",
+        _intermodpath_line(annotate_path, 10),  # single call: line is direct
+    )
+    sdf = {
+        "file": "route.sdf",
+        "corner": "typ",
+        "entries": "all",
+        "annotate_paths": [str(annotate_path)],
+        "bus_input_ports": {"a"},
+    }
+
+    with pytest.raises(
+        FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
+        fvt._verilog_top_sdf_gate(sdf, "icarus", build_log, test_log, {}, {})
+
+    message = str(excinfo.value)
+    assert "a[0] → u1.in" in message
+    assert "u_d.in" not in message
+    assert steps._sdf_intermodpath_hint(sdf, []) == ""  # no diagnostic, no arc

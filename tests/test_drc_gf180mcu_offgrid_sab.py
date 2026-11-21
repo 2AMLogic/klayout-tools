@@ -23,6 +23,7 @@ from klayout_tools.drc import run_drc
 
 SAB = (49, 0)
 CONTACT = (33, 0)
+METAL1 = (34, 0)  # contact landing: metal1.enclosing.contact.1 needs one (#5915)
 POLY2 = (30, 0)
 
 
@@ -43,8 +44,9 @@ def test_offgrid_contact_vertex_is_flagged(tmp_path):
     """The reported reproducer: a contact whose right edge is 2 dbu off the
     0.005um grid is reported under `contact.ongrid.1` (one violation per
     off-grid vertex); the same contact on-grid is clean."""
-    off = _write(tmp_path / "off.gds", {CONTACT: [kdb.Box(0, 0, 222, 220)]})
-    on = _write(tmp_path / "on.gds", {CONTACT: [kdb.Box(0, 0, 220, 220)]})
+    landing = {METAL1: [kdb.Box(-900, -900, 1200, 1120)]}
+    off = _write(tmp_path / "off.gds", {CONTACT: [kdb.Box(0, 0, 222, 220)], **landing})
+    on = _write(tmp_path / "on.gds", {CONTACT: [kdb.Box(0, 0, 220, 220)], **landing})
 
     report = run_drc(off, "gf180mcu")
     assert report["rule_counts"]["contact.ongrid.1"] == 2
@@ -95,7 +97,7 @@ def _sb_report(tmp_path, name, shapes):
 
 def test_sab_to_contact_spacing_sb4(tmp_path):
     """SAB 0.10um from a contact reports SB.4; 0.20um is clean."""
-    sab = {SAB: [kdb.Box(0, 0, 1000, 1000)]}
+    sab = {SAB: [kdb.Box(0, 0, 1000, 1000)], METAL1: [kdb.Box(1050, 300, 1700, 720)]}
     near = _sb_report(
         tmp_path, "near", {**sab, CONTACT: [kdb.Box(1100, 400, 1320, 620)]}
     )

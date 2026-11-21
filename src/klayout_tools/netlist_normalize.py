@@ -143,7 +143,7 @@ from . import _spice_number as spice_number
 from ._capacitor_mf import capacitor_mf_is_m_alias
 from ._diode_card import convert_diode_card
 from ._jsonnum import is_number
-from ._paths import fold_spice_continuations
+from ._spice_text import fold_spice_continuations
 from .pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
     DeviceLookup,
@@ -1241,7 +1241,6 @@ def _convert_capacitor_card(
     if has_length_param or has_width_param:
         l_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.length_param,
             params,
             has_length_param,
@@ -1250,7 +1249,6 @@ def _convert_capacitor_card(
         )
         w_um = _resolve_geometry_dimension(
             instance,
-            subckt_name,
             lookup.width_param,
             params,
             has_width_param,
@@ -1367,7 +1365,6 @@ def _resolve_call_geometry(
         return None
     l_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.length_param,
         params,
         has_length_param,
@@ -1376,7 +1373,6 @@ def _resolve_call_geometry(
     )
     w_um = _resolve_geometry_dimension(
         instance,
-        subckt_name,
         lookup.width_param,
         params,
         has_width_param,
@@ -1390,7 +1386,6 @@ def _resolve_call_geometry(
 
 def _resolve_geometry_dimension(
     instance: str,
-    subckt_name: str,
     param: str | None,
     params: dict[str, str],
     has_param: bool,
@@ -2239,7 +2234,6 @@ def normalize_reference_netlist(
 
 
 from .netlist_normalize_scan import (  # noqa: E402,F401  (re-exported)
-    _INCLUDE_LINE_RE,
     defined_subckt_names,
     detect_subckt_call_devices,
     quote_spice_includes,

@@ -59,7 +59,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # FastCap's own version string (what the binary prints: "Running fastcap 2.0
 # (18Sep92)"), suffixed with the short pinned commit so the install prefix
 # and the marker change if this pin is ever moved. Bump the version, the
-# commit, the checksum, and CHANGELOG.md together in the same change.
+# commit, the checksum, and a changelog fragment (`changelog.d/README.md`)
+# together in the same change.
 FASTCAP_VERSION="2.0-ec3479e"
 
 # ediloren/FastCap2 `master` has exactly one commit -- it is a 2015 snapshot
