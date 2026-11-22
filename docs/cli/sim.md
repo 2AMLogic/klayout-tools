@@ -358,7 +358,11 @@ capture records no digest. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
-agree) — never the submitter's banner. The submitting host's probe is kept
+agree, and `"error"` with every member's code named in `reason` when sharded
+members each failed the probe for *different* reasons, issue
+[#6260](https://github.com/2AMLogic/klayout-tools/issues/6260)) — never the
+submitter's banner. `"absent"` therefore always means no worker probe code was
+reported at all. The submitting host's probe is kept
 verbatim under `environment.client_engine_build`, with the same four keys and
 present only on off-host reports. `worker_environment.engine_build_comparison`
 (below) compares the two for you. A `local` report is unchanged: there
@@ -10656,25 +10660,44 @@ equal by construction, including for a mid-run edit, so `klt signoff
 --manifest`'s staleness gate and the environment block can never disagree
 inside the drift window.
 
-### `environment.corner_coverage` (issue #3794)
+### `environment.corner_coverage` (issue #3794; `unknown_devices` issue #5663)
 
-A multi-corner sweep can look complete while some device flavours never move:
-gf180mcu's deck binds its 5/6V MOSFETs (`06v0`, `06v0_nvt`) to the typical
-model in every process section. When `models.pdk` resolves to a PDK whose
-corner data is per-flavour (see [`klt pdk corners`](pdk.md#klt-pdk-corners))
-and the request has non-typical process corners, `environment.corner_coverage`
-lists, per requested process section, the flavours that do **not** move:
+A multi-corner sweep can look complete while some device flavours never move —
+or while the deck evidence cannot decide. When `models.pdk` resolves to a PDK
+whose corner data is per-flavour (see
+[`klt pdk corners`](pdk.md#klt-pdk-corners) and its `devices[].skew` for the
+classification evidence) and the request has non-typical process corners,
+`environment.corner_coverage` lists, per requested process section, two
+**disjoint** flavour lists (`<flavour>` placeholders — on today's supported
+PDKs both lists are empty, so the key is absent; see below):
 
 ```json
 "corner_coverage": {
   "pdk": "gf180mcuD",
-  "sections": [{"process": "ss", "unmoved_devices": ["06v0", "06v0_nvt"]}]
+  "sections": [
+    { "process": "ss", "unmoved_devices": ["<flavour>"] },
+    { "process": "ff", "unknown_devices": ["<flavour>"] }
+  ]
 }
 ```
 
+`unmoved_devices` are flavours `klt pdk corners` reports as
+`skew: "typical"` — provably bound to their typical model at that corner.
+`unknown_devices` are flavours it reports as `skew: "unknown"` (issue
+#5663): `.param` values differ from typical but the flavour's sub-library
+body cannot be resolved in the deck, so whether it skews is undecidable —
+reported here rather than silently claimed as unmoved. Either key is
+omitted when empty.
+
 Additive: absent when there is no `models.pdk`, the PDK is not found, it has
-no per-flavour corner data (e.g. sky130), or nothing is unmoved. No
-`schema_version` bump (docs/json-contract.md: new fields are additive).
+no per-flavour corner data (e.g. sky130), or nothing is unmoved or
+undecidable. On gf180mcuD as of issue #5663 that is the common case: its
+5/6V MOSFETs (`06v0`, `06v0_nvt`) are skewed *by `.param` overrides* the
+corner sections apply (reported `"param"`, not `"typical"` — the tokens
+still point at typical-named sub-libraries, but those sub-libraries consume
+the overridden parameters), so they no longer appear here.
+No `schema_version` bump (docs/json-contract.md: new fields and enum values
+are additive pre-1.0).
 
 ### `environment.netlist_identity` (issue #3074)
 
