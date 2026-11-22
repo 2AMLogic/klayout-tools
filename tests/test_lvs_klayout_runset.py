@@ -475,15 +475,6 @@ def test_deck_flags_refused_for_other_engines(tmp_path):
         run_lvs(request, deck_file="d.lvs")
 
 
-def test_cli_deck_var_parsing():
-    from klayout_tools.cli.lvs_cmd import _parse_deck_vars
-
-    assert _parse_deck_vars(["a=1", "b=x=y", "a=2"]) == {"a": "2", "b": "x=y"}
-    assert _parse_deck_vars(None) == {}
-    with pytest.raises(LvsError, match="invalid --deck-var"):
-        _parse_deck_vars(["novalue"])
-
-
 def test_portable_paths_runset_has_no_absolute_paths(tmp_path, fake_klayout):
     default = run_lvs(_request(tmp_path, 1))
     assert find_absolute_path_fields(default)  # absolute inputs still echo

@@ -71,8 +71,39 @@ def _voltage_flavor_ring_margin_um(family: str) -> float:
     return _PDK_VOLTAGE_FLAVOR_RING_MARGIN_UM.get(family, 0.0)
 
 
+# The sky130A.lydrc FEOL rules use the resolved hvi.drawing marker (75/20).
+# hvdifftap.22 encloses diffusion/tap with HVI. For a PFET, hvdifftap.17
+# and .19 also enclose diffusion and n-tap with the intersection of HVI
+# and nwell. Both thresholds are exact multiples of the manufacturing grid.
+_SKY130_HVI_ENCLOSURE_UM = 0.18
+_SKY130_HVNWELL_ENCLOSURE_UM = 0.33
+
+
+def apply_hv_mark_margins(
+    layer_params: dict[str, Any], family: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the native Sky130 HVI enclosures to either MOS generator."""
+    mark = layer_params["voltage_flavor_mark_layer"]
+    if family != "sky130" or (mark.layer, mark.datatype) != (75, 20):
+        return layer_params
+
+    pfet = params.get("flavor") == "pfet"
+    enclosure = _SKY130_HVNWELL_ENCLOSURE_UM if pfet else _SKY130_HVI_ENCLOSURE_UM
+    layer_params["voltage_flavor_mark_margin_um"] = max(
+        layer_params["voltage_flavor_mark_margin_um"], enclosure
+    )
+    layer_params["voltage_flavor_well_over_mark"] = pfet
+    if pfet and "ring_well_margin_um" in layer_params:
+        layer_params["ring_well_margin_um"] = max(
+            layer_params["ring_well_margin_um"], _SKY130_HVNWELL_ENCLOSURE_UM
+        )
+    return layer_params
+
+
 def apply_mos_array_mv_ring_margins(
-    layer_params: dict[str, Any], family: str
+    layer_params: dict[str, Any],
+    family: str,
+    params: dict[str, Any],
 ) -> dict[str, Any]:
     """Fold issue #6503's two margins into ``mos_array``'s merged hidden
     layer params, in place, and return them.
@@ -84,6 +115,9 @@ def apply_mos_array_mv_ring_margins(
     pads: their NCOMP lies under Dualgate and needs the same DF.4d_MV
     enclosure. Both well consumers use 0.16um; 3.3V-only requests keep
     their original margin. Ringless marker geometry is unchanged.
+
+    ``params`` (the request) additionally applies
+    :func:`apply_hv_mark_margins` (issue #7061).
     """
     layer_params["voltage_flavor_ring_margin_um"] = _voltage_flavor_ring_margin_um(
         family
@@ -94,4 +128,4 @@ def apply_mos_array_mv_ring_margins(
         mv_margin = _mv_ring_well_margin_um(family)
         if mv_margin > layer_params["ring_well_margin_um"]:
             layer_params["ring_well_margin_um"] = mv_margin
-    return layer_params
+    return apply_hv_mark_margins(layer_params, family, params)

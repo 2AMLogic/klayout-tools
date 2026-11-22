@@ -14014,12 +14014,12 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
 def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     tmp_path,
 ):
-    """The verdict exclusion is exactly two registered sets -- build identity
-    (issue #2249) and the report's quotation of the checklist (issue #2526):
-    every *other* top-level field of a tier report is still compared, so a
-    future field cannot quietly join the unchecked set. Guards against
-    widening either set by accident."""
+    """Pin three registered sets: build identity (#2249), checklist prose (#2526),
+    and derived unmet_reason_counts (#5903); compare every other top-level field."""
+    from klayout_tools.signoff_unmet_reasons import DERIVED_REPORT_PATHS
+
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    assert DERIVED_REPORT_PATHS == frozenset({("unmet_reason_counts",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
     excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {

@@ -312,9 +312,11 @@ continues and whitespace runs inside non-comment lines are collapsed to single
 spaces — exactly the layout `--check` compares — so two hosts whose xschem
 builds wrap long cards differently write byte-identical files from the same
 schematic. Comment lines are left byte-intact: the informational
-`**.subckt <name> <ports...>` port order is not rewritten, a `+` line is never
-joined onto a comment, and a quoted expression with embedded spaces
-(`ad='int((nf+1)/2) * w/nf * 0.29'`) survives verbatim. The fold is idempotent,
+`**.subckt <name> <ports...>` port order is not rewritten and a `+` line is
+never joined onto a comment. Non-comment lines are preserved token for token,
+with whitespace runs collapsed to single spaces — including runs inside a
+quoted expression, so `ad='int((nf+1)/2)  *  w/nf * 0.29'` is written back
+as `ad='int((nf+1)/2) * w/nf * 0.29'` (issue #6099). The fold is idempotent,
 so canonical output is a fixed point of the comparison: a netlist written with
 the flag still checks `match` (with or without the flag on the checking run).
 It is honoured under `--backend batch` too, applied client-side after the
