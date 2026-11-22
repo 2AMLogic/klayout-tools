@@ -158,10 +158,7 @@ _NO_CONGESTION_REPORT = (
     "no `global_route -congestion_report_file` report was produced or it held "
     "no congestion violations"
 )
-_NO_PARTIAL_ROUTE_CHECK = (
-    "OpenROAD exposes no per-net connectivity check; only nets with no routed "
-    "wire at all are counted"
-)
+_NO_PARTIAL_ROUTE_CHECK = "Final-stream pin connectivity has not been checked."
 
 
 def routing_completeness_lines() -> list[str]:

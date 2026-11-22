@@ -804,28 +804,9 @@ def _local_pin_candidate_points(
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
     internal routing -- issue #1183.
 
-    Must run *before* :func:`_erase_abstracted_cell_geometry` mutates
-    ``layout`` (the caller -- :func:`extract_netlist_from_layout` -- already
-    guarantees this: it calls this function first, over every matched cell
-    type, then erases). :func:`_resolve_abstract_cell_pins`'s
-    ``"in_cell_labels"`` path resolves a pin to exactly the one point where
-    its name label sits -- but a real standard cell's pin can legally carry
-    *several* geometrically disjoint metal shapes for one electrical node
-    (the same "one LEF pin, several PORT rectangles" shape #1181/#1182
-    already fixed for the ``"lef_abstract"`` path), and nothing guarantees
-    the label sits on the specific rectangle that ends up externally routed
-    -- the label is drawn once, at design-library time, long before any
-    particular instance's place-and-route decides which rectangle a via
-    actually lands on. When the label's own rectangle is a different,
-    internally-isolated fragment (tied to the routed one only through the
-    cell's own poly/diffusion -- exactly the connectivity
-    :func:`_erase_abstracted_cell_geometry` deliberately severs for
-    black-box abstraction), the label-only point resolves onto that isolated
-    island instead of the routed net (this issue's reported failure,
-    confirmed against the real ``gf180-trng`` ``clkload13``/``I`` case this
-    issue cites: the label's own local point resolves to an isolated net
-    while a probe at the DEF-verified via location resolves to the correctly
-    merged, externally-routed net).
+    Run before erasing the cell's internal geometry. A named metal pad can
+    reach a second access pad through the cell's own poly and contacts even
+    when the external via lands only on that second pad.
 
     This computes a *local*, cell-scoped ``LayoutToNetlist`` connectivity
     pass -- deliberately narrower than :func:`_extract_netlist`'s full
@@ -1127,6 +1108,22 @@ def _merge_lef_pins(
         pins.append((pin_name, points))
         merged.add(pin_name)
     return (lef_path if merged else None), merged, warnings
+
+
+def stream_metal_pin_points(
+    layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, list[tuple[kdb.Point, int]]]:
+    """Metal access points demonstrated by pin labels and cell-local connectivity."""
+    candidates = _local_pin_candidate_points(layout, cell, deck)
+    pins, *_ = _resolve_abstract_cell_pins(layout, cell, deck, {}, candidates)
+    return {
+        name: [
+            (point, int(role[5:]))
+            for point, role in points
+            if role and role.startswith("metal")
+        ]
+        for name, points in pins
+    }
 
 
 def _resolve_abstract_cell_pins(

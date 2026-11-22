@@ -1,51 +1,19 @@
 """``klt place-and-route --backend batch``: run each ``pdk.rebuild_corners``
 unit on the Spot batch fleet (issue #3518).
 
-A fleet dispatch host that must not run hand-launched grids sets
-``KLT_SIM_BACKEND=batch`` (or a caller passes ``--backend batch`` / sets the
-request's ``backend``), and every corner of a multi-corner request becomes
-one job on the same S3 job contract ``klt sim --backend batch`` and ``klt
-netlist --backend batch`` use. **This module owns no transport of its own**:
-submit, launch, poll, collect, the runner-version preflight and the
-bucket/profile/provision-script resolution are :mod:`klayout_tools.sim_batch`'s,
-called as they are. What is place-and-route-specific is small:
+The backend uses the existing simulation fleet transport. An explicit batch
+selection submits even one unit. Environment-selected batch uses the local
+backend for a single unit. Each corner receives the request tree excluding
+.klt and .git, with a corner-specific local request. Referenced netlist and
+macro files must live under the request directory. The package size limit
+is checked before upload. Jobs call the local CLI with JSON output and copy
+the stage artifacts back whether the route passes or fails.
 
-1. **Backend selection** (:func:`resolve_backend`) reuses
-   :func:`klayout_tools.sim.resolve_backend`'s precedence (flag > request >
-   ``$KLT_SIM_BACKEND`` > ``local``). An env-sourced ``batch`` steps back to
-   ``local`` for a single unit (a request without ``pdk.rebuild_corners``, or
-   a one-element list) -- the same rule ``klt sim`` applies. An *explicit*
-   ``batch`` on a single unit submits the whole flow as one job (#5799).
-2. **What is uploaded.** The job instance holds no forge credential, so the
-   submitter ships one ``tree.tar.gz`` of the request's directory (minus
-   ``.klt/`` and ``.git/``), refused above :data:`MAX_BATCH_TREE_BYTES`
-   *before* anything is written to S3, plus the unit's own ``request.json``:
-   the request with ``pdk.rebuild_corners`` replaced by ``pdk.corner`` and
-   ``backend`` dropped. The netlist and macro LEF/GDS must live under the
-   request directory; one outside it is refused, not silently left behind.
-3. **What runs.** The job command extracts the tree, drops the unit request
-   over the original, and runs ``klt place-and-route <request> --backend
-   local --format json`` there -- explicitly local, so a runner whose
-   environment sets ``KLT_SIM_BACKEND`` cannot recurse. The runner's
-   ``.klt/place-and-route/`` is copied to ``$EDA_OUTPUT_DIR/artifacts/``.
-4. **What comes back.** Each unit's artifacts land in the same
-   ``.klt/place-and-route/<corner>/`` directory a local run would write, and
-   every runner path in its report is rewritten to that directory, so
-   ``--check``/``--rerun`` see the layout they expect. The aggregated report
-   keeps the local shape and adds ``environment.remote.fleet[]`` (one block
-   per job, ``job_id`` included) and a ``job_id`` per ``corner_runs`` entry.
-5. **No fallback, ever.** A unit whose upload, launch, poll or run fails is a
-   ``failed`` ``corner_runs`` entry with the error, the job id and, when the
-   runner reported one, its ``error.code``; the command exits ``1``. Nothing
-   here can launch OpenROAD on this host. An unresolvable fleet config is a
-   :class:`~klayout_tools.place_and_route.PlaceAndRouteError` before any
-   upload.
-
-``deck_content_hash`` is the hash of the liberty deck the *runner* used (its
-report's ``provenance.deck.content_hash``). When this host can resolve the
-same corner's deck too, the two are compared and a disagreement fails the
-unit: a fleet image whose PDK differs from this host's would otherwise pass
-with a fake runner and silently diverge on the fleet.
+Outputs are installed in the local unit directory and runner paths rewritten
+for report verification. Each corner retains its job ID and remote environment.
+A failed job retains its error code with no local fallback. A physical open
+retains the finished route report and its artifacts. Runner Liberty hashes
+must match the locally resolved corner when available.
 """
 
 from __future__ import annotations
@@ -417,6 +385,27 @@ def _read_unit_report(collected: str, job_id: str) -> dict[str, Any]:
     return report
 
 
+def _completed_open_report(collected: str, status: dict, note: str) -> dict | None:
+    """A worker may complete the route and exit 1 to report a physical open."""
+    if (
+        note
+        or status.get("state") not in {"done", "failed"}
+        or sim_batch._status_exit_code(status) != 1
+    ):
+        return None
+    try:
+        report = sim_batch.read_collected_report(collected)
+    except sim_batch.BatchError:
+        return None
+    if report.get("status") == "failed" and report.get("stage_reached") == "route":
+        comp = (report.get("congestion") or {}).get("completeness") or {}
+        if comp.get("unrouted_net_count") or (comp.get("pin_connectivity") or {}).get(
+            "open_nets"
+        ):
+            return report
+    return None
+
+
 def _runner_deck_hash(report: dict[str, Any]) -> str | None:
     deck = (report.get("provenance") or {}).get("deck")
     value = deck.get("content_hash") if isinstance(deck, dict) else None
@@ -651,9 +640,13 @@ def _finish_unit(
         if done:
             raise _transport_failure(job_id, exc) from exc
         note = str(exc)
-    if not done:
+    report = (
+        _read_unit_report(collected, job_id)
+        if done
+        else _completed_open_report(collected, status, note)
+    )
+    if report is None:
         raise _job_failure(config, job_id, status, collected, remote, note)
-    report = _read_unit_report(collected, job_id)
     remote.update(sim_batch._read_runner_identity(collected))
     artifacts = os.path.join(collected, sim_batch.BATCH_ARTIFACTS_DIRNAME)
     if os.path.isdir(artifacts):
