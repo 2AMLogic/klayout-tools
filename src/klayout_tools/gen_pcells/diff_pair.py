@@ -53,21 +53,6 @@ def _ring_well_mark_box(
     )
 
 
-def _insert_voltage_flavor_marks(
-    pcell: Any, dbu: float, mark_box: tuple[float, float, float, float]
-) -> None:
-    """Draw ``mark_box`` on the primary ``voltage_flavor`` marker layer and,
-    when the PDK flavour resolves one (sky130 native-Vt: lvtn alongside
-    hvi), on the extra marker layer too."""
-    from klayout_tools.gen import _insert_boxes
-
-    layers = [pcell.voltage_flavor_mark_layer]
-    if pcell.voltage_flavor_extra_mark_present:
-        layers.append(pcell.voltage_flavor_extra_mark_layer)
-    for layer in layers:
-        _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [mark_box])
-
-
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``diff_pair`` reference generator's PCell -- a differential
     pair / current mirror cell.
@@ -94,6 +79,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _insert_boxes,
         _pcell_tap_reach_um,
     )
+    from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
     from ._ring_shapes import _draw_composed_guard_ring
 
@@ -372,7 +358,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_w_um"] + mark_margin,
                     info["core_h_um"] + mark_margin,
                 )
-                _insert_voltage_flavor_marks(
+                _draw_voltage_flavor_marks(
                     self, dbu, union_box(mark_box, ring_well_mark_box)
                 )
 

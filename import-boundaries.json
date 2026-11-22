@@ -157,6 +157,7 @@
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
         "klayout_tools._drc_edge_pair_hull",
+        "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
         "klayout_tools.drc_check_kinds",
@@ -273,6 +274,7 @@
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
+        "klayout_tools.extract_fragment_resistance",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
@@ -616,7 +618,9 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cell_models",
         "klayout_tools.pdk_cells",
+        "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
@@ -937,6 +941,7 @@
         "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
+        "klayout_tools.sim_echo_checks",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_environment_report",
@@ -1050,11 +1055,13 @@
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
+        "klayout_tools._sta_timing_derate",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
-        "klayout_tools.post_route_sta_stages"
+        "klayout_tools.post_route_sta_stages",
+        "klayout_tools.post_route_sta_verify"
       ]
     },
     "stats": {
@@ -1602,6 +1609,11 @@
       "consumer": "pdk",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "lvs",
+      "reason": "Issue #5827: `klt pdk decks` reports LVS runset globals with the runset harness's own reserved names (lvs_runset.RESERVED_RUNSET_VARS) folded in, so a deck listing cannot disagree with what `klt lvs` requires; imported lazily."
     },
     {
       "consumer": "pex",

@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4403
+      "lines": 4402
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -253,7 +253,7 @@
     },
     {
       "path": "src/klayout_tools/drc_klayout_engine.py",
-      "lines": 1627
+      "lines": 1593
     },
     {
       "path": "src/klayout_tools/economy.py",
@@ -309,7 +309,7 @@
     },
     {
       "path": "src/klayout_tools/extract_parasitics.py",
-      "lines": 3438
+      "lines": 3147
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
@@ -337,7 +337,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3025
+      "lines": 3023
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -469,11 +469,11 @@
     },
     {
       "path": "src/klayout_tools/pdk.py",
-      "lines": 2545
+      "lines": 2490
     },
     {
       "path": "src/klayout_tools/pdk_cells.py",
-      "lines": 804
+      "lines": 803
     },
     {
       "path": "src/klayout_tools/pdk_models.py",
@@ -493,7 +493,7 @@
     },
     {
       "path": "src/klayout_tools/place_and_route.py",
-      "lines": 3341
+      "lines": 3314
     },
     {
       "path": "src/klayout_tools/place_and_route_batch.py",
@@ -517,11 +517,11 @@
     },
     {
       "path": "src/klayout_tools/place_and_route_sta.py",
-      "lines": 1175
+      "lines": 1172
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4600
+      "lines": 4580
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12251
+      "lines": 12100
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4560
+      "lines": 4525
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -841,7 +841,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6564
+      "lines": 6516
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
@@ -849,7 +849,7 @@
     },
     {
       "path": "tests/test_functional_verification_sdf_ifnone_edge.py",
-      "lines": 586
+      "lines": 574
     },
     {
       "path": "tests/test_gen.py",
@@ -857,7 +857,7 @@
     },
     {
       "path": "tests/test_gen_compose.py",
-      "lines": 17469
+      "lines": 17460
     },
     {
       "path": "tests/test_gen_pdk_pcell.py",
@@ -1041,7 +1041,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15832
+      "lines": 15827
     },
     {
       "path": "tests/test_sim_batch.py",
