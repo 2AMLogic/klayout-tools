@@ -4,6 +4,7 @@ import json
 import math
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,10 +109,19 @@ def test_requires_readable_ac_plot_and_intact_axis(tmp_path):
         )
 
 
-def _run(tmp_path, options, args="dec 10 10 100k"):
-    (tmp_path / "body.spice").write_text(
-        "Vdrive in 0 DC 0 AC 1\nC1 in out 1n\nC2 out 0 1n\n"
-    )
+_CAPACITIVE = "Vdrive in 0 DC 0 AC 1\nC1 in out 1n\nC2 out 0 1n\n"
+#: With both stepping aids disabled and one iteration per step, ngspice aborts
+#: this AC sweep before it creates the `frequency` vector (issue #7293).
+_ABORTING = (
+    "Vin in 0 DC 1 AC 1\n"
+    "B1 out 0 V = 1e6*tanh(1e9*v(out)) + 1e6*v(in)\n"
+    "R1 out 0 1e-12\n"
+)
+_UNRECOVERABLE = {"itl1": 1, "itl2": 1, "gminsteps": 0, "srcsteps": 0}
+
+
+def _run(tmp_path, options, args="dec 10 10 100k", body=_CAPACITIVE):
+    (tmp_path / "body.spice").write_text(body)
     path = tmp_path / "request.json"
     path.write_text(
         json.dumps(
@@ -245,3 +255,86 @@ def test_logarithmic_endpoint_needs_the_original_length(tmp_path, log):
     path = tmp_path / "waveform.raw"
     _rawfile(path, [10 * 2 ** (i / 1000) for i in range(1002)])
     assert not sim_ac_waveform.complete(str(path), "oct 1000 10 20", log)
+
+
+#: After `write <raw>`, a capture-only AC deck records the original point
+#: count for the logarithmic endpoint check (issue #7120). The `if` keeps an
+#: aborted sweep -- which leaves no `frequency` vector -- from turning the
+#: probe into a klt-caused `no_such_vector` diagnostic (issue #7293).
+_FREQUENCY_PROBE = ["if length(frequency) > 0", "display frequency", "end"]
+
+
+def _control(analysis, measurements_spec=(), raw_path="/x/waveform.raw"):
+    return sim._corner_deck_control_lines(
+        point=SimpleNamespace(supply_v={}, params={}),
+        analysis=analysis,
+        measurements_spec=list(measurements_spec),
+        raw_path=raw_path,
+        osdi_preload=(),
+    )
+
+
+def test_frequency_probe_is_guarded_and_follows_the_rawfile_write():
+    lines = _control({"kind": "ac", "args": "dec 10 10 100k"})
+    write = lines.index("write /x/waveform.raw")
+    assert lines[write + 1 : write + 4] == _FREQUENCY_PROBE
+    assert "display frequency" not in lines[: write + 1] + lines[write + 4 :]
+
+
+@pytest.mark.parametrize(
+    ("analysis", "measurements_spec", "raw_path"),
+    [
+        (
+            {"kind": "ac", "args": "dec 10 10 100k"},
+            [{"name": "g", "expr": "v(out)"}],
+            "/x/waveform.raw",
+        ),
+        ({"kind": "tran", "args": "1u 1m"}, (), "/x/waveform.raw"),
+        ({"kind": "ac", "args": "dec 10 10 100k"}, (), None),
+    ],
+)
+def test_frequency_probe_needs_a_capture_only_ac_rawfile(
+    analysis, measurements_spec, raw_path
+):
+    assert "display frequency" not in _control(analysis, measurements_spec, raw_path)
+
+
+def _capture_logs(monkeypatch):
+    """Collect each ngspice log's text while the corner directory still exists."""
+    logs = []
+    original_run = sim.subprocess.run
+
+    def read_log(cmd, *args, **kwargs):
+        result = original_run(cmd, *args, **kwargs)
+        if "-o" in cmd and "-b" in cmd:
+            logs.append(Path(cmd[cmd.index("-o") + 1]).read_text())
+        return result
+
+    monkeypatch.setattr(sim.subprocess, "run", read_log)
+    return logs
+
+
+@real_ngspice
+def test_aborted_sweep_does_not_blame_the_frequency_probe(tmp_path, monkeypatch):
+    logs = _capture_logs(monkeypatch)
+    report = _run(tmp_path, {"ngspice_options": _UNRECOVERABLE}, body=_ABORTING)
+    (corner,) = report["corners"]
+    assert report["status"] == corner["status"] == "error"
+    assert {d["code"] for d in corner["diagnostics"]} == {
+        "analysis_aborted",
+        "timestep_too_small",
+    }
+    assert report["diagnostic_counts"]["by_severity"] == {"error": 2}
+    log = "\n".join(logs)
+    assert "ac simulation(s) aborted" in log
+    assert "no such vector as frequency" not in log
+
+
+@real_ngspice
+def test_completed_sweep_still_records_the_frequency_vector_length(
+    tmp_path, monkeypatch
+):
+    logs = _capture_logs(monkeypatch)
+    report = _run(tmp_path, {})
+    assert report["status"] == "pass"
+    assert re.search(r"frequency\s*:\s*frequency, complex, 41 long", "\n".join(logs))

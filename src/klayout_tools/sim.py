@@ -9509,7 +9509,14 @@ def _corner_deck_control_lines(
     if raw_path is not None:
         lines.append(f"write {raw_path}")
         if analysis["kind"] == "ac" and not measurements_spec:
-            lines.append("display frequency")  # Record the original AC point count.
+            # Record the original AC point count. Guarded (issue #7293): an
+            # aborted sweep never creates the `frequency` vector, and a bare
+            # `display` then makes ngspice print `Error: no such vector as
+            # frequency.` -- a klt-caused diagnostic on top of the abort.
+            # `if` evaluates a missing vector as empty without an error
+            # line, and a completed sweep still prints the count (verified
+            # against ngspice 42 and 47).
+            lines.extend(["if length(frequency) > 0", "display frequency", "end"])
     if analysis.get("linearize") is True:
         # Issue #4014: resample onto a uniform grid, after any rawfile
         # `write` (which keeps the solver's own points) and before the
