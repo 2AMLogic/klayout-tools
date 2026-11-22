@@ -6,10 +6,9 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 from typing import Any
 
-from . import build_identity
+from . import _warn, build_identity
 from ._paths import resolve_tool_binary
 from .drc import CODE_KLAYOUT_UNAVAILABLE, CODE_KLAYOUT_VERSION_TOO_OLD, DrcError
 
@@ -73,12 +72,17 @@ def _warn_binary_mismatch(provenance: dict[str, Any]) -> None:
     own warning for those runs: its ``--with klayout==<expected>`` remedy
     pins the pip wheel, which is *not* the engine here and would not
     reproduce the run. No-op unless the block says ``klayout_version_mismatch``.
+
+    Emitted through :func:`klayout_tools._warn.warn`, so a ``--format
+    json`` invocation defers (and, ahead of an application error, drops)
+    this line rather than prefixing it to the error envelope (issue
+    #6935); the wording itself is unchanged.
     """
     if not provenance.get("klayout_version_mismatch"):
         return
     actual = provenance.get("klayout_version")
     expected = build_identity._recorded_klayout_version_expected()
-    print(
+    _warn.warn(
         f"klt: warning: the standalone KLayout application that ran this "
         f"deck reports version {actual!r}, but this klayout-tools build/"
         f"commit was tested against KLayout {expected} -- DRC/LVS report "
@@ -89,8 +93,7 @@ def _warn_binary_mismatch(provenance: dict[str, Any]) -> None:
         f"install) a KLayout {expected} application "
         "(https://www.klayout.de/build.html); the pip `klayout` package is "
         "a separate install and does not pin this engine. See "
-        "docs/cli/drc.md, 'Engine' -> 'klayout'.",
-        file=sys.stderr,
+        "docs/cli/drc.md, 'Engine' -> 'klayout'."
     )
 
 

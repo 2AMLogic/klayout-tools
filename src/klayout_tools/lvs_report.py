@@ -9,6 +9,7 @@ def assemble_lvs_report(
     *,
     mismatches: Any,
     omit_mismatches: bool = False,
+    passive_pairing: dict[str, Any] | None = None,
     status: Any,
     engine: Any,
     engine_version: Any,
@@ -359,6 +360,11 @@ def assemble_lvs_report(
         ),
         "ignored_layers": layout_coverage.get("ignored_layers", []),
         "warnings": layout_coverage.get("warnings", []),
+        **(
+            {"sg13g2_passive_pairing": passive_pairing}
+            if passive_pairing is not None
+            else {}
+        ),
         "device_classes": device_classes,
         "environment": {
             "engine": engine,

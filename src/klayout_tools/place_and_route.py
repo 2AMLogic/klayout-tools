@@ -44,6 +44,7 @@ from . import macros as macro_spec
 from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
+from . import place_and_route_route_overflow as _route_overflow
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -53,11 +54,7 @@ from ._openroad_engine import (
     container_runtime_hint,
 )
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
-from ._paths import (
-    _load_request_json,
-    _reject_unknown_keys,
-    validate_request_shape,
-)
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._paths import _tcl_net_list as _tcl_net_list
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
@@ -249,7 +246,6 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
-from .place_and_route_route_overflow import grt_overflow
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -711,10 +707,7 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
         ("ground", "^VSSC$", False),
         ("ground", "^VPW$", False),
     ),
-    "sg13g2_stdcell": (
-        ("power", "^VDD$", True),
-        ("ground", "^VSS$", True),
-    ),
+    "sg13g2_stdcell": (("power", "^VDD$", True), ("ground", "^VSS$", True)),
 }
 
 #: Per-cell-library `tapcell` call arguments for the optional
@@ -886,10 +879,7 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
         "gf180mcu_fd_sc_mcu7t5v0__fill_2",
         "gf180mcu_fd_sc_mcu7t5v0__fill_1",
     ),
-    "sg13g2_stdcell": (
-        "sg13g2_fill_1",
-        "sg13g2_fill_2",
-    ),
+    "sg13g2_stdcell": ("sg13g2_fill_1", "sg13g2_fill_2"),
 }
 
 
@@ -897,9 +887,8 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
 #: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
-#: Like :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above, this
-#: bridges LEF/liberty cell-library names to ``klayout_tools.decks`` family
-#: keys, matching ``get_parasitics_deck``'s own accepted names exactly.
+#: The keys are LEF/Liberty library names; their values are curated
+#: extraction deck names accepted by ``get_parasitics_deck``.
 #:
 #: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
 #: family already registered in ``klayout_tools.decks.__init__`` (used
@@ -914,6 +903,7 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
     "asap7sc7p5t_rvt": "asap7",
+    "asap7sc7p5t_28_R": "asap7",
 }
 
 
@@ -1933,6 +1923,7 @@ def _run_single_corner(
             previous_hash = stage_hash
             continue
         logs_before = len(engine_logs)
+        _route_overflow.clear_congestion_report(stage, output_dir, hdl_toplevel)
 
         completed = _run_openroad(
             script_path,
@@ -1949,7 +1940,14 @@ def _run_single_corner(
                         pdk_info=pdk_info,
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
-                    )
+                    ),
+                    details=_route_overflow.route_failure_congestion(
+                        stage,
+                        completed,
+                        output_dir,
+                        hdl_toplevel,
+                        macros,
+                    ),
                 )
 
             metrics = _read_metrics(metrics_path, stage)
@@ -1990,7 +1988,7 @@ def _run_single_corner(
                 completeness=parse_routing_completeness(completed.stdout),
                 placement=placement_routability,
                 detailed=detailed_route_convergence(metrics),
-                overflow=grt_overflow(output_dir, hdl_toplevel, macros),
+                overflow=_route_overflow.grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for
