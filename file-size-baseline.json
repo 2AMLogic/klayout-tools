@@ -177,7 +177,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 563
+      "lines": 551
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4402
+      "lines": 4397
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11906
+      "lines": 11727
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26057
+      "lines": 26043
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

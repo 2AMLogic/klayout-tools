@@ -39,11 +39,11 @@ own read-failure verdict. (``gzip.BadGzipFile`` already is an ``OSError``.)
 """
 
 
-def open_text(path: str) -> IO[str]:
+def open_text(path: str, *, errors: str = "strict") -> IO[str]:
     """Open ``path`` for UTF-8 text reading, transparently decompressing it
     when its first two bytes are the gzip magic number."""
     with open(path, "rb") as probe:
         gzipped = probe.read(2) == GZIP_MAGIC
     if gzipped:
-        return gzip.open(path, "rt", encoding="utf-8")
-    return open(path, encoding="utf-8")
+        return gzip.open(path, "rt", encoding="utf-8", errors=errors)
+    return open(path, encoding="utf-8", errors=errors)
