@@ -41,6 +41,7 @@ import sys
 
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
+from ._parsing import parse_deck_options
 from .output import (
     emit_error,
     emit_success,
@@ -124,7 +125,12 @@ def run(args: argparse.Namespace) -> int:
             args.request,
             deck=args.deck,
             deck_file=args.deck_file,
-            deck_vars=_parse_deck_vars(args.deck_var),
+            # Repeatable `--deck-var NAME=VALUE` (issue #3206), parsed by the
+            # helper `klt drc`/`klt extract` share (issue #6738) so the three
+            # verbs accept one spelling.
+            deck_vars=(
+                parse_deck_options(args.deck_var, LvsError, flag="--deck-var") or {}
+            ),
             # `--progress` (issue #4347), same default as `klt extract`:
             # heartbeat only, and only when stderr is not a TTY.
             progress=(
@@ -168,21 +174,6 @@ def _write_output(report: dict, args: argparse.Namespace) -> int | None:
             args.format,
         )
     return None
-
-
-def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
-    """Parse repeatable ``--deck-var NAME=VALUE`` (issue #3206), same
-    spelling and last-one-wins rule as ``klt drc --deck-var``."""
-    deck_vars: dict[str, str] = {}
-    for item in raw or ():
-        name, sep, value = item.partition("=")
-        if not sep or not name:
-            raise LvsError(
-                f"invalid --deck-var {item!r}: expected 'name=value' "
-                "(e.g. --deck-var feol=true)"
-            )
-        deck_vars[name] = value
-    return deck_vars
 
 
 def _run_check(args: argparse.Namespace) -> int:

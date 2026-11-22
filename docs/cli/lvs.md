@@ -405,8 +405,11 @@ CLI: `klt lvs --deck-file PATH` and repeatable `--deck-var NAME=VALUE`
 (issue #3206) fill `deck_file`/`deck_vars`. Following the repo's request-vs-flag
 rule (a flag never silently overrides a request document), giving a flag
 together with the same request field, a flag with any other engine, a
-`--deck-var` without `=`, or either flag with `--check`, is an application
-error (exit 1). A relative `--deck-file` resolves against the current
+`--deck-var` without `=` or with a blank name, or either flag with `--check`,
+is an application error (exit 1). As with `klt drc` and `klt extract`, only
+the first `=` splits a name from its value, surrounding whitespace is
+stripped, and the last value for a repeated name wins (#6738).
+A relative `--deck-file` resolves against the current
 directory and is echoed as the caller wrote it (issue #5795): `deck_file` and
 `provenance.runset.deck_file` preserve the caller-given relative string — the
 same verbatim form the `layout`/`reference` echoes already keep — while an
