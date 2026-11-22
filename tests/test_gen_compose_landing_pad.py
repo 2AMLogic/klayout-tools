@@ -301,6 +301,31 @@ def test_verdict_helper_falls_back_to_the_generic_messages():
     )
 
 
+@pytest.mark.parametrize(
+    ("other_box", "conflicts"),
+    [
+        (kdb.Box(400, 100, 600, 200), True),
+        (kdb.Box(401, 100, 600, 200), False),
+        (kdb.Box(400, 400, 600, 600), False),
+    ],
+    ids=["shared-edge", "one-dbu-gap", "point-only"],
+)
+def test_intermediate_pad_conflicts_on_a_shared_edge(other_box, conflicts):
+    reason = pads._leg_conflict_message(
+        "sky130A",
+        [],
+        _MET1,
+        "other",
+        kdb.Region(kdb.Box(0, 0, 400, 400)),
+        kdb.Region(other_box),
+        0.001,
+        pads._make_landing_pad_side_um("sky130A"),
+        lambda _layer: None,
+        check_spacing=False,
+    )
+    assert (reason is not None) is conflicts
+
+
 def test_pad_boxes_use_the_pair_sized_override():
     drops = [
         {
