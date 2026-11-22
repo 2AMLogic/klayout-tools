@@ -229,7 +229,7 @@ import tempfile
 import uuid
 from typing import Any
 
-from . import env_provenance
+from . import env_provenance, synthesize_abc
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._engine_proc import run_in_group
@@ -987,6 +987,7 @@ _ALLOWED_REQUEST_KEYS = frozenset(
         "sv_frontend",
         "defines",
         "yosys_timeout_s",
+        "synthesis",
         "macros",
     }
 )
@@ -1137,15 +1138,8 @@ def run_synthesize(
     """
     request_state = _input_file_state(request_path)
     request = load_request(request_path)
+    mapping = synthesize_abc.resolve_mapping(request, request_path, SynthesizeError)
     request_dir = os.path.dirname(os.path.abspath(request_path))
-    # Issue #1844: every output-path field this run's own JSON response
-    # echoes (`netlist_path`/`script_path` and the nested occurrences --
-    # `arithmetic.candidates[].measured.*`, `restructuring.
-    # restructured_netlist_path`, `baseline.ref`'s literal-path fallback) is
-    # normalised against this one repo root, resolved once from the request
-    # file's own location -- the same "walk up from the input" default
-    # `env_provenance.find_repo_root` uses for its own caller, and the same
-    # convention `klt pex`/`klt sim` established for issue #1261.
     repo_root = env_provenance.find_repo_root(request_dir)
 
     engine = request.get("engine", "yosys")
@@ -1322,6 +1316,12 @@ def run_synthesize(
     )
 
     engine_options = _EngineOptions(
+        abc_fast=("native" if _abc_supports_option("-fast") else "inline")
+        if mapping and mapping.fast
+        else None,
+        abc_script_path=mapping.stage_script(output_dir, SynthesizeError)
+        if mapping
+        else None,
         liberty_path=liberty_path,
         cell_library=cell_library,
         delay_target_ps=delay_target_ps,
@@ -1351,30 +1351,10 @@ def run_synthesize(
             defines=defines,
         )
 
-    # Issue #1844: `repo_root` is threaded into this run's own script so
-    # that inputs resolving inside the invocation's repo (RTL sources, and
-    # the `.klt/synthesize/` output paths for `tee -o`/`write_verilog`) are
-    # embedded as repo-relative text rather than an absolute path -- the
-    # resolved liberty stays absolute regardless (see `_write_script`'s own
-    # docstring for why). Trial/probe/baseline scripts elsewhere in this
-    # module deliberately do **not** get this treatment (`repo_root` is left
-    # at its default `None` for those `_write_script` calls) -- they are
-    # ephemeral internal working artifacts, never the response's own
-    # `script_path`, so keeping them fully absolute (and their own
-    # `_run_yosys` calls `cwd`-independent, unchanged) is lower-risk than
-    # extending the relative-path/explicit-`cwd` pairing to every script
-    # this module writes.
-    #
-    # Issue #1870: `pdk_root` is threaded in for the same reason and with the
-    # same scope -- the top-level script only. It is what lets the resolved
-    # liberty be written as `$PDK_ROOT/...` instead of an absolute (usually
-    # home-rooted) path, which is what finally makes this artifact
-    # `klt env-provenance scan`-clean. `_write_script` then returns the
-    # *runnable* script to hand to Yosys (the rehydrated `synth_<top>.run.ys`
-    # sibling when a token was written, else `script_path` itself); the
-    # response keeps reporting `script_path` -- the commit-safe artifact --
-    # as `script_path`, and names the executed one in `run_script_path`.
+    # Publish a repo-relative, PDK-tokenized script and run its rehydrated copy.
     executed_script_path = _write_script(
+        abc_fast=engine_options.abc_fast,
+        abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
         sources=elab_sources,
         hdl_toplevel=hdl_toplevel,
@@ -1660,6 +1640,8 @@ def run_synthesize(
         "arithmetic": arithmetic,
         "baseline": None,
     }
+    if mapping is not None:
+        mapping.record(response, provenance)
     _attach_latch_map_report(
         response, latch_map_report, latch_techmap_path, repo_root=repo_root
     )
@@ -2463,23 +2445,11 @@ def _write_constr(constr_path: str, driving_cell: str, load_ff: float) -> None:
 
 
 def _abc_supports_dont_use() -> bool:
-    """Whether the resolved Yosys build's ``abc`` pass accepts ``-dont_use``.
+    return _abc_supports_option("-dont_use")
 
-    Probed against ``yosys -p 'help abc'`` rather than inferred from a
-    version number: measured live (issue #807), Yosys 0.68 documents
-    ``-dont_use`` and Ubuntu 24.04's distro-packaged 0.33 does not mention
-    it at all -- and passing an unknown option to ``abc`` is a hard Yosys
-    error. Older builds therefore degrade to a run with no exclusion list
-    (mapped exactly as before issue #807) rather than failing outright --
-    the same graceful-degradation posture ``sequential_area_um2`` already
-    takes toward those builds (#560). Never raises -- including on a
-    timeout (issue #1775): bounded by the same
-    :data:`DEFAULT_YOSYS_TIMEOUT_S` :func:`_run_yosys` uses, since this is
-    still a Yosys invocation that could in principle hang, but a stuck
-    capability probe degrades to "assume unsupported" rather than raising,
-    exactly like the missing-binary (``OSError``) and nonzero-exit cases
-    right below.
-    """
+
+def _abc_supports_option(option: str) -> bool:
+    """Probe the installed ABC pass, including downstream-patched Yosys builds."""
     try:
         completed = run_in_group(
             ["yosys", "-p", "help abc"],
@@ -2491,7 +2461,9 @@ def _abc_supports_dont_use() -> bool:
         return False
     if completed.returncode != 0:
         return False
-    return "-dont_use" in (completed.stdout or "")
+    return any(
+        line.split()[:1] == [option] for line in (completed.stdout or "").splitlines()
+    )
 
 
 def _resolve_dont_use_mode(constraints: dict[str, Any]) -> str:
@@ -2753,6 +2725,8 @@ def _write_script(
     pdk_root: str | None = None,
     parameters: dict[str, int | str] | None = None,
     defines: dict[str, str | None] | None = None,
+    abc_fast: synthesize_abc.FastMode = None,
+    abc_script_path: str | None = None,
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
@@ -2925,7 +2899,18 @@ def _write_script(
         else _script_path_text(abc_log_path, repo_root=repo_root)
     )
 
-    abc_command = f"abc -liberty {liberty_text}"
+    script_text = (
+        _script_path_text(abc_script_path, repo_root=repo_root)
+        if abc_script_path
+        else None
+    )
+    abc_command = synthesize_abc.liberty_command(
+        liberty_text,
+        abc_fast,
+        script_text,
+        constrained=constr_text is not None,
+        delay_ps=delay_target_ps,
+    )
     if constr_text is not None:
         abc_command += f" -constr {constr_text}"
     if delay_target_ps is not None:
@@ -2971,7 +2956,7 @@ def _write_script(
         lines.append(
             f"techmap -map {_script_path_text(adder_techmap_path, repo_root=repo_root)}"
         )
-    lines.append(f"synth -top {hdl_toplevel}")
+    lines.extend(synthesize_abc.synth_lines(hdl_toplevel, abc_fast))
     if latch_techmap_path is not None:
         lines.append(
             f"techmap -map {_script_path_text(latch_techmap_path, repo_root=repo_root)}"
@@ -4240,7 +4225,10 @@ def _canonicalize_synthesize_report_for_rerun_diff(
     -- the comparison view :func:`rerun_synthesize_report` diffs, never what
     it embeds as ``fresh``. See :func:`klayout_tools._report_verify.strip_keys`
     for why the exclusion is keyed by name rather than by path."""
-    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+    view = strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+    if isinstance(view.get("equivalence"), dict):
+        view["equivalence"].pop("elapsed_s", None)
+    return view
 
 
 def _synthesize_provenance_hashes(
@@ -4440,6 +4428,12 @@ def check_synthesize_report(
         _defines_check(
             get_path(committed, ("defines",)),
             _synthesize_request_defines(request_path),
+        ),
+        synthesize_abc.mapping_check(
+            committed.get("synthesis"),
+            synthesize_abc.resolve_mapping(
+                load_request(request_path), request_path, SynthesizeError
+            ),
         ),
         _netlist_sha256_check(committed, report_path, netlist_override),
     ]

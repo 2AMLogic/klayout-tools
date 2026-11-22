@@ -126,7 +126,11 @@ from .signoff_derived_rows import (
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
-from .signoff_details import _DETAIL_BUILDERS, _drc_rule_selection_detail
+from .signoff_details import (
+    _DETAIL_BUILDERS,
+    _drc_rule_selection_detail,
+    synthesis_disclosure,
+)
 
 # The `drc --engine both` (cross-check) envelope projection (issue #5815):
 # rewriting the cross-check shape into the single-engine `drc` envelope the
@@ -6148,25 +6152,19 @@ def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
 def _citation(
     resolution: dict[str, Any], *, runset_rehash_unverifiable: bool = False
 ) -> dict[str, Any]:
-    """Build a ``"met"`` item's ``citation`` block from a
-    :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
-    docstring for what each field means."""
+    """Build a met item's citation from its resolved evidence."""
     citation: dict[str, Any] = {
         "file": resolution["file"],
         "command": resolution["command"],
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
-        # Issue #2196: was that `content_hash` checked against the input artifact
-        # itself, or only against the envelope's own claim? Always present --
-        # including the `None` ("nothing was re-hashed") case, the one this
-        # field exists to stop being silent. See the "Input-artifact
-        # verification" docstring section; never consulted by any grading rule.
+        # Whether the input artifact was checked against its envelope (#2196).
+        # None records that no artifact was re-hashed.
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
-    # Issue #6403: a declared pathless `content_hash` binds nothing -- disclose
-    # that beside the unchanged `null` ({} -- no key -- otherwise).
+    citation.update(synthesis_disclosure(resolution["kind"], resolution["envelope"]))
     citation.update(declared_hash_unbound_disclosure(resolution))
     # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
     citation.update(_citation_pointer(resolution["spec"]))

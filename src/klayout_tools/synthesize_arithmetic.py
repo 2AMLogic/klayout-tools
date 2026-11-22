@@ -74,16 +74,11 @@ from .arith_gen import (
     generate_adder,
     normalize_architecture,
 )
+from .synthesize_abc import FastMode
 
 
 class _EngineOptions:
-    """The per-library Yosys/ABC knobs a trial synthesis needs to reproduce
-    the real run's engine configuration exactly.
-
-    Bundled into one object purely so :func:`_measure_candidate` does not
-    take nine positional look-alikes; every field is resolved once, in
-    :func:`run_synthesize`, from the same tables the real run uses.
-    """
+    """Engine settings shared by the final synthesis and arithmetic candidates."""
 
     __slots__ = (
         "liberty_path",
@@ -92,6 +87,8 @@ class _EngineOptions:
         "dont_use_globs",
         "tie_cells",
         "constr_inputs",
+        "abc_fast",
+        "abc_script_path",
     )
 
     def __init__(
@@ -103,6 +100,8 @@ class _EngineOptions:
         dont_use_globs: tuple[str, ...],
         tie_cells: tuple[tuple[str, str], tuple[str, str]] | None,
         constr_inputs: tuple[str, float] | None,
+        abc_fast: FastMode = None,
+        abc_script_path: str | None = None,
     ) -> None:
         self.liberty_path = liberty_path
         self.cell_library = cell_library
@@ -110,6 +109,8 @@ class _EngineOptions:
         self.dont_use_globs = dont_use_globs
         self.tie_cells = tie_cells
         self.constr_inputs = constr_inputs
+        self.abc_fast = abc_fast
+        self.abc_script_path = abc_script_path
 
     @property
     def target_period_ns(self) -> float | None:
@@ -710,12 +711,7 @@ def _measure_candidate(
     """Run one full trial synthesis for a candidate architecture and report
     what it measured.
 
-    Uses exactly the engine configuration the real run will use (same
-    liberty, same ``-constr``/``-D``/``-dont_use``/``hilomap`` knobs), into
-    its own ``.klt/synthesize/<run_id>/arith/<label>/`` directory so every trial's
-    script, netlist, stats and ABC log survive as debuggable artifacts --
-    "measured, not guessed" is only a real claim if the measurement is
-    reproducible afterwards.
+    Each trial keeps its script, netlist, stats and ABC log in its own directory.
 
     Returns ``None`` when this candidate's trial synthesis fails outright,
     which disqualifies it from selection without failing the whole run: one
@@ -750,6 +746,8 @@ def _measure_candidate(
         _write_constr(constr_path, *engine_options.constr_inputs)
 
     _write_script(
+        abc_fast=engine_options.abc_fast,
+        abc_script_path=engine_options.abc_script_path,
         script_path=script_path,
         sources=resolved_sources,
         hdl_toplevel=hdl_toplevel,

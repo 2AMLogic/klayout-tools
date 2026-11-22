@@ -1088,6 +1088,7 @@
         "klayout_tools.restructure",
         "klayout_tools.sta",
         "klayout_tools.synthesize",
+        "klayout_tools.synthesize_abc",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_driving_cell",
@@ -2343,6 +2344,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_abc",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Validate the synthesis subobject with the same request-key rules as its parent (issue #6915)."
     },
     {
       "consumer": "klayout_tools.synthesize",

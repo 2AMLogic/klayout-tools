@@ -33,7 +33,8 @@ flag line carries cleanly — not positional RTL file args.
 
 - `<request>` — a path to a request JSON file, e.g. `klt synthesize request.json`.
   Relative paths inside the request (`sources`) resolve against the
-  **request file's own directory**.
+  **request file's own directory**. Pass `-` to read JSON from stdin and resolve
+  relative input paths against the current working directory.
 - `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
@@ -340,6 +341,36 @@ retained directory next to that request.
 | `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
+
+### ABC mapping effort
+
+Use the optional top-level `synthesis` object to select one mapping change.
+
+| Request | Generic mapping | Standard-cell mapping |
+| --- | --- | --- |
+| Omit `synthesis` | Yosys `synth -top` internal ABC pass | Yosys default Liberty script |
+| `{"synthesis":{"abc_fast":true}}` | `synth -noabc -top`, then generic `abc -fast` and `opt -fast` | `abc -fast -liberty` |
+| `{"synthesis":{"abc_script":"scripts/map.abc"}}` | Yosys `synth -top` internal ABC pass | `abc -liberty … -script` with the specified file |
+
+Fast mapping reduces effort on both passes. On builds without the native
+`-fast` option, klt emits the corresponding Yosys 0.67 commands explicitly.
+With Liberty timing constraints it retains the buffer, sizing and `stime -p`
+steps. A custom script applies only to standard-cell mapping so it can refer
+to the target library. Use `--verify-equivalence` to check the resulting
+gate-level netlist against the source RTL. To populate ABC timing with a
+custom script, include `stime -p` and enable the appropriate ABC constraints.
+
+`abc_fast` accepts a boolean. `abc_script` names a file relative to the
+request directory (the working directory for stdin). A leading `+` is a
+literal filename character. klt snapshots the file beside the generated
+script and records its request-relative path and SHA-256 in both
+`synthesis.abc_script` and `provenance.abc_script`. Supply only one key.
+
+The report echoes `abc_fast`, `abc_script` (null without a script), and
+`reduced_passes` when the request includes `synthesis`. Fast mapping records
+`["synth_internal", "liberty"]`, a custom script records `["liberty"]`, and
+an empty object or `abc_fast: false` records `[]`. A signoff item 1 citation
+carries the same disclosure and uses the usual structural grading.
 
 ### ABC constraints, delay target, and cell exclusions
 
@@ -2015,7 +2046,11 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
-A fifth check, `netlist_sha256` (issue #4313), re-hashes the committed
+The `synthesis` check compares the effective fast flag and custom script SHA-256.
+A legacy report with no block uses default mapping. Changed script bytes or
+effort report `drifted`. Full `--rerun` reapplies the request and compares its report.
+
+The `netlist_sha256` check (issue #4313), re-hashes the committed
 gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
 with the report's recorded top-level `netlist_sha256`, so a hand-edited or
 stale-after-resynthesis netlist reports `drifted` with no Yosys and no extra
