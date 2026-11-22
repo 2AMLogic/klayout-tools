@@ -334,21 +334,22 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   graph flag), surfaced as `PexError` (`--dry-run` checks them too). Unlike `klt
   extract`, which keeps the legacy per-level series sum in its netlist, `klt
   pex` writes each net's terminal-aware `selected_resistance_ohm` as that net's
-  lumped R wherever `resistance_source` is `graph`; `legacy` nets (no per-cut
-  resistance given, three or more terminals, ...) keep the legacy value, as do
-  nets overridden with `--mom-rlc-resistance-ohm`. This removes the
-  double-counting of strapped / via-stitched conductors from the re-simulated
-  extracted side (#2458). The legacy value a `legacy` net keeps is a series
-  sum of *all* the net's fragments, so a tree-routed net's lumped total can
-  overstate the resistance between its two current-carrying terminals (stub
-  arms to terminals that carry no DC current, e.g. MOS gates, are summed in);
-  the echoed `terminals` and `pair_resistance_ohm` (issue #5894, verbatim
-  from the graph) give the path resistance between two named terminals —
-  exactly what a net with three or more terminals (always `legacy`: no
-  unique scalar to select) needs. Cannot be combined with `--distributed-rc`
-  (the ladder stays on the legacy scalar, so a critical net would mix
-  sources):
-  `PexError`. Off by default -- the netlist and JSON report are byte-identical
+  lumped R wherever `resistance_source` is `graph`. A landing without a
+  curated resistance, or a net with three or more terminals, keeps the legacy
+  value. An explicit `--mom-rlc-resistance-ohm` override also takes precedence.
+  When `--resistance-graph-r-cut` is omitted, each landing uses its nominal
+  deck resistance where available. See the `--resistance-graph` section in
+  [extract.md](extract.md) for the resolution order (#6917).
+  Graph resistance accounts for strapped and via-stitched parallel paths in
+  the extracted simulation (#2458). The legacy value sums all fragments in
+  series, including branches carrying no DC current such as MOS gate stubs.
+  On a tree-routed net this can overstate the resistance between two
+  current-carrying terminals. The echoed `terminals` and
+  `pair_resistance_ohm` give the graph resistance between named terminals
+  (#5894), including individual pairs on nets with three or more terminals.
+  Combining the graph with `--distributed-rc` raises `PexError` because the
+  ladder uses the legacy scalar. Off by default -- the netlist and JSON
+  report are byte-identical
   to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--resistance-graph-max-terminals N` (default 64, terminals per net),
   `--resistance-graph-max-cells N` (default 4096, mesh cells per merged

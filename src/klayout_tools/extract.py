@@ -262,7 +262,7 @@ from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
-from .extract_netlist_write import write_flat_netlist
+from .extract_netlist_write import write_flat_netlist, write_spice_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
 
@@ -2043,10 +2043,10 @@ def run_extract(
     ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    sets the per-cut via/contact resistance (``0`` = ideal via) the decks
-    curate (``ParasiticsDeck.cuts``) but ``klt extract`` does not consume yet
-    (#3053). ``None`` (the default) keeps a cross-level landing
-    ``unsupported`` and on the legacy scalar; needs ``resistance_graph=True``.
+    overrides every landing's per-cut resistance (``0`` = ideal via).
+    ``None`` (the default) resolves each landing from the deck's nominal
+    per-cut tables (``ParasiticsDeck.cuts``/``.poly_contact``, issue #6917)
+    and keeps an uncurated landing ``unsupported`` on the legacy scalar.
 
     ``resistance_graph_caps`` (``--resistance-graph-max-terminals`` /
     ``--resistance-graph-max-cells`` / ``--resistance-graph-max-nodes`` /
@@ -3651,7 +3651,7 @@ def _write_subcircuit_deck(
     if parasitics:
         description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
-        netlist.write(subcircuit_path, writer, description)
+        write_spice_netlist(netlist, subcircuit_path, writer, description)
     except Exception as exc:
         raise ExtractError(
             f"could not write sub-circuit netlist '{subcircuit_path}': {exc}"

@@ -160,7 +160,7 @@ _T_STRIP_CONTACTS = ((0, 0, 170, 170), (5 * UM - 170, 0, 5 * UM, 170))
 
 def _t_strip_report(caps=None):
     return _resistance_graph_report(
-        list(_T_STRIP), _region(*_T_STRIP_CONTACTS), [], DBU, 400.0, 0.0, caps
+        list(_T_STRIP), _region(*_T_STRIP_CONTACTS), [], DBU, 400.0, 0.0, caps=caps
     )
 
 
@@ -206,7 +206,7 @@ def _plate_report(caps=None):
     the plate's lower edge, each a terminal on the modelled conductor."""
     plate = [("metal0", 0.125, _region((0, 0, 20 * UM, 4 * UM)), None)]
     cuts = tuple((i * 300, 0, i * 300 + 200, 170) for i in range(65))
-    return _resistance_graph_report(plate, _region(*cuts), [], DBU, 9.0, 0.0, caps)
+    return _resistance_graph_report(plate, _region(*cuts), [], DBU, 9.0, 0.0, caps=caps)
 
 
 def test_adapter_terminal_cap_lets_the_65_terminal_plate_through():
@@ -228,7 +228,7 @@ def test_adapter_cell_cap_lets_the_perforated_plate_through():
     assert over["status"] == "unsupported"
     assert "graph_too_large" == over["diagnostics"][0]["code"]
     ok = _resistance_graph_report(
-        roles, contacts, [], DBU, 9.0, 0.0, {"max_cells": 65536}
+        roles, contacts, [], DBU, 9.0, 0.0, caps={"max_cells": 65536}
     )
     assert ok["status"] == "ok"
     assert ok["resistance_source"] == "graph"
