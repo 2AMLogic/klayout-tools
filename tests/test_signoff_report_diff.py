@@ -388,6 +388,38 @@ def test_refuses_an_ambiguous_duplicate_row_key(tmp_path, capsys):
     assert "two rows with the identity T1 #3" in message
 
 
+def test_refuses_an_inventory_with_an_items_array(tmp_path, capsys):
+    path = _saved(tmp_path, "inventory.json", {"items": [{"id": "sky130"}]})
+    assert main(["signoff", "--diff-reports", path, path, "--format", "json"]) == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert "inventory.json" in message and "tier report" in message
+
+
+def test_compares_reports_before_build_and_checklist_hash_were_recorded(tmp_path):
+    report = build_tier_report(_manifest())
+    report.pop("build")
+    report.pop("source_doc_content_hash")
+    for row in report["items"]:
+        row.pop("partition", None)
+    path = _saved(tmp_path, "historical.json", report)
+    assert not diff_tier_reports(path, path)["changed"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("tier", []), ("id", {"measure": 3}), ("id", True), ("partition", [])],
+)
+def test_refuses_malformed_row_identity(tmp_path, capsys, field, value):
+    original = build_tier_report(_manifest())
+    good = _saved(tmp_path, "good.json", original)
+    original["items"][0][field] = value
+    bad = _saved(tmp_path, "bad.json", original)
+
+    assert main(["signoff", "--diff-reports", good, bad, "--format", "json"]) == 1
+    message = json.loads(capsys.readouterr().err)["error"]["message"]
+    assert "bad.json" in message and "items[0]" in message
+
+
 def test_refuses_the_flags_of_every_other_mode(tmp_path, capsys):
     """The mode is mutually exclusive with every grading flag, by name, so
     none is ever silently ignored."""
@@ -399,6 +431,13 @@ def test_refuses_the_flags_of_every_other_mode(tmp_path, capsys):
         ["--manifest", manifest_path],
         ["--check", old_path],
         ["--describe-grader"],
+        ["--inventory", "inventory.json"],
+        ["--require-build-match"],
+        ["--skip-local-only"],
+        ["--input", "design.gds"],
+        ["--generator", "example"],
+        ["--regenerated-hash", "sha256:deadbeef"],
+        ["--hash-kind", "bytes"],
         ["-o", str(tmp_path / "out.json")],
     ):
         argv = [

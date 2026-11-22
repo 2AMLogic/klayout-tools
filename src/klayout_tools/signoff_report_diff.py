@@ -64,7 +64,7 @@ DIFF_ROW_FIELDS: tuple[str, ...] = ("title", "text", "notes")
 #: One report row's identity: ``(tier, id, partition)``. ``id`` is an int
 #: (T1 items) or ``None`` (the T2-T4 ladder rows); ``partition`` is a str
 #: (one side of a mixed-signal pair) or ``None``.
-_RowKey = tuple[str, Any, Any]
+_RowKey = tuple[str, int | None, str | None]
 
 
 def _row_order(key: _RowKey) -> tuple[Any, ...]:
@@ -106,6 +106,25 @@ def _row_entry(key: _RowKey, row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _row_key(row: dict[str, Any], path: str, index: int) -> _RowKey:
+    from .signoff import SignoffError
+
+    tier, item_id, partition = row.get("tier"), row.get("id"), row.get("partition")
+    if (
+        isinstance(tier, str)
+        and tier
+        and "id" in row
+        and (item_id is None or type(item_id) is int)
+        and isinstance(partition, (str, type(None)))
+    ):
+        return tier, item_id, partition
+    raise SignoffError(
+        f"committed report '{path}' items[{index}] has an invalid tier report "
+        "row identity: expected a tier name, an integer or null id, "
+        "and an optional string partition"
+    )
+
+
 def _index_rows(report: dict[str, Any], report_path: str) -> dict[_RowKey, dict]:
     """Index one report's ``items[]`` by ``(tier, id, partition)``.
 
@@ -116,6 +135,10 @@ def _index_rows(report: dict[str, Any], report_path: str) -> dict[_RowKey, dict]
     """
     from .signoff import SignoffError
 
+    # These fields were present in the first tier report schema, including
+    # when the design had attained no tier and 'tier' was null.
+    if not {"kind", "tier", "t1_item_count"}.issubset(report):
+        raise SignoffError(f"committed report '{report_path}' is not a tier report")
     items = report["items"]
     if not isinstance(items, list) or any(not isinstance(row, dict) for row in items):
         raise SignoffError(
@@ -124,8 +147,8 @@ def _index_rows(report: dict[str, Any], report_path: str) -> dict[_RowKey, dict]
             "(tier, id, partition); check the path"
         )
     rows: dict[_RowKey, dict] = {}
-    for row in items:
-        key = (row.get("tier"), row.get("id"), row.get("partition"))
+    for index, row in enumerate(items):
+        key = _row_key(row, report_path, index)
         if key in rows:
             raise SignoffError(
                 f"committed report '{report_path}' carries two rows with "
