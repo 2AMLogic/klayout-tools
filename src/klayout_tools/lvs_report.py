@@ -15,6 +15,7 @@ def assemble_lvs_report(
     netgen_binary: Any,
     layout_deck_name: Any,
     layout_hash_source: Any,
+    layout_coverage: dict[str, Any],
     layout_input_role: Any,
     layout_circuit: Any,
     layout_abstracted_cells: Any,
@@ -66,6 +67,7 @@ def assemble_lvs_report(
         _reference_conversion_echo,
     )
     from .lvs_finfet_power import derive_finfet_gate_level_power
+    from .lvs_label_coverage import pin_set_difference
     from .verilog_module_names import reference_module_names
 
     category_counts: dict[str, int] = {}
@@ -349,6 +351,14 @@ def assemble_lvs_report(
         "category_counts": dict(sorted(category_counts.items())),
         "category_error_counts": dict(sorted(category_error_counts.items())),
         "counts": counts,
+        "pin_set_difference": pin_set_difference(
+            layout_circuit,
+            reference_circuit,
+            layout_coverage.get("substrate_net"),
+            mismatches,
+        ),
+        "ignored_layers": layout_coverage.get("ignored_layers", []),
+        "warnings": layout_coverage.get("warnings", []),
         "device_classes": device_classes,
         "environment": {
             "engine": engine,

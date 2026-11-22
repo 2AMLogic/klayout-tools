@@ -54,6 +54,7 @@ def _resolve_layout_stage(
     request_dir: str,
     opts: _LvsRunOptions,
     progress: bool | str,
+    coverage: dict[str, Any] | None = None,
 ) -> _LayoutStage:
     """Resolve the layout netlist and take the pre-flatten snapshots.
 
@@ -87,6 +88,7 @@ def _resolve_layout_stage(
         opts.def_net_names,
         opts.def_pins,
         progress,
+        coverage,
     )
     # Inspect original scoped nets before any transform can discard a power
     # island or flatten independent child definitions into a shared scope.
