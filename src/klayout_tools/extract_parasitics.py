@@ -6,7 +6,7 @@ helpers that measure a net's resistive squares and area/perimeter
 (:func:`_n_squares` and the per-fragment/current-direction layer above it --
 :func:`_region_n_squares`, :func:`_directed_squares`,
 :func:`_fragment_port_points_um`, :func:`_polygon_extents_um`,
-:func:`_port_axis_points`, :func:`_drawn_region`, :func:`_metal_port_region`
+:func:`_port_axis_points`, :func:`_drawn_region`, :func:`_metal_port_regions`
 -- plus :func:`_instance_drawn_mask`, :func:`_net_area_perim_um`,
 :func:`_bbox_overlap`, :func:`_net_pair_key`), the lumped R/C model itself
 (:func:`_compute_parasitics`, 543 lines) and its dead-metal cross-check
@@ -348,23 +348,12 @@ def _directed_squares(
     """
     if len(ports) < 2 or area_um2 <= 0.0:
         return None
-    candidates = _port_axis_points(ports)
-    best_d2 = 0.0
-    axis: tuple[float, float] | None = None
-    for index, (ax, ay) in enumerate(candidates):
-        for bx, by in candidates[index + 1 :]:
-            dx = bx - ax
-            dy = by - ay
-            d2 = dx * dx + dy * dy
-            if d2 > best_d2:
-                best_d2 = d2
-                axis = (dx, dy)
-    if axis is None or best_d2 <= 0.0:
+    axis = _farthest_pair_axis(ports)
+    if axis is None:
         # Every port resolves to the same point (e.g. a via landing directly
         # on top of the contact below it): no direction is implied.
         return None
-    norm = math.sqrt(best_d2)
-    ux, uy = axis[0] / norm, axis[1] / norm
+    ux, uy, _ = axis
     along, across = _polygon_extents_um(polygon, dbu, ux, uy)
     if along <= 0.0 or across <= 0.0:
         return None
@@ -417,10 +406,152 @@ def _fragment_port_points_um(
     return points
 
 
+def _port_region_list(
+    port_region: kdb.Region | Sequence[kdb.Region] | None,
+) -> list[kdb.Region]:
+    """Normalize a ``port_region`` argument to a list of per-interface
+    regions (issue #7028): one ``Region`` is one interface layer, a sequence
+    keeps each layer (contacts, the via below, the via above) separate."""
+    import klayout.db as kdb
+
+    if port_region is None:
+        return []
+    if isinstance(port_region, kdb.Region):
+        return [port_region]
+    return list(port_region)
+
+
+def _fragment_port_groups_um(
+    fragment: kdb.Region,
+    dbu: float,
+    port_regions: list[kdb.Region],
+    drawn_region: kdb.Region | None,
+) -> list[list[tuple[float, float]]]:
+    """The same ports :func:`_fragment_port_points_um` finds, but kept
+    **grouped by the interface they belong to** (issue #7028): one group per
+    inter-layer landing layer (the landings' bbox centres) and one group for
+    every device cut edge on the fragment (each edge's two endpoints, so a
+    single straight cut face still has a direction of its own). Empty groups
+    are dropped.
+
+    A flat point list cannot tell a row of twenty contacts serving one
+    terminal from twenty separate terminals; the groups can, which is what
+    :func:`_opposed_interface_squares` needs to measure across the gap
+    *between* two interfaces rather than along the span *of* one.
+    """
+    groups: list[list[tuple[float, float]]] = []
+    for port_region in port_regions:
+        if port_region is None or port_region.is_empty():
+            continue
+        landings = [
+            (polygon.bbox().center().x * dbu, polygon.bbox().center().y * dbu)
+            for polygon in (port_region & fragment).merged().each()
+        ]
+        if landings:
+            groups.append(landings)
+    if drawn_region is not None and not drawn_region.is_empty():
+        cut: list[tuple[float, float]] = []
+        for edge in fragment.edges().inside_part(drawn_region).merged().each():
+            cut.append((edge.p1.x * dbu, edge.p1.y * dbu))
+            cut.append((edge.p2.x * dbu, edge.p2.y * dbu))
+        if cut:
+            groups.append(cut)
+    return groups
+
+
+def _farthest_pair_axis(
+    points: list[tuple[float, float]],
+) -> tuple[float, float, float] | None:
+    """``(ux, uy, span)`` -- the unit direction and length of the
+    farthest-apart pair among ``points`` (bounded by
+    :func:`_port_axis_points`), or ``None`` when every point coincides."""
+    candidates = _port_axis_points(points)
+    best_d2 = 0.0
+    axis: tuple[float, float] | None = None
+    for index, (ax, ay) in enumerate(candidates):
+        for bx, by in candidates[index + 1 :]:
+            dx = bx - ax
+            dy = by - ay
+            d2 = dx * dx + dy * dy
+            if d2 > best_d2:
+                best_d2 = d2
+                axis = (dx, dy)
+    if axis is None or best_d2 <= 0.0:
+        return None
+    norm = math.sqrt(best_d2)
+    return axis[0] / norm, axis[1] / norm, norm
+
+
+#: How much of the longer interface row's span the shorter row must overlap,
+#: measured along the rows, before :func:`_opposed_interface_squares` treats
+#: two rows as *facing* each other (issue #7028). Two rows that sit side by
+#: side but offset along their length -- a via row at one end of a strap and
+#: another at the far end -- carry current along the strap, not across it,
+#: and must stay on the farthest-pair estimator.
+_OPPOSED_ROW_OVERLAP = 0.5
+
+
+def _opposed_interface_squares(
+    polygon: kdb.Polygon,
+    dbu: float,
+    area_um2: float,
+    groups: list[list[tuple[float, float]]],
+) -> float | None:
+    """Square count of a fragment joining **exactly two opposing interface
+    rows**, measured along the normal between them -- or ``None`` when the
+    geometry does not identify such a pair (issue #7028).
+
+    The farthest-pair estimator in :func:`_directed_squares` sees one flat
+    point cloud, so a wide head contacted by a *row* of cuts takes its axis
+    from the row's own span and charges the long axis -- 25 squares on a
+    20 x 0.8 um head that current crosses in 0.04. Here the two interfaces
+    stay distinct: each must be a straight row (a cut face, or two or more
+    landings), the rows must be parallel and separated across their common
+    direction by more than either row's own scatter, and they must face each
+    other (overlap by :data:`_OPPOSED_ROW_OVERLAP` of the longer row along
+    their length). The fragment's extent along the normal is then the path
+    length, under the same :data:`_RECTANGULAR_FILL_TOLERANCE` check.
+
+    Anything else -- a single-point interface, three or more interfaces,
+    offset or skewed rows, a bent fragment -- returns ``None`` and leaves the
+    existing estimator in charge.
+    """
+    if len(groups) != 2 or area_um2 <= 0.0:
+        return None
+    axes = [_farthest_pair_axis(group) for group in groups]
+    if axes[0] is None or axes[1] is None:
+        return None
+    ux, uy, _ = max(axes, key=lambda axis: axis[2])
+    nx, ny = -uy, ux
+
+    bands = []
+    spans = []
+    for group in groups:
+        across = [x * nx + y * ny for x, y in group]
+        along = [x * ux + y * uy for x, y in group]
+        bands.append((min(across), max(across)))
+        spans.append((min(along), max(along)))
+    (lo_a, hi_a), (lo_b, hi_b) = sorted(bands)
+    gap = lo_b - hi_a
+    if gap <= 0.0 or max(hi_a - lo_a, hi_b - lo_b) > gap:
+        return None
+    overlap = min(spans[0][1], spans[1][1]) - max(spans[0][0], spans[1][0])
+    longest = max(spans[0][1] - spans[0][0], spans[1][1] - spans[1][0])
+    if longest <= 0.0 or overlap < _OPPOSED_ROW_OVERLAP * longest:
+        return None
+
+    along_n, across_n = _polygon_extents_um(polygon, dbu, nx, ny)
+    if along_n <= 0.0 or across_n <= 0.0:
+        return None
+    if area_um2 < _RECTANGULAR_FILL_TOLERANCE * along_n * across_n:
+        return None
+    return along_n * along_n / area_um2
+
+
 def _region_n_squares(
     region: kdb.Region,
     dbu: float,
-    port_region: kdb.Region | None = None,
+    port_region: kdb.Region | Sequence[kdb.Region] | None = None,
     drawn_region: kdb.Region | None = None,
 ) -> float:
     """Square count of a net's conductor on one role -- the net-level entry
@@ -472,6 +603,12 @@ def _region_n_squares(
     # `.merged()` unconditionally: `Region.is_merged()` can read `True` on a
     # region that still holds separate abutting polygons, which would split
     # one physical conductor into several "fragments" and over-count squares.
+    port_regions = _port_region_list(port_region)
+    flat_ports: kdb.Region | None = None
+    if port_regions:
+        flat_ports = kdb.Region()
+        for layer_ports in port_regions:
+            flat_ports += layer_ports
     merged = region.merged()
     total = 0.0
     for polygon in merged.each():
@@ -481,12 +618,21 @@ def _region_n_squares(
         if area_um2 <= 0.0 or perim_um <= 0.0:
             continue
         squares = _n_squares(area_um2, perim_um)
-        directed = _directed_squares(
+        # Two opposing interface rows (issue #7028) fix the axis outright;
+        # otherwise the farthest pair of the flattened ports does.
+        directed = _opposed_interface_squares(
             polygon,
             dbu,
             area_um2,
-            _fragment_port_points_um(fragment, dbu, port_region, drawn_region),
+            _fragment_port_groups_um(fragment, dbu, port_regions, drawn_region),
         )
+        if directed is None:
+            directed = _directed_squares(
+                polygon,
+                dbu,
+                area_um2,
+                _fragment_port_points_um(fragment, dbu, flat_ports, drawn_region),
+            )
         if directed is not None:
             squares = min(squares, directed)
         total += squares
@@ -534,9 +680,9 @@ def _drawn_region(
     return kdb.Region(top_cell.begin_shapes_rec(layer_index)).merged()
 
 
-def _metal_port_region(
+def _metal_port_regions(
     contacts: kdb.Region | None, vias: list[kdb.Region], level: int
-) -> kdb.Region:
+) -> list[kdb.Region]:
     """One net's inter-layer landings on metal ``level`` (issue #2359): the
     contacts underneath level ``0``, plus the via layers immediately below
     and above it (``vias[level - 1]`` and ``vias[level]``, index-aligned with
@@ -544,19 +690,20 @@ def _metal_port_region(
 
     These are the points a lumped series current can actually enter or leave
     this net's conductor on this level through -- everything else on the
-    fragment is a stub, not a terminal. Returns an empty ``Region`` when the
-    caller supplied no contact/via geometry, which simply leaves every
-    fragment on the whole-fragment fit.
+    fragment is a stub, not a terminal. Returned **one region per landing
+    layer**, never pre-merged (issue #7028): a li1 pad joining a licon row
+    to an mcon row has two distinct interfaces, and combining them into one
+    point cloud lets the rows' own span pick the current axis. Returns an
+    empty list when the caller supplied no contact/via geometry, which
+    simply leaves every fragment on the whole-fragment fit.
     """
-    import klayout.db as kdb
-
-    ports = kdb.Region()
+    ports: list[kdb.Region] = []
     if level == 0 and contacts is not None:
-        ports += contacts
+        ports.append(contacts)
     if 0 <= level - 1 < len(vias):
-        ports += vias[level - 1]
+        ports.append(vias[level - 1])
     if 0 <= level < len(vias):
-        ports += vias[level]
+        ports.append(vias[level])
     return ports
 
 
@@ -1609,7 +1756,7 @@ def _compute_parasitics(
                 continue
             net_metal_area_um2[(net, i)] = area_um2
             net_metal_perim_um[(net, i)] = perim_um
-            metal_ports = _metal_port_region(net_contacts, net_vias, i)
+            metal_ports = _metal_port_regions(net_contacts, net_vias, i)
             metal_drawn = drawn.get(f"metal{i}")
             metal_r_ohm = layer_rc.sheet_res_ohm_sq * _region_n_squares(
                 region, dbu, port_region=metal_ports, drawn_region=metal_drawn
