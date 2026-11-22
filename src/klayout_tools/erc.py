@@ -78,6 +78,7 @@ from .decks import (
     deck_source_path,
 )
 from .decks import get_extraction_deck as _get_extraction_deck
+from .erc_antenna_names import match_antenna_layers
 from .erc_disclosure import (
     FLOATING_GATE_ALLOWED_KEY,
     _disclosed_undeclared_classes,
@@ -901,15 +902,13 @@ def _merge_antenna_limits(
     pdk_limits: dict[str, tuple[float, str]] | None,
     pdk: str | None,
     spec_limits: list[dict[str, Any]],
+    stackup_names: list[str],
 ) -> dict[str, tuple[float, str]] | None:
-    """Layer name -> ``(limit, antenna_ratio_source)`` for every graded level
-    (issue #4090): the ``--pdk`` table's entries, each overridden by the
-    spec's caller-supplied ``antenna_limits`` entry for the same layer.
-    ``None`` when neither supplies a limit, so a spec-less run is unchanged.
-    """
+    """Resolve PDK limits by stackup name, then apply the spec's overrides."""
     merged: dict[str, tuple[float, str]] = {}
     if pdk_limits is not None and pdk is not None:
-        for layer, (value, rule_id) in pdk_limits.items():
+        rules = match_antenna_layers(pdk_limits, stackup_names[1:], pdk)
+        for layer, (value, rule_id) in rules.items():
             merged[layer] = (
                 value,
                 f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
@@ -2842,7 +2841,7 @@ def run_erc(
             "pass --findings-only for the erc_findings-only read, or --pdk "
             "for the antenna verdict, but not both"
         )
-    antenna_limits = _resolve_antenna_limits(pdk)
+    pdk_limits = _resolve_antenna_limits(pdk)
     deck_obj = _resolve_deck(deck)
 
     (
@@ -2854,11 +2853,11 @@ def run_erc(
         ties,
         ties_disclosure,
         devices,
-        spec_antenna_limits,
+        spec_limits,
         keepouts,
     ) = _parse_erc_spec(spec_path)
     fg_allowed = validate_floating_gate_allowed(spec, spec_path)
-    antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
+    antenna_limits = _merge_antenna_limits(pdk_limits, pdk, spec_limits, stackup_names)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
