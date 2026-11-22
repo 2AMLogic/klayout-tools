@@ -457,3 +457,17 @@ def test_apply_engine_host_leaves_local_runs_untouched():
     sim.apply_engine_host(environment, backend="local", client_ngspice_binary=None)
     assert "corner_section_libs_comparison" not in environment
     assert "models_lib_comparison" not in environment
+
+
+def test_worker_identity_imports_share_the_current_worker_implementation():
+    from klayout_tools import sim_batch_engine_build, sim_batch_worker_engine_build
+
+    for module in (sbm, sim_batch_engine_build):
+        assert (
+            module.apply_worker_engine_build
+            is sim_batch_worker_engine_build.apply_worker_engine_build
+        )
+        assert (
+            module.worker_ngspice_binary
+            is sim_batch_worker_engine_build.worker_ngspice_binary
+        )
