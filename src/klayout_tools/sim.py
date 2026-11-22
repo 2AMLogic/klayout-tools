@@ -165,6 +165,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
 from .coverage import (
@@ -7094,7 +7095,7 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
     top level, since a loaded section is."""
     decl = _NetlistDeclarations(set(), set(), {}, [])
     depth = 0
-    for line in _top_level_cards(_logical_netlist_lines(netlist_text)):
+    for line in circuit_lines(_logical_netlist_lines(netlist_text)):
         word = line.split(None, 1)[0].lower()
         if word == ".subckt":
             depth += 1
@@ -7103,21 +7104,6 @@ def _netlist_declarations(netlist_text: str) -> _NetlistDeclarations:
         elif not depth:
             _record_declaration(decl, line)
     return decl
-
-
-def _top_level_cards(lines: list[str]) -> list[str]:
-    """``lines`` without ``.control`` ... ``.endc`` blocks."""
-    kept: list[str] = []
-    in_control = False
-    for line in lines:
-        word = line.split(None, 1)[0].lower()
-        if word == ".control":
-            in_control = True
-        elif word == ".endc":
-            in_control = False
-        elif not in_control:
-            kept.append(line)
-    return kept
 
 
 def _record_declaration(decl: _NetlistDeclarations, line: str) -> None:
