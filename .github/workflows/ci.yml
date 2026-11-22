@@ -2006,11 +2006,18 @@ jobs:
       - name: Fetch this run's job and run timings
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # These two payloads are the one input the budget check below has no
+        # fallback for, so unlike the history fetch they are allowed to fail
+        # the step: a transient API failure is retried a bounded number of
+        # times first (#6439), and one that survives exits nonzero here, the
+        # check step is skipped, and nobody judges a run whose timings could
+        # not be read.
         run: |
-          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            > /tmp/ci-jobs.json
-          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            > /tmp/ci-run.json
+          python3 scripts/fetch_ci_wall_clock_timings.py \
+            --repo "${{ github.repository }}" \
+            --run-id "${{ github.run_id }}" \
+            --jobs-out /tmp/ci-jobs.json \
+            --run-out /tmp/ci-run.json
 
       - name: Fetch the rolling comparison window
         env:

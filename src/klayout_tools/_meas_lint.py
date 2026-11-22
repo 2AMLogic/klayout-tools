@@ -208,14 +208,24 @@ def _callee_start(spice: str, open_at: int) -> int | None:
     is a bare parenthesised group. A `.meas` card keyword (``when``,
     ``avg``, ...) sitting right before the ``(`` is not a callee: the group
     after it is a bare group, so the keyword stays outside any ``par('...')``
-    span built from it."""
+    span built from it. ``max``/``min`` are also ngspice functions, so a
+    depth-0 comma in their group marks the two-argument call form, a
+    callee (issue #6622); their keyword reading never has one."""
     cursor = open_at
     while cursor > 0 and spice[cursor - 1].isspace():
         cursor -= 1
     match = re.search(r"[A-Za-z0-9_.]+$", spice[:cursor])
-    if match is None or match.group(0).lower() in _MEAS_CARD_KEYWORDS:
+    if match is None:
         return None
-    return match.start()
+    word = match.group(0).lower()
+    if word not in _MEAS_CARD_KEYWORDS:
+        return match.start()
+    if word not in ("max", "min"):
+        return None
+    inner = spice[open_at + 1 : _balanced_close(spice, open_at) or len(spice)]
+    while "(" in inner:
+        inner = re.sub(r"\([^()]*\)", "", inner)
+    return match.start() if "," in inner else None
 
 
 def _token_end(spice: str, start: int) -> int | None:
@@ -293,8 +303,9 @@ def _extend_left_over_operand(spice: str, start: int) -> tuple[int, str]:
 
 
 def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
-    """Widen *end* over one operand bound by an arithmetic operator,
-    returning whether the walk may continue."""
+    """Widen *end* over one operand bound by an arithmetic operator, which
+    may carry a leading unary sign (``* -v(a)``, issue #6622), returning
+    whether the walk may continue."""
     right = end
     while right < len(spice) and spice[right].isspace():
         right += 1
@@ -303,6 +314,10 @@ def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
     cursor = right + 1
     while cursor < len(spice) and spice[cursor].isspace():
         cursor += 1
+    if cursor < len(spice) and spice[cursor] in "+-":
+        cursor += 1
+        while cursor < len(spice) and spice[cursor].isspace():
+            cursor += 1
     found = _token_end(spice, cursor)
     return (end, False) if found is None else (found, True)
 
