@@ -919,6 +919,7 @@
         "klayout_tools.sim_batch",
         "klayout_tools.sim_bin_range",
         "klayout_tools.sim_model_bins",
+        "klayout_tools.sim_model_digests",
         "klayout_tools.sim_batch_async",
         "klayout_tools.sim_batch_capacity_retry",
         "klayout_tools.sim_batch_capacity_watch",
