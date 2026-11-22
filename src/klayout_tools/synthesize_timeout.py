@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import contextvars
 import functools
-import math
 from collections.abc import Callable
 from typing import Any, TypeVar
 
-from ._jsonnum import is_number
+from ._jsonnum import is_finite_number
 from .synthesize_abc_timing import _ABC_MODULE_RE as _ABC_MODULE_RE
 
 #: Upper bound for the request's ``yosys_timeout_s`` (30 min needed by a
@@ -51,13 +50,7 @@ def bind_yosys_timeout(
     value = request.get("yosys_timeout_s")
     if value is None:
         return None
-    if (
-        isinstance(value, bool)
-        or not is_number(value)
-        or not math.isfinite(value)
-        or value <= 0
-        or value > YOSYS_TIMEOUT_MAX_S
-    ):
+    if not is_finite_number(value) or value <= 0 or value > YOSYS_TIMEOUT_MAX_S:
         raise error_cls(
             "request.yosys_timeout_s must be a finite number > 0 and <= "
             f"{YOSYS_TIMEOUT_MAX_S:g} (seconds); got {value!r}"
@@ -120,22 +113,16 @@ def timeout_diagnostic(stdout: str | bytes | None) -> str:
 
 
 def timeout_message(
-    timeout_s: float | None, script_path: str, stdout: str | bytes | None
+    timeout_s: float | None, script_path: str, log_path: str, stdout: str | bytes | None
 ) -> str:
-    """Full ``SynthesizeError`` text for a timed-out ``yosys -s`` run.
-
-    The prefix (``yosys did not complete within <N>s (script '<path>') --
-    process killed``) is kept byte-identical so existing log-greppers keep
-    matching; the ``(raise request.yosys_timeout_s to allow more time)``
-    hint mirrors ``drc_klayout_launch``/``lvs_netgen``/``lvs_runset``, and
-    :func:`timeout_diagnostic` appends the ABC-stall hint when the captured
-    log ends at an ABC extraction banner (issue #6333). Lives here rather
-    than in ``synthesize.py`` so that size-ratcheted file does not grow.
-    """
+    """Keep the watchdog message and log location, then suggest a phase-specific action."""
     message = (
-        f"yosys did not complete within {timeout_s}s (script "
-        f"'{script_path}') -- process killed (raise "
-        "request.yosys_timeout_s to allow more time)"
+        f"yosys did not complete within {timeout_s}s (script '{script_path}')"
+        " -- process killed (a run hung on yosys-abc's stdout has its abc"
+        f" child killed with the whole process group) -- log '{log_path}'"
     )
-    diagnostic = timeout_diagnostic(stdout)
-    return f"{message}{diagnostic}" if diagnostic else message
+    hint = (
+        timeout_diagnostic(stdout)
+        or " (raise request.yosys_timeout_s to allow more time)"
+    )
+    return message + hint

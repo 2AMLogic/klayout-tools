@@ -222,7 +222,6 @@ from __future__ import annotations
 import fnmatch
 import importlib
 import json
-import math
 import os
 import re
 import subprocess
@@ -234,7 +233,7 @@ from . import env_provenance
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
 from ._engine_proc import run_in_group
-from ._jsonnum import is_int, is_number
+from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -243,12 +242,9 @@ from ._provenance import (
     build_provenance,
     content_hash,
     sha256_file,
-    wasi_sandbox_hint_if_applicable,
 )
 from ._report_verify import (
-    VOLATILE_FLOW_PATHS,
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     load_committed_report,
@@ -262,9 +258,13 @@ from ._verilog_params import (
     validate_defines,
     validate_parameters,
 )
+from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .equiv_verdict import require_equivalence
+from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
+from .request_paths import RequestPaths
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -295,6 +295,7 @@ from .synthesize_arithmetic import (
     _select_arithmetic_candidate as _select_arithmetic_candidate,
 )
 from .synthesize_arithmetic import _verify_generated_adder as _verify_generated_adder
+from .synthesize_driving_cell import first_matching_glob, resolve_dont_use_globs
 from .synthesize_library_hint import (
     library_capability_warnings as _library_capability_warnings,
 )
@@ -303,7 +304,7 @@ from .synthesize_library_hint import (
 # `synthesize_memory.py` imports this module's helpers at call time only.
 from .synthesize_memory import collect_memory_evidence
 from .synthesize_netlist_normalize import rewrite_netlist
-from .synthesize_x_scan import netlist_x_constant_warning
+from .synthesize_x_scan import netlist_warnings
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -790,6 +791,9 @@ class SynthesizeError(Exception):
     """
 
 
+_rpath = RequestPaths(SynthesizeError)
+
+
 def _script_path_text(path: str, *, repo_root: str | None) -> str:
     """The text :func:`_write_script` embeds for one filesystem path (issue
     #1844) -- ``path`` unchanged (absolute) when ``repo_root`` is ``None``
@@ -1206,7 +1210,13 @@ def run_synthesize(
     dont_use_validated = _validate_dont_use_against_liberty(
         dont_use_requested, liberty_path
     )
-    abc_constr_request = _resolve_abc_constr_request(constraints, liberty_path)
+    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    resolved_globs = resolve_dont_use_globs(
+        library_defaults, dont_use_requested, dont_use_mode
+    )
+    abc_constr_request = _resolve_abc_constr_request(
+        constraints, liberty_path, resolved_globs=resolved_globs
+    )
 
     # Issue #2635: a declared macro's LEF/liberty/blackbox/GDS are *declared
     # inputs* to this run exactly as the RTL sources and the standard-cell
@@ -1307,7 +1317,8 @@ def run_synthesize(
         requested=dont_use_requested,
         mode=dont_use_mode,
         validated=dont_use_validated,
-        cell_library=cell_library,
+        library_defaults=library_defaults,
+        resolved=resolved_globs,
     )
 
     engine_options = _EngineOptions(
@@ -1442,7 +1453,7 @@ def run_synthesize(
                 constr_inputs=_ABC_CONSTR_INPUTS,
             ),
             **_missing_timing_warning(abc_log_path, timing),
-            **netlist_x_constant_warning(
+            **netlist_warnings(
                 _read_produced_netlist(netlist_path),
                 cell_library=cell_library,
                 has_tie_cells=cell_library in _TIE_CELLS,
@@ -1866,50 +1877,14 @@ def _verify_synthesis_equivalence(
             f"equivalence check against source RTL could not be completed: {exc}"
         ) from exc
 
-    status = equiv_report["status"]
-    if status != "equivalent":
-        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
-
-    return {
-        "status": status,
-        "engine": equiv_report["engine"],
-        "engine_version": equiv_report["engine_version"],
-        "timeout_s": equiv_report["timeout_s"],
-        "elapsed_s": equiv_report["elapsed_s"],
-        "artifacts": equiv_report["artifacts"],
-    }
-
-
-def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
-    """An actionable :class:`SynthesizeError` message for a non-
-    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
-    -- names the diverging outputs for a proven ``"counterexample"``, or the
-    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
-    log_path = equiv_report.get("artifacts", {}).get("log_path")
-    if status == "counterexample":
-        counterexample = equiv_report.get("counterexample") or {}
-        diverging = counterexample.get("diverging_outputs") or []
-        confirmed = counterexample.get("confirmed_by_simulation")
-        detail = (
-            f"diverging outputs: {', '.join(diverging)}"
-            if diverging
-            else "no diverging outputs reported"
-        )
-        message = (
-            "synthesized netlist is NOT equivalent to its source RTL "
-            f"(klt equiv reported 'counterexample'; {detail}; "
-            f"confirmed_by_simulation={confirmed})"
-        )
-    else:
-        diagnostics = equiv_report.get("diagnostics") or []
-        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
-        message = (
-            "equivalence check against source RTL did not reach a verdict "
-            f"(klt equiv reported '{status}'): {detail}"
-        )
-    if log_path:
-        message += f" -- see {log_path} for the full proof"
-    return message
+    return require_equivalence(
+        equiv_report,
+        error_cls=SynthesizeError,
+        counterexample_prefix=(
+            "synthesized netlist is NOT equivalent to its source RTL"
+        ),
+        no_verdict_prefix="equivalence check against source RTL",
+    )
 
 
 def _run_timing_restructuring(
@@ -2047,7 +2022,7 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
 
     resolved: list[str] = []
     for entry in sources:
-        path = entry if os.path.isabs(entry) else os.path.join(request_dir, entry)
+        path = _rpath(entry, request_dir, "request.sources entry")
         if not os.path.isfile(path):
             raise SynthesizeError(f"RTL source not found: {entry}")
         try:
@@ -2422,7 +2397,10 @@ def _describe_clock_targets(
 
 
 def _resolve_abc_constr_request(
-    constraints: dict[str, Any] | None, liberty_path: str
+    constraints: dict[str, Any] | None,
+    liberty_path: str,
+    *,
+    resolved_globs: tuple[str, ...],
 ) -> tuple[str, float] | None:
     """The validated ``constraints.abc_constr`` as ``(driving_cell, load_ff)``,
     or ``None`` when the request does not supply one (issue #4662).
@@ -2431,13 +2409,12 @@ def _resolve_abc_constr_request(
     the built-in :data:`_ABC_CONSTR_INPUTS` entry when both exist. Any shape
     problem, an unknown key, a ``driving_cell`` absent from the resolved
     liberty (skipped only when the liberty's cell list cannot be established,
-    as for ``dont_use``), or a non-positive/non-finite ``load_ff`` is a
-    :class:`SynthesizeError` naming the field.
+    as for ``dont_use``), an excluded driving cell, or a non-positive/non-finite
+    ``load_ff`` is a :class:`SynthesizeError` naming the field.
     """
     if not constraints or constraints.get("abc_constr") is None:
         return None
-    raw = constraints["abc_constr"]
-    where = "request.constraints.abc_constr"
+    raw, where = constraints["abc_constr"], "request.constraints.abc_constr"
     if not isinstance(raw, dict):
         raise SynthesizeError(f"{where} must be a JSON object")
     unknown = sorted(set(raw) - {"driving_cell", "load_ff"})
@@ -2452,12 +2429,7 @@ def _resolve_abc_constr_request(
     if not isinstance(driving_cell, str) or not driving_cell:
         raise SynthesizeError(f"{where}.driving_cell must be a non-empty string")
     load_ff = raw["load_ff"]
-    if (
-        isinstance(load_ff, bool)
-        or not isinstance(load_ff, (int, float))
-        or not math.isfinite(load_ff)
-        or load_ff <= 0
-    ):
+    if not is_finite_number(load_ff) or load_ff <= 0:
         raise SynthesizeError(
             f"{where}.load_ff must be a finite number greater than zero "
             f"(femtofarads), got {load_ff!r}"
@@ -2468,6 +2440,13 @@ def _resolve_abc_constr_request(
             f"{where}.driving_cell '{driving_cell}' is not a cell in the "
             f"resolved liberty '{os.path.basename(liberty_path)}' "
             f"({len(cell_names)} cells)"
+        )
+    pattern = first_matching_glob(driving_cell, resolved_globs)
+    if pattern is not None:
+        raise SynthesizeError(
+            f"{where}.driving_cell '{driving_cell}' matches dont_use "
+            f"pattern '{pattern}'. Choose another driving cell or change "
+            "constraints.dont_use or constraints.dont_use_mode."
         )
     return driving_cell, float(load_ff)
 
@@ -2590,7 +2569,7 @@ def _resolve_dont_use_request(
     engine, so it is safe to call before any PDK resolution or run-directory
     creation. The liberty-dependent half (does each pattern actually match a
     cell?) is :func:`_validate_dont_use_against_liberty`; the merge with the
-    built-in per-library table is :func:`_resolve_cell_exclusions`.
+    built-in per-library table is :func:`resolve_dont_use_globs`.
 
     Raises :class:`SynthesizeError` naming the field for a non-array value, a
     non-string/empty entry, an entry containing a character that would corrupt
@@ -2708,44 +2687,18 @@ def _resolve_cell_exclusions(
     requested: tuple[str, ...],
     mode: str,
     validated: bool | None,
-    cell_library: str,
+    library_defaults: tuple[str, ...],
+    resolved: tuple[str, ...],
 ) -> tuple[tuple[str, ...], dict[str, Any]]:
     """``(dont_use_globs, cell_exclusions)`` -- the ``-dont_use`` glob list
     actually passed to ABC, plus the response block disclosing how it was
     arrived at (issue #2382).
 
-    Merges the request's own ``constraints.dont_use`` patterns (already
-    shape-validated by :func:`_resolve_dont_use_request` and liberty-validated
-    by :func:`_validate_dont_use_against_liberty`) with the built-in
-    per-library :data:`_ABC_DONT_USE_GLOBS` table per ``mode`` -- see
-    :data:`_DONT_USE_MODES` for why ``"additive"`` is the default.
-
-    Degradation is shared, never bypassed: the resolved list is passed only
-    when :func:`_abc_supports_dont_use` says the resolved Yosys build's
-    ``abc`` accepts the flag at all, exactly as the built-in table already
-    degraded before this field existed. The probe is still made only when
-    there is something to exclude, so a library with no table entry and a
-    request with no list runs no extra Yosys invocation. Because degrading
-    means a request that asked for an exclusion gets a netlist that still
-    contains those cells, that case is disclosed -- both here (as
-    ``engine_supports_dont_use: false`` alongside a non-empty ``requested``
-    and an empty ``effective``) and, so it cannot be missed, as the
-    ``dont_use_unsupported`` capability warning
-    :func:`_dont_use_unsupported_warning` emits.
-
-    The returned block's ``effective`` is exactly the list handed to ABC, so a
-    committed report records what was excluded instead of leaving it implicit
-    in the tool version that produced it. Additive response field, no
-    ``schema_version`` bump (``docs/json-contract.md``).
+    The resolved patterns have already been checked against the request's
+    driving cell. Probe the engine only if there is something to exclude.
+    If Yosys lacks ``abc -dont_use``, report an empty ``effective`` list.
+    A dropped request pattern also triggers :func:`_dont_use_unsupported_warning`.
     """
-    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
-    if mode == "none":
-        resolved: tuple[str, ...] = ()
-    elif mode == "replace":
-        resolved = requested
-    else:
-        resolved = tuple(dict.fromkeys((*library_defaults, *requested)))
-
     supported: bool | None = None
     if resolved:
         supported = _abc_supports_dont_use()
@@ -3099,32 +3052,31 @@ def _run_yosys(
     """Invoke ``yosys -s <script_path>``, raising :class:`SynthesizeError`
     on any failure to run: missing binary, non-zero exit, or exceeding
     ``timeout_s`` (default :data:`DEFAULT_YOSYS_TIMEOUT_S`; ``None`` = none).
+    Never raises on a *successful* (exit 0) run; the caller validates that the
+    declared output files appeared. Returns the captured ``stdout`` log text --
+    Yosys's own ``Warning: `` lines land on stdout, never stderr (verified live;
+    matches :func:`_synthesis_error_message`'s stream-preference note for
+    ``ERROR:`` lines) -- so :func:`_compute_structural`/:func:`_summarize_warnings`
+    (issue #1588) can parse it without a second Yosys invocation.
 
-    Never raises on a *successful* (exit 0) run; the caller validates that
-    the declared output files appeared. Returns the captured ``stdout`` log
-    text -- Yosys's own ``Warning: `` lines land on stdout, never stderr
-    (verified live; matches :func:`_synthesis_error_message`'s
-    stream-preference note for ``ERROR:`` lines) -- so
-    :func:`_compute_structural`/:func:`_summarize_warnings` (issue #1588)
-    can parse it without a second Yosys invocation.
+    A timed-out run raises :class:`SynthesizeError` exactly like any other Yosys
+    failure (never a bare ``subprocess.TimeoutExpired``) -- this is what lets
+    :func:`_measure_candidate` (issue #1775) disqualify one hung arithmetic-
+    architecture trial synthesis without killing the rest of the ``"auto"``
+    sweep. The kill takes the child's whole process group (issue #5798), so a
+    ``yosys-abc`` grandchild cannot outlive the watchdog that ended its parent.
 
-    A timed-out run raises :class:`SynthesizeError` exactly like any other
-    Yosys failure (never a bare ``subprocess.TimeoutExpired``) -- this lets
-    :func:`_measure_candidate` (issue #1775) disqualify one hung trial
-    synthesis without killing the rest of the ``"auto"`` sweep.
-
-    ``cwd`` (issue #1844) is passed straight through to ``subprocess.run``;
-    ``script_path`` is always absolute, so ``cwd`` only matters for a
-    script :func:`_write_script` wrote with a relative-form embedded path
-    (``repo_root`` given), which must be run with ``cwd=<that same
-    repo_root>``. The default ``None`` reproduces the pre-#1844 behaviour
-    (subprocess's own default), correct for scripts embedding only
-    absolute paths.
-
-    The child env is a copy of ``os.environ`` with ``COLUMNS`` pinned to
-    4096, applied unconditionally (an inherited ``COLUMNS=80`` is exactly
-    the failing case), so the readline-wrapped ``source`` echo can never
-    wedge the abc handshake (issue #5780; see ``docs/cli/synthesize.md``).
+    ``cwd`` (issue #1844) is passed straight through to the spawn's own ``cwd``;
+    ``script_path`` is always given as an absolute path, so ``cwd`` only matters
+    for a script :func:`_write_script` wrote with a relative-form embedded path
+    (``repo_root`` given), which must run with ``cwd=<that same repo_root>`` to
+    resolve correctly. The default ``None`` reproduces the pre-#1844 behaviour
+    exactly (subprocess's own default: the invoking process's cwd), correct for
+    every script that embeds only absolute paths. The child env is a copy of
+    ``os.environ`` with ``COLUMNS`` pinned to 4096, applied unconditionally (an
+    inherited ``COLUMNS=80`` is exactly the failing case), so the readline-wrapped
+    ``source`` echo can never wedge the abc handshake (issue #5780; see
+    ``docs/cli/synthesize.md``).
     """
     timeout_s = ytimeout.resolve_timeout(timeout_s, DEFAULT_YOSYS_TIMEOUT_S)
     try:
@@ -3140,9 +3092,9 @@ def _run_yosys(
         _write_yosys_log(script_path, "", str(exc))
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        _write_yosys_log(script_path, exc.stdout, exc.stderr)
+        log_path = _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
-            ytimeout.timeout_message(timeout_s, script_path, exc.stdout)
+            ytimeout.timeout_message(timeout_s, script_path, log_path, exc.stdout)
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
@@ -3154,7 +3106,7 @@ def _run_yosys(
 
 def _write_yosys_log(
     script_path: str, stdout: str | bytes | None, stderr: str | bytes | None
-) -> None:
+) -> str:
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
@@ -3162,74 +3114,12 @@ def _write_yosys_log(
             return stream.decode("utf-8", errors="replace")
         return stream or ""
 
+    log_path = os.path.splitext(script_path)[0] + ".log"
     _write_text_file(
-        os.path.splitext(script_path)[0] + ".log",
+        log_path,
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
-
-
-_SV_SOURCE_ERROR_RE = re.compile(r"(?:^|[\s/\\])\S*\.svh?:\d+:\s*ERROR:")
-
-
-def _sv_frontend_hint_if_applicable(error_line: str) -> str:
-    """Hint appended when Yosys's native ``-sv`` front end rejects a
-    SystemVerilog construct (issue #4181).
-
-    Yosys prefixes a parse error with ``<file>:<line>:``, so the source
-    extension is read straight off the error line -- a ``.v`` source with
-    the same syntax error gets no hint. Conservative table: only the
-    unpacked-array-port class (``syntax error, unexpected '['`` while a
-    port list is expected) is recognised; anything else returns ``""``.
-    """
-    if not _SV_SOURCE_ERROR_RE.search(error_line):
-        return ""
-    if "syntax error, unexpected '['" not in error_line:
-        return ""
-    return (
-        " -- hint: this looks like an unpacked-array port (e.g. "
-        "`input logic [31:0] a_i[2]`), a SystemVerilog construct Yosys's "
-        "native `read_verilog -sv` front end does not support; rewrite it "
-        "as a packed/flattened port or pre-convert the source"
-    )
-
-
-def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
-    """Build an actionable error message from a failed ``yosys -s`` run.
-
-    Prefers the last ``ERROR:`` line Yosys itself printed (its own error
-    lines go to stderr -- verified live, Yosys survey worked example), on
-    either stream; falls back to a generic exit-code message with a short
-    tail of captured output when no ``ERROR:`` line is found.
-
-    When the error line is the ``Can't open script file `<path>' for
-    reading: No such file or directory`` shape *and* ``<path>`` verifiably
-    exists on the host filesystem, appends a hint that the ``yosys`` on
-    ``$PATH`` is likely a WASI-sandboxed build (e.g. ``yowasp-yosys``) whose
-    sandbox does not preopen that path -- see issue #1368; for a path under
-    the host temp dir the hint instead names the sandbox's private ``/tmp``
-    mount and leads with relocating the request (issue #2453). A script path
-    that genuinely does not exist is a different failure and is left
-    unchanged.
-    """
-    for stream in (completed.stderr or "", completed.stdout or ""):
-        error_lines = [line.strip() for line in stream.splitlines() if "ERROR:" in line]
-        if error_lines:
-            message = f"yosys synthesis failed: {error_lines[-1]}"
-            message += wasi_sandbox_hint_if_applicable(error_lines[-1])
-            # Issue #2635: `Module `\<cell>' ... is not part of the design`
-            # is what a hard macro with no `request.macros` entry looks
-            # like, and the raw line says nothing about which request field
-            # fixes it. Appended as a further `--` clause, the same
-            # recognized-hint structure the WASI hint above already uses.
-            macro_hint = macro_spec.undeclared_module_hint(error_lines[-1])
-            if macro_hint is not None:
-                message = f"{message} -- {macro_hint}"
-            message += _sv_frontend_hint_if_applicable(error_lines[-1])
-            return message
-
-    tail_source = (completed.stderr or completed.stdout or "").strip().splitlines()
-    snippet = " ".join(tail_source[-3:]) if tail_source else "no output captured"
-    return f"yosys exited with code {completed.returncode}: {snippet}"
+    return log_path
 
 
 def _submodule_key(
@@ -4271,19 +4161,12 @@ def _compute_baseline(
         )
 
     if response_path is not None:
-        resolved = (
-            response_path
-            if os.path.isabs(response_path)
-            else os.path.join(request_dir, response_path)
-        )
+        resolved = _rpath(response_path, request_dir, "request.baseline.response_path")
         baseline_metrics = _baseline_metrics_from_response_file(resolved)
         ref = ref or _baseline_ref_fallback(resolved, repo_root=repo_root)
     else:
-        resolved = (
-            netlist_path
-            if os.path.isabs(netlist_path)
-            else os.path.join(request_dir, netlist_path)
-        )
+        assert netlist_path is not None
+        resolved = _rpath(netlist_path, request_dir, "request.baseline.netlist_path")
         baseline_metrics = _baseline_metrics_from_netlist(
             resolved, liberty_path, hdl_toplevel, output_dir
         )
@@ -4639,11 +4522,4 @@ def rerun_synthesize_report(
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
     )
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
-        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("synthesize", report_path, committed=committed, fresh=fresh)

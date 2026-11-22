@@ -31,7 +31,9 @@ import os
 import shlex
 import sys
 
-from .. import pex_async
+from .. import pex_async, pex_runset
+from ..extract import ExtractError
+from ..extract_runset import parse_device_params
 from ..output_lock import OutputDirLockedError, OutputLockError
 from ..pex import PexError, run_pex
 from ..pex_dry_run import run_pex_dry_run
@@ -74,7 +76,14 @@ _REQUEST_EXCLUDED = frozenset(
 )
 #: Request fields holding filesystem paths, stored absolute so a bare
 #: ``--attach`` from another working directory resolves them identically.
-_REQUEST_PATH_FIELDS = ("layout", "output", "outdir", "pdk_root", "reference_netlist")
+_REQUEST_PATH_FIELDS = (
+    "layout",
+    "output",
+    "outdir",
+    "pdk_root",
+    "reference_netlist",
+    "deck_file",
+)
 
 
 def _submit_request(args: argparse.Namespace) -> dict:
@@ -164,10 +173,25 @@ def run(args: argparse.Namespace) -> int:
             and not args.testbenches
         ):
             _rehydrate_bare_attach(args)
+        # Issue #6559: `--engine klayout-runset` -- usage errors (exit 2) use
+        # `klt extract`'s own validation and text. `--deck` is not required
+        # here; given, it selects the curated deck whose parasitics are
+        # joined onto the runset devices by geometric net correspondence
+        # (issue #6606) -- never forwarded to the runset extraction itself.
+        try:
+            runset = pex_runset.runset_from_args(
+                args.engine,
+                args.deck_file,
+                parse_deck_options(args.deck_var, ExtractError, flag="--deck-var"),
+                parse_device_params(args.device_params),
+                args.runset_timeout,
+            )
+        except ExtractError as exc:
+            return _fail(args, str(exc), exit_code=EXIT_USAGE_ERROR)
         missing = [
             flag
             for flag, value in (("layout", args.layout), ("--deck", args.deck))
-            if value is None
+            if value is None and not (flag == "--deck" and runset is not None)
         ]
         if missing:
             return _fail(
@@ -198,6 +222,13 @@ def run(args: argparse.Namespace) -> int:
         # rather than by whatever `/bin/sh` the host happens to have.
         measure_command = _parse_measure_command(args.measure_command)
         if getattr(args, "dry_run", False):
+            if runset is not None:
+                raise PexError(
+                    "--dry-run does not model --engine klayout-runset: its "
+                    "preflight checks the curated deck and parasitics, which "
+                    "this engine does not use. Run `klt pex --extract-only` "
+                    "to exercise the extraction without a measurement leg"
+                )
             # Issue #5464: a separate entry point, not a `dry_run=` parameter
             # threaded through `run_pex`/`run_extract` -- a dry run performs a
             # strict, engine-free subset of the real run's checks and shares
@@ -350,6 +381,9 @@ def run(args: argparse.Namespace) -> int:
             submit_only=args.submit_only,
             attach=args.attach_manifest,
             submit_request=_submit_request(args) if args.submit_only else None,
+            # `--engine klayout-runset` (issue #6559): `None` for the curated
+            # engine, which leaves this call exactly as it was.
+            runset=runset,
         )
     except PexError as exc:
         # Issue #2889: a classified error (today: `schematic_flatten_*`)
