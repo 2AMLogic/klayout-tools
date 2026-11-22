@@ -9287,7 +9287,7 @@ def test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning(
         out_path=str(out_path),
     )
     captured = capfd.readouterr()
-    assert "DEF UNITS does not match reader DBU" in captured.out
+    assert captured.out == "" and "DEF UNITS does not match reader DBU" in captured.err
     # Falls back to KLayout's own default rather than crashing (issue
     # #1032's second acceptance criterion) -- the merge still completes.
     assert out_path.is_file()

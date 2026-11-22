@@ -87,10 +87,10 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import IO, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from . import (
@@ -302,6 +302,11 @@ from .sim_measurement_results import _corner_measurement_results, expand_request
 from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
+
+#: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
+#: without importing this runner; re-exported self-aliased for existing callers.
+from .sim_raw import _parse_and_persist_waveform as _parse_and_persist_waveform
+from .sim_raw import parse_ascii_rawfile as parse_ascii_rawfile
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -5889,9 +5894,7 @@ def _expand_monte_carlo(
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
 
-    Fan-out only -- reuses the same ``list[CornerPoint]`` shape every
-    execution backend already consumes (see :class:`CornerPoint`'s
-    docstring), so no new backend is needed. Sample order is deterministic
+    All backends consume this same list of sample points. Order is deterministic
     (outer: original corner order from :func:`_expand_corners`; inner:
     ``sample_index`` ``0..n-1``), matching the odometer-style determinism
     :func:`_expand_corners` already guarantees for the PVT axes.
@@ -5966,6 +5969,7 @@ def _expand_monte_carlo(
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    supply_waveforms=base.supply_waveforms,
                     mc_injected=(
                         sim_injected.draw(injected[0], mismatch_seed, injected[1])
                         if injected
@@ -11571,163 +11575,9 @@ def _rollup_measurements(
 
 # --------------------------------------------------------------------------- #
 # Waveform artifact (rawfile -> JSON)
+# The reader/writer moved to `sim_raw.py` (issue #6752); only the noise-mode
+# classifier of a parsed waveform stays here.
 # --------------------------------------------------------------------------- #
-
-
-def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
-    """Parse an ngspice ASCII rawfile (``set filetype=ascii`` + ``write``)
-    into the documented waveform JSON shape (see ``docs/cli/sim.md``)::
-
-        {
-            "plotname": str,
-            "variables": [{"index": int, "name": str, "type": str}, ...],
-            "points": [[v0, v1, ...], ...],
-        }
-
-    ``variables[0]`` is always the sweep variable (``time`` for ``.tran``,
-    frequency for ``.ac``, the swept source for ``.dc``). Raises
-    :class:`SimError` if the file is not a recognisable ngspice ASCII
-    rawfile.
-
-    ``ac``/``sp`` analyses declare ``Flags: complex`` in the header, and
-    every value in the ``Values:`` section is then written as a
-    comma-separated ``real,imag`` pair rather than a bare float (verified
-    against ngspice 46). Per the JSON contract's additive-only convention,
-    ``points[]`` always holds plain real-valued floats -- for a ``Flags:
-    complex`` rawfile, each column's magnitude (``hypot(real, imag)``) is
-    emitted instead of the raw pair, applied uniformly across all columns
-    including the sweep variable (whose imaginary part is always ``0``, so
-    its magnitude equals its real part). See ``docs/cli/sim.md``'s waveform
-    JSON shape section for the documented representation.
-    """
-    with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
-        return {"plotname": plotname, "variables": variables, "points": list(points)}
-
-
-def _note_rawfile_header_field(meta: dict[str, Any], line: str) -> None:
-    """Record the first ``Plotname:`` / ``Flags:`` / ``No. Variables:`` header
-    line seen into ``meta`` (later duplicates are ignored)."""
-    if meta["plotname"] is None and line.startswith("Plotname:"):
-        meta["plotname"] = line[len("Plotname:") :].strip()
-    elif meta["is_complex"] is None and line.startswith("Flags:"):
-        meta["is_complex"] = "complex" in line.lower()
-    elif meta["var_count"] is None:
-        count_match = re.match(r"No\. Variables:\s*(\d+)$", line)
-        if count_match is not None:
-            meta["var_count"] = int(count_match.group(1))
-
-
-def _scan_rawfile_header(
-    handle: IO[str],
-) -> tuple[dict[str, Any], bool, bool, list[str]]:
-    """Read ``handle`` up to the ``Values:`` marker.
-
-    Returns ``(meta, in_variables, saw_values, variable_lines)``.
-    """
-    meta: dict[str, Any] = {"plotname": None, "is_complex": None, "var_count": None}
-    in_variables = False
-    saw_values = False
-    variable_lines: list[str] = []
-    try:
-        for raw_line in handle:
-            line = raw_line.rstrip("\r\n")
-            if line == "Values:":
-                saw_values = True
-                break
-            if in_variables:
-                variable_lines.append(line)
-            elif line == "Variables:":
-                in_variables = True
-            else:
-                _note_rawfile_header_field(meta, line)
-    except OSError as exc:
-        raise SimError(f"could not read rawfile: {exc}") from exc
-    return meta, in_variables, saw_values, variable_lines
-
-
-def _parse_rawfile_variables(
-    variable_lines: list[str], var_count: int
-) -> list[dict[str, Any]]:
-    """Parse the ``Variables:`` table lines, checking the declared count."""
-    variables: list[dict[str, Any]] = []
-    for line in variable_lines:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        variables.append({"index": int(parts[0]), "name": parts[1], "type": parts[2]})
-    if len(variables) != var_count:
-        raise SimError(
-            f"malformed rawfile: declared {var_count} variables, "
-            f"parsed {len(variables)}"
-        )
-    return variables
-
-
-def _parse_rawfile_value(token: str, complex_values: bool) -> float:
-    if not complex_values:
-        return float(token)
-    # "real,imag" -- reduce to a single real-valued magnitude, applied
-    # uniformly to every column (including the sweep variable, whose
-    # imaginary part is always 0 so its magnitude equals its real part).
-    real_str, _, imag_str = token.partition(",")
-    real = float(real_str)
-    imag = float(imag_str) if imag_str else 0.0
-    return math.hypot(real, imag)
-
-
-def _iter_rawfile_points(
-    handle: IO[str], var_count: int, complex_values: bool
-) -> Iterator[list[float]]:
-    """Lazily yield one ``list[float]`` per point from the ``Values:`` body."""
-    current: list[float] = []
-    for raw_line in handle:
-        tokens = raw_line.split()
-        if not tokens:
-            continue
-        if len(tokens) == 2 and current == []:
-            # "<point_index> <value0>" -- start of a new point.
-            current = [_parse_rawfile_value(tokens[1], complex_values)]
-        elif len(tokens) == 1:
-            current.append(_parse_rawfile_value(tokens[0], complex_values))
-        else:
-            continue
-        if len(current) == var_count:
-            yield current
-            current = []
-
-
-@contextlib.contextmanager
-def _open_ascii_rawfile(
-    raw_path: str,
-) -> Iterator[tuple[str, list[dict[str, Any]], Iterator[list[float]]]]:
-    """Open an ngspice ASCII rawfile and yield ``(plotname, variables,
-    points)``, where ``points`` lazily yields one ``list[float]`` per point.
-
-    The header is read line by line up to the ``Values:`` marker, so a
-    non-rawfile or malformed header raises :class:`SimError` before any point
-    is produced, and peak memory does not scale with the size of the
-    ``Values:`` section (issue #3360). See :func:`parse_ascii_rawfile` for the
-    format notes (``Flags: complex`` magnitude reduction in particular).
-    """
-    try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise SimError(f"could not read rawfile: {exc}") from exc
-    with handle:
-        meta, in_variables, saw_values, variable_lines = _scan_rawfile_header(handle)
-        plotname = meta["plotname"]
-        var_count = meta["var_count"]
-        if plotname is None:
-            raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
-        if var_count is None:
-            raise SimError(f"malformed rawfile (no variable count): {raw_path}")
-        if not (in_variables and saw_values):
-            raise SimError(
-                f"malformed rawfile (no Variables/Values section): {raw_path}"
-            )
-        variables = _parse_rawfile_variables(variable_lines, var_count)
-        points = _iter_rawfile_points(handle, var_count, bool(meta["is_complex"]))
-        yield plotname, variables, points
 
 
 def noise_representation(waveform: dict[str, Any]) -> str:
@@ -11745,35 +11595,6 @@ def noise_representation(waveform: dict[str, Any]) -> str:
         if str(var.get("type", "")).endswith("^2"):
             return "power"
     return "amplitude"
-
-
-def _parse_and_persist_waveform(raw_path: str, decimate: int | None = None) -> str:
-    """Parse the rawfile at ``raw_path`` to the waveform JSON shape and write
-    it alongside as ``<raw_path>.json``, returning that path.
-
-    Kept as its own step (rather than inlining waveform data into the
-    response) so the JSON contract's own response never grows to
-    waveform-shaped size -- per the spike, waveform data is an optional
-    *artifact*, referenced by path, not inlined.
-    """
-    json_path = raw_path + ".json"
-    # Streamed point by point (issue #3360) so peak memory does not scale with
-    # the rawfile; the output is byte-identical to `json.dump` of the dict
-    # `parse_ascii_rawfile` returns.
-    try:
-        with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
-            with open(json_path, "w", encoding="utf-8") as handle:
-                handle.write('{"plotname": ' + json.dumps(plotname))
-                handle.write(', "variables": ' + json.dumps(variables))
-                handle.write(', "points": [')
-                sim_waveform_opts.write_points(handle, points, decimate)
-                handle.write("]}")
-    except (SimError, ValueError):
-        # Do not leave a truncated artifact behind a failed parse.
-        with contextlib.suppress(OSError):
-            os.remove(json_path)
-        raise
-    return json_path
 
 
 # --------------------------------------------------------------------------- #

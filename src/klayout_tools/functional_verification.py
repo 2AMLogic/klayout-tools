@@ -287,7 +287,7 @@ from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -1859,7 +1859,7 @@ def _find_coverage_dat(test_dir: str, build_dir: str) -> str | None:
 
 
 def collect_coverage(
-    *, test_dir: str, build_dir: str, info_path: str
+    *, test_dir: str, build_dir: str, info_path: str, repo_root: str | None = None
 ) -> dict[str, Any]:
     """Post-process Verilator's ``coverage.dat`` into the contract's
     ``coverage`` block (spike section 5).
@@ -1916,7 +1916,7 @@ def collect_coverage(
         "toggle_pct": percentages.get("toggle"),
         "branch_pct": percentages.get("branch"),
         "expr_pct": percentages.get("expr"),
-        "info_path": info_path,
+        "info_path": _hashed_path_envelope(info_path, repo_root=repo_root),
     }
 
 
@@ -1972,17 +1972,8 @@ def _find_trace_artifact(
 def _resolve_trace(
     *, hdl_toplevel: str, build_dir: str, test_dir: str
 ) -> dict[str, Any]:
-    """Build the response's ``trace`` block -- ``{"path", "format",
-    "size_bytes"}``, the identical shape ``klt wave build``'s own ``trace``
-    field already uses (``docs/schemas/wave-build-response.schema.json``),
-    so the object this verb hands back can be dropped straight into a
-    ``klt wave build`` request's own ``trace`` field unchanged.
-
-    Raises :class:`FunctionalVerificationError` when ``options.trace`` was
-    requested but the run produced no waveform file -- a requested-and-
-    missing trace would otherwise be indistinguishable from "not requested"
-    (``null``), the same posture :func:`collect_coverage` already takes for
-    a requested-and-missing ``coverage.dat``.
+    """Report waveform path, format and byte count. A wave-build request
+    takes the path and format. A requested but missing waveform is an error.
     """
     found = _find_trace_artifact(
         hdl_toplevel=hdl_toplevel, build_dir=build_dir, test_dir=test_dir
@@ -2677,19 +2668,17 @@ def run_functional_verification(
     run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
+    coverage_info_path = None
     if coverage_requested:
+        coverage_info_path = os.path.join(output_dir, "coverage.info")
         coverage = collect_coverage(
             test_dir=output_dir,
             build_dir=build_dir,
-            info_path=os.path.join(output_dir, "coverage.info"),
+            info_path=coverage_info_path,
+            repo_root=repo_root,
         )
 
-    # Additive (Epic #1585 Phase 3, issue #1845): `null` on a run that did
-    # not ask for a trace, an object -- `{"path", "format", "size_bytes"}`,
-    # the identical shape `klt wave build`'s own `trace` field already uses
-    # -- on one that did. Resolved *after* the verdict/coverage above so a
-    # missing waveform (options.trace requested but unproducible) is never
-    # mistaken for the run's own pass/fail outcome.
+    # Resolve a requested waveform after the run verdict and coverage are known.
     trace = None
     if trace_requested:
         trace = _resolve_trace(
@@ -2779,6 +2768,7 @@ def run_functional_verification(
     )
     with_run_inputs(report, run_inputs)
     report.local_paths = {
+        "coverage_info_path": coverage_info_path,
         "results_xml": results_xml,
         "test_log": test_log,
         "build_log": build_log,
