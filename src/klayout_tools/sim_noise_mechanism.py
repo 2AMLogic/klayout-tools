@@ -303,15 +303,20 @@ def _reduce_one(
     body = spec["noise"]
     mechanism = body.get("mechanism")
     names = [variable["name"] for variable in plot["variables"]]
-    columns = {
-        name: [point[index] for point in plot["points"]]
-        for index, name in enumerate(names)
-    }
-    missing = _refuse_plot(spec, columns, names)
+    columns_by_index = [
+        [point[index] for point in plot["points"]] for index in range(len(names))
+    ]
+    # Name-keyed for the unique aggregates alone (`frequency`,
+    # `onoise_spectrum`): two contributor columns may share a vector name
+    # (#6978), which a name-keyed dict collapses onto the last one.
+    columns = dict(zip(names, columns_by_index, strict=True))
+    missing = _refuse_plot(spec, names)
     if missing is not None:
         return missing
     leaves = sim_noise_leaves.classify_leaves(names)
-    contributors = sim_noise_contributors.rank(body, sweep, columns, leaves)
+    contributors = sim_noise_contributors.rank(
+        body, sweep, columns["frequency"], columns_by_index, leaves
+    )
     if mechanism is None:  # a total entry: only its ranked list is read here
         if contributors is None:
             return _no_value(spec)
@@ -323,7 +328,7 @@ def _reduce_one(
             body,
             sweep,
             columns["frequency"],
-            _power_density(columns, [leaf.name for leaf in subset], points),
+            _power_density(columns_by_index, [leaf.index for leaf in subset], points),
         )
 
     unclassified_leaves = [leaf for leaf in leaves if leaf.mechanism is None]
@@ -343,7 +348,7 @@ def _reduce_one(
         residual_relative=(
             abs(every - total) / total if every is not None and total > 0 else None
         ),
-        unclassified_suffixes=_powered_labels(unclassified_leaves, columns),
+        unclassified_suffixes=_powered_labels(unclassified_leaves, columns_by_index),
     )
 
 
@@ -359,11 +364,11 @@ def _no_value(spec: dict[str, Any]) -> NoiseMechanismOutcome:
 
 
 def _refuse_plot(
-    spec: dict[str, Any], columns: dict[str, list[float]], names: list[str]
+    spec: dict[str, Any], names: list[str]
 ) -> NoiseMechanismOutcome | None:
     """The rawfile parsed but cannot answer the question -- or None if it can."""
     mechanism = spec["noise"].get("mechanism")
-    if "onoise_spectrum" not in columns or "frequency" not in columns:
+    if "onoise_spectrum" not in names or "frequency" not in names:
         return NoiseMechanismOutcome(
             mechanism=mechanism,
             code="noise_mechanism_no_contributors",
@@ -389,18 +394,20 @@ def _refuse_plot(
 
 
 def _power_density(
-    columns: dict[str, list[float]], names: list[str], points: int
+    columns: list[list[float]], indices: list[int], points: int
 ) -> list[float]:
-    """The amplitude density of ``names`` combined: ``sqrt(sum(a**2))`` per
-    frequency point. Noise amplitudes add in power, never linearly."""
+    """The amplitude density of the columns at ``indices`` combined:
+    ``sqrt(sum(a**2))`` per frequency point. Noise amplitudes add in power,
+    never linearly. Keyed by column index, not name -- two columns may share
+    a vector name and both belong in the sum (#6978)."""
     return [
-        math.sqrt(sum(columns[name][index] ** 2 for name in names))
+        math.sqrt(sum(columns[column][index] ** 2 for column in indices))
         for index in range(points)
     ]
 
 
 def _powered_labels(
-    leaves: list[sim_noise_leaves.Leaf], columns: dict[str, list[float]]
+    leaves: list[sim_noise_leaves.Leaf], columns: list[list[float]]
 ) -> tuple[str, ...]:
     """The distinct labels of ``leaves`` that carry *any* power, sorted.
 
@@ -414,7 +421,7 @@ def _powered_labels(
             {
                 leaf.label
                 for leaf in leaves
-                if any(value != 0.0 for value in columns[leaf.name])
+                if any(value != 0.0 for value in columns[leaf.index])
             }
         )
     )
