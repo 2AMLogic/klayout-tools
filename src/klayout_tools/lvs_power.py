@@ -5,6 +5,18 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .lvs_base import (
+    _POWER_INSTANCE_SAMPLE_LIMIT,
+    POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
+    POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
+    POWER_STATUS_MATCH,
+    POWER_STATUS_MISMATCH,
+    POWER_STATUS_UNCHECKED,
+    RULE_POWER_INCONSISTENT_PIN_NET,
+    RULE_POWER_UNCONNECTED_PIN,
+    RULE_POWER_UNEXPECTED_PIN_NET,
+    LvsError,
+)
 from .socket_check import classify_pin_by_name
 
 
@@ -44,8 +56,6 @@ def _parse_power_connectivity(
     A wrong-shaped value is a clean request error, matching every other
     option parser in this module (see :func:`_parse_compare_parameters`).
     """
-
-    from .lvs import LvsError
 
     if "power_connectivity" not in options:
         return True, None, None
@@ -212,8 +222,6 @@ def _power_net_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     differ are the whole point of the finding.
     """
 
-    from .lvs import _POWER_INSTANCE_SAMPLE_LIMIT
-
     by_net: dict[str | None, list[dict[str, Any]]] = {}
     for row in rows:
         by_net.setdefault(row["net"], []).append(row)
@@ -299,12 +307,6 @@ def _power_connectivity_findings(
     lesser severity to soften (``power_connectivity.status`` is derived from
     the presence of findings, and the report's own ``status`` is untouched).
     """
-
-    from .lvs import (
-        RULE_POWER_INCONSISTENT_PIN_NET,
-        RULE_POWER_UNCONNECTED_PIN,
-        RULE_POWER_UNEXPECTED_PIN_NET,
-    )
 
     by_pin: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
@@ -432,11 +434,6 @@ def _power_pins_derivation(
     a ``reason`` naming the limitation.
     """
 
-    from .lvs import (
-        POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
-        POWER_PINS_RULE_EVERY_MASTER_PER_LIBRARY,
-    )
-
     if libraries is not None:
         # Issue #2707: multi-library derivation. `reason` names each library
         # that could not be corroborated on its own.
@@ -523,8 +520,6 @@ def _power_connectivity_unchecked(
     derivable universe at all) -- never omitted, so the key's presence is
     not itself a signal a consumer has to branch on.
     """
-
-    from .lvs import POWER_STATUS_UNCHECKED
 
     return {
         "status": POWER_STATUS_UNCHECKED,
@@ -678,11 +673,7 @@ def _power_connectivity_report(
     :func:`_power_pins_derivation`.
     """
 
-    from .lvs import (
-        POWER_STATUS_MATCH,
-        POWER_STATUS_MISMATCH,
-        _gate_level_power_pin_evidence_detail,
-    )
+    from .lvs import _gate_level_power_pin_evidence_detail
 
     power_pin_names, masters, corroborated, libraries = (
         _gate_level_power_pin_evidence_detail(reference_netlist, library_pin_orders)

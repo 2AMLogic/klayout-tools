@@ -36,20 +36,8 @@ subsystem are *not* part of this split -- they stay in
 ``functional_verification.py``, calling into this module's entry points
 exactly as they called the same functions when this was one file.
 
-Dependency surface is intentionally narrow: this module's only outbound
-coupling to ``functional_verification.py`` is
-:class:`~klayout_tools.functional_verification.FunctionalVerificationError`
-plus a handful of ``SDF_*`` engine/diagnostic constants, imported *inside*
-the handful of functions that use them (the same deferred-import discipline
-``lvs_mismatch.py`` uses to depend on ``lvs.py``) rather than at module
-scope, so this module never has a load-time dependency back on
-``functional_verification.py`` -- only ``functional_verification.py``
-depends on this module at import time. ``functional_verification.py`` in
-turn imports this module's entry points back (module scope, no cycle --
-this module never imports ``functional_verification`` at its own module
-scope) to preserve ``klayout_tools.functional_verification.<name>`` as a
-working import path for every name the test suite/callers used before this
-split.
+The runner re-exports these entry points. Shared SDF settings and the
+verification exception come from ``functional_verification_base``.
 """
 
 from __future__ import annotations
@@ -60,6 +48,23 @@ from collections.abc import Callable
 from typing import Any
 
 from ._text import read_text
+from .functional_verification_base import (
+    DEFAULT_SDF_CORNER,
+    DEFAULT_SDF_ENTRIES,
+    SDF_ANNOTATE_MODULE,
+    SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS,
+    SDF_CORNERS,
+    SDF_DIAGNOSTIC_LINE_RE,
+    SDF_DIAGNOSTIC_MARKERS,
+    SDF_ENGINES,
+    SDF_ENTRIES_MODES,
+    SDF_MIN_ICARUS_MAJOR,
+    SDF_OMITTED_ANNOTATION_MARKER,
+    SDF_SPLICED_LOG_HEADER_RE,
+    SDF_WRAPPER_DUT_INSTANCE,
+    SDF_WRAPPER_MODULE,
+    FunctionalVerificationError,
+)
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
 from .request_paths import resolve_request_path
 
@@ -85,8 +90,6 @@ def _reject_sdf_with_functional_models(
     checked at request-validation time, the same posture
     ``options.coverage`` + ``engine: "icarus"`` already takes.
     """
-    from .functional_verification import FunctionalVerificationError
-
     if sdf is None or "FUNCTIONAL" not in defines:
         return
     raise FunctionalVerificationError(
@@ -113,15 +116,6 @@ def _resolve_sdf_option(
     annotated when only net delays were meant -- which is precisely the class
     of failure this feature's own transcript gate exists to prevent.
     """
-    from .functional_verification import (
-        DEFAULT_SDF_CORNER,
-        DEFAULT_SDF_ENTRIES,
-        SDF_CORNERS,
-        SDF_ENGINES,
-        SDF_ENTRIES_MODES,
-        FunctionalVerificationError,
-    )
-
     if sdf is None:
         return None
     if not isinstance(sdf, dict):
@@ -166,8 +160,6 @@ def _resolve_sdf_option(
 def _resolve_sdf_file(file_value: Any, request_dir: str) -> str:
     """Validate ``options.sdf.file`` and return its path (absolute or
     ``request_dir``-relative); the file must exist and be readable."""
-    from .functional_verification import FunctionalVerificationError
-
     if not isinstance(file_value, str) or not file_value:
         raise FunctionalVerificationError(
             "request.options.sdf.file must be a non-empty string"
@@ -195,8 +187,6 @@ _SDF_SCOPE_COMPONENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*|\\[^\s.]+")
 def _validate_sdf_scope(scope: Any) -> str:
     """``options.sdf.scope``: a non-empty ``.``-separated path of instance
     names, relative to ``hdl_toplevel`` (issue #4521)."""
-    from .functional_verification import FunctionalVerificationError
-
     parts = _split_sdf_scope(scope) if isinstance(scope, str) else []
     if not parts:
         raise FunctionalVerificationError(
@@ -262,9 +252,6 @@ def _write_sdf_annotate_shim(path: str, *, sdf_paths: list[str], scope: str) -> 
     entries runs *after* the poisoning entry on its own net, so nothing is
     left to fail.
     """
-    from .functional_verification import (
-        SDF_ANNOTATE_MODULE,
-    )
 
     def _escape(sdf_path: str) -> str:
         return sdf_path.replace("\\", "\\\\").replace('"', '\\"')
@@ -407,8 +394,6 @@ def _parse_toplevel_ports(
     located -- any of which would otherwise produce a wrapper that fails to
     compile or, worse, compiles with the wrong port shape.
     """
-    from .functional_verification import FunctionalVerificationError
-
     text, header = _find_toplevel_header(source_paths, hdl_toplevel)
     if header is None or text is None:
         raise FunctionalVerificationError(
@@ -500,8 +485,6 @@ def _write_sdf_dut_wrapper(
     scope. Verified live end-to-end through real cocotb + Icarus 13.0, not
     just raw ``iverilog``/``vvp``.
     """
-    from .functional_verification import SDF_WRAPPER_DUT_INSTANCE, SDF_WRAPPER_MODULE
-
     port_lines = ",\n".join(
         f"  {direction} {(width + ' ') if width else ''}{name}".rstrip()
         for direction, width, name in ports
@@ -595,8 +578,6 @@ def _sdf_matching_paren(text: str, open_index: int) -> int:
     regex, since an SDF ``(DELAY (ABSOLUTE ...))`` clause nests arbitrarily
     and a non-greedy regex would truncate at the first inner ``)``.
     """
-    from .functional_verification import FunctionalVerificationError
-
     depth = 0
     index = open_index
     while index < len(text):
@@ -2104,8 +2085,6 @@ def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
     Never raises on a malformed/unreadable SDF file -- that is the
     simulator's own parser's job to report.
     """
-    from .functional_verification import FunctionalVerificationError
-
     try:
         with open(sdf_path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -2247,8 +2226,6 @@ def _reject_sdf_unresolvable_interconnect_instances(
       instance name or begins with ``<instance><DIVIDER>`` (hierarchy below a
       top-level instance is not inspected).
     """
-    from .functional_verification import FunctionalVerificationError
-
     try:
         with open(sdf_path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -2341,8 +2318,6 @@ def _reject_sdf_mis_scoped_top_cell(
     ``CELLTYPE`` is a module defined in the sources, differs from the scope's
     module, and is instantiated directly inside that module.
     """
-    from .functional_verification import FunctionalVerificationError
-
     try:
         with open(sdf_path, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -2396,11 +2371,6 @@ def _check_sdf_engine_capability(version: str | None) -> None:
     incompatibility. Refusing to run on an unreadable version string would
     trade a clear downstream failure for a spurious upstream one.
     """
-    from .functional_verification import (
-        SDF_MIN_ICARUS_MAJOR,
-        FunctionalVerificationError,
-    )
-
     if version is None:
         return
     match = re.match(r"(\d+)", version)
@@ -2473,15 +2443,6 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     read log contains no observed diagnostic; it is not proof of complete
     annotation coverage.
     """
-    from .functional_verification import (
-        SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS,
-        SDF_DIAGNOSTIC_LINE_RE,
-        SDF_DIAGNOSTIC_MARKERS,
-        SDF_OMITTED_ANNOTATION_MARKER,
-        SDF_SPLICED_LOG_HEADER_RE,
-        FunctionalVerificationError,
-    )
-
     actionable: list[str] = []
     dropped: dict[str, int] = {}
     for log_path in log_paths:

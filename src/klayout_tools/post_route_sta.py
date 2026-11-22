@@ -332,6 +332,7 @@ from .post_route_sta_electrical import (
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
+from .post_route_sta_errors import PostRouteStaError as PostRouteStaError
 from .post_route_sta_instance_paths import (
     _instance_check_lines,
     _instance_path_lines,
@@ -541,18 +542,6 @@ _INPUT_PORT_DIRECTIONS = ("input", "inout", "bidirect")
 _OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
 #: Issue #3042: ``constraints.report_ports`` accepts a port of any direction.
 _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
-
-
-class PostRouteStaError(Exception):
-    """Raised when a standalone STA run cannot be completed: a missing/
-    malformed request file, an unresolvable DEF/``pdk.cell_library``/
-    ``corner``/LEF/SPEF, a missing clock constraint, or an OpenROAD engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other ``klt`` verb's own module-specific
-    error class (``PlaceAndRouteError``, ``SynthesizeError``, ...).
-    """
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -3397,25 +3386,23 @@ def _constraint_completeness_lines() -> list[str]:
     ]
 
 
+_SPEF_SKIP_DRIVER_ONLY = (
+    "    if {![catch {",
+    "        set klt_pins [get_pins -quiet -of_objects $klt_design_net]",
+    "        expr {[llength $klt_pins] == 1",
+    '            && [get_property [lindex $klt_pins 0] direction] eq "output"',
+    "            && [llength [get_ports -quiet -of_objects $klt_design_net]] == 0}",
+    "    } klt_driver_only] && $klt_driver_only} {continue}",
+)
+
+
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
-    """The net-name-correlation sanity check (``place_and_route.py``'s
-    ``_spef_sta_script_lines`` docstring explains the rationale in full):
-    a caller-supplied ``spef`` has the identical name-mismatch risk a
-    ``klt extract --parasitics``-produced one does, so this reuses the same
-    two-directional (SPEF-side / design-side) measurement, run **before**
-    ``read_spef`` so an uncaught Tcl error partway through that call cannot
-    also silently skip this check.
+    """Correlate SPEF names with the linked design before reading parasitics.
 
-    ``net_names`` must already be *unescaped* (real design spelling, e.g.
-    ``a[10]``/``u_sub/net``, not SPEF's ``a\\[10\\]``/``u_sub\\/net``) --
-    :func:`_spef_net_names` guarantees this. ``get_full_name`` (design side)
-    never returns SPEF's backslash-escaped spelling, so a still-escaped
-    ``klt_spef_have`` key would silently fail to match any design net whose
-    name contains a SPEF-reserved character (issue #1422).
-
-    Also collects a capped sample (:data:`_SPEF_MISSING_NETS_SAMPLE_LIMIT`)
-    of design-side net names that fail to correlate, so a caller can see
-    *which* nets are missing rather than only the aggregate counts."""
+    ``net_names`` uses the unescaped design spelling returned by
+    :func:`_spef_net_names` and OpenSTA's ``get_full_name`` (issue #1422).
+    The SPEF side counts every listed name found in the design. The design
+    side skips only proven driver-only nets and samples missing names (#6970)."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -3430,6 +3417,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
         "set klt_design_missing {}",
         f"set klt_design_missing_limit {_SPEF_MISSING_NETS_SAMPLE_LIMIT}",
         "foreach klt_design_net [get_nets -quiet *] {",
+        *_SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",

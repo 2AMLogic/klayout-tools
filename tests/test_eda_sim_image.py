@@ -126,6 +126,10 @@ _VERSION_PIN_PATHS = [
     ("tools", "ngspice", "sha256"),
     ("tools", "xschem", "tag"),
     ("tools", "xschem", "commit"),
+    ("tools", "xschem", "asset"),
+    ("tools", "xschem", "release_repo"),
+    ("tools", "xschem", "release_tag"),
+    ("tools", "xschem", "sha256"),
     ("tools", "ciel", "version"),
     ("tools", "klayout_tools", "version"),
 ]

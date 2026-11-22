@@ -60,6 +60,7 @@ from .pex import (
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_sim_evidence import schematic_probes
 from .sim import SimError, run_sim
 
 #: Codes a dry run always reports in ``not_checked[]`` -- what no amount of
@@ -222,12 +223,12 @@ def _extraction_preflight(
 def _resolve_testbenches(
     testbench_paths: Sequence[str],
 ) -> tuple[list[str], list[str]]:
-    """``run_pex``'s own first pass, which in a real run only happens once
-    extraction has been paid for: ``(body_paths, dut_paths)``."""
+    """Validate schematic probes and resolve each testbench body and DUT."""
     body_paths: list[str] = []
     dut_paths: list[str] = []
     for testbench_path in testbench_paths:
         request = _load_testbench_request(testbench_path)
+        schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):
@@ -350,6 +351,7 @@ def run_pex_dry_run(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
+    _body_paths, dut_paths = _resolve_testbenches(testbench_paths)
     resolved_top = _extraction_preflight(
         layout_path,
         deck_name,
@@ -377,7 +379,6 @@ def run_pex_dry_run(
         mom_rlc_inductance_nh=mom_rlc_inductance_nh,
     )
 
-    _body_paths, dut_paths = _resolve_testbenches(testbench_paths)
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
         if command is not None and reference_netlist is not None
