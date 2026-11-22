@@ -2971,13 +2971,8 @@ def run_pex(
         else None
     )
 
-    # First pass: resolve every testbench's `.include`d DUT reference and
-    # validate them *before* running any simulation at all (extraction has
-    # already run above, but every `klt sim` call is comparatively
-    # expensive) -- a testbench with no `.include` directive, or a set of
-    # testbenches that disagree on which schematic DUT they reference, is
-    # reported as a fast, cheap error rather than only surfacing after every
-    # testbench has already been simulated on both sides.
+    # Check every DUT include before simulation. A missing include or testbenches
+    # pointing at different DUTs must fail before launching any measurement leg.
     for index, testbench_path in enumerate(testbench_paths):
         label = f"{index:02d}-{os.path.splitext(os.path.basename(testbench_path))[0]}"
         labels.append(label)
