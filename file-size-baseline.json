@@ -337,7 +337,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 3104
+      "lines": 2820
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
@@ -521,11 +521,11 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4580
+      "lines": 4569
     },
     {
       "path": "src/klayout_tools/power.py",
-      "lines": 2573
+      "lines": 2571
     },
     {
       "path": "src/klayout_tools/power_intent.py",
@@ -561,7 +561,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 6956
+      "lines": 6955
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12049
+      "lines": 11962
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

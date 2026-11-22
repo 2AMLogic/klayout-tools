@@ -28,7 +28,12 @@ from test_functional_verification import (
 def _make_tool(bindir: Path, name: str, version_line: str, rc: int = 0) -> Path:
     bindir.mkdir(exist_ok=True)
     path = bindir / name
-    path.write_text(f"#!/bin/sh\necho '{version_line}'\nexit {rc}\n", encoding="utf-8")
+    path.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = "--version" || exit 2\n'
+        f"echo\necho '{version_line}' >&2\nexit {rc}\n",
+        encoding="utf-8",
+    )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
@@ -125,6 +130,26 @@ def test_present_tools_are_echoed_and_path_from_request_env_is_used(
     ]
 
 
+@pytest.mark.parametrize(
+    "script",
+    ["#!/bin/sh\nexit 0\n", "#!/missing-klt-test-interpreter\n"],
+    ids=["silent", "missing-interpreter"],
+)
+def test_unavailable_tool_banner_preserves_executable_details(tmp_path, script):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / "sail"
+    tool.write_text(script, encoding="utf-8")
+    tool.chmod(0o755)
+    request = _request(tmp_path, bindir, [{"name": "sail", "version": "0.19"}])
+    with pytest.raises(FunctionalVerificationError) as error:
+        run_functional_verification(request)
+    assert error.value.code == "missing_tool"
+    (unmet,) = error.value.details["unmet_tools"]
+    assert unmet["found"] == {"path": str(tool), "version": None, "sha256": _sha(tool)}
+    assert unmet["reason"] == "version '0.19' not in --version output"
+
+
 @pytest.mark.parametrize("omitted", [True, False])
 def test_omitted_or_empty_requires_tools_only_adds_empty_tools(
     tmp_path, monkeypatch, omitted
@@ -150,3 +175,65 @@ def test_mutations_run_checks_tools_before_anything_else(tmp_path):
     with pytest.raises(FunctionalVerificationError) as info:
         fv.run_functional_verification_with_mutations(request_path, str(proposals))
     assert info.value.code == "missing_tool"
+
+
+_ICARUS_BANNER = "Icarus Verilog version 13.0 (stable) (v13_0)"
+
+
+def _make_icarus_stub(bindir: Path) -> Path:
+    """An ``iverilog`` that rejects ``--version`` like the real one and prints
+    its banner only for ``-V`` (issue #7094)."""
+    bindir.mkdir(exist_ok=True)
+    path = bindir / "iverilog"
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-V" ]; then\n'
+        f"  echo '{_ICARUS_BANNER}'\n"
+        "  echo 'Copyright stub'\n"
+        "  exit 0\n"
+        "fi\n"
+        "echo \"$0: invalid option -- '-'\" >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path
+
+
+def test_matching_iverilog_pin_is_probed_with_dash_v(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    tool = _make_icarus_stub(bindir)
+    request_path = _request(tmp_path, bindir, [{"name": "iverilog", "version": "13.0"}])
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    response = run_functional_verification(request_path)
+
+    assert runner.build_kwargs
+    assert response["environment"]["tools"] == [
+        {
+            "name": "iverilog",
+            "path": str(tool),
+            "version": _ICARUS_BANNER,
+            "sha256": _sha(tool),
+        }
+    ]
+
+
+def test_mismatched_iverilog_pin_reports_banner_and_no_build(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    tool = _make_icarus_stub(bindir)
+    request_path = _request(tmp_path, bindir, [{"name": "iverilog", "version": "12.0"}])
+    runner = _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    with pytest.raises(FunctionalVerificationError) as info:
+        run_functional_verification(request_path)
+
+    assert info.value.code == "missing_tool"
+    (unmet,) = info.value.details["unmet_tools"]
+    assert unmet["found"] == {
+        "path": str(tool),
+        "version": _ICARUS_BANNER,
+        "sha256": _sha(tool),
+    }
+    assert unmet["reason"] == "version '12.0' not in -V output"
+    assert not hasattr(runner, "build_kwargs") or not runner.build_kwargs
