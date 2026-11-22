@@ -637,6 +637,13 @@
       "package_version": "0.10.0"
     },
     {
+      "deck": "enforced_rules",
+      "content_hash": "sha256:dc5b3d94c2773a665b4217a5dc50fa92a35d7f661618dada9578571fd9204c60",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
       "deck": "extraction",
       "content_hash": "sha256:904db32665a7cc4ce5d647ba39798cfb6cf91096925697ab0e4b8ae57f5867b1",
       "git_tag": "v0.10.0",
