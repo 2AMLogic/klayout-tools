@@ -13,28 +13,16 @@ build-dir copies of the SDF and netlist, and reports each rename as
 from __future__ import annotations
 
 import json
-import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf_rename as fvr
 from klayout_tools.functional_verification import run_functional_verification
-
-
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
-HAVE_ICARUS = shutil.which("iverilog") is not None
 
 _RESULTS_XML = """\
 <testsuites name="results">
@@ -343,8 +331,8 @@ def test_stubbed_report_omits_renamed_when_nothing_was_renamed(tmp_path, monkeyp
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 @pytest.mark.parametrize(("divider", "sep"), [(".", "."), ("/", "."), ("/", "/")])
 def test_integration_real_icarus_escaped_divider_instances_annotate(
     tmp_path, divider, sep

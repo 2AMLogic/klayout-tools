@@ -112,7 +112,13 @@ def add_functional_verification_parser(
             "(stdin/inline: the cwd). Must exist and be a directory"
         ),
     )
-    functional_verification_parser.add_argument(
+    mode = functional_verification_parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--check",
+        metavar="REPORT",
+        help="compare a committed report's input hashes without running a simulator",
+    )
+    mode.add_argument(
         "--mutations",
         metavar="PROPOSALS_PATH",
         help=(

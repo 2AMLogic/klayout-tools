@@ -95,6 +95,14 @@ def pin_disclosure(
     :func:`content_hash_pin_state`, plus, when ``check_kind`` is given and
     the pin is uncomparable, the :func:`unverifiable_pin_note` saying why.
 
+    Issue #5963: a pinned entry whose resolution also carries
+    ``content_hash_unresolved`` (a `klt yield` samples document that could
+    not be hashed from disk *and* whose declared store pin could not resolve
+    it) has that disclosure folded in beside the pin state, so an unmet
+    item's ``detail`` names why -- the same field the ``met`` citation
+    carries -- instead of only the generic note. An entry that pins nothing
+    is untouched, exactly as before.
+
     The single implementation behind every site that surfaces a pin without
     letting it move the verdict, so those sites cannot drift.
     """
@@ -106,6 +114,9 @@ def pin_disclosure(
     detail: dict[str, Any] = {"content_hash_pin": pin_state}
     if pin_state == PIN_UNVERIFIABLE and check_kind is not None:
         detail["content_hash_pin_note"] = unverifiable_pin_note(check_kind, resolution)
+    unresolved = resolution.get("content_hash_unresolved")
+    if unresolved is not None:
+        detail["content_hash_unresolved"] = unresolved
     return detail
 
 

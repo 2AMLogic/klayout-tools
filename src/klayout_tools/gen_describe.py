@@ -77,7 +77,6 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
-    _res_end_contact_um,
     _res_flavor_layers,
     _res_flavor_min_width_um_floor,
     _res_sab_geometry_um,
@@ -87,6 +86,8 @@ from .gen_layer_params import (
     _tap_pads_wanted,
     mfg_grid_um,
 )
+from .gen_pitch import _pitch_hints_and_warnings
+from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
 from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
 from .gen_ring_ports import _ring_ports
 from .gen_voltage_flavor import _voltage_flavor_hints
@@ -130,9 +131,9 @@ def _resistor_strip_describe(
     )
 
     # Layer name is not resolved against a PDK layer map at phase 1 -- the
-    # drawing layer is a generator implementation detail (see the module
-    # docstring's `_HIDDEN_PARAMS` note); a real per-PDK layer name lookup is
-    # phase 2 scope, alongside the primitive families that actually need one.
+    # drawing layer is a generator implementation detail (hidden, per the
+    # module docstring); a real per-PDK layer name lookup is phase 2 scope,
+    # alongside the primitive families that actually need one.
     layer = {"layer": 67, "datatype": 20, "name": None}
 
     ports = [
@@ -306,36 +307,6 @@ def _share_sd_hints(
             "series chain"
         )
     return {"share_sd": True, "shared_sd_nodes": shared_nodes}
-
-
-def _pitch_hints_and_warnings(
-    params: dict[str, Any], info: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """Issue #3299 (Phase 1): only when a pitch override was requested, report
-    the effective pitch and whether it was clamped up to the legal minimum
-    (empty otherwise, so default reports are unchanged)."""
-    if params["pitch_x_um"] <= 0 and params["pitch_y_um"] <= 0:
-        return {}, []
-    hints = {
-        "pitch": {
-            "col_pitch_um": info["col_pitch_um"],
-            "row_pitch_um": info["row_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "min_row_pitch_um": info["min_row_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-            "pitch_y_clamped": info["pitch_y_clamped"],
-        }
-    }
-    warnings = [
-        f"params.{name}={params[name]} is below the legal minimum "
-        f"pitch {minimum}um; clamped up to {minimum}um"
-        for axis, name, minimum in (
-            ("x", "pitch_x_um", info["min_col_pitch_um"]),
-            ("y", "pitch_y_um", info["min_row_pitch_um"]),
-        )
-        if info[f"pitch_{axis}_clamped"]
-    ]
-    return hints, warnings
 
 
 from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
@@ -1125,10 +1096,10 @@ def _res_array_describe(
         if metal_level
         else {key: 0.0 for key in _METAL_RES_GEOMETRY_MIN_KEYS}
     )
-    # Issue #2449: sky130 high/xhigh draw a rectangular precision-poly licon.
-    end_contact = _res_end_contact_um(
-        family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-    )
+    flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
+    # Issues #2449/#5704: sky130 high/xhigh draw a rectangular licon + long head.
+    end_contact = _res_end_contact_um(family, flavor, metal_level)
+    head_len_um = _res_head_len_um(family, flavor, metal_level)
     info = _res_array_layout(
         params["length_um"],
         params["width_um"],
@@ -1140,9 +1111,8 @@ def _res_array_describe(
         floors["via_enclosure_min_um"],
         floors["via_space_min_um"],
         *end_contact,
-        _res_sab_geometry_um(
-            family, params.get("flavor", _DEFAULT_RES_FLAVOR), metal_level
-        )[0],
+        _res_sab_geometry_um(family, flavor, metal_level)[0],
+        head_len_um,
     )
     unit = info["unit"]
     # A metal-level resistor's own body layer (metN) is already a routing
@@ -1204,6 +1174,7 @@ def _res_array_describe(
             f"rectangular {end_contact[0]}um x {end_contact[1]}um end "
             "contacts (licon.1b/c precision-resistor exception) on "
             f"{unit['pad_height_um']}um-tall poly/local-metal end pads"
+            + _res_head_note(head_len_um)
         )
 
     snapped = _grid_snapped(
@@ -2374,6 +2345,8 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.ring_padding_um must be >= 0")
     if params["row_spacing_um"] < 0:
         raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
+    if params["pitch_x_um"] < 0:
+        raise GenError("generator 'diff_pair': params.pitch_x_um must be >= 0")
 
     # `gate_pad_clearance_um` is deliberately left at its default here: this
     # validator runs before the PDK family is resolved (the same PDK-agnostic
@@ -2390,6 +2363,7 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
             ring_padding_um=params["ring_padding_um"],
             row_spacing_um=params["row_spacing_um"],
             gate_contact=params["gate_contact"],
+            pitch_x_um=params["pitch_x_um"],
         )
     )
     _validate_ring_gap(
@@ -2430,6 +2404,7 @@ def _diff_pair_describe(
         _gate_bottom_endcap_um(family),
         top_endcap_um=_gate_top_endcap_um(family),
         tap_reach_um=_tap_reach_um(family),
+        pitch_x_um=params["pitch_x_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2514,6 +2489,7 @@ def _diff_pair_describe(
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     sd_implant_hints = _sd_implant_hints(family, params, notes)
+    pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info, axes=("x",))
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2531,6 +2507,7 @@ def _diff_pair_describe(
             "notes": notes,
             **voltage_flavor_hints,
             **sd_implant_hints,
+            **pitch_hints,
         },
         "warnings": (
             (
@@ -2538,6 +2515,7 @@ def _diff_pair_describe(
                 if snapped
                 else []
             )
+            + pitch_warnings
             + _mfg_grid_warnings(
                 "diff_pair",
                 family,
@@ -3077,40 +3055,17 @@ def _diode_describe(
     params: dict[str, Any], dbu: float, pdk_info: dict[str, Any]
 ) -> dict[str, Any]:
     from .gen import MIN_SAME_LAYER_SPACING_UM, _grid_snapped
-    from .gen_diode import _diode_layout
+    from .gen_diode import _diode_layout, diode_notes, diode_ports
 
+    family = _pdk_family(pdk_info["variant"])
     info = _diode_layout(
         params["kind"], params["voltage_class"], params["width_um"], params["length_um"]
     )
-    metal_pair = _PDK_ROLE_LAYERS[_pdk_family(pdk_info["variant"])]["metal"]
+    metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
     assert metal_pair is not None
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
-    ports = []
-    for name, box, direction in (
-        ("ANODE", info["anode_li"], 90),
-        ("CATHODE", info["cathode_li"], 90),
-    ):
-        ports.append(
-            {
-                "name": name,
-                "net": None,
-                "layer": metal_layer,
-                "x_um": (box[0] + box[2]) / 2,
-                "y_um": (box[1] + box[3]) / 2,
-                "width_um": box[2] - box[0],
-                "direction_deg": direction,
-            }
-        )
+    ports = diode_ports(info, metal_layer)
     snapped = _grid_snapped(dbu, params["width_um"], params["length_um"])
-    notes = [
-        "areaid.ed (81/19) is never drawn -- the extraction deck treats it as "
-        "an exclusion, so an ESD-flagged diode would not extract as diode_*"
-    ]
-    if params["kind"] == "n_psub":
-        notes.append(
-            "ANODE is a p+ substrate tap; the p-substrate itself is the anode "
-            "terminal in the extracted netlist"
-        )
     return {
         "device_count": 1,
         "ports": ports,
@@ -3118,11 +3073,18 @@ def _diode_describe(
             "min_spacing_um": MIN_SAME_LAYER_SPACING_UM,
             "matched_group_id": None,
             "snapped_to_grid": snapped,
-            "notes": notes,
+            "notes": diode_notes(params["kind"], params["voltage_class"]),
         },
         "warnings": (
             ["one or more dimensions were rounded to the technology grid"]
             if snapped
             else []
+        )
+        + _mfg_grid_warnings(
+            "diode",
+            family,
+            params,
+            # Both edges are diffusion extents.
+            checks=(("width_um", "active"), ("length_um", "active")),
         ),
     }

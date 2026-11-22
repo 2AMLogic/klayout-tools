@@ -480,7 +480,16 @@ written to every block.
      proof" section) — every `delta[]` row is explainable directly from the
      extracted netlist's own added R/C, not merely reported, including the
      (measured, not assumed) no-degradation rows that canary's current
-     topology produces.
+     topology produces. For a block whose core device family only the PDK's
+     own LVS runset recognises (the case `klt pex --engine
+     klayout-runset` exists for, #6559), the citation must carry parasitics:
+     `klt signoff` refuses a `parasitics_carried: false` leg with
+     `no_parasitics` (#6606) — the merged route (`klt pex --engine
+     klayout-runset --deck <curated>`, which attaches the curated deck's
+     parasitics to the runset devices through the measured geometric net
+     correspondence of
+     `docs/design/runset-pex-net-correspondence.md`) is the runset-engine
+     shape that grades.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
      pre-layout RTL/gate simulation. The machine-checkable evidence is a

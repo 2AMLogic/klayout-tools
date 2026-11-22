@@ -306,9 +306,9 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
             # 0.513. The packaged deck's V4.M5.AUX.2 wants a V4 exactly as
             # wide as M5, and the tech LEF only ships a wide V4 bar for an M5
             # strap of width 0.216 (VIARULE M5_M4widePWR0p864), so M5 is 0.216
-            # wide. Widths + spacings, pitches and offsets are multiples of
-            # the deck's 24 nm (M5) / 32 nm (M6) edge grids; the M6 offset is
-            # measured against a core whose origin is a multiple of 0.96 um.
+            # wide. pdngen measures offsets from the snapped core origin.
+            # The first M5 edge is core_x + 312 - 108 nm (24 nm grid).
+            # The first M6 edge is core_y + 344 - 144 nm (32 nm grid).
             {
                 "layer": "M5",
                 "width_um": 0.216,

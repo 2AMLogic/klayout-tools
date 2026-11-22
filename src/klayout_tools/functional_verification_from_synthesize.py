@@ -20,7 +20,7 @@ from typing import Any
 
 from ._provenance import sha256_file
 from ._report_verify import hash_check, load_committed_report, resolve_committed_path
-from .request_paths import resolve_request_path
+from .request_paths import resolve_readable_files, resolve_request_path
 
 FROM_SYNTHESIZE_KEYS = ("report", "netlist")
 
@@ -60,18 +60,13 @@ def _resolve_sources(
     if not all(isinstance(entry, str) and entry for entry in sources):
         raise _err("request.sources entries must be non-empty strings")
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _request_relative(entry, request_dir, "request.sources entry")
-        if not os.path.isfile(path):
-            raise _err(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise _err(f"could not read RTL source '{entry}': {exc}") from exc
-        resolved.append(path)
-    return resolved
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        _err,
+        field="request.sources entry",
+        noun="RTL source",
+    )
 
 
 def has_from_synthesize(options: Any) -> bool:
@@ -107,6 +102,7 @@ def resolve_from_synthesize(
     envelope,
     *,
     pdk_cell_library: str | None = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[str, dict[str, Any]] | None:
     """Resolve and verify ``options.from_synthesize``.
 
@@ -161,7 +157,9 @@ def resolve_from_synthesize(
         raise _err(f"options.from_synthesize netlist not found: {netlist}")
     expected = report.get("netlist_sha256")
     check = hash_check("netlist_sha256", expected, sha256_file(netlist))
-    if not check["match"]:
+    # A run requires the synthesis pin. An FV check compares the same file
+    # to the FV report's own pin, even when synthesis has since been rerun.
+    if verify_synthesis_pin and not check["match"]:
         why = (
             "the report records no netlist_sha256"
             if expected is None
@@ -186,6 +184,7 @@ def resolve_sources_with_synthesize(
     envelope,
     *,
     pdk_input: Any = None,
+    verify_synthesis_pin: bool = True,
 ) -> tuple[list[str], dict[str, Any] | None]:
     """The effective ``sources`` and the response block, or ``(sources,
     None)`` when ``options.from_synthesize`` is unused.
@@ -203,6 +202,7 @@ def resolve_sources_with_synthesize(
         request_dir,
         hdl_toplevel,
         envelope,
+        verify_synthesis_pin=verify_synthesis_pin,
         pdk_cell_library=(pdk_input.cell_library if pdk_input is not None else None),
     )
     sources = _resolve_sources(

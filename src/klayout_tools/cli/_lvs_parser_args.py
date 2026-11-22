@@ -1,22 +1,25 @@
-"""``klt lvs`` argument parser (split out of ``parser.py``, size ratchet).
+"""``klt lvs`` argparse flags (split out of ``parser.py``, issue #5845, to
+keep that module under its file-size ceiling -- the same split
+``_drc_parser_args.py``/``parser_sim.py`` made before it).
 
-Parser registration lives here; ``run()`` stays in ``lvs_cmd``. Shared
-helpers are passed in as callables, following ``parsers/extract``.
+``add_lvs_parser`` registers the whole ``lvs`` verb exactly as
+``parser._add_lvs_parser`` used to inline; the shared helpers
+(``_deck_names_str``, ``_add_format_arg``) are passed in by the caller so
+this module stays free of ``parser`` imports (which would be circular).
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from typing import Any
 
-from .. import lvs_cmd
+from . import lvs_cmd
 
 
 def add_lvs_parser(
     subparsers: argparse._SubParsersAction,
-    _add_format_arg: Callable[..., Any],
-    _deck_names_str: Callable[[], str],
+    deck_names_str: Callable[[], str],
+    add_format_arg: Callable[..., None],
 ) -> None:
     """Register the ``lvs`` verb for comparing netlist pairs.
 
@@ -40,7 +43,7 @@ def add_lvs_parser(
     )
     # `request` (positional) and `--check` (issue #1106) are mutually
     # exclusive input sources -- exactly one is required. See the matching
-    # `drc_input_group` comment above for why this is a required
+    # `drc_input_group` comment in parser.py for why this is a required
     # mutually-exclusive group rather than a manual runtime check.
     lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
     lvs_input_group.add_argument(
@@ -83,6 +86,24 @@ def add_lvs_parser(
         ),
     )
     lvs_parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="PATH",
+        help=(
+            "explicit reference-netlist input for --check/--rerun (issue "
+            "#5845): the --layout counterpart for REPORT's reference side. "
+            "Overrides the reference path REPORT recorded, "
+            "unconditionally -- use it when REPORT's reference is outside "
+            "any repository (scope 'external') or wrongly anchored (an "
+            "already-committed report of a nested-repo input, where the "
+            "recorded relative path is ambiguous); a reference that no "
+            "longer hashes to the recorded value reports 'drifted'. "
+            "Requires --check; a clean error (exit 1) otherwise. Note "
+            "--deck-file applies to a fresh klayout-runset run, never to "
+            "--check"
+        ),
+    )
+    lvs_parser.add_argument(
         "--rerun",
         action="store_true",
         help=(
@@ -99,7 +120,7 @@ def add_lvs_parser(
         "--deck",
         default=None,
         metavar="NAME",
-        help=f"extraction deck to run (currently: {_deck_names_str()}); fills "
+        help=f"extraction deck to run (currently: {deck_names_str()}); fills "
         "the request's layout.deck only, never reference.deck (issue "
         "#5733); a clean error (exit 1) if the request sets layout.deck too",
     )
@@ -157,5 +178,5 @@ def add_lvs_parser(
             "--rerun replays the omission from the report's own echo"
         ),
     )
-    _add_format_arg(lvs_parser)
+    add_format_arg(lvs_parser)
     lvs_cmd.configure(lvs_parser)  # -o/--output (issue #4984) + func=run

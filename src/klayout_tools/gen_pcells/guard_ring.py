@@ -134,6 +134,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeDouble,
                 "Harness-resolved minimum Comp enclosure of contacts at the cut",
                 default=0.0,
+                hidden=True,
             )
             self.param(
                 "add_well",
@@ -152,6 +153,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "band with ring_implant_margin_um of extension beyond every "
                 "edge of it (only used when ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "ring_implant_present",
@@ -159,6 +161,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the tap ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+                hidden=True,
             )
             self.param(
                 "ring_implant_margin_um",
@@ -167,6 +170,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "the tap ring's own band on every edge (only used when "
                 "ring_implant_present)",
                 default=0.0,
+                hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
 
