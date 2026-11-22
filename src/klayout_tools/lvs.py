@@ -156,6 +156,7 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .extract_netlist_write import write_spice_netlist
 from .extract_progress import StageTimer, active_timer, stage
 from .lvs_body import (
     _body_net_warnings,
@@ -178,6 +179,7 @@ from .lvs_coverage import (
     _coverage_kind,
     _geometry_disclosure_kind,
 )
+from .lvs_deck_defaults import apply_deck_ignored_parameters
 from .lvs_finfet import (
     apply_finfet_bulk_hierarchy,
     bulk_disclosures,
@@ -1627,22 +1629,14 @@ def run_lvs(
     # `device_classes` follow, never a spuriously empty `[]` that would read
     # as "no resistor/capacitor class participated".
     device_parameter_coverage: list[dict[str, Any]] | None = None
-    # Issue #2461: every `(class, parameter)` pair a request-side hook took
-    # out of *this* run's compare, so the classification pass downstream never
-    # reports one of them as a `device.property` error in the same report that
-    # discloses it as excluded. Kept as two sets so the coverage block can name
-    # which hook excluded each one.
+    # Suppress property mismatches for every disabled (class, parameter) pair.
+    # For coverage, track the source of each exclusion separately. A deck
+    # default or caller option only narrows coverage for parameters that were
+    # primary before the hook ran. Previously secondary parameters retain
+    # their built-in reason (#2461, #2654).
+    excluded_parameters: set[tuple[str, str]] = set()
     placeholder_excluded: set[tuple[str, str]] = set()
-    compare_scoped_excluded: set[tuple[str, str]] = set()
-    # Issue #2654: the subset of `compare_scoped_excluded` that
-    # `options.compare_parameters` actually took *out of* the compare -- the
-    # parameters that were primary before `enable_parameter` ran. The option
-    # can only narrow, so scoping a class to one subset also disables every
-    # sibling the caller did not name; a sibling the class itself declares
-    # secondary was never compared, so the coverage block must not attribute
-    # its exclusion to the caller's option (see
-    # `_record_excluded_parameters`). The full set above still drives the
-    # classification pass's suppression, unchanged.
+    deck_narrowed: set[tuple[str, str]] = set()
     compare_scoped_narrowed: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
@@ -1664,16 +1658,12 @@ def run_lvs(
 
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
-        # trim) reference's behavioural option construct to one concrete
-        # drawn state *before* anything else below -- every other reference-
-        # side normalisation in this block (`device_bulk`, placeholder
-        # values, `compare_parameters`, the parameter-coverage summary)
-        # should see the already-resolved device/net set, exactly as it
-        # would for a reference hand-authored at that one option code to
-        # begin with. Opt-in via `hints.short_nets`; a no-op (returns `[]`
-        # immediately) for every request that does not declare it, so a
-        # reference with no option construct present stays byte-identical to
-        # before this hook existed.
+        # trim) reference's behavioural option construct to one concrete drawn
+        # state *before* anything else below -- every other reference-side
+        # normalisation here (`device_bulk`, placeholder values,
+        # `compare_parameters`, the coverage summary) should see the resolved
+        # device/net set. Opt-in via `hints.short_nets`; a no-op (returns `[]`)
+        # without it, so a reference with no option construct is unchanged.
         short_nets_warnings = _apply_short_nets_hint(
             request.get("hints") or {},
             reference_netlist,
@@ -1682,13 +1672,11 @@ def run_lvs(
 
         # Issue #506: normalise the reference side's device classes up to the
         # layout side's terminal list *before* the comparer is constructed, so
-        # a deck's bulk-terminal device flavour (e.g. a `bulk_to_substrate`
-        # resistor's three-terminal `RES_X`) can be compared against a
-        # schematic-derived reference that does not model that terminal at
-        # all. Runs after the `combine_devices()` step above so combining
-        # still sees each side's own, unmodified device classes (the
-        # status-quo behaviour), and returns the `severity: "warning"`
-        # disclosure entries appended to `mismatches[]` further down.
+        # a deck's bulk-terminal flavour (e.g. a `bulk_to_substrate` resistor's
+        # three-terminal `RES_X`) can be compared against a schematic-derived
+        # reference that does not model that terminal. Runs after the
+        # `combine_devices()` step so combining still sees each side's own
+        # classes, and returns the `warning` disclosures appended further down.
         bulk_warnings = _apply_reference_device_bulk(
             reference_device_bulk,
             layout_netlist,
@@ -1696,13 +1684,11 @@ def run_lvs(
         )
 
         # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
-        # just above -- a `form: "subckt-call"` conversion's placeholder `0`
-        # value has to be taken out of the comparison *before* the comparer is
-        # constructed, since `NetlistComparer` reads each device class's
-        # `equal_parameters` when it builds its device-equivalence seeding.
-        # Runs after `combine_devices()` for the same reason too (combining
-        # still sees each side's unmodified classes), and returns the
-        # `severity: "warning"` disclosure entries appended further down.
+        # -- a `form: "subckt-call"` conversion's placeholder `0` value has to
+        # leave the comparison *before* the comparer is constructed, since
+        # `NetlistComparer` reads each class's `equal_parameters` when it seeds
+        # device equivalence. Runs after `combine_devices()` for the same
+        # reason, and returns the `warning` disclosures appended further down.
         placeholder_warnings = _apply_reference_placeholder_values(
             reference_placeholder_classes,
             layout_netlist,
@@ -1710,16 +1696,23 @@ def run_lvs(
             placeholder_excluded,
         )
 
-        # Issue #1928: same placement rationale once more -- `enable_parameter`
-        # has to run before the comparer is constructed for the same reason
-        # `equal_parameters` does just above, and after `combine_devices()`
-        # so combining still sees each side's unmodified classes. Returns
-        # the `severity: "warning"` disclosure entries appended further down.
-        compare_parameter_warnings = _apply_compare_parameters(
+        # Issues #1928, #4312: same placement rationale -- `enable_parameter` has
+        # to run before the comparer is built, after `combine_devices()`. The
+        # deck's own ignored parameters go first and skip any class
+        # `compare_parameters` names. Returns the disclosures appended below.
+        compare_parameter_warnings = apply_deck_ignored_parameters(
+            layout_deck,
             opts.compare_parameters,
             layout_netlist,
             reference_netlist,
-            compare_scoped_excluded,
+            placeholder_excluded,
+            excluded_parameters,
+            deck_narrowed,
+        ) + _apply_compare_parameters(
+            opts.compare_parameters,
+            layout_netlist,
+            reference_netlist,
+            excluded_parameters,
             compare_scoped_narrowed,
         )
 
@@ -1737,9 +1730,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             placeholder_excluded,
+            deck_narrowed,
             compare_scoped_narrowed,
         )
-        excluded_parameters = placeholder_excluded | compare_scoped_excluded
+        excluded_parameters.update(placeholder_excluded)
 
         logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
@@ -3329,11 +3323,10 @@ def _resolve_layout(
             os.makedirs(os.path.dirname(extracted_netlist_path), exist_ok=True)
             writer = kdb.NetlistSpiceWriter()
             writer.use_net_names = True
+            description = f"extracted by klt lvs (deck {deck_name})"
             try:
-                netlist.write(
-                    extracted_netlist_path,
-                    writer,
-                    f"extracted by klt lvs (deck {deck_name})",
+                write_spice_netlist(
+                    netlist, extracted_netlist_path, writer, description
                 )
             except Exception as exc:
                 raise LvsError(
@@ -6118,6 +6111,7 @@ def _apply_compare_parameters(
 #: * ``"placeholder_value"`` -- excluded by
 #:   :func:`_apply_reference_placeholder_values` (issue #1907); already
 #:   disclosed as :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE`.
+#: * ``"deck"`` -- excluded by the layout deck's ignored parameters (#4312).
 #: * ``"compare_parameters"`` -- *narrowed away* by
 #:   :func:`_apply_compare_parameters` (issue #1928): it was being compared
 #:   (``is_primary == True``) until that option scoped the class to a subset
@@ -6127,6 +6121,7 @@ def _apply_compare_parameters(
 #:   secondary.
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
+PARAMETER_NOT_COMPARED_DECK = "deck"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
 
 
@@ -6156,6 +6151,7 @@ def _device_parameter_coverage(
     layout_netlist: Any,
     reference_netlist: Any,
     placeholder_excluded: AbstractSet[tuple[str, str]],
+    deck_narrowed: AbstractSet[tuple[str, str]],
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
@@ -6193,10 +6189,8 @@ def _device_parameter_coverage(
     comparing it.
 
     **Never duplicates another disclosure.** A parameter in
-    ``placeholder_excluded``/``compare_scoped_narrowed`` is already reported
-    as ``device.placeholder_value``/``device.parameter_excluded``; it appears
-    in the coverage block (with that ``reason``) but never in the warning,
-    which is reserved for the case that had no disclosure at all.
+    any of the three exclusion sets already has a ``device.placeholder_value``
+    or ``device.parameter_excluded`` disclosure. Coverage records its source.
 
     ``compare_scoped_narrowed`` is :func:`_apply_compare_parameters`'
     *narrowed* set, not its full excluded set (issue #2654): a parameter that
@@ -6237,6 +6231,8 @@ def _device_parameter_coverage(
             pair = (key, param.name.lower())
             if pair in placeholder_excluded:
                 reason = PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE
+            elif pair in deck_narrowed:
+                reason = PARAMETER_NOT_COMPARED_DECK
             elif pair in compare_scoped_narrowed:
                 reason = PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS
             elif param.is_primary:

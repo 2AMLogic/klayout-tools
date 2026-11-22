@@ -58,6 +58,7 @@ def test_promoted_pin_resistance_tracks_sheet_and_series_cuts(tmp_path, vertical
     report = _extract(tmp_path, heads(), 1)
     base = _graphs(report)
     ideal = _graphs(_extract(tmp_path, heads(), 0))
+    nominal = _graphs(_extract(tmp_path, heads(), None))
     longer = _graphs(_extract(tmp_path, heads(680), 1))
     for pin, x in (("RA", 3.3), ("RB", 12.3)):
         assert any(
@@ -72,7 +73,12 @@ def test_promoted_pin_resistance_tracks_sheet_and_series_cuts(tmp_path, vertical
         r = graph["selected_resistance_ohm"]
         assert graph["resistance_source"] == "graph"
         assert 0 < r == graph["pair_resistance_ohm"][0][1] < float("inf")
-        assert r - ideal[pin]["selected_resistance_ohm"] == pytest.approx(2.0)
+        ideal_r = ideal[pin]["selected_resistance_ohm"]
+        assert r - ideal_r == pytest.approx(2.0)
+        # The SKY130 poly contact and mcon are in series on the promoted pin path.
+        assert nominal[pin]["selected_resistance_ohm"] - ideal_r == pytest.approx(
+            152 + 9.3
+        )
         assert longer[pin]["selected_resistance_ohm"] - r == pytest.approx(0.25)
 
 

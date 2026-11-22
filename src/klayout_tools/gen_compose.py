@@ -183,6 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
+from functools import cache
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -208,6 +209,7 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_dbu import DbuReconcileError, reconcile_block_dbu
 from .gen_compose_derived_frame import add_composed_frames as _framed
 from .gen_compose_draw import (
     _draw_routed_entry as _draw_routed_entry,
@@ -224,6 +226,7 @@ from .gen_compose_landing_pads import (
     _make_landing_pad_side_um,
     _parse_landing_pad_override,
 )
+from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -270,12 +273,10 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
-from .gen_compose_via_cuts import (
-    own_via_cut_clearance_reason,
-    via_drop_cut_side_um,
-)
+from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk_output_dbu import required_stream_dbu
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.gen_compose.request/1"
@@ -3444,19 +3445,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # from route_layer). So this cache is keyed by (block_id, layer) instead,
     # read lazily the same way, and reused by every leg that drops onto the
     # same block/layer pair.
-    own_block_layer_geometry_cache: dict[
-        tuple[str, tuple[int, int]], dict[str, Any] | None
-    ] = {}
-
+    @cache
     def _own_block_layer_geometry(
-        block_id: str, layer: tuple[int, int]
+        block_id: str, layer: tuple[int, int], dbu: float | None = None
     ) -> dict[str, Any] | None:
-        key = (block_id, layer)
-        if key not in own_block_layer_geometry_cache:
-            own_block_layer_geometry_cache[key] = read_block_layer_geometry(
-                block_id, blocks[block_id], offsets_um[block_id], layer
-            )
-        return own_block_layer_geometry_cache[key]
+        return read_block_layer_geometry(
+            block_id, blocks[block_id], offsets_um[block_id], layer, dbu
+        )
 
     # --- Per-net/per-leg routing-plane override (#1655) ----------------------
     # `routing.layer_role` resolves ONE plane for the whole composition, so a
@@ -3599,34 +3594,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return width
 
-    # dbu for the route-vs-route collision check below (#1057), read lazily
-    # (only once connectivity[] actually has a net to check) from any one
-    # block's own GDS -- this pre-flight check only ever compares continuous
-    # micron-space geometry quantized at *some* fine resolution, so any
-    # single block's own dbu is precise enough to reuse here even though (as
-    # of #1514) it need not be identical to every other block's dbu, nor to
-    # the composed layout's own dbu `_write_composed_gds` resolves below
-    # (the finest dbu across all blocks, reconciling any coarser block onto
-    # it) -- a difference of, at most, one block's own dbu step is far below
-    # any DRC-relevant tolerance.
-    _route_dbu_cache: list[float] = []
+    required_dbu = required_stream_dbu(pdk_info)
+
+    @cache
+    def _block_dbu(block_id: str) -> float:
+        layout, _ = _load_block_cell(block_id, blocks[block_id])
+        return float(layout.dbu)
 
     def _route_dbu() -> float:
-        if not _route_dbu_cache:
-            import klayout.db as kdb
+        # Route-vs-route spacing retains its historical first-block grid.
+        return _block_dbu(order[0])
 
-            probe_block_id = order[0]
-            probe_gds_path = blocks[probe_block_id]["gds_path"]
-            probe_layout = kdb.Layout()
-            try:
-                probe_layout.read(probe_gds_path)
-            except Exception as exc:  # klayout raises RuntimeError for bad paths
-                raise GenComposeError(
-                    f"block '{probe_block_id}': could not read gds_path "
-                    f"'{probe_gds_path}': {exc}"
-                ) from exc
-            _route_dbu_cache.append(probe_layout.dbu)
-        return _route_dbu_cache[0]
+    @cache
+    def _drawing_dbu() -> float:
+        # Snap landing pads and their block geometry on the writer's grid.
+        return required_dbu or min(_block_dbu(block_id) for block_id in order)
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -3859,7 +3841,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
-        ) -> str | None:
+        ) -> RouteConflict | None:
             """Route-vs-route collision check (#1057, spacing-aware since
             #1386) for one candidate leg.
 
@@ -3950,7 +3932,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             true` legs that still failed `klt drc`'s
             `li1.space.1`/`met1.space.1`) that the overlap-only version of
             this check could not see. A layer with no known ``"space"`` rule
-            keeps the overlap-only test.
+            keeps the overlap-only test (#6961: verdict is a ``RouteConflict``).
             """
             # candidate_width_um (#1620): this candidate's own drawn width --
             # cross_block_width_um when it resolved on cross_route_layer,
@@ -4019,7 +4001,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         check_spacing=check_spacing,
                     )
                     if message is not None:
-                        return message
+                        return RouteConflict(message, other_net)  # #6961
 
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
@@ -4048,22 +4030,28 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # The box collection lives in :func:`_landing_and_widen_pad_boxes`
             # (issue #5803: shared with the pad-vs-pitch message path).
             pad_boxes = _landing_and_widen_pad_boxes(
-                via_drops, stub_widen, layer, side_for_pair.drawn_side
+                via_drops,
+                stub_widen,
+                layer,
+                side_for_pair,
+                _drawing_dbu() if via_drops else _route_dbu(),
             )
 
-            for pad_layer, block_id, box, _drop in pad_boxes:
+            for pad_layer, block_id, box, drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
-                pad_geometry = _own_block_layer_geometry(block_id, pad_layer)
+                pad_geometry = _own_block_layer_geometry(
+                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                )
                 if pad_geometry is None:
                     continue
                 violation_um = _pad_self_notch_violation_um(
                     box, pad_geometry, pad_spacing_um
                 )
                 if violation_um is not None:
-                    return (
+                    return RouteConflict(
                         f"draws a pad ({box[0]:.4g}, {box[1]:.4g}) - "
                         f"({box[2]:.4g}, {box[3]:.4g}) on layer {pad_layer} "
                         f"that comes within {violation_um:.4g}um of block "
@@ -4132,7 +4120,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         own_spacing_um,
                     )
                     if violation_um is not None:
-                        return (
+                        return RouteConflict(
                             f"this leg's drawn {candidate_width_um:.4g}um metal "
                             f"comes within {violation_um:.4g}um of block "
                             f"'{block_id}''s own drawn geometry on layer "
@@ -4239,7 +4227,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                                 "landed_on_block": landed,
                             }
                             if leg["routed"]
-                            else {}
+                            else _blocking_net_field(leg)  # blocking_net (#6961)
                         ),
                     }
                     for leg, landed in zip(
@@ -4471,6 +4459,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         landing_pad_size_um=landing_pad_size_um,
         intermediate_landing_pad_size_um=intermediate_landing_pad_size_um,
         boundary_bbox_um=boundary_bbox_um,
+        required_output_dbu_um=required_dbu,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -4620,41 +4609,22 @@ def _collect_matched_groups(
     ]
 
 
-#: Relative tolerance for :func:`_integer_dbu_ratio`'s float-division check.
-#: Every dbu value this module ever sees comes from ``1.0 / DATABASE
-#: MICRONS`` (an integer denominator, #1512) or a hardcoded decimal
-#: constant (``klt draw``'s ``0.001``), so a genuine integer ratio lands
-#: within float noise of the nearest whole number -- this tolerance is many
-#: orders of magnitude looser than that noise while still being far tighter
-#: than any *non*-integer ratio a real DATABASE MICRONS mismatch could
-#: produce (e.g. 1000 vs. 1500 -> ratio 1.5).
-_DBU_RATIO_TOLERANCE = 1e-6
-
-
-def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
-    """Whether ``coarse_dbu`` is an exact whole-number multiple of
-    ``fine_dbu`` -- i.e. every ``fine_dbu``-grid coordinate maps onto the
-    ``coarse_dbu`` grid with zero remainder -- returning that integer
-    multiplier, or ``None`` when it is not (issue #1514).
-
-    Order matters: this only ever answers "how many ``fine_dbu`` steps make
-    up one ``coarse_dbu`` step" -- callers must pass the larger dbu value as
-    ``coarse_dbu``. Scaling a block's own integer database-unit coordinates
-    *up* by this returned integer (coarser grid -> finer grid) is always
-    exact; the reverse direction (finer -> coarser) would require *dividing*
-    those coordinates, which is only exact when every single coordinate
-    happens to already be a multiple of the ratio -- not guaranteed for
-    arbitrary drawn geometry -- so this module never attempts it.
-    """
-    if fine_dbu <= 0:
+def _rescale_block_layout(
+    src_layout: Any, src_cell: Any, dbu: float, block_id: str, gds_path: str
+) -> str | None:
+    """Reconcile the block before polygonizing its paths or copying its cell tree."""
+    original_dbu = src_layout.dbu
+    try:
+        ratio = reconcile_block_dbu(src_layout, src_cell, dbu)
+    except DbuReconcileError as exc:
+        raise GenComposeError(f"block '{block_id}': gds '{gds_path}' {exc}") from exc
+    if ratio == 1:
         return None
-    ratio = coarse_dbu / fine_dbu
-    nearest = round(ratio)
-    if nearest < 1:
-        return None
-    if abs(ratio - nearest) > _DBU_RATIO_TOLERANCE * max(1, nearest):
-        return None
-    return int(nearest)
+    return (
+        f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
+        f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
+        f"(exact integer ratio {ratio})"
+    )
 
 
 def _create_placed_sub_cell(
@@ -4699,13 +4669,17 @@ def _write_composed_gds(
     | None = None,
     intermediate_landing_pad_size_um: dict[Any, float] | None = None,
     boundary_bbox_um: dict[str, float] | None = None,
+    required_output_dbu_um: float | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
     routed metal. Returns ``(dbu, rescale_warnings)`` -- ``dbu`` is the
     composed layout's own dbu (:func:`compose` echoes it as the response's
-    ``dbu_um``, issue #1496), resolved as the *finest* dbu among all blocks
-    (see the reconciliation logic below, issue #1514); ``rescale_warnings``
+    ``dbu_um``, issue #1496), resolved as the PDK's required stream dbu when
+    ``required_output_dbu_um`` is given (issue #5721: the family's *declared*
+    requirement only, :func:`~klayout_tools.pdk_output_dbu.required_stream_dbu`
+    -- 0.001 for gf180mcu, ``None`` for every family with no declared entry),
+    else the *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
     is one string per block whose own dbu differed and was rescaled onto it,
     which :func:`compose` folds into the response's top-level ``warnings``.
 
@@ -4814,15 +4788,17 @@ def _write_composed_gds(
     top = layout.create_cell(cell_name)
 
     # Read every block's own GDS once, up front (#1514). The composed
-    # layout's own dbu is resolved as the *finest* (smallest-valued) dbu
-    # among all blocks -- not simply the first block processed, as before
-    # #1514 -- so every coarser block's own dbu (expected, per DATABASE
-    # MICRONS convention, to be a whole-number multiple of the finest one)
-    # can be rescaled *up* onto it losslessly: multiplying already-integer
-    # database-unit coordinates by an exact integer factor is exact, whereas
-    # dividing a finer grid's coordinates *down* onto a coarser one is the
-    # direction that can silently drop precision, so that direction is never
-    # attempted -- see `_integer_dbu_ratio` below.
+    # layout's own dbu is the PDK's required stream dbu when one is declared
+    # (issue #5721 -- gf180mcu's native runset rejects any dbu but 0.001, so
+    # the composed stream must be written there even when every block's own
+    # stream is finer), else the *finest* (smallest-valued) dbu among all
+    # blocks (#1514) -- so every coarser block's own dbu (expected, per
+    # DATABASE MICRONS convention, to be a whole-number multiple of the
+    # finest one) can be rescaled *up* onto it losslessly, and a block
+    # *finer* than the target (only possible in the #5721 case) is
+    # rescaled *down* onto it -- but only after an actual grid-exactness
+    # measurement, never by assumption or silent rounding (see the
+    # reconciliation logic below).
     src_layouts: dict[str, Any] = {}
     for block_id in order:
         gds_path = blocks[block_id]["gds_path"]
@@ -4835,7 +4811,10 @@ def _write_composed_gds(
             ) from exc
         src_layouts[block_id] = src_layout
 
-    dbu = min(src_layouts[block_id].dbu for block_id in order)
+    if required_output_dbu_um is not None:
+        dbu = required_output_dbu_um
+    else:
+        dbu = min(src_layouts[block_id].dbu for block_id in order)
     layout.dbu = dbu
     dbu_rescale_warnings: list[str] = []
 
@@ -4844,35 +4823,6 @@ def _write_composed_gds(
         gds_path = block["gds_path"]
         src_layout = src_layouts[block_id]
 
-        if abs(src_layout.dbu - dbu) > 1e-12:
-            # #1514: klt draw (always 0.001) and pre-#1512 `klt gen` output
-            # composed against a #1512-and-later `klt gen` block resolved
-            # against a finer-grid PDK (e.g. gf180mcu's 0.0005) used to hit
-            # a hard refusal here. Reconcile it instead, whenever the ratio
-            # is an exact integer, by rescaling this block's geometry onto
-            # `dbu` -- the same scale/transform pattern `_merge_gds_view`
-            # (place_and_route.py) already uses for the analogous DEF/LEF
-            # merge problem (#1090). `kdb.Layout.transform()` rescales every
-            # shape *and* every instance array vector in the layout, so a
-            # block's own internal hierarchy (and any array pitch inside it)
-            # survives the rescale intact.
-            ratio = _integer_dbu_ratio(src_layout.dbu, dbu)
-            if ratio is None:
-                raise GenComposeError(
-                    f"block '{block_id}': gds '{gds_path}' has dbu={src_layout.dbu}, "
-                    f"which does not evenly divide the composed cell's dbu={dbu} "
-                    "-- every block's dbu must be an exact integer multiple of "
-                    "the finest block's own dbu to be losslessly reconciled"
-                )
-            original_dbu = src_layout.dbu
-            src_layout.transform(kdb.ICplxTrans(float(ratio)))
-            src_layout.dbu = dbu
-            dbu_rescale_warnings.append(
-                f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
-                f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
-                f"(exact integer ratio {ratio})"
-            )
-
         src_cell_name = block["cell_name"]
         src_cell = src_layout.cell(src_cell_name)
         if src_cell is None:
@@ -4880,6 +4830,10 @@ def _write_composed_gds(
                 f"block '{block_id}': gds '{gds_path}' has no cell named "
                 f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
+
+        warning = _rescale_block_layout(src_layout, src_cell, dbu, block_id, gds_path)
+        if warning:
+            dbu_rescale_warnings.append(warning)
 
         sub_cell = _create_placed_sub_cell(
             layout, block, block_id, src_cell_name, dbu_rescale_warnings

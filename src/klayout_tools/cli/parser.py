@@ -19,6 +19,7 @@ from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
     array_check_cmd,
+    cell_hash_cmd,
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
@@ -231,14 +232,13 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
-
     _add_stats_parser(subparsers)
     add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
     _add_cells_parser(subparsers)
-
+    cell_hash_cmd.add_parser(subparsers, _add_format_arg)
     _add_clip_parser(subparsers)
     add_components_parser(subparsers, _add_format_arg)
 
@@ -2135,7 +2135,7 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    synthesize_cmd.configure(synthesize_parser)  # --yosys-timeout-s + func=run
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:

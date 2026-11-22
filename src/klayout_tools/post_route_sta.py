@@ -255,7 +255,7 @@ from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
 from . import _sta_timing_derate as _derate
-from . import env_provenance
+from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
 from ._openroad_engine import (
@@ -338,9 +338,7 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _PORT_PATHS_END,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
-    _apply_port_record,
     _empty_path_record,
-    _parse_port_path_rows,
     _port_paths,
     _worst_path_record,
     _worst_paths,
@@ -1154,6 +1152,8 @@ def _dispatch_sta(
         "provenance": provenance,
     }
 
+    if "wire_load" in corner_fields:
+        response["wire_load"] = corner_fields["wire_load"]
     if "port_paths" in corner_fields:
         response["port_paths"] = corner_fields["port_paths"]
     # Additive field (issue #5754): present only when the request named
@@ -1433,6 +1433,11 @@ def _run_corner_session(
         # Additive field (issue #3744): the assumptions behind that figure.
         "power_basis": _power_basis_block(power_activity, spef_path is not None),
     }
+    corner_fields.update(
+        _sta_wire_load.corner_fields(
+            stdout, wire_load_model, wire_load_mode, has_def=has_def
+        )
+    )
     # Additive field (issue #3042): only present when the request named
     # `constraints.report_ports`, so an unrequested response is unchanged.
     if report_ports:
@@ -3828,21 +3833,11 @@ def _sta_netlist_script_lines(
     module's own docstring "From-scratch netlist input" section for why
     this -- not a flat per-net capacitance, and not either of
     ``place_and_route.py``'s ``estimate_parasitics`` modes -- was chosen).
-    When both are omitted, no ``set_wire_load*`` command is issued at all:
-    OpenSTA falls back to whatever ``default_wire_load``/
-    ``default_wire_load_mode`` the resolved liberty itself declares (many
-    open-PDK standard-cell libraries, including ``sky130_fd_sc_hd``, ship
-    one), or to zero estimated wire parasitics if the liberty declares none
-    -- either way, ``response.wire_load_model``/``wire_load_mode`` echo
-    exactly what was (or was not) requested, never a guess at what OpenSTA
-    silently defaulted to on its own.
+    The session records the engine build after processing its wire-load
+    settings. The pinned build leaves the model and mode unset unless the
+    script sets them explicitly (see :mod:`._sta_wire_load`).
 
-    Reports the same timing/power/violation metrics
-    :func:`_sta_script_lines` does, via the identical ``report_*``/
-    ``puts``-marker sequence -- a caller diffing a ``def``-mode and
-    ``verilog``-mode response for the same design sees the same field
-    shapes throughout, differing only in ``geometry_source``/the estimate
-    provenance fields.
+    Timing, power and violation reporting share the DEF session's commands.
     """
     lines = [f"read_liberty {_tcl_literal(liberty_path)}"]
     # Issue #2635 (`request.macros`): each macro's corner-matching liberty
@@ -3881,6 +3876,7 @@ def _sta_netlist_script_lines(
         lines.append(f"set_wire_load_mode {wire_load_mode}")
     if wire_load_model is not None:
         lines.append(f"set_wire_load_model -name {{{wire_load_model}}}")
+    lines.append(_sta_wire_load.SESSION_MARKER_TCL)
     lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
