@@ -7,8 +7,13 @@ ratchet; the shared fixtures and helpers still live there.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from klayout_tools import sim
-from klayout_tools.coverage import coverage_refusal_reason
+from klayout_tools.cli import main
+from klayout_tools.coverage import coverage_refusal_reason, work_id
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_derived_rows import (
     _RECOGNISED_LIMIT_KEYS,
@@ -296,21 +301,54 @@ def test_item5_failing_sim_unreached_corner_withholds_the_row(tmp_path):
     assert sources == {"C": "derived"}
 
 
-def test_item5_failing_sim_credits_a_row_bound_at_every_corner(tmp_path):
-    specs = [_spec("A", {"min": 1}), _spec("B", {"max": 1.5})]
+@pytest.mark.parametrize(
+    "record", ["complete", "missing-corner", "wrong-bound", "missing-second-bound"]
+)
+def test_item5_failing_sim_credits_a_row_bound_at_every_corner(tmp_path, record):
+    specs = [_spec("A", {"min": 1, "max": 2}), _spec("B", {"max": 1.5})]
     corners = [
         _corner("tt", A=(1.7, "pass"), B=(1.7, "fail")),
         _corner("ss", A=(1.2, "pass"), B=(1.7, "fail")),
     ]
-    bad = _write(tmp_path, "bad.json", _producer_failure(specs, corners))
-
+    envelope = _producer_failure(specs, corners)
+    checked = envelope["coverage"]["checked"]
+    if record == "missing-corner":
+        checked.remove(work_id("limit", 1, "ss", "A", "min"))
+        checked.remove(work_id("limit", 1, "ss", "A", "max"))
+    elif record == "wrong-bound":
+        for index, corner_id in enumerate(("tt", "ss")):
+            checked.remove(work_id("limit", index, corner_id, "A", "min"))
+            checked.append(work_id("limit", index, corner_id, "A", "other"))
+    elif record == "missing-second-bound":
+        checked.remove(work_id("limit", 0, "tt", "A", "max"))
+    assert coverage_refusal_reason(envelope) is None
+    bad = _write(tmp_path, "bad.json", envelope)
     item = _item5(
         {"5": [{"file": bad, "rows": ["A", "B"]}]}, [{"id": "A"}, {"id": "B"}]
     )
+    assert _rows_of(item) == (
+        (["B"], {"A": "derived"}) if record == "complete" else (["A", "B"], {})
+    )
 
-    failed_rows, sources = _rows_of(item)
-    assert failed_rows == ["B"]
-    assert sources == {"A": "derived"}
+
+@pytest.mark.parametrize("name", [[], {}])
+def test_invalid_measurement_name_preserves_signoff_json(tmp_path, capsys, name):
+    specs = [_spec("A", {"min": 1}), _spec("B", {"max": 1.5})]
+    envelope = _producer_failure(
+        specs, [_corner("tt", A=(1.7, "pass"), B=(1.7, "fail"))]
+    )
+    envelope["measurements"][0]["name"] = name
+    bad = _write(tmp_path, "bad.json", envelope)
+    manifest = _manifest(
+        evidence={"5": [{"file": bad, "rows": ["A", "B"]}]},
+        spec_rows={"5": [{"id": "A"}, {"id": "B"}]},
+    )
+    path = _write(tmp_path, "manifest.json", manifest)
+    assert main(["signoff", "--manifest", path, "--format", "json"]) == 3
+    report = json.loads(capsys.readouterr().out)
+    item = next(item for item in report["items"] if item["id"] == 5)
+    assert item["reason"] == "check_failed"
+    assert _rows_of(item) == (["A", "B"], {})
 
 
 def test_item5_failing_sim_that_applied_no_bound_credits_nothing(tmp_path):

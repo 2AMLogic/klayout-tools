@@ -55,7 +55,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from .coverage import coverage_refusal_reason
+from .coverage import coverage_refusal_reason, work_id
 from .signoff_evidence_pin import (
     PIN_STALE,
     PIN_UNVERIFIABLE,
@@ -143,19 +143,18 @@ def _limit_work_names(ids: Iterable[Any]) -> set[str]:
 
 
 def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] | None:
-    """``(checked, skipped)`` measurement names off the envelope's own
-    checked-work ``coverage`` record: those with at least one bound the
-    producer applied at some corner, and those with at least one bound it
-    skipped at some corner (``unrecognized_limit_key``, ``missing_limit_value``,
-    ``not_reached``, ``unavailable_measurement``, ...). ``None`` for an
-    envelope with no such record (``coverage`` absent, or counters only), which
-    leaves the measurement's own bound as the only evidence."""
+    """Checked work IDs and measurement names with a skipped limit.
+
+    Counter-only and pre-coverage reports have no individual work record.
+    """
     block = envelope.get("coverage")
     if not isinstance(block, dict) or "checked" not in block:
         return None
     checked, skipped = block.get("checked"), block.get("skipped")
     return (
-        _limit_work_names(checked if isinstance(checked, list) else []),
+        {key for key in checked if isinstance(key, str)}
+        if isinstance(checked, list)
+        else set(),
         _limit_work_names(
             r.get("id")
             for r in (skipped if isinstance(skipped, list) else [])
@@ -164,14 +163,32 @@ def _bound_check_record(envelope: dict[str, Any]) -> tuple[set[str], set[str]] |
     )
 
 
-def _has_applicable_bound(measurement: dict[str, Any]) -> bool:
-    """Whether ``measurement.limits`` holds a bound `klt sim` can apply: a
-    recognised key with a non-``null`` value. A bare non-empty ``limits``
-    object (``{"minimum": 20}``, ``{"min": null}``) is not one."""
-    limits = measurement.get("limits")
-    return isinstance(limits, dict) and any(
-        limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS
-    )
+def _bounds_checked(
+    measurement: dict[str, Any],
+    corners: Any,
+    record: tuple[set[str], set[str]] | None,
+) -> bool:
+    """Confirm each declared bound for each reported corner using its full work ID."""
+    name, limits = measurement.get("name"), measurement.get("limits")
+    if not isinstance(name, str) or not name or not isinstance(limits, dict):
+        return False
+    keys = [key for key in _RECOGNISED_LIMIT_KEYS if limits.get(key) is not None]
+    if not keys:
+        return False
+    if record is None:
+        return True
+    checked, skipped = record
+    if name in skipped or not isinstance(corners, list) or not corners:
+        return False
+    for index, corner in enumerate(corners):
+        corner_id = corner.get("corner_id") if isinstance(corner, dict) else None
+        if not isinstance(corner_id, str):
+            return False
+        if any(
+            work_id("limit", index, corner_id, name, key) not in checked for key in keys
+        ):
+            return False
+    return True
 
 
 def _failed_envelope_rows(
@@ -181,7 +198,7 @@ def _failed_envelope_rows(
 
     A measurement grades its row only when it passed *and* its bound was
     really applied: a recognised, non-null ``min``/``max``
-    (:func:`_has_applicable_bound`) that the envelope's checked-work record
+    that the envelope's checked-work record
     (:func:`_bound_check_record`) shows checked and never skipped, at every
     corner it was reported for. The aggregate ``status: pass`` alone proves
     neither -- `klt sim` rolls up ``pass`` over a skipped bound, and over one
@@ -197,9 +214,9 @@ def _failed_envelope_rows(
     for m in tagged:
         if not m.get("limits"):
             continue
-        name = m.get("name")
-        applied = record is None or (name in record[0] and name not in record[1])
-        passed = m.get("status") == "pass" and _has_applicable_bound(m) and applied
+        passed = m.get("status") == "pass" and _bounds_checked(
+            m, envelope.get("corners"), record
+        )
         (graded if passed else ungraded).add(m["spec_row"])
     return graded - ungraded
 
