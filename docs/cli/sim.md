@@ -5025,7 +5025,48 @@ deck is byte-identical to before. `linearize` is refused (exit 1, naming the
 field) on a non-`tran` analysis, inside `analysis_steps[]`, for a non-boolean
 value, and with `engine: "xyce"`. The `batch` backend replays the same deck, so
 it needs no extra support. There is no generic `let`/control-line passthrough:
-express derived quantities as `expr` measurements.
+express derived quantities as `expr` measurements. The one narrow exception is
+`analysis.post_commands`, below.
+
+### Transforms between the analysis and `expr`: `analysis.post_commands`
+
+A waveform transform such as `fft` has to run *between* the transient and the
+`expr` lets, because afterwards the current plot is the spectrum.
+`analysis.post_commands` (a non-empty list of single-line strings) on a scalar
+`tran` analysis emits those lines in order after the analysis line, after the
+rawfile `write` and `linearize`, and before the `expr` lets. A two-tone bench:
+
+```json
+"analysis": {
+  "kind": "tran", "args": "1u 2m",
+  "post_commands": ["linearize v(a) v(b)", "fft v(a) v(b)"]
+},
+"measurements": [
+  { "name": "fund_a", "expr": "mag(a[10])", "unit": "V" }
+]
+```
+
+After `fft` the current plot is the spectrum, so `expr` measurements read
+spectrum bins (`a`, `b` here). Bare `linearize` resamples all vectors. To
+select vectors, give it a space-separated list such as `v(out) i(V1)`. Both
+commands accept bare vector names, numeric nodes, branch currents such as
+`v1#branch`, and device parameters such as `@m1[id]`. Names may contain
+letters, digits, underscores, periods and colons.
+
+`fft` requires at least one waveform expression. It also accepts differential
+voltage (`v(a,b)`), numeric factors, arithmetic (`+ - * / ^ %`), grouping
+parentheses and the functions `mag`, `abs`, `real`, `imag`, `db` and `ph`.
+For example, `fft v(a) mag(v(a) - v(b))` transforms two waveforms. Invalid
+arguments produce an indexed `analysis.post_commands[i]` error before the
+deck is composed.
+
+The following are also refused with exit 1: a non-list or empty value, a non-string entry, an entry
+containing a newline or `;`, a first token outside the allowlist, a non-`tran`
+analysis, use inside `analysis_steps[]`, `engine: "xyce"`, and any measurement
+other than `expr`/`spice` (crossings, energy, eye, ... read the transient plot,
+which `fft` replaces). Without the field the deck is byte-identical to before.
+A request using it needs a batch runner at klt 0.9.3 or later; an older runner
+is refused at submit rather than ignoring the field.
 
 ### `expr` after a `noise` analysis
 
@@ -5595,6 +5636,10 @@ without `top_n` is byte-identical to before.
 - **Order.** Largest `value` first; ties break by `name` ascending, so the
   order never depends on rawfile order. Fewer generators than `top_n` returns
   them all -- not an error.
+- **Same-named columns are separate contributors.** A rawfile may carry two
+  columns under one vector name (PSP103's OSDI model emits them); each is
+  reported under the same `name` with its own value, so the powers still close
+  to the total.
 - **Zero-power generators are omitted.** sky130's `igb`/`igd`/`igs` are
   emitted for every MOSFET and are identically zero at ordinary biases; a
   generator whose reduced value is exactly `0.0` never pads the list.
@@ -9473,7 +9518,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `netlist_title_line` | [#5433](https://github.com/2AMLogic/klayout-tools/issues/5433). The request's `netlist` starts with a SPICE **title line**, which `.include` parses as circuit content (see "Netlist convention" above). Classified from the log after the fact: ngspice echoes the offending source line under its `Error on line N ...` location line, and this code is emitted when that echo is the netlist's own first non-blank line (compared case-insensitively, with internal whitespace folded the way ngspice folds it) and that line is not a `*`/`.`/`+` card. The message names the netlist **file and the line number in it** — not the composed deck's `line N`, which is what ngspice reports — and gives the fix (prefix the line with `*`). Being a deck abort it also carries `analysis_started: false` and collapses the measurement cascade, and it replaces the `ngspice_fatal` and `model_bin_range` readings of the same abort (a title beginning with `m` otherwise surfaces as a BSIM bin-range problem). Never fires when the netlist is unreadable where classification runs, when the echo is some other line, or when line 1 is a comment/dot/continuation card — each falls through to the classification it had before. A title that parses as a *valid* card is undetectable by construction: there is no abort to classify. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). The `Error in netlist line no. N` reading is dropped when that alternative is the log's only fatal evidence *and* the run demonstrably completed (an analysis banner plus the `ngspice-N done` exit banner): ngspice-47 prints that line mid-analysis for a `.meas ... param='...'` whose referenced measure produced no value ("Cannot compute substitute"), so the corner fails only through its per-measurement diagnostics ([#6401](https://github.com/2AMLogic/klayout-tools/issues/6401)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |

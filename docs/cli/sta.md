@@ -292,7 +292,8 @@ bump. Reports without the field still verify, and `--check` treats
 | `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
 | `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
-| `wire_load_model` / `wire_load_mode` | string \| null | Additive fields (issue #1825). Echo of `request.constraints.wire_load_model`/`.wire_load_mode` — the parasitics-estimate knob actually used, for provenance. Always `null`/`null` on a `def`-mode response (that mode's parasitics never come from a liberty wire-load model); on a `verilog`-mode response, `null`/`null` means no `set_wire_load*` command was issued at all (the resolved liberty's own default wire load, if any, was left in effect). See "From-scratch netlist input" below. |
+| `wire_load_model` / `wire_load_mode` | string \| null | Echo the corresponding request constraints. An omitted setting has a null echo. DEF reports retain null for both. |
+| `wire_load` | object | Effective wire-load model and mode for a Verilog session. Each value has its own source. Multi-corner runs record this object inside each `corners[]` entry. |
 | `clock_targets` | object | Additive field (issue #4241). Always present: `{clocks, clock_groups}` — `clocks` echoes every clock applied (`[{port, period_ns}]`, primary first; one entry for the single-clock shorthand) and `clock_groups` the asynchronous groups (`[]` when none). When any `period_ns` is a per-corner map (issue #5240), the top-level echo keeps the map form and each `corners[]` entry gains its own `clock_targets` with the periods resolved for that corner; scalar requests emit neither change. |
 | `clock_mode` | string | Additive field (issue #2739). Exactly `"ideal"` or `"propagated"` — which clock mode **every analyzed corner** was timed with. `"ideal"` (the default) is the pre-#2739 behavior; `"propagated"` when the request set `constraints.propagated_clock: true`. Present on both response shapes (hoisted to the top level on a `corners` response) and identical across every per-corner session. **Never infer it from `clock_skew_ns`** — that is a measured skew metric the clock tree carries under ideal timing too. See "Propagated-clock timing" below. |
 | `clock_propagation` | object \| null | Additive field (issue #2739). `null` unless the request asked for propagated-clock timing. On a `corners` response the field is not hoisted — one block per `corners[]` entry instead (the latencies it reports *do* vary per corner). See "Propagated-clock timing" below for the field shapes. |
@@ -417,7 +418,8 @@ consume the same declaration.
   otherwise (LEF/DEF-only parasitics: never read those numbers as
   extracted-route numbers).
 - `coverage` — `"checked"` (the report ran; `violation_count: 0` is a real
-  zero), `"unsupported"` (the OpenSTA build rejected the report command), or
+  zero), `"unsupported"` (OpenSTA rejected the report command, or a marked
+  max-transition or max-capacitance violator row could not be parsed), or
   `"not_run"` (the session never reached the check). Counts, `net_count`,
   `worst_excess` and `worst_pin` are `null` unless `coverage` is `"checked"`
   — an absent check can never be read as zero violations.
@@ -2045,14 +2047,31 @@ wire-load model:
 - `constraints.wire_load_mode` — one of `"top"`/`"enclosed"`/`"segmented"`
   (OpenSTA's `set_wire_load_mode`); requires `wire_load_model` to also be
   given (rejected on its own as a request error).
-- **Both omitted (the default)**: no `set_wire_load*` command is issued at
-  all. OpenSTA falls back to whatever `default_wire_load`/
-  `default_wire_load_mode` the resolved liberty itself declares (many
-  open-PDK standard-cell libraries, `sky130_fd_sc_hd` included, ship one),
-  or to zero estimated wire parasitics if the liberty declares none. Either
-  way, the response's `wire_load_model`/`wire_load_mode` echo exactly what
-  was (or was not) requested — never a guess at what OpenSTA silently
-  defaulted to on its own.
+- With both settings omitted, the pinned OpenROAD build
+  (`26Q3-1510-g6cb3f2b704`) leaves both the model and mode unset, including
+  when the Liberty file declares `default_wire_load : "Small"` and
+  `default_wire_load_mode : top`. In a two-sink SKY130 test, this build
+  reported zero wire capacitance with or without the declarations. Selecting
+  `Small` activated its fanout-dependent capacitance.
+
+For the request above, the Verilog report includes the following object.
+
+```json
+{
+  "wire_load": {
+    "model": "Medium",
+    "model_source": "request",
+    "mode": "top",
+    "mode_source": "request"
+  }
+}
+```
+
+A source of `request` means the timing session executed the corresponding
+setter successfully. On the pinned build, an omitted setting has a null value
+and source `none`. On other builds, an omitted setting has source `unknown`.
+A missing session marker gives both settings source `unknown`. The report records model and mode
+independently.
 
 This is deliberately a **different, and less accurate, mechanism** from
 both `place_and_route.py`'s `estimate_parasitics -placement`/
@@ -2190,8 +2209,10 @@ klt sta flows/gcd/sta.json --check flows/gcd/sta.report.json --rerun   # full
   map-form `spef`) report hoists `provenance.input` and carries one
   `corners[].deck.content_hash` per corner, so each corner is checked on its
   own and the moved one is named, e.g. `corners[ss_100C_1v60].deck.content_hash`.
-  A recorded hash of `null` counts as drift. A corner added to or removed
-  from the request is reported under that corner’s deck hash.
+  A map-form `spef` names the Liberty and interconnect corner together, e.g.
+  `corners[ss_100C_1v60,min].deck.content_hash`. Each entry is checked against
+  its resolved Liberty digest. A missing entry, a recorded hash of `null`, or
+  a corner added to or removed from the request counts as drift.
 - **`--rerun` (full mode, requires `--check`).** Re-runs the analysis and diffs
   the fresh report against the committed one, reporting every changed field
   under `drift`. Excluded from the diff: `provenance.klt_version` /
