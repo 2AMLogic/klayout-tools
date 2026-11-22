@@ -42,9 +42,8 @@
 #   GH_TOKEN/GITHUB_TOKEN  When either is set (and `gh` is on PATH, and the
 #                        repository has a GitHub slug -- $GITHUB_REPOSITORY or
 #                        an origin remote on github.com), the report also
-#                        names the newest `release.yml` run when it FAILED,
-#                        with a link (issue #6911): a lagging repo then also
-#                        shows why the previous attempt did not go out. The
+#                        names the most recent failed `release.yml` run,
+#                        even after a later successful run (issue #6911). The
 #                        lookup is strictly best-effort -- no token, no `gh`,
 #                        no slug, or any API error just omits the line, prints
 #                        nothing to stdout (JSON lives there), and leaves the
@@ -194,24 +193,28 @@ fi
 
 # ---------- last failed Release run (best-effort, issue #6911) ----------
 
-# The repository's GitHub slug: $GITHUB_REPOSITORY when Actions provides it,
-# otherwise parsed from the origin remote (github.com, SSH or HTTPS).
+# Prefer the measured checkout's origin. Actions can run this script against
+# another checkout, in which case GITHUB_REPOSITORY names the caller.
 github_slug() {
-    if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-        printf '%s\n' "$GITHUB_REPOSITORY"
-        return 0
-    fi
     local url slug
-    url="$(git -C "$REPO" remote get-url origin 2>/dev/null)" || return 1
-    slug="$(printf '%s' "$url" | sed -e 's/\.git$//' -e 's/.*github\.com[:/]//')"
+    url="$(git -C "$REPO" remote get-url origin 2>/dev/null)" || url=""
+    case "$url" in
+        https://github.com/* | http://github.com/* | ssh://git@github.com/*)
+            slug="${url#*github.com/}" ;;
+        git@github.com:*) slug="${url#git@github.com:}" ;;
+        "") [ "$REPO" -ef "${GITHUB_WORKSPACE:-$DEFAULT_REPO}" ] || return 1
+            slug="${GITHUB_REPOSITORY:-}" ;;
+        *) return 1 ;;
+    esac
+    slug="${slug%.git}"
     case "$slug" in
-        */*/* | "") return 1 ;;
+        */*/* | /* | */) return 1 ;;
         */*) printf '%s\n' "$slug" ;;
         *) return 1 ;;
     esac
 }
 
-# Echo the html_url of the newest release.yml run iff it concluded `failure`.
+# Echo the html_url of the most recent failed release.yml run.
 # Silent on every unavailability; prints nothing else, so callers can treat
 # empty output as "no link".
 last_failed_release_run() {
@@ -219,7 +222,7 @@ last_failed_release_run() {
     [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ] || return 0
     local slug runs
     slug="$(github_slug)" || return 0
-    runs="$(gh api "repos/$slug/actions/workflows/release.yml/runs?per_page=100" \
+    runs="$(gh api "repos/$slug/actions/workflows/release.yml/runs?status=failure&per_page=100" \
         2>/dev/null)" || return 0
     printf '%s' "$runs" | python3 -c '
 import json, sys
@@ -228,18 +231,16 @@ try:
     runs = json.load(sys.stdin).get("workflow_runs") or []
 except ValueError:
     sys.exit(1)
-if not runs:
-    sys.exit(0)
-# The API does not guarantee an order; pick the newest deterministically.
-last = max(runs, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))
-if last.get("conclusion") == "failure":
+failed = [run for run in runs if run.get("conclusion") == "failure"]
+if failed:
+    last = max(failed, key=lambda r: (r.get("created_at") or "", r.get("id") or 0))
     print(last.get("html_url") or "")
 ' 2>/dev/null
 }
 
 LAST_FAILED_RUN="$(last_failed_release_run || true)"
 if [ -n "$LAST_FAILED_RUN" ]; then
-    MESSAGE="$MESSAGE Last Release workflow run failed: $LAST_FAILED_RUN"
+    MESSAGE="$MESSAGE Most recent failed Release workflow run: $LAST_FAILED_RUN"
 fi
 
 # ---------- reporting ----------

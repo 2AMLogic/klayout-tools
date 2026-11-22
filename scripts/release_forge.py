@@ -157,13 +157,24 @@ class Git:
             raise GitError(f"git {args[0]} failed: {detail}")
         return proc.stdout
 
-    def head(self) -> str:
-        return self._git("rev-parse", "HEAD").strip()
-
-    def push(self, branch: str) -> None:
-        """Push ``branch`` without force; an existing remote branch is kept."""
+    def create_branch(self, branch: str) -> str:
+        """Create the remote branch and return the exact commit that was pushed."""
         ref = f"refs/heads/{branch}"
-        self._git("push", self.remote, f"{ref}:{ref}")
+        sha = self._git("rev-parse", "--verify", ref).strip()
+        status = self._git(
+            "push",
+            "--porcelain",
+            "--no-follow-tags",
+            f"--force-with-lease={ref}:",
+            self.remote,
+            f"{sha}:{ref}",
+        )
+        # Git reports success for an identical existing tip, even with the
+        # absent-ref lease. Only the porcelain new-ref flag establishes ownership.
+        created = f"*\t{sha}:{ref}\t"
+        if not any(line.startswith(created) for line in status.splitlines()):
+            raise GitError(f"push did not create {ref}")
+        return sha
 
     def remote_sha(self, branch: str) -> str | None:
         """The remote tip of ``branch``; ``None`` only if the remote says absent."""

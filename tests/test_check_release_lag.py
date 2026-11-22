@@ -377,7 +377,7 @@ def _gh_env(dir_path: Path, runs_json: str, *, fail: bool = False) -> dict[str, 
         env.pop(var, None)
     env.update(
         PATH=f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
-        GITHUB_REPOSITORY="acme/widgets",
+        GITHUB_REPOSITORY="acme/workflow-runner",
         GH_TOKEN="stub-token",
         STUB_GH_LOG=str(dir_path / "gh.log"),
         STUB_GH_JSON=str(fixture),
@@ -389,6 +389,7 @@ def _gh_env(dir_path: Path, runs_json: str, *, fail: bool = False) -> dict[str, 
 def _lag_with_history(dir_path: Path, runs_json: str, *, fail: bool = False):
     dir_path.mkdir(parents=True, exist_ok=True)
     repo = _tagged_repo(dir_path, ahead=6, threshold=5)
+    _git("remote", "add", "origin", "https://github.com/acme/widgets.git", cwd=repo)
     proc = _run(
         "--repo",
         str(repo),
@@ -414,12 +415,12 @@ def test_newest_failed_release_run_is_named_with_its_link(tmp_path: Path) -> Non
     assert url in report["message"]
     # The query targeted this repository's release.yml workflow.
     assert (
-        "repos/acme/widgets/actions/workflows/release.yml/runs"
+        "repos/acme/widgets/actions/workflows/release.yml/runs?status=failure"
         in (tmp_path / "gh.log").read_text()
     )
 
 
-def test_failed_run_superseded_by_a_success_is_not_named(tmp_path: Path) -> None:
+def test_failed_run_is_still_named_after_a_success(tmp_path: Path) -> None:
     report, _code, _out, _err = _lag_with_history(
         tmp_path,
         _history(
@@ -427,8 +428,10 @@ def test_failed_run_superseded_by_a_success_is_not_named(tmp_path: Path) -> None
             _run_entry(103, "success", "2026-11-23T15:17:00Z"),  # newest, ok
         ),
     )
-    assert report["last_failed_run"] is None
-    assert "actions/runs" not in report["message"]
+    assert (
+        report["last_failed_run"] == "https://github.com/acme/widgets/actions/runs/102"
+    )
+    assert report["last_failed_run"] in report["message"]
 
 
 def test_empty_actions_history_has_no_link(tmp_path: Path) -> None:

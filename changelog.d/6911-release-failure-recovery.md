@@ -11,7 +11,7 @@
   that run pushed: an open PR on that head wins, an inconclusive lookup or a
   moved remote SHA keeps the branch, otherwise it is deleted under an
   expected-SHA lease so a retry pushes cleanly. The release-lag report
-  additionally names the newest `release.yml` run when it failed (new
+  additionally names the most recent failed `release.yml` run (new
   additive JSON field `last_failed_run`; exit codes unchanged), and
   RELEASING.md's manual sequence now mirrors the prepare job's order
   (committed bump before the generators, amend before pushing).

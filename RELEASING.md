@@ -44,9 +44,9 @@ warranted."
    scheduled or dispatched run (see "Automated release"). The script itself is
    advisory and never tags, pushes, or triggers `publish.yml`. When it can read
    Actions history (a `gh` on PATH plus `GH_TOKEN`/`GITHUB_TOKEN`), the report
-   also names the newest `release.yml` run *if it failed*, with a link, so a
-   lagging repository also shows why the previous attempt did not go out; that
-   lookup is best-effort and never changes the exit codes (issue #6911). Run it
+   links to the most recent failed `release.yml` run, including after a later
+   successful run. The lookup is best-effort and preserves the exit codes
+   (issue #6911). Run it
    locally the same way CI does:
 
    ```bash

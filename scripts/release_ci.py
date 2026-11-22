@@ -206,9 +206,8 @@ def publish(forge, git, *, repo: str, version: str, base: str = "main") -> int:
         "Automated release PR (RELEASING.md, Automated release). Merging it makes "
         f"the tag job tag `v{version}` and dispatch `publish.yml`. Not auto-merged."
     )
-    sha = git.head()
     try:
-        git.push(branch)
+        sha = git.create_branch(branch)
     except GitError as exc:
         _annotate(
             "error",

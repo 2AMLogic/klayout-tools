@@ -205,6 +205,19 @@ def test_an_existing_remote_branch_is_never_overwritten(env: Env, capsys) -> Non
     assert "left nothing on the remote" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("original", ["HEAD", "HEAD^"])
+def test_release_run_only_cleans_up_a_ref_it_created(env: Env, original: str) -> None:
+    ref = f"refs/heads/{BRANCH}"
+    git("push", "-q", "origin", f"{original}:{ref}", cwd=env.work)
+    before = env.remote_ref()
+    forge = StubForge()
+    forge.create_error = DENIAL
+
+    assert env.publish(forge) == 1
+    assert env.remote_ref() == before
+    assert not forge.calls
+
+
 def test_cli_publish_wires_the_checkout_and_forge(env: Env, monkeypatch) -> None:
     forge = StubForge()
     monkeypatch.chdir(env.work)
