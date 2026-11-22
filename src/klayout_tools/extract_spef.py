@@ -293,6 +293,7 @@ class DefNetConnections(dict):
 
     port_pins: dict[str, tuple[str, ...]]
     routed_signals: set[str]
+    wired_signal_count: int
     complete: bool
 
     def __init__(

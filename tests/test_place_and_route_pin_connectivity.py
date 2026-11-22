@@ -1,12 +1,14 @@
 """Post-route instance pin connectivity from the DEF and final GDS (#6905)."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
 from klayout_tools import place_and_route as flow
+from klayout_tools import place_and_route_pin_connectivity as connectivity
 from klayout_tools import place_and_route_reports as reports
 from klayout_tools.cli import main
 from klayout_tools.place_and_route_pin_connectivity import (
@@ -57,10 +59,11 @@ def _stream(path, *, connect, missing_pin=False, pairs=False):
 
 
 @pytest.mark.parametrize(
-    "connect,status,count", [(False, "failed", 1), (True, "ok", 0)]
+    "connect,unrouted,status,count",
+    [(False, 0, "failed", 1), (True, 0, "ok", 0), (True, 1, "failed", 0)],
 )
 def test_public_route_verdict_uses_physical_islands(
-    tmp_path, monkeypatch, capsys, connect, status, count
+    tmp_path, monkeypatch, capsys, connect, unrouted, status, count
 ):
     request = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)
@@ -70,7 +73,8 @@ def test_public_route_verdict_uses_physical_islands(
         "\n".join(
             [
                 reports.ROUTING_COMPLETENESS_BEGIN,
-                "KLT_ROUTING_COMPLETENESS signal_nets=1 unrouted=0",
+                f"KLT_ROUTING_COMPLETENESS signal_nets={1 + unrouted} "
+                f"unrouted={unrouted}",
                 reports.ROUTING_COMPLETENESS_END,
             ]
         ),
@@ -80,17 +84,22 @@ def test_public_route_verdict_uses_physical_islands(
 
     def merge(**kwargs):
         info = stub(**kwargs)
-        Path(kwargs["def_path"]).write_text(DEFC)
+        definition = DEFC
+        if unrouted:
+            definition = definition.replace("NETS 2 ;", "NETS 3 ;").replace(
+                "END NETS", "- wholly_unrouted ( A Y ) ( B Y ) ;\nEND NETS"
+            )
+        Path(kwargs["def_path"]).write_text(definition)
         _stream(kwargs["out_path"], connect=connect)
         return info
 
     monkeypatch.setattr(flow, "_merge_def_to_gds", merge)
     assert main(["place-and-route", request, "--format", "json"]) == (
-        0 if connect else 1
+        0 if status == "ok" else 1
     )
     report = json.loads(capsys.readouterr().out)
     comp = report["congestion"]["completeness"]
-    assert comp["unrouted_net_count"] == 0
+    assert comp["unrouted_net_count"] == unrouted
     assert report["stages"][-1]["congestion"] == report["congestion"]
     assert report["status"] == status
     assert comp["partially_routed_net_count"] == count
@@ -109,6 +118,19 @@ def _audit(tmp, definition, **stream_args):
         "MACRO logic_buf\n PIN Y\n DIRECTION OUTPUT ;\n END Y\nEND logic_buf\n"
     )
     return audit_pin_connectivity(str(d), str(g), "gcd", "sky130", str(lef))
+
+
+@pytest.mark.parametrize("change", ["missing_via", "extra_label"])
+def test_inconsistent_extraction_stack_is_unchecked(tmp_path, monkeypatch, change):
+    deck = connectivity.get_extraction_deck("sky130")
+    if change == "missing_via":
+        malformed = replace(deck, vias=deck.vias[:-1])
+    else:
+        malformed = replace(deck, metal_labels=(*deck.metal_labels, (999, 1)))
+    monkeypatch.setattr(connectivity, "get_extraction_deck", lambda name: malformed)
+    check = _audit(tmp_path, DEFC, connect=True)
+    assert check["status"] == "unchecked"
+    assert "via per adjacent metal pair" in check["reason"]
 
 
 def test_two_pairs_on_separate_islands(tmp_path):

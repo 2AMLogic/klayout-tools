@@ -758,6 +758,9 @@ the liberty corner baked into `provenance.deck.name` — so a caller sweeping
 both axes can always tell which (device, interconnect) corner pair produced
 a given result, even when they name different corners in the same request
 (e.g. `corner: "ss_125C_3v00"`, `interconnect_corner: "max"`).
+Consumers and later stages use `provenance.deck.name` to locate artifacts by
+cell library and Liberty corner. Changing the wire RC corner therefore changes
+the separate `interconnect_corner` field and preserves the artifact name.
 
 An unresolvable liberty or LEF is a clear **"liberty/LEF not found for
 deck"** application error (exit 1), matching `klt drc`'s existing "deck
@@ -1419,11 +1422,17 @@ the engine's raw values:
   `route_drc_violation_count`.
 - **`completeness`** records OpenROAD's `signal_net_count` and
   `unrouted_net_count` for multi-terminal signal nets, including those with
-  no routed wire. After the DEF-to-GDS merge, `pin_connectivity` compares every
+  no routed wire. Any positive `unrouted_net_count` yields a full route report
+  with `status: "failed"` and exit 1, even if every wired net passes the pin
+  check. After the DEF-to-GDS merge, `pin_connectivity` compares every
   intended terminal on each wired, multi-terminal signal or clock net against
   the metal and via islands in the final stream. Top-level ports count as
   peers. Intentionally unused single-terminal outputs are excluded.
   Instance names come from the routed DEF identifiers preserved in the GDS.
+  The DEF reader collects each multiline `NETS` record through the semicolon.
+  It reads terminals before the first `+` clause because routed coordinates use
+  the same parentheses. A `( PIN name )` entry identifies a top-level port
+  and stays separate from instance terminals in the SPEF connection list.
   The check follows each labeled pin to alternate metal pads through the
   master's own conductors.
   - `checked` means all eligible nets were compared and physically connected.
@@ -2671,7 +2680,7 @@ plain string" for the full enumeration and rationale.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
-| `status` | string | `"failed"` for confirmed open routing, otherwise `"ok"`. A confirmed open retains the full report. |
+| `status` | string | `"failed"` when OpenROAD reports a wholly unrouted multi-terminal signal net or the final GDS shows a split routed net. Both outcomes retain the full report. Other completed runs report `"ok"`. |
 | `stage_reached` | string | The last stage this run actually completed. Always equal to or beyond the request's own `target_stage` in a successful response. |
 | `seed` | integer | Echo of the request. |
 | `netlist` | `{path, scope}` | Additive field (issue #3751). The gate-level netlist the run placed — the file `request.netlist` names — as the `{path, scope}` envelope (`docs/json-contract.md`): `{"path": "<repo-relative POSIX path>", "scope": "repo"}`, or `{"path": null, "scope": "external"}` when it lies outside the repo (an absolute path is never emitted). `provenance.input.content_hash` is the `sha256:` digest of the **raw bytes of this file**, with no transform, concatenation or temp copy, so `sha256sum <path>` reproduces it offline. In a `--backend batch` report each `corner_runs[]` entry carries the field as the runner emitted it (that unit's own netlist). |
@@ -3523,9 +3532,13 @@ concurrently. Per job:
   directory; one outside it is refused before any upload
   (`batch_input_outside_tree`, `batch_input_too_large`).
 - The runner executes `klt place-and-route` on the unit request with
-  `--backend local`, and its `.klt/place-and-route/` is collected into this
+  `--backend local`. This flag overrides a worker's `KLT_SIM_BACKEND=batch`
+  setting so the job cannot recursively submit another job. Its
+  `.klt/place-and-route/` is collected into this
   host's `.klt/place-and-route/<corner>/`. Paths in the unit's report point
   there, so `--check` and `--rerun` work on a batch-produced report.
+- A failed upload, launch, poll or worker run remains a batch failure. The
+  submitting host never falls back to running OpenROAD locally.
 - `request.batch.job_timeout_s` (default 14400) bounds one job.
 
 The aggregated report keeps the shape above and adds:
@@ -3769,8 +3782,8 @@ possible here. Full policy, library exceptions and platform scope:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Place-and-route reached the requested `target_stage` with no confirmed open routing. |
-| `1` | Confirmed open routing (full report emitted), or failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set, or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. For a `pdk.rebuild_corners` request, also any corner's unit failing (the aggregated report is still emitted). |
+| `0` | Place-and-route reached the requested `target_stage` with no wholly unrouted signal nets or confirmed splits on wired nets. |
+| `1` | A wholly unrouted signal net or a confirmed split on a wired net (full report emitted), or failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set, or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. For a `pdk.rebuild_corners` request, also any corner's unit failing (the aggregated report is still emitted). |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | `--check` only: the committed report no longer reproduces (`status: "drifted"`). |
 

@@ -795,12 +795,38 @@ def lef_layer_probe_roles(
     return roles
 
 
-def _local_pin_candidate_points(
+def _pin_labels_on_nets(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    l2n: kdb.LayoutToNetlist,
+    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]],
+) -> tuple[dict[int, set[str]], dict[tuple[int, str], list[kdb.Point]]]:
+    """Index local labels by conductor and by layer/name before abstraction (#1994)."""
+    import klayout.db as kdb
+
+    names_by_net: dict[int, set[str]] = {}
+    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
+    for layer, region in labelled_regions:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            point = kdb.Point(text.x, text.y)
+            label_points.setdefault((layer_index, text.string), []).append(point)
+            net = l2n.probe_net(region, point)
+            if net is not None:
+                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    return names_by_net, label_points
+
+
+def indexed_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
-    label_clusters: dict[str, set[int]] | None = None,
-) -> dict[str, list[tuple[kdb.Point, str]]]:
+    label_clusters: dict[str, set[int]],
+) -> dict[str, list[tuple[kdb.Point, int]]]:
     """Extra local (cell-frame) candidate access points for every in-cell
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
     internal routing -- issue #1183.
@@ -879,12 +905,11 @@ def _local_pin_candidate_points(
     precisely why :func:`_erase_abstracted_cell_geometry` severs it for the
     real extraction pass.
 
-    The optional ``label_clusters`` output identifies labels on distinct
+    The ``label_clusters`` output identifies labels on distinct
     cell-local conductors for callers that require physical proof.
     """
     import klayout.db as kdb
 
-    label_clusters = {} if label_clusters is None else label_clusters
     active = _region(layout, cell, deck.active)
     poly = _region(layout, cell, deck.poly)
     contact = _region(layout, cell, deck.contact)
@@ -912,42 +937,23 @@ def _local_pin_candidate_points(
             l2n.connect(metals[index + 1])
     l2n.extract_netlist()
 
-    # Every label this cell draws on a conductor the local graph above
-    # reaches, grouped by the cell-local net it sits on (issue #1994).
-    # `label_points` is the same scan indexed the other way round, so the
-    # second pass can ask "which shapes on this layer carry *this* pin's own
-    # label?" without re-probing.
-    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]] = [
-        (deck.poly_label, poly)
-    ] + [
-        (layer, metals[index])
-        for index, layer in enumerate(deck.metal_labels)
-        if index < len(metals)
+    # The second pass needs both the names on each conductor and each pin's
+    # own label points to reject fragments reached through a second pin.
+    labelled_regions = [
+        (deck.poly_label, poly),
+        *zip(deck.metal_labels, metals, strict=False),
     ]
-    names_by_net: dict[int, set[str]] = {}
-    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
-    for layer, region in labelled_regions:
-        if layer is None:
-            continue
-        layer_index = layout.find_layer(*layer)
-        if layer_index is None:
-            continue
-        for text in kdb.Texts(cell.shapes(layer_index)).each():
-            point = kdb.Point(text.x, text.y)
-            label_points.setdefault((layer_index, text.string), []).append(point)
-            net = l2n.probe_net(region, point)
-            if net is not None:
-                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+    names_by_net, label_points = _pin_labels_on_nets(
+        layout, cell, l2n, labelled_regions
+    )
 
-    extra_points: dict[str, list[tuple[kdb.Point, str]]] = {}
-    for metal_index, layer in enumerate(deck.metal_labels):
-        if layer is None or metal_index >= len(metals):
-            continue
-        layer_index = layout.find_layer(*layer)
+    extra_points: dict[str, list[tuple[kdb.Point, int]]] = {}
+    for metal_index, (layer, target_region) in enumerate(
+        zip(deck.metal_labels, metals, strict=False)
+    ):
+        layer_index = layout.find_layer(*layer) if layer is not None else None
         if layer_index is None:
             continue
-        role = f"metal{metal_index}"
-        target_region = metals[metal_index]
         for text in kdb.Texts(cell.shapes(layer_index)).each():
             point = kdb.Point(text.x, text.y)
             net = l2n.probe_net(target_region, point)
@@ -966,7 +972,7 @@ def _local_pin_candidate_points(
             for polygon in kdb.Region(shapes).merged().each():
                 if crossed and not any(polygon.inside(own) for own in own_points):
                     continue
-                candidate = (_polygon_interior_point(polygon), role)
+                candidate = (_polygon_interior_point(polygon), metal_index)
                 if candidate not in points:
                     points.append(candidate)
     return extra_points
@@ -1110,20 +1116,13 @@ def _merge_lef_pins(
     return (lef_path if merged else None), merged, warnings
 
 
-def stream_metal_pin_points(
+def _local_pin_candidate_points(
     layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
-) -> dict[str, list[tuple[kdb.Point, int]]]:
-    """Interior metal points on a pin with a unique labeled cell-local conductor.
-
-    A label over empty space or labels on separate local conductors cannot
-    establish connectivity even if a parent wire happens to cross them.
-    """
-    clusters: dict[str, set[int]] = {}
-    candidates = _local_pin_candidate_points(layout, cell, deck, clusters)
+) -> dict[str, list[tuple[kdb.Point, str]]]:
+    """Return local access points with the layer role used by abstract extraction."""
     return {
-        name: [(point, int(role[5:])) for point, role in points]
-        for name, points in candidates.items()
-        if len(clusters[name]) == 1
+        name: [(point, f"metal{index}") for point, index in points]
+        for name, points in indexed_pin_candidate_points(layout, cell, deck, {}).items()
     }
 
 

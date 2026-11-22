@@ -11,7 +11,7 @@ from klayout_tools.decks import (
     UnknownExtractionDeckError,
     get_extraction_deck,
 )
-from klayout_tools.extract_abstract import stream_metal_pin_points
+from klayout_tools.extract_abstract import indexed_pin_candidate_points
 from klayout_tools.extract_spef import DefName, DefNetConnections, def_net_instance_pins
 from klayout_tools.lef_header import read_lef_header
 from klayout_tools.place_and_route_reports import (
@@ -26,6 +26,15 @@ if TYPE_CHECKING:
 Terminal = tuple[str | None, str]
 
 
+def _stream_pin_points(
+    layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[str, list[tuple[kdb.Point, int]]]:
+    """Only a unique labeled conductor in the master proves physical access."""
+    clusters: dict[str, set[int]] = {}
+    pins = indexed_pin_candidate_points(layout, cell, deck, clusters)
+    return {name: points for name, points in pins.items() if len(clusters[name]) == 1}
+
+
 class _Stream:
     """A flat electrical graph for wires and vias, indexed by physical terminals."""
 
@@ -37,6 +46,12 @@ class _Stream:
         top = self.layout.cell(top_name)
         if top is None:
             raise ValueError(f"top cell {top_name} is absent from the stream")
+        if len(deck.vias) != len(deck.metals) - 1 or len(deck.metal_labels) > len(
+            deck.metals
+        ):
+            raise ValueError(
+                "deck needs one via per adjacent metal pair and matching label layers"
+            )
         self.deck = deck
         self.graph = kdb.LayoutToNetlist(top.name, self.layout.dbu)
         self.metals = [region(self.layout, top, layer) for layer in deck.metals]
@@ -73,7 +88,7 @@ class _Stream:
                 return set()
             cell = ref.cell
             if cell.name not in self.masters:
-                self.masters[cell.name] = stream_metal_pin_points(
+                self.masters[cell.name] = _stream_pin_points(
                     self.layout, cell, self.deck
                 )
             points = [
