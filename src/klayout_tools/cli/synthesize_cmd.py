@@ -40,6 +40,11 @@ never a false pass.
 """
 
 import argparse
+import os
+import shutil
+import sys
+import tempfile
+from contextlib import ExitStack
 
 from ..env_provenance import render_path_field
 from ..synthesize import (
@@ -94,6 +99,25 @@ def configure(parser: argparse.ArgumentParser) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.request != "-":
+        return _run_request(args)
+    # The engine reopens its request for provenance and replay. Spool stdin
+    # beside its relative inputs so every reader sees the same request bytes.
+    with ExitStack() as cleanup:
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=".", delete=False
+            ) as doc:
+                cleanup.callback(os.unlink, doc.name)
+                shutil.copyfileobj(sys.stdin, doc)
+        except (OSError, UnicodeError) as exc:
+            return emit_error(
+                "synthesize", f"could not read stdin request: {exc}", args.format
+            )
+        return _run_request(argparse.Namespace(**{**vars(args), "request": doc.name}))
+
+
+def _run_request(args: argparse.Namespace) -> int:
     if args.check is not None:
         return _run_check(args)
 
