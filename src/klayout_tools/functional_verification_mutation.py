@@ -215,8 +215,8 @@ def run_functional_verification_with_mutations(
         raise _fv.FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
-    module, module_dir, testcase = _fv._resolve_testbench(
-        request_doc["testbench"], request_dir
+    module, module_dir, testcase, plusargs = _fv._resolve_testbench_target(
+        None, request_doc["testbench"], request_dir
     )
     parameters = _fv._resolve_parameters(request_doc.get("parameters"))
     env = _fv._resolve_env(request_doc.get("env"))
@@ -227,6 +227,9 @@ def run_functional_verification_with_mutations(
     )
 
     output_dir = _fv._resolve_output_dir(request_dir, output_dir)
+    # Issue #6762: `log_path` envelopes are relative to the request's repo (as
+    # the baseline run's are), never the cwd's.
+    repo_root = _fv.find_repo_root(request_dir)
     mutants_dir = os.path.join(output_dir, "mutants")
     try:
         os.makedirs(mutants_dir, exist_ok=True)
@@ -288,7 +291,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": doc_rejections[index],
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(None),
+                    "log_path": _fv._path_envelope(None, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -334,6 +337,10 @@ def run_functional_verification_with_mutations(
                 test_dir=mutant_dir,
                 results_xml=mutant_results_xml,
                 test_log=test_log,
+                # Issue #6906: `testbench.plusargs` apply to the baseline and
+                # every variant alike -- a DUT that needs `+lut=` to run at
+                # all cannot pass the baseline gate otherwise.
+                plusargs=plusargs,
             )
         _write_mutant_combined_log(combined_log, build_log, test_log)
 
@@ -346,7 +353,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             killed_count += 1
@@ -359,7 +366,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": detail,
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -374,7 +381,7 @@ def run_functional_verification_with_mutations(
                     "status": "rejected",
                     "reason": str(exc),
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             rejected_count += 1
@@ -387,7 +394,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "killed",
                     "first_killing_test": first_killing_test,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             killed_count += 1
@@ -397,7 +404,7 @@ def run_functional_verification_with_mutations(
                     **base_result,
                     "status": "survived",
                     "first_killing_test": None,
-                    "log_path": _fv._path_envelope(combined_log),
+                    "log_path": _fv._path_envelope(combined_log, repo_root=repo_root),
                 }
             )
             survived_count += 1

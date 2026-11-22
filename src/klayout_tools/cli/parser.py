@@ -22,7 +22,6 @@ from . import (
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
-    deck_cmd,
     design_centering_cmd,
     draw_cmd,
     drc_cmd,
@@ -42,7 +41,6 @@ from . import (
     layout_metrics_cmd,
     layout_plan_cmd,
     lef_abstract_cmd,
-    lvs_cmd,
     mcp_cmd,
     mom_cmd,
     pdk_cmd,
@@ -77,7 +75,9 @@ from . import (
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
+from ._lvs_parser_args import add_lvs_parser
 from .parser_artifact import add_artifact_parser
 from .parser_characterize import add_characterize_parser
 from .parser_diff import add_diff_parser
@@ -87,6 +87,7 @@ from .parser_netlist import add_netlist_parser
 from .parser_pex import add_pex_parser
 from .parser_sim import add_sim_parser
 from .parsers.components import add_components_parser
+from .parsers.deck import add_deck_parser
 from .parsers.em import add_em_parser
 from .parsers.extract import add_extract_parser
 from .parsers.signoff import add_signoff_parser
@@ -211,7 +212,7 @@ def _add_expect_version_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = DocArgumentParser(
         prog="klt",
         description="Tools for AI agents to work with IC layout.",
     )
@@ -227,7 +228,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     # No default handler: absence of a subcommand is handled by main().
     parser.set_defaults(func=None)
-
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
@@ -264,7 +264,13 @@ def create_parser() -> argparse.ArgumentParser:
     _add_layout_metrics_parser(subparsers)
     _add_render_parser(subparsers)
     _add_pdk_parser(subparsers)
-    _add_deck_parser(subparsers)
+    add_deck_parser(
+        subparsers,
+        _no_subcommand_handler,
+        _add_format_arg,
+        _deck_names_str,
+        _drc_deck_names_str,
+    )
     _add_env_provenance_parser(subparsers)
     _add_evidence_parser(subparsers)
     add_artifact_parser(subparsers, _no_subcommand_handler, _add_format_arg)
@@ -280,7 +286,7 @@ def create_parser() -> argparse.ArgumentParser:
         _parasitic_variant_arg,
         _REQUEST_ARGV_FLAG_EXCLUDE,
     )
-    _add_lvs_parser(subparsers)
+    add_lvs_parser(subparsers, _deck_names_str, _add_format_arg)
 
     add_netlist_parser(subparsers, _add_pdk_args, _add_format_arg)
 
@@ -1698,133 +1704,6 @@ def _add_draw_parser(subparsers: argparse._SubParsersAction) -> None:
     draw_parser.set_defaults(func=draw_cmd.run)
 
 
-def _add_lvs_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``lvs`` verb for comparing netlist pairs.
-
-    Compare a layout-derived netlist against a reference SPICE netlist and
-    report mismatches. See docs/cli/lvs.md for full details.
-    """
-    lvs_parser = subparsers.add_parser(
-        "lvs",
-        help="compare an extracted/reference netlist pair and report mismatches",
-        description=(
-            "Compare a layout-derived netlist (extracted inline, or a "
-            "pre-extracted `klt extract` output) against a reference "
-            "(schematic/golden) SPICE netlist and report structured "
-            "mismatches -- see docs/design/lvs-extraction-spike.md section "
-            "2b for the request/response contract and docs/cli/lvs.md for "
-            "the CLI surface. Runs fully headless via KLayout's native "
-            "NetlistComparer/NetlistSpiceReader -- no GUI, no Qt. Takes a "
-            "request-document path (like `klt sim`/`klt gen`), not "
-            "positional netlist file args."
-        ),
-    )
-    # `request` (positional) and `--check` (issue #1106) are mutually
-    # exclusive input sources -- exactly one is required. See the matching
-    # `drc_input_group` comment above for why this is a required
-    # mutually-exclusive group rather than a manual runtime check.
-    lvs_input_group = lvs_parser.add_mutually_exclusive_group(required=True)
-    lvs_input_group.add_argument(
-        "request",
-        nargs="?",
-        default=None,
-        help=(
-            "klt lvs request: a path to a JSON file, '-' to read the "
-            "request from stdin, or an inline JSON object string. Omit "
-            "when using --check (inputs are read from the committed "
-            "report instead)"
-        ),
-    )
-    lvs_input_group.add_argument(
-        "--check",
-        default=None,
-        metavar="REPORT",
-        help=(
-            "verify a previously committed 'klt lvs --format json' report "
-            "(REPORT) instead of running a fresh compare: mutually exclusive "
-            "with the positional 'request', since inputs are read from "
-            "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
-            "REPORT's recorded inputs; combine with --rerun for full mode "
-            "(re-run the compare and diff verdict-bearing fields). Exits 0 "
-            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
-            "'--check'"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--layout",
-        default=None,
-        metavar="PATH",
-        help=(
-            "explicit layout/netlist input for --check/--rerun (issue "
-            "#2699): overrides the layout path REPORT recorded, "
-            "unconditionally -- use it when REPORT's layout is outside any "
-            "repository or the verifying clone is laid out differently; a "
-            "layout that no longer hashes to the recorded value reports "
-            "'drifted'. Requires --check; a clean error (exit 1) otherwise"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--rerun",
-        action="store_true",
-        help=(
-            "full mode for --check (issue #1106): best-effort re-run of "
-            "the compare REPORT names (reconstructed from REPORT's own "
-            "echoed layout/reference/engine/deck/parameter_tolerance "
-            "fields -- see docs/cli/lvs.md for reconstruction limits) and "
-            "diff verdict-bearing fields against the committed report, "
-            "excluding the provenance version echoes. Requires --check; a "
-            "clean error (exit 1) otherwise"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--deck",
-        default=None,
-        metavar="NAME",
-        help=f"extraction deck to run (currently: {_deck_names_str()}); fills "
-        "the request's layout.deck only, never reference.deck (issue "
-        "#5733); a clean error (exit 1) if the request sets layout.deck too",
-    )
-    lvs_parser.add_argument(
-        "--deck-file",
-        dest="deck_file",
-        default=None,
-        metavar="PATH",
-        help=(
-            "path to the PDK's KLayout LVS runset for request.engine "
-            "'klayout-runset' (issue #3206); fills request.deck_file, and "
-            "is a clean error (exit 1) if the request already sets it or "
-            "uses another engine. A relative PATH resolves against the "
-            "current directory"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--deck-var",
-        dest="deck_var",
-        action="append",
-        metavar="NAME=VALUE",
-        default=None,
-        help=(
-            "extra '-rd NAME=VALUE' global passed to the runset (engine "
-            "'klayout-runset' only; issue #3206). Repeatable; fills "
-            "request.deck_vars; a clean error (exit 1) if the request "
-            "already sets it or uses another engine"
-        ),
-    )
-    lvs_parser.add_argument(
-        "--progress",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "write stage start/finish lines and a periodic heartbeat for "
-            "inline layout extraction to stderr (stdout stays the pure "
-            "response). Default: heartbeat lines only (every 30s of a long "
-            "stage) when stderr is not a TTY; --no-progress forces off"
-        ),
-    )
-    _add_format_arg(lvs_parser)
-    lvs_cmd.configure(lvs_parser)  # -o/--output (issue #4984) + func=run
-
-
 def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``equiv`` verb for proving combinational equivalence.
 
@@ -2385,7 +2264,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
-            + (f" {rerun_extra}" if rerun_extra else "")
+            + (f". {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -2460,7 +2339,7 @@ def _add_layout_plan_parser(subparsers: argparse._SubParsersAction) -> None:
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``wave`` verb with nested ``build``/``query``
     subcommands (Epic #1585, issue #1601), mirroring ``pdk``/``deck``'s
-    grouped-verb pattern (see ``_add_deck_parser``).
+    grouped-verb pattern (see ``parsers/deck.py``).
 
     Query and index a functional-verification waveform trace (VCD or FST)
     via `native/wave`'s standalone `klt-wave` binary (issues #1599/#1600) --
@@ -2681,14 +2560,14 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     decks_parser = pdk_sub.add_parser(
         "decks",
-        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        help="list a PDK's KLayout DRC decks/LVS runsets and their -rd globals",
         description=(
-            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
-            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
-            "--pdk` runs (`is_default`), and a best-effort static scan of the "
-            "`-rd` globals each consumes (`required_by_caller`, `default`). "
-            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
-            "`--deck-var` flags it needs."
+            "List the `.lydrc`/`.drc` KLayout DRC decks and `.lvs` LVS runsets "
+            "(kind `lvs`) under the resolved variant's libs.tech/klayout, which "
+            "one `klt drc`/`klt lvs --pdk` runs (`is_default`), and a static "
+            "scan of the `-rd` globals each consumes (`required_by_caller`, "
+            "`default`). Use it to pick a sibling deck for `klt drc --deck-file` "
+            "and the `--deck-var` flags it needs; filter on `kind` for DRC only."
         ),
     )
     _add_pdk_args(
@@ -2826,252 +2705,17 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     stackup_parser.set_defaults(func=pdk_cmd.run_stackup)
 
 
-def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``deck`` verb with nested ``resolve`` (issue #623),
-    ``hash`` (issue #1202), ``info`` (issue #1209), and ``rules`` (issue
-    #2308) subcommands, mirroring ``pdk``/``kb``'s grouped-verb pattern (see
-    ``_add_pdk_parser``) so future deck-identity/deck-history operations
-    (e.g. listing the full table) have a natural home alongside them.
-    """
-    deck_parser = subparsers.add_parser(
-        "deck",
-        help="identify a built-in rule deck, resolve one to its release, "
-        "report the installed build's own deck coverage, or list the rule "
-        "values a deck enforces",
-        description=(
-            "Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, "
-            "sg13g2). `hash` reports the `provenance.deck.content_hash` this "
-            "build resolves for a deck, with no layout file and no check run "
-            "-- the cheap way to gate on the deck revision a build will use "
-            "before doing any work. `resolve` goes the other way: it turns a "
-            "pinned `provenance.deck.content_hash` (docs/json-contract.md) "
-            "or a `deck name + version` can be turned back into the "
-            "klayout-tools git tag/commit and PyPI version that shipped it "
-            "-- without hand-bisecting this repo's git history to reproduce "
-            "against an older deck revision (`resolve`), or report this "
-            "install's own deck content hash, structural device-class "
-            "coverage, and release status directly, with no input layout "
-            "needed (`info`). `rules` reports what the deck actually "
-            "requires -- every rule's id, description, and threshold in "
-            "micrometres, with the deck's content hash -- so pre-layout "
-            "arithmetic can read a constant from the installed deck instead "
-            "of transcribing it out of a deck comment. Resolve-only: this "
-            "does not fetch, check out, or build a historical revision -- "
-            "install the reported version yourself to reproduce against it."
-        ),
-    )
-    deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
-
-    deck_parser.set_defaults(func=_no_subcommand_handler(deck_parser))
-
-    resolve_parser = deck_sub.add_parser(
-        "resolve",
-        help="resolve a deck's content hash or (name, version) to a release",
-        description=(
-            "Look up a deck query against the generated hash/version -> "
-            "release history table. Give either --content-hash (optionally "
-            "narrowed with --deck), or both --deck and --version together."
-        ),
-    )
-    resolve_parser.add_argument(
-        "--content-hash",
-        dest="content_hash",
-        default=None,
-        help=(
-            "sha256:<hex> deck content hash to resolve, e.g. as reported by "
-            "`klt drc --deck sky130`'s provenance.deck.content_hash"
-        ),
-    )
-    resolve_parser.add_argument(
-        "--deck",
-        default=None,
-        help=(
-            "deck name (e.g. sky130, gf180mcu); narrows a --content-hash "
-            "query, or combines with --version for an exact lookup"
-        ),
-    )
-    resolve_parser.add_argument(
-        "--version",
-        default=None,
-        help="klayout-tools package version to look up (requires --deck)",
-    )
-    resolve_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
-    resolve_parser.set_defaults(func=deck_cmd.run_resolve)
-
-    hash_parser = deck_sub.add_parser(
-        "hash",
-        help="report the content hash this build resolves for a deck",
-        description=(
-            "Report the `provenance.deck.content_hash` this build would "
-            "record for a built-in deck -- with no layout file and no check "
-            "run (issue #1202). The hash, not the package version, is what "
-            "pins a run's rule set, so gating on it used to mean running a "
-            "throwaway `klt drc` on whatever layout happened to be around "
-            "just to read the hash back out of the report. This answers the "
-            "same question directly, so a CI preflight or container smoke "
-            "test can check the deck it is about to use before doing any "
-            "work. Pair with `klt deck resolve --content-hash <hash>` to "
-            "turn the answer into the release that shipped it."
-        ),
-    )
-    hash_parser.add_argument(
-        "--deck",
-        required=True,
-        help=f"built-in deck name to identify (e.g. {_deck_names_str()})",
-    )
-    _add_format_arg(hash_parser)
-    hash_parser.set_defaults(func=deck_cmd.run_hash)
-
-    path_parser = deck_sub.add_parser(
-        "path",
-        help="print the installed path of a deck's standalone DRC script",
-        description=(
-            "Print the absolute path of a built-in deck's standalone KLayout "
-            "DRC-DSL script (issue #3789) -- a file usable as `klt drc "
-            "--engine klayout --deck-file <path>` from a wheel / `uv tool` "
-            "install, where the repo-relative src/ path does not exist. Only "
-            "asap7 ships such a script; the Python rule-table decks exit 1."
-        ),
-    )
-    path_parser.add_argument(
-        "--deck",
-        required=True,
-        help="built-in deck name whose script path to print (asap7)",
-    )
-    _add_format_arg(path_parser)
-    path_parser.set_defaults(func=deck_cmd.run_path)
-
-    info_parser = deck_sub.add_parser(
-        "info",
-        help="report the installed build's own deck content hash, device "
-        "coverage, and release status",
-        description=(
-            "Report this klt install's own deck content hash, structural "
-            "device-class coverage (ExtractionDeck.device_classes -- e.g. "
-            "whether diode recognition is wired up at all), and release "
-            "status -- with no input layout needed. Complements `klt deck "
-            "resolve`: `resolve` turns a hash you already have into a "
-            "release; `info` tells you your own currently-running hash and "
-            "coverage without first running an extraction (issue #1209 -- "
-            "two installs can report the identical `klt --version` string "
-            "while shipping different deck content)."
-        ),
-    )
-    info_parser.add_argument(
-        "--deck",
-        default=None,
-        help="deck name (e.g. sky130, gf180mcu) to report; omit to report "
-        "every registered deck",
-    )
-    info_parser.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="output format (default: text)",
-    )
-    info_parser.set_defaults(func=deck_cmd.run_info)
-
-    rules_parser = deck_sub.add_parser(
-        "rules",
-        help="list the rule values a built-in deck enforces (id, "
-        "description, threshold in um), with no layout needed",
-        description=(
-            "Report the *numbers* a built-in deck enforces -- every "
-            "registered rule's id, description, check kind, drawn layers, "
-            "and distance threshold in micrometres -- alongside the deck's "
-            "own content hash, with no layout file and no check run (issue "
-            "#2308). `klt drc` reports violations and therefore needs a "
-            "stream; this answers the pre-layout question (area budgeting, "
-            "device pitch, whether a proposed segmentation is drawable at "
-            "all) that has to be settled before any GDS exists. Rule ids "
-            "are this deck's own (`poly.width.1`), not the upstream PDK's "
-            "numbering -- that is reported per rule under "
-            "`provenance.rule_id`. Pair the reported `content_hash` with a "
-            "cited constant to make the citation re-checkable against the "
-            "installed deck on the next PDK bump."
-        ),
-    )
-    rules_parser.add_argument(
-        "--deck",
-        required=True,
-        help=(
-            "built-in curated-DRC deck name whose rules to list "
-            f"(e.g. {_drc_deck_names_str()})"
-        ),
-    )
-    rules_parser.add_argument(
-        "--rule",
-        default=None,
-        help=(
-            "narrow to a single rule by exact id (e.g. poly.width.1); an id "
-            "the deck does not carry is a clean error, not an empty list"
-        ),
-    )
-    _add_format_arg(rules_parser)
-    rules_parser.set_defaults(func=deck_cmd.run_rules)
-
-    devices_parser = deck_sub.add_parser(
-        "devices",
-        help="list the drawn-layer predicate set (marker + per-terminal "
-        "requires/excludes) each of a deck's device classes is recognised by",
-        description=(
-            "Report what has to be **drawn** for each of an extraction "
-            "deck's device classes to be recognised -- its device-"
-            "recognition marker layer plus every per-terminal "
-            "requires/excludes predicate, with layer/datatype numbers -- "
-            "alongside the deck's own content hash, with no layout file and "
-            "no extraction run (issue #2365). `klt deck info` says which "
-            "device classes a deck *can* recognise; this says what a layout "
-            "must draw for one to be found. Most classes are driven off "
-            "drawn conductor/diffusion geometry alone, but a minority are "
-            "gated on a marker layer and/or implant predicates (filter on "
-            "`marker_gated`/`predicate_gated`) -- and a layout missing any "
-            "single member of that set extracts as `device_count: 0`, which "
-            "reads exactly like 'this layout contains none of that device'. "
-            "`klt extract` names the missing layer in `warnings[]` for a "
-            "junction-diode near miss; this answers the same question "
-            "ahead of time, for every class."
-        ),
-    )
-    devices_parser.add_argument(
-        "--deck",
-        required=True,
-        help=(
-            "built-in extraction deck name whose device classes to list "
-            f"(e.g. {_deck_names_str()})"
-        ),
-    )
-    devices_parser.add_argument(
-        "--class",
-        dest="device_class",
-        default=None,
-        help=(
-            "narrow to a single device class by exact name (e.g. "
-            "diode_pd2nw_06v0); a name the deck does not declare is a clean "
-            "error, not an empty list"
-        ),
-    )
-    _add_format_arg(devices_parser)
-    devices_parser.set_defaults(func=deck_cmd.run_devices)
-
-
 def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``evidence`` verb (issue #4044): the ``evidence-record/1``
-    writer per docs/design/sim-evidence-discipline-spike.md, plus lint/claims."""
+    """Register the ``evidence`` verb (#4044): the ``evidence-record/1`` writer
+    (docs/design/sim-evidence-discipline-spike.md) + lint/claims/render/canon."""
     evidence_parser = subparsers.add_parser(
         "evidence",
-        help="write an evidence-record/1 file around a finished klt sim / "
-        "klt pex report",
+        help="evidence records around finished klt sim / klt pex runs",
         description=(
             "Evidence records around finished `klt sim` / `klt pex` runs. "
             "`record` wraps the untouched report with git provenance, a "
-            "dirty-inputs flag, pins, environment provenance and the "
-            "per-corner deck/log snapshot. Never overwrites a record."
+            "dirty-inputs flag, pins and the per-corner snapshot, never "
+            "overwriting. `canonicalize` emits a report's `--rerun` view."
         ),
     )
     evidence_sub = evidence_parser.add_subparsers(
@@ -3170,6 +2814,7 @@ def _add_evidence_parser(subparsers: argparse._SubParsersAction) -> None:
     lint_parser.set_defaults(func=evidence_cmd.run_lint)
     evidence_cmd.add_claims_parser(evidence_sub, _add_format_arg)
     evidence_cmd.add_render_parser(evidence_sub, _add_format_arg)
+    evidence_cmd.add_canonicalize_parser(evidence_sub, _add_format_arg)
 
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:

@@ -1,10 +1,16 @@
-"""Runner-image gap hint on off-host ``expr()`` ngspice_fatal (issue #4891)."""
+"""Runner-image gap hint on off-host ``expr()`` ngspice_fatal (issue #4891), and
+the all-units-failed-to-converge run-level hint (issue #6720)."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from klayout_tools import sim, sim_spiceinit
 from klayout_tools import sim_batch as sb
+from klayout_tools import sim_batch_hints as hints
+from test_sim_batch import _capture, _fake_corner, _resume_request, _run
 
 _EXPR_LOG = (
     "Error in netlist line no. 12:\n"
@@ -115,373 +121,376 @@ def test_modelname_without_quoted_card_falls_back_unchanged():
     assert diag["message"] == raw
 
 
-# --------------------------------------------------------------------------- #
-# Worker-stamp attribution of the modelname abort (issue #5593)
-# --------------------------------------------------------------------------- #
+# --- all-units-failed-to-converge run-level hint (issue #6720) ----------------
+#
+# Synthetic reports only: no fleet, no ngspice grid.
 
-_STAMP_TEXT = "open_pdks c6d73a35f524070e85faff4a6a9eef49553ebc2b\n"
-_LEGACY_TAIL = "compare this model's w/l against the library's bin cards"
+_HINT_CODE = "batch_convergence_all_failed"
+_SHA = "sha256:" + "ab" * 32
+_CLIENT_SHA = "sha256:" + "cd" * 32
 
 
-def _worker_block(
-    *,
-    capture="ok",
-    variant="gf180mcuD",
-    stamp_sha256="c" * 64,
-    stamp_text=_STAMP_TEXT,
-    models_staged=False,
-    comparison=None,
-):
-    """A processed ``worker_environment`` block as ``_read_worker_environment``
-    builds it (only the fields the attribution reads)."""
-    if comparison is None:
-        comparison = {"status": "mismatch", "warning": "stamps differ"}
+def _unit(corner_id, *codes, status="error"):
     return {
-        "capture": capture,
-        "pdk": {
-            "variant": variant,
-            "stamp_scheme": "sources-sha256",
-            "stamp_sha256": stamp_sha256,
-            "stamp_text": stamp_text,
-            "models_staged": models_staged,
-            "stamp_scope": "image" if models_staged else "executed",
+        "corner_id": corner_id,
+        "status": status,
+        "diagnostics": [
+            {"code": code, "severity": "error", "message": "m"} for code in codes
+        ],
+    }
+
+
+def _worker_entry(
+    *, status="match", source="none", sha=None, omp=None, capture="ok", **extra
+):
+    """One ``environment.remote`` / ``fleet[]`` entry, as klt reports it."""
+    return {
+        "worker_environment": {
+            "capture": capture,
+            "engine_build_comparison": {"status": status},
+            "ngspice_init": {"source": source, "lines": None, "sha256": sha},
+            "omp_num_threads": omp,
         },
-        "pdk_stamp_comparison": comparison,
+        **extra,
     }
 
 
-def _attributed_message(worker_environment):
-    from klayout_tools.sim_batch_hints import attribute_modelname
-
-    diag = {
-        "code": "model_bin_range",
-        "message": "Error: could not find a valid modelname",
-    }
-    attribute_modelname(diag, _MODELNAME_LOG, worker_environment)
-    return diag["message"]
+def _attach(corners, remote=None, *, backend="batch", **environment):
+    report = {"environment": {**environment}}
+    if remote is not None:
+        report["environment"]["remote"] = remote
+    hints.attach_convergence_hint(report, corners, backend=backend)
+    return report
 
 
-def test_worker_block_names_fleet_stamp_comparison_and_remedy():
-    msg = _attributed_message(_worker_block())
-    assert "the fleet resolved PDK gf180mcuD" in msg
-    assert "c" * 64 in msg
-    assert "revision c6d73a35f524070e85faff4a6a9eef49553ebc2b" in msg
-    assert "pdk_stamp_comparison: mismatch" in msg
-    assert "options.stage_model_inputs: true" in msg
-    assert _LEGACY_TAIL not in msg
+def _hints_in(report):
+    return [d for d in report.get("diagnostics", []) if d["code"] == _HINT_CODE]
 
 
-@pytest.mark.parametrize(
-    "comparison, expected",
-    [
-        ({"status": "match"}, "pdk_stamp_comparison: match"),
-        ({"status": "mismatch", "warning": "w"}, "pdk_stamp_comparison: mismatch"),
-        (
-            {"status": "not_comparable", "reason": "worker_stamp_unavailable"},
-            "pdk_stamp_comparison: not_comparable (worker_stamp_unavailable)",
-        ),
-        (
-            {"status": "not_comparable", "reason": "client_stamp_unavailable"},
-            "pdk_stamp_comparison: not_comparable (client_stamp_unavailable)",
-        ),
-    ],
-)
-def test_worker_block_names_every_comparison_status(comparison, expected):
-    assert expected in _attributed_message(_worker_block(comparison=comparison))
+@pytest.mark.parametrize("code", ["singular_matrix", "nonconvergence"])
+def test_all_units_failing_to_converge_get_one_hint_with_worker_values(code):
+    corners = [_unit("a", code), _unit("b", code)]
+    remote = _worker_entry(status="mismatch", source="home", sha=_SHA, omp="1")
+    report = _attach(corners, remote, ngspice_options={"gmin": 1e-10})
 
-
-@pytest.mark.parametrize(
-    "block",
-    [
-        None,
-        {"capture": "absent", "pdk": None, "pdk_stamp_comparison": {}},
-        {"capture": "malformed", "pdk": None, "pdk_stamp_comparison": {}},
-        {"capture": "ok", "pdk": None, "pdk_stamp_comparison": {}},
+    [hint] = _hints_in(report)
+    assert hint["severity"] == "warning"
+    assert hint["unit_count"] == 2
+    message = hint["message"]
+    # Every field the issue asks for is named, with the worker's value.
+    for field in (
+        "environment.remote.worker_environment",
+        "engine_build_comparison.status",
+        "ngspice_init.source",
+        "ngspice_init.sha256",
+        "omp_num_threads",
+        "environment.ngspice_options",
+    ):
+        assert field in message
+    assert '"mismatch"' in message and '"home"' in message
+    assert _SHA in message and '"1"' in message
+    assert '{"gmin": 1e-10}' in message
+    # The digest is comparable to a local run's, and the canary is named.
+    assert "environment.ngspice_init.sha256" in message
+    assert "--backend local" in message
+    assert "keep_artifacts" in message
+    assert "Transient convergence differs between local and batch" in message
+    assert hint["workers"] == [
         {
+            "fleet_index": None,
             "capture": "ok",
-            "pdk": {"variant": None, "stamp_sha256": "c" * 64},
-            "pdk_stamp_comparison": {"status": "mismatch"},
-        },
+            "engine_build_comparison": "mismatch",
+            "ngspice_init": {"source": "home", "sha256": _SHA},
+            "omp_num_threads": "1",
+        }
+    ]
+
+
+def test_mixed_convergence_codes_and_extra_diagnostics_still_count():
+    corners = [
+        _unit("a", "singular_matrix", "measurement"),
+        _unit("b", "measurement", "nonconvergence"),
+    ]
+    assert len(_hints_in(_attach(corners, _worker_entry()))) == 1
+
+
+def test_one_unit_ok_gets_no_hint():
+    corners = [_unit("a", "singular_matrix"), _unit("b", status="pass")]
+    assert "diagnostics" not in _attach(corners, _worker_entry())
+
+
+def test_a_unit_that_errored_for_another_reason_gets_no_hint():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "ngspice_fatal")]
+    assert "diagnostics" not in _attach(corners, _worker_entry())
+
+
+def test_non_convergence_codes_alone_get_no_hint():
+    corners = [_unit("a", "ngspice_fatal"), _unit("b", "ngspice_fatal")]
+    assert "diagnostics" not in _attach(corners, _worker_entry())
+
+
+def test_an_errored_unit_with_no_diagnostics_gets_no_hint():
+    corners = [_unit("a", "singular_matrix"), _unit("b")]
+    assert "diagnostics" not in _attach(corners, _worker_entry())
+
+
+@pytest.mark.parametrize("backend", ["local", "remote", "local-parallel", None])
+def test_non_batch_backends_get_no_hint(backend):
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    assert "diagnostics" not in _attach(corners, _worker_entry(), backend=backend)
+
+
+@pytest.mark.parametrize("ids", [[], ["a"]])
+def test_fewer_than_two_units_get_no_hint(ids):
+    corners = [_unit(i, "nonconvergence") for i in ids]
+    assert "diagnostics" not in _attach(corners, _worker_entry())
+
+
+def test_hint_is_attached_once_however_often_it_is_called():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    report = _attach(corners, _worker_entry())
+    hints.attach_convergence_hint(report, corners, backend="batch")
+    assert len(_hints_in(report)) == 1
+
+
+def test_hint_appends_to_existing_report_diagnostics():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    report = {"environment": {}, "diagnostics": [{"code": "other", "message": "x"}]}
+    hints.attach_convergence_hint(report, corners, backend="batch")
+    assert [d["code"] for d in report["diagnostics"]] == ["other", _HINT_CODE]
+
+
+def _attach_with_client_values(remote):
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    return _attach(
+        corners,
+        remote,
+        ngspice_init={"source": "home", "lines": None, "sha256": _CLIENT_SHA},
+        engine_build={"version_banner": "CLIENT-BANNER"},
+    )
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        None,  # a resumed run that kept no remote block
+        {},  # a block with no worker_environment (legacy worker)
+        {"worker_environment": None},
     ],
-    ids=["no-block", "absent", "malformed", "no-pdk", "no-variant"],
 )
-def test_without_usable_worker_block_message_is_byte_for_byte_legacy(block):
-    assert _attributed_message(block) == _attributed_message(None)
-    assert _LEGACY_TAIL in _attributed_message(block)
+def test_missing_worker_environment_still_hints_without_worker_values(remote):
+    [hint] = _hints_in(_attach_with_client_values(remote))
+    # The client's own values must never be presented as the worker's.
+    assert _CLIENT_SHA not in hint["message"]
+    assert "CLIENT-BANNER" not in hint["message"]
+    assert all(w["ngspice_init"] is None for w in hint["workers"])
+    assert all(w["omp_num_threads"] is None for w in hint["workers"])
+    assert all(w["engine_build_comparison"] is None for w in hint["workers"])
+    assert "Transient convergence differs between local and batch" in hint["message"]
 
 
-def test_worker_block_without_readable_stamp_names_the_gap():
-    msg = _attributed_message(
-        _worker_block(
-            stamp_sha256=None,
-            comparison={
-                "status": "not_comparable",
-                "reason": "worker_stamp_unavailable",
-            },
-        )
-    )
-    assert "no readable stamp" in msg
-    assert "pdk_stamp_comparison: not_comparable (worker_stamp_unavailable)" in msg
-    assert "options.stage_model_inputs: true" in msg
+def test_capture_absent_reports_the_capture_state_and_no_preflight_values():
+    remote = _worker_entry(capture="absent", status="not_comparable")
+    [hint] = _hints_in(_attach_with_client_values(remote))
+    assert hint["workers"][0]["capture"] == "absent"
+    assert hint["workers"][0]["omp_num_threads"] is None
+    assert '"absent"' in hint["message"]
+    assert _CLIENT_SHA not in hint["message"]
+    assert "CLIENT-BANNER" not in hint["message"]
 
 
-def test_worker_block_without_parseable_revision_token_omits_it():
-    msg = _attributed_message(_worker_block(stamp_text="store:1.2.3\n"))
-    assert "c" * 64 in msg
-    assert "revision" not in msg
+def test_ngspice_options_not_set_is_stated_not_invented():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    [hint] = _hints_in(_attach(corners, _worker_entry()))
+    assert "environment.ngspice_options" in hint["message"]
+    assert "not set" in hint["message"]
 
 
-def test_staged_run_is_not_told_to_stage_again():
-    block = _worker_block(
-        models_staged=True,
-        comparison={"status": "match", "basis": "staged_model_inputs"},
-    )
-    msg = _attributed_message(block)
-    assert "options.stage_model_inputs" not in msg
-    assert "staged model inputs" in msg
-    assert "worker_environment.model_inputs" in msg
-    assert "pdk_stamp_comparison: match [basis: staged_model_inputs]" in msg
-
-
-def test_worker_attribution_is_idempotent():
-    from klayout_tools.sim_batch_hints import attribute_modelname
-
-    diag = {
-        "code": "model_bin_range",
-        "message": "Error: could not find a valid modelname",
+def test_sharded_run_lists_each_shard_and_collapses_identical_ones():
+    corners = [_unit(f"c{i}", "singular_matrix") for i in range(4)]
+    remote = {
+        "fleet": [
+            _worker_entry(source="none", job_id="j0"),
+            _worker_entry(source="none", job_id="j1"),
+            _worker_entry(source="home", sha=_SHA, job_id="j2"),
+        ]
     }
-    attribute_modelname(diag, _MODELNAME_LOG, _worker_block())
-    once = diag["message"]
-    attribute_modelname(diag, _MODELNAME_LOG, _worker_block())
-    assert diag["message"] == once
+    [hint] = _hints_in(_attach(corners, remote))
+    assert [w["fleet_index"] for w in hint["workers"]] == [0, 1, 2]
+    assert [w["ngspice_init"]["source"] for w in hint["workers"]] == [
+        "none",
+        "none",
+        "home",
+    ]
+    message = hint["message"]
+    assert "fleet[0], fleet[1]" in message and "fleet[2]" in message
+    assert message.count(_SHA) == 1
 
 
-# --------------------------------------------------------------------------- #
-# End to end through one collected batch job (issue #5593); the fixtures come
-# from ``test_sim_batch`` (its own file sits at its size-ratchet ceiling).
-# --------------------------------------------------------------------------- #
+def test_many_distinct_shards_keep_the_message_bounded():
+    corners = [_unit(f"c{i}", "singular_matrix") for i in range(20)]
+    remote = {
+        "fleet": [_worker_entry(omp=str(i), sha=f"sha256:{i:064x}") for i in range(20)]
+    }
+    [hint] = _hints_in(_attach(corners, remote))
+    assert len(hint["workers"]) == 20  # the structured field is complete
+    assert len(hint["message"]) < 2000  # three shard groups, not twenty
+    assert "17 more" in hint["message"]
 
-_MODELNAME_ABORT_LOG = (
-    "Circuit: * deck\n"
-    "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7\n"
-    "Error: could not find a valid modelname\n"
+
+def test_malformed_remote_blocks_never_raise():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    for remote in ("x", 3, [], {"fleet": "x"}, {"fleet": [None, 4]}):
+        assert len(_hints_in(_attach(corners, remote))) == 1
+    junk = [None, "x", {"status": "error"}, _unit("a", "singular_matrix")]
+    assert "diagnostics" not in _attach(junk, _worker_entry())
+
+
+def test_runner_hints_entry_point_applies_both_hints():
+    corners = [_unit("a", "singular_matrix"), _unit("b", "singular_matrix")]
+    for corner in corners:
+        corner["measurements"] = [{"name": "v", "value": None}]
+    report = {"environment": {"remote": _worker_entry()}}
+    hints.attach_runner_hints(
+        report, [{"name": "v", "expr": "v(out)"}], corners, backend="batch"
+    )
+    assert sorted(d["code"] for d in report["diagnostics"]) == sorted(
+        ["expr_runner_may_predate", _HINT_CODE]
+    )
+
+
+# --- through run_sim: the hint is built from the finished report --------------
+
+
+def _fake_batch_dispatch(monkeypatch, *, worker_environment, first_converges=False):
+    """Swap the batch dispatch for a fake whose every corner fails to converge
+    (except the first, with ``first_converges``) and which reports
+    ``worker_environment``."""
+
+    def fake(*, corner_points, **kwargs):
+        corners = [
+            _fake_corner(
+                point,
+                code=None if first_converges and i == 0 else "singular_matrix",
+            )
+            for i, point in enumerate(corner_points)
+        ]
+        remote = {
+            "provider": "aws-batch-fleet",
+            "worker_environment": worker_environment,
+        }
+        return corners, "46", remote
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake)
+
+
+_RUN_SIM_FIXTURES = pytest.mark.usefixtures(
+    "real_build_identity_git", "bare_name_ngspice_resolution"
 )
 
 
-def _modelname_job_runner(monkeypatch, outputs):
-    from helpers.subprocess_fakes import fake_completed
-    from test_sim_batch import (
-        _FakeRunner,
-        _install_fake_batch_transport,
-        _status,
-    )
-
-    runner = _FakeRunner()
-    runner.default = fake_completed(_status("failed", exit_code="4"))
-    runner.outputs = outputs
-    _install_fake_batch_transport(monkeypatch, runner=runner)
-    return runner
-
-
-def _run_modelname_job(tmp_path, monkeypatch, runner, request):
-    from test_sim_batch import (
-        _config,
-        _corner_points,
-        _measurements_spec,
-        _write_body,
-    )
-
-    return sb._run_batch_job(
-        config=_config(tmp_path),
-        job_id="job-1",
-        corner_points=_corner_points(1),
-        netlist_path=str(_write_body(tmp_path)),
-        timeout_s=30.0,
-        keep_artifacts=False,
-        want_waveforms=False,
-        artifacts_dir=str(tmp_path / "artifacts"),
-        request=request,
-        measurements_spec=_measurements_spec(),
-        runner=runner,
-        sleep=runner.sleep,
-    )
-
-
-def test_modelname_abort_with_worker_capture_names_fleet_pdk(tmp_path, monkeypatch):
-    """A usable collected worker capture makes the surfaced modelname
-    diagnostic attribute the abort to the fleet's observed PDK stamp, the
-    stamp comparison, and the staging remedy -- not the submitter's own bin
-    cards."""
-    from test_sim_batch import _capture, _errored_report_without_include_code
-
-    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
-    runner = _modelname_job_runner(
-        monkeypatch,
-        {
-            "report.json": _errored_report_without_include_code(remote_log),
-            "artifacts/tt_1.800_27/ngspice.log": _MODELNAME_ABORT_LOG,
-            "worker_environment.json": _capture(
-                pdk={
-                    "variant": "gf180mcuD",
-                    "root": "/opt/pdk",
-                    "stamp_scheme": "sources-sha256",
-                    "stamp_sha256": "b" * 64,
-                    "stamp_text": "open_pdks f6eeac7bf3e04b1c\n",
-                    "models_staged": False,
-                }
-            ),
-        },
-    )
-
-    corners, _, environment = _run_modelname_job(
-        tmp_path,
-        monkeypatch,
-        runner,
-        {"netlist": "body.spice", "models": {"pdk": "gf180mcuD"}},
-    )
-
-    assert environment["worker_environment"]["capture"] == "ok"
-    msg = corners[0]["diagnostics"][1]["message"]
-    assert "the fleet resolved PDK gf180mcuD" in msg
-    assert "b" * 64 in msg
-    assert "revision f6eeac7bf3e04b1c" in msg
-    assert "pdk_stamp_comparison:" in msg
-    assert "options.stage_model_inputs: true" in msg
-    assert "library's bin cards" not in msg
-
-
-def test_modelname_abort_without_worker_capture_keeps_legacy_advice(
+@_RUN_SIM_FIXTURES
+def test_run_sim_batch_grid_that_never_converges_carries_the_hint(
     tmp_path, monkeypatch
 ):
-    """No collected capture (legacy worker) keeps the pre-#5593 diagnostic
-    byte for byte."""
-    from test_sim_batch import _errored_report_without_include_code
+    worker_environment = {
+        "capture": "ok",
+        "simulator": {"version_banner": "ngspice-46 WORKER"},
+        "ngspice_init": {"source": "none", "lines": None, "sha256": None},
+        "omp_num_threads": None,
+    }
+    _fake_batch_dispatch(monkeypatch, worker_environment=worker_environment)
+    report = _run(_resume_request(tmp_path), tmp_path)
 
-    remote_log = "/var/tmp/eda-job-1/outputs/artifacts/tt_1.800_27/ngspice.log"
-    runner = _modelname_job_runner(
-        monkeypatch,
+    assert report["errored"] == report["corner_count"] == 3
+    [hint] = _hints_in(report)
+    # The fake worker block carries no comparison; klt attaches one after the
+    # dispatch. The hint must quote that attached status (whatever this host's
+    # own ngspice makes it: match / mismatch / not_comparable), which a hint
+    # built before the attach could not -- it would read None.
+    attached = report["environment"]["remote"]["worker_environment"][
+        "engine_build_comparison"
+    ]["status"]
+    assert attached in ("match", "mismatch", "not_comparable")
+    assert hint["workers"][0]["engine_build_comparison"] == attached
+    assert f'engine_build_comparison.status="{attached}"' in hint["message"]
+    assert hint["unit_count"] == 3
+
+
+@_RUN_SIM_FIXTURES
+def test_run_sim_batch_grid_with_one_converging_corner_has_no_hint(
+    tmp_path, monkeypatch
+):
+    _fake_batch_dispatch(
+        monkeypatch, worker_environment={"capture": "ok"}, first_converges=True
+    )
+    report = _run(_resume_request(tmp_path), tmp_path)
+    assert report["errored"] == report["corner_count"] - 1 == 2
+    assert _hints_in(report) == []
+
+
+def test_hint_points_at_a_docs_section_that_exists():
+    # The hint tells the reader to open this section by name; a rename must
+    # not strand the pointer.
+    docs = Path(__file__).resolve().parents[1] / "docs" / "cli" / "sim.md"
+    assert "### Transient convergence differs between local and batch\n" in (
+        docs.read_text(encoding="utf-8")
+    )
+
+
+# --- the hint reads what klt's own producers emit, not hand-built dicts -------
+
+
+def _real_job_identity(tmp_path, monkeypatch, *, client_banner):
+    """``environment.remote`` as the real producers build it: the on-disk
+    worker capture and the worker's own ``ngspice_init`` through
+    ``_read_job_identity``, then klt's ``engine_build_comparison``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".spiceinit").write_text("set wnflag=1\n")
+    monkeypatch.setenv("HOME", str(home))
+    init = sim_spiceinit.effective_init((), (), engine="ngspice", offhost=False)
+    capture_dir = tmp_path / "collected"
+    capture_dir.mkdir()
+    (capture_dir / sb.BATCH_WORKER_ENVIRONMENT_FILENAME).write_text(_capture())
+    identity = sb._read_job_identity(
+        str(capture_dir), None, report={"environment": {"ngspice_init": init}}
+    )
+    sb.attach_engine_build_comparison(identity, {"version_banner": client_banner})
+    return identity, init
+
+
+def test_hint_reads_the_real_worker_environment_shape(tmp_path, monkeypatch):
+    identity, init = _real_job_identity(
+        tmp_path, monkeypatch, client_banner="ngspice-46 build B"
+    )
+    assert init["source"] == "home"  # produced by the real effective_init
+    corners = [_unit("a", "singular_matrix"), _unit("b", "nonconvergence")]
+    [hint] = _hints_in(_attach(corners, identity))
+    assert hint["workers"] == [
         {
-            "report.json": _errored_report_without_include_code(remote_log),
-            "artifacts/tt_1.800_27/ngspice.log": _MODELNAME_ABORT_LOG,
-        },
-    )
-
-    corners, _, _ = _run_modelname_job(
-        tmp_path, monkeypatch, runner, {"netlist": "body.spice"}
-    )
-
-    msg = corners[0]["diagnostics"][1]["message"]
-    assert msg.endswith("compare this model's w/l against the library's bin cards")
-
-
-def test_errored_batch_text_output_prints_pdk_stamp_line(tmp_path, monkeypatch, capsys):
-    """`klt sim` text output prints the `pdk_stamp:` line on an *errored*
-    batch run (no analysis started), not only on a completed one -- the text
-    renderer runs before the exit code is derived from the status."""
-    import argparse
-    import json
-
-    from klayout_tools.cli import sim_cmd
-    from test_sim_batch import _errored_report_without_include_code
-
-    report = json.loads(_errored_report_without_include_code())
-    report["netlist"] = {"path": "body.spice", "scope": "repo"}
-    report["inconclusive"] = 0
-    report["environment"].update(
-        models_lib={"path": None, "scope": "external"},
-        remote={
-            "worker_environment": {
-                "capture": "ok",
-                "pdk": {"variant": "gf180mcuD", "models_staged": False},
-                "pdk_stamp_comparison": {
-                    "status": "not_comparable",
-                    "reason": "client_stamp_unavailable",
-                },
-            }
-        },
-    )
-    monkeypatch.setattr(sim_cmd, "run_sim", lambda *a, **k: report)
-    args = argparse.Namespace(
-        request=str(tmp_path / "request.json"),
-        outdir=None,
-        backend=None,
-        max_workers=None,
-        hosts=None,
-        budget_s=None,
-        resume=None,
-        plot=None,
-        fail_fast_probe=None,
-        fail_on_diagnostic=None,
-        max_units_per_job=None,
-        max_concurrent_jobs=None,
-        op_lint=False,
-        op_lint_corner=None,
-        format="text",
-    )
-
-    assert sim_cmd.run(args) == sim_cmd.EXIT_CORNER_ERRORED
-    out = capsys.readouterr().out
-    assert "pdk_stamp: not_comparable (client_stamp_unavailable)" in out
-    assert "models_staged: false" in out
+            "fleet_index": None,
+            "capture": "ok",
+            "engine_build_comparison": "mismatch",
+            "ngspice_init": {"source": "home", "sha256": init["sha256"]},
+            "omp_num_threads": "1",
+        }
+    ]
+    assert init["sha256"] in hint["message"]
+    assert 'engine_build_comparison.status="mismatch"' in hint["message"]
+    assert 'omp_num_threads="1"' in hint["message"]
 
 
-# --------------------------------------------------------------------------- #
-# Defensive branches the CI coverage floor caught uncovered (#3312 ratchet).
-# --------------------------------------------------------------------------- #
-
-
-def test_comparison_sentence_is_empty_without_a_usable_comparison():
-    from klayout_tools.sim_batch_hints import _worker_comparison_sentence
-
-    assert _worker_comparison_sentence({}) == ""
-    assert _worker_comparison_sentence({"pdk_stamp_comparison": {}}) == ""
-    assert _worker_comparison_sentence({"pdk_stamp_comparison": "mismatch"}) == ""
-
-
-def test_worker_block_without_comparison_omits_the_line():
-    msg = _attributed_message(_worker_block(comparison={}))
-    assert "pdk_stamp_comparison" not in msg
-    assert "the fleet resolved PDK gf180mcuD" in msg
-
-
-def test_modelname_non_instance_card_names_the_card(tmp_path):
-    from klayout_tools.sim_batch_hints import attribute_modelname
-
-    log = (
-        "Circuit: * deck\n"
-        "Error on line 12 : c.x1 a b 1.0e-12 w=1.0e-5\n"
-        "Error: could not find a valid modelname\n"
-    )
-    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
-    attribute_modelname(diag, log)
-    assert "'c.x1' (w=1.0e-5)" in diag["message"]
-
-
-def test_modelname_instance_card_without_params_omits_the_parenthetical():
-    from klayout_tools.sim_batch_hints import attribute_modelname
-
-    log = (
-        "Circuit: * deck\n"
-        "Error on line 570 : m.x1.m0 d g s b nfet_03v3\n"
-        "Error: could not find a valid modelname\n"
-    )
-    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
-    attribute_modelname(diag, log)
-    assert "instance 'm.x1.m0' model 'nfet_03v3'" in diag["message"]
-    assert "(" not in diag["message"].split("ngspice card at expanded-deck line")[1]
-
-
-def test_modelname_message_with_card_only_log_keeps_the_card():
-    from klayout_tools.sim_batch_hints import attribute_modelname
-
-    log = "Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4\n"
-    diag = {"code": "model_bin_range", "message": "could not find a valid modelname"}
-    attribute_modelname(diag, log)
-    assert "instance 'm.x1.m0' model 'nfet_03v3'" in diag["message"]
-
-
-def test_read_log_head_unreadable_path_is_empty(tmp_path):
-    from klayout_tools.sim_batch_hints import _read_log_head
-
-    assert _read_log_head(str(tmp_path / "absent" / "ngspice.log")) == ""
-    assert _read_log_head(str(tmp_path)) == ""  # a directory: IsADirectoryError
+def test_hint_reads_a_real_absent_capture_beside_a_real_one(tmp_path, monkeypatch):
+    ok, init = _real_job_identity(tmp_path, monkeypatch, client_banner="x")
+    absent = sb._read_job_identity(None)  # what a legacy worker leaves behind
+    sb.attach_engine_build_comparison(absent, {"version_banner": "x"})
+    corners = [_unit(f"c{i}", "singular_matrix") for i in range(3)]
+    [hint] = _hints_in(_attach(corners, {"fleet": [ok, absent]}))
+    first, second = hint["workers"]
+    assert (first["fleet_index"], first["capture"]) == (0, "ok")
+    assert first["ngspice_init"]["sha256"] == init["sha256"]
+    assert (second["fleet_index"], second["capture"]) == (1, "absent")
+    assert second["ngspice_init"] is None and second["omp_num_threads"] is None
+    # Two distinct value sets, so both are spelled out per shard.
+    assert "fleet[0]" in hint["message"] and "fleet[1]" in hint["message"]
