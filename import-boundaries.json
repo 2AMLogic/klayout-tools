@@ -609,6 +609,7 @@
         "klayout_tools.decks.sky130_offgrid",
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_merge",
+        "klayout_tools.liberty_merge_syntax",
         "klayout_tools.pdk",
         "klayout_tools.pdk_ambiguity",
         "klayout_tools.pdk_capabilities",
