@@ -13,7 +13,11 @@ def _print_op_lint_text(report: dict) -> None:
     print(
         f"devices: {report['device_count']}  findings: {report['finding_count']} "
         f"(errors: {report['error_count']}, warnings: {report['warning_count']})"
-        + (f"  unexpanded: {n}" if (n := report["unexpanded_instance_count"]) else "")
+        + (
+            f"  unexpanded: {n}"
+            if (n := report.get("unexpanded_instance_count"))
+            else ""
+        )
     )
 
     devices = report["devices"]
