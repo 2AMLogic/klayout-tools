@@ -121,8 +121,8 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
     """
     try:
         from .. import __version__, build_identity
-        from .._provenance import sha256_file
-        from . import deck_names, deck_source_path
+        from .._digest import content_hash as file_content_hash
+        from . import deck_content_hash, deck_names
 
         ident = build_identity.identity()
         if ident.get("is_release") is not True:
@@ -138,12 +138,7 @@ def _self_release_entries(content_hash: str, deck: str | None) -> list[dict[str,
             if recorded is not None:
                 own_hashes = [recorded.get(name), recorded.get(f"{name}.drc")]
             else:
-                own_hashes = []
-                for path in (deck_source_path(name), drc_path):
-                    digest = sha256_file(path) if path is not None else None
-                    own_hashes.append(
-                        f"sha256:{digest}" if digest is not None else None
-                    )
+                own_hashes = [deck_content_hash(name), file_content_hash(drc_path)]
             if content_hash not in own_hashes:
                 continue
             matches.append(
@@ -335,7 +330,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     is:
 
     - ``deck`` -- the deck name.
-    - ``content_hash`` -- this install's ``sha256:``-prefixed deck module
+    - ``content_hash`` -- this install's ``sha256:``-prefixed deck source
       hash (the same computation and shape as
       ``provenance.deck.content_hash``), or ``None`` if the deck's source
       file can't be hashed.
@@ -375,8 +370,8 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
+        deck_content_hash,
         deck_provides,
-        deck_source_path,
         get_extraction_deck,
         get_unmodeled_rules,
         known_extraction_deck_names,
@@ -391,8 +386,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         except UnknownExtractionDeckError as exc:
             raise DeckHistoryError(str(exc)) from exc
 
-        digest = sha256_file(deck_source_path(deck_name))
-        content_hash = f"sha256:{digest}" if digest is not None else None
+        content_hash = deck_content_hash(deck_name)
         released, release = _release_status(deck_name, content_hash)
 
         entry: dict[str, Any] = {
@@ -457,7 +451,7 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
     Returns a flat envelope:
 
     - ``deck`` -- the deck name, as given.
-    - ``content_hash`` -- this install's ``sha256:``-prefixed deck module
+    - ``content_hash`` -- this install's ``sha256:``-prefixed deck source
       hash, the same value :func:`deck_info`/``provenance.deck.content_hash``
       report, so a consumer can pin the exact deck revision a constant was
       read from and detect drift on the next PDK bump. ``None`` when the
@@ -517,12 +511,9 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
     - ``unresolved`` -- ``[{"layer", "datatype", "rules": [id]}]`` for each
       pair the (selected) rules read that has no deck name; sorted.
     """
-    # Imported lazily for the same circular-import reason `deck_info` is --
-    # see its own note.
-    from .._provenance import sha256_file
     from . import (
         UnknownDeckError,
-        deck_source_path,
+        deck_content_hash,
         get_deck,
         get_layer_names,
         get_marker_blind_layers,
@@ -547,12 +538,11 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
         rules = selected
 
     layer_names = get_layer_names(name)
-    digest = sha256_file(deck_source_path(name))
 
     return {
         "schema_version": 1,
         "deck": name,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
+        "content_hash": deck_content_hash(name),
         "nominal_dbu_um": nominal_dbu,
         "rules": [_project_rule(rule, nominal_dbu, layer_names) for rule in rules],
         "unmodeled_rules": get_unmodeled_rules(name),
@@ -594,7 +584,7 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     Returns a flat envelope:
 
     - ``deck`` / ``content_hash`` -- the deck name as given, and this
-      install's ``sha256:``-prefixed deck module hash (the same value
+      install's ``sha256:``-prefixed deck source hash (the same value
       :func:`deck_info`/``provenance.deck.content_hash`` report), so a
       transcribed layer number stays re-checkable against the installed deck
       on the next PDK bump.
@@ -647,12 +637,9 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
     plus the deck's published name for the pair when it publishes one
     (``null`` rather than a fabricated name when it does not).
     """
-    # Imported lazily for the same circular-import reason `deck_info` is --
-    # see its own note.
-    from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
-        deck_source_path,
+        deck_content_hash,
         get_extraction_deck,
         get_layer_names,
     )
@@ -676,12 +663,10 @@ def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
             )
         entries = selected
 
-    digest = sha256_file(deck_source_path(name))
-
     return {
         "schema_version": 1,
         "deck": name,
-        "content_hash": f"sha256:{digest}" if digest is not None else None,
+        "content_hash": deck_content_hash(name),
         "device_classes": entries,
     }
 

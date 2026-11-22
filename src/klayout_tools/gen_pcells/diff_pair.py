@@ -23,7 +23,34 @@ from ._common_params import (
     declare_ring_well_margin,
     declare_voltage_flavor_mark_params,
     declare_well_present,
+    union_box,
 )
+
+
+def _ring_well_mark_box(
+    pcell: Any, info: dict[str, Any]
+) -> tuple[float, float, float, float] | None:
+    """The guard ring's own well tie box, or ``None`` when no ring well is
+    drawn (issue #6458)."""
+    from klayout_tools.gen import _shift_box
+
+    if (
+        info["ring"] is None
+        or not pcell.add_guard_ring
+        or not pcell.well_present
+        or pcell.flavor != "pfet"
+    ):
+        return None
+    margin = pcell.ring_well_margin_um
+    return _shift_box(
+        (
+            -margin,
+            -margin,
+            info["ring"]["outer_w_um"] + margin,
+            info["ring"]["outer_h_um"] + margin,
+        ),
+        *info["ring_offset_um"],
+    )
 
 
 def _insert_voltage_flavor_marks(
@@ -65,11 +92,10 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         _draw_pcell_npc,
         _draw_pcell_tap_pads,
         _insert_boxes,
-        _insert_implant_ring,
-        _insert_ring,
         _pcell_tap_reach_um,
-        _shift_box,
     )
+
+    from ._ring_shapes import _draw_composed_guard_ring
 
     class _DiffPairPCell(kdb.PCellDeclarationHelper):
         """Differential pair / current mirror cell (spike section 4's
@@ -185,12 +211,12 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "voltage_flavor",
                 self.TypeString,
-                "Optional medium-voltage/thick-oxide device-class marker: "
-                "'' (default, no marker drawn) or a name the resolved PDK "
-                "family's role-layer table recognises (e.g. 'medium_voltage' "
-                "on gf180mcu, drawing its Dualgate marker). A name the family "
-                "doesn't recognise draws nothing and is reported via "
-                "drc_hints.notes, never silently dropped",
+                "Optional medium-voltage/thick-oxide device-class marker: '' "
+                "(default, no marker drawn) or a name the resolved PDK family's "
+                "role-layer table recognises (e.g. 'medium_voltage' on gf180mcu, "
+                "drawing its Dualgate marker; 'lvt' on sky130, drawing lvtn.drawing "
+                "for the low-Vt device). A name the family doesn't recognise draws "
+                "nothing and is reported via drc_hints.notes, never silently dropped",
                 default="",
             )
             self.param(
@@ -210,12 +236,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 self.TypeLayer,
                 "Guard ring tap drawing layer",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             self.param(
                 "well_layer",
                 self.TypeLayer,
                 "Guard ring well drawing layer (only used when well_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_well_present(self)
             declare_ring_implant_params(self, kdb)
@@ -226,6 +254,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "layer, sized to enclose the device pair's own footprint "
                 "(only used when voltage_flavor_mark_present)",
                 default=kdb.LayerInfo(0, 0),
+                hidden=True,
             )
             declare_voltage_flavor_mark_params(self, kdb)
             self.param(
@@ -235,6 +264,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "beyond the device pair's own shared active footprint (see "
                 "_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM)",
                 default=WELL_ENCLOSURE_MARGIN_UM,
+                hidden=True,
             )
             declare_ring_well_margin(self, WELL_ENCLOSURE_MARGIN_UM)
 
@@ -319,11 +349,21 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 li_well = self.layout.layer(self.well_layer)
                 _insert_boxes(self.cell, li_well, dbu, [device_well_box])
 
+            # The ring's own well tie box (flavor == "pfet" only), computed
+            # up front so the marker below can be grown over it (issue
+            # #6458, the `diff_pair` sibling of #6025) and the well shape
+            # drawn further down is the very same box -- the two cannot
+            # drift apart.
+            ring_well_mark_box = _ring_well_mark_box(self, info)
+
             # Medium-voltage/thick-oxide device-class marker (issue #1054):
             # its *own* box (issue #1577), not the well shape's -- gf180mcu's
             # real signoff deck needs the marker to reach further than the
             # well's own margin does, see
-            # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring.
+            # `_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM`'s own docstring. Issue
+            # #6458: also grown over the guard ring's well tie when one is
+            # drawn, so an HV-nwell enclosure rule (sky130 nwell.9) holds;
+            # one unioned box keeps it a single polygon per marker layer.
             if self.voltage_flavor_mark_present:
                 mark_margin = self.voltage_flavor_mark_margin_um
                 mark_box = (
@@ -332,68 +372,22 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     info["core_w_um"] + mark_margin,
                     info["core_h_um"] + mark_margin,
                 )
-                _insert_voltage_flavor_marks(self, dbu, mark_box)
+                _insert_voltage_flavor_marks(
+                    self, dbu, union_box(mark_box, ring_well_mark_box)
+                )
 
             if info["ring"] is not None and self.add_guard_ring:
-                li_tap = self.layout.layer(self.tap_layer)
-                ox, oy = info["ring_offset_um"]
-                ring = info["ring"]
-                gap_box = (
-                    _shift_box(ring["gap"]["box_um"], ox, oy)
-                    if ring["gap"] is not None
-                    else None
-                )
-                _insert_ring(
-                    self.cell,
-                    li_tap,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_ring(
-                    self.cell,
-                    li_metal,
-                    dbu,
-                    _shift_box(ring["outer_box_um"], ox, oy),
-                    _shift_box(ring["inner_box_um"], ox, oy),
-                    gap_box,
-                    self.mfg_grid_um,
-                )
-                _insert_boxes(
-                    self.cell, li_contact, dbu, ring["contact_boxes_um"], ox, oy
-                )
-                if self.well_present and self.flavor == "pfet":
+                if ring_well_mark_box is not None:
                     li_well = self.layout.layer(self.well_layer)
-                    margin = self.ring_well_margin_um
-                    well_box = (
-                        -margin,
-                        -margin,
-                        ring["outer_w_um"] + margin,
-                        ring["outer_h_um"] + margin,
-                    )
-                    _insert_boxes(
-                        self.cell, li_well, dbu, [_shift_box(well_box, ox, oy)]
-                    )
-                if self.ring_implant_present:
-                    # Tracks the tap ring, extended `ring_implant_margin_um`
-                    # past every edge of it (issue #2369's NP.5b/PP.5b
-                    # extension-beyond-COMP fix to #1580's originally
-                    # coincident implant) -- still a ring, never a blanket
-                    # over the enclosed pair (mirrors `well_island`'s own
-                    # `well_tap_implant` ring precedent).
-                    _insert_implant_ring(
-                        self.cell,
-                        self.layout.layer(self.ring_implant_layer),
-                        dbu,
-                        _shift_box(ring["outer_box_um"], ox, oy),
-                        _shift_box(ring["inner_box_um"], ox, oy),
-                        gap_box,
-                        ring["gap"]["side"] if ring["gap"] is not None else None,
-                        self.ring_implant_margin_um,
-                        self.mfg_grid_um,
-                    )
+                    _insert_boxes(self.cell, li_well, dbu, [ring_well_mark_box])
+                _draw_composed_guard_ring(
+                    self,
+                    self.layout.layer(self.tap_layer),
+                    li_metal,
+                    li_contact,
+                    dbu,
+                    info,
+                )
 
             # Tap pads (issue #3648): see `_MosArrayPCell.produce_impl`.
             _draw_pcell_tap_pads(self, info["tap_pads"], li_metal, li_contact)
