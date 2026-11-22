@@ -283,6 +283,21 @@ def test_rerun_verifies_clean_despite_per_run_bookkeeping(
     assert out["fresh"]["engine_version"] != committed["engine_version"]
 
 
+def test_rerun_verifies_unmodified_repo_relative_def(tmp_path, monkeypatch, capsys):
+    (tmp_path / ".git").mkdir()
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request_path)
+    committed = json.loads(Path(report).read_text(encoding="utf-8"))
+    assert committed["def_path"] == {"path": "top.def", "scope": "repo"}
+
+    code, out = _verify(capsys, request_path, report, "--rerun")
+
+    assert code == 0
+    assert out["status"] == "match"
+    assert out["drift"] == []
+
+
 def test_rerun_multi_corner_verifies_clean(tmp_path, monkeypatch, capsys):
     request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
     _stub_openroad_multi_corner(monkeypatch)

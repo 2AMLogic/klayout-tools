@@ -41,7 +41,7 @@ def test_match_verdict_from_database(tmp_path, fake_klayout):
     report = run_lvs(_request(tmp_path, 1, deck_vars={"feol": True}))
     assert report["status"] == "match"
     assert report["engine"] == "klayout-runset"
-    assert report["device_census"] == {"layout": {"NMOS": 1}, "reference": {"NMOS": 1}}
+    fx.assert_nmos_reference_census(report, expected_layout={"NMOS": 1})
     assert report["counts"]["devices"]["matched"] == 1
     assert coverage_validation_error(report["coverage"]) is None
     assert report["coverage"]["checked"] == ["NMOS"]
@@ -199,7 +199,7 @@ def test_empty_extraction_without_compare_is_a_graded_mismatch(tmp_path, fake_kl
     fake_klayout["compare"] = False
     report = run_lvs(_request(tmp_path, 1))
     assert report["status"] == "mismatch"
-    assert report["device_census"] == {"layout": {}, "reference": {"NMOS": 1}}
+    fx.assert_nmos_reference_census(report, expected_layout={})
     assert report["error_count"] > 0
     unmatched = [m for m in report["mismatches"] if m["category"] == "device.unmatched"]
     assert len(unmatched) == 1

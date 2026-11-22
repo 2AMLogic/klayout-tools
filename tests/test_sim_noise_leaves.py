@@ -117,6 +117,16 @@ def test_a_leaf_with_no_device_total_is_unclassified_and_named_in_full():
     assert leaf.label == "onoise_m1_id"
 
 
+def test_duplicate_names_are_two_leaves_on_distinct_columns():
+    """#6978: a rawfile column's identity is its index, not its name --
+    ngspice OSDI models emit distinct generators under one flattened name."""
+    leaves = sim_noise_leaves.classify_leaves(
+        ["frequency", "onoise_x1_1overf", "onoise_x1_1overf", "onoise_spectrum"]
+    )
+    assert [leaf.name for leaf in leaves] == ["onoise_x1_1overf"] * 2
+    assert [leaf.index for leaf in leaves] == [1, 2]
+
+
 # ------------------------------------------------------------ classification
 
 
