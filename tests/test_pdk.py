@@ -2075,7 +2075,7 @@ def test_corners_gf180mcu_boilerplate_param_not_misclassified_as_skew(tmp_path):
     """A `.param` line present but with an unchanged value from the family's
     typical section must classify as ``"typical"``, not ``"param"`` -- a
     naive "any `.param` line present" check would misclassify this (see
-    :func:`klayout_tools.pdk._param_lines`'s docstring)."""
+    :func:`klayout_tools.pdk_corner_skew._param_lines`'s docstring)."""
     deck = """\
 .LIB typical
 .param rsh_nplus_u_m=60
