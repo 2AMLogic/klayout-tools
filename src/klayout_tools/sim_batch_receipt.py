@@ -7,10 +7,53 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from . import sim_staging
+from .sim_batch_contract import BATCH_NETLIST_FILENAME, BATCH_REQUEST_FILENAME
+from .sim_batch_contract_spec import BatchJobSpec
 from .sim_errors import SimError
+
+COLLECTED_NETLIST_MISMATCH = "batch_netlist_digest_mismatch"
+
+
+def submitted_netlist_sha256(spec: BatchJobSpec, source_digest: str | None) -> str:
+    """Capture the expected runner digest before submitting the prepared inputs."""
+    deck = next(item for item in spec.inputs if item.name == BATCH_NETLIST_FILENAME)
+    if deck.content is None and source_digest is not None:
+        return source_digest
+    return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+
+
+def attached_netlist_sha256(request: dict[str, Any], netlist_path: str) -> str:
+    """Reconstruct the submitted netlist's flat include names for a collected job."""
+    try:
+        deck = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name=BATCH_NETLIST_FILENAME,
+            reserved_names=(BATCH_REQUEST_FILENAME,),
+            roots=sim_staging.host_resolved_roots(request),
+        ).netlist
+        return sim_staging.staged_input_sha256(deck.content, deck.local_path)
+    except (OSError, sim_staging.IncludeStagingError) as exc:
+        raise SimError(f"cannot verify staged batch netlist: {exc}") from exc
+
+
+def check_collected_netlist(
+    job_id: str, report: dict[str, Any], expected_digest: Callable[[], str]
+) -> None:
+    reported = (report.get("environment") or {}).get("netlist_sha256")
+    if reported is None:
+        return
+    expected = expected_digest()
+    if not isinstance(reported, str) or reported.lower() != expected.lower():
+        raise SimError(
+            f"batch job {job_id}: expected staged netlist sha256 {expected}, "
+            f"runner reported {reported!r}",
+            code=COLLECTED_NETLIST_MISMATCH,
+        )
 
 
 def request_sha256(request: dict[str, Any]) -> str:

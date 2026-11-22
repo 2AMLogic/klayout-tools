@@ -595,7 +595,7 @@ def _stage_model_closure(
                 field=item.field,
                 kind=root.kind if root is not None else "dependency",
                 source_path=item.local_path,
-                sha256=_staged_sha256(staged),
+                sha256=staged_input_sha256(staged.content, staged.local_path),
                 rewritten=staged.content is not None,
                 source_sha256=sha256_file_required(item.local_path),
             )
@@ -780,11 +780,11 @@ def _rewrite_worker_request(
     return worker
 
 
-def _staged_sha256(staged: StagedFile) -> str:
-    if staged.content is not None:
-        return hashlib.sha256(staged.content.encode("utf-8")).hexdigest()
-    assert staged.local_path is not None
-    return sha256_file_required(staged.local_path)
+def staged_input_sha256(content: str | None, local_path: str | None) -> str:
+    if content is not None:
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert local_path is not None
+    return sha256_file_required(local_path)
 
 
 # --------------------------------------------------------------------------- #
