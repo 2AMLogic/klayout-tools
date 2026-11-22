@@ -80,16 +80,17 @@ jobs:
           PDK_ROOT: /home/runner/.ciel
         run: |
           set -o pipefail
-          uv run --frozen --extra dev pytest tests/test_post_route_sta.py \
-            tests/test_post_route_sta_instance_paths_run.py \
-            -k "test_live_engine_spef_name_map_annotation or test_live_engine_driving_cell_and_output_load or test_live_engine_report_instances" \
+          uv run --frozen --extra dev pytest \
+            tests/test_post_route_sta.py::test_live_engine_spef_name_map_annotation \
+            tests/test_post_route_sta.py::test_live_engine_driving_cell_and_output_load \
+            tests/test_post_route_sta_instance_paths_run.py::test_live_engine_report_instances \
+            tests/test_post_route_sta_clock_driver.py::test_live_driver_on_propagated_buffered_clock \
             -v -rs | tee pytest-post-route-sta-live.log
 
       - name: Confirm the live tests ran to completion, not skipped
         # A skip exits 0, so grep the `-rs` summary and fail explicitly if
-        # provisioning did not satisfy `_live_sky130_env()`. The `-k` filter
-        # selects exactly the three live tests above, so any skip is one of
-        # them.
+        # provisioning did not satisfy `_live_sky130_env()`. Each node ID above selects a live test,
+        # so a skip means that one of the four checks did not run.
         run: |
           if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-post-route-sta-live.log; then
             echo "::error::Live klt sta test was SKIPPED, not run -- provisioning did not satisfy _live_sky130_env()." >&2
