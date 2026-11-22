@@ -8,7 +8,7 @@ and `sim` docstrings cite it there)."""
 
 from __future__ import annotations
 
-import sys
+from . import _warn
 
 
 def _warn_klayout_version_mismatch(
@@ -34,7 +34,13 @@ def _warn_klayout_version_mismatch(
     (dirty tree, or no recorded commit) never renders as a fabricated
     command: the line says the build is not reinstallable and points at
     ``klt version --format json``, which carries the same
-    ``reinstall_spec`` field."""
+    ``reinstall_spec`` field.
+
+    Emitted through :func:`klayout_tools._warn.warn`, so a ``--format
+    json`` invocation defers (and, ahead of an application error, drops)
+    this line rather than prefixing it to the error envelope (issue
+    #6935); the wording itself is unchanged.
+    """
     if reinstall_spec is None:
         remedy = (
             "this klayout-tools build is not reinstallable from a single "
@@ -54,4 +60,4 @@ def _warn_klayout_version_mismatch(
         f"{remedy} -- see docs/json-contract.md's "
         '"Shared `provenance` block".'
     )
-    print(message, file=sys.stderr)
+    _warn.warn(message)
