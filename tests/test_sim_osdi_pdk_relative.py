@@ -245,6 +245,33 @@ def test_batch_digest_follows_the_resolved_object_not_its_spelling(tmp_path, spe
     assert _join([_resolved(text, 0)], other) == [None]
 
 
+@pytest.mark.parametrize(
+    "declared", ["$PDK_ROOT/osdi/device.osdi", None, 7], ids=["string", "none", "int"]
+)
+@pytest.mark.parametrize(
+    "reported",
+    [{}, {"name": None}, {"name": 7}],
+    ids=["name-absent", "name-null", "name-not-a-string"],
+)
+def test_batch_digest_is_kept_when_there_is_no_name_to_contradict_it(
+    declared, reported
+):
+    """The basename corroboration only rejects a digest on a proven mismatch.
+    A string entry whose worker slot carries no usable ``name`` -- or an entry
+    that is neither a string nor a ``pdk_relative`` object -- has nothing to
+    disagree with, so the index-joined digest is kept, as it was before the
+    object form existed. (The object form itself is stricter: it needs both a
+    string path and a string name, see
+    ``test_batch_digest_requires_the_worker_slot_and_matching_basename``.)"""
+    digest = "1" * 64
+    worker = {"runner_osdi_preload": [{**reported, "sha256": digest}]}
+    assert _join([_resolved(declared, 0)], worker) == [digest]
+    # A string name that does disagree with a string entry is still refused.
+    if isinstance(declared, str):
+        wrong = {"runner_osdi_preload": [{"name": "wrong.osdi", "sha256": digest}]}
+        assert _join([_resolved(declared, 0)], wrong) == [None]
+
+
 @pytest.mark.usefixtures("real_build_identity_git")
 @pytest.mark.parametrize("resume", [False, True])
 def test_staged_object_checks_local_abi_after_host_default_yields(
