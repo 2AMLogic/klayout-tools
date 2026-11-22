@@ -1052,6 +1052,7 @@ def run_synthesize(
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
     equiv_engine: str | None = None,
+    yosys_timeout_s: str | float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
     _scratch_run_dir: bool = False,
@@ -1110,6 +1111,7 @@ def run_synthesize(
     ``restructure_max_iterations`` overrides
     :data:`klayout_tools.restructure.DEFAULT_MAX_ITERATIONS`; ``None``
     (default) leaves that default in effect.
+    ``yosys_timeout_s`` (``--yosys-timeout-s``, #5773): see ``bind_yosys_timeout``.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/synthesize.md`` / ``docs/design/digital-flow-contracts-spike.md``
@@ -1163,7 +1165,7 @@ def run_synthesize(
     )
 
     sv_frontend = validate_sv_frontend(request.get("sv_frontend"), SynthesizeError)
-    yosys_timeout_s = ytimeout.bind_yosys_timeout(request, SynthesizeError)
+    budget_s = ytimeout.bind_yosys_timeout(request, SynthesizeError, yosys_timeout_s)
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -1258,7 +1260,7 @@ def run_synthesize(
     # Issue #4196: likewise for preprocessor defines (a separate field, so the
     # input content hash of existing committed reports is unchanged).
     provenance["defines"] = dict(defines)
-    provenance.update(ytimeout.timeout_fields(yosys_timeout_s))
+    provenance.update(ytimeout.timeout_fields(budget_s))
     output_dir = _create_run_directory(
         request_dir, request, ignore_outputs_dir=_scratch_run_dir
     )
@@ -1636,7 +1638,7 @@ def run_synthesize(
             executed_script_path, repo_root=repo_root
         ),
         "provenance": provenance,
-        **ytimeout.timeout_fields(yosys_timeout_s),
+        **ytimeout.timeout_fields(budget_s),
         "equivalence": equivalence,
         "restructuring": restructuring,
         "arithmetic": arithmetic,
@@ -3015,12 +3017,7 @@ def _write_script_text(script_path: str, text: str) -> None:
         ) from exc
 
 
-#: Default per-invocation wall-clock timeout for one ``yosys -s <script>`` run
-#: (:func:`_run_yosys`); a request overrides it with ``yosys_timeout_s``
-#: (:mod:`klayout_tools.synthesize_timeout`). Generous on purpose: a full
-#: ``synth``/``abc`` pass does more work than ``equiv``'s SAT proof, and
-#: ``arithmetic: auto`` pays this budget ~10+ times per request.
-DEFAULT_YOSYS_TIMEOUT_S = 300.0
+DEFAULT_YOSYS_TIMEOUT_S = ytimeout.DEFAULT_YOSYS_TIMEOUT_S  # see that module
 
 
 def _run_yosys(
@@ -4219,6 +4216,7 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
         # the diff -- a committed report whose macro declaration changed
         # *should* fail the rerun check.
         "blackbox_path",
+        *ytimeout.RERUN_BOOKKEEPING_KEYS,  # host-level budget (#5773), not minted
     }
 )
 
@@ -4465,6 +4463,7 @@ def rerun_synthesize_report(
     verify_equivalence: bool = False,
     equiv_timeout_s: float | None = None,
     equiv_engine: str | None = None,
+    yosys_timeout_s: str | float | None = None,
     restructure_timing: bool = False,
     restructure_max_iterations: int | None = None,
 ) -> dict[str, Any]:
@@ -4509,6 +4508,7 @@ def rerun_synthesize_report(
         verify_equivalence=verify_equivalence,
         equiv_timeout_s=equiv_timeout_s,
         equiv_engine=equiv_engine,
+        yosys_timeout_s=yosys_timeout_s,
         restructure_timing=restructure_timing,
         restructure_max_iterations=restructure_max_iterations,
         _scratch_run_dir=True,
