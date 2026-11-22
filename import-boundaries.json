@@ -22,6 +22,13 @@
         "klayout_tools.cli.parser_artifact"
       ]
     },
+    "cell-hash": {
+      "kind": "verb",
+      "description": "CLI for the canonical geometry digest of a named cell.",
+      "modules": [
+        "klayout_tools.cli.cell_hash_cmd"
+      ]
+    },
     "cells": {
       "kind": "verb",
       "description": "`klt cells` implementation: core modules plus CLI adapter.",
@@ -116,6 +123,7 @@
         "klayout_tools.cli.deck_cmd",
         "klayout_tools.cli.parsers.deck",
         "klayout_tools.deck_diff",
+        "klayout_tools.decks.enforced_rules",
         "klayout_tools.decks.history"
       ]
     },
@@ -332,6 +340,7 @@
         "klayout_tools.functional_verification_mutation_proposals",
         "klayout_tools.functional_verification_mutation_variant",
         "klayout_tools.functional_verification_pdk",
+        "klayout_tools.functional_verification_results",
         "klayout_tools.functional_verification_run_inputs",
         "klayout_tools.functional_verification_run_results",
         "klayout_tools.functional_verification_sdf",
@@ -1250,6 +1259,11 @@
       "consumer": "arith_gen",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "cell-hash",
+      "exporter": "cli-infra",
+      "reason": "The cell-hash command uses the shared text and JSON output helpers."
     },
     {
       "consumer": "cells",
