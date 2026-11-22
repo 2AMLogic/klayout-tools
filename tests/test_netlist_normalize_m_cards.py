@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from klayout_tools.netlist_normalize import normalize_reference_netlist
+from klayout_tools.netlist_normalize import (
+    convert_reference_netlist,
+    normalize_reference_netlist,
+)
 
 
 def test_sg13g2_m_cards_map_to_deck_classes():
@@ -47,3 +50,19 @@ def test_x_card_output_unchanged_alongside_m_cards():
         x + "M2 d g s b nfet_03v3 w=1u l=1u\n", deck="gf180mcu"
     )
     assert mixed.startswith(only_x)
+
+
+@pytest.mark.parametrize("deck", ["gf180mcu", None])
+@pytest.mark.parametrize("voltage", ["06v0", "05v0"])
+def test_subckt_call_conversion_flavour_classes_gf180mcu_pair(deck, voltage):
+    ref = (
+        ".subckt top d g s b\n"
+        f"XM1 d g s b nfet_{voltage} L=0.7u W=1u\n"
+        f"XM2 d g s b pfet_{voltage} L=0.5u W=2u\n"
+        "X3 d g s b nfet_03v3 L=0.28u W=1u\n"
+        ".ends\n"
+    )
+    text = convert_reference_netlist(ref, deck=deck, mos_flavour_classes=True).text
+    assert "M1 d g s b nfet__06v0 L=0.7U W=1U" in text.splitlines()
+    assert "M2 d g s b pfet__06v0 L=0.5U W=2U" in text.splitlines()
+    assert " nfet " in text

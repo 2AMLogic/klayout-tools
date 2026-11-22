@@ -16,7 +16,12 @@ Design notes (additive envelope, not a wrapping one):
 - ``--format json`` output on success goes to **stdout only**; on error, the
   JSON error object goes to **stderr**, and stdout is left empty. This means
   a caller never has to inspect stdout content to distinguish success from
-  failure under ``--format json`` — check the exit code.
+  failure under ``--format json`` — check the exit code. That error stderr
+  carries the envelope *alone*: under ``--format json`` klt's human-readable
+  warnings are deferred for the invocation and dropped ahead of an
+  application error, so parsing the whole stream yields exactly one JSON
+  document, while report-producing runs still deliver them to stderr
+  (issue #6935, :mod:`klayout_tools._warn`).
 - ``--format text`` is a courtesy rendering, not the contract: success calls
   a command-supplied ``text_renderer`` callback, and errors print a plain
   ``klt <command>: <message>`` line to stderr, matching pre-existing
@@ -40,6 +45,8 @@ import json
 import sys
 from collections.abc import Callable, Iterator
 from typing import Any
+
+from .. import _warn
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
@@ -87,6 +94,10 @@ def emit_success(
     character stdout cannot encode prints as a ``\\uXXXX`` escape rather than
     aborting the render (:func:`_printable_stdout`).
     """
+    # Issue #6935: this invocation produced a report, so any warning deferred
+    # for it is delivered now -- to stderr, ahead of the payload, leaving
+    # both streams exactly as documented (advisory visible, no envelope).
+    _warn.flush()
     if format == "json":
         json.dump(payload, sys.stdout, indent=2)
         print()
@@ -366,6 +377,9 @@ def emit_error(
     ``code`` it appears only in the JSON envelope and only when set.
     """
     if format == "json":
+        # Issue #6935: stderr belongs to this one document -- warnings
+        # deferred for the invocation are dropped, never prefixed to it.
+        _warn.discard()
         error: dict[str, Any] = {"command": command, "message": message}
         if code is not None:
             error["code"] = code
@@ -375,6 +389,9 @@ def emit_error(
         json.dump(error_payload, sys.stderr, indent=2)
         print(file=sys.stderr)
     else:
+        # Text is not the contract, but the advisory stays visible ahead of
+        # the plain-text error line (issue #6935).
+        _warn.flush()
         print(f"klt {command}: {message}", file=sys.stderr)
     return exit_code
 

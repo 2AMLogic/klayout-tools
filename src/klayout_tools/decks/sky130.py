@@ -2698,10 +2698,9 @@ PARASITICS = ParasiticsDeck(
         ),
         # met2 (issue #508). sheet: `resist (allm2)/metal2` in the same
         # nominal `variants (),(orig),(si)` block as met1 above (125
-        # milliohms/sq = 0.125 ohm/sq -- identical to met1's own value in
-        # that block); area/perim from the matching nominal
-        # `defaultareacap`/`defaultperimeter allm2 metal2` entries (17.5
-        # aF/um^2, 37.76 aF/um).
+        # milliohms/sq = 0.125 ohm/sq, identical to met1's own value in that
+        # block); area/perim from the matching nominal `defaultareacap`/
+        # `defaultperimeter allm2 metal2` entries (17.5 aF/um^2, 37.76 aF/um).
         LayerRC(
             sheet_res_ohm_sq=0.125,
             sheet_res_high_ohm_sq=0.145,
@@ -2713,8 +2712,8 @@ PARASITICS = ParasiticsDeck(
         # nominal `variants (),(orig),(si)` block as met1/met2 above (47
         # milliohms/sq = 0.047 ohm/sq); area/perim from the matching nominal,
         # non-RERAM `defaultareacap`/`defaultperimeter allm3 metal3` entries
-        # (12.37 aF/um^2, 40.99 aF/um -- the `#else (!RERAM)` branch, the
-        # same branch met1/met2's own values above were transcribed from).
+        # (12.37 aF/um^2, 40.99 aF/um, the `#else (!RERAM)` branch met1/met2
+        # above were transcribed from too).
         LayerRC(
             sheet_res_ohm_sq=0.047,
             sheet_res_high_ohm_sq=0.056,
@@ -2724,8 +2723,8 @@ PARASITICS = ParasiticsDeck(
         ),
         # met4 (issue #619). sheet: `resist (allm4)/metal4`, same nominal
         # block and `#ifdef METAL5` guard sky130.tech wraps met4/met5 in (47
-        # milliohms/sq = 0.047 ohm/sq -- identical to met3's own value in
-        # that block); area/perim from the matching nominal, non-RERAM
+        # milliohms/sq = 0.047 ohm/sq, identical to met3's own value in that
+        # block); area/perim from the matching nominal, non-RERAM
         # `defaultareacap`/`defaultperimeter allm4 metal4` entries (8.42
         # aF/um^2, 36.68 aF/um).
         LayerRC(
@@ -2754,12 +2753,12 @@ PARASITICS = ParasiticsDeck(
     # (L5132-5138); high-R: `variants (hrhc),(hrlc)` (L5180-5186); low-R:
     # `variants (lrhc),(lrlc)` (L5228-5234). The high/low *metal* sheet
     # resistances on `metals` above are from L5166-5170 / L5214-5218 (li1 is
-    # `allli`, L5165 / L5213; nominal L5117-5122). Unlike gf180mcu the cuts
-    # differ per layer.
+    # `allli`, L5165 / L5213; nominal L5117-5122); cuts differ per layer.
     # `lower_metal_index` is the level the cut lands on: mcon = li1->met1,
     # m2c = met1->met2, m3c = met2->met3, via3 = met3->met4, via4 =
-    # met4->met5. Not curated: the diffusion/poly contacts (`ndc`, `pdc`,
-    # `pc`, ...), `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack).
+    # met4->met5. Not curated: the diffusion contacts (`ndc`, `pdc`, ...),
+    # `mimcc`/`mim2cc`, and `mrdlc` (RDL, outside this stack); the poly
+    # contact is `poly_contact` below.
     cuts=(
         CutRC("mcon", 0, nominal_ohm=9.3, high_ohm=23.0, low_ohm=1.6),
         CutRC("m2c", 1, nominal_ohm=4.5, high_ohm=15.0, low_ohm=2.0),
@@ -2767,6 +2766,13 @@ PARASITICS = ParasiticsDeck(
         CutRC("via3", 3, nominal_ohm=3.41, high_ohm=8.0, low_ohm=0.5),
         CutRC("via4", 4, nominal_ohm=0.38, high_ohm=0.891, low_ohm=0.012),
     ),
+    # The poly->li1 contact (licon, issue #6917): `contact pc,xpc` in the
+    # same three corner blocks as `cuts` above -- nominal `152000` (L5131),
+    # high-R `252000` (L5179), low-R `52000` (L5227), milliohm per cut /
+    # 1000. A separate field, not a `cuts` row: `cuts` is keyed by
+    # `lower_metal_index` between two metals, and poly is not one, so the
+    # index is unused here.
+    poly_contact=CutRC("pc", 0, nominal_ohm=152.0, high_ohm=252.0, low_ohm=52.0),
     # `defaultoverlap` vertical plate-coupling coefficients (issue #760,
     # Extract Stage 2a): entry `i` is the coefficient between `metals[i]`
     # (lower plate) and `metals[i+1]` (upper plate), so a fully-populated
@@ -2783,10 +2789,9 @@ PARASITICS = ParasiticsDeck(
     # `... nwell,pwell well` and `... allpolynonres active` rows describe
     # overlap onto the substrate/poly the existing `cap_area_ff_um2` ground
     # term already covers, and its non-adjacent rows (e.g. `allm3 metal3
-    # allm1 metal1`) are Stage 2's non-adjacent-level extension, not this one.
-    #
-    # Magic states these in aF/um^2; divided by 1000 to fF/um^2, matching
-    # `cap_area_ff_um2`'s convention above.
+    # allm1 metal1`) are Stage 2's non-adjacent-level extension, not this
+    # one. Magic states these in aF/um^2; divided by 1000 to fF/um^2,
+    # matching `cap_area_ff_um2`'s convention above.
     metal_overlaps=(
         # li1 (idx0) <-> met1 (idx1): `defaultoverlap allm1 metal1 allli
         # locali 114.20`.
@@ -2809,13 +2814,11 @@ PARASITICS = ParasiticsDeck(
     # same-layer coupling (unlike `metal_overlaps`' adjacent-*pair*
     # indexing), so this table has `len(metals)` = 6 entries for this
     # li1..met5 stack. First parameter only (aF/um, divided by 1000 to
-    # fF/um to match `cap_perim_ff_um`'s convention) -- the second
-    # parameter's exact magic distance/scaling semantics are an open
-    # question (docs/design/extract-fidelity-roadmap.md's open question #1),
-    # deliberately not transcribed here (see `metal_sidewall_lookback_um`
-    # below for what this deck uses instead). Transcribed from the same
-    # nominal `variants (),(orig),(si)` block `metal_overlaps` above is
-    # sourced from.
+    # fF/um to match `cap_perim_ff_um`'s convention); the second parameter's
+    # exact magic semantics are an open question (roadmap open question #1),
+    # deliberately not transcribed (see `metal_sidewall_lookback_um` below
+    # for what this deck uses instead). Same nominal `variants (),(orig),
+    # (si)` block `metal_overlaps` above is sourced from.
     metal_sidewalls=(
         # li1 (idx0): `defaultsidewall allli locali 25.5 0.14`.
         0.0255,
@@ -2834,21 +2837,18 @@ PARASITICS = ParasiticsDeck(
     # this deck's own same-layer minimum-spacing DRC rule for that level (see
     # `DECK` above), not magic's own `defaultsidewall` second parameter (see
     # `metal_sidewalls`' comment above for why). Exactly the bare minimum
-    # spacing itself was tried first and rejected: a `separation_check(d)`
-    # only reports edges *closer than* `d`, so a lookback of exactly the
-    # legal minimum can only ever fire on a DRC-*illegal* layout (impossible
-    # on anything `klt drc`-clean) -- measured directly on the routed `gcd`
-    # corpus fixture (`tests/corpus/place_and_route/gcd.gds.gz`) via a raw
-    # `Region.space_check` self-scan per layer: **zero** same-layer facing
-    # pairs at 1x minimum spacing on every populated level (li1/met1/met2/
-    # met3/met4), vs. thousands at 2x (e.g. li1: 0 -> 17 668, met1: 0 -> 7
-    # 793) -- i.e. real detail-routed pitch on this design sits at roughly
-    # double the bare DRC minimum, not at it. 2x is a simple, round,
-    # empirically-grounded choice that captures genuinely near-neighbour
-    # routing on a DRC-clean layout; it is not a decode of magic's own
-    # second parameter (still an open question), and a narrower or
-    # differently-shaped lookback model is a named follow-on, not this
-    # issue's scope.
+    # spacing was tried first and rejected: a `separation_check(d)` only
+    # reports edges *closer than* `d`, so a 1x lookback can only fire on a
+    # DRC-*illegal* layout -- measured directly on the routed `gcd` corpus
+    # fixture (`tests/corpus/place_and_route/gcd.gds.gz`) via a raw
+    # `Region.space_check` self-scan per layer: zero same-layer facing pairs
+    # at 1x minimum spacing on every populated level (li1/met1/met2/met3/
+    # met4) vs. thousands at 2x (li1: 0 -> 17 668, met1: 0 -> 7 793), i.e.
+    # real detail-routed pitch sits at roughly double the bare minimum, not
+    # at it. 2x is a round, empirically-grounded choice that captures
+    # genuinely near-neighbour routing on a DRC-clean layout; it is not a
+    # decode of magic's second parameter (still an open question), and a
+    # narrower lookback model is a named follow-on, not this issue's scope.
     metal_sidewall_lookback_um=(
         0.34,  # li1 (idx0): 2x `li1.space.1` (0.17).
         0.28,  # met1 (idx1): 2x `met1.space.1` (0.14).

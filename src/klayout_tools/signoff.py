@@ -54,7 +54,6 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
-from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -84,10 +83,12 @@ from .signoff_artifact import (
     report_artifact_unavailable,
     unavailable_is_unresolved,
 )
+from .signoff_artifact import (
+    resolve_input_artifact_value as _resolve_input_artifact_value,
+)
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
-# that requires them machine-derived (issue #5462); out of this file for its
-# size-ratchet ceiling, same as `signoff_multi_member` and `signoff_na`.
+# requiring them machine-derived (#5462); out of file for its size ceiling.
 from .signoff_attest_binding import attestation_record
 from .signoff_attest_canonical_yaml import rehash_checks as _rehash_yaml
 
@@ -111,8 +112,13 @@ from .signoff_coverage_disclosure import (
 )
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
+    _maybe_record_failed_sim,
+    _record_envelope,
+    _remember_envelope,
+    _sim_coverage_counts,
+    _sim_no_limits_applied,
     asserted_rows,
-    credited_rows,
+    member_credited_rows,
     multi_row_info,
     read_require_derived_rows,
 )
@@ -231,10 +237,10 @@ from .signoff_na import (
     _na_statistical_detail,
 )
 
-# The cited `klt pex` envelope's extraction disclosures (issues #1983, #6559),
-# split out of this file for its size-ratchet ceiling and re-imported by name so
-# `signoff.<name>` keeps resolving.
+# The cited `klt pex` envelope's extraction disclosures (issues #1983/#6559)
+# and its item-7 parasitics gate (#6606), split out for the size-ratchet ceiling.
 from .signoff_pex_disclosure import _pex_body_bias_disclosure, _pex_engine_disclosure
+from .signoff_pex_disclosure import parasitic_free_refusal as _parasitic_free
 
 # T1 item 11's ("Power delivery (structural)") grading subsystem lives in its
 # own module (issue #2626, split out of this one at ~7600 lines), following
@@ -1095,16 +1101,12 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: "re-run the check"): here nothing was ever recorded to compare against,
 #: so the remedy is different -- "re-produce this evidence with a producer
 #: that records provenance" (or unpin `content_hash` for this entry), not
-#: "re-run the same producer again". A `klt yield` envelope is unaffected by
-#: this distinction: :func:`_yield_samples_content_hash` supplies a computed
-#: fallback hash whenever its samples document can be found -- resolved
-#: relative to the report file's own directory first, falling back to this
-#: process's own working directory for compatibility (issue #2197) -- so its
-#: ``resolution["content_hash"]`` is ``None`` for that reason alone only when
-#: the named document could not be located in *either* place (see
-#: ``resolution["content_hash_unresolved"]``, which then names what was
-#: named and where this looked, so that case stays distinguishable from an
-#: envelope that recorded no samples document at all).
+#: "re-run the same producer again". For yield, :func:`_yield_samples_content_hash`
+#: looks for the samples beside the report, then in the working directory
+#: (#2197). If both disk lookups fail, it tries the declared store manifest
+#: (#5963). When none resolves, the digest is null. For a named samples
+#: document, ``content_hash_unresolved`` records the searched paths and,
+#: if a declared manifest lookup failed, its path and the failure reason.
 #:
 #: Issue #2496 adds a third route to both of these two reasons, item 11
 #: only: :func:`_erc_supply_spec_hash_reason` re-hashes the **spec**
@@ -2761,27 +2763,6 @@ def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
     return None if _erc_connectivity_state(envelope) is not None else refusal
 
 
-def _sim_coverage_counts(envelope: Mapping[str, Any]) -> tuple[int, int] | None:
-    """``(measurements_declared, measurements_with_limits)`` off a `klt sim`
-    envelope's ``coverage`` block, or ``None`` when absent or non-integer
-    (pre-coverage evidence keeps grading exactly as before)."""
-    block = envelope.get("coverage")
-    if not isinstance(block, dict):
-        return None
-    declared = block.get("measurements_declared")
-    limited = block.get("measurements_with_limits")
-    if type(declared) is not int or type(limited) is not int:
-        return None
-    return declared, limited
-
-
-def _sim_no_limits_applied(envelope: Mapping[str, Any]) -> bool:
-    """Whether a `klt sim` envelope declares measurements yet none carry a
-    ``limits`` bound (issue #3769). ``capture_only`` runs declare none."""
-    counts = _sim_coverage_counts(envelope)
-    return counts is not None and counts[0] > 0 and counts[1] == 0
-
-
 def _drc_rule_subset(envelope: Mapping[str, Any]) -> bool:
     """Whether a `klt drc` envelope declares a deliberate ``--rules`` subset
     (issue #2768) -- a run that executed only some of its deck's registered
@@ -3212,6 +3193,7 @@ def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
 
 
 def _kind_gated_check(
+    item_id: int | None,
     check_kind: str,
     envelope: dict[str, Any],
     *,
@@ -3220,28 +3202,26 @@ def _kind_gated_check(
 ) -> tuple[str | None, bool]:
     """Return ``(refusal, runset_rehash_unverifiable)`` for a passing envelope.
 
-    These checks apply only to kinds the item accepts
-    (:func:`_kind_is_accepted`):
+    Checks on accepted kinds (:func:`_kind_is_accepted`) run in this order:
 
-    - :data:`_REASON_NOTHING_CHECKED` (issue #1996) -- the envelope's own
-      ``coverage`` block reports ``nothing_checked: true``, so its passing
-      ``status`` was measured over nothing at all.
+    - :data:`_REASON_NOTHING_CHECKED` for vacuous coverage (issue #1996).
+    - Item 7 refuses a pex leg that carried no parasitics.
     - :func:`check_runset` -- the pinned-runset check for LVS evidence.
-    - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
-      the item requires.
+    - :data:`_REASON_NOT_POST_LAYOUT` when the item requires a post-layout run.
     - :data:`_REASON_UNDERSIZED_SAMPLE` /
       :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED` (issue #2467) -- the
       cited `klt yield` campaign's own ``sample_size.verdict`` says its
       estimate is not sized, or its own declared negative control did not
       detect the seeded degradation. See :func:`_yield_campaign_refusal`.
 
-    :func:`_check_passed` runs before these checks. Within this gate,
-    ``nothing_checked`` comes first and the yield campaign check comes last.
+    :func:`_check_passed` precedes this gate. Coverage is first and yield is last.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None, False
     refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
+        return refusal, False
+    if item_id == 7 and check_kind == "pex" and (refusal := _parasitic_free(envelope)):
         return refusal, False
     rehash_unverifiable = False
     if check_kind == "lvs":
@@ -4873,78 +4853,6 @@ def _yield_samples_content_hash(
     return None, unresolved, None, None
 
 
-def _resolve_input_artifact_value(
-    value: Any,
-    spec: Mapping[str, Any],
-    evidence_dir: str | None,
-    repo_root: str | Path | None = None,
-) -> list[str]:
-    """Every filesystem path one input-artifact field's raw envelope
-    ``value`` could mean **from this grading context** -- ``[]`` when the
-    value's shape cannot be resolved here. Shared by every per-field branch
-    in :func:`_input_artifact_candidates`, native and ``generic`` alike, so
-    the two agree on exactly one resolution convention.
-
-    A path an envelope names is not portable: it was written relative to
-    whatever directory the producing run used, which is not necessarily the
-    one grading happens in. Rather than guess a single interpretation, this
-    returns each plausible one and lets :func:`_verify_input_artifact`
-    prefer a *match* over a mismatch, so a coincidentally same-named file
-    beside the envelope can never turn a genuinely fresh citation into a
-    reported mismatch:
-
-    - as the producing run itself named it -- :func:`_resolve_relative_to_spec`
-      (``spec["cwd"]`` for a command-backed entry, this process's cwd
-      otherwise), the same convention `klt drc --check`/`klt lvs --check`
-      re-hash a committed report under;
-    - relative to the **evidence file's own directory**, for a file-backed
-      entry. This is the case the two ``--check`` modes document as a known
-      limitation (``lvs.py``): ``klt lvs`` echoes ``layout``/``reference``
-      exactly as the *request document* gave them, so evidence committed
-      beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
-      ``layout.spice``) is only resolvable this way.
-
-    The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
-    `klt pex`'s ``layout``; issue #2879 -- `klt sta` schema 2's
-    ``def_path``/``verilog_path``; issue #2403 -- a ``generic`` envelope's
-    opt-in ``provenance.input.path``) is resolved against the repo root discovered
-    from the evidence file's own location, which is what ``scope: "repo"``
-    means by construction. ``scope: "external"`` carries no path at all (it
-    is ``null`` on purpose, so a host-specific absolute path never lands in
-    committed evidence) and is therefore unresolvable here -- correctly
-    reported as "not verified" rather than guessed at.
-
-    ``repo_root`` (``klt signoff --repo-root``, issue #2878) names that root
-    explicitly and replaces the discovery: evidence graded outside any git
-    checkout (a source archive, a vendored copy, an unpacked CI artifact)
-    has no ``.git`` ancestor to find, so every repo-scoped path would be
-    unresolvable without it. The caller validates the directory exists --
-    an explicit root is never second-guessed by a ``.git`` walk here.
-
-    A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
-    tried only as written: it is never re-rooted by stripping a guessed host
-    prefix, so it verifies only where that exact path still exists.
-
-    **The grading basis is the git index, not the working tree** (issue
-    #5857): a candidate inside a functioning checkout whose index does
-    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
-    holds the contract and the fallbacks.
-    """
-    candidates: list[str] = []
-    local = materialize_citation(value)
-    if local is not None:
-        return [local]
-    if isinstance(value, str) and value:
-        candidates.append(_resolve_relative_to_spec(value, spec))
-        if evidence_dir is not None and not os.path.isabs(value):
-            candidates.append(os.path.join(evidence_dir, value))
-    elif isinstance(value, Mapping) and value.get("scope") == "repo":
-        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
-    return [
-        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
-    ]
-
-
 def _input_artifact_candidates(
     kind: str,
     envelope: Mapping[str, Any],
@@ -5234,6 +5142,9 @@ def _grade_evidence(
         allowed_kinds=allowed_kinds,
     )
     if unmet is not None:
+        _maybe_record_failed_sim(
+            envelope_sink, unmet, check_kind, envelope, spec, resolution, allowed_kinds
+        )
         return unmet
 
     sta_refusal = sta_annotation_refusal(
@@ -5243,6 +5154,7 @@ def _grade_evidence(
         return sta_refusal
 
     kind_gated, rehash_unverifiable = _kind_gated_check(
+        item_id,
         check_kind,
         envelope,
         allowed_kinds=allowed_kinds,
@@ -5336,11 +5248,11 @@ def _grade_check_outcome(
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
         if applied is not None:
             return {"foundry_cell_exceptions": applied}, None
-        failure_detail = {
-            **failure_detail,
-            "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
-        }
+        failure_detail["foundry_cell_exceptions"] = {"applied": False, "lapsed": lapsed}
     reason = _non_passing_reason(kind, envelope, allowed_kinds=allowed_kinds)
+    if reason == _REASON_RUNSET_UNRECOGNISED_DEVICE:
+        # Issue #6902: name the recognition gaps (disclosure only).
+        failure_detail["runset_device_gaps"] = unrecognised_device_gaps(envelope)
     failure_detail.update(  # Issue #5692: name what was read (reverses #5479)
         vacuous.nothing_checked_item_detail(envelope, _citation(resolution))
         if reason == _REASON_NOTHING_CHECKED
@@ -6439,8 +6351,8 @@ def _build_tier_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     not_applicable: dict[str, Any] | None = None
-    # Issue #3778: the envelope of every ``met`` citation graded below, keyed
-    # by the spec's identity, for `_grade_multi_citation`'s `spec_row` check.
+    # Issue #3778: the envelope of every ``met`` citation graded below -- and
+    # every ``check_failed`` ``sim`` one (#6027) -- for the row credit.
     met_envelopes: dict[int, dict[str, Any]] = {}
 
     def grade_spec(
@@ -6456,7 +6368,6 @@ def _build_tier_item(
             generator_exec=generator_exec,
             envelope_sink=sink,
         )
-        _remember_envelope(met_envelopes, spec, sink)
         opt_in_items = (
             _OPT_IN_KIND_ITEMS.get(spec_citation["kind"])
             if spec_status == "met"
@@ -6470,6 +6381,7 @@ def _build_tier_item(
             and spec_citation["kind"] not in allowed_kinds
         ):
             return "unmet", _REASON_WRONG_KIND, None, spec_detail
+        _remember_envelope(met_envelopes, spec, sink)  # not for wrong_kind (#6027)
         # Issue #5789: refuse an item 3 whose declared coverage disagrees.
         return _item3_coverage_verdict(
             item_id,
@@ -6675,13 +6587,20 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``. With ``require_derived`` (issue
-    #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
-    row is not coverage: an otherwise passing set carrying one is
-    ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
-    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``;
-    so is ``require_coverage_invalid`` (issue #5789, via
-    :func:`_checked_multi_members`).
+    covered row ``derived`` or ``asserted``; a tagged, limited ``"reported"``
+    `klt yield` measurement additionally covers an unratified row (issue
+    #5490). With ``require_derived`` (issue #5462, the manifest's
+    ``require_derived_rows``, item 5 only) an asserted row is not coverage: an
+    otherwise passing set carrying one is ``unmet``/``partial_coverage`` with
+    ``detail.asserted_rows``. ``require_derived_invalid`` (a non-boolean key)
+    is ``invalid_evidence``; so is ``require_coverage_invalid`` (issue #5789,
+    via :func:`_checked_multi_members`).
+
+    Issue #6027: a ``check_failed`` ``sim`` member's envelope is captured too,
+    so its tagged, limited, passing rows join ``covered``/``row_sources`` as
+    ``derived`` and leave ``failed_rows``; the citation still grades
+    ``unmet`` with its own reason, and a named row whose tagged measurement
+    fails stays in ``failed_rows``.
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -6702,11 +6621,9 @@ def _grade_multi_citation(
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    # Rows each member is credited with, and whether that was machine-derived.
-    credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): credited_rows(rows, (met_envelopes or {}).get(id(spec)))
-        for spec, rows, _ in graded
-    }
+    # Rows each member is credited with, whether that was machine-derived,
+    # and the issue-#5490 `reported` case (needs kind + the unratified set).
+    credited = member_credited_rows(graded, met_envelopes, spec_rows)
     row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [
@@ -6997,24 +6914,6 @@ def _parse_multi_members(
                 return None, f"{where} 'rows' is not a non-empty list of strings"
         members.append((spec, rows))
     return members, None
-
-
-def _record_envelope(
-    sink: list[dict[str, Any]] | None, envelope: dict[str, Any]
-) -> None:
-    """Append ``envelope`` to ``sink`` when one was given (issue #3778)."""
-    if sink is not None:
-        sink.append(envelope)
-
-
-def _remember_envelope(
-    met_envelopes: dict[int, dict[str, Any]],
-    spec: dict[str, Any],
-    sink: list[dict[str, Any]],
-) -> None:
-    """Key the envelope a ``met`` grading captured by ``spec``'s identity."""
-    if sink:
-        met_envelopes[id(spec)] = sink[0]
 
 
 # --------------------------------------------------------------------------- #

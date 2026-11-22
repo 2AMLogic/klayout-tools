@@ -77,7 +77,7 @@ from ._report_verify import (
 from .env_provenance import find_repo_root, repo_relative_path
 from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
-from .pdk_cells import list_lib_corners
+from .pdk_sweep_corners import list_sweep_corners
 
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
@@ -1669,34 +1669,6 @@ def _audit_filler_masters(
     return _FILLER_CELLS.get(cell_library, ())
 
 
-def _select_sweep_corners(
-    corners: list[dict[str, Any]],
-    sweep_corners: list[str] | None,
-    cell_library: str,
-) -> list[dict[str, Any]]:
-    """Issue #1092: scope the sweep to `request.pdk.sweep_corners` when given
-    -- every requested name must actually be one of `cell_library`'s own
-    shipped corners, or this is a clear request error (matching this module's
-    existing unresolvable-request-field convention) rather than a
-    silently-dropped name."""
-    if sweep_corners is None:
-        return corners
-    available_names = {corner["name"] for corner in corners}
-    unknown_names = sorted(set(sweep_corners) - available_names)
-    if unknown_names:
-        raise PlaceAndRouteError(
-            "request.pdk.sweep_corners names unknown corner(s) "
-            f"{', '.join(unknown_names)} for cell_library "
-            f"'{cell_library}' -- available corners: "
-            + (
-                ", ".join(sorted(available_names))
-                if available_names
-                else "(none shipped)"
-            )
-        )
-    return [corner for corner in corners if corner["name"] in sweep_corners]
-
-
 def _run_single_corner(
     request_path: str,
     request: dict[str, Any],
@@ -2021,7 +1993,7 @@ def _run_single_corner(
                 completeness=parse_routing_completeness(completed.stdout),
                 placement=placement_routability,
                 detailed=detailed_route_convergence(metrics),
-                overflow_regions=grt_overflow(output_dir, hdl_toplevel, macros),
+                overflow=grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for setup/hold
@@ -2030,8 +2002,9 @@ def _run_single_corner(
             # `_corner_sweep_script_lines` explain why this is a separate
             # session rather than more Tcl appended above.
             assert io_spec is not None  # required to reach "route" (validated above)
-            corners = list_lib_corners(cell_library, pdk_info)
-            corners = _select_sweep_corners(corners, sweep_corners, cell_library)
+            corners = list_sweep_corners(
+                cell_library, pdk_info, PlaceAndRouteError, sweep_corners
+            )
             (
                 worst_setup_slack_ns,
                 worst_hold_slack_ns,

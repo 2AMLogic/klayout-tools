@@ -51,9 +51,12 @@ Design notes:
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from typing import Any
+
+from ._text import read_text
 
 #: ``power.placed.evidence`` when the DEF was read and parsed: every count
 #: in the block is a real measurement, and a ``0`` means zero.
@@ -119,11 +122,7 @@ def read_def_text(def_path: str) -> str | None:
     stray non-UTF-8 byte in a comment must not turn a readable file into
     "no evidence".
     """
-    try:
-        with open(def_path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
+    return read_text(def_path)
 
 
 def parse_def_component_masters(text: str) -> dict[str, int] | None:
@@ -447,14 +446,13 @@ def audit_power_delivery(
     special_nets = parse_def_special_nets(text)
     if special_nets is None:
         # A `SPECIALNETS` section that is present but structurally broken
-        # (record count disagrees with its header, or the file stops
-        # mid-record). Its grid cannot be measured, and a short read of it
-        # would grade as a *smaller but complete-looking* grid -- so the
-        # whole block is unavailable evidence, not a measurement.
+        # (count vs header mismatch, or a file stopped mid-record) is
+        # unavailable evidence, not a measurement -- a short read grades as
+        # a smaller-but-complete-looking grid; ``or ''`` narrows the type.
         return _unavailable_block(
             def_path,
-            f"DEF at {def_path} has a truncated or miscounted SPECIALNETS "
-            "section (its power grid cannot be measured)",
+            f"DEF '{os.path.basename(def_path or '')}' has a truncated or "
+            "miscounted SPECIALNETS section (its power grid cannot be measured)",
         )
     tapcells = masters.get(tapcell_master, 0) if tapcell_master else 0
     endcaps = masters.get(endcap_master, 0) if endcap_master else 0
@@ -502,13 +500,13 @@ def _read_placed_masters(
         return None, None, unavailable_reason or "no DEF was written by this run"
     text = read_def_text(def_path)
     if text is None:
-        return None, None, f"DEF at {def_path} could not be read"
+        return None, None, f"DEF '{os.path.basename(def_path)}' could not be read"
     masters = parse_def_component_masters(text)
     if masters is None:
         return (
             None,
             None,
-            f"DEF at {def_path} declares no COMPONENTS section "
+            f"DEF '{os.path.basename(def_path)}' declares no COMPONENTS section "
             "(truncated or not a DEF)",
         )
     return text, masters, None

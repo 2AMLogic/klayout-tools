@@ -41,6 +41,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import quote
 
 from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._openroad_engine import (
@@ -1066,12 +1067,9 @@ def _run_corner_sweep(
     corner_breakdown = []
     for corner in corners:
         corner_name = corner["name"]
-        corner_script_path = os.path.join(
-            output_dir, f"pnr_{hdl_toplevel}_route_corner_{corner_name}.tcl"
-        )
-        corner_metrics_path = os.path.join(
-            output_dir, f"{hdl_toplevel}_route_corner_{corner_name}_metrics.json"
-        )
+        stem = f"{hdl_toplevel}_route_corner_{quote(corner_name, safe='')}"
+        corner_script_path = os.path.join(output_dir, f"pnr_{stem}.tcl")
+        corner_metrics_path = os.path.join(output_dir, f"{stem}_metrics.json")
         corner_lines = _corner_sweep_script_lines(
             checkpoint_in=checkpoint_in,
             corners=[corner],

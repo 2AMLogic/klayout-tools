@@ -33,7 +33,6 @@ Three tiers:
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
 import os
@@ -8185,6 +8184,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
     import klayout.db as kdb
 
     from klayout_tools.cli import equiv_cmd, lvs_cmd
+    from klayout_tools.cli.parser import create_parser
 
     # The two verbs agree on the numeric value, by construction.
     assert lvs_cmd.EXIT_INCONCLUSIVE == equiv_cmd.EXIT_INCONCLUSIVE == 4
@@ -8205,19 +8205,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    args = argparse.Namespace(
-        request=path,
-        format="json",
-        check=None,
-        rerun=False,
-        deck=None,
-        deck_file=None,
-        deck_var=None,
-        layout=None,
-        reference=None,
-        progress=None,
-        output=None,
-    )
+    args = create_parser().parse_args(["lvs", path, "--format", "json"])
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"
@@ -8563,24 +8551,6 @@ def test_subckt_call_conversion_flavour_classes_split_only_flavoured_models():
     assert sum(" nfet__nvt " in f"{line} " for line in lines) == 1
     assert sum(" nfet__hvi " in f"{line} " for line in lines) == 2
     assert sum(" nfet " in f"{line} " for line in lines) == 1
-
-
-def test_subckt_call_conversion_flavour_classes_gf180mcu_pair():
-    from klayout_tools.netlist_normalize import convert_reference_netlist
-
-    ref = (
-        ".subckt top d g s b\n"
-        "X1 d g s b nfet_06v0 L=0.7u W=1u\n"
-        "X2 d g s b pfet_06v0 L=0.5u W=1u\n"
-        "X3 d g s b nfet_03v3 L=0.28u W=1u\n"
-        ".ends\n"
-    )
-    text = convert_reference_netlist(
-        ref, deck="gf180mcu", mos_flavour_classes=True
-    ).text
-    assert " nfet__06v0 " in text
-    assert " pfet__06v0 " in text
-    assert " nfet " in text
 
 
 # --------------------------------------------------------------------------- #
@@ -11539,11 +11509,12 @@ def test_normalize_si_and_eng_suffixes_convert_to_um():
     assert "W=1.5U" in out
 
 
-def test_normalize_unknown_subckt_name_fails_clearly():
+@pytest.mark.parametrize(
+    "deck,subckt", [("sky130", "totally_made_up"), ("gf180mcu", "nfet_06v0_dss")]
+)
+def test_normalize_unknown_subckt_name_fails_clearly(deck, subckt):
     with pytest.raises(NormalizeError, match="not a known"):
-        normalize_reference_netlist(
-            "XM1 d g s b totally_made_up L=0.5u W=1u\n", deck="sky130"
-        )
+        normalize_reference_netlist(f"XM1 d g s b {subckt} L=0.5u W=1u\n", deck=deck)
 
 
 def test_normalize_wrong_deck_device_name_fails():
@@ -12103,9 +12074,12 @@ def test_run_lvs_subckt_call_reference_converts_and_matches(tmp_path):
     assert report["mismatch_count"] == 0
 
 
-def test_run_lvs_subckt_call_reference_gf180_converts_and_matches(tmp_path):
+@pytest.mark.parametrize("voltage", ["03v3", "05v0", "06v0"])
+def test_run_lvs_subckt_call_reference_gf180_converts_and_matches(tmp_path, voltage):
     layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
-    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_GF180)
+    reference_path = _write(
+        tmp_path / "ref.spice", _INVERTER_SUBCKT_CALL_GF180.replace("03v3", voltage)
+    )
     request = {
         "layout": {"netlist": layout_path, "top": "inv"},
         "reference": {
@@ -12686,12 +12660,12 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
-    # (issue #5491), with the two antenna-diode keys that binding added.
-    # Both fully-curated decks are unchanged: no derived entry is added.
+    # For sg13g2's keys see test_extract_sg13g2_antenna_diodes.py (#5491).
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
+        "nfet_05v0",
+        "pfet_05v0",
         "nfet_06v0",
         "pfet_06v0",
         # Drain-extended LDMOS (issue #4570) -- curated in `pdk_models.py`.
@@ -12710,10 +12684,13 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        "efuse",  # read-only: `_RESISTOR_READ_ONLY_TABLE` (issue #4312)
         # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
         "cap_mim_2f0_m4m5_noshield",
+        # Their PDK fF/ff spellings (issue #7031) -- read-side aliases.
+        *(f"cap_mim_{d}{s}" for d in ("1f0", "1f5", "2f0") for s in ("fF", "ff")),
         # MOS capacitors (issue #2919) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_nmos_03v3",
         "cap_pmos_03v3",
@@ -12736,9 +12713,8 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
-        # Fixed-width wrapper family (issue #2459) -- curated, not derived,
-        # same discipline as gf180mcu's metal-resistor flavours above (see
-        # `_RESISTOR_FIXED_WIDTH_TABLE`).
+        # Fixed-width wrapper family (issue #2459) -- curated, not derived
+        # (see `_RESISTOR_FIXED_WIDTH_TABLE`), like the flavours above.
         "sky130_fd_pr__res_high_po_0p35",
         "sky130_fd_pr__res_high_po_0p69",
         "sky130_fd_pr__res_high_po_1p41",
@@ -25389,10 +25365,7 @@ def test_abstract_cells_reconstructed_request_and_rerun(tmp_path):
 
 _LVS_SCHEMA = json.loads(
     (
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "schemas"
-        / "lvs-response.schema.json"
+        Path(__file__).resolve().parents[1] / "docs/schemas/lvs-response.schema.json"
     ).read_text()
 )
 
@@ -25412,6 +25385,7 @@ _LVS_ALWAYS_REQUIRED = [
     "body_verification",
     "device_parameter_coverage",
     "mismatch_count",
+    "mismatches_omitted",
     "error_count",
     "category_counts",
     "category_error_counts",
