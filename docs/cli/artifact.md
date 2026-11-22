@@ -51,8 +51,10 @@ never falls back to a local copy or a direct store path.
 - **stat** answers `{key, exists, size}`.
 - **delete** answers any 200 JSON object. The broker owns authorization and
   any retention policy; the client has no list op, so it deletes only objects
-  it is told to name. A broker without `/v1/delete` answers a refusal, which
-  `klt` surfaces as `broker_refused` without retrying or falling back.
+  it is told to name. A broker without `/v1/delete` answers a route-level
+  refusal (404, 405 or 501) — since `stat` had already confirmed the object
+  present, `klt` surfaces that as `unsupported_operation` (exit 1).
+  Other refusals, including 403 and 503, keep `broker_refused`.
 - A **refusal** is `{"error", "message"}` with a 4xx or 5xx status. Examples
   are 403 `repo_firewalled`, `repo_unknown`, `not_granted` or `unknown_caller`,
   503 `fleet_unavailable`, 429, and 502 `store_error`.
@@ -334,6 +336,17 @@ With no `--keep`, the guard cannot run, and the output says so
 (`guard.checked: false`). An object that is already absent is `absent` and a
 success. Duplicate targets are collapsed.
 
+The broker must implement `POST /v1/delete`. If the delete call itself is
+refused with 404, 405 or 501 — `stat` had already reported the object
+present, so the route, not the object, is what is missing — `delete` exits
+`1` with `error.code: "unsupported_operation"`, whose `error` still carries
+`broker_status`, `broker_error` and `broker_message`, and whose message says
+the broker does not implement delete for that object. The command stops at
+the first refusal. If earlier deletes succeeded, the diagnostic lists their
+SHA-256 digests. If none succeeded, an unsupported-operation message says
+nothing was deleted. Other refusals, including 403 `not_granted` and
+503 `fleet_unavailable`, keep `error.code: "broker_refused"`.
+
 `--format json`: `{schema_version: 1, status: "dry_run"|"deleted", objects:
 [{sha256, key, status}], guard: {keep_manifests, checked, forced}}`; in a dry
 run each object also carries `exists`, `size` and `would_delete`. `status` is
@@ -370,7 +383,7 @@ Campaign outputs are cited the same way.
 | Code | Meaning |
 |---|---|
 | `0` | Done: stored, fetched and verified, every entry ok, or delete (dry run, deleted or absent) |
-| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
+| `1` | Not done: no broker, a broker refusal (`error.code: "broker_refused"` with `broker_status`, `broker_error` and `broker_message`; a route-level 404/405/501 on delete — a broker with no `/v1/delete` — is code `"unsupported_operation"` instead), a broker still rate-limiting after retries (`broker_rate_limited`), an unreachable broker (`broker_unreachable`), a malformed manifest, unreadable input, a `get` whose bytes failed verification, a `delete` of a still-referenced object (`still_referenced`), or — `verify --local` only — a run in which no entry resolved (`nothing_verified`) or an entry name escaping the verify root (`name_escapes_root`) |
 | `2` | Usage error |
 | `3` | `verify` only: at least one checked entry is missing or mismatched (broker-backed or `--local`) |
 

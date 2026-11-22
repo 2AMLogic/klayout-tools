@@ -26,7 +26,9 @@ Broker wire contract (the broker is not part of this repo):
   ``stat`` answers ``{exists, size}``. ``delete`` takes the ``stat`` body and
   answers any 200 JSON object; the broker owns authorization and retention.
 - A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
+  verbatim as :class:`ArtifactError` code ``broker_refused`` -- except a
+  route-level 404/405/501 on ``delete`` (no ``/v1/delete``), re-raised as
+  ``unsupported_operation``. HTTP 429 is
   retried with bounded backoff (honoring ``Retry-After``); when the retries run
   out it is code ``broker_rate_limited`` instead. There is no
   local fallback and no direct object-store path (no cloud SDK, no cloud
@@ -43,32 +45,9 @@ Two invariants hold everywhere in this module (as in :mod:`.artifact_verify`):
    recomputed sha256 matches both the digest that was asked for (the
    manifest's) and the digest the broker's object key names.
 
-Manifest format (``schema_version`` 1) -- written by ``put`` here, validated
-and verified by :mod:`.artifact_verify`::
-
-    {
-      "schema_version": 1,
-      "entries": [
-        {
-          "sha256": "<64 lowercase hex>",
-          "size": 1234,
-          "kind": "evidence",
-          "producer": {"tool": "klt", "version": "0.4.2",
-                       "loom.repo": "owner/name", "commit": "<git sha>"},
-          "uri": "artifact:<key>",
-          "name": "sim/run1/report.json",      # optional
-          "media_type": "application/json"     # optional
-        }
-      ]
-    }
-
-An entry carries exactly those fields. ``uri`` is a **logical** URI,
-``artifact:<key>``, that only the artifact broker resolves (operator ruling
-H1, 2AMLogic/2am#5553): ``<key>`` is the broker's own answer, verbatim, never
-assembled here, and nothing about the storage location (no bucket, no
-endpoint) is written, so a manifest stays safe to commit to a public repo.
-``get`` accepts that scheme only; any other ``uri`` is an
-``invalid_manifest``.
+``put`` writes the manifest documented in ``docs/cli/artifact.md#manifest``.
+Each ``artifact:<key>`` URI records the broker's key verbatim.
+Manifest validation and verification live in :mod:`.artifact_verify`.
 """
 
 from __future__ import annotations
@@ -422,6 +401,28 @@ def referenced_digests(keep_manifests: list[str]) -> dict[str, str]:
     return referenced
 
 
+UNIMPLEMENTED_DELETE_STATUSES = (404, 405, 501)
+
+
+def _delete_failure(exc: ArtifactError, objects: list[dict[str, Any]]) -> ArtifactError:
+    """Keep the broker details and identify any deletes confirmed before the refusal."""
+    code, message = exc.code, str(exc)
+    status = exc.details.get("broker_status")
+    if code == "broker_refused" and status in UNIMPLEMENTED_DELETE_STATUSES:
+        code = "unsupported_operation"
+        message = (
+            "the artifact broker does not implement the delete op for this object "
+            f"(HTTP {status}: {exc.details.get('broker_error')}: "
+            f"{exc.details.get('broker_message')})"
+        )
+    deleted = [row["sha256"] for row in objects if row["status"] == "deleted"]
+    if deleted:
+        message += "; previously deleted: " + ", ".join(deleted)
+    elif code == "unsupported_operation":
+        message += "; nothing was deleted"
+    return ArtifactError(message, code, dict(exc.details))
+
+
 def delete_objects(
     client: BrokerClient,
     targets: list[FetchTarget],
@@ -437,6 +438,12 @@ def delete_objects(
     referenced target refuses the whole batch with ``still_referenced``
     unless ``force_referenced``. An absent object is success. The client
     cannot enumerate the store, so only objects the caller names are touched.
+
+    A route-level 404/405/501 refusal on the ``delete`` call (no
+    ``/v1/delete`` route; ``stat`` had already confirmed the object present)
+    is re-raised as code ``unsupported_operation``; other refusals (403
+    authorization, 5xx) stay ``broker_refused``. A stat→delete race would be
+    misreported as it -- acceptable, since such a race deletes nothing anyway.
     """
     unique: dict[tuple[str, str, str], FetchTarget] = {}
     for target in targets:
@@ -475,10 +482,11 @@ def delete_objects(
             )
             continue
         if stat.exists:
-            client.call(
-                "delete",
-                {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
-            )
+            body = {"kind": target.kind, "repo": target.repo, "sha256": target.sha256}
+            try:
+                client.call("delete", body)
+            except ArtifactError as exc:
+                raise _delete_failure(exc, objects) from exc
         objects.append({**item, "status": "deleted" if stat.exists else "absent"})
     return {
         "status": "deleted" if yes else "dry_run",
