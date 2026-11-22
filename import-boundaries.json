@@ -1018,6 +1018,7 @@
         "klayout_tools.sim_snm_meas",
         "klayout_tools.sim_spiceinit",
         "klayout_tools.sim_staging",
+        "klayout_tools.sim_step_grading",
         "klayout_tools.sim_step_resolution",
         "klayout_tools.sim_step_shadow",
         "klayout_tools.sim_steps",
