@@ -445,7 +445,13 @@ unroutable. The higher planes are empty for row-of-generators blocks (each
 generator draws its pads on local interconnect), every routability check and
 the route-vs-route gate re-run in full against the candidate plane, and a
 leg draws at that plane's own deck-minimum width when the plan's
-`routing.width_um` is narrower. Nets that name their own plane
+`routing.width_um` is narrower. An automatic via ladder needs clear landing
+pads on every intervening layer at both ends. On the source layer the pad
+may touch the conductor under the declared port. A GF180A climb stops below
+the 30K top metal because its ordinary via ladder cannot ensure the required
+thick-metal array and enclosure. On GF180B the top-metal landing must cover
+at least 0.75 µm per side. On B, C and D the top backbone is at least 0.44 µm
+wide. Nets that name their own plane
 (`routing.nets[<net>].layer_role`, #1655) and caller-supplied `waypoints_um`
 paths are never climbed — "explicit wins". Still-unavailable levers: a
 per-group port-side hint (placing a group's supply pins on the side that

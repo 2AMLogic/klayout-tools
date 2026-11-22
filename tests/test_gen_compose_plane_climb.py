@@ -165,7 +165,10 @@ def test_gf180_climb_stops_at_the_selected_variant_upper_metal(variant, depth):
     deck = get_extraction_deck("gf180mcu")
     first = deck.metals[0]
     fixture = _same_facing_row_fixture(first)
-    geometry = _geometry_for_layer(fixture[2], deck.metals[:depth])
+    # Occupy each intermediate plane but leave the port landing clear.
+    # A solid upper-metal polygon under the via is an unrelated conductor.
+    inset = {name: {**box, "x1": box["x1"] - 1.5} for name, box in fixture[2].items()}
+    geometry = _geometry_for_layer(inset, deck.metals[:depth])
 
     def route(selected):
         return _climb_bundle(

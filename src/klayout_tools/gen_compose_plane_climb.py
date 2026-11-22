@@ -109,6 +109,8 @@ class PlaneClimbContext(NamedTuple):
     grid_um: float
     auto: bool
     width_aware_conflict: Any
+    landing_pad_side: Any
+    route_dbu: Any
 
     def retry_leg_on_cross_layer(
         self,
@@ -240,6 +242,84 @@ class PlaneClimbContext(NamedTuple):
         ladder, _ = _resolve_via_drop_layer(self.extraction_deck, plane, source)
         return bool(ladder)
 
+    def _pad_is_clear(
+        self,
+        box: Any,
+        drop: dict[str, Any],
+        layer: tuple[int, int],
+        plane: tuple[int, int],
+    ) -> bool:
+        """On the port plane, only metal connected at the declared port may overlap."""
+        import klayout.db as kdb
+
+        for block, bbox in self.placed_bboxes_um.items():
+            if block != drop["block_id"] and not box.touches(
+                kdb.DBox(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+            ):
+                continue
+            geometry = self.geometry_for_layer(layer)(block)[block]
+            if geometry is None:
+                continue
+            unit = geometry["dbu"]
+            pad = kdb.Region(box.to_itype(unit))
+            touched = geometry["region"].interacting(pad)
+            if touched.is_empty():
+                continue
+            # Only the declared port plane establishes pin ownership.
+            if (
+                block != drop["block_id"]
+                or layer == plane
+                or layer not in drop["terminal_landing_layers"]
+            ):
+                return False
+            pin = kdb.Point(round(drop["x_um"] / unit), round(drop["y_um"] / unit))
+            if any(not polygon.inside(pin) for polygon in touched.each_merged()):
+                return False
+        return True
+
+    def _landings_clear(
+        self, drops: list[dict[str, Any]], plane: tuple[int, int]
+    ) -> bool:
+        """Check the pads as drawn, on every hop including intermediate metals."""
+        import klayout.db as kdb
+
+        from .gen_compose_landing_pads import _make_landing_pad_side_um
+        from .gen_compose_routing import _drop_array_extra_um
+        from .gen_compose_via_cuts import landing_pad_half_dbu, via_drop_cut_side_um
+
+        if not drops:
+            return True
+        if self.pdk_variant is None:
+            return False
+        side = (
+            self.landing_pad_side
+            or _make_landing_pad_side_um(self.pdk_variant).drawn_side
+        )
+        dbu = self.route_dbu() if self.route_dbu is not None else 0.001
+        for drop in drops:
+            via = drop["via_layer"]
+            cut = via_drop_cut_side_um(self.pdk_variant, via)
+            cx, cy = (round(drop[key] / dbu) for key in ("x_um", "y_um"))
+            for layer in drop["landing_layers"]:
+                # A top-metal port can also be the source of a downward via.
+                if self.pdk_variant == "gf180mcuA" and layer == (42, 0):
+                    return False
+                size = side(layer, via, drop) + _drop_array_extra_um(drop)
+                if self.pdk_variant == "gf180mcuB" and layer == (46, 0) and size < 0.75:
+                    # Native MT.1/MT.4 on the 11K top need 0.44 um width and
+                    # 0.5625 um² area; accept a pad that meets both on its own.
+                    return False
+                half = landing_pad_half_dbu(size, cut, dbu)
+                box = kdb.DBox(
+                    (cx - half) * dbu,
+                    (cy - half) * dbu,
+                    (cx + half) * dbu,
+                    (cy + half) * dbu,
+                )
+                if not self._pad_is_clear(box, drop, layer, plane):
+                    return False
+        return True
+
     def _attempt_on(
         self, i: int, j: int, plane: tuple[int, int], leg_width_um: float
     ) -> dict[str, Any] | None:
@@ -253,6 +333,10 @@ class PlaneClimbContext(NamedTuple):
 
         if not all(self._can_land(index, plane) for index in (i, j)):
             return None
+        # The 3LM 30K top requires thick-metal enclosures and a via array.
+        # The ordinary one-cut ladder cannot guarantee those rules.
+        if self.pdk_variant == "gf180mcuA" and plane == (42, 0):
+            return None
         width_um = leg_width_um
         if (
             plane == self.cross_block_route_layer
@@ -263,6 +347,13 @@ class PlaneClimbContext(NamedTuple):
             floor = _min_width_um_for_layer(self.pdk_variant, plane)
             if floor is not None and width_um < floor[0]:
                 width_um = floor[0]
+        if (self.pdk_variant, plane) in {
+            ("gf180mcuB", (46, 0)),
+            ("gf180mcuC", (81, 0)),
+            ("gf180mcuD", (81, 0)),
+        }:
+            # The native 9K and 11K options both require 0.44 um (MT.1).
+            width_um = max(width_um, 0.44)
         conflict_check = (
             partial(self.width_aware_conflict, candidate_width_um=width_um)
             if self.width_aware_conflict is not None
@@ -284,7 +375,7 @@ class PlaneClimbContext(NamedTuple):
             block_geometry_for=fetch,
             grid_um=self.grid_um,
         )
-        if not retry["routed"]:
+        if not retry["routed"] or not self._landings_clear(retry["via_drops"], plane):
             return None
         if conflict_check is not None:
             conflict = conflict_check(

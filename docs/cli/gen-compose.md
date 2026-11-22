@@ -1154,7 +1154,11 @@ into the circuit.)
   `route_two_pin()` pass (every routability check, via-drop ladder included)
   against that plane's own drawn-block geometry, gated by the same
   route-vs-route check, and drawing at the plane's own deck-minimum width
-  when `routing.width_um` is narrower. The climb is off for a net that
+  when `routing.width_um` is narrower. Every via landing must clear unrelated
+  conductors in the placed cells across the entire ladder. Automatic climbs
+  skip GF180A's 30K top and require a top landing of at least 0.75 µm per
+  side on GF180B. The B/C/D top backbones use a minimum width of 0.44 µm.
+  The climb is off for a net that
   named its own plane (`connectivity[].layer_role`, #1655 "explicit wins")
   and for caller-supplied `waypoints_um` paths; a request that configured
   `routing.cross_block_layer_role` keeps that retry first, the climb

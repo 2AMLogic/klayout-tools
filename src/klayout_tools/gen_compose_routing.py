@@ -4036,6 +4036,8 @@ def route_bundle(
     pdk_variant: str | None = None,
     auto_plane_climb: bool = True,
     width_aware_conflict: Any = None,
+    landing_pad_side: Any = None,
+    route_dbu: Any = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4396,6 +4398,8 @@ def route_bundle(
         grid_um=grid_um,
         auto=auto_plane_climb,
         width_aware_conflict=width_aware_conflict,
+        landing_pad_side=landing_pad_side,
+        route_dbu=route_dbu,
     )
 
     legs: list[dict[str, Any]] = []

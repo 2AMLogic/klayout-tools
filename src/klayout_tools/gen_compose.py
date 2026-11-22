@@ -4182,6 +4182,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 pdk_variant=pdk_info["variant"],
                 auto_plane_climb=net_auto_climb,
                 width_aware_conflict=_leg_conflict,
+                landing_pad_side=side_for_pair.drawn_side,
+                route_dbu=_route_dbu,
             )
             notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
