@@ -254,8 +254,8 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
+from . import _sta_spef_inputs, env_provenance
 from . import _sta_timing_derate as _derate
-from . import env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
 from ._openroad_engine import (
@@ -303,6 +303,7 @@ from ._sta_period_maps import (
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
+    PostRouteStaError,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
@@ -540,18 +541,6 @@ _OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
 _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
 
 
-class PostRouteStaError(Exception):
-    """Raised when a standalone STA run cannot be completed: a missing/
-    malformed request file, an unresolvable DEF/``pdk.cell_library``/
-    ``corner``/LEF/SPEF, a missing clock constraint, or an OpenROAD engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other ``klt`` verb's own module-specific
-    error class (``PlaceAndRouteError``, ``SynthesizeError``, ...).
-    """
-
-
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sta`` request JSON file.
 
@@ -706,10 +695,10 @@ def run_sta(
             # Issue #3228: the map form (`{"min"|"nom"|"max": path}`) is the
             # interconnect axis of a liberty x interconnect matrix; there is
             # no single hoistable `spef_path` for it.
-            spef_map = _resolve_spef_map(spef_field, request_dir)
+            spef_map = _sta_spef_inputs.resolve_spef_map(spef_field, request_dir)
             spef_path = None
         else:
-            spef_path = _resolve_spef(spef_field, request_dir)
+            spef_path = _sta_spef_inputs.resolve_spef(spef_field, request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
     write_sdf = _validate_sdf(
         request.get("sdf"),
@@ -742,6 +731,7 @@ def run_sta(
         repo_root=env_provenance.find_repo_root(request_dir),
     )
     with report_paths.scrubbing_errors():
+        spef_hashes = _sta_spef_inputs.input_hashes(spef_path, spef_map)
         response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,
@@ -782,6 +772,7 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        _sta_spef_inputs.attach_hashes(response, spef_hashes)
         if boundary and "clock_driving_cell" in boundary:
             response["clock_driving_cell"] = boundary["clock_driving_cell"]
         attach_sdc_drift(  # issue #5236: opt-in, informational only
@@ -1902,53 +1893,6 @@ def _resolve_verilog(verilog_field: Any, request_dir: str) -> str:
         raise PostRouteStaError(
             f"could not read verilog '{verilog_field}': {exc}"
         ) from exc
-    return os.path.abspath(path)
-
-
-_INTERCONNECT_CORNERS = ("min", "nom", "max")
-
-
-def _resolve_spef_map(spef_field: dict[str, Any], request_dir: str) -> dict[str, str]:
-    """Issue #3228: validate map-form ``request.spef`` and return the engine
-    paths keyed by interconnect corner in canonical min/nom/max order."""
-    if not spef_field:
-        raise PostRouteStaError(
-            "request.spef must be a non-empty object when given as a map"
-        )
-    unknown = [key for key in spef_field if key not in _INTERCONNECT_CORNERS]
-    if unknown:
-        raise PostRouteStaError(
-            f"request.spef has unknown interconnect corner '{unknown[0]}' "
-            f"-- allowed keys are {', '.join(_INTERCONNECT_CORNERS)}"
-        )
-    resolved: dict[str, str] = {}
-    for key in _INTERCONNECT_CORNERS:
-        if key not in spef_field:
-            continue
-        value = spef_field[key]
-        if not isinstance(value, str) or not value:
-            raise PostRouteStaError(
-                f"request.spef.{key} must be a non-empty string when given"
-            )
-        path = value if os.path.isabs(value) else os.path.join(request_dir, value)
-        if not os.path.isfile(path):
-            raise PostRouteStaError(f"spef not found for request.spef.{key}: {value}")
-        resolved[key] = os.path.abspath(path)
-    return resolved
-
-
-def _resolve_spef(spef_field: Any, request_dir: str) -> str | None:
-    if spef_field is None:
-        return None
-    if not isinstance(spef_field, str) or not spef_field:
-        raise PostRouteStaError("request.spef must be a non-empty string when given")
-    path = (
-        spef_field
-        if os.path.isabs(spef_field)
-        else os.path.join(request_dir, spef_field)
-    )
-    if not os.path.isfile(path):
-        raise PostRouteStaError(f"spef not found: {spef_field}")
     return os.path.abspath(path)
 
 
