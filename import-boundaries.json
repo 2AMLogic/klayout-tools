@@ -157,6 +157,7 @@
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
         "klayout_tools._drc_edge_pair_hull",
+        "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
         "klayout_tools.drc_check_kinds",
@@ -617,6 +618,7 @@
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
@@ -1603,6 +1605,11 @@
       "consumer": "pdk",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "lvs",
+      "reason": "Issue #5827: `klt pdk decks` reports LVS runset globals with the runset harness's own reserved names (lvs_runset.RESERVED_RUNSET_VARS) folded in, so a deck listing cannot disagree with what `klt lvs` requires; imported lazily."
     },
     {
       "consumer": "pex",
