@@ -18,6 +18,7 @@ from test_op_sanity import (
     _SATURATED_NMOS,
     _SATURATED_PMOS,
     _install_fake_ngspice,
+    _three_corner_request,
     _write_request,
 )
 from test_sim import _isolate_pdk_search, _make_pdk_store
@@ -184,3 +185,21 @@ def test_print_op_lint_text_without_pdk_block_prints_no_pdk_line(capsys):
     out = capsys.readouterr().out
     assert "status: clean" in out
     assert "pdk:" not in out
+
+
+def test_cli_all_corner_text_reports_millivolts_and_failed_corner(
+    tmp_path, monkeypatch, capsys
+):
+    request = _three_corner_request(tmp_path)
+    marginal = {"XM1": {**_SATURATED_NMOS, "vds": 0.1}, "XM2": _SATURATED_PMOS}
+    _install_fake_ngspice(
+        monkeypatch, by_temp={27.0: _VALUES, 70.0: marginal, 125.0: None}
+    )
+
+    status = main(["sim", "--op-lint", "--op-lint-corner", "all", str(request)])
+
+    output = capsys.readouterr().out
+    assert status == 4
+    assert "default/1.800V/70C  -50.0 mV  device=XM1  triode=1" in output
+    assert "default/1.800V/125C  n/a  device=-  triode=0" in output
+    assert "nonconvergence: Error: no convergence" in output
