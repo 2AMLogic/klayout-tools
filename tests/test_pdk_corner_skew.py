@@ -10,15 +10,19 @@ lines must classify exactly as issue #3794's token-only classifier did --
 those decks' assertions are written as exact equality, not "is not typical".
 """
 
+import json
+
 import pytest
 
 from helpers.pdk_install_fixtures import isolate_pdk_search_space, make_install
-from klayout_tools import pdk
+from klayout_tools import pdk, sim
+from klayout_tools.cli import main
 from klayout_tools.pdk_corner_skew import (
     _differing_param_names,
     _param_lines,
     _prefix_flavour,
 )
+from test_sim_corner_coverage import _points
 
 _FILENAME = "sm141064.ngspice"
 
@@ -317,3 +321,49 @@ def test_prefix_flavour_uses_the_flavour_shape_rule():
     assert _prefix_flavour("rsh_nplus_u_m") == "nplus_u"
     assert _prefix_flavour("cap_mim_scale") == "mim"
     assert _prefix_flavour("noise_corner") == "noise_corner"
+
+
+@pytest.mark.parametrize(
+    ("typical", "slow", "skew"),
+    [
+        ("1 unused=1", "1 unused=2", "typical"),
+        ("1 unused=1", "2 unused=1", "param"),
+        ("1 unused=1", "1\n .param unused = 1", "typical"),
+        ("1 unused=1", "1 unused=", "unknown"),
+        ("1 unused=1", "1 unused=1 unused=2", "unknown"),
+        ("1 unused='a == b'", "1 unused='a == c'", "typical"),
+    ],
+)
+def test_grouped_assignments_in_pdk_cli_and_sim_coverage(
+    tmp_path, capsys, typical, slow, skew
+):
+    deck = _DECK_CONSUMED_PARAM.replace(
+        ".param nfet_06v0_vth0=0\n", f".param nfet_06v0_vth0={typical}\n"
+    ).replace(".param nfet_06v0_vth0=-0.1298\n", f".param nfet_06v0_vth0={slow}\n")
+    root = _install(tmp_path, deck)
+    assert (
+        main(
+            [
+                "pdk",
+                "corners",
+                "--pdk",
+                "gf180mcuD",
+                "--pdk-root",
+                str(root),
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert _devices(json.loads(capsys.readouterr().out), "ss")["06v0"] == skew
+
+    request = {"models": {"pdk": "gf180mcuD", "pdk_root": str(root)}}
+    env = sim._corner_coverage_environment(request, _points("typical", "ss"))
+    rows = env.get("corner_coverage", {}).get("sections", [])
+    assert any("06v0" in row.get("unmoved_devices", []) for row in rows) == (
+        skew == "typical"
+    )
+    assert any("06v0" in row.get("unknown_devices", []) for row in rows) == (
+        skew == "unknown"
+    )

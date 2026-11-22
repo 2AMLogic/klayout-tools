@@ -45,6 +45,7 @@ The ``devices[].skew`` values a flavour can take:
 * ``"unknown"`` -- undecidable (issue #5663): identical tokens, ``.param``
   values do differ from typical, but the flavour's sub-library body cannot
   be resolved in the deck and no differing param's name-prefix maps to it.
+  A changed parameter block with ambiguous assignments is also unknown.
   Reported as its own value -- never silently folded into ``"typical"``
   (the false "nothing moved" answer this issue fixes) -- and surfaced by
   ``klt sim`` under ``environment.corner_coverage``'s ``unknown_devices``
@@ -58,6 +59,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ._spice_tokens import split_spice_tokens
+
 #: Matches both a `.param` statement line and its `+`-prefixed ngspice
 #: line-continuations -- gf180mcu's `bjt_*`/`diode_*`/`res_*`/`moscap_*`
 #: sections write their assignments as a bare `.param` line followed by
@@ -65,11 +68,11 @@ from typing import Any
 #: not `.param name=value` on one line the way `mimcap_*` does.
 _PARAM_LINE_RE = re.compile(r"^\s*(?:\.param\b|\+)", re.IGNORECASE)
 
-#: Every ``name=`` assignment on one normalised ``.param`` line (a line may
-#: carry several). A quoted value expression containing ``=`` can smuggle in
-#: a stray match; that only ever *enlarges* the differing-name set, i.e. it
-#: errs toward reporting param evidence rather than suppressing it.
-_PARAM_ASSIGN_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=")
+#: The shared SPICE tokenizer keeps grouped expressions together. Accept only
+#: complete assignments; ambiguous syntax has no provable per-flavour skew.
+_PARAM_ASSIGNMENT = re.compile(
+    r"""([a-zA-Z_][a-zA-Z0-9_]*)=([^\s='";{}()]+|'[^']+'|"[^"]+"|\{[^{}]+\}|\([^()]+\))"""
+)
 
 
 def _param_lines(body: str) -> frozenset[str]:
@@ -100,20 +103,37 @@ def _param_lines(body: str) -> frozenset[str]:
     )
 
 
+def _parameter_values(lines: frozenset[str]) -> dict[str, str] | None:
+    """Read assignments from unordered lines, rejecting conflicting reassignments."""
+    values: dict[str, str] = {}
+    for line in lines:
+        for token in split_spice_tokens(_PARAM_LINE_RE.sub("", line, count=1)):
+            if token.startswith(";") or token == "$":
+                break
+            assignment = _PARAM_ASSIGNMENT.fullmatch(token)
+            if assignment is None:
+                return None
+            name, value = assignment.groups()
+            if values.setdefault(name.lower(), value) != value:
+                return None
+    return values
+
+
 def _differing_param_names(
     params: frozenset[str] | None, typical_params: frozenset[str] | None
-) -> frozenset[str]:
-    """The ``.param`` *names* whose normalised line differs between a
-    corner section and its family's typical section: the symmetric
-    difference of the two :func:`_param_lines` sets, reduced to the names
-    assigned on each differing line. ``None`` on either side (the
-    issue #3794 call shape -- no ``.param`` evidence) yields nothing."""
-    if params is None or typical_params is None:
+) -> frozenset[str] | None:
+    """Compare individual assignments. Return None when a value cannot be resolved."""
+    if params is None or typical_params is None or params == typical_params:
         return frozenset()
-    names: set[str] = set()
-    for line in params ^ typical_params:
-        names.update(_PARAM_ASSIGN_RE.findall(line))
-    return frozenset(names)
+    current = _parameter_values(params)
+    typical = _parameter_values(typical_params)
+    if current is None or typical is None:
+        return None
+    return frozenset(
+        name
+        for name in current.keys() | typical.keys()
+        if current.get(name) != typical.get(name)
+    )
 
 
 def _prefix_flavour(param_name: str) -> str:
@@ -131,8 +151,7 @@ def _unchanged_token_skew(
     flavour: str,
     tokens: set[tuple[str, str]],
     blocks: dict[str, str],
-    differing: frozenset[str],
-    lines_differ: bool,
+    differing: frozenset[str] | None,
 ) -> str:
     """Classify a flavour whose include tokens are identical to its typical
     corner's -- the case issue #5663 fixes. (A flavour whose tokens *moved*
@@ -142,7 +161,9 @@ def _unchanged_token_skew(
     carries for the flavour; ``blocks`` is the whole deck's
     ``{block_name: body}`` map (:func:`klayout_tools.pdk._parse_named_lib_blocks`).
     """
-    if not lines_differ:
+    if differing is None:
+        return "unknown"
+    if not differing:
         # No `.param` differs from typical: token-identical is provably
         # unmoved, with nothing param-shaped to decide (issue #3794
         # behaviour, preserved verbatim so token-only input classifies
@@ -153,7 +174,10 @@ def _unchanged_token_skew(
         consumed = {
             name
             for name in differing
-            if any(re.search(rf"\b{re.escape(name)}\b", body) for body in bodies)
+            if any(
+                re.search(rf"\b{re.escape(name)}\b", body, re.IGNORECASE)
+                for body in bodies
+            )
         }
         # Resolvable sub-library bodies are direct consumption evidence:
         # consuming a differing param is a real skew; consuming none is
@@ -218,11 +242,6 @@ def _flavour_devices(
     ``"unknown"``.
     """
     differing = _differing_param_names(params, typical_params)
-    lines_differ = (
-        params is not None
-        and typical_params is not None
-        and bool(params ^ typical_params)
-    )
     devices: list[dict[str, Any]] = []
     for flavour in sorted(set(flavours) | set(typical)):
         if flavour not in flavours:
@@ -233,7 +252,7 @@ def _flavour_devices(
             skew = "skewed"
         else:
             skew = _unchanged_token_skew(
-                flavour, flavours[flavour], blocks or {}, differing, lines_differ
+                flavour, flavours[flavour], blocks or {}, differing
             )
         devices.append(
             {
