@@ -14,6 +14,8 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
                       [--findings-only] [--omit-antenna-tables]
                       [--format text|json]
 klt erc --check <report> [--rerun] [--format text|json]
+klt erc --validate-spec <spec> [--format text|json]
+klt erc --pnr-response <run.json> [--format json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -72,6 +74,38 @@ klt erc --check <report> [--rerun] [--format text|json]
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
+
+## Generate a supply spec from a routed block
+
+Save the JSON response from a successful Sky130A or Sky130B HD standard-cell
+route with an explicit PDN. Generate and validate an editable spec offline,
+then run ERC on the GDS from that route.
+
+```sh
+klt erc --pnr-response run.json --format json > supply.json
+klt erc --validate-spec supply.json --format json
+klt erc routed.gds supply.json --findings-only --format json > erc.json
+```
+
+Generation writes the spec itself. It uses the Sky130 extraction deck's
+gate, active, li1–met5, label and cut layers. The n-well check requires
+a dedicated tap connected through a drawn licon1 cut to li1 and the power
+net. The response must identify the HD library, its tap master, a resolved
+Sky130 layer map and supported strap layers. Macro grids are outside this
+profile.
+
+For renamed supplies, `power.library_rail_labels` records which configured
+nets the applied global-connect rules tie to VPWR and VGND. The generator
+declares each renamed pair with `same_net_as`. Older responses work when
+both supplies already have their native names. If the mapping is missing
+for renamed supplies, rerun P&R or write and verify the aliases in your
+spec. A custom pin regex with ambiguous matches requires an explicit spec.
+
+Add any design-specific substrate regions, fill exclusions and exclusive
+layer ownership assertions after inspecting the block. Signal routing can
+share a strap layer. The generated n-well declaration does not cover the
+substrate. Read the layout run's `erc_findings` and `erc_coverage` to see
+which physical checks ran.
 
 ## Phase scope: what `klt erc` is, and what has shipped so far
 
