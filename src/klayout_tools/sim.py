@@ -487,9 +487,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
-        # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
-        # predates request fields, under `runner_version_check: "warn"`.
+        # Report-level batch runner version and request-feature checks.
         "batch_runner_request_feature_predated",
+        "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
