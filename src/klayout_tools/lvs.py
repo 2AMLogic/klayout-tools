@@ -239,6 +239,16 @@ from .lvs_power import (
     _with_stub_power_connectivity_reason,
 )
 from .lvs_reference_stage import _read_reference_stage
+from .lvs_replay import (
+    _anchor_top_level_pins_replay_options,
+    _combine_devices_max_attempts_replay_options,
+    _constant_nets_replay_hints,
+    _omit_mismatches_replay,
+    _reference_conversion_echo,  # noqa: F401 (re-export: lvs_report/lvs_runset)
+    _reference_conversion_replay,
+    _supply_nets_replay_options,
+    _validate_omit_mismatches,
+)
 from .lvs_report import assemble_lvs_report
 from .lvs_runset import RUNSET_ENGINE, run_lvs_klayout_runset
 from .lvs_short_nets import _short_nets_disclosure as _short_nets_disclosure
@@ -1228,6 +1238,7 @@ def run_lvs(
     deck_file: str | None = None,
     deck_vars: dict[str, str] | None = None,
     progress: bool | str = False,
+    omit_mismatches: bool = False,
 ) -> dict[str, Any]:
     """Run the netlist compare declared by ``request``.
 
@@ -1242,6 +1253,24 @@ def run_lvs(
     both a flag and its request field is a clean :class:`LvsError`.
 
     ``deck`` (issue #5733): the ``klt lvs --deck`` spelling of ``layout.deck``.
+
+    ``omit_mismatches`` (issue #5610) is the ``klt lvs --omit-mismatches``
+    CLI value for the compaction knob every verb with a verdict-bearing list
+    eventually needs (``klt erc`` has ``--omit-antenna-tables``): when true
+    -- given as the flag, as the request document's top-level boolean
+    ``omit_mismatches`` (the flag wins when both name it), or both -- the
+    response's ``mismatches[]`` is emitted as ``[]`` (the key stays present;
+    it is schema-required) beside a ``mismatches_omitted: true`` echo, while
+    ``status``, ``mismatch_count``, ``error_count``, ``category_counts``,
+    ``category_error_counts`` and the exit code keep their full-run values:
+    the compare still runs in full and the tally still runs over the full
+    list, only the per-entry echo is dropped, so a failing flat compare's
+    report stays committable. Omitted/false, the response is unchanged
+    apart from the always-present ``mismatches_omitted: false`` echo.
+    ``klt lvs --check`` verifies such a report as-is (cheap mode never reads
+    ``mismatches[]``), and ``--check --rerun`` replays the omission from
+    the report's own echo (see :func:`_reconstruct_lvs_request` /
+    :func:`_reconstruct_runset_request`).
 
     ``request`` accepts the same three forms every ``klt lvs`` request
     argument does (see :func:`load_request_arg` / docs/cli/lvs.md): a path
@@ -1491,6 +1520,12 @@ def run_lvs(
     _merge_deck_flags(loaded, engine, deck_file, deck_vars)
     _merge_layout_deck(loaded, deck)
     portable_paths = _validate_portable_paths(loaded.get("portable_paths"))
+    # Issue #5610: the request key is validated even when the CLI flag won,
+    # so a malformed value stays visible; the flag (a `store_true`, so it can
+    # only raise the value to `True`) takes precedence over the request
+    # field.
+    request_omit_mismatches = _validate_omit_mismatches(loaded.get("omit_mismatches"))
+    omit_mismatches = bool(omit_mismatches) or request_omit_mismatches
 
     layout_spec = request["layout"]
     if not isinstance(layout_spec, dict):
@@ -1500,14 +1535,8 @@ def run_lvs(
         raise LvsError("request.reference must be a JSON object")
 
     if engine == RUNSET_ENGINE:
-        # Issue #2849: the PDK's own runset does extraction and compare; the
-        # verdict is read back from its .lvsdb (see lvs_runset.py). Its
-        # report records klayout_binary as a basename in both modes (#5795,
-        # finishing what #3988 started for portable_paths).
-        return _finish_response(
-            run_lvs_klayout_runset(request, request_dir),
-            portable=portable_paths,
-            request_dir=request_dir,
+        return _run_runset_response(
+            request, request_dir, portable_paths, omit_mismatches
         )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
@@ -2010,6 +2039,7 @@ def run_lvs(
 
     return assemble_lvs_report(
         mismatches=mismatches,
+        omit_mismatches=omit_mismatches,
         status=status,
         engine=engine,
         engine_version=engine_version,
@@ -2052,6 +2082,20 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
+
+
+def _run_runset_response(
+    request: dict[str, Any],
+    request_dir: str,
+    portable_paths: bool,
+    omit_mismatches: bool,
+) -> dict[str, Any]:
+    """Apply compact output after the runset has tallied all findings."""
+    report = run_lvs_klayout_runset(request, request_dir)
+    report["mismatches_omitted"] = omit_mismatches
+    if omit_mismatches:
+        report["mismatches"] = []
+    return _finish_response(report, portable=portable_paths, request_dir=request_dir)
 
 
 def _finish_response(
@@ -2200,6 +2244,11 @@ def _reconstruct_runset_request(
     for key in ("deck_vars", "options"):
         if committed.get(key):
             request[key] = committed[key]
+    # Issue #5610: replay the omission from the committed report's own echo
+    # (same helper as `_reconstruct_lvs_request`; the runset's `options`
+    # echo carries no compaction knob, so without this a flagged runset
+    # report reruns uncompacted and reports its own blanked list as drift).
+    request.update(_omit_mismatches_replay(committed))
     return request
 
 
@@ -2405,112 +2454,18 @@ def _reconstruct_lvs_request(
     # Issue #3014: replay the applied `hints.constant_nets` bindings; other
     # hints are not echoed and stay best-effort (see the docstring).
     request.update(_constant_nets_replay_hints(committed))
+    # Issue #5610: replay the omission from the committed report's own
+    # `mismatches_omitted` echo, the way `klt erc --rerun` replays
+    # `antenna_tables_omitted` (`erc.py`) -- without it a compacted report
+    # (`mismatches: []`) diffs against a fresh, uncompacted list and reports
+    # false drift. This is a response echo replayed as a top-level request
+    # field (the field lives outside `options`, which only echoes
+    # compare-shaping inputs), so it deliberately does not go through the
+    # `_strict_top_level_pin_count_replay_options` helpers, which re-assert
+    # entries of the `options` block. A report without the echo replays
+    # uncompacted, exactly as it was produced.
+    request.update(_omit_mismatches_replay(committed))
     return request
-
-
-def _combine_devices_max_attempts_replay_options(
-    echoed: dict[str, Any],
-) -> dict[str, Any]:
-    """``{"combine_devices_max_attempts": <echoed value>}`` when the committed
-    report recorded one (issue #2682), else ``{}`` so a legacy report replays
-    at the parser's default. The value is passed through unmodified, so a
-    malformed recorded budget is rejected by the parser on replay rather than
-    silently becoming a valid one."""
-    key = "combine_devices_max_attempts"
-    return {key: echoed[key]} if key in echoed else {}
-
-
-def _reference_conversion_echo(
-    reference_form: str,
-    reference_spec: dict[str, Any],
-    pin_order_files: list[str] | None = None,
-) -> dict[str, Any]:
-    """``{"reference_conversion": {...}}`` for a ``subckt-call`` or
-    ``gate-level-verilog`` reference, else ``{}`` (issues #2673, #4353).
-
-    The conversion is a function of the reference file *and* this context, so
-    a report that records only the file cannot be replayed: ``--rerun`` would
-    re-read the simulation-form SPICE / structural Verilog as plain-element
-    SPICE. ``subckt-call`` echoes ``deck``/``device_map``; ``gate-level-
-    verilog`` echoes ``library``/``pdk``/``pdk_root`` and the *resolved*
-    ``pin_order_files`` (``null`` when omitted). Values are echoed as the
-    caller gave them.
-    """
-    if reference_form == "subckt-call":
-        return {
-            "reference_conversion": {
-                "form": reference_form,
-                "deck": reference_spec.get("deck"),
-                "device_map": reference_spec.get("device_map"),
-            }
-        }
-    if reference_form == "gate-level-verilog":
-        return {
-            "reference_conversion": {
-                "form": reference_form,
-                "library": reference_spec.get("library"),
-                "pdk": reference_spec.get("pdk"),
-                "pdk_root": reference_spec.get("pdk_root"),
-                "pin_order_files": list(pin_order_files) if pin_order_files else None,
-            }
-        }
-    return {}
-
-
-def _reference_conversion_replay(committed: dict[str, Any]) -> dict[str, Any]:
-    """The ``request.reference`` keys that rebuild a committed report's
-    ``reference_conversion`` echo (issues #2673, #4353); ``{}`` for a report
-    without one (every other form, and any committed before the echo existed
-    -- those stay best-effort, as documented)."""
-    echoed = committed.get("reference_conversion")
-    if not isinstance(echoed, dict):
-        return {}
-    if echoed.get("form") == "gate-level-verilog":
-        spec: dict[str, Any] = {"form": "gate-level-verilog"}
-        for key in ("library", "pdk", "pdk_root"):
-            if echoed.get(key) is not None:
-                spec[key] = echoed[key]
-        if isinstance(echoed.get("pin_order_files"), list):
-            spec["pin_order_files"] = list(echoed["pin_order_files"])
-        return spec
-    if echoed.get("form") != "subckt-call":
-        return {}
-    spec = {"form": "subckt-call"}
-    if echoed.get("deck") is not None:
-        spec["deck"] = echoed["deck"]
-    if isinstance(echoed.get("device_map"), dict):
-        spec["device_map"] = dict(echoed["device_map"])
-    return spec
-
-
-def _constant_nets_replay_hints(committed: dict[str, Any]) -> dict[str, Any]:
-    """``{"hints": {"constant_nets": {...}}}`` when the committed report
-    echoed applied bindings, else ``{}`` (issue #3014)."""
-    applied = committed.get("constant_nets_applied")
-    if isinstance(applied, dict) and applied:
-        return {"hints": {"constant_nets": dict(applied)}}
-    return {}
-
-
-def _anchor_top_level_pins_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
-    """``{"anchor_top_level_pins": <bool>}`` when the committed report echoed
-    an explicit value for it, else ``{}`` (issue #2692).
-
-    Includes ``false``: unlike every other option
-    :func:`_reconstruct_lvs_request` replays, omitting this one does **not**
-    mean "off" for every reference form -- a ``gate-level-verilog`` request
-    that omits it gets anchoring *on* (see
-    :func:`_anchor_top_level_pins_enabled`). Dropping an explicit ``false``
-    would therefore replay the original compare with anchoring turned on, and
-    report the resulting (correct, but different) verdict as drift.
-    """
-    requested = echoed.get("anchor_top_level_pins")
-    return {"anchor_top_level_pins": requested} if isinstance(requested, bool) else {}
-
-
-def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
-    names = echoed.get("supply_nets")
-    return {"supply_nets": list(names)} if isinstance(names, list) else {}
 
 
 #: `rerun_lvs_report`'s own exclusion set (issue #1223), layered on top of
@@ -2680,6 +2635,11 @@ def rerun_lvs_report(
             # Issue #1983: same rule -- a report committed before the
             # `body_verification` block existed cannot have drifted in it.
             "body_verification",
+            # Issue #5610: same rule -- a report committed before the
+            # `mismatches_omitted` echo existed cannot have drifted on it
+            # (the replay above leaves such a report uncompacted, so the
+            # only difference would be the fresh run's new `false` echo).
+            "mismatches_omitted",
         )
         if field not in committed
     )
