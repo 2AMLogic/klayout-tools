@@ -115,7 +115,8 @@ byte-identical, so no `schema_version` bump -- but a consumer that switches
 exhaustively on measurement `status` must treat `"absent"` as "no value, not a
 failure". `klt pex` `delta[].schematic_status` / `extracted_status` echo it
 (issue #3620): `"absent"` on exactly one side makes the row `status: "error"`;
-on both sides, `"pass"` -- `delta[].status` stays `pass|fail|error`. See
+on both sides, `"pass"`. For a schematic-only observation, `delta[].status`
+is `"skipped"` unless the schematic measurement errored. See
 [`docs/cli/sim.md`](cli/sim.md)'s "Optional measurements".
 
 `measurements[].crossings` (issue #2868) is the third form and the first
