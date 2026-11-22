@@ -164,6 +164,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   An nfet MV ring gets the marker growth too, and still draws no Nwell.
   Other families resolve no ring margin; 3.3V-only gf180mcu rings and
   tap pads keep their 0.15um default.
+- **`klt deck info` reports `enforced_rule_count`, and labels a curated
+  deck's hash truthfully** (#5843, 2026-11-17): each entry gains an additive
+  `enforced_rule_count` field — how many rules the deck's curated DRC rule
+  table enforces, the same count as the `rules:` header of `klt deck rules`
+  — so a provenance row built from `deck info` alone can state deck
+  coverage, not just its `NOT ENFORCED` remainder. It is `null` (present,
+  never omitted, never `0`) for a deck with no curated rule table
+  (`asap7`), keeping "enforces nothing" distinct from "has no rule table".
+  Text output prints `enforced_rules: N` directly above the existing
+  `NOT ENFORCED` line, and for a deck whose `provides` includes
+  `curated_drc` (sky130, gf180mcu, sg13g2, sg13cmos5l) relabels the deck
+  source hash `deck content_hash (extraction + curated DRC rule table)` — the pin
+  covers the primary module and its declared rule sources, so the hash is the identical value `klt deck
+  hash` and `klt deck rules` report and `deck info` alone is sufficient for
+  a provenance citation. `asap7`'s two-artifact rendering is unchanged. The
+  JSON field name `content_hash` does not change; `schema_version` stays
+  `1`.
+
 
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
@@ -831,6 +849,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   and the Verilog-top path. `path`/`scope` is the repo-relative shape, so a
   source outside the repo reads `{"path": null, "scope": "external"}` and never
   leaks a host path. No `schema_version` bump.
+- **`klt sim` gains `analysis.post_commands`** (#6080, 2026-11-17): an additive,
+  opt-in list of control commands (first token `linearize` or `fft` only) that a
+  scalar `tran` analysis emits after the analysis, `write` and `linearize`
+  lines and before the `expr` lets, so FFT-class benches read spectrum bins
+  without packing a multi-line string into `analysis.kind`. Refused (exit 1)
+  for non-`tran`, `analysis_steps[]`, `engine: "xyce"`, non-`expr`/`spice`
+  measurements, and malformed entries. A request using it needs a batch runner
+  at klt 0.9.3 or later. Requests without the field render a byte-identical deck.
 - **`klt signoff --attest 9`: a `cold_start` may be a list — several named
   cold starts over one inventoried file** (#5641, 2026-11-17): an item-9
   `testbenches[]` entry's `cold_start` now also accepts a non-empty list of
@@ -972,6 +998,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   `could not read samples '<path>': …` like every other unreadable input, and
   `run_yield` raises `YieldError` rather than leaking `zlib.error` at the
   library surface. No output-shape change; no `schema_version` bump.
+
+- **`klt signoff --manifest` item 6: a `reported` yield campaign now covers an
+  unratified spec row** (#5490, 2026-11-13): a `klt yield` measurement that
+  declares no `target_yield` has `status: "reported"` — it made no claim, so
+  nothing could fail — but item 6's derived-row reader credited a row only
+  from a `status: "pass"` tagged measurement. A row honestly declared
+  `ratified: false` and cited with a real campaign therefore came back in
+  `detail.uncovered_rows`, as if nobody had measured it, and the only
+  workaround was to invent a `target_yield` the campaign was known to clear.
+  A tagged, `limits`-bearing `reported` measurement of a `yield` envelope now
+  covers its row **when that row is `ratified: false`**, recorded
+  `row_sources: "derived"` like any other derived row. Deliberately scoped: a
+  ratified row is unaffected, `fail` / `insufficient_evidence` / no-`limits`
+  measurements still credit nothing, a citation the #2467 gates refuse still
+  credits nothing, and item 5 is untouched (`klt sim` never emits
+  `reported`). No item verdict changes anywhere — only the `detail` lists —
+  and such an item stays `unmet` / `partial_coverage` through
+  `unratified_rows`. No new JSON field; no `schema_version` bump. See
+  `docs/cli/signoff.md`.
 - **`klt pex` and `klt sim --monte-carlo` now read a SPICE card the same way
   the flattener does: `w = 1` and `w=(2 * 1u)` are parameters, not device
   names** (#5461, 2026-11-13): three hand-rolled card tokenizers lived in
