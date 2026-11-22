@@ -7,12 +7,14 @@ Split from `tests/test_sim_save_mode.py` (pinned at its
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import sim, sim_batch, sim_remote, sim_save_diagnostic
+from klayout_tools.cli import main
 from test_sim_save_mode import _capture_decks, _write_request
 
 pytestmark = pytest.mark.usefixtures(
@@ -170,9 +172,28 @@ def test_supersede_preflight_never_raises_on_an_unreadable_netlist(tmp_path):
         "want_waveforms": True,
     }
     assert sim_save_diagnostic.preflight(str(tmp_path / "missing"), **kwargs) is None
-    binary = tmp_path / "bin.spice"
-    binary.write_bytes(b"\xff\xfe\x00.save v(a)\n")
-    sim_save_diagnostic.preflight(str(binary), **kwargs)  # must not raise
+
+
+@pytest.mark.parametrize(("encoding", "warns"), [("latin-1", False), ("utf-8", True)])
+def test_non_ascii_comment_before_save_card(tmp_path, capsys, encoding, warns):
+    body = tmp_path / "body.spice"
+    body.write_bytes(("* bias in µA\n" + _SAVE_BODY).encode(encoding))
+    diagnostic = sim_save_diagnostic.preflight(str(body), "ngspice", "all", (), True)
+    assert (diagnostic is not None) == warns
+
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": _TRAN, "options": {"waveforms": True}},
+    )
+    code = main(
+        ["sim", str(request), "--dry-run", "--backend", "local", "--format", "json"]
+    )
+    assert code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["dry_run"] is True
+    assert [d["code"] for d in report.get("diagnostics", [])] == (
+        ["save_all_supersedes"] if warns else []
+    )
 
 
 def test_raw_bytes_survives_batch_and_remote_artifact_rewrites(tmp_path):

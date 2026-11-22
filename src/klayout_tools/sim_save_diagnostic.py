@@ -24,8 +24,8 @@ def preflight(
 ) -> dict[str, Any] | None:
     """Request-level warning when the generated ``save all`` supersedes a
     ``.save`` card of the netlist body while waveform capture is on (issue
-    #5622). Never raises; reports presence only, so a ``.save`` reachable only
-    through ``.include``/``.lib`` is a documented miss.
+    #5622). Unreadable or non-UTF-8 bodies yield no advisory. Only the
+    supplied body is scanned, so cards in ``.include``/``.lib`` are skipped.
 
     Gated on every condition that makes the widening real *and* costly: a
     top-level body ``.save`` that actually restricts (a card whose only
@@ -46,7 +46,7 @@ def preflight(
     ):
         return None
     try:
-        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+        with open(netlist_path, encoding="utf-8") as handle:
             cards = _body_save_cards(handle.read())
     except Exception:  # advisory only
         return None
