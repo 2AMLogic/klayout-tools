@@ -3855,9 +3855,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             same as it always excluded a single-hop drop's *far* (port-side)
             pad.
 
-            Intermediate and far pads are compared on their own physical
-            layers. Extraction can merge nets through one of these pads
-            even when their backbones lie on different metals.
+            Intermediate and far pads are checked on their own physical layers.
+            An area overlap or a shared edge can connect distinct nets through
+            one pad even when their backbones lie on different metals.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --

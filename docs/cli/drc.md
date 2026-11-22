@@ -4827,7 +4827,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. `error.decks_executed` lists observed starts. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. When the GF180 3LM `mslot1` deck aborts on `metal4_drawn`, `error.abort.hint` points to the [deck selectors and their coverage](#gf180-3lm-deck-selection). `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.
