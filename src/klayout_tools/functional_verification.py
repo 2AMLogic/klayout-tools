@@ -1995,8 +1995,8 @@ def _run_test(
     :func:`parse_results_xml` instead, which the caller runs next.
 
     ``module_dirs`` are prepended to ``sys.path`` (list order preserved, so
-    entry 0 shadows entry 1) for the duration of the call; entries already on
-    ``sys.path`` are neither re-inserted nor later removed. This is done
+    entry 0 shadows entry 1) for the duration of the call. A single directory
+    already on the path keeps its legacy position. This is done
     because ``Runner._set_env`` propagates the *calling* process's ``sys.path``
     to the simulator as ``PYTHONPATH`` (verified live) -- there is no
     ``test_module`` search-path parameter to use instead.
@@ -2026,10 +2026,12 @@ def _run_test(
     simulator to dump a waveform this run -- see :func:`_find_trace_artifact`
     for where each engine writes it.
     """
-    inserted = [d for d in module_dirs if d not in sys.path]
-    # Reverse so the first entry ends up first on sys.path.
-    for d in reversed(inserted):
-        sys.path.insert(0, d)
+    original_path = sys.path
+    if len(module_dirs) > 1 or (module_dirs and module_dirs[0] not in original_path):
+        sys.path = [
+            *module_dirs,
+            *(path for path in original_path if path not in module_dirs),
+        ]
     try:
         engine_runner.test(
             test_module=module,
@@ -2059,11 +2061,7 @@ def _run_test(
             f"{engine} simulation failed: {exc} ({_log_tail(log_path)})"
         ) from exc
     finally:
-        for d in inserted:
-            try:
-                sys.path.remove(d)
-            except ValueError:  # pragma: no cover - defensive
-                pass
+        sys.path = original_path
 
 
 def _engine_version(engine: str) -> str | None:

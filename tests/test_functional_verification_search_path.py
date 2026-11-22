@@ -14,6 +14,7 @@ import sys
 
 import pytest
 
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
@@ -21,8 +22,6 @@ from klayout_tools.functional_verification import (
 )
 from test_functional_verification import (
     _TESTBENCH,
-    HAVE_COCOTB,
-    HAVE_SIMULATOR,
     _write,
     _write_request,
 )
@@ -108,7 +107,7 @@ def test_run_test_inserts_all_dirs_in_order_and_restores_sys_path(tmp_path):
 
     class _Runner:
         def test(self, **_kw):
-            seen["path"] = list(sys.path[:3])
+            seen["path"] = list(sys.path)
 
     present = str(tmp_path / "present")
     sys.path.append(present)
@@ -129,7 +128,8 @@ def test_run_test_inserts_all_dirs_in_order_and_restores_sys_path(tmp_path):
             parameters={},
             log_path=str(tmp_path / "l"),
         )
-        assert seen["path"][:2] == ["/d0", "/d1"]
+        assert seen["path"][:3] == ["/d0", present, "/d1"]
+        assert seen["path"].count(present) == 1
         assert sys.path == before
     finally:
         sys.path.remove(present)
@@ -160,10 +160,8 @@ async def test_counts(dut):
 """
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(
-    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
-)
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_search_path_list_two_directory_bench(tmp_path, monkeypatch):
     """Issue #5797: a bench split across two directories runs from the request
     alone (no ambient PYTHONPATH); listing only the first entry fails."""
