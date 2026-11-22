@@ -53,7 +53,12 @@ def _draw_voltage_flavor_marks(
     pcell: Any, dbu: float, box_um: tuple[float, float, float, float]
 ) -> None:
     """Draw ``pcell``'s resolved ``voltage_flavor`` marker layer (and its
-    extra layer, when it has one) over ``box_um``; a no-op without a marker."""
+    extra layer, when it has one) over ``box_um``; a no-op without a marker.
+
+    When the harness resolved ``voltage_flavor_well_over_mark`` (issue #7061:
+    a sky130 ``hvi`` pfet), the pfet's well is drawn over the same box, so
+    the ``hvi AND nwell`` intersection the native deck measures reaches the
+    marker's own margin rather than stopping at the narrower device well."""
     from .gen import _insert_boxes
 
     if not pcell.voltage_flavor_mark_present:
@@ -61,5 +66,7 @@ def _draw_voltage_flavor_marks(
     layers = [pcell.voltage_flavor_mark_layer]
     if pcell.voltage_flavor_extra_mark_present:
         layers.append(pcell.voltage_flavor_extra_mark_layer)
+    if pcell.voltage_flavor_well_over_mark:
+        layers.append(pcell.well_layer)
     for layer in layers:
         _insert_boxes(pcell.cell, pcell.layout.layer(layer), dbu, [box_um])

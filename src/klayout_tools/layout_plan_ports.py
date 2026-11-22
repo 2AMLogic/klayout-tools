@@ -12,6 +12,10 @@ import re
 from typing import Any
 
 from ._jsonnum import is_number
+from .gen import GenError
+from .gen_layer_params import resistor_flavor_for_class
+from .pdk import PdkNotFoundError, find_pdk
+from .pdk_families import pdk_variant_family
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -79,11 +83,7 @@ def apply_gate_contact(
     return [gate_contact_warning(group["id"])]
 
 
-#: Which resolved digest params (MOS/resistor ``L``/``W``) map onto which
-#: ``klt gen`` params field, per generator -- see ``layout_plan_execute``'s
-#: module docstring's scope decision 1. Moved here from
-#: ``layout_plan_execute.py`` with :func:`_netlist_derived_size_params`
-#: (#5765) to keep that module under its file-size ceiling.
+#: Digest dimensions accepted by each generator, in micrometres.
 _SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
     "mos_array": {"L": "l_um", "W": "w_um"},
     "diff_pair": {"L": "l_um", "W": "w_um"},
@@ -95,18 +95,10 @@ _SIZE_PARAM_TARGETS: dict[str, dict[str, str]] = {
 def _netlist_derived_size_params(
     generator: str, device_params: dict[str, Any]
 ) -> dict[str, float]:
-    """Pick the ``L``/``W``-style digest params a given generator's own
-    ``klt gen`` params can absorb, per :data:`_SIZE_PARAM_TARGETS`.
+    """Map positive digest dimensions to generator parameters.
 
-    Only a **positive** digest value counts as "the netlist specified this
-    device's geometry" -- ``NetlistSpiceReader`` reports ``L``/``W`` as
-    ``0.0`` (KLayout's own structural default for an unset device-class
-    param) for a resistor written in the bare, purely-electrical
-    ``R<name> n1 n2 <ohms>`` SPICE form (no ``L=``/``W=`` at all), which is
-    "the netlist did not specify a geometric size for this device," not "the
-    netlist specifies a zero-sized device" -- treating it as the latter
-    would hand a real generator a rejected (``> 0`` required) param instead
-    of falling back to its own documented default.
+    KLayout reports zero for the unspecified L and W of a bare SPICE resistor.
+    Omitting those dimensions lets the generator apply its geometry defaults.
     """
     targets = _SIZE_PARAM_TARGETS.get(generator)
     if not targets:
@@ -182,6 +174,52 @@ def diff_pair_leg_error(
                     "docs/cli/layout-plan-execute.md)."
                 )
     return None
+
+
+def apply_resistor_flavor(
+    group: dict[str, Any],
+    params: dict[str, Any],
+    pdk_spec: dict[str, Any],
+    family: str | None,
+) -> list[str]:
+    """Select the first mapped device class and disclose mixed materials."""
+    if (
+        group["generator"] != "res_array"
+        or "flavor" in params
+        or "metal_level" in params
+    ):
+        return []
+    if family is None:
+        try:
+            variant = (
+                pdk_spec.get("variant")
+                or find_pdk(root=pdk_spec.get("root"))["variant"]
+            )
+        except PdkNotFoundError as exc:
+            raise GenError(str(exc)) from exc
+        family = pdk_variant_family(variant)
+    selected = []
+    for device in group["devices"]:
+        flavor = resistor_flavor_for_class(family, device["device_class"])
+        if flavor is not None and flavor not in selected:
+            selected.append(flavor)
+    if not selected:
+        return []
+    first = selected[0]
+    warnings = []
+    group_label = f"device_groups (id '{group['id']}')"
+    if first != "generic":
+        params["flavor"] = first
+        warnings.append(
+            f"{group_label}: derived params.flavor='{first}' "
+            "from the declared resistor class"
+        )
+    if len(selected) > 1:
+        warnings.append(
+            f"{group_label}: devices disagree on resistor flavor "
+            f"({', '.join(selected)}). Using '{first}'"
+        )
+    return warnings
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:

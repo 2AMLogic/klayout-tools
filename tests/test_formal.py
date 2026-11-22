@@ -249,6 +249,27 @@ def test_request_validation(tmp_path, fake_solver, override, message):
         run_formal(req)
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root reads chmod-000 files",
+)
+def test_unreadable_source_rejected_at_request_validation(tmp_path, fake_solver):
+    """A present-but-unreadable RTL source is a named request error (#5718).
+
+    ``klt synthesize`` / ``equiv`` / ``functional-verification`` already probe
+    each source with ``open(path, "rb")``; ``klt formal`` used to accept it and
+    hand it to sby, where it surfaced as an opaque engine failure.
+    """
+    req = _request(tmp_path, _fake_sby(tmp_path, _PASS_BODY))
+    source = tmp_path / "d.v"
+    os.chmod(source, 0o000)
+    try:
+        with pytest.raises(FormalError, match="could not read source 'd.v'"):
+            run_formal(req)
+    finally:
+        os.chmod(source, 0o644)
+
+
 def test_absolute_tmp_source_is_staged_not_referenced(tmp_path, fake_solver):
     other = tmp_path / "elsewhere"
     other.mkdir()
