@@ -258,7 +258,16 @@ directory itself, or a named subdirectory of it). When present it wins over
   the rest), long group values are shown around their first difference, and
   a group rename outside the exception above (`operating_conditions (typ)` vs
   `operating_conditions (slow)`) is reported once as the same group under a
-  different name. Matching files are merged into one
+  different name.
+  A differing `default_max_transition` is refused
+  with an explanation: an output pin without its own `max_transition` is
+  limited by its source library's default. The error names a cell and output
+  that inherit that limit when it finds one. To use the files together,
+  supply a single plain `.lib` that preserves each output's original
+  effective limit and set `liberty.<cell_library>.<corner>` to its
+  root-relative path (a prepared cell group can carry an explicit pin
+  `max_transition` wherever changing the shared header would otherwise
+  change that output's limit). Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized

@@ -119,10 +119,10 @@ def test_renamed_group_with_different_body_says_so(tmp_path):
 
 
 def test_single_delta_message_text_unchanged(tmp_path):
-    a = _write(tmp_path, "groupA.lib", _lib("A", max_trans="1.0"))
-    b = _write(tmp_path, "groupB.lib", _lib("B", max_trans="4.0"))
+    a = _write(tmp_path, "groupA.lib", _lib("A", header_extra='  time_unit : "1ns";\n'))
+    b = _write(tmp_path, "groupB.lib", _lib("B", header_extra='  time_unit : "2ns";\n'))
     with pytest.raises(liberty_merge.LibertyMergeError) as exc:
         liberty_merge.merge_liberty([a, b])
     assert str(exc.value) == (
-        f"cannot merge: 'default_max_transition' differs: 1.0 in '{a}', 4.0 in '{b}'"
+        f"""cannot merge: 'time_unit' differs: "1ns" in '{a}', "2ns" in '{b}'"""
     )

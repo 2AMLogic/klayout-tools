@@ -33,12 +33,14 @@ import re
 import tempfile
 
 from .liberty_header_diff import header_mismatch
-from .liberty_scan import (
+from .liberty_merge_syntax import (
+    _CELL_NAME_RE,
     _find_matching,
     _find_terminator,
     _next_significant,
+    _normalize_header,
+    _scan_cells,
     _skip_ws,
-    _starts_group,
     _tokens,
 )
 
@@ -46,8 +48,6 @@ from .liberty_scan import (
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
 
-_LIBRARY_NAME_RE = re.compile(r"\blibrary\s*\([^)]*\)")
-_CELL_NAME_RE = re.compile(r"\(\s*\"?([^\")\s]+)\"?\s*\)")
 _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 
 #: Header attributes ignored when comparing files for a merge: free text with
@@ -137,7 +137,7 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
             first_condition_count = condition_count
         else:
             retained = "".join(raw for _, raw in file_templates) + body
-            first_fields, other_fields = _reconcile_conditions(
+            first_fields, other_fields, context = _reconcile_conditions(
                 first_path,
                 header_fields,
                 path,
@@ -145,9 +145,11 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 retained,
                 single_condition=first_condition_count == condition_count == 1,
             )
-            mismatch = header_mismatch(first_path, first_fields, path, other_fields)
+            mismatch = header_mismatch(
+                first_path, first_fields, texts[0], path, other_fields, text
+            )
             if mismatch:
-                raise LibertyMergeError(mismatch)
+                raise LibertyMergeError(mismatch + context)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -319,7 +321,7 @@ def _reconcile_conditions(
     retained: str,
     *,
     single_condition: bool,
-) -> tuple[dict[str, str], dict[str, str]]:
+) -> tuple[dict[str, str], dict[str, str], str]:
     """The header field maps with the operating-condition pair removed when
     the two headers differ only by its local name (issue #6940).
 
@@ -329,24 +331,27 @@ def _reconcile_conditions(
     reference its local name in ``retained`` (its body and template text --
     a reference would dangle in the output). Anything else about the pair
     (content, count, a foreign or missing default) is left in place for the
-    normal field-by-field comparison to refuse."""
+    normal field-by-field comparison to refuse. The last return value adds
+    context when the retained text refers to a discarded name."""
     if not single_condition:
-        return first, other
+        return first, other, ""
     a = _local_condition(first)
     b = _local_condition(other)
     if a is None or b is None or a[1] == b[1] or a[2] != b[2]:
-        return first, other
+        return first, other, ""
     if _references_condition(retained, b[1]):
-        detail = header_mismatch(first_path, first, path, other)
-        raise LibertyMergeError(
-            f"{detail}\n'{path}' references operating condition '{b[1]}' "
+        return (
+            first,
+            other,
+            f"\n'{path}' references operating condition '{b[1]}' "
             f"outside its header, but the merged header keeps only "
-            f"'{first_path}' spelling '{a[1]}'"
+            f"'{first_path}' spelling '{a[1]}'",
         )
     drop = {a[0], b[0], "default_operating_conditions"}
     return (
         {k: v for k, v in first.items() if k not in drop},
         {k: v for k, v in other.items() if k not in drop},
+        "",
     )
 
 
@@ -376,31 +381,6 @@ def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
         last = hi
     stripped.append(header[last:])
     return " ".join(stripped), found
-
-
-def _normalize_header(header: str) -> str:
-    """Header text with comments, whitespace and the library name ignored."""
-    parts: list[str] = []
-    i, n = 0, len(header)
-    while i < n:
-        if header[i] == '"':
-            j = i + 1
-            while j < n and header[j] != '"':
-                j += 2 if header[j] == "\\" else 1
-            parts.append(header[i : j + 1])
-            i = j + 1
-        elif header.startswith("/*", i):
-            stop = header.find("*/", i + 2)
-            i = n if stop < 0 else stop + 2
-            parts.append(" ")
-        elif header.startswith("//", i):
-            stop = header.find("\n", i)
-            i = n if stop < 0 else stop
-        else:
-            parts.append(header[i])
-            i += 1
-    text = _LIBRARY_NAME_RE.sub("library ()", "".join(parts), count=1)
-    return " ".join(text.split())
 
 
 def _write_atomic(out_path: str, merged: str) -> None:
@@ -437,27 +417,3 @@ def _split(path: str, text: str) -> tuple[str, str, list[str], int]:
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
     return text[:first_cell], text[first_cell:close], cells, conditions
-
-
-def _scan_cells(text: str) -> tuple[int | None, list[str], int | None, int]:
-    """Locate cells and count top-level operating-condition declarations."""
-    conditions = 0
-    first_cell: int | None = None
-    cells: list[str] = []
-    depth = 0
-    for kind, pos, end in _tokens(text):
-        if kind == "{":
-            depth += 1
-        elif kind == "}":
-            depth -= 1
-            if depth == 0:
-                return first_cell, cells, pos, conditions
-        elif depth == 1 and text[pos:end] == "operating_conditions":
-            conditions += _starts_group(text, end)
-        elif depth == 1 and text[pos:end] == "cell":
-            match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
-            if match:
-                cells.append(match.group(1))
-                if first_cell is None:
-                    first_cell = pos
-    return first_cell, cells, None, conditions
