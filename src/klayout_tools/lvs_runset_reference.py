@@ -196,3 +196,32 @@ def convert_reference(
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(converted)
     return out
+
+
+def _unresolved_reference_calls(
+    reference_path: str, top: str | None, converted_names: set[str]
+) -> list[dict[str, Any]]:
+    """Issue #4519: ``reference.unresolved_subckt_call`` findings for ``X``
+    calls the runset neither converted nor could resolve.
+
+    The reference is re-read with the plain SPICE reader (hierarchy intact).
+    A callee the runset itself converts (``converted_names``, upper-cased:
+    its declared device classes plus the deck's ``DEVICE_LIST``) is not
+    reported. ``[]`` when the reference cannot be re-read: the
+    runset's own verdict stands."""
+    import klayout.db as kdb
+
+    from .lvs import _unresolved_reference_subckt_calls
+
+    netlist = kdb.Netlist()
+    try:
+        netlist.read(reference_path, kdb.NetlistSpiceReader())
+    except Exception:
+        return []
+    return _unresolved_reference_subckt_calls(
+        netlist,
+        converted_names,
+        form="spice",
+        top=top,
+        reference_path=reference_path,
+    )

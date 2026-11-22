@@ -9,6 +9,9 @@ capacitor top-plate-via overlap exclusion (:func:`_capacitor_top_via_overlap_reg
 and the MoM (finger) capacitor device class and extractor
 (:data:`MOM_FEED_TOKENS`, :func:`mom_capacitor_device_class`,
 :func:`_build_mom_capacitor_extractor`, and their feed / metal-range helpers).
+:func:`_resistor_body_region` itself (and the split-terminal geometry behind
+``ResistorDevice.anode_marker``) now lives in
+:mod:`klayout_tools.extract_split_terminal`, re-exported here unchanged.
 
 This is a move, not a rewrite: every function body is unchanged. Dependencies
 are imported from their defining modules (deck types from
@@ -31,70 +34,11 @@ from ._layout import region as _region
 from .decks import CapacitorDevice, ExtractionDeck, ResistorDevice
 from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
+from .extract_split_terminal import resistor_body_region as _resistor_body_region
+from .extract_split_terminal import split_terminal_regions, subtract_dummy
 
 if TYPE_CHECKING:
     import klayout.db as kdb
-
-
-def _resistor_body_region(
-    layout: kdb.Layout,
-    top_cell: kdb.Cell,
-    resistor: ResistorDevice,
-    base: kdb.Region | None = None,
-    heads: kdb.Region | None = None,
-) -> kdb.Region:
-    """Recognise the same resistor body in extraction and ERC (#2204).
-
-    Intersect the body conductor, marker and every required layer, then
-    subtract each excluded layer. For ``abutting_heads`` (#2679), start
-    from the marker and keep components touching two separate heads.
-    Extraction supplies the possibly black-box-masked ``base`` and ``heads``.
-    Otherwise read the drawn body conductor and terminal layer directly,
-    defaulting the terminal layer to the body layer.
-    """
-    if resistor.topology == "abutting_heads":
-        # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
-        # `base` is only the head conductor it abuts.
-        body = _region(layout, top_cell, resistor.marker)
-    else:
-        if base is None:
-            base = _region(layout, top_cell, resistor.body)
-        body = base & _region(layout, top_cell, resistor.marker)
-    for layer in resistor.requires:
-        body = body & _region(layout, top_cell, layer)
-    for layer in resistor.excludes:
-        body = body - _region(layout, top_cell, layer)
-    if resistor.topology == "abutting_heads":
-        if heads is None:
-            heads = _region(
-                layout,
-                top_cell,
-                resistor.terminal if resistor.terminal is not None else resistor.body,
-            )
-        body = _bodies_with_two_heads(body, heads)
-    return body
-
-
-def _bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:
-    """Keep only the connected components of ``body`` that touch ``heads``
-    (abutting or overlapping) in at least two separate head regions.
-
-    The head regions are first reduced to ``heads - body`` so a head that
-    merely overlaps the body (a continuous bar) is judged by the pieces left
-    on either side of it, then merged; each surviving component needs two
-    distinct such pieces touching it. A missing head, or a head separated by
-    a gap, leaves fewer than two and the component is not a resistor.
-    """
-    import klayout.db as kdb
-
-    merged = body.merged()
-    outer = (heads - merged).merged()
-    kept = kdb.Region()
-    for component in merged.each():
-        comp = kdb.Region(component)
-        if outer.interacting(comp).count() >= 2:
-            kept += comp
-    return kept
 
 
 def _sever_terminal_enclosure_bands(
@@ -144,7 +88,14 @@ def _resolve_resistors(
     metals: list[kdb.Region],
     dummy: kdb.Region,
 ) -> tuple[
-    list[tuple[ResistorDevice, kdb.Region, kdb.Region]],
+    list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            kdb.Region,
+            tuple[kdb.Region, kdb.Region] | None,
+        ]
+    ],
     kdb.Region,
     kdb.Region,
     list[kdb.Region],
@@ -154,8 +105,10 @@ def _resolve_resistors(
     """Resolve the deck's drawn-resistor declarations against this layout.
 
     Return ``(resistors, poly, active, metals, poly_candidate_bodies,
-    dummy_devices_dropped)``. Each resistor triple contains its spec, body
-    and terminals. The conductor regions have recognised bodies removed and
+    dummy_devices_dropped)``. Each resistor tuple contains its spec, body,
+    terminals and ``split``: ``(anode, cathode)`` for an ``anode_marker``
+    entry (#4312, whose whole scope is cut from the conductor), else
+    ``None``. The conductor regions have recognised bodies removed and
     declared enclosure bands severed. The connectivity graph uses these
     same regions, including for the MOS gate/source-drain split.
     A body or terminal layer outside the deck conductors raises
@@ -187,7 +140,14 @@ def _resolve_resistors(
                 "of the deck's conductor layers (active/poly/metals)"
             ) from None
 
-    recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]] = []
+    recognised: list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            tuple[int, int],
+            tuple[kdb.Region, kdb.Region, kdb.Region] | None,
+        ]
+    ] = []
     poly_candidate_bodies = kdb.Region()
     dummy_devices_dropped = 0
     for spec in deck.resistors:
@@ -195,9 +155,16 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = _resistor_body_region(
-            layout, top_cell, spec, base=base, heads=bases[terminal_layer]
-        )
+        split = None
+        if spec.anode_marker is not None:
+            scope, body, anode, cathode = split_terminal_regions(
+                layout, top_cell, spec, base
+            )
+            split = (scope, anode, cathode)
+        else:
+            body = _resistor_body_region(
+                layout, top_cell, spec, base=base, heads=bases[terminal_layer]
+            )
         if body.is_empty():
             continue
         if spec.body == deck.poly:
@@ -206,18 +173,33 @@ def _resolve_resistors(
             for component in body.merged().each():
                 if (kdb.Region(component) - dummy).is_empty():
                     dummy_devices_dropped += 1
-            body = body - dummy
+            body, split = subtract_dummy(body, split, dummy)
         if body.is_empty():
             continue
-        recognised.append((spec, body, terminal_layer))
+        recognised.append((spec, body, terminal_layer, split))
 
-    for spec, body, _terminal_layer in recognised:
-        bases[spec.body] = bases[spec.body] - body
+    for spec, body, _terminal_layer, split in recognised:
+        bases[spec.body] = bases[spec.body] - (body if split is None else split[0])
 
-    _sever_terminal_enclosure_bands(layout, recognised, bases)
+    # A split-terminal body has no enclosure band: its scope is already cut.
+    _sever_terminal_enclosure_bands(
+        layout,
+        [
+            (spec, body, layer)
+            for spec, body, layer, split in recognised
+            if split is None
+        ],
+        bases,
+    )
 
     resistors = [
-        (spec, body, bases[terminal_layer]) for spec, body, terminal_layer in recognised
+        (
+            spec,
+            body,
+            bases[terminal_layer] if split is None else split[1] | split[2],
+            None if split is None else (split[1], split[2]),
+        )
+        for spec, body, terminal_layer, split in recognised
     ]
     return (
         resistors,
