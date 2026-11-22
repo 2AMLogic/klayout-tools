@@ -99,7 +99,7 @@ def run(args: argparse.Namespace) -> int:
                 "reads the deck from the committed report",
                 args.format,
             )
-        if args.omit_mismatches:
+        if getattr(args, "omit_mismatches", False):
             return emit_error(
                 "lvs",
                 "--omit-mismatches applies to a fresh run; --check reads "
@@ -134,7 +134,7 @@ def run(args: argparse.Namespace) -> int:
             ),
             # `--omit-mismatches` (issue #5610), mirroring `klt erc
             # --omit-antenna-tables`.
-            omit_mismatches=args.omit_mismatches,
+            omit_mismatches=getattr(args, "omit_mismatches", False),
         )
     except LvsError as exc:
         return emit_error("lvs", str(exc), args.format)

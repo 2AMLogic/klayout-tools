@@ -1529,13 +1529,8 @@ def run_lvs(
         raise LvsError("request.reference must be a JSON object")
 
     if engine == RUNSET_ENGINE:
-        # The runset tallies findings in its .lvsdb report before omission.
-        report = run_lvs_klayout_runset(request, request_dir)
-        report["mismatches_omitted"] = omit_mismatches
-        if omit_mismatches:
-            report["mismatches"] = []
-        return _finish_response(
-            report, portable=portable_paths, request_dir=request_dir
+        return _run_runset_response(
+            request, request_dir, portable_paths, omit_mismatches
         )
 
     # `layout.deck_options` (issue #600) mirrors `klt extract --deck-option`'s
@@ -2079,6 +2074,20 @@ def _validate_portable_paths(value: Any) -> bool:
     if not isinstance(value, bool):
         raise LvsError("request.portable_paths must be a boolean")
     return value
+
+
+def _run_runset_response(
+    request: dict[str, Any],
+    request_dir: str,
+    portable_paths: bool,
+    omit_mismatches: bool,
+) -> dict[str, Any]:
+    """Apply compact output after the runset has tallied all findings."""
+    report = run_lvs_klayout_runset(request, request_dir)
+    report["mismatches_omitted"] = omit_mismatches
+    if omit_mismatches:
+        report["mismatches"] = []
+    return _finish_response(report, portable=portable_paths, request_dir=request_dir)
 
 
 def _finish_response(
