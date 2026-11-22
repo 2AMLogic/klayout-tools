@@ -232,6 +232,7 @@ from typing import Any
 from . import env_provenance, synthesize_abc
 from . import macros as macro_spec
 from . import synthesize_timeout as ytimeout
+from ._digest import netlist_digest_fields
 from ._engine_proc import run_in_group
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
@@ -1620,11 +1621,10 @@ def run_synthesize(
         "netlist_path": env_provenance.repo_relative_path(
             netlist_path, repo_root=repo_root
         ),
-        # Issue #2452: SHA-256 of the exact bytes of the file `netlist_path`
-        # refers to, taken from the internal absolute path (never the
-        # redacted `{path, scope}` object) after signed-qualifier stripping.
-        # Additive field; no `schema_version` bump.
-        "netlist_sha256": sha256_file(netlist_path),
+        # Issues #2452/#7277: the exact-file digest and its banner-normalised
+        # companion, both from the internal absolute path after final
+        # processing — see `_digest.netlist_digest_fields`.
+        **netlist_digest_fields(netlist_path),
         "script_path": env_provenance.repo_relative_path(
             script_path, repo_root=repo_root
         ),
