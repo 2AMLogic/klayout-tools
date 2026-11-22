@@ -14,8 +14,8 @@ Exit codes (see ``docs/cli/lvs.md`` for the full table):
     4 - ran, but the compare the request asked for could not be performed, so
         no verdict about the design was reached (``status: "inconclusive"``,
         issue #1370 -- ``options.combine_devices`` exhausted its retry budget
-        and both sides were rolled back to their uncombined state); never
-        ``0``
+        and both sides were rolled back to their uncombined state), or a
+        recorded input is unavailable under cheap --check
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. The 0/1/2/3 split is `klt drc`'s -- LVS is a clean/dirty verdict
 like DRC -- and `4` is `klt equiv`'s ``EXIT_INCONCLUSIVE`` reused verbatim for
@@ -31,9 +31,8 @@ explicitly, overriding the recorded one unconditionally. Cheap mode (default):
 re-hash the layout/reference netlists (and extraction deck, when one was used)
 named in the report and compare against its own recorded hash values, no compare engine
 re-run. Full mode (``--check <report> --rerun``): best-effort re-run of the
-compare the report describes and diff verdict-bearing fields. Both reuse
-``status: "match"`` / ``"drifted"`` and the same 0/3 exit-code split as a
-normal run (see ``klayout_tools._report_verify``).
+compare the report describes and diff verdict-bearing fields. Both report match (0)
+or drifted (3). Cheap mode also reports unverifiable (4) for an unavailable input.
 """
 
 import argparse
@@ -203,7 +202,9 @@ def _run_check(args: argparse.Namespace) -> int:
     text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
-    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+    return {"match": EXIT_MATCH, "unverifiable": EXIT_INCONCLUSIVE}.get(
+        result["status"], EXIT_DRIFTED
+    )
 
 
 def _print_mismatches_omitted(report: dict) -> None:
