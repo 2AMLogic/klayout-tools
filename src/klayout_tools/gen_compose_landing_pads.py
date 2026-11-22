@@ -94,8 +94,8 @@ class _LandingPadSideResolver:
     ``compose()`` builds one per request and threads it into every
     collision-check footprint builder (``_drawn_leg_footprint_region``,
     :func:`_drawn_leg_intermediate_pad_regions`, ``_leg_conflict``'s #1520
-    pad-box loop and its own-block escape checks), so the checked footprint
-    matches what drawing will insert for the same pair.
+    pad-box loop through ``drawn_side``, and its own-block escape checks).
+    The self-notch check uses the side that drawing inserts for the pair.
 
     Without an override (the default) the resolver answers the fixed
     ``_VIA_LANDING_SIZE_UM`` baseline for every pair -- the exact footprint
@@ -154,6 +154,19 @@ class _LandingPadSideResolver:
     ) -> float:
         from .gen_compose import _VIA_LANDING_SIZE_UM
 
+        if self._override_um is None and not (
+            self.minimal_ladder and _pad_is_intermediate(drop, pad_layer)
+        ):
+            return _VIA_LANDING_SIZE_UM
+        return self.drawn_side(pad_layer, via_layer, drop)
+
+    def drawn_side(
+        self,
+        pad_layer: tuple[int, int],
+        via_layer: tuple[int, int],
+        drop: dict[str, Any] | None = None,
+    ) -> float:
+        """Landing size used by drawing and the own-block self-notch check."""
         intermediate = self.minimal_ladder and _pad_is_intermediate(drop, pad_layer)
         key = (pad_layer, via_layer, intermediate)
         if key not in self._pair_cache:
@@ -167,7 +180,11 @@ class _LandingPadSideResolver:
                 )
                 self._pair_cache[key] = floor_side
             elif self._override_um is None:
-                self._pair_cache[key] = _VIA_LANDING_SIZE_UM
+                from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
+
+                self._pair_cache[key] = _landing_pad_side_um_for_pair(
+                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
+                )
             else:
                 from .gen_compose_layer_rules import _landing_pad_floor_um
 

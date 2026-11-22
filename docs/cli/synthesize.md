@@ -83,13 +83,26 @@ width — `len($TMPDIR) + 43` — reaches column 79 (i.e. `$TMPDIR` is 36+
 characters), readline wraps the echo: it arrives as a prompt, a carriage
 return, and only the tail of the path, with no `source ` token. Yosys's
 handshake then never arms and both processes block until the run's
-`yosys_timeout_s` watchdog kills it with a bare "did not complete within
-Ns" — the run log's last line is
-``2.22.1. Extracting gate netlist of module `…' to `<abc-temp-dir>/input.blif'.``.
+`yosys_timeout_s` watchdog kills it with "did not complete within Ns" —
+the run log's last non-empty line is
+``2.22.1. Extracting gate netlist of module `…' to `<abc-temp-dir>/input.blif'.``
+and the error carries the ABC-stall diagnostic described below.
 The pin removes the length sensitivity entirely (mapping results are
 unchanged); an inherited `COLUMNS=80` from an interactive shell is
 overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
 inherited unchanged.
+
+### Watchdog timeouts ("did not complete within")
+
+Each `yosys -s` invocation uses `request.yosys_timeout_s` (default 300 s).
+When the watchdog kills the process group, the error names the budget,
+the script, and the sibling `.log` file containing both output streams.
+
+When the last non-empty stdout line is the ABC gate-netlist extraction
+banner, the error reports that ABC produced no output after extraction.
+Check the ABC build bundled with the `yosys` on `$PATH` and the selected
+liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
+Other timeouts suggest raising `request.yosys_timeout_s` to allow more time.
 
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
