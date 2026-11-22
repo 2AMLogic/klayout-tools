@@ -1097,16 +1097,12 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: "re-run the check"): here nothing was ever recorded to compare against,
 #: so the remedy is different -- "re-produce this evidence with a producer
 #: that records provenance" (or unpin `content_hash` for this entry), not
-#: "re-run the same producer again". A `klt yield` envelope is unaffected by
-#: this distinction: :func:`_yield_samples_content_hash` supplies a computed
-#: fallback hash whenever its samples document can be found -- resolved
-#: relative to the report file's own directory first, falling back to this
-#: process's own working directory for compatibility (issue #2197) -- so its
-#: ``resolution["content_hash"]`` is ``None`` for that reason alone only when
-#: the named document could not be located in *either* place (see
-#: ``resolution["content_hash_unresolved"]``, which then names what was
-#: named and where this looked, so that case stays distinguishable from an
-#: envelope that recorded no samples document at all).
+#: "re-run the same producer again". For yield, :func:`_yield_samples_content_hash`
+#: looks for the samples beside the report, then in the working directory
+#: (#2197). If both disk lookups fail, it tries the declared store manifest
+#: (#5963). When none resolves, the digest is null. For a named samples
+#: document, ``content_hash_unresolved`` records the searched paths and,
+#: if a declared manifest lookup failed, its path and the failure reason.
 #:
 #: Issue #2496 adds a third route to both of these two reasons, item 11
 #: only: :func:`_erc_supply_spec_hash_reason` re-hashes the **spec**
