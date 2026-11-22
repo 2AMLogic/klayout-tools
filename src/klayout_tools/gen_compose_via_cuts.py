@@ -143,7 +143,6 @@ def own_via_cut_clearance_reason(
     blocker-less :class:`RouteConflict` since #6961 (this check names a
     block's own geometry, never an already-routed net) -- or ``None``.
     """
-
     for drop in via_drops:
         drop_block = drop.get("block_id")
         cut_layer = drop.get("via_layer")

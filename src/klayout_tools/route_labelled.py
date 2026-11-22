@@ -167,7 +167,6 @@ def _route_nets(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], list[dict[str, Any]]]:
     """``(routes, unrouted_nets, legs)``: the report rows plus the raw legs
     (drawing and overlap input) for every net, via ``route_two_pin``."""
-
     route_layer, label_layer, extraction_deck = routing
     offsets_um = {bid: dict(b["_offset_um"]) for bid, b in blocks.items()}
     placed_bboxes_um = {bid: dict(b["_placed_bbox_um"]) for bid, b in blocks.items()}
@@ -257,7 +256,6 @@ def _write_output(
     routing: tuple[Any, Any, Any],
 ) -> dict[str, str] | None:
     """Draw every routed leg into the (already analysed) layout and write it."""
-
     if req["output"] is None:
         return None
     route_layer, label_layer, _deck = routing

@@ -56,7 +56,6 @@ def _intermediate_landing_pad_floor_um(
     justify shrinking"). Same for an unresolvable family/deck -- the
     mode-off size is the conservative answer there too.
     """
-
     floor_side = 0.0
     floors: list[tuple[str, float]] = []
     area_floor = _min_area_um2_for_layer(variant, pad_layer)
@@ -109,7 +108,6 @@ def _resolve_intermediate_landing_pad_sizes(
     its own cut; the concentric squares merge in the drawn GDS, and the
     union encloses both cuts.
     """
-
     sizes: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
         for drop in route.get("via_drops", []):

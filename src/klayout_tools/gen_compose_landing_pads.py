@@ -74,7 +74,6 @@ def _parse_landing_pad_override(raw: Any, where: str) -> float | None:
     which raises once the router has resolved which pairs this request
     really draws.
     """
-
     if raw is None:
         return None
     if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:

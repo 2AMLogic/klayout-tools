@@ -20,4 +20,9 @@ options:
   --min MIN limits.min per measurement
   --max MAX limits.max per measurement
   --target-yield TARGET_YIELD limits.target_yield per measurement
+  --negative-control CSV known-bad per-draw CSV using the same columns and group names
+  --description DESCRIPTION description recorded with the negative control
+  --seed SEED run seed recorded in provenance
+  --rng RNG random number generator recorded in provenance
+  --draws-per-population N declared number of draws per population
   --format {text,json} output format (default: text)

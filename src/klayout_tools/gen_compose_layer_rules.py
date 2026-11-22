@@ -35,7 +35,6 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     is not a known role, or the resolved family's curated deck has no layer
     for the role (``None`` entry).
     """
-
     try:
         family = _pdk_family(variant)
     except GenError as exc:
@@ -272,7 +271,6 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     Drawing and the own-block self-notch check use the resolved side. The
     router’s other spacing checks retain their search footprint (#6469).
     """
-
     area_floor = _min_area_um2_for_layer(variant, layer)
     if area_floor is None:
         side_um = _VIA_LANDING_SIZE_UM
@@ -391,7 +389,6 @@ def _landing_pad_side_um_for_pair(
     via_side: float,
 ) -> float:
     """Default drawn side of one landing pad, before via-array growth."""
-
     floor, _ = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
     return max(_VIA_LANDING_SIZE_UM, floor)
 
@@ -425,7 +422,6 @@ def _resolve_landing_pad_sizes(
     Resolve once per distinct pair for drawing. Route conflict checks use
     the same floors and round the pad onto the output grid.
     """
-
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
         for drop in route.get("via_drops", []):

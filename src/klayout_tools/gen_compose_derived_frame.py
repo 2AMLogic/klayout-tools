@@ -26,14 +26,12 @@ def add_composed_frames(
 
     Applies the identical transform every other per-block coordinate gets:
     orient each source-frame point about the block's own origin via
-    :func:`gen_compose_base._apply_orientation_um`, then add ``offset_um`.
-    Each entry gains
-    ``label_composed_um: {x, y}``; a non-null ``landing`` additionally gains
+    :func:`gen_compose_base._apply_orientation_um`, then add ``offset_um``.
+    Each entry gains ``label_composed_um: {x, y}``. A non-null ``landing`` also gains
     ``x_composed_um``/``y_composed_um`` beside its unchanged ``x_um``/
     ``y_um``. Returns new dicts -- the parse-time
     ``blocks[id]["derived_ports"]`` stays source-frame for any other reader.
     """
-
     orientation = block.get("orientation", "none")
     offset_x, offset_y = offset_um["x"], offset_um["y"]
     framed: list[dict[str, Any]] = []
