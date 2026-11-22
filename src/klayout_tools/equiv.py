@@ -91,7 +91,7 @@ from .equiv_replay import (  # noqa: F401 -- sim-backend constants stay public h
 )
 from .equiv_stage import stage_record_path
 from .evidence_canonicalize import rerun_result_for
-from .request_paths import RequestPaths
+from .request_paths import RequestPaths, resolve_readable_files
 
 _rpath = RequestPaths(EquivError)
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -568,17 +568,13 @@ def _resolve_side(spec: Any, request_dir: str, label: str) -> dict[str, Any]:
             f"request.{label}.liberty must be a non-empty string when given"
         )
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _rpath(entry, request_dir, f"request.{label}.sources entry")
-        if not os.path.isfile(path):
-            raise EquivError(f"{label} source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise EquivError(f"could not read {label} source '{entry}': {exc}") from exc
-        resolved.append(os.path.abspath(path))
+    resolved = resolve_readable_files(
+        sources,
+        request_dir,
+        EquivError,
+        field=f"request.{label}.sources entry",
+        noun=f"{label} source",
+    )
 
     resolved_liberty = None
     if liberty is not None:

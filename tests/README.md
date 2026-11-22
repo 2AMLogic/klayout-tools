@@ -27,7 +27,8 @@ tests/
 ```
 
 - **`helpers/`** — shared test-only doubles (`subprocess_fakes.fake_completed`,
-  `cocotb_fakes.FakeCocotbRunner`, `fake_aws._FakeAws`,
+  `cocotb_fakes.FakeCocotbRunner`, `fake_aws.FakeAws`,
+  `fake_s3_batch.FakeS3BatchRunner`,
   `metrics_regression`'s tolerance-based scalar comparator), extracted from
   near-identical definitions that had drifted across multiple test files.
   Nothing here is importable from the installed `klt` distribution. It also

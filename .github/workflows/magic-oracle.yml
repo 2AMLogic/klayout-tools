@@ -118,6 +118,7 @@ jobs:
 
       - name: Run the magic cross-validation oracle
         run: |
+          set -o pipefail
           uv run --frozen --extra dev pytest \
             tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py \
             tests/test_lvs_magic_oracle.py \

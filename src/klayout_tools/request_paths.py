@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from klayout_tools._paths import _resolve_relative
 
@@ -58,6 +58,49 @@ def resolve_request_path(
             f"{names}; export it before running or use a literal path"
         )
     return _resolve_relative(path, base_dir)
+
+
+def resolve_readable_files(
+    entries: Iterable[str],
+    request_dir: str,
+    error_cls: Callable[[str], Exception],
+    *,
+    field: str,
+    noun: str,
+) -> list[str]:
+    """Resolve each ``request.sources``-style entry to an absolute, readable file.
+
+    The one per-entry loop behind ``klt synthesize`` / ``equiv`` / ``formal`` /
+    ``functional-verification``: anchor the entry at ``request_dir`` through
+    :func:`resolve_request_path`, require it to be a regular file, probe it
+    with ``open(path, "rb")``, and return ``os.path.abspath(path)``. Keeping
+    the readability probe in one place means an existing-but-unreadable source
+    is rejected at request validation by every verb, rather than surfacing
+    later as an opaque engine failure from whichever verb forgot the probe.
+
+    ``entries`` must already be shape-checked (a list of non-empty strings);
+    that validation stays with each caller because its messages differ per
+    verb and are pinned by tests. ``field`` names the request path in an
+    unset-``$VAR`` error (``"request.sources entry"``). ``noun`` is the only
+    wording that varies in the loop's own messages -- ``"RTL source"``,
+    ``"source"``, ``f"{label} source"`` -- so each verb's existing strings stay
+    byte-identical:
+
+    * ``error_cls(f"{noun} not found: {entry}")``
+    * ``error_cls(f"could not read {noun} '{entry}': {exc}")``
+    """
+    resolved: list[str] = []
+    for entry in entries:
+        path = resolve_request_path(entry, request_dir, error_cls, field)
+        if not os.path.isfile(path):
+            raise error_cls(f"{noun} not found: {entry}")
+        try:
+            with open(path, "rb"):
+                pass
+        except OSError as exc:
+            raise error_cls(f"could not read {noun} '{entry}': {exc}") from exc
+        resolved.append(os.path.abspath(path))
+    return resolved
 
 
 class RequestPaths:
