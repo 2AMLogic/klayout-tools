@@ -22,6 +22,7 @@ from typing import Any
 from . import sim
 from ._jsonnum import is_finite_number
 from ._paths import _load_request_json
+from .sim_batch_resume import UNRUN_BATCH_CODES
 
 #: The only top-level keys a matrix file may carry. Anything else is refused
 #: rather than silently narrowing (or failing to narrow) the expected grid.
@@ -31,6 +32,21 @@ _MATRIX_KEYS = frozenset({*_AXIS_KEYS, "exclude", "schema", "description"})
 #: Corner statuses that mean the unit produced numbers worth grading.
 #: ``fail`` is a simulated corner whose measurement left its limits.
 _SIMULATED_STATUSES = frozenset({"pass", "fail"})
+
+
+# These diagnostics are produced by the engine log classifiers or the local
+# engine invocation itself. A preflight or missing measurement alone is
+# insufficient to establish that a worker attempted this corner.
+_ENGINE_ATTEMPT_CODES = {
+    "analysis_aborted",
+    "engine_aborted",
+    "engine_killed",
+    "ngspice_fatal",
+    "nonconvergence",
+    "singular_matrix",
+    "timestep_too_small",
+    "timeout",
+}
 
 
 class CornerMatrixError(Exception):
@@ -105,6 +121,29 @@ def _measurement_nonfinite(corner: dict[str, Any]) -> bool:
     return False
 
 
+def _attempted_error(corner: dict[str, Any]) -> bool:
+    if corner.get("status") != "error":
+        return False
+    diagnostics = corner.get("diagnostics")
+    codes = (
+        {
+            item["code"]
+            for item in diagnostics
+            if isinstance(item, dict) and isinstance(item.get("code"), str)
+        }
+        if isinstance(diagnostics, list)
+        else set()
+    )
+    if codes & UNRUN_BATCH_CODES:
+        return False
+    signal = corner.get("engine_killed_by_signal")
+    return (
+        type(corner.get("engine_exit_code")) is int
+        or (isinstance(signal, str) and signal.startswith("SIG") and bool(signal[3:]))
+        or bool(codes & _ENGINE_ATTEMPT_CODES)
+    )
+
+
 def check_corner_matrix(
     matrix_path: str, *, request_path: str | None = None, report_path: str | None = None
 ) -> dict[str, Any]:
@@ -144,6 +183,7 @@ def check_corner_matrix(
                 for cid in in_matrix
                 if by_id[cid].get("status") not in _SIMULATED_STATUSES
             ],
+            "errored": [cid for cid in in_matrix if _attempted_error(by_id[cid])],
             "non_finite": [
                 cid
                 for cid in in_matrix

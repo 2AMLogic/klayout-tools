@@ -2928,3 +2928,9 @@ The envelope modules (`klayout_tools.cli.output`,
 `klayout_tools.signoff_envelopes`) are held to `disallow_untyped_defs` under
 mypy and the package ships `py.typed`. The rest of the code is covered by a
 baseline ratchet; see [`type-checking.md`](type-checking.md).
+
+In report mode, `errored[]` contains the expected corner IDs whose error row
+records an engine attempt, in matrix order. It is a subset of
+`not_simulated[]`. A report without attempted errors emits an empty array.
+Request mode omits this field. Both verdicts and the exit status retain
+their existing meanings (#7008).
