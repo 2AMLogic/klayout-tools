@@ -106,6 +106,7 @@ from . import (
     sim_energy,
     sim_eye,
     sim_form_signals,
+    sim_homotopy,
     sim_injected,
     sim_mismatch_declarations,
     sim_mismatch_gate,
@@ -514,18 +515,15 @@ WAVEFORM_TOO_LARGE_CODE = "waveform_too_large"
 #: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
 IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
 
-#: The codes above: emitted by the **grading** step rather than by a log
-#: classifier or an unrun-corner path, and therefore deliberately **not**
-#: members of :data:`DIAGNOSTIC_CODES`. All are produced downstream of
-#: ``options.fail_on_diagnostic``'s code match on an already-inconclusive
-#: corner, so listing either there could not change any verdict; accepting
-#: them would only invite the misreading that it could. ``test_sim.py``'s
-#: drift guard derives this distinction rather than restating it.
+#: Grading markers and post-grading information are emitted downstream of
+#: ``options.fail_on_diagnostic`` matching. Keep these codes outside the
+#: selectable vocabulary. The drift guard derives them from emission sites.
 _GRADING_MARKER_CODES: frozenset[str] = frozenset(
     {
         INCONCLUSIVE_DIAGNOSTIC_CODE,
         IMPLAUSIBLE_DIAGNOSTIC_CODE,
         MARGIN_AMBIGUOUS_DIAGNOSTIC_CODE,
+        sim_homotopy.DC_HOMOTOPY_RECOVERY_CODE,
     }
 )
 
@@ -8263,6 +8261,7 @@ def _run_corner(
         _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
+    diagnostics.extend(sim_homotopy.recovery_diagnostics(engine, log_text))
 
     artifacts: dict[str, str | int | None] = {
         "log": None,
