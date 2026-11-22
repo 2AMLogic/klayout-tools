@@ -136,6 +136,14 @@ def test_quoted_expression_with_spaces_is_untouched():
     assert fold_continuations(data) == data
 
 
+def test_whitespace_run_inside_a_quoted_expression_collapses():
+    """The collapse is quote-unaware, as intended (issue #6099): a multi-space
+    run inside a quoted expression folds to single spaces too -- the token
+    sequence is what ``--check`` compares, and it is unchanged for SPICE."""
+    data = b"M1 a b ad='int((nf+1)/2)  *  w/nf * 0.29'\n"
+    assert fold_continuations(data) == b"M1 a b ad='int((nf+1)/2) * w/nf * 0.29'\n"
+
+
 def test_crlf_input_folds_to_lf_cards():
     data = b"M1 a b L=0.15\r\n+ W=1\r\n"
     assert fold_continuations(data) == b"M1 a b L=0.15 W=1\n"

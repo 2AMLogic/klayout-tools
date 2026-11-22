@@ -45,12 +45,12 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   invocation (there are two per run, one per side). Default `1800`, the same
   cap [`signoff.md`](signoff.md) puts on a command-backed evidence entry.
   Requires `--measure-command`.
-- `--deck` — required (except for a bare `--attach`, and under `--engine klayout-runset`, where it is refused by name), passed through to `klt extract --parasitics`.
+- `--deck` — required (except for a bare `--attach`; optional under `--engine klayout-runset`, where giving it selects the merged route of issue #6606), passed through to `klt extract --parasitics`.
 - `--engine`, `--deck-file`, `--deck-var`, `--device-param`, `--runset-timeout` —
   select and drive the runset-engine route (issue #6559); same spelling and
   validation as [`klt extract`](extract.md)'s. See
   ["Runset engine"](#runset-engine-a-device-family-only-the-pdk-runset-recognises---engine-klayout-runset)
-  below, including what it does **not** give you: **no parasitics**.
+  below, including what that route gives you only with `--deck`: **parasitics**.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Same default
   as `klt extract`: `<layout>` with its extension replaced by `.spice`, next
   to the input.
@@ -335,8 +335,16 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   resistance given, three or more terminals, ...) keep the legacy value, as do
   nets overridden with `--mom-rlc-resistance-ohm`. This removes the
   double-counting of strapped / via-stitched conductors from the re-simulated
-  extracted side (#2458). Cannot be combined with `--distributed-rc` (the
-  ladder stays on the legacy scalar, so a critical net would mix sources):
+  extracted side (#2458). The legacy value a `legacy` net keeps is a series
+  sum of *all* the net's fragments, so a tree-routed net's lumped total can
+  overstate the resistance between its two current-carrying terminals (stub
+  arms to terminals that carry no DC current, e.g. MOS gates, are summed in);
+  the echoed `terminals` and `pair_resistance_ohm` (issue #5894, verbatim
+  from the graph) give the path resistance between two named terminals —
+  exactly what a net with three or more terminals (always `legacy`: no
+  unique scalar to select) needs. Cannot be combined with `--distributed-rc`
+  (the ladder stays on the legacy scalar, so a critical net would mix
+  sources):
   `PexError`. Off by default -- the netlist and JSON report are byte-identical
   to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`
@@ -775,7 +783,9 @@ and `flat_dut_mismatch`, and always `null` in `--measure-command` mode.
 
 **Exit behaviour.** Identical to its siblings: the extracted leg is skipped,
 `delta[]` rows carry `extracted_value: null` and `status: "error"`, the
-report `status` is `"error"`, and the exit code is `4`. Fix by wrapping the
+report `status` is `"error"`, and the exit code is `4`. Each row's
+`error` names the extracted side, the `execute` stage, the
+`pin_order_mismatch` code, and the diagnostic's `detail`. Fix by wrapping the
 schematic DUT in a `.SUBCKT` that declares the pins in the extracted order
 (shown in the block), so one instantiation line is valid for both legs.
 Rewriting the testbench instance by pin name, or reordering the extracted
@@ -1074,35 +1084,61 @@ klt pex pnpMPA.gds --engine klayout-runset --deck-file sg13cmos5l.lvs \
     --top pnpMPA_lvs --extract-only --format json
 ```
 
-**This is a device-level extraction with no parasitics — and a report from this
-route therefore does not, by itself, satisfy T1 item 7's intent.**
+**Without `--deck`, this is a device-level extraction with no parasitics —
+and a report from that route does not satisfy T1 item 7: `klt signoff`
+refuses it (`unmet`, reason `no_parasitics`).**
 [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 is parasitic
-verification; a runset leg has no R/C cards, so its `delta[]` is a
-device-representation delta. The route makes that gap *visible in the
-envelope* instead of unreachable. Joining the runset's devices with the curated
-deck's parasitics needs a net correspondence between two independently-numbered
-extractions, which nothing in this repo provides yet — that is
-[#6606](https://github.com/2AMLogic/klayout-tools/issues/6606), and it is what
-closes the gap. Until then `klt signoff` reports the disclosure below on the
-item-7 citation and does not grade on it.
+verification; a parasitic-free runset leg has no R/C cards, so its `delta[]`
+is a device-representation delta. **`--deck <curated>` (issue #6606) is the
+route that closes the gap**: it additionally runs that curated deck with
+parasitics and joins the two extractions by a measured geometric net
+correspondence
+([`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)
+records the decision and the refuted alternatives), attaching the curated
+parasitic network to the runset devices:
+
+```
+klt pex pnpMPA.gds --engine klayout-runset --deck-file sg13cmos5l.lvs \
+    --deck sg13cmos5l --top pnpMPA_lvs --extract-only --format json
+```
+
+A net the correspondence cannot match 1:1 is **listed, never silently
+dropped or silently merged** (`extraction.net_correspondence`:
+`matched` / `unmatched_runset_nets` / `unmatched_curated_nets` /
+`disagreements` — a net split or merged *between the two engines* is
+detected and reported, not compared), and such a leg's `delta[]` is a real
+parasitic delta over the nets that did match. `parasitics_carried` is
+`true` exactly when at least one parasitic card attached — on a layout the
+curated deck cannot read (labels off its `.pin` layers, PCell vias the pip
+`klayout.db` engine cannot resolve — IHP's own `pnpMPA` testcase is the
+measured example) the merged run honestly degenerates to the device-only
+leg and item 7 still refuses it.
 
 **Flags.** `--deck-file <runset.lvs>` is required under the engine and a usage
 error (exit 2) under any other; `--deck-var`, `--device-param` and
 `--runset-timeout` are runset-only and likewise usage errors otherwise (the
 spelling, validation and error text are `klt extract`'s own).
-`--device-model` is honoured. `--deck` is not a runset flag and is refused by
-name, as on `klt extract`. `--device-param` matters: without it every `X` card
-is parameter-free and the devices simulate at the PDK subcircuit's own
-defaults, so a delta over them is not a delta over the drawn sizes — it is the
-only way measured parameters reach the cards (issue #5513).
+`--device-model` is honoured. `--deck` under this engine is the merged
+route above (it selects the curated *parasitic* deck and is never forwarded
+to the runset extraction itself); without the engine it is the curated-deck
+selector as always. `--label-layer` is honoured by the merged route's
+curated leg (it is how a layout labelled off the deck's own `.pin` layers
+still names its nets); without `--deck` it stays refused. `--device-param`
+matters: without it every `X` card is parameter-free and the devices
+simulate at the PDK subcircuit's own defaults, so a delta over them is not
+a delta over the drawn sizes — it is the only way measured parameters reach
+the cards (issue #5513).
 
 **Refused by name, never silently ignored.** Every option that only makes sense
-with parasitics or the curated deck is refused with the flag spelled out
+with a richer curated parasitic model is refused with the flag spelled out
 (`engine 'klayout-runset' cannot honour --critical-net, --distributed-rc …`),
-exit 1: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
+exit 1 — under the merged route too, which serves the curated deck's default
+lumped model only: `--critical-net*`, `--distributed-rc`, `--resistance-graph*`,
 `--mom-rlc-*`, `--parasitic-variant`, `--substrate-tie-ohms`, `--deck-option`,
-`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--label-layer`,
-`--pdk`, `--pdk-root` (the same table `klt extract` refuses them from), plus
+`--pins`, `--rename-declared-pins`, `--tie-declared-pins`, `--pdk`,
+`--pdk-root` (the same table `klt extract` refuses them from), plus
+`--label-layer` *without* `--deck` (with `--deck` it routes to the curated
+leg, above),
 `--device-only-leg` (the runset leg *is* already the parasitic-free one) and
 `--tie-net` (it ties nets the curated deck reports as unbiased PMOS bodies,
 which this engine never computes). `--dry-run` is refused too: its preflight
@@ -1110,7 +1146,8 @@ models the curated deck and parasitics; use `--extract-only` to exercise the
 extraction without a measurement leg. `--backend batch` is **not** refused:
 `klt extract` refuses it because that verb would ship the extraction off-host,
 where the standalone `klayout` binary is not, but `klt pex --backend` only
-reaches the `klt sim` legs — the extraction always runs here.
+reaches the `klt sim` legs — the extraction always runs here (both legs of
+the merged route included).
 
 **What the envelope says.** Additive `extraction` fields, present **only** under
 this engine (a default-engine envelope is byte-identical to one produced before
@@ -1119,15 +1156,45 @@ the route existed; `schema_version` stays `2`):
 | Field | Meaning |
 |---|---|
 | `extraction.engine` | `"klayout-runset"`. |
-| `extraction.parasitics_carried` | Always `false`: the extracted leg has no R/C cards. Reported, never graded on. |
+| `extraction.parasitics_carried` | `false` for a plain runset leg (no R/C cards). For a merged leg (`--deck`, issue #6606): `true` exactly when the net correspondence attached at least one parasitic card; `klt signoff` refuses a `false` for item 7 (`no_parasitics`). |
+| `extraction.net_correspondence` | Merged legs only. Each `matched[]` row gives the runset node and `runset_cluster_id`, plus the curated label and `cluster_id` (the curated parasitic row’s `net_id`). `unmatched_runset_nets` and `unmatched_curated_nets` list names. `unmatched_curated_clusters[]` identifies each unmatched parasitic island by `{curated, cluster_id}`. Split disagreements include `curated_cluster_ids` in the same order as `curated_nets`. Merge disagreements include the curated `cluster_id`. `incomplete_geometry[]` names each affected `runset_net` and the reason (`ambiguous_layer`, `unidentified_layer`, `no_interior_probe`, `unresolved_probe` or `coordinate_mismatch`). Layer-specific entries also give the runset database's `layer_index` and `candidate_roles`. These nets receive no parasitic cards. The block also gives `probe_count`, `deck` and `attached_card_count`. |
 | `extraction.params_not_carried` | `{class: [PARAM, …]}` — the measured parameters the `X` cards do **not** carry, per device class, copied from `klt extract`'s own `params_not_carried`. `{}` once every parameter is declared with `--device-param`. |
 | `extraction.device_counts` | `{class: count}` — what the runset recognised, so a reader sees a family is present (or absent) without the extract JSON. Counted over the **instantiated hierarchy**, not the selected circuit alone: a hierarchical runset's top often holds no device itself (its devices sit in called cells), and the selected circuit's own count would read `{}` for a design full of them. Equal to `klt extract`'s `device_counts` for a flat runset, and to its `instantiated_device_counts` always. |
 | `extraction.device_count` | The total of `extraction.device_counts` — under this engine it replaces the echo of `klt extract`'s selected-circuit `device_count`, so the two never disagree. |
 | `extraction.extra_circuits` | `[circuit, …]` — the circuits the runset wrote besides the selected one; `[]` for a flat runset. A non-empty list is how a reader knows the extraction is hierarchical and that `extraction.net_count` still describes the selected circuit alone (nets inside a called cell are not summed: a net is not a per-instance quantity). |
 
-`extraction.deck` is `null` (no curated deck ran), `extraction.model` is
-`null` (no parasitic model), and `provenance.runset` carries the runset's
-`deck_file`, `content_hash` and `klayout_application_version`.
+`extraction.deck` is `null` and `extraction.model` is `null` on a plain
+runset leg (no curated deck ran); on a merged leg `extraction.deck` is the
+curated deck's name and `extraction.model` identifies the curated model.
+`extraction.parasitic_integrity` is `null` because the merged network has no
+integrity assessment. `provenance.runset` carries the
+runset's `deck_file`, `content_hash` and `klayout_application_version`
+either way. The merged leg's own netlist header names the deck and the
+match counts, and its written cards are the curated lumped model (one
+series `R` per matched net, a ground `C`, matched coupling, the substrate
+DC tie) — see
+[`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)
+for why it is coarser than the curated engine's own star.
+The merged extraction publishes the SPICE file after both extractions and the
+merge succeed. A coordinate mismatch with the source geometry withholds all
+matches. A metal fragment without an interior grid point also withholds all
+matches because the fragment could share a curated cluster with another net.
+
+Renames and parasitic cards apply only inside the selected subcircuit.
+When a runset label needs a different SPICE spelling or collides with another
+node, `runset_node_renames[]` records its `original` label, `runset_cluster_id`
+and resulting `node`. Geometry matching uses the cluster ID for every spelling.
+Each same-labelled island retains its own R/C values. Curated coupling rows
+identify endpoints by label. The writer records each skipped pair in
+`omitted_couplings[]` with its two `curated_nets` and a reason of
+`ambiguous_label` or `unmatched_endpoint`.
+
+When ground capacitors are written, `substrate_return` records their actual
+SPICE `node`, the `curated` substrate name, its original `runset` match and
+`tie_resistance_ohm`. A null `runset` means the caps return to a separate
+substrate node with a DC tie to SPICE ground. Its connection to a runset
+device body is unverified. The signoff citation carries this disclosure.
+
 `body_bias.status` is **`"not_assessed"`** (with `null` counts): the runset
 engine never runs the curated deck's floating-PMOS-body check, so `"biased"`
 would state a clean result nothing measured.
@@ -1347,7 +1414,8 @@ the network it emits; this command carries those diagnostics through as
 self-describing about the health of the network its numbers were measured
 on.
 
-The block is `null` only for an extraction report predating issue #2764.
+The block is `null` for a runset leg (including a merged leg) and for an
+extraction report predating issue #2764.
 Otherwise it is `klt extract`'s own integrity summary verbatim (check
 settings and aggregate counts — see [`extract.md`](extract.md)'s "Parasitic
 network integrity" for the field list and the model limits), plus a `nets`
@@ -1914,7 +1982,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. `{path: null, scope: "absent"}` for a bare `--extract-only` (issue #3739), which has no schematic side — or the caller's own `--reference-netlist` when `--extract-only` is given one (issue #5477), which still measures nothing and is used only to compute `model_mismatch`. |
-| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `device_classes` and `unsupported_devices` (issue #5477 — `klt extract`'s own device-coverage disclosure, forwarded verbatim in every mode: the device classes the resolved deck can recognise at all (issue #221), and the deck-declared `UnsupportedDeviceMarker` geometry the layout draws on (issue #2919, `[]` when there is none). Neither can see a family the deck declares no class for **and** whose recognition region the PDK derives rather than drawing a marker for — for that, see `model_mismatch` and `--extract-only --reference-netlist` above), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm, fallback_reason}`; `resistance_source` says which value the extracted netlist's lumped R used, and `fallback_reason` (issue #5747, additive) says why it was not the graph value: `null` when `resistance_source` is `graph`, otherwise the first diagnostic `code` of an `unsupported` graph (e.g. `via_resistance_unknown`, `graph_too_large`, `unsupported_geometry`) or else `klt extract`'s `resistance_source_reason` (`terminal_count_not_two`, `graph_status_skipped`, `pair_resistance_unavailable`) — never `null` for a `legacy` net), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. **Runset engine only** (issue #6559, additive): `engine`, `parasitics_carried` (`false`), `params_not_carried`, `device_counts` and `extra_circuits` — see "Runset engine" above; `deck` and `model` are `null` there, and `device_count`/`device_counts` there count the instantiated hierarchy rather than the selected circuit alone. |
+| `extraction`         | object            | `deck`, `netlist_adaptation` (issue #5128 — the simulator adaptation applied to the extracted and `--device-only-leg` legs' DUT netlist: `"asap7_bsimcmg.adapt_extracted_netlist"` for `--deck asap7`, `null` otherwise; see the asap7 section above), `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), `parasitic_variant` (issue #3056 — the `--parasitic-variant` request echoed back; present only when the flag was given), `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list), `label_layers` (issue #2686 — `null` unless `--label-layer` was given, in which case `klt extract`'s own `label_layers` echo: `{"<role>": [layer, datatype] | null}`, sorted by role, `null` for a role cleared with `none`), `device_models` (issue #4234 — `null` unless `--device-model` was given, in which case the applied `{"<class>": "<subckt>"}` mapping), `device_classes` and `unsupported_devices` (issue #5477 — `klt extract`'s own device-coverage disclosure, forwarded verbatim in every mode: the device classes the resolved deck can recognise at all (issue #221), and the deck-declared `UnsupportedDeviceMarker` geometry the layout draws on (issue #2919, `[]` when there is none). Neither can see a family the deck declares no class for **and** whose recognition region the PDK derives rather than drawing a marker for — for that, see `model_mismatch` and `--extract-only --reference-netlist` above), `resistance_graph` (issue #4037 — present only with `--resistance-graph`: `{r_cut_ohm, nets[]}` where each `nets[]` entry is `{net, net_id, resistance_source, selected_resistance_ohm, legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`; `resistance_source` says which value the extracted netlist's lumped R used, and `fallback_reason` (issue #5747, additive) says why it was not the graph value: `null` when `resistance_source` is `graph`, otherwise the first diagnostic `code` of an `unsupported` graph (e.g. `via_resistance_unknown`, `graph_too_large`, `unsupported_geometry`) or else `klt extract`'s `resistance_source_reason` (`terminal_count_not_two`, `graph_status_skipped`, `pair_resistance_unavailable`) — never `null` for a `legacy` net), and `parasitic_integrity` (issue #2764 — the extraction's own per-net parasitic RC network integrity diagnostics; see below). The `terminals` list and full `pair_resistance_ohm` matrix come directly from the extraction graph (#5894), so the resistance between two named terminals is available on nets with three or more terminals. Pins the extraction method alongside `provenance.deck`'s content-hash version pin. **Runset engine only** (issue #6559, additive): `engine`, `parasitics_carried` (whether cards were attached), `params_not_carried`, `device_counts` and `extra_circuits` — see "Runset engine" above; `deck` and `model` are `null` on a plain runset leg, and `device_count`/`device_counts` there count the instantiated hierarchy rather than the selected circuit alone. |
 | `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`, or `"tied"` when every unbiased net was declared tied with `--tie-net`, or — issue #6559 — `"not_assessed"` for a `--engine klayout-runset` leg, which never runs the floating-body check and reports `null` counts), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim), and — only with `--tie-net` (issue #4245) — `tied[]` (`{extracted_net, schematic_net, source: "declared"}`). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) `"command"` (a caller-supplied `--measure-command` produced both legs) or `"extract-only"` (issue #3739: `--extract-only` measured nothing — `testbenches` and `delta` are empty, `status` is `not_checked`, and `command`/`timeout_s`/`sides` are `null`). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `request_sha256`, `netlist` (`{path, scope}` — the simulation body the request names), `netlist_sha256`, `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `schematic_netlist_sha256`, `corner_count`, `measurement_names`, and the issue #2872 `sides` / `nothing_simulated_corners` execution evidence (see "Per-side execution evidence" below). The `*_sha256` fields are the issue #2875 content identities, see "Schematic-side content identity" below. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
@@ -1953,7 +2021,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, `"error"` (also when the schematic measurement is missing), or `"absent"` (issue #3620: an optional measurement with no value). Does not affect `status`. |
 | `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"error"` for rows whose extracted side never produced a response. |
-| `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. In `--measure-command` mode, when the blamed side has no diagnostics, `message` is that side's measurement-document `message` and `stage` is `"execute"` (issue #4555). The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
+| `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). When a static diagnostic skips the extracted leg, `stage` is `"execute"`, `code` is `pin_count_mismatch`, `flat_dut_mismatch`, or `pin_order_mismatch`, and `message` carries that diagnostic's `detail`. Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. In `--measure-command` mode, when the blamed side has no diagnostics, `message` is that side's measurement-document `message` and `stage` is `"execute"` (issue #4555). The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
 | `device_only_value` | number \| null | Issue #3298 (additive, `--device-only-leg` only). The measurement on the parasitic-free third leg; `null` when that leg produced nothing for this row. |
 | `representation_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `schematic_value` → `device_only_value`: the device-representation/geometry part of `delta_pct`. |
 | `parasitic_delta_pct` | number \| null | Issue #3298 (additive, `--device-only-leg` only). `delta_pct`'s rule applied to `device_only_value` → `extracted_value`: the parasitic part of `delta_pct`. |
