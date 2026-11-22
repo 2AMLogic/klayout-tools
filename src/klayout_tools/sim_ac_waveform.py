@@ -13,23 +13,20 @@ _SCALE_LENGTH_RE = re.compile(
 )
 
 
-def _increments(
-    mode: str, count: int, start: float, stop: float
-) -> tuple[float, float]:
-    """The additive step and multiplier used by ngspice's ACan."""
-    if mode == "lin":
-        # ngspice 46/47 emit just the start for both lin 1 and lin 2.
-        return ((stop - start) / (count - 1) if count > 2 else 0.0), 1.0
-    if mode == "dec" and stop / 10 >= start:
-        span = stop / start
-        intervals = math.floor(math.log10(span) * count)
-        if intervals < 1:
-            raise ValueError("indeterminate decade step")
-        return 0.0, math.exp(math.log(span) / intervals)
-    if mode == "dec" and start == stop:
-        return 0.0, 1.0
-    base = 10 if mode == "dec" else 2
-    return 0.0, math.exp(math.log(base) / count)
+def _log_ratios(mode: str, count: int, start: float, stop: float) -> tuple[float, ...]:
+    """Multipliers used by ngspice's ACan for the requested log sweep."""
+    if mode == "oct":
+        return (math.exp(math.log(2) / count),)
+    if start == stop:
+        return (1.0,)
+    span = stop / start
+    intervals = math.floor(math.log10(span) * count)
+    ratios = (math.exp(math.log(span) / intervals),) if intervals else ()
+    if stop / 10 < start:
+        # ngspice 42 fits whole intervals to the span even below a decade.
+        # ngspice 47 uses a fixed number of intervals per decade there.
+        ratios += (math.exp(math.log(10) / count),)
+    return ratios
 
 
 def _parse_grid(args: str) -> tuple[str, int, float, float]:
@@ -68,10 +65,6 @@ def _next_frequency(
 
 def _matches_grid(raw: sim_raw.ComplexRawfile, args: str, log_text: str) -> bool:
     mode, count, start, stop = _parse_grid(args)
-    step, ratio = _increments(mode, count, start, stop)
-    following = _next_frequency(raw, start, step, ratio)
-    if following is None:
-        return False
     rows = DATA_ROWS_RE.findall(log_text)
     counts = _SCALE_LENGTH_RE.findall(log_text)
     if len(rows) == 1:
@@ -79,13 +72,22 @@ def _matches_grid(raw: sim_raw.ComplexRawfile, args: str, log_text: str) -> bool
     if any(int(count) != len(raw.points) for count in counts):
         return False
     if mode == "lin":
-        return len(raw.points) == (count if step else 1)
-    if ratio == 1:
-        return len(raw.points) == 1
+        # ngspice emits just the start for both lin 1 and lin 2.
+        step = (stop - start) / (count - 1) if count > 2 else 0.0
+        return len(raw.points) == (count if step else 1) and (
+            _next_frequency(raw, start, step, 1.0) is not None
+        )
     # The last logarithmic point depends on ngspice's effective RELTOL. Its
     # original frequency-vector length identifies the exact endpoint even
     # when the generic analysis row reports are missing or ambiguous.
-    return bool(counts) and following > stop
+    for ratio in _log_ratios(mode, count, start, stop):
+        following = _next_frequency(raw, start, 0.0, ratio)
+        if following is not None:
+            if ratio == 1:
+                return len(raw.points) == 1
+            if counts and following > stop:
+                return True
+    return False
 
 
 def complete(raw_path: str, args: str, log_text: str | None) -> bool:

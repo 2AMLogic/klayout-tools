@@ -35,6 +35,7 @@ def _rawfile(path, frequencies, plot="AC Analysis", axis="frequency"):
         ("lin 3 0 1kHz", [0, 500, 1000]),
         ("dec 10 10 850", [10 * 85 ** (i / 19) for i in range(20)]),
         ("dec 10 10 90", [10 * 10 ** (i / 10) for i in range(10)]),
+        ("dec 10 10 90", [10 * 9 ** (i / 9) for i in range(10)]),
         ("oct 3 10 850", [10 * 2 ** (i / 3) for i in range(20)]),
         ("oct 1000 10 20", [10 * 2 ** (i / 1000) for i in range(1002)]),
     ],
@@ -50,6 +51,22 @@ def test_frequency_grid(tmp_path, args, frequencies):
     _rawfile(path, frequencies[:-1])
     for log in (scale, rows, rows + "\n" + scale):
         assert not sim_ac_waveform.complete(str(path), args, log)
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_subdecade_grid_requires_the_same_spacing_throughout(tmp_path, legacy):
+    path = tmp_path / "waveform.raw"
+    # Both versions produce 306 points at reltol=0.01, with distinct spacing.
+    older = [10 * 2 ** (i / 301) for i in range(306)]
+    newer = [10 * 10 ** (i / 1000) for i in range(306)]
+    grid, other = (older, newer) if legacy else (newer, older)
+    args = "dec 1000 10 20"
+    scale = "frequency : frequency, complex, 306 long"
+    _rawfile(path, grid)
+    assert sim_ac_waveform.complete(str(path), args, scale)
+    grid[150] = other[150]
+    _rawfile(path, grid)
+    assert not sim_ac_waveform.complete(str(path), args, scale)
 
 
 @pytest.mark.parametrize(
