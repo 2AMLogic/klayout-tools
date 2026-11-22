@@ -5711,7 +5711,9 @@ per-net lumped model would produce.
     (a cut face, or two or more landings), parallel, separated across their
     common direction by more than either row's own scatter, and facing each
     other along at least half the longer row, the current axis is the normal
-    between the two rows (#7028). Examples are a wide poly head contacted by
+    between the two rows (#7028). A straight row can have up to one grid
+    diagonal of transverse scatter from rounding its landing centres.
+    Examples are a wide poly head contacted by
     a row of licons opposite the resistor body, or a li1 pad joining a licon
     row to a parallel mcon row. A 20 × 0.8 µm head reads 0.04 squares
     whether it carries one centred contact or twenty along its width.
