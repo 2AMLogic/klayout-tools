@@ -24,6 +24,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   Off-host runners that predate this release reject the new keys with the same
   named error (a loud failure, not a silent drop).
 
+- **Changed** (#5784, breaking — `klt functional-verification` `schema_version`
+  2 → 3): the three request-resolved *input* paths the response echoes no
+  longer leak the producing checkout's absolute layout. `environment.sdf.file`
+  and `environment.initial_state.netlist` are now the hashed
+  `{path, scope, sha256}` envelope (`path` relative to the request's repo —
+  the #6762 anchor every other envelope of this verb uses — `{"path": null,
+  "scope": "external"}` outside it), and `environment.source_defines`
+  is retyped from an absolute-path-keyed object to a list of
+  `{"source": <envelope>, "defines": {...}}` (`[]` when absent) — an envelope
+  cannot be a JSON object key, and a source outside the repo has no path to
+  key on. Both response builders (cocotb and Verilog-bench) emit the new
+  shape, and a committed report now passes `klt env-provenance
+  lint-envelope` clean. Path *resolution* is unchanged — the engine still
+  receives the absolute path (the `$sdf_annotate` shim, the define wrappers)
+  — and `--format text` still prints the real absolute paths, via the
+  `local_paths` side-channel. Consumers reading these three fields as
+  strings (schema-2 evidence) must adapt; completing #4279.
+
 - **`klt extract --deck gf180mcu` resolves marker-scoped MOS capacitors ~2x
   faster on marker-rich layouts** (#6527, 2026-11-20): the bulk-algebra
   resolver #5807 introduced memoized its layer *read* (`region_of`) but not
