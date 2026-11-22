@@ -156,3 +156,43 @@ def test_netlist_line_abort_without_banner_is_unchanged(tmp_path, monkeypatch):
 def test_docs_table_documents_the_exemption():
     doc = Path(__file__).resolve().parents[1] / "docs" / "cli" / "sim.md"
     assert "#6401" in doc.read_text()
+
+
+@pytest.mark.parametrize("abort", ["", "Simulation interrupted due to error!\n"])
+def test_collected_large_log_matches_runner_and_keeps_preview_bounded(tmp_path, abort):
+    preview = sb._BATCH_ENGINE_LOG_HEAD_BYTES
+    log = _BENIGN_LOG.removesuffix("ngspice-47 done\n") + "0\t1.0\n" * (preview // 5)
+    log += abort + "1\t2.0\n" * (preview // 5) + "ngspice-47 done\n"
+    assert log.find("Error in netlist") < preview < log.find("ngspice-47 done")
+    (tmp_path / "ngspice.log").write_text(log)
+
+    corner = {"status": "error", "diagnostics": [{"code": "measurement"}]}
+    sb._surface_log_fatal([corner], str(tmp_path))
+    note, diagnostic = sb._engine_log_note(str(tmp_path))
+    assert len(note) < sb._BATCH_ENGINE_LOG_TAIL_CHARS + 100
+    assert "ngspice-47 done" not in note
+    assert "Simulation interrupted" not in note
+    runner_codes = [d["code"] for d in sim._classify_diagnostics(log)]
+    assert runner_codes == (["ngspice_fatal"] if abort else [])
+    assert [d["code"] for d in corner["diagnostics"]] == ["measurement", *runner_codes]
+    assert ([diagnostic["code"]] if diagnostic else []) == runner_codes
+
+
+def test_late_specific_fatal_and_banner_split_at_cutoff(tmp_path):
+    limit = sb._BATCH_ENGINE_LOG_HEAD_BYTES
+    first = _BENIGN_LOG.removesuffix("ngspice-47 done\n")
+    # Split the completion marker across the head boundary; the missing include
+    # is beyond it. A real specific cause outranks the generic measure error.
+    text = first + "x" * (limit - len(first) - 5) + "\nngspice-47 done\n"
+    text += "\n" * 2048 + "Error: Could not find include file missing.spice\n"
+    (tmp_path / "ngspice.log").write_text(text)
+    note, found = sb._engine_log_note(str(tmp_path))
+    assert found == sim._classify_diagnostics(text)[0]
+    assert found["code"] == "missing_include"
+    assert "missing.spice" not in note
+
+
+def test_unreadable_collected_log_has_no_evidence(tmp_path):
+    from klayout_tools.sim_batch_log import read_collected_log
+
+    assert read_collected_log(str(tmp_path / "absent"), 100) == ("", "")
