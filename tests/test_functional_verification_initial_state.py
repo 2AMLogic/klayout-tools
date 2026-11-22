@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from helpers.cocotb_fakes import FakeCocotbRunner
+from helpers.tool_probes import HAVE_COCOTB, HAVE_ICARUS, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
@@ -312,7 +313,7 @@ def test_hard_macro_is_a_request_error(tmp_path, monkeypatch):
         run_functional_verification(_request(tmp_path, _state()))
 
 
-@pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog not installed")
+@SKIP_NO_ICARUS
 class TestRealIcarusDrive:
     """The generated shim against a real Icarus: seeds reproduce, differ, and
     mode x leaves every flop unknown; the captured value survives the
@@ -389,17 +390,9 @@ async def probe(dut):
 """
 
 
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
 needs_real_toolchain = pytest.mark.skipif(
-    not _have_cocotb() or shutil.which("iverilog") is None,
-    reason="cocotb and iverilog are both required",
+    not HAVE_COCOTB or not HAVE_ICARUS,
+    reason="cocotb, iverilog and vvp are required",
 )
 
 

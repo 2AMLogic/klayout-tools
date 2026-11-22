@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from klayout_tools.cli import lvs_cmd, main
 from klayout_tools.cli.lvs_cmd import run as lvs_run
 from klayout_tools.cli.parser import create_parser
 from klayout_tools.lvs import LvsError, run_lvs
@@ -152,3 +153,39 @@ def test_cli_deck_flag_parser_and_check_guard(capsys):
     assert lvs_run(check_args) == 1
     payload = json.loads(capsys.readouterr().err)
     assert "--deck" in payload["error"]["message"]
+
+
+def test_cli_deck_var_parsing(monkeypatch, capsys):
+    """``klt lvs --deck-var`` is parsed by the shared
+    ``cli._parsing.parse_deck_options`` (issue #6738), the one implementation
+    ``klt drc``/``klt extract`` also use: last-one-wins, only the first ``=``
+    splits, whitespace around key and value is stripped, and a missing ``=``
+    or blank key is a clean error (exit 1) with the shared message."""
+    seen: list[dict[str, str]] = []
+
+    def _capture(request, **kwargs):
+        seen.append(kwargs["deck_vars"])
+        raise LvsError("stop after capturing deck_vars")
+
+    monkeypatch.setattr(lvs_cmd, "run_lvs", _capture)
+
+    def _run(*deck_vars: str) -> dict:
+        argv = ["lvs", "req.json", "--format", "json"]
+        for item in deck_vars:
+            argv += ["--deck-var", item]
+        assert main(argv) == 1
+        return json.loads(capsys.readouterr().err)
+
+    _run("a=1", "b=x=y", "a=2")
+    assert seen.pop() == {"a": "2", "b": "x=y"}
+    _run()
+    assert seen.pop() == {}
+    _run("a = 1", " b=  y ")
+    assert seen.pop() == {"a": "1", "b": "y"}
+
+    for bad in ("novalue", "=v", "  =v"):
+        message = _run(bad)["error"]["message"]
+        assert message == (
+            f"--deck-var entry {bad!r} is not KEY=VALUE -- e.g. --deck-var poly_res=2k"
+        )
+        assert seen == []  # rejected before the engine was ever invoked
