@@ -136,7 +136,7 @@ from ._provenance import (
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -1550,6 +1550,7 @@ def run_lvs(
     import klayout.db as kdb
 
     from .lvs_layout_stage import _resolve_layout_stage
+    from .lvs_passive_pairing import curated_pairing
 
     layout_stage = _resolve_layout_stage(
         layout_spec, reference_spec, request_dir, opts, progress
@@ -1568,6 +1569,7 @@ def run_lvs(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
     ) = layout_stage
 
     ref_stage = _read_reference_stage(
@@ -1582,18 +1584,11 @@ def run_lvs(
         power_only_pruning_warnings,
         combine_per_circuit_warnings,
     )
-    reference_netlist_path = ref_stage.reference_netlist_path
-    reference_form = ref_stage.reference_form
     anchor_top_level_pins = ref_stage.anchor_top_level_pins
     power_connectivity = ref_stage.power_connectivity
     reference_device_bulk = ref_stage.reference_device_bulk
-    reference_pdk_info = ref_stage.reference_pdk_info
-    reference_pin_order_sources = ref_stage.reference_pin_order_sources
     reference_placeholder_classes = ref_stage.reference_placeholder_classes
-    reference_gate_level_case_folds = ref_stage.reference_gate_level_case_folds
     supply_universe = ref_stage.supply_universe
-    unresolved_subckt_call_findings = ref_stage.unresolved_subckt_call_findings
-    reference_pin_order_files = ref_stage.reference_pin_order_files
     reference_netlist = ref_stage.reference_netlist
 
     (
@@ -1613,7 +1608,7 @@ def run_lvs(
         opts,
         flatten_warnings,
         power_connectivity,
-        reference_form,
+        ref_stage.reference_form,
     )
 
     bulk_warnings: list[dict[str, Any]] = []
@@ -1651,11 +1646,10 @@ def run_lvs(
     # the other request-side disclosures further down.
     anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
-    # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
-    # roles as `anchored_pins`/`anchor_warnings` above.
     constant_bindings: list[_ConstantNetBinding] = []
     constant_warnings: list[dict[str, Any]] = []
 
+    passive_pairing = None
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
         # trim) reference's behavioural option construct to one concrete drawn
@@ -1826,8 +1820,6 @@ def run_lvs(
                 # state, so the second pass would otherwise compare on
                 # topology alone and could reach a `"match"` the first,
                 # anchored pass had already refused.
-                # Issue #3014: bindings are comparer state too, so they are
-                # re-applied on the fresh comparer exactly like the hints.
                 constant_bindings, constant_warnings = _apply_constant_nets(
                     comparer,
                     request.get("hints") or {},
@@ -1894,15 +1886,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
-            # Issue #2692: an anchored pin pairing the comparer refused is a
-            # real finding, reported through the same reconciliation a
-            # hand-written `hints.same_nets` refusal goes through.
             anchored_pins=[
                 (anchor.layout_net, anchor.reference_net, anchor.pin)
                 for anchor in anchored_pins
             ],
-            # Issue #3014: a refused constant binding is a `hints.rejected`
-            # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
@@ -1959,9 +1946,14 @@ def run_lvs(
                 "matched": logger.matched_pins,
             },
         }
+        passive_pairing = curated_pairing(
+            (layout_deck_name, reference_spec.get("deck")),
+            logger,
+            counts["devices"],
+            status,
+            (layout_netlist, reference_netlist),
+        )
     else:
-        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member;
-        # see `_run_netgen_engine_branch`.
         (
             status,
             mismatches,
@@ -2014,16 +2006,23 @@ def run_lvs(
         power_only_pruning_warnings=power_only_pruning_warnings,
         family_findings=family_findings,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
-        reference_gate_level_case_folds=reference_gate_level_case_folds,
+        reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
         supply_findings=supply_findings,
-        unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        unresolved_subckt_call_findings=ref_stage.unresolved_subckt_call_findings,
     )
     note_known_limit(
-        mismatches, opts.finfet_layout, status, reference_spec, layout_spec
+        mismatches,
+        opts.finfet_layout,
+        status,
+        reference_spec,
+        layout_spec,
+        layout_counts=layout_known_limit_counts,
+        reference_counts=ref_stage.reference_known_limit_counts,
     )
 
     return assemble_lvs_report(
+        passive_pairing=passive_pairing,
         mismatches=mismatches,
         omit_mismatches=omit_mismatches,
         status=status,
@@ -2036,12 +2035,12 @@ def run_lvs(
         layout_circuit=layout_circuit,
         layout_abstracted_cells=layout_abstracted_cells,
         reference_circuit=reference_circuit,
-        reference_form=reference_form,
+        reference_form=ref_stage.reference_form,
         reference_spec=reference_spec,
-        reference_pdk_info=reference_pdk_info,
-        reference_pin_order_sources=reference_pin_order_sources,
-        reference_pin_order_files=reference_pin_order_files,
-        reference_netlist_path=reference_netlist_path,
+        reference_pdk_info=ref_stage.reference_pdk_info,
+        reference_pin_order_sources=ref_stage.reference_pin_order_sources,
+        reference_pin_order_files=ref_stage.reference_pin_order_files,
+        reference_netlist_path=ref_stage.reference_netlist_path,
         extracted_netlist_path=extracted_netlist_path,
         equivalent_pins_applied=equivalent_pins_applied,
         constant_bindings=constant_bindings,
@@ -2173,7 +2172,7 @@ def check_lvs_report(
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
-    if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
+    if committed.get("engine") == RUNSET_ENGINE:
         # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
@@ -2186,7 +2185,7 @@ def check_lvs_report(
                 include_repo_root=True,
             )
         )
-    result = build_check_result(report_path=report_path, checks=checks)
+    result = build_input_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
     return result
 
@@ -2626,6 +2625,7 @@ def rerun_lvs_report(
             # (the replay above leaves such a report uncompacted, so the
             # only difference would be the fresh run's new `false` echo).
             "mismatches_omitted",
+            "sg13g2_passive_pairing",
         )
         if field not in committed
     )
