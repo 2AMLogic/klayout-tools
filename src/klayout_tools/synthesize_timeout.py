@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from ._jsonnum import is_finite_number
+from .synthesize_abc_timing import _ABC_MODULE_RE as _ABC_MODULE_RE
 
 #: Upper bound for the request's ``yosys_timeout_s`` (30 min needed by a
 #: large generic-``abc`` run, with 2x headroom). The budget is paid per Yosys
@@ -87,32 +88,22 @@ def _validate_yosys_timeout(
     return float(value)
 
 
-def _env_yosys_timeout(error_cls: type[Exception]) -> float | None:
-    """The host-level ``$KLT_YOSYS_TIMEOUT_S`` override, or ``None``.
-
-    Read from the environment on every call -- never cached at import time
-    -- so a library caller can set it between two ``run_synthesize``
-    invocations and a test can set/clear it without a reset hook. Unset, or
-    set to an empty/whitespace-only string (what ``KLT_YOSYS_TIMEOUT_S=``
-    in a shell env file produces), means "no override": behaviour is then
-    identical to a host without the variable. Any other value is validated
-    by :func:`_validate_yosys_timeout` -- a non-numeric string is passed
-    through as-is so the error shows what the operator actually typed.
-    """
-    raw = os.environ.get(YOSYS_TIMEOUT_ENV)
-    if raw is None or not raw.strip():
-        return None
-    text = raw.strip()
-    try:
-        return _validate_yosys_timeout(float(text), YOSYS_TIMEOUT_ENV, error_cls)
-    except ValueError:
-        return _validate_yosys_timeout(text, YOSYS_TIMEOUT_ENV, error_cls)
+def _validate_override(
+    value: str | float, source_label: str, error_cls: type[Exception]
+) -> float:
+    """Parse flag and environment text, retaining invalid input for the error."""
+    if isinstance(value, str):
+        try:
+            value = float(value)
+        except ValueError:
+            pass
+    return _validate_yosys_timeout(value, source_label, error_cls)
 
 
 def bind_yosys_timeout(
     request: dict[str, Any],
     error_cls: type[Exception],
-    flag_value: float | None = None,
+    flag_value: str | float | None = None,
 ) -> float | None:
     """Resolve the per-invocation Yosys budget and bind it for this run.
 
@@ -134,8 +125,9 @@ def bind_yosys_timeout(
     """
     flag: float | None = None
     if flag_value is not None:
-        flag = _validate_yosys_timeout(flag_value, "--yosys-timeout-s", error_cls)
-    env = _env_yosys_timeout(error_cls)
+        flag = _validate_override(flag_value, "--yosys-timeout-s", error_cls)
+    raw_env = os.environ.get(YOSYS_TIMEOUT_ENV, "").strip()
+    env = _validate_override(raw_env, YOSYS_TIMEOUT_ENV, error_cls) if raw_env else None
     request_value = request.get("yosys_timeout_s")
     if request_value is not None:
         request_value = _validate_yosys_timeout(
@@ -165,3 +157,53 @@ def scoped_yosys_timeout(func: _F) -> _F:
             _YOSYS_TIMEOUT_VAR.reset(token)
 
     return wrapper  # type: ignore[return-value]
+
+
+def timeout_diagnostic(stdout: str | bytes | None) -> str:
+    """Diagnostic appended to a timeout error when the captured log shows
+    Yosys stalled inside ABC (issue #6333).
+
+    Recognises the shape reproduced on an open gf180mcu flow: the run log's
+    last non-empty line is Yosys's per-module ABC banner -- the
+    ``Extracting gate netlist of module `…'`` form already matched by
+    :data:`~klayout_tools.synthesize_abc_timing._ABC_MODULE_RE` -- with no
+    ABC output after it. That reads as "this ABC build cannot process this
+    liberty", not "the design is too big for the budget": the
+    :class:`~klayout_tools.synthesize.SynthesizeError` names it so the
+    reader does not shrink the design or raise a budget that cannot finish.
+
+    ``stdout`` is whatever ``subprocess.TimeoutExpired`` captured so far
+    (``str``, ``bytes`` -- decoded as :func:`klayout_tools.synthesize.
+    _write_yosys_log` decodes -- or ``None``); any of those is accepted and
+    an empty/absent log simply yields ``""``. Conservative by construction:
+    a banner followed by *any* later output means ABC made progress past
+    extraction, so no diagnostic is offered.
+    """
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    lines = [line for line in (stdout or "").splitlines() if line.strip()]
+    if not lines or not _ABC_MODULE_RE.search(lines[-1]):
+        return ""
+    return (
+        " -- hint: ABC produced no output after its gate-netlist extraction"
+        " banner -- this points to an ABC/liberty incompatibility in the"
+        " yosys build on PATH rather than a design-size problem, so raising"
+        " yosys_timeout_s is unlikely to help; check the yosys build against"
+        " the environment guidance in docs/cli/synthesize.md"
+    )
+
+
+def timeout_message(
+    timeout_s: float | None, script_path: str, log_path: str, stdout: str | bytes | None
+) -> str:
+    """Name the timeout, saved log and the next step for the observed phase."""
+    message = (
+        f"yosys did not complete within {timeout_s}s (script '{script_path}')"
+        " -- process killed (a run hung on yosys-abc's stdout has its abc"
+        f" child killed with the whole process group) -- log '{log_path}'"
+    )
+    hint = timeout_diagnostic(stdout) or (
+        " (raise --yosys-timeout-s, $KLT_YOSYS_TIMEOUT_S or "
+        "request.yosys_timeout_s to allow more time)"
+    )
+    return message + hint

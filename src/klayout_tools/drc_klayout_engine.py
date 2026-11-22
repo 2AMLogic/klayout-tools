@@ -19,6 +19,7 @@ import signal
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from typing import Any
 
 from . import env_provenance
@@ -31,6 +32,7 @@ from .coverage import (
     rollup_status,
     work_id,
 )
+from .deck_global_defaults import _record_deck_default
 from .drc import (
     CODE_MULTIPLE_TOP_CELLS,
     CODE_NEGATIVE_CONTROL_FAILED,
@@ -513,55 +515,14 @@ _DECK_GLOBAL_IGNORED = frozenset(
     {
         "input", "report", "top_cell",
         "stdout", "stderr", "stdin", "PROGRAM_NAME", "LOAD_PATH",
-        "LOADED_FEATURES", "DEBUG", "VERBOSE", "FILENAME",
+        "LOADED_FEATURES", "DEBUG", "VERBOSE", "FILENAME", "CHILD_STATUS",
     }
 )  # fmt: skip
 
-#: ``if not defined? $x`` / ``unless defined? $x`` opening a default block.
-_DECK_DEFAULT_BLOCK_RE = re.compile(
-    r"^\s*(?:if\s+(?:not|!)\s*defined\?\s*\(?\s*\$(\w+)\s*\)?|"
-    r"unless\s+defined\?\s*\(?\s*\$(\w+)\s*\)?)\s*$"
-)
-#: ``$x = <value> unless defined? $x`` / ``... if not defined? $x``.
-_DECK_DEFAULT_INLINE_RE = re.compile(
-    r"^\s*\$(\w+)\s*=\s*(?P<value>.+?)\s+"
-    r"(?:unless\s+defined\?|if\s+(?:not|!)\s*defined\?)\s*\(?\s*\$(\w+)\s*\)?\s*$"
-)
-_DECK_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*(?:\|\|)?=\s*(?P<value>.+?)\s*$")
-_DECK_OR_ASSIGN_RE = re.compile(r"^\s*\$(\w+)\s*\|\|=\s*(?P<value>.+?)\s*$")
 
-
-def _ruby_literal(value: str) -> str:
-    """``"false"``/``'3'`` -> ``false``/``3``; anything else is kept verbatim."""
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-        return value[1:-1]
-    return value
-
-
-def _record_deck_default(
-    line: str, guarded: str | None, defaults: dict[str, str | None]
-) -> str | None:
-    """Fold one deck line into ``defaults`` (see :func:`scan_deck_globals`);
-    returns the ``defined?``-guarded global whose block is still open."""
-    block = _DECK_DEFAULT_BLOCK_RE.match(line)
-    if block:
-        guarded = block.group(1) or block.group(2)
-        defaults.setdefault(guarded, None)
-        return guarded
-    inline = _DECK_DEFAULT_INLINE_RE.match(line) or _DECK_OR_ASSIGN_RE.match(line)
-    if inline:
-        defaults.setdefault(inline.group(1), _ruby_literal(inline.group("value")))
-        return guarded
-    assign = _DECK_ASSIGN_RE.match(line)
-    if guarded and assign and assign.group(1) == guarded:
-        if defaults.get(guarded) is None:
-            defaults[guarded] = _ruby_literal(assign.group("value"))
-        return None
-    return guarded
-
-
-def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
+def scan_deck_globals(
+    deck_file: str, extra_ignored: Iterable[str] = (), *, runset_idioms: bool = False
+) -> list[dict[str, Any]]:
     """Best-effort static scan of the ``-rd`` globals a KLayout DRC deck
     consumes (issue #3816), following literal Ruby and ``# %include``
     includes as :func:`_deck_script_files` does.
@@ -572,6 +533,8 @@ def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
     with that assignment's literal as ``default``; every other ``$name``
     mentioned outside a comment is ``required_by_caller: True`` with
     ``default: None``. See :data:`_DECK_GLOBAL_IGNORED` for what is skipped.
+    ``extra_ignored`` names more; ``runset_idioms`` (LVS runsets, issue #5827)
+    adds the ``<helper>?($x)`` and ``$x || '<literal>'`` defaults (DRC: off).
 
     A heuristic, not a Ruby parser: a missing entry is not proof the deck
     ignores a variable, and an unreadable file contributes nothing.
@@ -588,9 +551,12 @@ def scan_deck_globals(deck_file: str) -> list[dict[str, Any]]:
         for line in lines:
             if line.lstrip().startswith("#"):
                 continue
-            guarded = _record_deck_default(line, guarded, defaults)
+            guarded = _record_deck_default(
+                line, guarded, defaults, runset_idioms=runset_idioms
+            )
             seen.update(_DECK_GLOBAL_RE.findall(line))
-    names = {n for n in seen | set(defaults) if n not in _DECK_GLOBAL_IGNORED}
+    ignored = _DECK_GLOBAL_IGNORED | frozenset(extra_ignored)
+    names = {n for n in seen | set(defaults) if n not in ignored}
     # A name only ever assigned (never read, never default-guarded) is deck
     # internal state, not an input; but we cannot tell reads from writes
     # line-wise beyond the default forms, so every mentioned name is listed.

@@ -79,7 +79,6 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--yosys-timeout-s",
         dest="yosys_timeout_s",
-        type=float,
         default=None,
         help=(
             "per-invocation Yosys wall-clock budget in seconds for this run "
