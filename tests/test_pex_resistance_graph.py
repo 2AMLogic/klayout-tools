@@ -113,5 +113,7 @@ def test_run_pex_resistance_graph_legacy_net_keeps_legacy_value(tmp_path):
     (net,) = graph["extraction"]["resistance_graph"]["nets"]
     assert net["resistance_source"] == "legacy"
     assert net["fallback_reason"] == "via_resistance_unknown"
+    assert net["terminals"] == []
+    assert net["pair_resistance_ohm"] == []
     assert net["selected_resistance_ohm"] == net["legacy_resistance_ohm"]
     assert graph["extraction"]["netlist_sha256"] == base["extraction"]["netlist_sha256"]
