@@ -59,6 +59,10 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   naming is part of `klt gen`'s documented output: a change to it is a
   CHANGELOG-recorded event, since structure names are written into the
   stream.
+  Under `--pdk-pcell` the child is **not** renamed: it keeps the vendor
+  PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
+  generated under different `--cell-name`s share that child name (issue
+  #5933; pinned by `tests/test_gen_pdk_pcell_vendor_name.py`).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -1173,10 +1177,16 @@ head-geometry attribution was measured, not assumed (2026-11-15: Magic
 forcing the marker to a uniform 0.2 µm on all four sides (`spacing_um` <=
 0.4) left the `rpm.1` verdict unchanged, while sweeping only the head
 length cleared it — `rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean
-from 2.08 µm. (The duplicated `poly.2` reports — "Distance between
-precision resistors < 0.21um" and "poly spacing < 0.21um" — seen on a
-standalone unit at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they
-are not tracked.) `klt drc --deck sky130` does not check the head rules (see
+from 2.08 µm. (The duplicated `poly.2` reports, “Distance between precision
+resistors < 0.21um” and “poly spacing < 0.21um”, were length-specific in
+the 2026-11-18 measurements for #6706. With Magic 8.3.683, open_pdks
+sky130A `c6d73a35f524`, and klt `0.9.3.dev1789` and `0.9.3.dev1792`,
+a `length_um: 9.765` body fired both rules for both `high` and `xhigh`.
+The 9.77 and 10.0 µm bodies drew no `poly.2` report. A half-grid regrid
+at the odd multiple of 5 nm is an **unverified** explanation. Magic also
+printed “Input off lambda grid by 1/2” for the two clear lengths. Only
+these three lengths were measured. The finding stays with the odd-5 nm
+case below unless another length class reproduces it.) `klt drc --deck sky130` does not check the head rules (see
 `docs/cli/drc.md`, "Precision-poly-resistor head rules are not checked"),
 so use `klt drc --engine klayout` for the independent check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
@@ -2047,6 +2057,7 @@ above for why, and the hand-drawn-recipe workaround.
 | `ring_gap_offset_um` | double | `0.0` | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um`  | double | `0.5`   | Padding between the device core and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. Widening this grows the band between the outermost active edge and the ring — the only room available for a gate contact's routing stub (issue #484). |
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
+| `pitch_x_um`       | double | `0.0`   | Override the inter-unit column pitch (µm) between adjacent sub-instances of a row (issue #5764). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates this param. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When it is set, `drc_hints.pitch` reports `col_pitch_um` (effective), `min_col_pitch_um` and `pitch_x_clamped`, and a clamp adds a `warnings` entry. The override scales every column of *both* rows by the same step, so the legs' shared-x-column common-centroid property (above) is preserved. This is the room a [`gen-compose`](gen-compose.md) route needs for its own port stub plus via-drop landing pads when it wires two different nets to adjacent units of one row — on gf180mcu the default gap leaves ~0.19 µm where the deck demands 0.28 µm. |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"`/`"lvt"` resolve on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
