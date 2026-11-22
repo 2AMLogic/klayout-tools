@@ -4,14 +4,9 @@ Landing-pad sizing lives in :mod:`.gen_compose_layer_rules` (the deck-floor
 lookups and ``_resolve_landing_pad_sizes``); this module holds everything
 those sizes feed on the *check* side of the router:
 
-* ``_make_landing_pad_side_um`` -- the memoized per-pair size resolver
-  ``compose()`` threads into its collision-check footprint builders, so a
-  request-level ``routing.landing_pad_size_um`` override is checked at the
-  same size it is drawn at (the #1197 "check and drawn output cannot
-  disagree" rule) while a request without one keeps today's fixed-baseline
-  footprints byte-for-byte; since #6058 the resolver also answers the
-  per-pair floor of a ``routing.minimal_ladder`` request's *intermediate*
-  landings, from the drop's own ``terminal_landing_layers`` marking;
+* ``_make_landing_pad_side_um`` -- the per-request resolver for terminal
+  and intermediate landing sizes. Compose uses its ``drawn_side`` and
+  cached cut sizes for route collision checks on the output grid;
 * ``_landing_and_widen_pad_boxes`` -- every pad box one leg draws (via-drop
   landing pads plus stub-widen boxes), extracted verbatim from
   ``compose()``'s ``_leg_conflict`` (#1520's own-block self-notch loop) so
@@ -141,7 +136,7 @@ class _LandingPadSideResolver:
         self._via_cache: dict[tuple[int, int], float] = {}
         self._via_side_lookup = via_drop_cut_side_um
 
-    def _via_side_um(self, via_layer: tuple[int, int]) -> float:
+    def via_side_um(self, via_layer: tuple[int, int]) -> float:
         if via_layer not in self._via_cache:
             self._via_cache[via_layer] = self._via_side_lookup(self._variant, via_layer)
         return self._via_cache[via_layer]
@@ -176,20 +171,20 @@ class _LandingPadSideResolver:
                 )
 
                 floor_side, _floors = _intermediate_landing_pad_floor_um(
-                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
                 self._pair_cache[key] = floor_side
             elif self._override_um is None:
                 from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 
                 self._pair_cache[key] = _landing_pad_side_um_for_pair(
-                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
             else:
                 from .gen_compose_layer_rules import _landing_pad_floor_um
 
                 floor_side, _floors = _landing_pad_floor_um(
-                    self._variant, pad_layer, via_layer, self._via_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
                 self._pair_cache[key] = max(self._override_um, floor_side)
         return self._pair_cache[key]
@@ -256,57 +251,28 @@ def _landing_and_widen_pad_boxes(
     via_drops: list[dict[str, Any]],
     stub_widen: list[dict[str, Any]],
     layer: tuple[int, int] | None,
-    side_for_pair: Any,
+    sizes: _LandingPadSideResolver,
+    dbu: float,
 ) -> list[_LegPadBox]:
-    """Every pad box one routed leg draws, sized for its own pair (#1520).
+    """Own-block landing and stub-widen boxes in the composed frame (µm).
 
-    Extracted verbatim from ``compose()``'s ``_leg_conflict`` (issue #1520's
-    own-block pad self-notch loop grew there; issue #5803's message path
-    needs the same boxes, so the loop moved here beside it instead of being
-    duplicated). ``side_for_pair`` (issue #5803) is
-    :func:`_make_landing_pad_side_um`'s resolver -- a landing pad is sized
-    for its own ``(landing, via)`` pair rather than the fixed baseline, so
-    a request-level override is checked at the size drawing will insert.
-    Stub-widen boxes draw on the leg's own ``layer`` at their own width,
-    exactly as before (they are not pair-sized; ``drop`` is ``None``).
-
-    Returns ``[(pad_layer, block_id, (x0, y0, x1, y1)_um, drop)]``. A
-    pre-#1520 caller-built entry (``block_id`` absent) is skipped, not an
-    error -- unchanged behaviour.
+    Landings use the writer's integer box on the composed grid. Stub-widen
+    boxes retain their own width and length. Drops without an owning block
+    predate this check and are skipped.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_routing import _drop_array_extra_um
+    from .gen_compose_via_cuts import drawn_landing_box
 
     boxes: list[_LegPadBox] = []
     for drop in via_drops:
         block_id = drop.get("block_id")
         if block_id is None:
-            continue  # pre-#1520 caller-built via_drops -- skip, not an error
+            continue
         via_layer = drop["via_layer"]
-        cx, cy = drop["x_um"], drop["y_um"]
-        # Each hop's landing pad is drawn on *both* of its own
-        # ``landing_layers`` (see _write_composed_gds) -- issue #1567
-        # generalized this from a single hop's fixed (port_layer, this leg's
-        # own route layer) pair to whatever pair *that hop* actually lands
-        # on, so a multi-level ladder's intermediate pads are checked here
-        # too, not just the one nearest the backbone or the one nearest the
-        # pin. dict.fromkeys dedupes the common case where both layers of a
-        # hop happen to be identical.
         for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
-            side_um = (
-                side_for_pair(pad_layer, via_layer, drop)
-                if side_for_pair is not None
-                else _VIA_LANDING_SIZE_UM
-            )
-            half_um = (side_um + _drop_array_extra_um(drop)) / 2.0
-            boxes.append(
-                (
-                    pad_layer,
-                    block_id,
-                    (cx - half_um, cy - half_um, cx + half_um, cy + half_um),
-                    drop,
-                )
-            )
+            side = sizes.drawn_side(pad_layer, via_layer, drop)
+            box = drawn_landing_box(drop, side, sizes.via_side_um(via_layer), dbu)
+            bounds = (box.left * dbu, box.bottom * dbu, box.right * dbu, box.top * dbu)
+            boxes.append((pad_layer, block_id, bounds, drop))
     for widen in stub_widen:
         block_id = widen.get("block_id")
         if block_id is None or layer is None:
@@ -322,11 +288,39 @@ def _landing_and_widen_pad_boxes(
     return boxes
 
 
+def _landing_pad_box(
+    drop: dict[str, Any],
+    layer: tuple[int, int] | None,
+    dbu: float,
+    side_for_pair: Any,
+    cut_side_um: Any,
+) -> Any:
+    """One landing on the output grid, including via-array growth and cut rounding."""
+    import klayout.db as kdb
+
+    from .gen_compose import _VIA_LANDING_SIZE_UM
+    from .gen_compose_routing import _drop_array_extra_um
+    from .gen_compose_via_cuts import drawn_landing_box
+
+    side = (
+        side_for_pair(layer, drop["via_layer"], drop)
+        if side_for_pair is not None and layer is not None
+        else _VIA_LANDING_SIZE_UM
+    )
+    if cut_side_um is not None:
+        return drawn_landing_box(drop, side, cut_side_um(drop["via_layer"]), dbu)
+    # A caller without a PDK uses the original nominal footprint.
+    half = round((side + _drop_array_extra_um(drop)) / (2 * dbu))
+    cx, cy = (round(drop[key] / dbu) for key in ("x_um", "y_um"))
+    return kdb.Box(cx - half, cy - half, cx + half, cy + half)
+
+
 def _drawn_leg_intermediate_pad_regions(
     via_drops: list[dict[str, Any]],
     dbu: float,
     route_layer: tuple[int, int] | None,
     side_for_pair: Any = None,
+    cut_side_um: Any = None,
 ) -> dict[tuple[int, int], Any]:
     """Every via-drop landing-pad box this leg draws on a physical layer
     *other than* its own primary ``route_layer``, grouped by that pad's own
@@ -365,9 +359,6 @@ def _drawn_leg_intermediate_pad_regions(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_routing import _drop_array_extra_um
-
     regions: dict[tuple[int, int], Any] = {}
     if route_layer is None:
         return regions
@@ -376,27 +367,13 @@ def _drawn_leg_intermediate_pad_regions(
         landing_layers = drop.get("landing_layers")
         if not landing_layers:
             continue
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
         # dict.fromkeys dedupes the common case where both layers of a hop
         # happen to be identical (mirrors the same idiom in
         # `_leg_conflict`'s own-block pad self-notch loop).
         for pad_layer in dict.fromkeys(landing_layers):
             if pad_layer == route_layer:
                 continue  # already part of _drawn_leg_footprint_region
-            if side_for_pair is not None:
-                side_um = side_for_pair(pad_layer, drop["via_layer"], drop)
-            else:
-                side_um = _VIA_LANDING_SIZE_UM
-            landing_half_dbu = int(
-                round((side_um + _drop_array_extra_um(drop)) / 2.0 / dbu)
-            )
-            box = kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
+            box = _landing_pad_box(drop, pad_layer, dbu, side_for_pair, cut_side_um)
             region = regions.get(pad_layer)
             if region is None:
                 region = kdb.Region()

@@ -199,12 +199,11 @@ def test_gf180mcu_mos_provenance_cites_lvs_deck():
 
 
 def test_gf180mcu_resistor_provenance_cites_lvs_deck():
-    """Every one of gf180mcu's curated resistor entries carries a
-    `provenance` citing the real `res_extraction.lvs` device-class name its
-    `sheet_rho_ohm_sq` was transcribed from (issue #904, extended to the
-    drawn metal-resistor family -- `rm1`/`rm2`/`rm3`/`tm9k` (this deck's own
-    default `metal_top` flavour) -- by issue #1640)."""
-    by_name = {r.name: r for r in GF180MCU_DECK.resistors}
+    """Every curated gf180mcu resistor entry but the eFuse (see
+    `test_lvs_gf180mcu_efuse.py`) carries a `provenance` citing the real
+    `res_extraction.lvs` device-class name its `sheet_rho_ohm_sq` was
+    transcribed from (issue #904; metal family `rm1`..`tm9k`, issue #1640)."""
+    by_name = {r.name: r for r in GF180MCU_DECK.resistors if r.name != "efuse"}
     assert set(by_name) == {
         "ppolyf_u",
         "ppolyf_u_1k",
@@ -214,7 +213,7 @@ def test_gf180mcu_resistor_provenance_cites_lvs_deck():
         "tm9k",
     }
 
-    for resistor in GF180MCU_DECK.resistors:
+    for resistor in by_name.values():
         assert resistor.provenance is not None
         assert (
             resistor.provenance.source_repo
@@ -1367,6 +1366,7 @@ _GOLDEN_PAIR_TESTED_RULE_IDS: dict[str, frozenset[str]] = {
             "gf180mcu_fd_pr__rm2",
             "gf180mcu_fd_pr__rm3",
             "gf180mcu_fd_pr__tm9k",
+            "gf180mcu_fd_pr__efuse",  # golden pair: test_lvs_gf180mcu_efuse.py
             "cap_mim_2f0fF",
             "BJT.3",
             "gf180mcu_fd_pr__diode_nd2ps_06v0",

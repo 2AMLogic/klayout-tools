@@ -29,7 +29,6 @@ a verdict is ``unknown``, never ``pass`` (cf. ``klt equiv``'s
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -43,8 +42,8 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import resolve_tool_binary, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
+    _combined_content_hash,
     build_provenance,
-    sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
 from .request_paths import RequestPaths, resolve_readable_files
@@ -498,15 +497,6 @@ def _find_trace(workdir: str) -> str | None:
     return os.path.abspath(found[0]) if found else None
 
 
-def _combined_hash(paths: list[str]) -> str | None:
-    """One ``sha256:`` digest over every input's content (order-independent)."""
-    digests = [sha256_file(path) for path in paths]
-    if None in digests:
-        return None
-    joined = "\n".join(sorted(d for d in digests if d))
-    return "sha256:" + hashlib.sha256(joined.encode()).hexdigest()
-
-
 def _build_report(
     *,
     status: str,
@@ -535,7 +525,7 @@ def _build_report(
     else:
         provenance = build_provenance()
         provenance["input"] = {
-            "content_hash": _combined_hash(inputs),
+            "content_hash": _combined_content_hash(inputs),
             "role": INPUT_ROLE_SOURCE,
         }
     return {

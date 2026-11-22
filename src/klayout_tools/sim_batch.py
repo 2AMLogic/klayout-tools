@@ -128,6 +128,7 @@ from .sim_batch_features import (
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_log import read_collected_log
 from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
     _resume_attach_config,
@@ -1580,14 +1581,13 @@ def job_exists(
     runner: remote_transport.CommandRunner | None = None,
 ) -> bool:
     """Whether ``<prefix>/job.json`` exists, i.e. the job was really
-    submitted (issue #2978)."""
+    submitted (issue #2978). One ``head-object`` probe shared with
+    ``--job-status`` (issue #5613): a 404 is "absent"; any other failure
+    (credentials, throttling, timeout) raises :class:`BatchError`."""
+    from .sim_batch_async import _job_head  # imports this module at load time
+
     run = runner if runner is not None else _run_subprocess
-    argv = _aws_argv(config, "s3", "cp", f"{job_uri(config, job_id)}/job.json", "-")
-    try:
-        result = run(argv, _BATCH_AWS_TIMEOUT_S)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise BatchError(f"job.json lookup could not complete: {exc}") from exc
-    return result.returncode == 0
+    return _job_head(config, job_id, run) is not None
 
 
 def _advance_interrupted_clock(
@@ -2371,16 +2371,6 @@ def _find_engine_logs(collected: str) -> list[str]:
     return sorted(found)
 
 
-def _read_log_head(path: str) -> str:
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
-                "utf-8", errors="replace"
-            )
-    except OSError:
-        return ""
-
-
 def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
     ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
@@ -2433,7 +2423,8 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _fatal_log_diagnostic(_read_log_head(log_path))
+        _, evidence = read_collected_log(log_path, _BATCH_ENGINE_LOG_HEAD_BYTES)
+        found = _fatal_log_diagnostic(evidence)
         if found is not None:
             diagnostics.append(found)
 
@@ -2450,11 +2441,11 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
             "outputs (engine logs are retrieved only when artifacts are kept)",
             None,
         )
-    text = _read_log_head(logs[0])
+    text, evidence = read_collected_log(logs[0], _BATCH_ENGINE_LOG_HEAD_BYTES)
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(evidence)
 
 
 def _job_failure_corners(
@@ -3437,15 +3428,12 @@ def _run_batch(
     collect_partial: bool = False,
     shard_fingerprint: str | None = None,
     netlist_sha256: str | None = None,
+    explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
 
-    Like ``remote``, this is **the same code path as ``local-parallel``, run
-    on a different box** -- the job command is a plain
-    ``klt sim ... --backend local-parallel --format json`` invocation on the
-    fleet's own pinned image, so corner expansion, ordering, measurement
-    extraction, and pass/fail classification are never reimplemented here.
+    The pinned worker runs ``klt sim ... --backend local-parallel --format json``.
     Unlike ``remote``, this process provisions nothing, holds no SSH key,
     and needs no ``RunInstances`` authority: it writes an S3 job contract
     and asks 2am's launch script to acquire diversified Spot capacity for
@@ -3576,8 +3564,11 @@ def _run_batch(
                 len(corner_points),
                 checkpoint is not None,
                 netlist_sha256,
+                units_sha256=sim_batch_receipt.units_digest(corner_points),
+                require_units_digest=explicit_points is not None,
             ),
             corner_points=corner_points,
+            explicit_points=explicit_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
@@ -3707,6 +3698,12 @@ def _raise_client_interrupted(signum: int, _frame: Any) -> None:
     )
 
 
+def _require_shard_environment(result: _ShardResult) -> _ShardResult:
+    if result[2] is None:
+        raise BatchError("batch shard returned no remote environment")
+    return result
+
+
 class _BatchFleetRun:
     """The per-shard half of :func:`_run_batch_fleet`: runs one shard's job
     (submit, or re-attach under ``--resume``) and carries the run-wide state
@@ -3810,9 +3807,7 @@ class _BatchFleetRun:
         launch_if_unlaunched: bool = False,
         resumed: bool = False,
     ) -> _ShardResult:
-        # The job id doubles as the shard's artifacts subdirectory, so
-        # per-shard artifact trees never collide and each one is traceable
-        # back to the S3 prefix it was collected from.
+        # Each retained artifact directory maps back to its job's S3 prefix.
         shard_artifacts_dir = (
             os.path.join(self.artifacts_dir, job_id)
             if self.keep_artifacts
@@ -3820,14 +3815,12 @@ class _BatchFleetRun:
         )
         shard_config = self.shard_config()
         if resumed:
-            # A recorded job still ``interrupted`` on resume already waited out
-            # the full grace in the prior run: surface it after ~one poll so
-            # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
+            # An interrupted shard already spent its grace on the prior run.
             shard_config = _resume_attach_config(
                 shard_config, _RESUME_INTERRUPTED_GRACE_S
             )
         try:
-            return _run_batch_job(
+            result = _run_batch_job(
                 config=shard_config,
                 job_id=job_id,
                 corner_points=shard_points,
@@ -3847,20 +3840,18 @@ class _BatchFleetRun:
                 sleep=self.abortable_sleep,
                 launch_kwargs=self._launch_kwargs(shard_config, index),
             )
+            return _require_shard_environment(result)
         except BatchError as exc:
             if type(exc) is not BatchError:
                 # Poll timeout / interruption already say where the job is.
                 raise
             raise BatchError(
-                f"{exc}{_remote_state_note(shard_config, job_id)}", code=exc.code
+                f"shard {index}: {exc}{_remote_state_note(shard_config, job_id)}",
+                code=exc.code,
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Begin a ``--capacity-retries`` pass (issue #5567): hand back the
-        shards the last pass lost to a capacity refusal, in shard order, and
-        give the pass a fresh ``--wait-for-capacity`` budget (the run-wide
-        one is long spent, which would make every retry a single no-wait
-        attempt)."""
+        """Retry capacity-refused shards in order with a fresh wait budget."""
         refused = sorted(self.capacity_refused)
         self.started = time.monotonic()
         self.budget_spent.clear()
