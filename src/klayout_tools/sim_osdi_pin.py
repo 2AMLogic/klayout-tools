@@ -8,12 +8,38 @@ from __future__ import annotations
 
 import ntpath
 import os
-from pathlib import PureWindowsPath
+import posixpath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from ._paths import _resolve_relative
 from .sim_errors import SimError
 from .sim_staging import _PDK_ROOT_LITERAL_PREFIXES
+
+#: ``(normpath, pure path class)`` for each path convention an executing host
+#: may use. A backslash separates components only under the Windows convention
+#: and is an ordinary filename character under POSIX, so the two count different
+#: directory components for a mixed-separator reference.
+_PATH_CONVENTIONS = (
+    (posixpath.normpath, PurePosixPath),
+    (ntpath.normpath, PureWindowsPath),
+)
+
+
+def _leaves_variant(ref: str) -> bool:
+    """Whether ``ref`` is anchored or starts with a parent component under
+    *either* path convention.
+
+    A portable request is resolved by whichever host executes it, and
+    :func:`_preload_ref` hands that host ``os.path.normpath(ref)``. Checking
+    only one convention would pass a reference that normalizes to ``.`` under
+    one and ``..`` under the other (``models\\device/../..``).
+    """
+    for normpath, pure_path in _PATH_CONVENTIONS:
+        normalized = pure_path(normpath(ref))
+        if normalized.anchor or normalized.parts[:1] == ("..",):
+            return True
+    return False
 
 
 def osdi_pdk_root_pin(request: dict[str, Any]) -> str | None:
@@ -46,8 +72,7 @@ def _preload_ref(entry: Any, field: str, pdk_variant: str | None) -> str:
     if not isinstance(ref, str) or not ref.strip():
         raise SimError(f"{field}.pdk_relative must be a non-empty relative path")
     # A portable request must stay relative under either host's path rules.
-    windows_path = PureWindowsPath(ntpath.normpath(ref))
-    if windows_path.anchor or windows_path.parts[:1] == ("..",):
+    if _leaves_variant(ref):
         raise SimError(
             f"{field}.pdk_relative must stay within the selected PDK variant"
         )

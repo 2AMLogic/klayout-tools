@@ -60,6 +60,15 @@ def test_pinned_pdk_and_request_relative_strings_load_different_files(
         ({"pdk_relative": "/lib/d.osdi"}, {"pdk": VARIANT}, "within"),
         ({"pdk_relative": r"..\model.osdi"}, {"pdk": VARIANT}, "within"),
         ({"pdk_relative": "foo/../../d.osdi"}, {"pdk": VARIANT}, "within"),
+        # Mixed separators: ``\`` is a separator only under Windows rules and an
+        # ordinary filename character under POSIX rules, so the two conventions
+        # count different directory components. Each of these stays inside the
+        # variant under one convention and escapes it under the other.
+        ({"pdk_relative": r"models\device/../.."}, {"pdk": VARIANT}, "within"),
+        ({"pdk_relative": r"models/..\.."}, {"pdk": VARIANT}, "within"),
+        ({"pdk_relative": r"models\device/../../d.osdi"}, {"pdk": VARIANT}, "within"),
+        ({"pdk_relative": "a/..\\..\\d.osdi"}, {"pdk": VARIANT}, "within"),
+        ({"pdk_relative": r"C:d.osdi"}, {"pdk": VARIANT}, "within"),
     ],
 )
 def test_invalid_entries_are_reported_even_when_deferred(
@@ -68,6 +77,20 @@ def test_invalid_entries_are_reported_even_when_deferred(
     request = {"models": models, "options": {"osdi_preload": [entry]}}
     with pytest.raises(SimError, match=r"osdi_preload\[0\].*" + error):
         resolve_request_osdi(request, str(tmp_path), frozenset({0}))
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [REL, "a/./b.osdi", "a/../b.osdi", r"models\device.osdi", "libs..tech/d.osdi"],
+)
+def test_contained_references_are_not_over_rejected(tmp_path, ref):
+    """The both-conventions containment check still accepts a reference that
+    stays inside the variant under each convention."""
+    request = {
+        "models": {"pdk": VARIANT},
+        "options": {"osdi_preload": [{"pdk_relative": ref}]},
+    }
+    assert resolve_request_osdi(request, str(tmp_path), frozenset({0})) == ()
 
 
 def test_missing_binary_and_variant_name_the_entry(tmp_path):
@@ -186,6 +209,40 @@ def test_batch_digest_requires_the_worker_slot_and_matching_basename(name):
     assert _join([_resolved(ENTRY, 0, "pdk_relative")], worker) == [
         digest if name == "device.osdi" else None
     ]
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        REL,
+        f"{REL}/.",
+        "libs.tech/./ngspice//device.osdi",
+        "libs.tech/other/../ngspice/device.osdi",
+    ],
+)
+def test_batch_digest_follows_the_resolved_object_not_its_spelling(tmp_path, spelling):
+    """Every accepted spelling of one object resolves to the same file, so each
+    keeps the worker's digest, while the report still names the declared entry
+    as written. A differently named worker file still yields no digest."""
+    root = tmp_path / "root"
+    binary = _install(root)
+    entry = {"pdk_relative": spelling}
+    request = {
+        "models": {"pdk": VARIANT, "pdk_root": str(root)},
+        "options": {"osdi_preload": [entry]},
+    }
+    assert resolve_request_osdi(request, str(tmp_path)) == (str(binary),)
+    digest = "1" * 64
+    resolved = [_resolved(entry, 0, "pdk_relative")]
+    worker = {"runner_osdi_preload": [{"name": "device.osdi", "sha256": digest}]}
+    assert _join(resolved, worker) == [digest]
+    assert resolved[0]["entry"] == entry
+    other = {"runner_osdi_preload": [{"name": "wrong.osdi", "sha256": digest}]}
+    assert _join([_resolved(entry, 0, "pdk_relative")], other) == [None]
+    # A string declaration normalizes the same way.
+    text = f"$PDK_ROOT/{spelling}"
+    assert _join([_resolved(text, 0)], worker) == [digest]
+    assert _join([_resolved(text, 0)], other) == [None]
 
 
 @pytest.mark.usefixtures("real_build_identity_git")
