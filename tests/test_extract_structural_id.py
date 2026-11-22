@@ -1,27 +1,16 @@
-"""Tests for ``nets[].structural_id`` (issue #5735): the per-net stable
-handle emitted by ``assemble_extract_report``.
-
-Every anonymous net carries the `$anon<...>` structural identity
-``_anonymous_net_name_map`` already derives for ``--check --rerun`` and
-``netlist_normalized_sha256`` (issue #3407); named nets and zero-terminal
-anonymous nets carry ``null``. The field is stripped alongside ``net_id``
-by ``_strip_net_id_and_rewrite_names`` so both the digest and
-``--check --rerun`` stay byte-identical across the field's introduction.
-"""
+"""Stable terminal identities for top-level anonymous nets in extraction reports."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
+import klayout.db as kdb
 import pytest
 
-from klayout_tools.decks import get_extraction_deck
 from klayout_tools.extract import run_extract
-from klayout_tools.extract_assemble import assemble_extract_report
+from klayout_tools.extract_report import _describe_devices, _describe_nets
 from test_extract import (
     _DIGEST_FIXTURE_SHA256,
-    _anon_connectivity,
     _digest_fixture,
     _make_series_nmos_layout,
     _write_gds,
@@ -40,63 +29,31 @@ def tmp_path(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _assemble_report(
-    devices: list[Any], nets: list[dict[str, Any]], tmp_path: Path
-) -> dict[str, Any]:
-    """Run the real ``assemble_extract_report`` over a synthetic
-    ``devices``/``nets`` pair (issue #5735): every stage input the assembler
-    consumes is filled with its flag-less-run equivalent so the call isolates
-    the ``structural_id`` annotation loop. ``nets`` entries gain the ``pin``
-    key the assembler's ``pin_count`` sum reads."""
-    input_path = tmp_path / "synthetic.gds"
-    input_path.write_bytes(b"")
-    return assemble_extract_report(
-        abstracted_cells=[],
-        black_box_regions=[],
-        dbu_um=1000,
-        dead_metal=[],
-        dead_metal_omitted=False,
-        dead_metal_summary={},
-        deck=get_extraction_deck("sky130"),
-        deck_name="sky130",
-        deck_options={},
-        declared_pins=None,
-        def_pin_promotion=None,
-        def_pins=None,
-        device_counts={},
-        device_models=None,
-        device_recognition_only_layers=[],
-        devices=devices,
-        dummy_devices_dropped=0,
-        hierarchy_report=None,
-        ignored_layers=[],
-        label_layers=None,
-        matched_device_groups_report=None,
-        merged_net_labels=[],
-        missing_flavour_markers=[],
-        netlist_sha256=None,
-        nets=[{"pin": False, **entry} for entry in nets],
-        parasitics_report=None,
-        report_parasitics_shape=None,
-        path=str(input_path),
-        pdk_info=None,
-        pin_renames=None,
-        pin_ties=[],
-        probe_results=[],
-        rename_declared_pins=False,
-        reported_netlist_path=None,
-        single_terminal_nets=[],
-        spef_path=None,
-        split_net_labels=[],
-        subcircuit_report=None,
-        tie_declared_pins=False,
-        top_cell_name="TOP",
-        unbiased_pmos_body_nets=[],
-        unmodelled_poly=[],
-        unsupported_devices=[],
-        voltage_domain_warnings=[],
-        warnings=[],
-    )
+def _circuit_report(first=3, second=7, *, rewire=False, tie_terminals=False):
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    mos = kdb.DeviceClassMOS4Transistor()
+    mos.name = "MOS"
+    netlist.add(mos)
+    source = circuit.create_net("VSS")
+    gate = circuit.create_net("IN")
+    internal = circuit.create_net()
+    internal.cluster_id = first
+    drain = circuit.create_net()
+    drain.cluster_id = second
+    circuit.create_net().cluster_id = 999
+    m1 = circuit.create_device(mos, "M1")
+    m1.connect_terminal("D", internal)
+    m1.connect_terminal("G", gate)
+    m1.connect_terminal("S", internal if tie_terminals else source)
+    m2 = circuit.create_device(mos, "M2")
+    m2.connect_terminal("D", drain)
+    m2.connect_terminal("G", gate if rewire else internal)
+    m2.connect_terminal("S", source)
+    devices, _ = _describe_devices(circuit)
+    return {"devices": devices, "nets": _describe_nets(circuit)}
 
 
 def test_extract_report_nets_carry_structural_id(tmp_path):
@@ -146,53 +103,26 @@ def test_structural_id_stable_across_runs(tmp_path):
     assert anonymous_ids, "fixture must carry an anonymous net with an identity"
 
 
-def test_structural_id_ignores_anonymous_net_numbering(tmp_path):
-    """Synthetic renumbering (the same shape the `netlist_normalized_sha256`
-    tests use, issue #5735 acceptance criterion 1): reports that differ only
-    in `$N` numbering report equal `structural_id` sets -- a consumer cannot
-    tell a renumbering happened -- while a genuine rewiring, routed through
-    the real ``assemble_extract_report``, changes them."""
-    first: list[Any] = []
-    second: list[Any] = []
-    for numbers, sink in (((3, 7), first), ((81, 12), second)):
-        devices, nets = _anon_connectivity(*numbers)
-        report = _assemble_report(devices, nets, tmp_path)
-        sink.extend(entry["structural_id"] for entry in report["nets"])
-    assert sorted(sid for sid in first if sid is not None) == sorted(
-        sid for sid in second if sid is not None
+def test_structural_id_ignores_anonymous_net_numbering():
+    original = _circuit_report()
+    renumbered = _circuit_report(81, 12)
+    first = {n["name"]: n["structural_id"] for n in original["nets"]}
+    second = {n["name"]: n["structural_id"] for n in renumbered["nets"]}
+    assert first[r"\$3"] == second[r"\$81"] == "$anon<M1.d,M2.g>"
+    assert first[r"\$7"] == second[r"\$12"] == "$anon<M2.d>"
+
+    rewired = _circuit_report(rewire=True)
+    assert (
+        next(n for n in rewired["nets"] if n["name"] == r"\$3")["structural_id"]
+        == "$anon<M1.d>"
     )
-    assert len(first) == len(second) == 4  # nulls line up too
-    assert first[1] == "$anon<M1.D,M2.G>"  # `\\$3`'s own attachments, verbatim
-    assert first[2] == "$anon<M2.D>"
-
-    devices, nets = _anon_connectivity(3, 7)
-    base_ids = [
-        entry["structural_id"]
-        for entry in _assemble_report(devices, nets, tmp_path)["nets"]
-    ]
-    devices[1]["nets"]["G"] = "IN"  # rewire M2's gate off the anonymous net
-    rewired_ids = [
-        entry["structural_id"]
-        for entry in _assemble_report(devices, nets, tmp_path)["nets"]
-    ]
-    assert rewired_ids != base_ids
 
 
-def test_structural_id_null_when_no_identity(tmp_path):
-    """`structural_id` is `null` exactly when the net has no structural
-    identity (issue #5735 acceptance criterion 3): a named net, or an
-    anonymous net with zero device terminals -- the case
-    `_net_attachment_key` returns `""` for and
-    `_anonymous_net_name_map` skips."""
-    devices, nets = _anon_connectivity(3, 7)
-    nets.append({"name": "\\$999", "net_id": 999, "device_count": 0})
-    report = _assemble_report(devices, nets, tmp_path)
-    by_name = {entry["name"]: entry for entry in report["nets"]}
-    assert by_name["IN"]["structural_id"] is None
-    assert by_name["VSS"]["structural_id"] is None
-    assert by_name["\\$999"]["structural_id"] is None
-    assert by_name["\\$3"]["structural_id"] == "$anon<M1.D,M2.G>"
-    assert by_name["\\$7"]["structural_id"] == "$anon<M2.D>"
+def test_structural_id_null_when_no_identity():
+    ids = {n["name"]: n["structural_id"] for n in _circuit_report()["nets"]}
+    assert ids["IN"] is None
+    assert ids["VSS"] is None
+    assert ids[r"\$999"] is None
 
 
 def test_structural_id_present_on_every_net_with_no_netlist(tmp_path):
@@ -220,11 +150,13 @@ def test_normalized_netlist_hash_ignores_structural_id_field(tmp_path):
     alongside `net_id` before the digest is serialized."""
     from klayout_tools.extract import _normalized_netlist_sha256
 
-    devices, nets = _anon_connectivity(3, 7)
-    nets = [{"pin": False, **entry} for entry in nets]
-    base = _normalized_netlist_sha256(devices, nets)
-    report = _assemble_report(devices, nets, tmp_path)
-    assert _normalized_netlist_sha256(devices, report["nets"]) == base
+    report = _circuit_report()
+    legacy = [
+        {k: v for k, v in n.items() if k != "structural_id"} for n in report["nets"]
+    ]
+    assert _normalized_netlist_sha256(
+        report["devices"], report["nets"]
+    ) == _normalized_netlist_sha256(report["devices"], legacy)
 
     # Golden-digest pin across the field's introduction: the annotated
     # `_digest_fixture` (which carries floating nets, non-dict entries and
@@ -242,21 +174,20 @@ def test_normalized_netlist_hash_ignores_structural_id_field(tmp_path):
 
 def test_canonicalization_strips_structural_id(tmp_path):
     """The mechanism behind criteria 4-5: `_canonicalize_extract_report_for_rerun_diff`
-    drops every `structural_id` key (the identity is redundant with the
+    drops each top-level net row’s `structural_id` (the identity is redundant with the
     anonymous-name rewrite it performs anyway, and dropping it keeps
     pre-field committed reports comparable), so a committed report
     predating the field can never diff against a fresh one on the new key."""
     from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
 
-    devices, nets = _anon_connectivity(3, 7)
-    report = _assemble_report(devices, nets, tmp_path)
+    report = _circuit_report()
     canonical = _canonicalize_extract_report_for_rerun_diff(report)
     for entry in canonical["nets"]:
         assert "structural_id" not in entry, entry
     # ...and the anonymous names still rewrite to the same `$anon<...>`
     # spelling the stripped field carried.
     by_name = {entry["name"] for entry in canonical["nets"]}
-    assert {"$anon<M1.D,M2.G>", "$anon<M2.D>"} <= by_name
+    assert {"$anon<M1.d,M2.g>", "$anon<M2.d>"} <= by_name
 
 
 def test_rerun_matches_report_committed_without_structural_id(tmp_path):
@@ -283,10 +214,11 @@ def test_structural_id_keeps_duplicate_attachments(tmp_path):
     duplicate in its identity: `_net_attachment_index` deliberately stores
     one `<device>.<terminal>` entry per terminal, so the emitted token
     carries both (issue #5735 edge case)."""
-    devices = [{"name": "M1", "nets": {"D": "\\$5", "S": "\\$5"}}]
-    nets = [{"name": "\\$5", "net_id": 5}]
-    report = _assemble_report(devices, nets, tmp_path)
-    assert report["nets"][0]["structural_id"] == "$anon<M1.D,M1.S>"
+    nets = _circuit_report(rewire=True, tie_terminals=True)["nets"]
+    assert (
+        next(n for n in nets if n["name"] == r"\$3")["structural_id"]
+        == "$anon<M1.d,M1.s>"
+    )
 
 
 def test_parasitics_nets_gain_no_structural_id(tmp_path):
@@ -304,3 +236,42 @@ def test_parasitics_nets_gain_no_structural_id(tmp_path):
     assert report["parasitics"]["nets"]
     for entry in report["parasitics"]["nets"]:
         assert "structural_id" not in entry, entry
+
+
+@pytest.mark.parametrize("label", ["$2", "$123"])
+def test_drawn_dollar_label_does_not_alias_an_anonymous_net(tmp_path, label):
+    layout = _make_series_nmos_layout()
+    (output,) = (
+        shape
+        for shape in layout.top_cell().shapes(layout.layer(67, 5)).each()
+        if shape.is_text() and shape.text.string == "Y"
+    )
+    output.text_string = label
+    gds = _write_gds(layout, tmp_path / "series.gds")
+    report = run_extract(gds, "sky130", no_netlist=True)
+    named = next(
+        net
+        for net in report["nets"]
+        if any(p["text"] == label for p in net["label_positions_um"])
+    )
+    assert named["structural_id"] is None
+    (internal,) = [net for net in report["nets"] if net["structural_id"] is not None]
+    assert internal["device_count"] == 2
+    assert internal["structural_id"].count(",") == 1
+
+
+def test_canonicalize_keeps_same_spelling_outside_top_level_nets():
+    from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
+
+    def report(value):
+        return {
+            "devices": [{"name": "M", "nets": {"structural_id": value}}],
+            "nets": [{"name": "A", "structural_id": None}],
+            "provenance": {"runset": {"deck_vars": {"structural_id": value}}},
+        }
+
+    normalized = _canonicalize_extract_report_for_rerun_diff(report("A"))
+    assert normalized["nets"] == [{"name": "A"}]
+    assert normalized["devices"][0]["nets"] == {"structural_id": "A"}
+    assert normalized["provenance"]["runset"]["deck_vars"] == {"structural_id": "A"}
+    assert normalized != _canonicalize_extract_report_for_rerun_diff(report("B"))

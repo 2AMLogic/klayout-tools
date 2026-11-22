@@ -467,3 +467,33 @@ def test_curated_engine_is_unchanged_by_the_new_parameters():
         )
         == []
     )
+
+
+@pytest.mark.parametrize("no_netlist", [False, True])
+def test_runset_nets_expose_terminal_identity(tmp_path, fake_klayout, no_netlist):
+    output = None if no_netlist else str(tmp_path / "extracted.spice")
+    report = _run(tmp_path, no_netlist=no_netlist, output=output)
+    assert len(report["nets"]) == 5
+    assert {net["structural_id"] for net in report["nets"]} == {
+        None,
+        "$anon<$1.s>",
+        "$anon<$1.g>",
+        "$anon<$1.d>",
+        "$anon<$1.b>",
+    }
+
+
+def test_runset_withholds_an_ambiguous_numbered_label(tmp_path, fake_klayout):
+    gds, deck = _inputs(tmp_path)
+    layout = kdb.Layout()
+    layout.read(gds)
+    child = layout.create_cell("LABELS")
+    child.shapes(layout.layer(24, 0)).insert(kdb.Text("$1", kdb.Trans()))
+    layout.cell("TOP").insert(kdb.CellInstArray(child.cell_index(), kdb.Trans()))
+    layout.write(gds)
+    result = run_extract(
+        gds, None, engine="klayout-runset", deck_file=deck, no_netlist=True
+    )
+    gate = next(net for net in result["nets"] if net["net_id"] == 1)
+    assert gate["device_count"] == 1
+    assert gate["structural_id"] is None

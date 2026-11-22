@@ -1070,6 +1070,13 @@ resolves to a plausible-but-wrong measurement). Two extractions of one GDS
 differing only in numbering report the same value per corresponding net; a
 genuine connectivity change reports a different one.
 
+An external runset's LVS database serializes an unnamed net as `$<cluster_id>`.
+The runset engine treats that spelling as generated when the net has no pin and
+the selected layout hierarchy contains no text with that spelling. Ambiguous
+numbered labels receive `null`. A name supplied only by a custom deck that
+exactly matches the generated spelling has no separate identity marker in the
+database.
+
 The field is `null` when no structural identity is derivable: a **named**
 net (its `name` is the label a consumer already joins on — and, per the
 "Net-name collisions" caveat below, no unique per-net identity would be

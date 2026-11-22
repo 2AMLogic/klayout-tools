@@ -3887,13 +3887,9 @@ def _canonicalize_extract_report_for_rerun_diff(
     ``klt extract --check <report> --rerun`` stops reporting bookkeeping-only
     differences as ``status: "drifted"``:
 
-    - every ``net_id`` (``Net.cluster_id``, KLayout's own internal counter)
-      and ``structural_id`` key (issue #5735's per-net handle -- stripped
-      so pre-field committed reports stay comparable) is stripped wherever
-      it appears, at any nesting depth -- it is never itself part of the
-      extracted *content*, only a same-run handle onto a net object (see
-      this module's many "resolved by net_id, not by name" docstrings, e.g.
-      :func:`_net_identity_name`, :func:`_mom_ground_entry_for_crosscheck`);
+    - every ``net_id`` (KLayout's per-run cluster counter) is stripped
+      recursively. Only top-level net rows lose ``structural_id``, so
+      pre-field committed reports stay comparable (#5735);
     - every anonymous ``\\$<n>`` net-name spelling is rewritten to the
       structural identity :func:`_anonymous_net_name_map` derives for it
       (that net's own sorted ``<device>.<terminal>`` attachment list), so
@@ -3930,6 +3926,10 @@ def _canonicalize_extract_report_for_rerun_diff(
     normalized = _strip_net_id_and_rewrite_names(report, name_map)
 
     nets = normalized.get("nets")
+    if isinstance(nets, list):
+        for entry in nets:
+            if isinstance(entry, dict):
+                entry.pop("structural_id", None)
     devices = normalized.get("devices")
     if isinstance(nets, list) and isinstance(devices, list):
         index = _net_attachment_index(devices)
@@ -4004,18 +4004,12 @@ def _parasitics_net_attachment_key(entry: Mapping[str, Any]) -> str:
 
 
 def _strip_net_id_and_rewrite_names(value: Any, name_map: Mapping[str, str]) -> Any:
-    """Recursively rebuild ``value`` (a JSON-decoded report, or any nested
-    piece of one), dropping every ``net_id`` and ``structural_id`` key
-    (leaving the #5735 per-net handle in would shift the digest and flag
-    every pre-field committed report as drifted) and passing every string
-    leaf through :func:`_rewrite_net_name` -- the bookkeeping normalizations
-    :func:`_canonicalize_extract_report_for_rerun_diff` applies report-wide,
-    so a new net-name-carrying field needs no separate registration here."""
+    """Strip per-run net IDs and rewrite anonymous names throughout the report."""
     if isinstance(value, dict):
         return {
             key: _strip_net_id_and_rewrite_names(val, name_map)
             for key, val in value.items()
-            if key not in ("net_id", "structural_id")
+            if key != "net_id"
         }
     if isinstance(value, list):
         return [_strip_net_id_and_rewrite_names(item, name_map) for item in value]
