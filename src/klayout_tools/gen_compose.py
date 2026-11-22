@@ -183,6 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
+from functools import cache
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -3444,19 +3445,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # from route_layer). So this cache is keyed by (block_id, layer) instead,
     # read lazily the same way, and reused by every leg that drops onto the
     # same block/layer pair.
-    own_block_layer_geometry_cache: dict[
-        tuple[str, tuple[int, int]], dict[str, Any] | None
-    ] = {}
-
+    @cache
     def _own_block_layer_geometry(
-        block_id: str, layer: tuple[int, int]
+        block_id: str, layer: tuple[int, int], dbu: float | None = None
     ) -> dict[str, Any] | None:
-        key = (block_id, layer)
-        if key not in own_block_layer_geometry_cache:
-            own_block_layer_geometry_cache[key] = read_block_layer_geometry(
-                block_id, blocks[block_id], offsets_um[block_id], layer
-            )
-        return own_block_layer_geometry_cache[key]
+        return read_block_layer_geometry(
+            block_id, blocks[block_id], offsets_um[block_id], layer, dbu
+        )
 
     # --- Per-net/per-leg routing-plane override (#1655) ----------------------
     # `routing.layer_role` resolves ONE plane for the whole composition, so a
@@ -3599,34 +3594,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return width
 
-    # dbu for the route-vs-route collision check below (#1057), read lazily
-    # (only once connectivity[] actually has a net to check) from any one
-    # block's own GDS -- this pre-flight check only ever compares continuous
-    # micron-space geometry quantized at *some* fine resolution, so any
-    # single block's own dbu is precise enough to reuse here even though (as
-    # of #1514) it need not be identical to every other block's dbu, nor to
-    # the composed layout's own dbu `_write_composed_gds` resolves below
-    # (the finest dbu across all blocks, reconciling any coarser block onto
-    # it) -- a difference of, at most, one block's own dbu step is far below
-    # any DRC-relevant tolerance.
-    _route_dbu_cache: list[float] = []
+    @cache
+    def _block_dbu(block_id: str) -> float:
+        layout, _ = _load_block_cell(block_id, blocks[block_id])
+        return float(layout.dbu)
 
     def _route_dbu() -> float:
-        if not _route_dbu_cache:
-            import klayout.db as kdb
+        # Route-vs-route spacing retains its historical first-block grid.
+        return _block_dbu(order[0])
 
-            probe_block_id = order[0]
-            probe_gds_path = blocks[probe_block_id]["gds_path"]
-            probe_layout = kdb.Layout()
-            try:
-                probe_layout.read(probe_gds_path)
-            except Exception as exc:  # klayout raises RuntimeError for bad paths
-                raise GenComposeError(
-                    f"block '{probe_block_id}': could not read gds_path "
-                    f"'{probe_gds_path}': {exc}"
-                ) from exc
-            _route_dbu_cache.append(probe_layout.dbu)
-        return _route_dbu_cache[0]
+    @cache
+    def _drawing_dbu() -> float:
+        # The writer reconciles every block onto the finest input grid.
+        return min(_block_dbu(block_id) for block_id in order)
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -4048,15 +4028,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # The box collection lives in :func:`_landing_and_widen_pad_boxes`
             # (issue #5803: shared with the pad-vs-pitch message path).
             pad_boxes = _landing_and_widen_pad_boxes(
-                via_drops, stub_widen, layer, side_for_pair.drawn_side
+                via_drops,
+                stub_widen,
+                layer,
+                side_for_pair,
+                _drawing_dbu() if via_drops else _route_dbu(),
             )
 
-            for pad_layer, block_id, box, _drop in pad_boxes:
+            for pad_layer, block_id, box, drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
-                pad_geometry = _own_block_layer_geometry(block_id, pad_layer)
+                pad_geometry = _own_block_layer_geometry(
+                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                )
                 if pad_geometry is None:
                     continue
                 violation_um = _pad_self_notch_violation_um(
