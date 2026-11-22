@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from klayout_tools.extract_report import (
     _case_collision_warnings,
     detect_case_colliding_net_names,
@@ -79,3 +81,122 @@ def test_run_extract_warns_on_case_colliding_labels(tmp_path):
     clean = _write_gds(_strapped(_make_inverter_layout()), tmp_path / "ok.gds")
     report = run_extract(clean, "sky130", output=str(tmp_path / "ok.spice"))
     assert not any("differ only by case" in w for w in report["warnings"])
+
+
+# --- issue #7091: flat --parasitics SPICE refuses case-fold net names -------
+
+
+def _relabel(layout, mapping):
+    """Rename top-level 67/5 (li1 label) texts per ``mapping``, geometry fixed."""
+    import klayout.db as kdb
+
+    li = layout.layer(67, 5)
+    top = layout.top_cell()
+    for shape in list(top.shapes(li).each()):
+        if shape.is_text() and shape.text_string in mapping:
+            shape.text = kdb.Text(mapping[shape.text_string], shape.text_trans)
+    return layout
+
+
+def _colliding_gds(tmp_path):
+    from test_extract import _make_inverter_layout, _write_gds
+
+    layout = _relabel(_make_inverter_layout(), {"A": "N1", "VGND": "n1"})
+    return _write_gds(layout, tmp_path / "two.gds")
+
+
+def _assert_names_both(exc_info):
+    message = str(exc_info.value)
+    assert "'N1'" in message and "'n1'" in message
+    assert "differ only by case" in message
+
+
+_KNOWN = "* pre-existing netlist, must survive\n"
+
+
+@pytest.mark.parametrize("scope", [None, ("VPWR",)], ids=["full-rc", "rc-vpwr"])
+def test_parasitic_spice_refuses_case_colliding_clusters(tmp_path, scope):
+    from klayout_tools.extract import ExtractError, run_extract
+
+    gds = _colliding_gds(tmp_path)
+    fresh = tmp_path / "fresh.spice"
+    kwargs = {"parasitics": True}
+    if scope is not None:
+        kwargs["parasitics_nets"] = scope
+    with pytest.raises(ExtractError) as exc_info:
+        run_extract(gds, "sky130", output=str(fresh), **kwargs)
+    _assert_names_both(exc_info)
+    assert not fresh.exists()
+
+    existing = tmp_path / "existing.spice"
+    existing.write_text(_KNOWN)
+    with pytest.raises(ExtractError):
+        run_extract(gds, "sky130", output=str(existing), **kwargs)
+    assert existing.read_text() == _KNOWN
+
+
+def test_parasitic_default_output_is_protected(tmp_path):
+    from klayout_tools.extract import ExtractError, run_extract
+
+    gds = _colliding_gds(tmp_path)
+    default = tmp_path / "two.spice"
+    default.write_text(_KNOWN)
+    with pytest.raises(ExtractError) as exc_info:
+        run_extract(gds, "sky130", parasitics=True)
+    _assert_names_both(exc_info)
+    assert default.read_text() == _KNOWN
+
+
+def test_parasitic_no_netlist_census_keeps_warning(tmp_path):
+    from klayout_tools.extract import run_extract
+
+    report = run_extract(
+        _colliding_gds(tmp_path), "sky130", parasitics=True, no_netlist=True
+    )
+    assert any("differ only by case" in w for w in report["warnings"])
+    assert report["netlist_path"] is None and report["netlist_sha256"] is None
+    assert {"N1", "n1"} <= {n["name"] for n in report["nets"]}
+
+
+def test_device_only_extraction_keeps_warning_and_writes(tmp_path):
+    from klayout_tools.extract import run_extract
+
+    out = tmp_path / "dev.spice"
+    report = run_extract(_colliding_gds(tmp_path), "sky130", output=str(out))
+    assert any("differ only by case" in w for w in report["warnings"])
+    assert out.exists()
+
+
+@pytest.mark.parametrize("extra_a_label", [None, "a"], ids=["clean", "A|a"])
+def test_parasitic_spice_still_written_without_cross_net_collision(
+    tmp_path, extra_a_label
+):
+    from klayout_tools.extract import run_extract
+    from test_extract import _make_inverter_layout, _write_gds
+
+    layout = _make_inverter_layout(extra_a_label=extra_a_label)
+    gds = _write_gds(layout, tmp_path / "ok.gds")
+    out = tmp_path / "ok.spice"
+    report = run_extract(gds, "sky130", output=str(out), parasitics=True)
+    assert out.exists() and report["netlist_path"] == str(out)
+    assert not any("differ only by case" in w for w in report["warnings"])
+    if extra_a_label:
+        assert "A|a" in {n["name"] for n in report["nets"]}
+
+
+def test_pex_surfaces_case_collision_before_simulation(tmp_path, monkeypatch):
+    import klayout_tools.pex as pex_module
+    from klayout_tools.pex import PexError, run_pex
+    from test_pex import _write_request, _write_schematic_dut, _write_testbench
+
+    def _unreachable(*_args, **_kwargs):
+        raise AssertionError("run_sim must not run after a failed extraction")
+
+    monkeypatch.setattr(pex_module, "run_sim", _unreachable)
+    tb = _write_testbench(
+        tmp_path / "tb.spice", _write_schematic_dut(tmp_path / "d.sp")
+    )
+    request = _write_request(tmp_path / "request.json", tb)
+    with pytest.raises(PexError, match="extraction failed") as exc_info:
+        run_pex(_colliding_gds(tmp_path), [str(request)], "sky130")
+    _assert_names_both(exc_info)

@@ -1132,15 +1132,15 @@ def _rewrite_remote_artifact_paths(
     filesystem (where the pulled report JSON was generated) to the local
     path :func:`remote_transport.pull_artifacts` just copied them to.
 
-    The response's ``artifacts`` block always describes paths on the machine
-    the caller is running on -- ``local``/``local-parallel``/``remote``
-    alike -- so a raw remote path would be meaningless (and unreadable) to a
-    caller inspecting the returned report.
+    The response's ``artifacts`` block always describes paths on the caller's
+    own machine (local, local-parallel and remote alike), so a raw remote
+    path would be meaningless there. Only path-valued entries are rewritten;
+    non-path metadata (``raw_bytes``, issue #5622) passes through untouched.
     """
     for corner in corners:
         artifacts = corner.get("artifacts") or {}
         for key, value in list(artifacts.items()):
-            if not value:
+            if not isinstance(value, str) or not value:
                 continue
             relative = os.path.relpath(value, remote_root)
             artifacts[key] = os.path.join(local_root, relative)

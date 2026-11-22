@@ -20,7 +20,7 @@ from typing import Any
 
 from ._provenance import sha256_file
 from ._report_verify import hash_check, load_committed_report, resolve_committed_path
-from .request_paths import resolve_request_path
+from .request_paths import resolve_readable_files, resolve_request_path
 
 FROM_SYNTHESIZE_KEYS = ("report", "netlist")
 
@@ -60,18 +60,13 @@ def _resolve_sources(
     if not all(isinstance(entry, str) and entry for entry in sources):
         raise _err("request.sources entries must be non-empty strings")
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _request_relative(entry, request_dir, "request.sources entry")
-        if not os.path.isfile(path):
-            raise _err(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise _err(f"could not read RTL source '{entry}': {exc}") from exc
-        resolved.append(path)
-    return resolved
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        _err,
+        field="request.sources entry",
+        noun="RTL source",
+    )
 
 
 def has_from_synthesize(options: Any) -> bool:
