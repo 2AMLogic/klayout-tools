@@ -152,6 +152,7 @@ jobs:
           PDK: sky130A
           PDK_ROOT: /home/runner/.ciel
         run: |
+          set -o pipefail
           uv run --frozen --extra dev pytest tests/test_equiv.py \
             -k register_preserving_transformation \
             -v -rs | tee pytest-equiv-canary.log
