@@ -528,6 +528,7 @@
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_reference_stage",
         "klayout_tools.lvs_report",
+        "klayout_tools.lvs_replay",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",

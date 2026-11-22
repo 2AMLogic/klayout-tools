@@ -401,7 +401,7 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6355
+      "lines": 6315
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26071
+      "lines": 26057
     },
     {
       "path": "tests/test_lvs_device_provenance.py",
