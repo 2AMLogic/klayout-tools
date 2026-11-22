@@ -415,7 +415,8 @@ consume the same declaration.
   otherwise (LEF/DEF-only parasitics: never read those numbers as
   extracted-route numbers).
 - `coverage` — `"checked"` (the report ran; `violation_count: 0` is a real
-  zero), `"unsupported"` (the OpenSTA build rejected the report command), or
+  zero), `"unsupported"` (OpenSTA rejected the report command, or a marked
+  max-transition or max-capacitance violator row could not be parsed), or
   `"not_run"` (the session never reached the check). Counts, `net_count`,
   `worst_excess` and `worst_pin` are `null` unless `coverage` is `"checked"`
   — an absent check can never be read as zero violations.
