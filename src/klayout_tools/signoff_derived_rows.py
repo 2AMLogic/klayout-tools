@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .signoff_row_extent import row_credits
+
 #: The one T1 item whose row coverage ``require_derived_rows`` ratchets. The
 #: manifest key is top-level, but item 6 reuses the same list form and is
 #: deliberately left alone -- see the issue's scope.
@@ -112,19 +114,10 @@ def multi_row_info(
     """
     if spec_rows is None:
         return {}
-    credited = credited or {}
-    covered: set[str] = set()
-    row_sources: dict[str, str] = {}
-    for spec, rows, g in graded:
-        if g[0] != "met":
-            continue
-        member_rows, derived = credited.get(id(spec), (rows, False))
-        for r in member_rows or []:
-            covered.add(r)
-            # A row covered by any derived citation is machine-checked.
-            if derived or r not in row_sources:
-                row_sources[r] = "derived" if derived else "asserted"
-    failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
+    row_sources, slices, partial = row_credits(graded, credited or {}, spec_rows)
+    failed_rows = sorted(
+        {r for _, rows, _ in failed for r in rows or []} - row_sources.keys()
+    )
     justified = [
         {
             "id": row["id"],
@@ -142,7 +135,7 @@ def multi_row_info(
             for row in spec_rows
             if row["gap"] is None
             and row["justified_gap"] is None
-            and row["id"] not in covered
+            and row["id"] not in row_sources
             and row["id"] not in failed_rows
         ],
         "declared_gaps": [
@@ -158,5 +151,7 @@ def multi_row_info(
             and row["justified_gap"] is None
             and not row["ratified"]
         ],
+        **({"row_slices": slices} if slices else {}),
+        **({"partial_rows": partial} if partial else {}),
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
     }

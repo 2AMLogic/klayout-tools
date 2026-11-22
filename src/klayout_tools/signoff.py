@@ -250,6 +250,7 @@ from .signoff_power_delivery import (
     _build_power_delivery_item,
     _read_power_port_policy,
 )
+from .signoff_row_extent import has_covers, invalid_covers, label_list
 from .signoff_runset import (
     PINNED_RUNSETS,
     check_runset,
@@ -6450,15 +6451,10 @@ def _build_tier_item(
             item5_require_derived_invalid
             or spec_rows is not None
             or spec_rows_invalid
-            # Issue #4190: declared ``spec_rows`` with no evidence entry at
-            # all grade as a zero-citation set (every row uncovered or a
-            # declared gap), not as ``no_evidence`` -- so ``spec_rows``
-            # routes the branch with or without an entry, while a bare list
-            # or an RTL-flow kind pair still needs one (issues #2959/#3741).
-            or (
-                raw_entry is not None
-                and (isinstance(raw_entry, list) or required_kind_pair is not None)
-            )
+            # A declared row set also grades an empty citation set (#4190).
+            or isinstance(raw_entry, list)
+            or has_covers(raw_entry)
+            or (raw_entry is not None and required_kind_pair is not None)
         )
     ):
         # Issue #2959: item 5 may cite several envelopes (and declare the
@@ -6477,6 +6473,7 @@ def _build_tier_item(
             met_envelopes=met_envelopes,
             required_kind_pair=required_kind_pair,
             require_derived=item5_require_derived,
+            check_slices=not report_list,
             require_derived_invalid=item5_require_derived_invalid,
             require_coverage_invalid=item3_key_invalid(
                 item_id, require_coverage_disclosure_invalid
@@ -6577,6 +6574,7 @@ def _grade_multi_citation(
     met_envelopes: dict[int, dict[str, Any]] | None = None,
     required_kind_pair: tuple[str, ...] | None = None,
     require_derived: bool = False,
+    check_slices: bool = True,
     require_derived_invalid: bool = False,
     require_coverage_invalid: bool = False,
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any], dict[str, Any]]:
@@ -6625,7 +6623,7 @@ def _grade_multi_citation(
         return invalid("'require_derived_rows' must be a boolean")
 
     members, problem = _checked_multi_members(
-        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid
+        raw_entry, spec_rows, spec_rows_invalid, require_coverage_invalid, check_slices
     )
     if members is None:
         return invalid(problem or "malformed evidence entry")
@@ -6638,7 +6636,9 @@ def _grade_multi_citation(
         for spec, rows, _ in graded
     }
     row_info = multi_row_info(graded, failed, spec_rows, credited)
+    slices = row_info.pop("row_slices", {})
     extra: dict[str, Any] = {
+        **({"row_coverage": {"row_slices": slices}} if slices else {}),
         "citations_graded": [
             {
                 "citation": _citation_label(spec),
@@ -6649,7 +6649,7 @@ def _grade_multi_citation(
                 **graded_entry_campaign(g[2]),
             }
             for spec, rows, g in graded
-        ]
+        ],
     }
 
     if failed:
@@ -6660,9 +6660,7 @@ def _grade_multi_citation(
             **row_info,
         }
         return "unmet", first[1], None, detail, extra
-    # Issue #5599 + #4314: the justified-gap declaration check and the
-    # timing-margin rule are the two outcomes decided after every member has
-    # graded but before partial coverage.
+    # Check justified gaps and timing margins before partial coverage.
     post_member = _post_member_outcome(
         spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
     )
@@ -6686,7 +6684,7 @@ def _grade_multi_citation(
     if kinds_unmet is not None:
         return kinds_unmet
     if row_info:
-        extra["row_coverage"] = row_info
+        extra["row_coverage"] = {**row_info, **extra.get("row_coverage", {})}
     if not graded:
         # Unreachable for a non-empty declared row set (every row is then
         # uncovered or a gap); never grade a citation-less entry ``met``.
@@ -6700,6 +6698,7 @@ def _checked_multi_members(
     spec_rows: list[dict[str, Any]] | None,
     spec_rows_invalid: bool,
     require_coverage_invalid: bool = False,
+    check_slices: bool = True,
 ) -> tuple[list[tuple[dict[str, Any], list[str] | None]] | None, str | None]:
     """The parsed ``(spec, rows)`` members of a multi-citation entry, or
     ``(None, <problem>)`` when ``spec_rows``, a member, or a member's row
@@ -6716,6 +6715,8 @@ def _checked_multi_members(
         return None, problem
     if not _members_rows_declared(members, spec_rows):
         return None, "a member names a row that is undeclared or a declared gap"
+    if check_slices and (problem := invalid_covers(members, spec_rows)):
+        return None, problem
     return members, None
 
 
@@ -6919,12 +6920,10 @@ def _parse_multi_members(
         rows: list[str] | None = None
         if isinstance(raw, dict) and "rows" in raw:
             rows = raw["rows"]
-            if (
-                not isinstance(rows, list)
-                or not rows
-                or not all(isinstance(r, str) and r for r in rows)
-            ):
+            if not label_list(rows) or not rows:
                 return None, f"{where} 'rows' is not a non-empty list of strings"
+        if has_covers(raw):
+            spec["covers"] = raw["covers"]
         members.append((spec, rows))
     return members, None
 
