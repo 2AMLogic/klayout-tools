@@ -284,6 +284,50 @@ ship Liberty only as `.7z`; extract it in the pinned flow (or a fetch script)
 and point the descriptor at the plain `.lib`. When the mapped file is missing but
 a sibling `.7z` exists, the error says so.
 
+#### Assembling an ASAP7 root
+
+From a klayout-tools checkout, initialize the two data submodules in an
+[ASAP7 checkout](https://github.com/The-OpenROAD-Project/asap7).
+Install 7-Zip (`7zz` or `7z` on PATH) for the upstream Liberty archives.
+
+```sh
+git -C "$ASAP7" submodule update --init asap7sc7p5t_28 asap7_pdk_r1p7
+uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"
+uv run klt pdk find --pdk asap7 --pdk-root "$ROOT" --format json
+```
+
+Choose a new output directory. The script publishes it after checking every
+requested Liberty group and physical view. Its default selection is RVT at TT.
+For several threshold voltages and corners, append `--vt RVT LVT --corner TT SS`.
+The other supported selections are `SLVT`, `SRAM` and the fast corner `FF`.
+For each selected flavour, use the library key `asap7sc7p5t_rvt`,
+`asap7sc7p5t_lvt`, `asap7sc7p5t_slvt` or `asap7sc7p5t_sram` and the uppercase
+corner key in requests. Pass the same root to synthesis, place-and-route and STA.
+
+Under `libs/<library>/`, `lef/`, `techlef/`, `gds/` and `lib/` hold regular
+files. `klayout/tech/asap7.map` is the upstream APR layer map.
+`klt-pdk-sources.json` records the superproject and two submodule commits,
+SHA-256 digests of every consumed input (including the compressed archives),
+every published view and the descriptor. It records working-tree bytes, so a
+local edit remains distinguishable at the same checkout commit.
+
+The upstream SIMPLE files have a 4000 ps default maximum transition while
+the other cell groups specify 320 ps. The assembler writes an explicit
+4000 ps limit on each SIMPLE signal pin that inherited it, then sets the
+shared library default to 320 ps. Existing pin limits and timing tables are
+preserved. The sidecar counts newly explicit limits. The shared Liberty
+merger checks the remaining headers, cell names and timing-table templates.
+
+At ASAP7 commit `d24f8b857ff74cf5b21ab18a7e1b11a3954c449b`, the
+RVT SIMPLE file labelled FF declares the TT operating conditions. Selecting
+RVT/FF there produces a header mismatch and leaves the output unpublished.
+When a checkout includes the corrected `250407` RVT SIMPLE FF file, the
+assembler aligns its operating-condition name and adds the reference
+library's unused input/output voltage declarations. The corrected file and SEQ
+reuse template names for different timing tables, so its templates and their
+references receive unique names. Table contents, pin data and operating
+conditions are preserved. The sidecar records each name change.
+
 See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
 DRC/LVS source-shape) this port surfaced, and the general steps for adding
