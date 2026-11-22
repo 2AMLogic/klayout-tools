@@ -936,7 +936,11 @@ accepted anything:
   gate-level design never has, so this ratio is expected to sit below 1
   even on a perfectly-correlated run.
 - `design_nets_annotated`/`design_nets_total` — design-side **name-match
-  count**: how many of the nets OpenSTA times are named by the SPEF. It is
+  count**: how many eligible linked nets are named by the SPEF. A confirmed
+  internal net connected to just one instance output and no port is excluded
+  from both counts and the missing-net sample, even if it appears in the SPEF.
+  Nets with a sink or any connected top-level port count. When OpenSTA cannot
+  establish connectivity, the verifier keeps the net in the comparison. It is
   not evidence that parasitics were applied to the timing; the
   machine-checkable signal for that is `annotation_complete` (below).
 - `design_nets_missing_sample` — a capped sample (at most 20) of the
