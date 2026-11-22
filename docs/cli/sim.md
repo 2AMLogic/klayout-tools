@@ -5638,6 +5638,10 @@ without `top_n` is byte-identical to before.
 - **Order.** Largest `value` first; ties break by `name` ascending, so the
   order never depends on rawfile order. Fewer generators than `top_n` returns
   them all -- not an error.
+- **Same-named columns are separate contributors.** A rawfile may carry two
+  columns under one vector name (PSP103's OSDI model emits them); each is
+  reported under the same `name` with its own value, so the powers still close
+  to the total.
 - **Zero-power generators are omitted.** sky130's `igb`/`igd`/`igs` are
   emitted for every MOSFET and are identically zero at ordinary biases; a
   generator whose reduced value is exactly `0.0` never pads the list.
