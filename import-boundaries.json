@@ -924,6 +924,7 @@
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
+        "klayout_tools._meas_lint_expression",
         "klayout_tools._meas_lint_wrapper",
         "klayout_tools.digital_fleet",
         "klayout_tools.remote_fleet",
