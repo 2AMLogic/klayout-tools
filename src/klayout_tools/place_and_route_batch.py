@@ -33,6 +33,7 @@ from typing import Any
 from . import _batch_common, _provenance, output_lock, remote_transport, sim, sim_batch
 from ._batch_collect import remote_stderr_tail, runner_error
 from ._jsonnum import is_number
+from ._report_verify import get_path
 from .place_and_route import (
     SCHEMA_VERSION,
     PlaceAndRouteError,
@@ -398,9 +399,11 @@ def _completed_open_report(collected: str, status: dict, note: str) -> dict | No
     except sim_batch.BatchError:
         return None
     if report.get("status") == "failed" and report.get("stage_reached") == "route":
-        comp = (report.get("congestion") or {}).get("completeness") or {}
-        if comp.get("unrouted_net_count") or (comp.get("pin_connectivity") or {}).get(
-            "open_nets"
+        comp = get_path(report, ("congestion", "completeness"))
+        whole = get_path(comp, ("unrouted_net_count",))
+        partial = get_path(comp, ("pin_connectivity", "open_nets"))
+        if (type(whole) is int and whole > 0) or (
+            isinstance(partial, list) and partial
         ):
             return report
     return None

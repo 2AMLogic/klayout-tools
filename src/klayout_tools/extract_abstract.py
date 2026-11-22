@@ -799,6 +799,7 @@ def _local_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
+    label_clusters: dict[str, set[int]] | None = None,
 ) -> dict[str, list[tuple[kdb.Point, str]]]:
     """Extra local (cell-frame) candidate access points for every in-cell
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
@@ -878,14 +879,12 @@ def _local_pin_candidate_points(
     precisely why :func:`_erase_abstracted_cell_geometry` severs it for the
     real extraction pass.
 
-    Deliberately *not* fixed in :func:`_abstract_pin_net_score` instead: the
-    score is presented with a candidate that genuinely does resolve onto
-    ``VPWR``, and nothing at that layer can tell it apart from a pin the
-    design really does route to the supply. The bad candidate must not be
-    produced in the first place.
+    The optional ``label_clusters`` output identifies labels on distinct
+    cell-local conductors for callers that require physical proof.
     """
     import klayout.db as kdb
 
+    label_clusters = {} if label_clusters is None else label_clusters
     active = _region(layout, cell, deck.active)
     poly = _region(layout, cell, deck.poly)
     contact = _region(layout, cell, deck.contact)
@@ -954,6 +953,7 @@ def _local_pin_candidate_points(
             net = l2n.probe_net(target_region, point)
             if net is None:
                 continue
+            label_clusters.setdefault(text.string, set()).add(net.cluster_id)
             # Issue #1994: this walk crossed from one *declared pin* to
             # another, so the net's shapes can no longer all be attributed
             # to `text.string` -- keep only the fragments carrying this
@@ -1113,16 +1113,17 @@ def _merge_lef_pins(
 def stream_metal_pin_points(
     layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
 ) -> dict[str, list[tuple[kdb.Point, int]]]:
-    """Metal access points demonstrated by pin labels and cell-local connectivity."""
-    candidates = _local_pin_candidate_points(layout, cell, deck)
-    pins, *_ = _resolve_abstract_cell_pins(layout, cell, deck, {}, candidates)
+    """Interior metal points on a pin with a unique labeled cell-local conductor.
+
+    A label over empty space or labels on separate local conductors cannot
+    establish connectivity even if a parent wire happens to cross them.
+    """
+    clusters: dict[str, set[int]] = {}
+    candidates = _local_pin_candidate_points(layout, cell, deck, clusters)
     return {
-        name: [
-            (point, int(role[5:]))
-            for point, role in points
-            if role and role.startswith("metal")
-        ]
-        for name, points in pins
+        name: [(point, int(role[5:])) for point, role in points]
+        for name, points in candidates.items()
+        if len(clusters[name]) == 1
     }
 
 

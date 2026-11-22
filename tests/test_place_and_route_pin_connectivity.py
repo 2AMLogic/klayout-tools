@@ -234,3 +234,29 @@ def test_def_and_router_count_disagreement_stays_unchecked(tmp_path):
     assert comp["pin_connectivity"]["status"] == "unchecked"
     assert "OpenDB counted 2" in comp["pin_connectivity"]["reason"]
     assert comp["partially_routed_net_count"] is None
+
+
+@pytest.mark.parametrize(
+    "geometry", ["label_over_parent_wire", "duplicate_isolated_labels"]
+)
+def test_ambiguous_master_pin_cannot_be_proved_by_parent_route(tmp_path, geometry):
+    gds = tmp_path / "gcd.gds"
+    _stream(gds, connect=True)
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    cell = layout.cell("logic_buf")
+    metal, label = layout.find_layer(68, 20), layout.find_layer(68, 5)
+    if geometry == "label_over_parent_wire":
+        cell.shapes(metal).clear()
+    else:
+        cell.shapes(metal).insert(kdb.Box(500, 0, 700, 200))
+        cell.shapes(label).insert(kdb.Text("I", kdb.Trans(600, 100)))
+    layout.write(str(gds))
+    definition, lef = tmp_path / "gcd.def", tmp_path / "cells.lef"
+    definition.write_text(DEFC)
+    lef.write_text("")
+    result = audit_pin_connectivity(
+        str(definition), str(gds), "gcd", "sky130", str(lef)
+    )
+    assert result["status"] == "unchecked"
+    assert result["unresolved_nets"][0]["net"] == "sig"

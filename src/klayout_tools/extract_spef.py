@@ -307,7 +307,7 @@ class DefNetConnections(dict):
         self.complete = False
 
     def record_wire(self, name: str, record: str, terminal_count: int) -> None:
-        """Track routed signals/clocks and the subset counted by OpenDB's SIGNAL test."""
+        """Track routed signal and clock nets and the OpenDB SIGNAL subset."""
         use = re.search(r"\s\+\s+USE\s+(\w+)", record)
         net_type = use[1] if use else "SIGNAL"
         if net_type in {"SIGNAL", "CLOCK"} and re.search(

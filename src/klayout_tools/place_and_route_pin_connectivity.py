@@ -45,6 +45,7 @@ class _Stream:
             self.graph.connect(metal)
         for index, layer in enumerate(deck.vias):
             via = region(self.layout, top, layer)
+            self.graph.connect(via)
             self.graph.connect(self.metals[index], via)
             self.graph.connect(via, self.metals[index + 1])
         self.graph.extract_netlist()
