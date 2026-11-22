@@ -2611,7 +2611,8 @@ an inventory the author did not write.
 | | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
-| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
+| | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
+| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
@@ -2753,6 +2754,19 @@ report and cited envelopes are recorded by hash in their `present` checks, and
 metric value. The `field` of each metric binding is chosen by the inventory
 author for the cited envelope's kind (for example `place-and-route` reports
 Fmax as `fmax_mhz`); the producer reads only what is named.
+
+A committed record a klt flow did not run — an OpenROAD/ORFS result collect,
+a vendor tool report, a lab measurement sheet — is citable through
+`external_records` (issue #6939): the listed path's `envelope` check records
+`kind: "external"` and passes on presence, recognition is deliberately
+skipped for it (and only for it: an unlisted non-klt citation still fails,
+#5688), its bytes are content-hashed like any citation, the caller's
+`envelope_checks` command is its freshness proof, and a metric binding may
+declare `{"transform": "reciprocal", "scale": 1000}` so a `min_period_ns`
+record binds `fmax` in MHz. The disclosure is the claimant's, not klt's:
+**klt recorded the record's hash and ran the freshness command; it did not
+produce or verify the numbers** — an external record's content is the
+claimant's word, visible as `kind: "external"` in `attestation.checks[]`.
 
 #### Envelope
 
@@ -4500,7 +4514,23 @@ new. Outcomes:
 
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
-  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
+  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
+  **passing** measurements grade (issue #6027): those rows leave
+  `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
+  bench with one known-failing row can claim the rows its envelope genuinely
+  carries. A row whose tagged measurement fails — or that the failing
+  envelope does not tag — stays in `failed_rows`, and a failing envelope of a
+  kind that carries no `spec_row` tags (or one refused on a stale pin,
+  binding, provenance or `no_limits_checked`) credits nothing. The credit is
+  stricter than a passing envelope's, because a failing envelope's aggregate
+  `status: "pass"` also covers a bound `klt sim` skipped: a measurement
+  credits its row only when it carries a recognised, non-null `min`/`max`
+  and, where the envelope has the producer's `coverage` record, that bound
+  was checked and never skipped at any corner (an unrecognised key, a `null`
+  bound, or a corner `not_reached` withholds the row). A limited measurement
+  tagged with the same row that fails or goes unchecked also keeps the row in
+  `failed_rows`;
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
@@ -4597,7 +4627,12 @@ declares `limits`; a named row with no such measurement is uncovered
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
 `row_coverage.row_sources` maps each covered row to `"derived"` (checked
-against the envelope) or `"asserted"` (the manifest's word only). The change is
+against the envelope) or `"asserted"` (the manifest's word only). The same
+derivation credits a row from a *failing* `klt sim` citation when the envelope
+tags a passing, limited measurement with it whose bound `klt sim` actually
+applied at every corner (issue #6027; the stricter rule is in the
+`failed_rows` bullet above) — visible in `detail.row_sources`, since
+`row_coverage` itself is only emitted on `met`. The change is
 additive: `schema_version` is not bumped.
 
 The same rule reads a `klt yield` envelope's `spec_row`-tagged
