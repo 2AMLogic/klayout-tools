@@ -247,24 +247,13 @@ def remote_entry_environment(
     checkpoint_path: str | None,
     request: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """``environment.remote`` -- additive/optional (``remote``/``batch`` only).
+    """Build the remote or batch environment for the simulation report.
 
-    See ``docs/cli/sim.md``. ``checkpoint_path`` is the retained checkpoint
-    (``None`` when the sweep did not retain one), which
-    :func:`~klayout_tools._batch_common.apply_unrun_signal` uses to point a
-    later ``--resume`` at the corners this run never got back.
-
-    The value under ``"remote"`` is whatever ``apply_unrun_signal`` returns:
-    ``remote_environment`` itself when no unrun signal applies, else a new
-    dict carrying the additive ``unrun_units``/``resumable``/``shard_map``
-    fields. Either way a later reader of ``environment["remote"]`` -- notably
-    :func:`~klayout_tools.sim_batch_features.pop_remote_diagnostics` -- sees
-    exactly what it saw when this was inline.
-
-    ``request`` (issue #5593) additionally yields
-    ``pdk_revision_comparison`` beside ``remote``: a declared
-    ``options.pdk_revision`` compared with each worker-observed stamp on
-    ``remote_environment`` (advisory; :mod:`sim_provenance` owns the shape).
+    ``apply_unrun_signal`` preserves the worker identity and adds resume
+    details when corners were lost. It uses the retained checkpoint, when
+    available, to point a later ``--resume`` at the missing corners.
+    A declared PDK revision is compared with the workers' observed stamps
+    in the sibling ``pdk_revision_comparison`` report field.
     """
     if remote_environment is None:
         return {}
