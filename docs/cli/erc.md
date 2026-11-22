@@ -666,6 +666,13 @@ draws that the spec never declared" below.
     `bottom < top`.
   - `connect_to` (string, required) — the `stackup` role name the tap is
     wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
+  - `through` (optional string) names a `vias[]` entry whose `between`
+    includes `connect_to`. For example, a tie with `"connect_to": "met1"`
+    and `"through": "cont"` reaches Metal1 only through a drawn `cont` cut
+    overlapping both the tap and Metal1. Metal1 may cross the diffusion
+    elsewhere without joining it. With no such cut the tap is electrically
+    untied. Omitting `through` connects this tie to overlapping `connect_to`
+    geometry directly.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
