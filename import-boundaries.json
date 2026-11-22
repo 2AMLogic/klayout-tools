@@ -318,7 +318,6 @@
       "kind": "verb",
       "description": "`klt functional_verification` implementation: core modules plus CLI adapter.",
       "modules": [
-        "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
@@ -747,6 +746,7 @@
       "modules": [
         "klayout_tools",
         "klayout_tools._annotation",
+        "klayout_tools._artifact_envelope",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
@@ -1948,8 +1948,8 @@
     },
     {
       "consumer": "em",
-      "exporter": "functional_verification",
-      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
+      "exporter": "env_provenance",
+      "reason": "`klt em` discovers the request's repository root to anchor retained artifact paths."
     }
   ],
   "shared_private_permissions": [
