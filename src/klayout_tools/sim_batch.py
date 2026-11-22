@@ -867,7 +867,6 @@ def _enforce_published_runner_features(
 ) -> dict[str, Any] | None:
     """Check mandatory features before upload. A missing candidate list warns;
     a known unsupported mandatory feature refuses submission under either policy."""
-
     features = _request_features(request)
     images = assessment["images"]
     if not images:
