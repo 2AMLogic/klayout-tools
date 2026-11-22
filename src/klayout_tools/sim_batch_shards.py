@@ -40,7 +40,7 @@ def receipt_request_sha256(request: dict[str, Any]) -> str:
     """:func:`request_sha256` that also drops a ``batch`` block the exclusion
     emptied, so a request that never had one (``--wait-for-capacity`` folds
     ``batch.capacity_wait_s`` in) hashes the same as the original file
-    (issue #5194). Used by the synchronous submit receipt."""
+    (issue #5194). Used by single-job corner receipts."""
     return _canonical_sha256(_without_submission_only(request, drop_empty=True))
 
 
@@ -48,6 +48,8 @@ def _without_submission_only(
     request: dict[str, Any], *, drop_empty: bool
 ) -> dict[str, Any]:
     batch = request.get("batch")
+    if drop_empty and batch == {}:
+        return {k: v for k, v in request.items() if k != "batch"}
     if not (
         isinstance(batch, dict)
         and any(k in batch for k in _SUBMISSION_ONLY_BATCH_FIELDS)
