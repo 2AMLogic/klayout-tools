@@ -338,9 +338,7 @@ from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _PORT_PATHS_END,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
-    _apply_port_record,
     _empty_path_record,
-    _parse_port_path_rows,
     _port_paths,
     _worst_path_record,
     _worst_paths,
@@ -646,13 +644,7 @@ def run_sta(
             "request.hdl_toplevel must be a non-empty string when given"
         )
 
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PostRouteStaError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PostRouteStaError("request.pdk.cell_library is required")
-    requested_corner, requested_corners = _validate_corner_selection(pdk_spec)
+    cell_library, requested_corner, requested_corners = _resolve_pdk_selection(request)
 
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # before any PDK resolution or engine invocation; the corner-dependent
@@ -2529,10 +2521,16 @@ def _validate_false_path_from(
     return list(value) or None
 
 
-def _validate_corner_selection(
-    pdk_spec: dict[str, Any],
-) -> tuple[str | None, list[str] | None]:
-    """Validate the mutually exclusive scalar and multi-corner request forms."""
+def _resolve_pdk_selection(
+    request: dict[str, Any],
+) -> tuple[str, str | None, list[str] | None]:
+    """Resolve the library and validate the two alternative corner selectors."""
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PostRouteStaError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PostRouteStaError("request.pdk.cell_library is required")
     requested_corner = pdk_spec.get("corner")
     if requested_corner is not None and not (
         isinstance(requested_corner, str) and requested_corner
@@ -2548,7 +2546,7 @@ def _validate_corner_selection(
             "existing single-corner response shape, or a list for "
             "multi-corner characterization (see docs/cli/sta.md)"
         )
-    return requested_corner, requested_corners
+    return cell_library, requested_corner, requested_corners
 
 
 def _validate_corners(value: Any) -> list[str] | None:

@@ -5,12 +5,12 @@
 ``environment`` block from a long ordered sequence of contributions. Most of
 them already came from small, individually testable ``*_environment(...)``
 helpers -- :func:`~klayout_tools.sim._portable_environment`,
-:func:`~klayout_tools.sim._corner_coverage_environment`,
 :func:`~klayout_tools.sim_param_file.param_file_environment` and friends --
 but eleven were still written inline in the sweep function's epilogue, as a
 flat append-point that every feature needing to disclose something extended
 in place. This module holds those eleven, in the same shape the pattern
-already used:
+already used. The corner coverage helper shares the PDK's per-flavour
+classification with the sweep report (#5663).
 
 * each takes only the two-to-five values it actually needs, never the
   sweep function's ambient locals;
@@ -39,11 +39,14 @@ from . import device_multiplier_lint, env_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._provenance import sha256_file
+from .pdk import PdkNotFoundError, list_corners
 
 __all__ = [
+    "ModelInputDigests",
     "NetlistDigests",
     "backend_environment",
     "budget_environment",
+    "corner_coverage_environment",
     "device_multiplier_environment",
     "fail_fast_probe_environment",
     "monte_carlo_environment",
@@ -79,6 +82,77 @@ def netlist_closure_environment(
         }
     except sim_staging.IncludeStagingError as exc:
         return {"netlist_closure_error": str(exc)}
+
+
+def _corner_process_sections(corner_points: list[Any]) -> list[str]:
+    """List process sections in sweep order for coverage and Monte Carlo reports."""
+    return [
+        name
+        for point in corner_points
+        for name in (
+            point.process_sections
+            if point.process_sections is not None
+            else ([point.process] if point.process else [])
+        )
+    ]
+
+
+def corner_coverage_environment(
+    request: dict[str, Any], corner_points: list[Any]
+) -> dict[str, Any]:
+    """Report typical and unknown device flavours at requested non-typical corners.
+
+    Use :func:`klayout_tools.pdk.list_corners`'s classification (#3794, #5663).
+    Each section lists proven typical flavours in ``unmoved_devices`` and
+    inconclusive ones in ``unknown_devices``. Omit empty lists, empty sections,
+    and the whole fragment when no PDK data or reportable sections remain.
+    """
+    models = request.get("models") or {}
+    if not (models.get("pdk") or models.get("pdk_root")):
+        return {}
+    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
+    if not process_sections:
+        return {}
+    try:
+        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
+    except PdkNotFoundError:
+        return {}
+    by_corner = {entry["corner"]: entry for entry in report["corners"]}
+    entries: list[dict[str, Any]] = []
+    for name in process_sections:
+        corner = by_corner.get(name)
+        if corner is None:
+            continue
+        devices = [
+            device
+            for section in corner["sections"]
+            for device in section.get("devices", [])
+        ]
+        if not devices:
+            continue
+        entry = _corner_coverage_entry(name, devices)
+        if entry is not None:
+            entries.append(entry)
+    if not entries:
+        return {}
+    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
+
+
+def _corner_coverage_entry(
+    name: str, devices: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """One ``corner_coverage.sections[]`` row, or ``None`` when it must be
+    omitted (the typical section, or nothing to report either way)."""
+    unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
+    unknown = [d["flavour"] for d in devices if d["skew"] == "unknown"]
+    if name == "typical" or not (unmoved or unknown):
+        return None
+    entry: dict[str, Any] = {"process": name}
+    if unmoved:
+        entry["unmoved_devices"] = unmoved
+    if unknown:
+        entry["unknown_devices"] = unknown
+    return entry
 
 
 @dataclass(frozen=True)
@@ -152,6 +226,56 @@ class NetlistDigests:
         block = provenance.get("input")
         if block is not None and self.sha256 is not None:
             block["content_hash"] = f"sha256:{self.sha256}"
+
+
+def _capture_model_files(paths: tuple[str, ...]) -> tuple[tuple[str, str | None], ...]:
+    return tuple((path, sha256_file(path)) for path in paths)
+
+
+def _model_file_entries(
+    files: tuple[tuple[str, str | None], ...], *, repo_root: str | None
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": os.path.basename(path),
+            **env_provenance.repo_relative_path(path, repo_root=repo_root),
+            "sha256": digest,
+        }
+        for path, digest in files
+    ]
+
+
+@dataclass(frozen=True)
+class ModelInputDigests:
+    """Client-side model hashes captured in load order before dispatch (#6508)."""
+
+    models_lib_sha256: str | None
+    osdi_preload: tuple[tuple[str, str | None], ...]
+    corner_section_libs: tuple[tuple[str, str | None], ...]
+
+    @classmethod
+    def capture(
+        cls,
+        models_lib: str | None,
+        osdi_preload: tuple[str, ...],
+        corner_section_libs: tuple[str, ...],
+    ) -> ModelInputDigests:
+        return cls(
+            sha256_file(models_lib),
+            _capture_model_files(osdi_preload),
+            _capture_model_files(corner_section_libs),
+        )
+
+    def environment(self, *, repo_root: str | None) -> dict[str, list[dict[str, Any]]]:
+        """Report OSDI files in load order and section libraries in first-use order."""
+        return {
+            key: _model_file_entries(files, repo_root=repo_root)
+            for key, files in (
+                ("osdi_preload", self.osdi_preload),
+                ("corner_section_libs", self.corner_section_libs),
+            )
+            if files
+        }
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:
