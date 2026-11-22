@@ -1094,6 +1094,25 @@ def _lef_port_access_points(
     return points
 
 
+# Only a nonempty base followed entirely by numeric index groups is a bus bit.
+_BUS_BIT_RE = re.compile(r"([^<>()\[\]{}]+)((?:<\d+>|\(\d+\)|\[\d+\]|\{\d+\})+)")
+
+
+def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
+    """Compare indexed pins by base and numeric indices (issue #6843).
+
+    For example, ``A[01][0]`` and ``A<1><0>`` share a key. A literal name
+    such as ``A<B>`` keeps its spelling and has an empty index tuple.
+    """
+    match = _BUS_BIT_RE.fullmatch(pin_name)
+    if match is None:
+        return (pin_name, ())
+    return (
+        match.group(1),
+        tuple(int(index) for index in re.findall(r"\d+", match.group(2))),
+    )
+
+
 def _merge_lef_pins(
     layout: kdb.Layout,
     cell: kdb.Cell,
@@ -1102,17 +1121,19 @@ def _merge_lef_pins(
     labelled: dict[str, Any],
     pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]],
 ) -> tuple[str | None, set[str], list[str]]:
-    """Append the LEF ``MACRO``'s pins the labels did not supply to ``pins``
-    (issue #3749). Returns ``(lef_path or None if nothing merged, merged pin
-    names, warnings)``."""
+    """Append LEF-only pins, preserving label names and access points for aliases.
+
+    Return the LEF path if any pins were merged, their names, and warnings.
+    """
     entry = lef_macros.get(cell.name)
     if entry is None:
         return None, set(), []
     lef_path, lef_pins = entry
+    labelled_keys = {_bus_bit_alias_key(name) for name in labelled}
     merged: set[str] = set()
     warnings: list[str] = []
     for pin_name in sorted(lef_pins):
-        if pin_name in labelled:
+        if _bus_bit_alias_key(pin_name) in labelled_keys:
             continue
         boxes = lef_pins[pin_name]
         if not boxes:
@@ -1185,22 +1206,14 @@ def _resolve_abstract_cell_pins(
     regardless of whether it is the one the design actually routes.
     ``resolution_source`` is:
 
-    - ``"in_cell_labels"`` -- the cell draws text on one of the deck's own
-      label layers (``metal_labels[i]``/``well_label``/``poly_label``)
-      **directly in the cell** (``cell.shapes``, never
-      ``begin_shapes_rec``): a label promoted up from a nested sub-cell
-      belongs to that sub-cell's interface, not this one's, and the whole
-      point of this mode is to stop at *this* cell's boundary. Each label
-      carries its own layer role, so the pin is probed on exactly the
-      conductor its label names.
-      **LEF merge (issue #3749):** when a ``--abstract-cell-lef`` LEF also
-      declares a ``MACRO`` of this cell's name, every LEF pin whose name the
-      labels did not supply is appended (labels win on any name present in
-      both), and ``lef_path`` names that LEF. A standard cell routinely
-      draws its substrate/well pin (``VNB``) on a label layer the deck does
-      not read (sky130 ``pwell.label``), so the labels alone silently lose
-      it; the LEF is the only place it is declared. ``lef_merged`` is the
-      set of appended pin names (always empty on the other paths).
+    - ``"in_cell_labels"`` -- only text directly on the cell's deck label
+      layers (``metal_labels[i]``/``well_label``/``poly_label``) belongs to
+      its interface. Read ``cell.shapes`` to exclude nested cells' labels
+      and keep each point's layer role for probing.
+      A matching LEF macro supplies missing pins such as sky130's
+      ``VNB`` substrate pin (#3749). Labels win for equivalent bus bits
+      such as ``DATA<0>`` and ``DATA[0]`` (#6843). When pins are appended,
+      ``lef_path`` names the LEF and ``lef_merged`` lists their names.
     - ``"lef_abstract"`` -- no such label, but a ``--abstract-cell-lef`` LEF
       declares a ``MACRO`` of this cell's name with ``PORT`` geometry. Each
       port's bounding-box centre is the access point, read directly as
@@ -1225,22 +1238,10 @@ def _resolve_abstract_cell_pins(
       into an :class:`ExtractError` when the cell type actually has
       instances.
 
-    ``warnings`` (issue #624) is only ever populated on the ``"lef_abstract"``
-    path: a LEF-declared ``PIN`` whose :func:`~klayout_tools.lef_header.
-    parse_lef_macro_pin_ports` entry resolves zero port boxes (e.g. a pin
-    drawn only via ``PATH``/``VIA`` geometry, or a malformed ``POLYGON`` --
-    both statement shapes that module's own "declarative header + pin-access-
-    point only" scope deliberately never reads, see its module docstring) is
-    dropped from the returned pin list rather than raising, mirroring every
-    other malformed/partial-LEF tolerance in this codebase -- but *this*
-    silent drop is otherwise invisible to a caller, since it never prevents
-    the macro overall from resolving (the acceptance criterion only requires
-    *some* pin to resolve). One ``warnings`` entry per dropped pin names the
-    macro and pin so the gap has a caller-visible signal instead of a
-    silently incomplete black-box ``.SUBCKT``. Always ``[]`` on the
-    ``"in_cell_labels"``/``None`` paths, where every resolved pin always
-    carries at least one concrete point (an in-cell label is never
-    geometry-less).
+    When a LEF pin has no readable PORT geometry, it is omitted.
+    On both the LEF-only and label-merge paths, ``warnings`` names each
+    such pin if the macro resolves (#624). The unresolved path returns
+    an empty list.
 
     ``local_candidates`` (issue #1183) is
     :func:`_local_pin_candidate_points`'s ``{<pin name>: [(<extra local
@@ -1256,12 +1257,10 @@ def _resolve_abstract_cell_pins(
     every candidate exactly as it already does for a multi-rectangle LEF pin
     (#1181/#1182) and pick whichever one actually lands on routed geometry.
 
-    ``lef_layer_roles`` (issue #2658) is :func:`lef_layer_probe_roles`'s
-    ``{<lower-cased LEF layer name>: "metal<i>"}`` result for the active
-    PDK. Only consulted on the ``"lef_abstract"`` path (an in-cell label
-    already knows its own layer directly). ``None`` (the default) or an
-    empty dict behaves exactly as before this issue's fix: every LEF point
-    carries ``role=None`` and is probed bottom-up.
+    ``lef_layer_roles`` maps lower-cased LEF layer names to deck metal
+    roles (#2658, :func:`lef_layer_probe_roles`). It applies to both
+    LEF-only and merged pins. A missing mapping leaves the point's role
+    unset for bottom-up probing.
     """
     import klayout.db as kdb
 

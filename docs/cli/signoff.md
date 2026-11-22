@@ -2611,7 +2611,8 @@ an inventory the author did not write.
 | | `spec_rows`: list of row ids | yes, non-empty | each row has at least one citation (`citation`, role `spec_row`) and every envelope it cites exists (`present`, role `evidence`) **and is a recognised evidence envelope** (`envelope`, role `evidence`, with the recognised `kind`, `null` on failure; issue #5688). A refusal of a document that parsed as JSON also carries an additive `reason`, the one `--manifest` grading gives it ([reason values](#reason-values), issue #5986): `"envelope_version_skew"` — a response from an older `klt`, so re-run the check under the current `klt` — or `"unrecognized_envelope"` — not an object, no recognised shape, or malformed for one, so cite a different artifact. The text line names the skew and its remedy. A recognised envelope carries no `reason`, so a passing attestation is byte-identical to before; a file that cannot be read or parsed as JSON at all (missing, bad gzip, nonfinite literal) carries none either |
 | | `citations`: `{row: [envelope path, ...]}` | yes | keys must be declared rows; a declared row with no entry fails its `citation` check |
 | | `envelope_checks`: `{envelope path: command}` | yes, one per cited envelope | each command exits `0` (`command`, role `freshness`) — e.g. the cited verb's own `--check`. Recognition uses the same classifier as `--manifest` grading (valid JSON with `schema_version`, a self-declared `kind: generic` or a native verb shape); it does not check kind, verdict or hashes -- all content verification beyond recognition is this command's job |
-| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. |
+| | `external_records`: list of repo paths | no | the citation path for records produced **outside klt** (issue #6939) — an ORFS result collect, a vendor tool report, a lab measurement sheet. A listed path skips recognition: its `envelope` check records `kind: "external"` and passes on presence alone, its bytes are hashed by its `present` check like any citation, and the caller's `envelope_checks` command stays the freshness proof. Every listed path must be cited by at least one spec row (an uncited one is refused, exit `1`, the same refusal an `envelope_checks` entry naming an uncited path gets); a non-list, empty list or non-string member is refused (exit `1`), as is any path under the ordinary rules (absolute, `..`, symlink). A path that *is* a recognised klt envelope may also be listed — recognition is still skipped, `kind` reads `"external"`. An unlisted non-klt citation fails exactly as before (#5688). klt records the record's hash and runs the freshness command; it did not produce the numbers and does not verify them — an external record's *content* is the claimant's word. A `.json.gz` record is read gzip-transparent, so it can be metric-bound too |
+| | `corners`: list of names, with `metrics`: `{corner: {fmax\|area\|power: {"envelope": path, "field": "dotted.path"}}}` | digital partitions only (both or neither) | for every corner and each of `area`, `fmax`, `power`, the named field of the named cited envelope is a finite number (`metric`, role `digital`; the value is recorded). A missing binding or non-numeric field is a **failed check**. Digit segments index lists, e.g. `result.0.fmax_mhz`. A binding may additionally declare `"transform": "reciprocal"` with `"scale": <finite number > 0>` (issue #6939): the metric value is `scale / raw`, so a record carrying a minimum period binds the frequency metric — `{"field": "min_period_ns", "transform": "reciprocal", "scale": 1000}` turns a 2.5 ns period into a 400 MHz Fmax. The check additively records `raw_value`, `transform` and `scale`. Both keys or neither, any other transform, or a `scale` that is `<= 0`, non-finite or not a number is refused (exit `1`); a raw value of `0`, missing, non-numeric or one the division cannot consume is a **failed metric check**, not a malformed inventory. Allowed on any cited envelope, not only an `external_records` one |
 | **9** Testbenches shipped | `testbenches`: list of paths, or `{"path", "cold_start", "depends_on", "sources"}` objects (mixing is fine; the object form first ships in 0.9.0, `sources` in 0.9.3) | yes, non-empty | each file exists (`present`, role `testbench`); every member also emits a passing `dependency_binding` check (role `testbench`) recording how many dependencies it declared |
 | | `sources` (on a `{"path", ...}` entry): non-empty list of paths | no | each file exists (`present`, role `source`, plus `testbenches: [<bench path>, ...]` — the sorted benches that declared it). The same source named by several benches is hashed once and lists all of them; a path declared both as a bench and as a source is refused (exit `1` — its bytes are already pinned as the bench). *First ships in 0.9.3.* |
 | | `cold_start`: command, or a non-empty list of `{name, ...}` commands (each `name` a non-empty string, unique within its entry; the list form is refused otherwise, exit `1`) | yes, unless **every** testbench entry carries its own `cold_start` | exits `0` (`command`, role `cold_start`). A per-bench `cold_start` is a command too and yields a `command` check with `testbench: "<path>"`, so a failure names its bench. The list form declares several cold starts over the same file: each member yields its own `command` check carrying `testbench` **and** `name`, graded independently, while the file is still inventoried (and hashed) exactly once — the honest way to attest N benches that share one implementation module, where minting one wrapper file per bench would hash hollow files and leave the real module attested by nothing. Members are emitted in `name` order after benches sorted by path. When both forms are present, the top-level command runs as well. A cold start (either form) may add `documented_argv` — the full reproducing invocation, recorded and never run; see "A cold start that only validates its bench" below. *Per-bench `cold_start` first ships in the first release after `v0.9.2`; the list form adds no envelope field for today's single-command inventories (no `schema_version` bump).* |
@@ -2753,6 +2754,19 @@ report and cited envelopes are recorded by hash in their `present` checks, and
 metric value. The `field` of each metric binding is chosen by the inventory
 author for the cited envelope's kind (for example `place-and-route` reports
 Fmax as `fmax_mhz`); the producer reads only what is named.
+
+A committed record a klt flow did not run — an OpenROAD/ORFS result collect,
+a vendor tool report, a lab measurement sheet — is citable through
+`external_records` (issue #6939): the listed path's `envelope` check records
+`kind: "external"` and passes on presence, recognition is deliberately
+skipped for it (and only for it: an unlisted non-klt citation still fails,
+#5688), its bytes are content-hashed like any citation, the caller's
+`envelope_checks` command is its freshness proof, and a metric binding may
+declare `{"transform": "reciprocal", "scale": 1000}` so a `min_period_ns`
+record binds `fmax` in MHz. The disclosure is the claimant's, not klt's:
+**klt recorded the record's hash and ran the freshness command; it did not
+produce or verify the numbers** — an external record's content is the
+claimant's word, visible as `kind: "external"` in `attestation.checks[]`.
 
 #### Envelope
 
@@ -4500,7 +4514,23 @@ new. Outcomes:
 
 - any citation fails -> `unmet` with that citation's `reason` (e.g.
   `check_failed`); `detail.failed_citations` names the failing envelopes and,
-  when `spec_rows` is declared, `detail.failed_rows` lists their rows;
+  when `spec_rows` is declared, `detail.failed_rows` lists their rows. A
+  failing `klt sim` citation still credits the rows its tagged, `limits`-bearing,
+  **passing** measurements grade (issue #6027): those rows leave
+  `detail.failed_rows` and read `"derived"` under `row_sources` (below), so a
+  bench with one known-failing row can claim the rows its envelope genuinely
+  carries. A row whose tagged measurement fails — or that the failing
+  envelope does not tag — stays in `failed_rows`, and a failing envelope of a
+  kind that carries no `spec_row` tags (or one refused on a stale pin,
+  binding, provenance or `no_limits_checked`) credits nothing. The credit is
+  stricter than a passing envelope's, because a failing envelope's aggregate
+  `status: "pass"` also covers a bound `klt sim` skipped: a measurement
+  credits its row only when it carries a recognised, non-null `min`/`max`
+  and, where the envelope has the producer's `coverage` record, that bound
+  was checked and never skipped at any corner (an unrecognised key, a `null`
+  bound, or a corner `not_reached` withholds the row). A limited measurement
+  tagged with the same row that fails or goes unchecked also keeps the row in
+  `failed_rows`;
 - all pass but a declared row is uncovered or a `gap` -> `unmet` /
   `partial_coverage`, with `detail.uncovered_rows`, `detail.failed_rows` and
   `detail.declared_gaps` (`[{id, gap}]`) reported separately -- a gap is never
@@ -4597,8 +4627,17 @@ declares `limits`; a named row with no such measurement is uncovered
 citation does not name is ignored. A citation whose envelope has no tags keeps
 the manifest-asserted `rows`, so existing manifests grade identically.
 `row_coverage.row_sources` maps each covered row to `"derived"` (checked
-against the envelope) or `"asserted"` (the manifest's word only). The change is
+against the envelope) or `"asserted"` (the manifest's word only). The same
+derivation credits a row from a *failing* `klt sim` citation when the envelope
+tags a passing, limited measurement with it whose bound `klt sim` actually
+applied at every corner (issue #6027; the stricter rule is in the
+`failed_rows` bullet above) — visible in `detail.row_sources`, since
+`row_coverage` itself is only emitted on `met`. The change is
 additive: `schema_version` is not bumped.
+
+The same rule reads a `klt yield` envelope's `spec_row`-tagged
+`measurements[]` for item 6, with one additional covering case — see "Item 6
+with several statistical rows" below.
 
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by
 itself: an item whose coverage is entirely `"asserted"` grades exactly like a
@@ -4875,6 +4914,36 @@ A manifest with no `spec_rows."6"` grades exactly as before. `ratified` is
 additive and also parsed for item 5 rows, where it likewise blocks `met`.
 `schema_version`: no bump; `detail.unratified_rows` is a new optional field
 and `partial_coverage` is an existing reason.
+
+**Derived coverage on a `klt yield` envelope, and `reported` measurements
+(issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
+written: when a citation carries `rows` **and** its envelope has at least one
+`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
+measurement grades are covered. One case is added on top of it, for `klt
+yield` envelopes only:
+
+- a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
+  the token `klt yield` gives a measurement that declares no `target_yield`,
+  so nothing could fail ([`yield.md`](yield.md)) — covers its row **when that
+  row is declared `ratified: false`**, and `row_sources` records it
+  `"derived"` like any other derived row;
+- the same measurement does **not** cover a **ratified** row: that row still
+  needs a measurement graded against a declared target, exactly as before.
+
+The restriction to unratified rows is what keeps every item verdict
+unchanged. An item with an unratified row is already `unmet` /
+`partial_coverage` through `unratified_rows`, so only the `detail` lists
+move; nothing here can turn an `unmet` item `met`. A `fail` or
+`insufficient_evidence` measurement, and a tag with no `limits`, still cover
+nothing — ratified or not — and a citation the #2467 campaign-discipline
+gates refuse never reaches the crediting step at all.
+
+The case this closes: a row whose spec states a method rather than a number
+has no yield claim to make, so declaring a `target_yield` for it would invent
+one — the number-invention `ratified: false` exists to let a manifest avoid.
+Before this, such a row came back in `uncovered_rows` as if no campaign had
+been run, and the only workaround was to declare a `target_yield` the
+campaign was known to clear. No new field, no `schema_version` bump.
 
 #### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
@@ -5732,7 +5801,7 @@ resolved hash renders `unmet`/`unverifiable_provenance`.
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
-| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document. |
+| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document — an absent key never means "the input was verified", only that this particular failure mode did not occur; the byte-verification verdict lives in `input_verified`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own when no digest resolves, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. `status: "not_assessed"` (issue #6559: a `klt pex --engine klayout-runset` leg, which never runs the check) carries `null` for both `unbiased_device_count` and `unbiased_nets` — not `0` / `[]` — and the text rendering prints no count for it; the same citation then also carries `pex_extraction` (`{"engine", "parasitics_carried", "params_not_carried"}` plus `substrate_return` when present, quoted from the cited envelope's `extraction`; absent for a curated-deck run), rendered as a `pex extraction:` text line beside `body bias:`. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. For a **grouped** citation (issue #5597) these are the *leading group's* parts, and every group's own parts live in the item-level `citations` array (one compound citation per group, in manifest order) beside `citations_graded` and `members_covered`/`members_total` — see "Item 11 is compound" above. **Absent** for every other item. |

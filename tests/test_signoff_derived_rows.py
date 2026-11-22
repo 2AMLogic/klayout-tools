@@ -16,7 +16,9 @@ import pytest
 
 from klayout_tools.signoff import build_tier_report
 from klayout_tools.signoff_derived_rows import multi_row_info
-from test_signoff import STA_MULTI_CORNER_CLEAN_ENVELOPE
+from test_signoff import (
+    STA_MULTI_CORNER_CLEAN_ENVELOPE,
+)
 
 _LIM = {"min": 1.0}
 
