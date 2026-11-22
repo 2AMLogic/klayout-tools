@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
+
+from ._jsonnum import is_finite_number
+from ._tcl import tcl_literal
 
 CLOCK_UNCERTAINTY_KEYS = ("setup_ns", "hold_ns")
 
@@ -34,11 +36,7 @@ def validate_clock_uncertainty(
         return None
 
     def _number(number: Any, name: str) -> float:
-        if (
-            isinstance(number, bool)
-            or not isinstance(number, (int, float))
-            or not math.isfinite(number)
-        ):
+        if not is_finite_number(number):
             raise _error(f"{name} must be a finite number")
         if number < 0:
             raise _error(f"{name} must be >= 0, got {number}")
@@ -66,4 +64,35 @@ def validate_clock_uncertainty(
             else None
         )
         for key in CLOCK_UNCERTAINTY_KEYS
+    }
+
+
+def clock_uncertainty_lines(
+    clock_port: str, clock_uncertainty: dict[str, float | None] | None
+) -> list[str]:
+    """``set_clock_uncertainty -setup/-hold`` (issue #4240) on the clock
+    :func:`_clock_lines` created; empty when none was requested. Orthogonal
+    to ``set_propagated_clock``."""
+    if not clock_uncertainty:
+        return []
+    return [
+        f"set_clock_uncertainty -{key[:-3]} {clock_uncertainty[key]!r} "
+        f"[get_clocks {tcl_literal(clock_port)}]"  # issue #5708: literal word
+        for key in CLOCK_UNCERTAINTY_KEYS
+        if clock_uncertainty.get(key) is not None
+    ]
+
+
+def clock_uncertainty_block(
+    clock_uncertainty: dict[str, float | None] | None,
+) -> dict[str, Any]:
+    """The ``clock_uncertainty`` response block (issue #4240): whether any
+    uncertainty was applied. A side not given is ``null`` (unconstrained),
+    never copied from the other."""
+    if not clock_uncertainty:
+        return {"applied": False}
+    return {
+        "applied": True,
+        "setup_ns": clock_uncertainty.get("setup_ns"),
+        "hold_ns": clock_uncertainty.get("hold_ns"),
     }

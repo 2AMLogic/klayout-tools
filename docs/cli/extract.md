@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--defer-resistor-fixed-offset] [--omit-dead-metal] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
+klt extract <file> [--engine klayout|klayout-runset] --deck sky130|gf180mcu|sg13g2|sg13cmos5l|asap7 [--deck-file <runset.lvs>] [--deck-var <name>=<value> ...] [--runset-timeout <s>] [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--substrate-tie-ohms <ohms>] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--rename-declared-pins] [--tie-declared-pins] [--deck-option <key>=<value> ...] [--label-layer <role>=<layer>/<datatype> ...] [--device-model <class>=<subckt> ...] [--device-param <class>:<param>=<name>[:<suffix>] ...] [--defer-resistor-fixed-offset] [--omit-dead-metal] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--hierarchical-cells <cell>[,<cell>...]] [--progress|--no-progress] [--backend local|batch] [--timeout-s <s>] [--batch-root <dir>] [--batch-include <glob> ...] [--batch-exclude <glob> ...] [--format text|json]
 klt extract <request.json>|-|'{...}' [--backend local|batch] [--timeout-s <s>] [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -27,7 +27,24 @@ two disagree, this document (and the code) win.
   file, `-` to read the document from stdin, or an inline JSON object string.
   Mutually exclusive with the flags it replaces — see "Request document"
   below.
-- `--deck` — required. The connectivity + device-extraction deck to run.
+- `--engine` — which extractor runs: `klayout` (default, the curated
+  `--deck`) or `klayout-runset` (the PDK's own LVS runset, `--deck-file`).
+  See "Engine" below. Every flag and report of the default engine is unchanged
+  by this flag's existence.
+- `--deck-file` — the PDK's own KLayout LVS runset, for
+  `--engine klayout-runset` only (required there, a clean error elsewhere).
+- `--deck-var <name>=<value>` — repeatable; an extra `-rd name=value` global
+  passed to that runset. `--engine klayout-runset` only.
+- `--runset-timeout <seconds>` — wall-clock budget for the runset subprocess
+  (default 600). `--engine klayout-runset` only.
+- `--device-param <class>:<param>=<name>[:<suffix>]` — repeatable; carries the
+  measured KLayout parameter `<param>` of device class `<class>` onto every `X`
+  call of that class as `<name>=<value><suffix>` (issue #5513), e.g.
+  `--device-param sg13_hv_nmos:W=w:u`. Without it the call is parameter-free
+  and the PDK subcircuit's defaults apply. `--engine klayout-runset` only (a
+  clean error elsewhere). See "Carrying measured parameters" under "Engine".
+- `--deck` — required for `--engine klayout` (the default); refused by name
+  under `--engine klayout-runset`. The connectivity + device-extraction deck to run.
   Currently: `sky130`, `gf180mcu`, `sg13g2`, `sg13cmos5l`. `sg13g2`'s device
   coverage is MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the
   thick-oxide `sg13_hv_*` flavour scoped to `ThickGateOx` 44/0), three drawn
@@ -393,6 +410,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `parasitics` | bool | `--parasitics` |
 | `mom_net` | string | `--mom-net` |
 | `spef` | string | `--spef` |
+| `report_parasitics` | string | `--report-parasitics` (issue #5816): `"full"` (the default) or `"slim"`; `"slim"` requires `spef` |
 | `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
 | `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
 | `critical_net_patterns` / `parasitics_net_patterns` | array\<string\> \| string | repeatable `--critical-net-pattern` / `--parasitics-net-pattern` (issue #2974) |
@@ -420,6 +438,7 @@ Every field name is the flag's own `dest`, so the mapping is one-for-one:
 | `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
 | `label_layers` | object\<string, [int, int] \| null\> | repeatable `--label-layer ROLE=LAYER/DATATYPE` (issue #2656), e.g. `{"metal0": [8, 25], "poly": null}`. `null` is the flag's `none` spelling. A role name containing `=`, or a value that is neither `null` nor a `[layer, datatype]` pair of non-negative integers, is rejected. |
 | `device_models` | object\<string, string\> | repeatable `--device-model CLASS=SUBCKT` (issue #4234), e.g. `{"bjt": "pnp_05p00x05p00"}`. |
+| `device_params` | array\<string\> | repeatable `--device-param CLASS:PARAM=NAME[:SUFFIX]` (issue #5513), e.g. `["sg13_hv_nmos:W=w:u"]`; each entry is validated exactly like the flag. `--engine klayout-runset` only. |
 | `probes` | array\<object\|string\> | repeatable `--probe` (issue #2986): each entry is `{"name", "layer", "x", "y"}` or the flag's own `name=…,layer=…,x=…,y=…` string. Validated exactly like the flag. |
 | `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
 | `omit_dead_metal` | bool | `--omit-dead-metal` (issue #5545) |
@@ -482,6 +501,256 @@ to anchor them to in those cases. `~` and `$VAR` are expanded. This is
 `klt lvs`'s convention verbatim (both use the same shared helper).
 
 ## Engine
+
+`--engine` selects which extractor runs (issue #5481):
+
+| `--engine` | What runs | Needs |
+|---|---|---|
+| `klayout` (default) | the curated `--deck` (`decks/`) through the pip `klayout` module | `pip install klayout` only |
+| `klayout-runset` | the PDK's **own** KLayout LVS runset (`--deck-file`) through the standalone `klayout` application | the `klayout` binary + the PDK install |
+
+Everything in the rest of this document describes the default `klayout`
+engine unless it says otherwise. `--engine klayout` is the default, so every
+invocation and every report that predates the flag is unchanged by it: a
+curated-deck report carries no `engine` field at all.
+
+### `--engine klayout-runset` (issue #5481)
+
+A curated deck can only extract a device family it declares a class for. For a
+family it does not — IHP's `pnpMPA` on `sg13cmos5l` — `klt extract --deck
+sg13cmos5l` reports `device_count: 0`, and there was no `klt` path to an
+extracted *netlist* containing the device at all. `klt lvs` could already
+reach such a family by running the PDK's own runset
+([`docs/cli/lvs.md`](lvs.md) → "`klayout-runset`", issue #2849), but a verdict
+is not a netlist. This engine closes exactly that gap:
+
+```bash
+klt extract "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/testing/testcases/unit/bjt_devices/layout/pnpMPA.gds" \
+  --engine klayout-runset \
+  --deck-file "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/sg13cmos5l.lvs" \
+  --top pnpMPA_lvs -o pnpMPA.spice --format json
+```
+
+```
+device_count: 2   device_counts: {"pnpMPA": 1, "ptap1": 1}
+```
+
+The same layout through the curated deck still reports `device_count: 0`
+(`tests/test_extract_runset_pdk.py` measures both, rather than asserting the
+contrast from memory).
+
+**Flags.** `--deck-file PATH` is the PDK's runset, required under this engine
+and refused under any other; `--deck-var NAME=VALUE` (repeatable) passes an
+extra `-rd NAME=VALUE` global to it; `--runset-timeout SECONDS` is the
+subprocess budget (default 600). All three are spelled as on `klt lvs`.
+`--device-param` (below) is this engine's own. `$KLT_KLAYOUT_BINARY` picks the `klayout` application, exactly as for
+`klt lvs`. The engine sets `input`, `schematic`, `report`, `top` and `topcell`
+itself, so `--deck-var` may not.
+
+**Where the netlist comes from.** The runset is launched by the *same*
+launcher `klt lvs` uses — same binary resolution, same `-rd` construction,
+same error text — and the netlist is read back from the `.lvsdb` it writes
+(`LayoutVsSchematic.read()` + `.netlist()`), **never** from a runset's own
+`<top>_extracted.cir` side file: that file's location is runset-specific
+(`sg13cmos5l.lvs` derives it from the *layout's* directory, not the process
+cwd), so depending on it would make the engine runset-specific too.
+
+**The synthesized stub schematic.** A PDK runset runs a complete LVS flow and
+hard-requires a schematic. This engine therefore synthesizes an empty
+`.SUBCKT <top> / .ENDS <top>` stub purely to satisfy that requirement and
+**discards the compare verdict entirely** — comparing is `klt lvs`'s job. The
+open question of whether a stub costs devices was measured against
+`sg13cmos5l.lvs` for issue #5481: it does not. The runset's own log reports
+`Devices to compare: layout=2 schematic=0` after `align`, its default
+`SIMPLIFY` pass keeps both, and the written `.lvsdb` carries them. (Its
+`net_only=true` switch — which skips the compare and would need no stub —
+was measured too and **rejected**: on that runset it writes neither the
+`.lvsdb` nor a side netlist, leaving nothing to read back.)
+
+**Every device is written as an `X` subcircuit call.** A runset's device-class
+names *are* the PDK's own device names, and an open PDK's ngspice library
+declares those as **subcircuits** — IHP's `sg13cmos5l_pnpMPA_mod.lib:38` is
+`.subckt pnpMPA c b e`, `resistors_mod.lib:23` is `.subckt ptap1 1 2`.
+KLayout's default primitive writer would emit `Q$1 … pnpMPA` / `R$2 … ptap1`,
+whose trailing token ngspice reads as a `.model` reference no PDK model
+library declares; neither card binds. So this engine writes every extracted
+device as an `X` call onto the class's own name, in the class's own terminal
+order — **KLayout's order, which is not always the subcircuit's declared pin
+order**. It matches for `pnpMPA` (`C B E` against `.subckt pnpMPA c b e`) and
+does not for MOS: KLayout's MOS4 class writes `S G D B` onto the PDK's
+`.subckt sg13_hv_nmos d g s b`, so the net KLayout calls S lands on pin `d`.
+For a symmetric model that is the same device with its source and drain
+labels swapped; it only matters for what is *attached* to each side, which is
+why the junction parameters need the cross-declaration shown under "Carrying
+measured parameters" below.
+
+```spice
+.SUBCKT pnpMPA_lvs PAD VDD VSS
+X$1 \$1 PAD VDD pnpMPA
+X$2 VSS \$1 ptap1
+.ENDS pnpMPA_lvs
+```
+
+`--device-model CLASS=SUBCKT` renames the target for a class whose PDK
+spelling differs — the same flag the curated engine uses for its own unbound
+bipolar classes (issue #4234), generalised here to any class because under a
+runset there is no curated binding table to consult. A class the PDK model
+library does not declare fails loudly in the simulator as an unknown
+subcircuit rather than binding to something wrong.
+
+**By default, measured parameters are not carried onto the call.** KLayout
+reports a device's geometry in micron units (`A=2` µm², `P=6` µm for `pnpMPA`)
+while the PDK subcircuit declares its own in SI (`.param a=2p p=6u`), and the
+parameter *names* differ per class and per PDK. Guessing a per-family unit
+rescale is the per-PDK workaround that disqualified
+`tests/helpers/extract_klayout_oracle.py` as the basis for this engine, so by
+default the `X` call is written parameter-free and the subcircuit's own
+declared defaults apply. This is disclosed, never silent: every dropped
+parameter is named per class in `warnings[]`, and `devices[].params` still
+carries every measured value the report has a field for. A block whose MOS or
+resistors are not at their subcircuit's default size therefore needs the
+next section before its netlist is simulated.
+
+### Carrying measured parameters (`--device-param`, issue #5513)
+
+`--device-param CLASS:PARAM=NAME[:SUFFIX]` (repeatable) is the caller's
+statement of *how* one class's measured parameter maps onto its subcircuit:
+every `X` call of `CLASS` gets `NAME=<value><SUFFIX>`, where `<value>` is the
+extractor's measured `PARAM` **unscaled** (12 significant digits, in the micron
+units `devices[].params` reports) and `SUFFIX` is a SPICE scale suffix
+(letters only) appended verbatim, empty if omitted. `klt` carries no per-PDK
+table and infers no unit: a PDK runset's own writer makes the same statement,
+one name-keyed suffix per parameter and no arithmetic, and the caller reads it
+off the PDK (IHP's `sg13cmos5l`: `W`/`L`/`PS`/`PD` are `u`, `AS`/`AD`/`A` are
+`p`). Without the flag, output is byte-identical to before it existed.
+
+```bash
+klt extract "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/testing/testcases/unit/mos_devices/layout/sg13_hv_nmos.gds" \
+  --engine klayout-runset \
+  --deck-file "$PDK_ROOT/ihp-sg13cmos5l/libs.tech/klayout/tech/lvs/sg13cmos5l.lvs" \
+  --device-param sg13_hv_nmos:W=w:u  --device-param sg13_hv_nmos:L=l:u \
+  --device-param sg13_hv_nmos:AS=ad:p --device-param sg13_hv_nmos:AD=as:p \
+  --device-param sg13_hv_nmos:PS=pd:u --device-param sg13_hv_nmos:PD=ps:u \
+  -o hv_nmos.spice
+```
+
+```spice
+* before: X$1 \$4 \$2 \$3 \$1 sg13_hv_nmos            (simulated at 0.35u / 0.34u)
+X$1 \$4 \$2 \$3 \$1 sg13_hv_nmos as=0.265p ad=0.265p l=1u ps=2.56u pd=2.56u w=1u
+```
+
+The card's `w=1u l=1u` is the report's own `devices[0].params`
+(`w_um: 1.0`, `l_um: 1.0`).
+
+**MOS source/drain: cross-declare the junction parameters.** Because the call
+is `S G D B` onto a subcircuit declared `d g s b` (above), the net KLayout
+calls S sits on pin `d`, so the measured source-side area/perimeter belong on
+`ad`/`pd` and the drain-side ones on `as`/`ps` — hence `AS=ad:p`, `AD=as:p`,
+`PS=pd:u`, `PD=ps:u` in the example. This replaces any pin-reordering
+option. **Declare the four junction parameters together or not at all**:
+`sg13_hv_nmos`/`sg13_lv_nmos` honour `as`/`ad`/`ps`/`pd` only when `as` is
+positive and otherwise recompute all four from `w`, so declaring (say) `AD`
+alone has no effect on that model. The equivalence was measured once for issue
+#5513, not asserted: on `ihp-sg13cmos5l`'s `sg13_hv_nmos` (PSP103, one ngspice
+`.op`), a device with deliberately asymmetric junctions (`AS=0.1p`, `AD=0.5p`,
+`PS=1u`, `PD=3u`) written as the cross-declared `S G D B` card and written as
+a hand-reordered `D G S B` card with straight declarations gave
+**terminal currents identical in all 14 printed digits at four bias points**
+(forward, reversed, and both leakage polarities), while the same card
+*without* the cross-declaration differed in the fourth digit of the leakage
+currents — so the check does discriminate. The effect of junction asymmetry at
+`.op` is small for this model (~2e-4 relative on leakage); do not read the
+check as evidence for a different model family.
+
+**Validation.** `PARAM` is the extractor's own name (case-sensitive; the names
+`warnings[]` and `devices[].params` use) and must be one the class defines: an
+unknown one is a clean error (exit 1) listing the class's real parameters, never
+a device silently left at its default size. A `CLASS` the runset's netlist has
+no device class for cannot be checked and carries nothing, so it is a warning.
+Two parameters of one class may not target the same `NAME`; a later entry for
+the same `CLASS:PARAM` wins, as for `--device-model`. The flag composes with
+`--device-model`: the rename picks the subcircuit, the declarations its
+parameters.
+
+**What is still disclosed.** `warnings[]` and the netlist header name only what
+is *still* not carried: a class with every measured parameter declared gets no
+dropped-parameter warning, and the header's "device parameters are not
+carried" line is written only when some card actually drops one.
+
+**Refused flags.** Everything only the curated engine can honour is refused by
+name with exit 1, never silently ignored — a caller who believes
+`--parasitics` is in force would otherwise read a device-only netlist as a
+parasitic-annotated one. That covers `--deck`, `--pdk`/`--pdk-root`,
+`--parasitics` and everything built on it (`--critical-net*`,
+`--parasitics-net*`, `--distributed-rc`, `--resistance-graph*`,
+`--resistance-path*`, `--spef`, `--report-parasitics slim`, `--mom-net`, `--mom-rlc-*`,
+`--parasitic-variant`, `--substrate-spreading`, `--substrate-tie-ohms`),
+`--deck-option`, `--label-layer`, `--subcircuit`/`--subcircuit-output`,
+`--hierarchical-cells`, `--abstract-cells`/`--abstract-cell-lef`, `--probe`,
+`--pins`/`--def-pins`/`--pin-source-cells`, `--top-cell-pins`,
+`--rename-declared-pins`/`--tie-declared-pins`, `--matched-group`,
+`--def-net-names`/`--def-net-connections`, `--defer-resistor-fixed-offset`.
+`--backend batch` is refused too: the batch runner's request cannot ship the
+`klayout` application or the PDK install the runset needs on the executing
+host. `-o/--output`, `--no-netlist`, `--top`, `--device-model`,
+`--device-param`, `--format` and `--progress` all work as usual. The converse
+holds too: `--device-param` is refused under the default `--engine klayout`
+rather than silently ignored.
+
+**No parasitics.** The result is a device-level netlist with
+`parasitics: null`. Combining runset devices with curated-deck parasitics
+needs a geometric net correspondence between two independent extractions
+that number their unlabelled nets independently (`\$1` above; see "Anonymous
+net numbering" below) — this engine stays device-only, and `klt extract
+--engine klayout-runset --deck` is refused as ever.
+[`klt pex --engine klayout-runset --deck <curated>`](pex.md) (issues #6559,
+#6606) is where that correspondence lives: it runs this engine for devices,
+a curated deck for parasitics, joins the two by measured geometric rules
+([`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)),
+and merges the parasitic network into the leg it re-simulates. A `klt pex`
+report from that route can satisfy `docs/design-evidence-tiers.md` T1 item
+7's intent when its envelope says `extraction.parasitics_carried: true`;
+a parasitic-free leg (either runset shape) is refused by `klt signoff`
+(`no_parasitics`, issue #6606).
+
+**Report.** Additive fields only, so `SCHEMA_VERSION` is unchanged (4): the
+report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
+`parasitics: null`, `pdk: null`, and `provenance.runset` (`deck_file`,
+`deck_vars`, `content_hash`, `klayout_application_version`, `exit_status`,
+`engine_error_lines`) — the same block `klt lvs` emits. When
+`--device-param` was given it also carries `device_params`
+(`{class: {PARAM: {"name", "suffix"}}}`, sorted); the key is **absent**, not
+`null`, otherwise, so a report without the flag is byte-identical to one from
+before it existed. It always carries `params_not_carried` (issue #6559: `{class: [PARAM, …]}`,
+sorted — the measured parameters the `X` cards do not carry, the structured form
+of the per-class `warnings[]` prose; `{}` once every parameter is declared), which
+`klt pex` copies into its own `extraction` block. It also always carries two
+additive fields for a runset that does not flatten (issue #6559):
+`instantiated_device_counts` (`{class: count}` — the devices instantiated from
+the selected circuit through every circuit it calls, once per call; equal to
+`device_counts` for a flat runset) and `extra_circuits` (`[circuit, …]` — the
+circuits written besides the selected one, `[]` when flat). `device_count`,
+`device_counts`, `devices[]`, `nets[]` describe the **selected circuit alone**
+— `{}`/`0`/empty for a top whose devices all sit in called cells, which the
+`warnings[]` entry for a multi-circuit netlist states — and the "recognised no
+devices" warning keys on `instantiated_device_counts`, never on that top-only
+count. `klt pex` reports `instantiated_device_counts` as its own
+`extraction.device_counts`. `netlist_path`, `netlist_sha256`,
+`netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
+mean for the curated engine. **The exit status proves nothing** about the
+extraction: a runset may exit non-zero purely because its (discarded) compare
+against the stub failed, so the verdict comes from the database, exactly as in
+`klt lvs`. A missing `klayout` binary, a run that wrote no database, a
+timeout, and an unreadable database are each a clean error envelope with exit
+1.
+
+**Tested target.** Only IHP `sg13cmos5l` is pinned by a test. The engine takes
+any `--deck-file`, but a runset that aborts or prunes its devices against an
+empty stub schematic (sky130's `sky130.lvs` needs `net_only`/`top_lvl_pins` to
+avoid exactly that, per `tests/helpers/extract_klayout_oracle.py`) is not
+supported today; try `--deck-var` for that runset's own switches first.
+
+### The default `klayout` engine
 
 `klt extract` runs fully headless via the pip `klayout` package's native
 `klayout.db.LayoutToNetlist` (connectivity + device extraction) and
@@ -774,8 +1043,9 @@ netlists.
 runs on the same pinned `klayout` build and `klt` commit; a pin recorded on a
 different one can change once even when every count matches, because the
 writer owns the `$N` labels (above) and `klt extract` does not renumber them.
-A numbering-independent hash field is not yet offered — it is tracked in
-#3407. Two consecutive runs on the same environment produce identical
+For a pin that must survive a `klayout` build change, use
+`netlist_normalized_sha256` (issue #3407), which is numbering-independent.
+Two consecutive runs on the same environment produce identical
 `netlist_sha256` (`test_consecutive_runs_give_identical_netlist_sha256`).
 
 Rather than hand-rolling this normalization, `klt extract --check <report>
@@ -826,12 +1096,20 @@ two things let a caller tell a slow run from a hang and budget the step:
   `unattributed_seconds` (the remainder no stage covers, so
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
   **exclusive**: a stage opened inside another is credited to the inner stage
-  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  only, so the parent's value excludes it (issue #5716). The `--progress`
+  `finished in Ns` line is **not** this quantity: it is wall time *inside* the
+  stage, inclusive of any stage nested in it, so for a parent stage it exceeds
+  that stage's `timing.stages` value by its children's time (e.g.
+  `device_extraction` with `--parasitics`, whose `parasitics_compute` runs
+  inside it). Use the stderr line to see how long a stage has been open, and
+  `timing.stages` to see where the time went. Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
   and passive-region work; **excludes** the `--parasitics` compute),
   `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
   run while the `LayoutToNetlist` is still live; issue #5716; present only with
   `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
+  `unsupported_devices` (the #2919 diagnostic re-runs the recogniser walks
+  to find device markers the deck could not classify),
   `parasitics_inject` (building the parasitics report and injecting the R/C
   elements into the netlist, issue #5716; present only with `--parasitics`),
   `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
@@ -866,20 +1144,22 @@ agreed within ~10 % on `device_extraction`).
 | 2× `gcd` | 9,714 | 4,107 | 3.96 s | 0.14 s | 20.4 s | 24.9 s |
 | 4× `gcd` | 19,428 | 8,213 | 10.4 s | 0.26 s | 79.7 s | 90.9 s |
 
-**Scaling.** `device_extraction` is mildly super-linear (≈0.36 → 0.41 → 0.54
-ms/device across 4.9k → 9.7k → 19.4k devices, roughly n^1.2) but is not the
-problem. `netlist_normalized_hash` is: it grows ~4× per doubling (quadratic) and
-is 70–88 % of the whole run once a netlist is written, which is the default.
+**Scaling.** On these sky130 routed digital blocks, `device_extraction` is
+mildly super-linear (≈0.36 → 0.41 → 0.54 ms/device across 4.9k → 9.7k → 19.4k
+devices, roughly n^1.2). The dominant stage is `netlist_normalized_hash`,
+which grows ~4× per doubling (quadratic) and accounts for 70–88 % of the
+whole run once a netlist is written, which is the default.
 A ~8.5k-instance block (≈9–10k devices, the 2× row) spends ~20 s of a ~25 s run
 there. Before issue #3408 that time was reported as `unattributed_seconds`
 (5.1 s of 7.0 s on `gcd`), so the `timing` object understated the cost; it now
 has its own stage. Passing `--no-netlist` skips it (the `mult8` row and the
 earlier `device_extraction`-dominated numbers).
 
-`device_extraction` was not split further: it is under 50 % of a default run
-and its growth is close to linear, so the data does not warrant it. Making the
-normalized hash itself sub-quadratic is a separate change and is out of scope
-here; this section only records and attributes the cost.
+On this sky130 corpus, `device_extraction` took under 50 % of a default run
+and grew close to linearly, so those measurements did not warrant splitting
+the stage further. On a 1,600-cell gf180mcu flat array, the unsupported-device
+diagnostic alone accounted for 123 s of `unattributed_seconds` before #5807
+rewrote the recogniser walks and timed the diagnostic as `unsupported_devices`.
 
 ### Reserved annotation layer
 
@@ -2009,6 +2289,31 @@ continuous `GatPoly` bar with `PolyRes` over its middle still extracts the
 same device. Every other resistor class keeps the default
 `topology="overlap"` (`body & marker`) unchanged; `klt deck devices`
 reports each resistor class's `topology`.
+
+gf180mcu's two poly entries (`ppolyf_u`, `ppolyf_u_1k`/`_2k`/`_3k`) declare
+`ResistorDevice.terminal_enclosure_um=0.22` (issue #5889): the DRM's own
+SB.10 (`poly2.enclosing.sab.1`) *mandates* that Poly2 extend >= 220 nm
+beyond every SAB edge, so a DRC-clean drawing necessarily surrounds the
+recognised body with an unmarked 220 nm Poly2 band on every side. That
+band wraps the body and touches it along its whole perimeter, so "the rest
+of the conductor" would merge both contacted leads into ONE terminal
+component and the resistor would silently vanish from the extracted
+netlist ("Expected two polygons on contacts interacting with one resistor
+shape") while `klt drc` reports the layout clean -- before #5889 a
+DRC-clean and an LVS-extractable poly resistor were mutually exclusive.
+With the field set, the terminal region is narrowed to the Poly2 lying
+within 220 nm of Poly2 drawn *beyond* the mandated band -- each lead plus
+its channel through the band -- and the band's side flanks are severed
+from the terminal conductor's connectivity, so each lead is its own
+terminal on its own net (and the severed flanks become isolated, floating
+salicided poly). A drawing with no band at all (exact-body markers, SB.10
+violated -- the fixture style every pre-#5889 test uses) extracts
+bit-for-bit as before; a drawing whose halo is itself part of a conductor
+path around the body (e.g. a poly bar uniformly wider than the dilated
+body) is genuinely shorted through its own conductor and still forms no
+device. `tests/test_extract_gf180mcu_sab_resistor.py` covers the
+compliant, exact-body, wide-lead and shared-halo (two SAB bodies at SB.2's
+0.42 µm minimum, in series through the gap) cases.
 
 sky130's `res_generic_m1`..`res_generic_m5` (issue #1621) have no `.subckt`
 in the real sky130 device library — only a bare `.model
@@ -3406,12 +3711,15 @@ the full per-rule table and each test's docstring for the underlying
 geometry/coefficient detail.
 
 **Scope.** `run_extract_klayout_engine` is a Python helper used by this
-cross-check's own test module, not (yet) wired up as a `klt extract
---engine klayout` CLI flag the way `run_drc_klayout_engine` is for `klt
-drc` — this issue's acceptance criteria ask for the cross-check to be run
-and reported, not for a new user-facing engine flag; promoting it to a CLI
-surface (JSON contract, docs, exit codes) is a separate, explicitly-scoped
-follow-on if a caller ever needs to run this oracle outside of tests.
+cross-check's own test module (it lives in `tests/helpers/extract_klayout_oracle.py`),
+and it is **not** the implementation behind `klt extract --engine`. Issue
+#869's acceptance criteria asked for the cross-check to be run and reported,
+not for a user-facing engine flag. That flag now exists — `--engine
+klayout-runset` (issue #5481), see "Engine" above — but it was written as its
+own module (`src/klayout_tools/extract_runset.py`) rather than by promoting
+this oracle, which re-reads the runset's own SPICE output and carries per-PDK
+unit-rescale workarounds that are appropriate for an oracle and not for a
+product surface. This oracle stays test-only.
 gf180mcu was out of scope for issue #869 (its device entries carried no
 `RuleProvenance` citations yet to cross-check against at the time) — see the
 next section for issue #904's own gf180mcu cross-check, once that
@@ -3425,16 +3733,16 @@ reported (not asserted)." This section is the gf180mcu counterpart of the
 sky130 section immediately above, reusing the exact same infrastructure
 (`run_extract_klayout_engine`) and reporting discipline.
 
-**Unlike gf180mcu's own DRC deck** (which ships only as unassembled
-per-feature fragments under `libs.tech/klayout/drc/rule_decks/*.drc` with no
-single runnable file, per `docs/cli/drc.md`'s "Engine" → "klayout"
-limitation — the reason gf180mcu's *DRC*-side native cross-check remains
-deferred), **gf180mcu's native LVS deck ships as a single, directly-runnable
-`libs.tech/klayout/lvs/gf180mcu.lvs`** — verified against a real
-`volare`-fetched `gf180mcuD` install for this issue, resolved the same way
-`sky130.lvs` is via `klayout_tools.pdk.lvs_deck_file` (whose own docstring
-already flagged this exact possibility as of issue #869: "a future caller
-is free to attempt it").
+**gf180mcu's native LVS deck is a single, directly runnable file.** For #904,
+`klayout_tools.pdk.lvs_deck_file` resolved `libs.tech/klayout/lvs/gf180mcu.lvs`
+in a `volare`-fetched `gf180mcuD` install, just as it resolves `sky130.lvs`.
+
+The gf180mcu golden-pair DRC cross-check remains deferred because the manifest
+tests do not yet run those fixtures through the native engine. Since #4002,
+`klt drc --engine klayout|both --pdk <variant>`
+resolves the family main script `tech/drc/gf180mcu.drc` as
+`native_deck.kind: pdk_main_script`. Both engines completed a live
+`--engine both` run on `gf180mcuA` (premise corrected 2026-11-18, issue #5720).
 
 **A generalization `run_extract_klayout_engine` needed for a second PDK.**
 sky130.lvs's own custom SPICE-writer delegate emits length/area parameters
@@ -4653,6 +4961,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   case-insensitively and would report a false `net.merged`. Pair it with
   `options.flatten_layout` in `klt lvs` — see
   [`klt lvs`](lvs.md) (`options.flatten_layout`).
+  A flat `--parasitics` run that would *write* such a netlist fails instead
+  (exit 1, issue #7091), naming each colliding group: ngspice folds case,
+  so the two nets would become one node and their net-derived parasitic
+  cards (`RN1_t0` / `Rn1_t0`) would be rejected as duplicate devices —
+  regardless of which nets `--parasitics-net` / `--critical-net` select.
+  Nothing is written and an existing output file (including the default
+  `<input>.spice`) is left untouched; `klt pex` reports it as
+  `extraction failed` before any simulation. `--parasitics --no-netlist`
+  still returns the report with the warning, and a device-only extraction
+  still writes its netlist with the warning. Several labels on *one* net
+  (`A|a`) are not a collision.
 
 ### Flat vs hierarchical
 
@@ -5427,14 +5746,22 @@ per-net lumped model would produce.
   > with tap count even though the real resistance between two fixed points
   > does not. Across levels, two strapped layers joined at both ends are
   > charged as the sum of both, not their parallel combination, while two
-  > levels joined at a single landing correctly add. The true value depends
+  > levels joined at a single landing correctly add. A net routed as a tree
+  > is over-charged the same way: the total sums every branch in series,
+  > including stub arms that end on terminals carrying no DC current (e.g.
+  > MOS gates), so it overstates the trunk-plus-two-arms path between the
+  > current-carrying terminals. The true value depends
   > on which terminals carry current and on the boundary conditions, and a
   > net with three or more terminals has no single scalar. `--distributed-rc`
   > does **not** repair this: the ladder redistributes the *same*
   > `resistance_ohm` along the terminal order and conserves its total, so it
-  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
-  > graph, specified (design only, not implemented) in Stage 3 of
-  > `docs/design/extract-fidelity-roadmap.md`.
+  > inherits the bias. The opt-in terminal-aware resistance graph
+  > ("Terminal-aware resistance graph" above, from Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`) is the cross-check: it
+  > reports the per-terminal-pair path resistance.
+  > Only a two-terminal net gets a graph-sourced scalar; a net with three or
+  > more terminals keeps the legacy total and must be read pairwise through
+  > its `pair_resistance_ohm` matrix.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -5792,13 +6119,16 @@ Output, additive:
 | Field | Meaning |
 |---|---|
 | `parasitics.critical_nets` | The `--critical-net` request, echoed back verbatim. `[]` when the flag was never given. When a pattern / `--critical-net-all` was given: the resolved concrete names, sorted (exact names included). |
+| `parasitics.lateral_coupling` | Capability signal for this pass (`"computed"` / `"unmodelled"`): `"computed"` when the deck curates at least one `metal_sidewalls` coefficient, `"unmodelled"` when it curates none (the pass reports zero lateral coupling for every requested net), `null` when no critical-net selection was requested. Lets a consumer distinguish "no coupling at this separation" from "this deck cannot model coupling" without string-matching `warnings` — the deck-level `warnings` entry below stays as back-compat; both read the same predicate, so neither can report a capability the other denies for a resolved selection. |
 | `parasitics.critical_net_patterns` / `.critical_net_all` / `.critical_net_excludes` / `.parasitics_net_patterns` | The requested selectors, present only when given. (`parasitics.parasitics_nets` likewise echoes the resolved sorted names when `--parasitics-net-pattern` was given.) |
 | `parasitics.nets[].coupled[].lateral_levels` | Per coupling counterpart, the sorted list of same-`metal_index` levels that contributed lateral coupling to that pair — `[]` unless one side was named `--critical-net`. |
 
-Both `sky130`'s deck curates `metal_sidewalls`/its lookback distance for
-every metal level today; a deck that does not populates neither, so
-`--critical-net` on it reports zero lateral coupling for every requested
-net (flagged in `warnings`, mirroring `overlap_pairs_without_coefficient`'s
+Both `sky130` and `gf180mcu` curate `metal_sidewalls`/its lookback distance
+for every metal level (gf180mcu joins as of issue #5742; `sg13g2`,
+`sg13cmos5l` and `asap7` curate none); a deck that does not populates
+neither, so `--critical-net` on it reports zero lateral coupling for every
+requested net, `parasitics.lateral_coupling` reads `"unmodelled"`, and a
+`warnings` entry names the gap (mirroring `overlap_pairs_without_coefficient`'s
 gap-reporting discipline rather than silently zeroing).
 
 ### Distributed (multi-segment) RC ladder for critical nets (`--distributed-rc`, issue #977)
@@ -6337,11 +6667,18 @@ from the same routed DEF `declared_pins` already reads.
 
 **Pair it with `--def-pins` (issue #3257).** `--def-net-connections` alone
 leaves every labelled net a top-level port, and OpenSTA resolves a bare-name
-port hub through the design's *pin* names, so most nets fail to attach
-(`STA-1656`) and timing comes out byte-identical to the unannotated run.
+port hub through the design's *pin* names. Whether such a net then attaches
+is **layout-dependent** -- it hinges on whether the label happens to match a
+real design pin or port name in the routed DEF (one layout drops every RC
+element, `STA-1656`; the #3560 `gcd` run annotated 537 / 537 with
+`delay_changed: true`), so the no-`--def-pins`/`--pins` annotation outcome
+is not a stable signature and must not be asserted on in either direction.
 Pass `--def-pins <routed.def>` (or `--pins`) too. Without either, the
 response's `warnings[]` carries a `--def-net-connections without
---def-pins/--pins` entry; the SPEF bytes are unchanged by the warning.
+--def-pins/--pins` entry -- a pure function of the flags, and the stable
+invariant a `--def-pins`-omitted negative control should assert on (the
+SPEF's `*PORTS` count exceeding the routed DEF's `PINS` count is a second).
+The SPEF bytes are unchanged by the warning.
 
 **Live OpenSTA check (issue #3560).** Measured on the `gcd` corpus design
 (`klt place-and-route` to `route`, OpenROAD `26Q3-1510-g6cb3f2b704`, tt
@@ -6575,6 +6912,74 @@ genuine signal nets (never un-strapped this way in practice).
 Additive field: `spef_path` (top-level, alongside `netlist_path`) — the
 resolved SPEF path, or `null` when `--spef` was omitted (byte-identical to
 before this feature existed).
+
+### Slimming the parasitics report (`--report-parasitics {full,slim}`, issue #5816)
+
+`--spef` and the JSON report describe **the same measurement twice**: the
+SPEF is a format translation of the per-net R/C model `parasitics.nets[]`
+already reports (every `*CAP`/`*RES` value is copied verbatim from it), and
+each coupling capacitor appears in the JSON once *from each side of the
+pair* (so summing `coupled[].capacitance_ff` across `nets[]` double-counts
+— use `total_coupling_capacitance_ff`). On a routed block of a few hundred
+nets with ~6k coupling capacitors, ~94% of a ~4 MB pretty-printed report is
+`parasitics.nets[]` — and almost all of that is either a re-statement of
+the SPEF or one constant repeated per net. A caller who wants the complete
+measurement and a *committable* report should not have to commit the same
+bytes twice.
+
+`--report-parasitics slim` (requires `--spef`; meaningful only beside one)
+shapes the JSON `parasitics` block down to what the SPEF does **not**
+carry. Per `parasitics.nets[]` entry it drops:
+
+- `coupled[]` — the per-side copy of every coupling capacitor (the SPEF's
+  two-terminal `*CAP` rows carry the same values, bit-for-bit). The global
+  `parasitics.coupling_by_layer_pair` histogram summarizes the vertical
+  `levels` and same-layer `lateral_levels` from those entries.
+- `hub_net` — the net's hub node spelling, which the SPEF's own
+  `*D_NET`/`*CONN` node naming already encodes.
+- `terminals[]`/`segments[]`/`pin_order` — **only when empty/constant**
+  (the lumped model's defaults). A `--distributed-rc` net's populated
+  ladder fields are per-net data no SPEF row spells out and are kept, as
+  is any per-net `integrity` sub-key carrying a real finding.
+- the five vacuous lumped-model `integrity` sub-keys (`open` when its
+  status is the star model's `not_applicable`; `islands`/`orphan_nodes`/
+  `suspicious_resistors`/`short_candidates` when `count` is 0 with empty
+  `details`). The top-level `parasitics.integrity` summary — which already
+  aggregates the counts — is untouched; a net with a real finding keeps
+  that sub-key (and its `details[]`, which the summary does not carry).
+  `integrity.capacitance` (the net's own declared-vs-emitted
+  reconciliation) is always kept.
+
+Everything else is untouched: `net`/`net_id`, `resistance_ohm`,
+`capacitance_ff`, `inductance_nh`, the `--parasitics-top-cell-only` shares,
+`by_layer`, `resistance_graph` (`--resistance-graph`), every summary scalar
+and the whole `metrics` block. Two additive fields tell a reader which
+shape it is looking at:
+
+| Field | Meaning |
+|---|---|
+| `parasitics.report_shape` | Always `"slim"` on a slimmed report; a `full` report carries no `report_shape` key at all (its shape is the documented default). |
+| `parasitics.coupling_by_layer_pair` | Maps `"<lower_metal_index>/<upper_metal_index>"` to `{"count", "capacitance_ff"}`. For same-layer coupling, both indices equal the level from `lateral_levels` (for example, `"1/1"`). The histogram is `{}` when no coupling was measured. |
+
+Each capacitor contributes one count and its full measured capacitance to
+every layer pair it spans, after deduplicating the two `coupled[]` entries
+for the same capacitor. A lateral-only capacitor contributes to its same-layer
+buckets. Summing across buckets can count a capacitor more than once. Read
+`cc_count` and `total_coupling_capacitance_ff` for the report's totals.
+
+```
+klt extract routed.gds --deck sky130 --parasitics --spef routed.spef \
+    --report-parasitics slim --format json
+```
+
+A slim run's SPEF and written SPICE are **byte-identical** to a full run's
+— the flag shapes the JSON only, and is applied strictly after the SPEF
+writer and the `metrics` re-keying have consumed the full block.
+`--report-parasitics full` (the default) is byte-identical to the output
+before this flag existed; given without `--spef`, `slim` is a clean
+`ExtractError`, the same convention `--def-net-connections requires
+--spef` follows. The request document carries the same choice as the
+`report_parasitics` string field.
 
 ### DEF-derived net names (`--def-net-names`, issue #951, Epic #700 Phase 3)
 
@@ -7664,7 +8069,13 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 
 `resistance_ohm` is a series sum over a net's fragments (see "Squares are
 counted per connected fragment"); it cannot express parallel structure or
-the resistance *between two named terminals*. `--resistance-graph` (requires
+the resistance *between two named terminals*. Because the sum runs over
+**every** fragment of the net, a tree-routed net (one trunk, several stub
+arms to different terminals) is charged the sum of all arms — including
+arms that end on terminals carrying no DC current (e.g. MOS gates) — so the
+lumped total can overstate the two-terminal path by multiples; the
+`pair_resistance_ohm` matrix below is the cross-check for exactly that
+case. `--resistance-graph` (requires
 `--parasitics`) additionally builds the geometry-derived resistor graph of
 `docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
 `extract_resistance_graph.build_resistance_graph`, DC solve
@@ -8468,7 +8879,7 @@ Every field in this report falls into exactly one of four classes:
 | **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
-| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift; a hand-rolled comparer should drop it. The full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
+| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift. Rather than hand-rolling a comparer that drops it, pipe the report through `klt evidence canonicalize --kind extract` (issue #5541), which emits exactly the `--rerun` view; the full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
 
 `klt extract --check <report> --rerun` (below) normalizes every
 **bookkeeping** field before diffing (an anonymous net's committed and
@@ -8577,6 +8988,13 @@ changed since this report was committed, so the previously-recorded
 `devices`/`nets` (and any downstream `klt lvs` comparison against them) can
 no longer be trusted to still reproduce without re-running.
 
+A report produced by `--engine klayout-runset` (above) has no curated deck
+to hash — its `provenance.deck.name` is the runset's own filename — so the
+deck check is replaced by a `provenance.runset.content_hash` check against
+the `deck_file` runset the report itself names, mirroring `klt lvs --check`
+(issue #2849). A changed runset changes the extraction exactly as a changed
+curated deck does, so it grades `status: "drifted"` the same way.
+
 ### Full mode (`--rerun`)
 
 Actually re-runs the extraction (`run_extract`) against the `file`/`deck`/
@@ -8655,6 +9073,12 @@ Both modes use the same 0/3 split described below: `0` when `status` is
 `"match"`, `3` when it is `"drifted"`. A missing or unparseable
 `<report.json>` exits `1` with a clean error message, same as any other
 application-level failure.
+
+Both modes accept plain JSON and gzip-compressed reports, such as
+`report.json.gz`. Compression is detected by the file's contents, so a
+compressed report renamed to `.json` also works. A damaged or truncated
+gzip file exits `1` with a clean error naming the file, including the usual
+error envelope under `--format json`.
 
 ## Exit codes
 

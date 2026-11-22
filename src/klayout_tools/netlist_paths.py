@@ -98,11 +98,13 @@ def fold_continuations(data: bytes) -> bytes:
     with the writer so ``klt netlist --canonical-wrap`` output is independent
     of the host xschem's wrap column.
 
-    Comment lines (``*``) are left byte-intact: a ``+`` line is never joined
-    onto one, and comment content -- xschem's ``**.subckt`` port order
-    included -- is not rewritten. Only line layout changes, never a token of
-    a non-comment line, so a quoted expression with embedded spaces
-    (``ad='int((nf+1)/2) * w/nf * 0.29'``) survives verbatim. Idempotent.
+    Comment lines (``*``) are preserved byte-for-byte: a ``+`` line is never
+    joined onto one, and comment content -- xschem's ``**.subckt`` port order
+    included -- is not rewritten. Non-comment lines are preserved token for
+    token, with whitespace runs collapsed to single spaces -- including runs
+    inside a quoted expression, so ``ad='int((nf+1)/2)  *  w/nf * 0.29'``
+    comes out as ``ad='int((nf+1)/2) * w/nf * 0.29'`` (issue #6099).
+    Idempotent.
     """
     lines: list[bytes] = []
     prev_joinable = False

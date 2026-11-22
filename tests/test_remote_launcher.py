@@ -5,9 +5,8 @@ Every test here is a pure unit test: the injectable `aws_runner` callable
 (`RemoteLauncher(aws_runner=...)`) is always replaced with an in-memory fake
 that records calls and returns canned output, so **no test in this file ever
 invokes the real `aws` CLI, makes a network call, or could provision a real
-AWS resource** -- see CLAUDE.md's "tests that would actually launch real EC2
-instances must NOT run in CI/tests" instruction. `subprocess.run` itself is
-never reached by any test below.
+AWS resource** -- CLAUDE.md: "tests that would actually launch real EC2
+instances must NOT run in CI/tests". `subprocess.run` is never reached.
 """
 
 from __future__ import annotations
@@ -1817,6 +1816,7 @@ def test_published_runner_identities_latest_per_pdk_and_region(tmp_path):
             "klt_version": "0.7.0",
             "klt_ref": "v0.7.0",
             "pdk_variants": None,
+            "open_pdks_commit": None,
             "ngspice_version": "46",
             "pdk_snapshot": "sky130A-2026.10.01",
         }
@@ -1906,7 +1906,7 @@ def test_build_script_publishes_the_pinned_klt_ref_and_installed_version():
     script = _BUILD_SCRIPT.read_text()
     # The same $KLT_REF is what the build instance installs.
     assert 'klayout-tools@${KLT_REF}"' in script
-    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS")' in script
+    assert '"$BUILT_AT" "$3" "$KLT_REF" "$PDK_VARIANTS" "$OPEN_PDKS_COMMIT")' in script
 
 
 def test_build_script_refuses_to_publish_an_unknown_version():

@@ -79,10 +79,9 @@ def check_offhost_engine_version_pin(
     simulates there (issue #5853). This check is the backstop: it compares
     the version the runner's reports carried after the run, which is also
     what fails closed for a runner too old to know the field (its reports
-    carry no version), what raises the submitter's own
-    ``engine_version_unmet`` when a runner-side refusal left no report at
-    all, and what catches everything the pre-submit manifest check let
-    through."""
+    carry no version) and what raises the submitter's own
+    ``engine_version_unmet`` when a runner-side refusal means the recovered
+    report is an error envelope carrying no ``environment.engine_version``."""
     from . import sim
 
     if pin is None or backend not in sim._OFFHOST_BACKENDS:

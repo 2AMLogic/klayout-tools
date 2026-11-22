@@ -28,7 +28,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from . import remote_transport, sim_batch
+from . import remote_transport, sim_batch, sim_batch_receipt
 from .sim_batch import (
     BATCH_RECEIPT_FILENAME,
     BATCH_TERMINAL_STATES,
@@ -119,6 +119,7 @@ def submit_only(
     runner: remote_transport.CommandRunner | None = None,
     shard_fingerprint: str | None = None,
     hosts: int | None = None,
+    netlist_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Upload and launch one batch job, then return its identity at once.
 
@@ -184,6 +185,9 @@ def submit_only(
         request=request,
         config=config,
         spec=spec,
+        receipt_identity=sim_batch_receipt.corner_receipt_identity(
+            request, netlist_sha256
+        ),
         unit_count=len(corner_points),
         job_ceiling=job_ceiling,
         artifacts_dir=artifacts_dir,
@@ -282,6 +286,7 @@ def launch_prepared_job(
     spec: Any,
     unit_count: int,
     job_ceiling: dict[str, Any] | None,
+    receipt_identity: dict[str, str] | None = None,
     artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
 ) -> dict[str, Any]:
@@ -298,7 +303,8 @@ def launch_prepared_job(
     except BatchError as exc:
         raise SimError(f"batch backend failed: {exc}", code=exc.code) from exc
     launched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    digest = request_sha256(request)
+    if receipt_identity is None:  # deck-list jobs retain their own digest format
+        receipt_identity = {"request_sha256": request_sha256(request)}
     if artifacts_dir is not None:
         _write_batch_receipt(
             os.path.join(artifacts_dir, BATCH_RECEIPT_FILENAME),
@@ -308,7 +314,7 @@ def launch_prepared_job(
                 "region": config.region,
                 "profile": getattr(config, "profile", None),
                 "launched_at": launched_at,
-                "request_sha256": digest,
+                **receipt_identity,
                 "state": None,
             },
         )
@@ -321,7 +327,7 @@ def launch_prepared_job(
         "jobs_prefix": config.jobs_prefix,
         "job_uri": job_uri(config, job_id),
         "launched_at": launched_at,
-        "request_sha256": digest,
+        "request_sha256": receipt_identity["request_sha256"],
         "unit_count": unit_count,
         "job_ceiling": job_ceiling,
     }

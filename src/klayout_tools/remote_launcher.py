@@ -89,34 +89,29 @@ from typing import Any
 
 from .pdk_families import family_subset, pdk_variant_family
 
-#: Step 2 of :func:`load_ami_manifest`'s 4-step resolution order -- an
-#: explicit manifest path, consulted when no ``manifest_path`` argument
-#: (``request.remote.ami_manifest``, plumbed through by ``sim.py``'s
-#: ``_run_remote``) is given. Mirrors ``pdk.py``'s ``$PDK_ROOT`` convention
-#: (issue #370).
+#: Step 2 of :func:`load_ami_manifest`'s 4-step resolution order: an
+#: explicit manifest path, used when no ``manifest_path`` argument
+#: (``request.remote.ami_manifest``) is given. Mirrors ``pdk.py``'s
+#: ``$PDK_ROOT`` convention (issue #370).
 AMI_MANIFEST_ENV_VAR = "KLT_AMI_MANIFEST"
 
 #: Step 3 of :func:`load_ami_manifest`'s resolution order -- where
 #: ``scripts/aws/build-remote-sim-ami.sh`` additionally writes an
 #: operator-built AMI's manifest (alongside the repo checkout's own
-#: ``data/`` copy) so it is usable from *any* ``klt`` install on that
-#: machine immediately, no release required (issue #370 -- a tool-installed
-#: ``klt`` resolves :data:`DEFAULT_MANIFEST_PATH` inside its own installed
-#: package-data dir, never an operator's checkout).
+#: ``data/`` copy), usable from *any* ``klt`` install on that machine
+#: immediately, no release required (issue #370).
 USER_MANIFEST_PATH: Path = Path(
     "~/.config/klt/remote-sim-ami-manifest.json"
 ).expanduser()
 
 #: Step 4 (final fallback) of :func:`load_ami_manifest`'s resolution order:
-#: <repo root>/data/remote-sim-ami-manifest.json -- this file lives at
-#: <repo root>/src/klayout_tools/remote_launcher.py. Mirrors kb.py's
-#: DEFAULT_KB_ROOT convention: walk up from this module's own location so the
-#: module works the same from an installed wheel's source checkout or a repo
-#: clone; every function also accepts an explicit path override for tests.
-#: For a tool-installed ``klt`` (uv tool / pipx / pip) this resolves inside
-#: the installed package's own data dir -- the historically sole location,
-#: now the last-resort fallback behind :data:`USER_MANIFEST_PATH` and
-#: :data:`AMI_MANIFEST_ENV_VAR`.
+#: <repo root>/data/remote-sim-ami-manifest.json. Mirrors kb.py's
+#: DEFAULT_KB_ROOT convention -- walk up from this module's own location so
+#: the module works the same from an installed wheel's source checkout or a
+#: repo clone; every function also accepts an explicit path override for
+#: tests. A tool-installed ``klt`` (uv tool / pipx / pip) resolves this
+#: inside the installed package's own data dir -- the historically sole
+#: location, now behind :data:`USER_MANIFEST_PATH`/:data:`AMI_MANIFEST_ENV_VAR`.
 DEFAULT_MANIFEST_PATH: Path = (
     Path(__file__).resolve().parent.parent.parent
     / "data"
@@ -133,9 +128,8 @@ DEFAULT_MANIFEST_PATH: Path = (
 #: ``"ihp-sg13g2"`` (see ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), which
 #: never equals its manifest key, so it always goes through
 #: :func:`ami_pdk_key`'s family-reduction path -- the same shape as
-#: ``"gf180mcuC"`` -> ``"gf180mcu"``, not sky130's variant/key coincidence.
-#: ``scripts/aws/build-remote-sim-ami.sh --pdk sg13g2`` is the matching build
-#: invocation.
+#: ``"gf180mcuC"`` -> ``"gf180mcu"``, not sky130's variant/key coincidence
+#: (build invocation: ``--pdk sg13g2``).
 SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2")
 
 #: The PDK **families** the remote backend's baked-AMI transport covers, used
@@ -145,19 +139,18 @@ SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu", "sg13g2")
 #: A deliberate, declared *narrowing* of
 #: :data:`klayout_tools.pdk_families.KNOWN_PDK_FAMILIES` (issue #2026): the
 #: remote AMI pipeline genuinely maintains fewer families than the toolkit
-#: supports locally, which is a legitimate subsystem-specific support decision
-#: -- but it is now spelled as a subset rather than as an independent literal,
-#: so "narrowed on purpose" is distinguishable from "typo'd or forgotten" at
-#: this definition site and :func:`~klayout_tools.pdk_families.family_subset`
-#: rejects a non-family name at import time.
+#: supports locally, a legitimate subsystem-specific support decision --
+#: but spelled as a subset rather than an independent literal, so
+#: "narrowed on purpose" is distinguishable from "typo'd or forgotten"
+#: here, and ``family_subset`` rejects a non-family name at import time.
 #:
-#: This module deliberately imports nothing else from the package (it shells
-#: out to the AWS CLI and reads a JSON manifest); ``pdk_families`` is a leaf
-#: module whose only imports are stdlib, so depending on it pulls in no PDK
-#: subsystem -- previously this list was duplicated precisely to avoid such a
+#: This module deliberately imports nothing else from the package (it
+#: shells out to the AWS CLI and reads a JSON manifest); ``pdk_families``
+#: is a stdlib-only leaf, so depending on it pulls in no PDK subsystem --
+#: previously this list was duplicated precisely to avoid such a
 #: dependency. Ordering is no longer load-bearing either: :func:`ami_pdk_key`
-#: classifies via :func:`~klayout_tools.pdk_families.pdk_variant_family` and
-#: then tests membership, so there is no longest-prefix-first requirement.
+#: classifies via ``pdk_variant_family`` then tests membership, so there is
+#: no longest-prefix-first requirement.
 _AMI_PDK_FAMILIES: frozenset[str] = family_subset("gf180mcu", "sky130", "sg13g2")
 
 #: ``c7i`` instance-family sizing ladder: (name, vcpu count), ascending.
@@ -293,10 +286,9 @@ class RemoteLaunchError(Exception):
 
     Mirrors ``sim.SimError``'s "fails loudly before any corner runs" role,
     but scoped to provisioning: no `RunInstances` call that costs money is
-    ever made once this is raised (see :func:`require_cost_config`'s
-    docstring), and this exception is never used for a *corner*-level
-    failure -- that stays the fan-out issue's ``status: "error"`` reporting
-    convention.
+    ever made once this is raised (see :func:`require_cost_config`), and it
+    is never a *corner*-level failure -- that stays the fan-out's
+    ``status: "error"`` convention.
     """
 
 
@@ -408,10 +400,9 @@ def select_instance_type(
     ``c7i.12xlarge`` (48 vCPU), exactly the design note's own worked example.
 
     Raises :class:`RemoteLaunchError` for a non-positive ``corner_count``/
-    ``threads_per_corner`` (nothing to size), or when the requested matrix
-    exceeds the largest ``c7i`` size the ladder knows about (192 vCPU,
-    ``c7i.48xlarge``) -- surfaced loudly rather than silently returning an
-    undersized instance.
+    ``threads_per_corner`` (nothing to size), or when the matrix exceeds the
+    largest ``c7i`` size the ladder knows (192 vCPU, ``c7i.48xlarge``) --
+    loudly, rather than silently returning an undersized instance.
     """
     if corner_count < 1:
         raise RemoteLaunchError("corner_count must be a positive integer")
@@ -541,21 +532,18 @@ def _candidate_manifest_paths(
     Resolution order:
 
     1. ``manifest_path`` -- an explicit override (``request.remote.ami_manifest``,
-       plumbed through by ``sim.py``'s ``_run_remote``). Disables the rest of
-       the search, same as ``pdk.find_pdk``'s ``root=`` parameter: an
+       plumbed through by ``sim.py``'s ``_run_remote``). Disables the rest
+       of the search, same as ``pdk.find_pdk``'s ``root=`` parameter: an
        explicit path that does not exist is an error, not a silent fallback
-       (the module's own "no silent default" discipline -- a wrong AMI
-       silently used is worse than a loud failure).
+       ("no silent default" -- a wrong AMI silently used is worse than a
+       loud failure).
     2. :data:`AMI_MANIFEST_ENV_VAR` (``$KLT_AMI_MANIFEST``), when (1) is not
        given.
-    3. :data:`USER_MANIFEST_PATH` -- where
-       ``scripts/aws/build-remote-sim-ami.sh`` additionally writes an
-       operator-built AMI's manifest, usable by any ``klt`` install on the
-       machine immediately, no release required.
+    3. :data:`USER_MANIFEST_PATH` -- the operator-built AMI copy, usable by
+       any ``klt`` install on the machine immediately, no release required.
     4. :data:`DEFAULT_MANIFEST_PATH` -- the packaged default (historically
-       the sole location; a tool-installed ``klt`` resolves this inside its
-       own installed package-data dir, never an operator's checkout -- see
-       (3) for the fix).
+       the sole location; a tool-installed ``klt`` resolves it inside its
+       own package-data dir, never an operator's checkout -- see (3)).
     """
     if manifest_path is not None:
         return [(Path(manifest_path), "explicit ami_manifest override")]
@@ -629,9 +617,9 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
 
     ``models.pdk`` has one meaning everywhere else in ``klt sim``: the PDK
     variant directory to resolve locally (``sim._resolve_model_lib`` passes it
-    straight to ``pdk.find_pdk(variant=...)``). The AMI manifest, however, is
-    keyed by whatever ``build-remote-sim-ami.sh --pdk`` was given, which for
-    gf180mcu is the bare *family*.
+    straight to ``pdk.find_pdk(variant=...)``). The AMI manifest, however,
+    is keyed by whatever ``build-remote-sim-ami.sh --pdk`` was given, which
+    for gf180mcu is the bare *family*.
 
     For sky130 the two coincide -- ``sky130A`` is both a real variant
     directory and the manifest key -- which is why #615 went unnoticed through
@@ -639,9 +627,8 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     ``gf180mcuA``-``D`` and its manifest key is ``gf180mcu``, so before this
     mapping existed there was no value of ``models.pdk`` that both resolved
     locally *and* found an AMI. SG13G2 (#2573) is the gf180mcu shape, not
-    sky130's: its one real local variant directory is ``ihp-sg13g2`` (see
-    ``pdk_families.PDK_VARIANT_FAMILY_ALIASES``), while the manifest key is
-    the bare family ``sg13g2``, so ``ihp-sg13g2`` always goes through the
+    sky130's (see :data:`SUPPORTED_PDKS`' note above): the manifest key is
+    the bare family, so ``ihp-sg13g2`` always goes through the
     family-reduction path below.
 
     Exact matches win, so an explicit manifest key still works; otherwise the
@@ -655,7 +642,7 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
     ``backend`` names the off-host backend in the refusal message and is the
     *only* thing it changes (issue #2523). Both off-host backends run on
     images this same pipeline publishes, so both must accept exactly the same
-    PDK set: ``sim_batch._resolve_batch_config`` calls this function with
+    PDK set: ``sim_batch._resolve_batch_config`` calls this with
     ``backend="batch"`` before its first S3 write rather than re-deriving
     :data:`SUPPORTED_PDKS`/:data:`_AMI_PDK_FAMILIES` on its own, so the two
     backends cannot silently disagree about which PDKs are supported.
@@ -679,6 +666,7 @@ def ami_pdk_key(pdk: str, *, backend: str = "remote") -> str:
 #: (``0.7.0``, ``0.7.1.dev3+gabc1234``). Mirrors the ``pattern`` in
 #: docs/schemas/remote-sim-ami-manifest.schema.json.
 _MANIFEST_KLT_VERSION_RE = re.compile(r"[0-9][A-Za-z0-9._+-]{0,79}")
+_MANIFEST_OPEN_PDKS_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 #: Marker the AMI build's user-data prints (``<marker>[<klt version>]``) after
 #: installing ``klayout-tools`` from the pinned ``--klt-ref``, so
@@ -689,12 +677,11 @@ BUILD_KLT_VERSION_MARKER = "klt-remote-sim-ami-klt-version="
 
 
 def _manifest_runner_field(image: dict[str, Any], key: str) -> str | None:
-    """A manifest entry's optional runner-identity field (``klt_version`` /
-    ``klt_ref``, issue #2851; ``ngspice_version`` / ``pdk_snapshot``, issue
-    #5851), or ``None`` -- explicitly *unknown* -- for a legacy or unusable
-    entry. A malformed ``klt_version`` is unknown rather than an error: it
-    only ever feeds the batch backend's advisory pre-launch check, which
-    must fall back to the runner-side preflight instead of refusing on it."""
+    """A manifest entry's optional runner-identity field, or ``None`` --
+    explicitly *unknown* -- when the entry predates the field or carries
+    something unusable. A malformed ``klt_version`` is unknown rather than an
+    error: it only feeds the batch backend's advisory pre-launch check, which
+    falls back to the runner-side preflight instead of refusing on it."""
     value = image.get(key)
     if not isinstance(value, str) or not value.strip():
         return None
@@ -719,9 +706,8 @@ def _manifest_pdk_variants(image: dict[str, Any]) -> list[str] | None:
 
 
 def _latest_image(candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    # Most recently built wins -- `built_at` is an ISO-8601 string per the
-    # manifest schema (see scripts/aws/build-remote-sim-ami.sh), so plain
-    # string comparison is chronological.
+    # Most recently built wins -- `built_at` is ISO-8601 per the manifest
+    # schema, so plain string comparison is chronological.
     return max(candidates, key=lambda image: image.get("built_at", ""))
 
 
@@ -735,15 +721,14 @@ def published_runner_identities(
     exactly what :func:`resolve_ami` picks (issue #2851).
 
     ``None`` for ``pdk`` or ``region`` widens the selection to every PDK key
-    or every region: the batch fleet chooses its own Spot pool, so a client
-    that does not pin a region cannot know which region's image it gets.
+    or every region (the batch fleet chooses its own Spot pool, so a client
+    that does not pin a region cannot know which region's image it gets).
     Each item is ``{"pdk", "region", "ami_id", "klt_version", "klt_ref",
-    "pdk_variants", "ngspice_version", "pdk_snapshot"}``; all but the first
-    three are ``None`` for a legacy entry (``pdk_variants`` lists the PDK
-    variant directories the image ships, issue #3251; the two engine fields
-    feed the pre-submit ``engine_version`` pin check, issue #5851). Raises
-    :class:`RemoteLaunchError` when the manifest cannot be loaded or ``pdk``
-    has no AMI family, like :func:`resolve_ami`.
+    "pdk_variants", "open_pdks_commit", "ngspice_version", "pdk_snapshot"}``.
+    Legacy entries report missing fields as ``None``. The PDK fields identify
+    installed variants and the open_pdks build. The simulator version feeds
+    the pre-submit engine pin check. Raises :class:`RemoteLaunchError` when
+    the manifest cannot be loaded or ``pdk`` has no AMI family.
     """
     key = ami_pdk_key(pdk) if pdk else None
     manifest = load_ami_manifest(manifest_path)
@@ -768,6 +753,7 @@ def published_runner_identities(
                 "klt_version": _manifest_runner_field(latest, "klt_version"),
                 "klt_ref": _manifest_runner_field(latest, "klt_ref"),
                 "pdk_variants": _manifest_pdk_variants(latest),
+                "open_pdks_commit": _manifest_runner_field(latest, "open_pdks_commit"),
                 "ngspice_version": _manifest_runner_field(latest, "ngspice_version"),
                 "pdk_snapshot": _manifest_runner_field(latest, "pdk_snapshot"),
             }
@@ -782,8 +768,8 @@ def parse_build_klt_version(console: str) -> str | None:
 
     The build's user-data prints ``<BUILD_KLT_VERSION_MARKER>[<version>]``
     right after installing ``klayout-tools`` from the pinned ``--klt-ref``;
-    under ``set -x`` the trace of that ``echo`` carries the same expanded
-    value, so the last occurrence wins.
+    under ``set -x`` the same text also appears in that ``echo``'s trace,
+    and the last occurrence wins.
     """
     pattern = re.escape(BUILD_KLT_VERSION_MARKER) + r"\[([^\]\s]*)\]"
     matches = re.findall(pattern, console)
@@ -806,6 +792,7 @@ def ami_manifest_entry(
     klt_version: str,
     klt_ref: str,
     pdk_variants: list[str] | None = None,
+    open_pdks_commit: str | None = None,
 ) -> dict[str, Any]:
     """One AMI-manifest ``images[]`` entry, as
     ``scripts/aws/build-remote-sim-ami.sh`` publishes it (issue #2851).
@@ -813,15 +800,19 @@ def ami_manifest_entry(
     ``klt_version`` is the version the build installed from ``klt_ref`` (the
     script's pinned ``--klt-ref``) and is what the batch backend's pre-launch
     check compares; ``klt_ref`` is audit provenance. Both are required for a
-    new entry, so a build can never publish an image whose runner identity
-    is unknown; they stay optional in the schema only so historical entries
-    still load. Raises :class:`RemoteLaunchError` for an unusable value.
+    new entry -- optional in the schema only so historical entries still
+    load. Raises :class:`RemoteLaunchError` for an unusable value.
 
     ``pdk_variants`` (issue #3251) optionally lists the PDK variant
     directories the image ships (e.g. ``["gf180mcuD"]``); the batch backend
-    refuses a request for an unlisted variant before any S3 write. It is
-    left out of the entry when not given, so the entry stays loadable by
-    older clients.
+    refuses a request for an unlisted variant before any S3 write, and it
+    is omitted when not given so the entry stays loadable by older clients.
+
+    ``open_pdks_commit`` (issue #6156) optionally records the 40-hex
+    open_pdks commit the image's PDK was fetched at, so a client can tell
+    which PDK build an image carries before launching a run. Omitted when
+    not given (SG13G2 has no single commit; history is never back-filled
+    with a guess); a non-40-hex value is refused, never published.
     """
     version = (klt_version or "").strip()
     if version.startswith("klt "):
@@ -858,6 +849,14 @@ def ami_manifest_entry(
                 "PDK variant directory names without whitespace"
             )
         entry["pdk_variants"] = variants
+    if open_pdks_commit is not None:
+        commit = open_pdks_commit.strip()
+        if not _MANIFEST_OPEN_PDKS_COMMIT_RE.fullmatch(commit):
+            raise RemoteLaunchError(
+                f"open_pdks_commit {open_pdks_commit!r} must be a 40-character "
+                "lowercase hex git commit"
+            )
+        entry["open_pdks_commit"] = commit
     return entry
 
 
@@ -871,17 +870,16 @@ def resolve_ami(
 
     ``klt_version``/``klt_ref`` (issue #2851) are the ``klt`` build baked
     into the image and the git ref it was installed from; both are ``None``
-    -- explicitly unknown -- for a legacy entry published before the build
-    script recorded them.
+    -- explicitly unknown -- on a legacy entry predating the build script's
+    recording of them.
 
     ``pdk`` is the request's ``models.pdk`` -- a *local variant* name -- and is
     mapped to the manifest key by :func:`ami_pdk_key` (``"gf180mcuC"`` ->
     ``"gf180mcu"``), so the same value works on both backends (#615).
 
     Raises :class:`RemoteLaunchError` for a ``pdk`` whose family has no
-    published AMI, or when the manifest has no published entry for the
-    ``(key, region)`` pair -- never silently substitutes a different region's
-    or a stale AMI.
+    published AMI or a ``(key, region)`` pair with no published entry --
+    never silently substitutes another region's or a stale AMI.
     """
     key = ami_pdk_key(pdk)
 
