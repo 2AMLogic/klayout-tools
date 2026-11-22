@@ -2460,14 +2460,16 @@ def run_drc(
     tile_pair = parse_tile(tile) if isinstance(tile, str) else tile
     control_result = None
     if negative_control is not None:
-        control_result = _run_curated_negative_control(
+        control = run_drc(
             negative_control,
-            negative_control_categories,
             deck_name=deck_name,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
             rules=rules,
+        )
+        control_result = _grade_negative_control(
+            control, negative_control, negative_control_categories
         )
     setup = _prepare_drc(
         path, deck_name, top, pdk_variant, pdk_root, rules, waivers_file, tile_pair
@@ -2487,32 +2489,12 @@ def run_drc(
     return report
 
 
-def _run_curated_negative_control(
-    control_path: str,
-    categories: list[str] | None,
-    **run_kwargs: Any,
-) -> dict[str, Any]:
-    """Run the same curated deck over a known-bad fixture and require
-    findings (issue #4320), mirroring the native engine's control: proof the
-    deck can fail on this stream's own layers, so a clean verdict on the real
-    layout is not vacuous. Raises :class:`DrcError` (code
-    ``negative_control_failed``) on no violations or a missing category."""
-    control = run_drc(control_path, **run_kwargs)
-    return _grade_negative_control(control, control_path, categories)
-
-
 def _grade_negative_control(
     control: dict[str, Any],
     control_path: str,
     categories: list[str] | None,
 ) -> dict[str, Any]:
-    """Grade a finished negative-control fixture run (issue #6959): the one
-    verdict shared by the curated and native engines, each of which runs the
-    fixture with its own deck first and passes the finished report here, so
-    the pass/fail decision, diagnostic, and serialized
-    ``negative_control`` block cannot drift between them (#5755 precedent).
-    Raises :class:`DrcError` (code ``negative_control_failed``) on no
-    violations or a missing category."""
+    """Require a known-bad fixture to trigger the specified categories on this deck."""
     found = sorted({v["rule"] for v in control["violations"]})
     missing = sorted(set(categories or []) - set(found))
     if control["violation_count"] < 1 or missing:
