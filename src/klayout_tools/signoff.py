@@ -54,7 +54,6 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
-from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -84,6 +83,9 @@ from .signoff_artifact import (
     report_artifact_unavailable,
     unavailable_is_unresolved,
 )
+from .signoff_artifact import (
+    resolve_input_artifact_value as _resolve_input_artifact_value,
+)
 
 # Item 5's spec-row coverage sources (issue #3778) and the manifest ratchet
 # that requires them machine-derived (issue #5462); out of this file for its
@@ -112,7 +114,7 @@ from .signoff_coverage_disclosure import (
 from .signoff_derived_rows import (
     DERIVED_ROWS_ITEM_ID,
     asserted_rows,
-    credited_rows,
+    member_credited_rows,
     multi_row_info,
     read_require_derived_rows,
 )
@@ -1095,16 +1097,12 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: "re-run the check"): here nothing was ever recorded to compare against,
 #: so the remedy is different -- "re-produce this evidence with a producer
 #: that records provenance" (or unpin `content_hash` for this entry), not
-#: "re-run the same producer again". A `klt yield` envelope is unaffected by
-#: this distinction: :func:`_yield_samples_content_hash` supplies a computed
-#: fallback hash whenever its samples document can be found -- resolved
-#: relative to the report file's own directory first, falling back to this
-#: process's own working directory for compatibility (issue #2197) -- so its
-#: ``resolution["content_hash"]`` is ``None`` for that reason alone only when
-#: the named document could not be located in *either* place (see
-#: ``resolution["content_hash_unresolved"]``, which then names what was
-#: named and where this looked, so that case stays distinguishable from an
-#: envelope that recorded no samples document at all).
+#: "re-run the same producer again". For yield, :func:`_yield_samples_content_hash`
+#: looks for the samples beside the report, then in the working directory
+#: (#2197). If both disk lookups fail, it tries the declared store manifest
+#: (#5963). When none resolves, the digest is null. For a named samples
+#: document, ``content_hash_unresolved`` records the searched paths and,
+#: if a declared manifest lookup failed, its path and the failure reason.
 #:
 #: Issue #2496 adds a third route to both of these two reasons, item 11
 #: only: :func:`_erc_supply_spec_hash_reason` re-hashes the **spec**
@@ -4872,78 +4870,6 @@ def _yield_samples_content_hash(
     return None, unresolved, None, None
 
 
-def _resolve_input_artifact_value(
-    value: Any,
-    spec: Mapping[str, Any],
-    evidence_dir: str | None,
-    repo_root: str | Path | None = None,
-) -> list[str]:
-    """Every filesystem path one input-artifact field's raw envelope
-    ``value`` could mean **from this grading context** -- ``[]`` when the
-    value's shape cannot be resolved here. Shared by every per-field branch
-    in :func:`_input_artifact_candidates`, native and ``generic`` alike, so
-    the two agree on exactly one resolution convention.
-
-    A path an envelope names is not portable: it was written relative to
-    whatever directory the producing run used, which is not necessarily the
-    one grading happens in. Rather than guess a single interpretation, this
-    returns each plausible one and lets :func:`_verify_input_artifact`
-    prefer a *match* over a mismatch, so a coincidentally same-named file
-    beside the envelope can never turn a genuinely fresh citation into a
-    reported mismatch:
-
-    - as the producing run itself named it -- :func:`_resolve_relative_to_spec`
-      (``spec["cwd"]`` for a command-backed entry, this process's cwd
-      otherwise), the same convention `klt drc --check`/`klt lvs --check`
-      re-hash a committed report under;
-    - relative to the **evidence file's own directory**, for a file-backed
-      entry. This is the case the two ``--check`` modes document as a known
-      limitation (``lvs.py``): ``klt lvs`` echoes ``layout``/``reference``
-      exactly as the *request document* gave them, so evidence committed
-      beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
-      ``layout.spice``) is only resolvable this way.
-
-    The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
-    `klt pex`'s ``layout``; issue #2879 -- `klt sta` schema 2's
-    ``def_path``/``verilog_path``; issue #2403 -- a ``generic`` envelope's
-    opt-in ``provenance.input.path``) is resolved against the repo root discovered
-    from the evidence file's own location, which is what ``scope: "repo"``
-    means by construction. ``scope: "external"`` carries no path at all (it
-    is ``null`` on purpose, so a host-specific absolute path never lands in
-    committed evidence) and is therefore unresolvable here -- correctly
-    reported as "not verified" rather than guessed at.
-
-    ``repo_root`` (``klt signoff --repo-root``, issue #2878) names that root
-    explicitly and replaces the discovery: evidence graded outside any git
-    checkout (a source archive, a vendored copy, an unpacked CI artifact)
-    has no ``.git`` ancestor to find, so every repo-scoped path would be
-    unresolvable without it. The caller validates the directory exists --
-    an explicit root is never second-guessed by a ``.git`` walk here.
-
-    A plain absolute string (schema-1 `klt sta` evidence, issue #2879) is
-    tried only as written: it is never re-rooted by stripping a guessed host
-    prefix, so it verifies only where that exact path still exists.
-
-    **The grading basis is the git index, not the working tree** (issue
-    #5857): a candidate inside a functioning checkout whose index does
-    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
-    holds the contract and the fallbacks.
-    """
-    candidates: list[str] = []
-    local = materialize_citation(value)
-    if local is not None:
-        return [local]
-    if isinstance(value, str) and value:
-        candidates.append(_resolve_relative_to_spec(value, spec))
-        if evidence_dir is not None and not os.path.isabs(value):
-            candidates.append(os.path.join(evidence_dir, value))
-    elif isinstance(value, Mapping) and value.get("scope") == "repo":
-        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
-    return [
-        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
-    ]
-
-
 def _input_artifact_candidates(
     kind: str,
     envelope: Mapping[str, Any],
@@ -5336,11 +5262,11 @@ def _grade_check_outcome(
         applied, lapsed = foundry_cell.evaluate(envelope, exceptions)
         if applied is not None:
             return {"foundry_cell_exceptions": applied}, None
-        failure_detail = {
-            **failure_detail,
-            "foundry_cell_exceptions": {"applied": False, "lapsed": lapsed},
-        }
+        failure_detail["foundry_cell_exceptions"] = {"applied": False, "lapsed": lapsed}
     reason = _non_passing_reason(kind, envelope, allowed_kinds=allowed_kinds)
+    if reason == _REASON_RUNSET_UNRECOGNISED_DEVICE:
+        # Issue #6902: name the recognition gaps (disclosure only).
+        failure_detail["runset_device_gaps"] = unrecognised_device_gaps(envelope)
     failure_detail.update(  # Issue #5692: name what was read (reverses #5479)
         vacuous.nothing_checked_item_detail(envelope, _citation(resolution))
         if reason == _REASON_NOTHING_CHECKED
@@ -6675,13 +6601,14 @@ def _grade_multi_citation(
     only the named rows some tagged, limited, passing measurement grades --
     a named row with none is uncovered. A member with no tags keeps the
     manifest-asserted ``rows``. ``row_coverage.row_sources`` marks each
-    covered row ``derived`` or ``asserted``. With ``require_derived`` (issue
-    #5462, the manifest's ``require_derived_rows``, item 5 only) an asserted
-    row is not coverage: an otherwise passing set carrying one is
-    ``unmet``/``partial_coverage`` with ``detail.asserted_rows``.
-    ``require_derived_invalid`` (a non-boolean key) is ``invalid_evidence``;
-    so is ``require_coverage_invalid`` (issue #5789, via
-    :func:`_checked_multi_members`).
+    covered row ``derived`` or ``asserted``; a tagged, limited ``"reported"``
+    `klt yield` measurement additionally covers an unratified row (issue
+    #5490). With ``require_derived`` (issue #5462, the manifest's
+    ``require_derived_rows``, item 5 only) an asserted row is not coverage: an
+    otherwise passing set carrying one is ``unmet``/``partial_coverage`` with
+    ``detail.asserted_rows``. ``require_derived_invalid`` (a non-boolean key)
+    is ``invalid_evidence``; so is ``require_coverage_invalid`` (issue #5789,
+    via :func:`_checked_multi_members`).
 
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
@@ -6702,11 +6629,9 @@ def _grade_multi_citation(
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
     failed = [g for g in graded if g[2][0] != "met"]
-    # Rows each member is credited with, and whether that was machine-derived.
-    credited: dict[int, tuple[list[str] | None, bool]] = {
-        id(spec): credited_rows(rows, (met_envelopes or {}).get(id(spec)))
-        for spec, rows, _ in graded
-    }
+    # Rows each member is credited with, whether that was machine-derived,
+    # and the issue-#5490 `reported` case (needs kind + the unratified set).
+    credited = member_credited_rows(graded, met_envelopes, spec_rows)
     row_info = multi_row_info(graded, failed, spec_rows, credited)
     extra: dict[str, Any] = {
         "citations_graded": [

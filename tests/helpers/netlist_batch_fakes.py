@@ -10,74 +10,15 @@ growing past its file-size ceiling.
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 
-from helpers.subprocess_fakes import fake_completed, keep_uploaded
+from helpers.fake_s3_batch import FakeS3BatchRunner as _FakeRunner
 from klayout_tools import _provenance, sim_batch
 from klayout_tools import netlist_batch as nb
 
 FAKE_BUCKET = "fake-batch-jobs-000000000000"
 CLIENT_VERSION = "0.7.0"
-
-
-def _write_output(path: Path, content: str | bytes) -> None:
-    if isinstance(content, bytes):
-        path.write_bytes(content)
-    else:
-        path.write_text(content, encoding="utf-8")
-
-
-class _FakeRunner:
-    """Records every argv, keeps a copy of every uploaded file, answers
-    `status.json` reads from a queue, and materializes ``outputs`` into the
-    collect destination -- standing in for `aws` and the launch script."""
-
-    def __init__(self, keep_dir: Path) -> None:
-        self.calls: list[list[str]] = []
-        self.keep_dir = keep_dir
-        self.uploads: dict[str, Path] = {}
-        self.statuses: list[str] = []
-        self.outputs: dict[str, str | bytes] = {}
-        self.failures: dict[str, object] = {}
-
-    def __call__(self, argv: list[str], timeout_s: float) -> object:
-        self.calls.append(list(argv))
-        joined = " ".join(argv)
-        for key, value in self.failures.items():
-            if key in joined:
-                if isinstance(value, Exception):
-                    raise value
-                return value
-        if "cp" in argv:
-            source, destination = argv[argv.index("cp") + 1 : argv.index("cp") + 3]
-            if destination.startswith("s3://"):
-                self.uploads.update(
-                    keep_uploaded(argv, source, destination, self.keep_dir)
-                )
-                return fake_completed()
-            if source.endswith("/status.json"):
-                if not self.statuses:
-                    return fake_completed(returncode=1, stderr="NoSuchKey")
-                state = (
-                    self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
-                )
-                return fake_completed(stdout=state)
-            if source.endswith("/outputs/"):
-                for name, content in self.outputs.items():
-                    path = Path(destination) / name
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    _write_output(path, content)
-                return fake_completed()
-        return fake_completed()
-
-    @property
-    def job_json(self) -> dict:
-        return json.loads(self.uploads["job.json"].read_text(encoding="utf-8"))
-
-    def aws_calls(self) -> list[list[str]]:
-        return [argv for argv in self.calls if argv and argv[0] == "aws"]
 
 
 def _git(repo: Path, *args: str) -> None:

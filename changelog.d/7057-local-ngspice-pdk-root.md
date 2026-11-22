@@ -1,0 +1,1 @@
+- **Local ngspice corners use the resolved PDK root** for netlist includes and the simulator environment, including when the shell points at another store (#7057, 2026-11-21).

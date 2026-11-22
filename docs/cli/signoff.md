@@ -586,6 +586,11 @@ carry `foundry_cell_exceptions` (issue #4530, operator ruling 2026-10-28; see
  "layout": "block.gds"}
 ```
 
+To obtain `cell_hash`, run `klt cell-hash --cell PAD bare-pad.gds` and copy
+the printed digest into the exception. Running the command on the containing
+block yields the same digest when the cell and its descendants have matching
+geometry. [Cell-hash command](cell-hash.md)
+
 `layout` is optional (default: the DRC envelope's `file`). `cell_hash` is
 `klayout_tools._provenance.cell_geometry_digest` of the cell and everything
 beneath it. A `violations` report is graded `met` only if, for every
@@ -800,7 +805,7 @@ a second input the envelope happens to mention:
 | `lvs` | `layout` | The **layout side** of the compare, which is what `provenance.input` pins (issue #1969) — the GDS/OASIS stream of a `layout.file` request, or the SPICE file of a pre-extracted `layout.netlist` one. `reference` is deliberately not re-hashed: it is pinned separately under `environment.reference_sha256`, so comparing it here would report a mismatch that is not one. |
 | `sim` | `netlist` | The SPICE deck it simulated. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
-| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; a schema-1 absolute string verifies only where that exact path exists. |
+| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; an older absolute string can also verify against a same-named file beside the evidence when its content hash matches. |
 | `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. Exception (issue #5963): when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
 
 **`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
@@ -831,7 +836,16 @@ producing run named it (the command entry's `cwd`, else this process's
 working directory, the same convention `klt drc --check`/`klt lvs --check`
 use), and relative to the evidence file's own directory, which is how
 evidence committed beside its inputs resolves (`examples/signoff/`'s
-`lvs.json` names `layout.spice`). A `{path, scope}` input echo (issue #1261,
+`lvs.json` names `layout.spice`). For an **absolute** string path — the
+legacy shape `klt drc`/`klt extract`/`klt erc` record when invoked with a
+`$PWD/...` layout from a checkout that does not exist in the grading one —
+the path's *basename* beside the evidence file is also tried (issue #2340),
+after the as-named candidate, so a layout committed next to its envelope
+under the same name is re-hashed even though the original host path is
+gone. That candidate verifies only on a hash match: a same-named file with
+different bytes reports `input_verified: false` (unless another candidate
+matches), never `true` on its name alone, and if neither the original path
+nor the basename resolves the citation stays `null`. A `{path, scope}` input echo (issue #1261,
 `klt sim`/`klt pex`) resolves against the repo root the evidence lives in
 when `scope` is `"repo"` — concretely, the nearest ancestor of the evidence
 file that holds a `.git` entry — and a `.git` file (a linked worktree)
@@ -2501,6 +2515,25 @@ command's interpreter already sees. Verified 2026-11-17 on klt 0.9.x
 (Linux): with `uvx --with tomli_w --from klayout-tools klt signoff --attest 2 …`,
 `["python3", "-c", "import tomli_w"]` fails as above, and the same check with
 the absolute path of a separate venv that has `tomli_w` passes.
+
+A third option keeps the bare `python3` in `argv`: put an **exec-wrapper**
+`python3` in a directory of your own on `PATH`, mirroring the symlink-dir
+recipe consumer READMEs give for exposing a pinned `klt`. The wrapper is a
+two-line script — `#!/bin/sh`, then
+`exec /abs/path/to/venv/bin/python3 "$@"` — which re-execs the venv
+interpreter by its real path, so venv detection (it looks for `pyvenv.cfg`
+beside the executable as invoked) still finds the venv. A **symlink** to the
+venv's `python3` in that directory does not work: invoked by its symlink
+path, the interpreter finds no `pyvenv.cfg` beside that path and the check
+fails with `ModuleNotFoundError` with or without `-I` (measured 2026-11-18 on
+Linux, CPython 3.12.3: the symlinked `python3 -I -c 'import <module>'` fails,
+the same check through the wrapper passes, and the venv's own `python3 -I`
+passes). The strip stays deliberate (#4192, #5860, #5565): klt removes only
+the tool venv's own `bin` directory from `PATH`, and the wrapper directory is
+the consumer's, so it survives — putting the venv's `bin` itself on `PATH`
+changes nothing, that being the one directory stripped. The absolute
+interpreter path remains the more explicit choice: the wrapper changes what
+every bare `python3` in the inventory means.
 
 ##### Minting above the grading pin
 
@@ -4567,6 +4600,10 @@ the manifest-asserted `rows`, so existing manifests grade identically.
 against the envelope) or `"asserted"` (the manifest's word only). The change is
 additive: `schema_version` is not bumped.
 
+The same rule reads a `klt yield` envelope's `spec_row`-tagged
+`measurements[]` for item 6, with one additional covering case — see "Item 6
+with several statistical rows" below.
+
 **Requiring derived coverage (issue #5462).** `row_sources` is report-only by
 itself: an item whose coverage is entirely `"asserted"` grades exactly like a
 fully tagged one. A project that has finished tagging its envelopes can ratchet
@@ -4843,6 +4880,36 @@ additive and also parsed for item 5 rows, where it likewise blocks `met`.
 `schema_version`: no bump; `detail.unratified_rows` is a new optional field
 and `partial_coverage` is an existing reason.
 
+**Derived coverage on a `klt yield` envelope, and `reported` measurements
+(issue #5490).** "Derived coverage (issue #3778)" above applies to item 6 as
+written: when a citation carries `rows` **and** its envelope has at least one
+`spec_row`-tagged measurement, only the rows a tagged, `limits`-bearing
+measurement grades are covered. One case is added on top of it, for `klt
+yield` envelopes only:
+
+- a tagged, `limits`-bearing measurement whose `status` is **`reported`** —
+  the token `klt yield` gives a measurement that declares no `target_yield`,
+  so nothing could fail ([`yield.md`](yield.md)) — covers its row **when that
+  row is declared `ratified: false`**, and `row_sources` records it
+  `"derived"` like any other derived row;
+- the same measurement does **not** cover a **ratified** row: that row still
+  needs a measurement graded against a declared target, exactly as before.
+
+The restriction to unratified rows is what keeps every item verdict
+unchanged. An item with an unratified row is already `unmet` /
+`partial_coverage` through `unratified_rows`, so only the `detail` lists
+move; nothing here can turn an `unmet` item `met`. A `fail` or
+`insufficient_evidence` measurement, and a tag with no `limits`, still cover
+nothing — ratified or not — and a citation the #2467 campaign-discipline
+gates refuse never reaches the crediting step at all.
+
+The case this closes: a row whose spec states a method rather than a number
+has no yield claim to make, so declaring a `target_yield` for it would invent
+one — the number-invention `ratified: false` exists to let a manifest avoid.
+Before this, such a row came back in `uncovered_rows` as if no campaign had
+been run, and the only workaround was to declare a `target_yield` the
+campaign was known to clear. No new field, no `schema_version` bump.
+
 #### Item 6's evidence needs the `[yield]` extra (issue #2466)
 
 Item 6 accepts only a `yield` envelope, and `klt yield` requires the
@@ -5041,7 +5108,10 @@ object (resolved against the repo root the evidence lives in — the nearest
 `.git` ancestor, or the directory [`--repo-root`](#grading-outside-a-git-checkout---repo-root)
 names when the evidence sits outside any checkout — mirroring `klt
 sim`'s `netlist`) — never a raw absolute host path, for the same reason
-`repo_relative_path` never emits one for `scope: "external"`. Omitting
+`repo_relative_path` never emits one for `scope: "external"`. (A legacy
+envelope that does carry an absolute string gets the same basename-beside-
+the-evidence fallback every native kind does — see "Path resolution is
+best-effort" above, issue #2340 — but new envelopes should not rely on it.) Omitting
 `provenance.input.path` is unaffected either way: `input_verified` stays
 `null`, exactly as it always has for `generic` — and since issue #6403 a
 citation whose envelope declared a `content_hash` but names nothing
@@ -5696,7 +5766,7 @@ resolved hash renders `unmet`/`unverifiable_provenance`.
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
-| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document. |
+| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document — an absent key never means "the input was verified", only that this particular failure mode did not occur; the byte-verification verdict lives in `input_verified`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own when no digest resolves, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. `status: "not_assessed"` (issue #6559: a `klt pex --engine klayout-runset` leg, which never runs the check) carries `null` for both `unbiased_device_count` and `unbiased_nets` — not `0` / `[]` — and the text rendering prints no count for it; the same citation then also carries `pex_extraction` (`{"engine", "parasitics_carried", "params_not_carried"}` plus `substrate_return` when present, quoted from the cited envelope's `extraction`; absent for a curated-deck run), rendered as a `pex extraction:` text line beside `body bias:`. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. For a **grouped** citation (issue #5597) these are the *leading group's* parts, and every group's own parts live in the item-level `citations` array (one compound citation per group, in manifest order) beside `citations_graded` and `members_covered`/`members_total` — see "Item 11 is compound" above. **Absent** for every other item. |
@@ -5755,7 +5825,7 @@ actually ran and failed):
 | `"lvs_did_not_pass"`      | no  | **Item 11 only** (issue #2495). The ERC half of the item **is** complete — every declared supply resolved to its declared island count, every declared tie was computed and found, no supply-side finding — and the cited LVS report did not pass on its own terms, so the LVS half is *unavailable* rather than answered. Still unmet: no citation reaches `met` on a failing compare, and `net_correspondence` (matched-nets-only) cannot say the supplies took part in a mismatched one even when the defect is a restated device parameter that has no bearing on any rail. Kept distinct from the plain `"check_failed"` below because the remedy differs and the record would otherwise read as "power delivery unverified" for a block whose rails *are* proven continuous and tied: fix the LVS defect (item 4 is blocked on it too), never the ERC spec, which already asked and answered. `detail.power_delivery` names the supply nets the ERC half proved, plus the LVS report's `status` and `power_connectivity.status`. See "Item 11 is compound" above. |
 | `"runset_not_pinned"`     | no  | **Items 4 and 11** (issue #2870). The cited `lvs` report is `"engine": "klayout-runset"` but its `provenance.runset.content_hash` is not in the signoff-side allowlist of PDK-published runsets (`signoff_runset.PINNED_RUNSETS`). Cite a report produced with the PDK's own runset at a pinned revision, or a curated-deck report. |
 | `"runset_hash_mismatch"`  | no  | **Items 4 and 11** (issue #2870). A `klayout-runset` report whose runset file (`deck_file`) no longer hashes to the recorded `provenance.runset.content_hash`: the runset changed since the run. Re-run `klt lvs`. |
-| `"runset_unrecognised_device"` | no | **Item 4 and item 11's LVS half** (issue #2870). A `klayout-runset` report read `status: "match"` but `coverage.declared_not_recognized` is non-empty, or `device_census` per-class layout/reference counts differ: a device went unrecognised or was dropped. |
+| `"runset_unrecognised_device"` | no | **Item 4 and item 11's LVS half** (issues #2870, #6902). A `klayout-runset` report read `status: "match"` but cannot prove every device was recognised: `device_census` per-class layout/reference counts differ (compared case-insensitively — SPICE names are case-insensitive and the sides arrive in different case), a census is malformed (each class needs a non-negative integer count), or the report carries no `device_census.reference_source` evidence (a pre-#6902 report fails closed — re-run `klt lvs` with a klt that emits it), or a source class has too few converted devices even when all class totals add up. The pinned SKY130 reader renames `sky130_fd_pr__special_nfet_01v8` subcircuit calls when `convert_subckts=true`. The grader credits only calls counted in `reference_source_subcircuits`. `coverage.declared_not_recognized` is disclosure only — a PDK runset declares classes no real block instantiates. `detail.runset_device_gaps` names each gap. |
 | `"power_port_unproven"`   | no  | **Item 11 only** (issue #2839, provisional). The port-accessibility half is in force (manifest `power_ports.required`, or port evidence cited) but no `klt socket-check` envelope carrying `power_ports` facts is cited — none at all, or one produced before #2839. See "Item 11 port accessibility" above. |
 | `"no_edge_power_port"`    | no  | **Item 11 only** (issue #2839). A declared supply has no port: no `POWER`/`GROUND` socket pin of that name, its label not where the descriptor says, or no drawn conductor under it. |
 | `"power_port_interior_only"` | no | **Item 11 only** (issue #2839). The supply has drawn port(s), but none lies within the policy's edge band of a counted outline edge with a clear approach channel. |
