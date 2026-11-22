@@ -62,6 +62,7 @@ from .drc_klayout_selection import (
     selection_fields,
 )
 from .pdk import PdkNotFoundError, find_pdk_for_deck
+from .pdk_native_drc import gf180_main_path
 
 # --------------------------------------------------------------------------- #
 # "klayout" engine (issue #565): opt-in subprocess wrapper around the
@@ -651,6 +652,7 @@ def _deck_tree_identity(deck_file: str) -> dict[str, Any] | None:
     it is not a git checkout or git is unavailable). Computed-path includes
     are not followed (see :func:`_deck_script_files`).
     """
+    deck_file = gf180_main_path(deck_file) or deck_file
     files = _deck_script_files(deck_file)
     if len(files) < 2:
         return None
@@ -1519,7 +1521,6 @@ def run_drc_klayout_engine(
             path, repo_root=env_provenance.repo_root_for(path)
         ),
         "deck": deck_file,
-        **({"native_deck": native_deck} if native_deck is not None else {}),
         "engine": "klayout",
         "environment": {"klayout_binary": recorded_binary},
         # Additive, and present *only* when --allow-deck-errors actually
@@ -1540,7 +1541,7 @@ def run_drc_klayout_engine(
         ),
         # The captured deck log is evidence only (#6613).
         "deck_output": deck_output,
-        **selection_fields(selection),
+        **selection_fields(selection, native_deck),
         "dbu_um": dbu,
         "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": violation_count,

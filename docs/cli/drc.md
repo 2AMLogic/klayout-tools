@@ -924,7 +924,9 @@ deck lists the separate `MSLOT.<k>` IDs under `coverage.unmodeled_rules`.
 `native_deck.preludes` and `provenance.deck.preludes` record the macro’s name,
 SHA-256 digest and reason. `klt drc --check` verifies its digest. Selecting
 `decks=mslot` checks slotting alone. Without an independent category assertion,
-a zero-finding native run returns `coverage_unknown` (exit 4).
+a zero-finding native run returns `coverage_unknown` (exit 4). Asserting
+all 27 slot categories returns `clean_partial` because 171 other deck IDs
+were omitted on this PDK.
 
 #### GF180 3LM deck selection
 

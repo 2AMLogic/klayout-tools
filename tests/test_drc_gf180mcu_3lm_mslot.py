@@ -9,7 +9,7 @@ import pytest
 from klayout_tools import _drc_gf180_3lm
 from klayout_tools.cli import main
 from test_drc_gf180mcu_moscap import _SKIP_NO_NATIVE_TIER
-from test_drc_gf180mcu_native_deck import _install
+from test_drc_gf180mcu_native_deck import _install, _stub_family_install
 from test_drc_klayout_engine import (
     _EDGE_PAIR_RDB,
     _EMPTY_RDB,
@@ -36,7 +36,7 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 def test_family_stack_controls_macro_and_provenance(
     tmp_path, monkeypatch, capsys, variant, overrides, explicit_file, expect_prelude
 ):
-    root = _install(tmp_path, variant, ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch, variant)
     deck = Path(root, variant, "libs.tech/klayout/tech/drc/gf180mcu.drc")
     layout = _write_gds(tmp_path / "chip.gds")
     cmds = []
@@ -80,6 +80,9 @@ def test_unslotted_metal1_trips_foundry_rule(tmp_path, capsys):
     report = json.loads(capture.out)
     assert report["status"] == "violations"
     assert report["rule_counts"]["MSLOT1.1"] >= 1
+    native = report["native_deck"]
+    assert native["preludes"] == report["provenance"]["deck"]["preludes"]
+    assert native["deck_selection"]["started"] == [f"mslot{i}" for i in range(1, 7)]
     categories = report["coverage"]["rule_categories"]
     for level in (1, 2, 3):
         assert f"MSLOT{level}.1" in categories
@@ -90,7 +93,7 @@ def test_unslotted_metal1_trips_foundry_rule(tmp_path, capsys):
 def test_saved_slot_report_replays_and_detects_changed_prelude(
     tmp_path, capsys, monkeypatch
 ):
-    root = _install(tmp_path, "gf180mcuA", ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch)
     _stub_klayout_drc_subprocess(monkeypatch)
     layout = _write_gds(tmp_path / "chip.gds")
     args = [
@@ -151,7 +154,7 @@ def test_zero_findings_stay_unknown_after_passing_wide_metal_control(tmp_path, c
 
 def test_rerun_preserves_install_with_symlinked_decks(tmp_path, monkeypatch, capsys):
     variant = "gf180mcu-local"
-    root = _install(tmp_path, variant, ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch, variant)
     deck_dir = Path(root, variant, "libs.tech/klayout/tech/drc")
     shared = deck_dir.rename(tmp_path / "shared-decks")
     deck_dir.symlink_to(shared, target_is_directory=True)
@@ -192,9 +195,17 @@ def test_rerun_preserves_install_with_symlinked_decks(tmp_path, monkeypatch, cap
     )
     assert kwargs["pdk_root"] == root
 
+    # A verified alias to the same family script also retains the recorded macro.
+    for name in ("options.rb", "rule_framework.rb"):
+        (shared / name).touch()
+    alias = tmp_path / "foundry.drc"
+    alias.symlink_to(shared / "gf180mcu.drc")
+    aliased = _drc_gf180_3lm.replay_prelude_kwargs(original, str(alias))
+    assert aliased["native_deck"]["preludes"] == original["native_deck"]["preludes"]
+
 
 def test_extracted_native_report_replays(tmp_path, monkeypatch, capsys):
-    root = _install(tmp_path, "gf180mcuA", ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch)
     layout = _write_gds(tmp_path / "wide.gds", layer=(34, 0), box=(0, 0, 40000, 40000))
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
     args = [
@@ -216,7 +227,9 @@ def test_extracted_native_report_replays(tmp_path, monkeypatch, capsys):
     assert main(args) == 3
     envelope = json.loads(capsys.readouterr().out)
     native = envelope["reports"]["native"]
-    assert native["native_deck"] == envelope["native_deck"]
+    for key, value in envelope["native_deck"].items():
+        assert native["native_deck"][key] == value
+    assert native["native_deck"]["deck_selection"]["requested"] == "mslot"
     saved = tmp_path / "native.json"
     saved.write_text(json.dumps(native))
     assert (
@@ -226,7 +239,7 @@ def test_extracted_native_report_replays(tmp_path, monkeypatch, capsys):
 
 
 def test_rerun_executes_recorded_negative_control(tmp_path, monkeypatch, capsys):
-    root = _install(tmp_path, "gf180mcuA", ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch)
     narrow = _write_gds(tmp_path / "narrow.gds")
     wide = _write_gds(tmp_path / "wide.gds")
     outputs = {"wide.gds": _EDGE_PAIR_RDB, "narrow.gds": _EMPTY_RDB}

@@ -25,6 +25,14 @@ def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
     return str(root)
 
 
+def _stub_family_install(tmp_path, monkeypatch, variant="gf180mcuA"):
+    # This fixture writes a placeholder deck without a foundry Ruby registry.
+    from klayout_tools import drc_klayout_selection
+
+    monkeypatch.setattr(drc_klayout_selection, "_registry", lambda *args: None)
+    return _install(tmp_path, variant, ("gf180mcu.drc",))
+
+
 def _installed_gf180_script(tmp_path):
     root = _install(tmp_path, "gf180mcuA", ("gf180mcu.drc",))
     return str(Path(root) / "gf180mcuA/libs.tech/klayout/tech/drc/gf180mcu.drc")
@@ -126,7 +134,7 @@ def test_malformed_deck_var_raises_drc_error(tmp_path, entry):
 def test_cli_klayout_engine_uses_main_script_and_reports_it(
     tmp_path, monkeypatch, capsys, real_build_identity_git
 ):
-    root = _install(tmp_path, "gf180mcuD", ("gf180mcu.drc",))
+    root = _stub_family_install(tmp_path, monkeypatch, "gf180mcuD")
     commands = []
     _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=commands)
     gds = _write_gds(tmp_path / "a.gds")
@@ -280,6 +288,10 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path, capsys):
         alias_report = json.loads(capsys.readouterr().out)
         assert alias_report["status"] == "clean_partial"
         assert alias_report["rule_selection"] == wide["rule_selection"]
+        assert (
+            alias_report["provenance"]["deck"]["tree"]["content_hash"]
+            == wide["provenance"]["deck"]["tree"]["content_hash"]
+        )
         alias_reports.append(alias_report)
     from klayout_tools.coverage import build_check_coverage
 

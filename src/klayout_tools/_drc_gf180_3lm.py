@@ -6,13 +6,15 @@ from pathlib import Path
 
 from ._digest import sha256_file, sha256_file_required
 from ._report_verify import get_path, hash_check
+from .pdk_native_drc import gf180_main_path
 
 PRELUDE = Path(__file__).with_name("decks") / "gf180mcu_3lm_prelude.rb"
 
 
 def configure_prelude(native: dict, deck_vars: dict[str, str]) -> None:
     """Select the macro only for an auto-resolved gf180mcu family script."""
-    if Path(native["deck_file"]).name != "gf180mcu.drc":
+    deck = native["deck_file"]
+    if Path(deck).name != "gf180mcu.drc" and gf180_main_path(deck) is None:
         return
     # options.rb accepts both variant spellings. An explicit stack wins.
     level = deck_vars.get("metal_level")
