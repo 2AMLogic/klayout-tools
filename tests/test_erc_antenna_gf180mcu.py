@@ -113,6 +113,69 @@ def test_cli_accepts_pdk_gf180mcu(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["pdk"] == "gf180mcu"
 
 
+@pytest.mark.parametrize(("pdk", "limit"), [("gf180mcu", 400), ("ihp-sg13g2", 200)])
+def test_pdk_limit_uses_stackup_spelling(tmp_path, capsys, pdk, limit):
+    gds, spec = tmp_path / "case.gds", tmp_path / "case.json"
+    _fixture(gds, metal1_um2=500)
+    _spec(spec, metal_name="metal1")
+    report = run_erc(str(gds), str(spec), pdk=pdk)
+    layer = next(
+        level for level in report["gates"][0]["levels"] if level["layer"] == "metal1"
+    )
+    assert layer["antenna_ratio_max"] == limit
+    assert layer["verdict"] == "violate"
+    assert "warning:" not in capsys.readouterr().err
+
+
+def test_spec_limit_overrides_casefolded_pdk_limit(tmp_path, capsys):
+    gds, spec = tmp_path / "case.gds", tmp_path / "case.json"
+    _fixture(gds, metal1_um2=500)
+    _spec(spec, metal_name="metal1")
+    raw = json.loads(spec.read_text())
+    raw["antenna_limits"] = [
+        {"layer": "metal1", "max_ratio": 1000, "source": "fixture"}
+    ]
+    spec.write_text(json.dumps(raw))
+    report = run_erc(str(gds), str(spec), pdk="gf180mcu")
+    layer = next(
+        level for level in report["gates"][0]["levels"] if level["layer"] == "metal1"
+    )
+    assert (layer["antenna_ratio_max"], layer["verdict"]) == (1000, "pass")
+    assert layer["antenna_ratio_source"] == "spec antenna_limits[0]: fixture"
+    assert "warning:" not in capsys.readouterr().err
+
+
+def test_no_matching_pdk_layers_warns_once_on_stderr(tmp_path, capsys):
+    gds, spec = tmp_path / "case.gds", tmp_path / "case.json"
+    _fixture(gds, metal1_um2=500)
+    _spec(spec, metal_name="LocalMetal")
+    main(["erc", str(gds), str(spec), "--pdk", "gf180mcu", "--format", "json"])
+    streams = capsys.readouterr()
+    assert json.loads(streams.out)["status"] == "not_checked"
+    warnings = [
+        line for line in streams.err.splitlines() if "klt erc: warning:" in line
+    ]
+    assert len(warnings) == 1
+    assert all(
+        name in warnings[0] for name in ("LocalMetal", "Metal1", "MetalTop", "gf180mcu")
+    )
+
+    for options in ([], ["--findings-only"]):
+        main(["erc", str(gds), str(spec), *options, "--format", "json"])
+        assert "klt erc: warning:" not in capsys.readouterr().err
+
+
+def test_pdk_rule_available_for_both_spellings_in_one_stackup(capsys):
+    from klayout_tools.erc_antenna_names import match_antenna_layers
+
+    rules = {"Metal1": (400.0, "canonical")}
+    result = match_antenna_layers(rules, ["ungraded", "Metal1", "metal1"], "gf180mcu")
+    assert result["Metal1"] == result["metal1"] == rules["Metal1"]
+    assert "ungraded" not in result
+    assert match_antenna_layers(rules, [], "gf180mcu") == rules
+    assert not capsys.readouterr().err
+
+
 def _diffusion_fixture(path, mode):
     layout = kdb.Layout()
     layout.dbu = DBU

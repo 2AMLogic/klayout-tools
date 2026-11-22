@@ -3108,6 +3108,11 @@ The [common v1 coverage contract](../coverage-contract.md) is additive to
 this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
 
+With `--pdk`, ERC matches non-gate stackup names to the antenna rule table
+case-insensitively. Reports keep the spelling from the spec, and a spec's
+layer-specific limit takes precedence. If none of the names match, ERC prints
+one warning to stderr listing the stackup names and the PDK table's keys.
+
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
 actually compared against a limit. Levels with no limit (no `--pdk` and no spec `antenna_limits` entry, or a
 `--pdk` table lacking the role) are skipped

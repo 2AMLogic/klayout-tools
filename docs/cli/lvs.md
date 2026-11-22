@@ -625,6 +625,29 @@ hierarchical compare still does not match (sub-cell circuits are not paired
 with differently-named reference `.SUBCKT`s), so the flattened recipe is the
 supported path.
 
+##### Diagnosing missing layout port names
+
+When `counts.pins.layout` is smaller than expected, inspect `warnings` and
+`ignored_layers`. Inline extraction uses the effective deck, including any
+`layout.label_layers` overrides. If the selected top cell has text but none
+on a pin-label layer, `warnings` lists the layer/datatype pairs where text
+was actually drawn. For example, a SKY130 layout whose li1 labels are on
+67/10 can select that purpose with `"label_layers": {"metal0": [67, 10]}`.
+Text inside an instance does not establish that the top cell has port text.
+
+`ignored_layers` uses the same `{layer, datatype, shapes}` rows and
+stream-wide shape counts as `klt extract`. With a pre-extracted
+`layout.netlist`, both extraction diagnostic arrays are empty.
+
+`pin_set_difference` compares the named ports of the selected top circuits
+in both input forms. It folds case and applies the same gate-level reference
+port aliases used in comparison. `layout_only_pins` and
+`reference_only_pins` each show up to 20 names. Their `_count` fields give
+the full totals and their `_truncated` flags indicate an incomplete sample.
+A layout pin named for the extraction deck’s synthesized substrate appears
+under `deck_synthesized_layout_pins`. These fields describe name coverage
+independently of the topology verdict.
+
 ##### Routed multi-cell blocks (issue #4610)
 
 Measured on `tests/test_asap7_routed_block.py`: two abutted `INVx1` cells
