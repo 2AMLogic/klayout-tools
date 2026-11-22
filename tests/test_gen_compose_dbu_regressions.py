@@ -193,3 +193,86 @@ def test_compose_coarsening_refuses_off_grid_geometry_behind_magnified_instance(
     assert not output.exists(), (
         "a refused composition must not leave an output stream behind"
     )
+
+
+def _compose_fine_macro(tmp_path, pdk_root, shapes):
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.0005
+    macro = layout.create_cell("macro_top")
+    layer = layout.layer(34, 0)
+    for shape in shapes:
+        macro.shapes(layer).insert(shape)
+    source = tmp_path / "macro.gds"
+    layout.write(str(source))
+    ring = _gen_block_variant(tmp_path, pdk_root, "gf180mcuD", "guard_ring", "ring0")
+    return compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "ring", "generator_report": ring},
+                {
+                    "id": "macro",
+                    "cell": {"gds_path": str(source), "cell_name": "macro_top"},
+                },
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["ring", "macro"],
+                "spacing_um": 1,
+            },
+            "options": {"cell_name": "composed", "output": str(tmp_path / "out.gds")},
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("x", "width", "start", "end", "detail"),
+    [
+        (1001, 1002, 0, 0, r"path point.*\(1001, 0\)"),
+        (1000, 1001, 0, 0, "path width.*1001"),
+        (1000, 1000, 3, 0, "path begin extension.*3"),
+        (1000, 1000, 0, 3, "path end extension.*3"),
+    ],
+)
+def test_coarsening_validates_stored_path_fields(
+    tmp_path, both_pdk_root, x, width, start, end, detail
+):
+    import klayout.db as kdb
+
+    path = kdb.Path([kdb.Point(x, 0), kdb.Point(x, 4000)], width, start, end)
+    with pytest.raises(GenComposeError, match=rf"'macro'.*layer 34/0.*{detail}"):
+        _compose_fine_macro(tmp_path, both_pdk_root, [path])
+    assert not (tmp_path / "out.gds").exists()
+
+
+def test_coarsening_validates_covered_shape_coordinates(tmp_path, both_pdk_root):
+    import klayout.db as kdb
+
+    output = tmp_path / "out.gds"
+    output.write_bytes(b"existing output")
+    with pytest.raises(
+        GenComposeError, match=r"'macro'.*layer 34/0.*\(15, (?:15|45)\)"
+    ):
+        _compose_fine_macro(
+            tmp_path, both_pdk_root, [kdb.Box(0, 0, 200, 200), kdb.Box(15, 15, 45, 45)]
+        )
+    assert output.read_bytes() == b"existing output"
+
+
+def test_exact_path_coarsening_preserves_drawn_region_and_extensions(
+    tmp_path, both_pdk_root
+):
+    import klayout.db as kdb
+
+    path = kdb.Path([kdb.Point(1000, 0), kdb.Point(1000, 4000)], 1000, 12, 20)
+    _compose_fine_macro(tmp_path, both_pdk_root, [path])
+    output = kdb.Layout()
+    output.read(str(tmp_path / "out.gds"))
+    assert output.dbu == pytest.approx(0.001)
+    [shape] = list(output.cell("macro__macro_top").shapes(output.layer(34, 0)).each())
+    assert shape.is_path()
+    rescaled = shape.path.transformed(kdb.ICplxTrans(2))
+    assert (kdb.Region(path.polygon()) ^ kdb.Region(rescaled.polygon())).is_empty()
+    assert (rescaled.bgn_ext, rescaled.end_ext) == (12, 20)

@@ -65,8 +65,8 @@ def _reachable_cells(layout: Any, top_cell: Any) -> list[Any]:
 
 def _shape_vertex_offender(
     layout: Any, cells: list[Any], ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(layer name, x, y)`` polygon vertex in any reachable
+) -> tuple[str, str] | None:
+    """Describe the first polygon vertex in any reachable
     cell's *own* shapes that is off the ratio-``ratio`` grid, via
     ``kdb.Region.grid_check`` -- the primitive the open PDKs' DRC-DSL
     ``ongrid`` checks compile to (:func:`klayout_tools.drc._run_grid_check`)
@@ -86,7 +86,10 @@ def _shape_vertex_offender(
         for layer_index in layout.layer_indexes():
             info = layout.get_info(layer_index)
             layer_name = f"layer {info.layer}/{info.datatype}"
-            region = kdb.Region(cell.shapes(layer_index)).merged()
+            region = kdb.Region(cell.shapes(layer_index))
+            # Layout.transform scales each stored shape, including vertices
+            # inside a neighbor on the same layer.
+            region.merged_semantics = False
             if region.is_empty():
                 continue
             offenders = region.grid_check(ratio, ratio)
@@ -94,41 +97,57 @@ def _shape_vertex_offender(
                 point = next(iter(offenders.each())).first.p1
                 return (
                     f"a shape vertex on {layer_name} in cell '{cell.name}'",
-                    point.x,
-                    point.y,
+                    f"coordinate ({point.x}, {point.y})",
                 )
     return None
 
 
-def _text_offender(
+def _path_off_grid(path: Any, ratio: int) -> str | None:
+    """Check the fields KLayout scales before constructing the path outline."""
+    for point in path.each_point():
+        if point.x % ratio or point.y % ratio:
+            return f"path point ({point.x}, {point.y})"
+    for name, value in (
+        ("width", path.width),
+        ("begin extension", path.bgn_ext),
+        ("end extension", path.end_ext),
+    ):
+        if value % ratio:
+            return f"path {name} {value}"
+    return None
+
+
+def _stored_shape_offender(
     layout: Any, cells: list[Any], ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(description, x, y)`` text position across ``cells`` that
-    is off the ratio-``ratio`` grid, or ``None``. Checked separately from the
-    polygon pass because ``kdb.Region`` is blind to texts (verified against
-    KLayout 0.30.12: a Shapes collection holding only a text builds an empty
-    region)."""
+) -> tuple[str, str] | None:
+    """Inspect path parameters and text anchors, which a polygon view loses."""
     for cell in cells:
         for layer_index in layout.layer_indexes():
             info = layout.get_info(layer_index)
             for shape in cell.shapes(layer_index).each():
-                if not shape.is_text():
-                    continue
-                text = shape.text
-                if text.x % ratio or text.y % ratio:
-                    return (
-                        f"text '{text.string}' in cell '{cell.name}' on "
-                        f"layer {info.layer}/{info.datatype}",
-                        text.x,
-                        text.y,
-                    )
+                if shape.is_path():
+                    detail = _path_off_grid(shape.path, ratio)
+                    if detail:
+                        return (
+                            f"a path on layer {info.layer}/{info.datatype} "
+                            f"in cell '{cell.name}'",
+                            detail,
+                        )
+                elif shape.is_text():
+                    text = shape.text
+                    if text.x % ratio or text.y % ratio:
+                        return (
+                            f"text '{text.string}' in cell '{cell.name}' on "
+                            f"layer {info.layer}/{info.datatype}",
+                            f"coordinate ({text.x}, {text.y})",
+                        )
     return None
 
 
 def _instance_vector_offender(
     layout: Any, cells: list[Any], ratio: int
-) -> tuple[str, int, int] | None:
-    """The first ``(description, x, y)`` instance displacement or regular-
+) -> tuple[str, str] | None:
+    """Describe the first instance displacement or regular-
     array ``a``/``b`` step vector across ``cells`` that is off the
     ratio-``ratio`` grid, or ``None``. The counts (``na``/``nb``) are
     dimensionless; the vectors are coordinates like any other, and
@@ -145,7 +164,10 @@ def _instance_vector_offender(
                 vectors.append(("array b-vector", inst.b))
             for tag, vector in vectors:
                 if vector.x % ratio or vector.y % ratio:
-                    return (f"{inst_name}'s {tag}", vector.x, vector.y)
+                    return (
+                        f"{inst_name}'s {tag}",
+                        f"coordinate ({vector.x}, {vector.y})",
+                    )
     return None
 
 
@@ -155,24 +177,24 @@ def _assert_grid_exact(layout: Any, top_cell: Any, ratio: int) -> None:
     the composed cell is written at -- every coordinate a multiple of
     ``ratio`` database units (``ratio`` = target-dbu / this layout's own
     dbu). The measurement is split across the ``_*_offender`` helpers
-    (polygon vertices, texts, instance vectors -- each needing its own
-    read-out because ``kdb.Region`` sees only polygons); the first offender
+    (path parameters, polygon vertices, texts and instance vectors).
+    The first offender
     names the offending layer (or text/instance vector) and one offending
     coordinate. A pass returns ``None`` and the caller may divide safely."""
     cells = _reachable_cells(layout, top_cell)
-    checks = (
-        _shape_vertex_offender(layout, cells, ratio),
-        _text_offender(layout, cells, ratio),
-        _instance_vector_offender(layout, cells, ratio),
-    )
-    for offender in checks:
+    for check in (
+        _stored_shape_offender,
+        _shape_vertex_offender,
+        _instance_vector_offender,
+    ):
+        offender = check(layout, cells, ratio)
         if offender is None:
             continue
-        what, x, y = offender
+        what, detail = offender
         composed_dbu_um = layout.dbu * ratio
         raise DbuReconcileError(
             f"cannot be composed at the required dbu={composed_dbu_um}: "
-            f"{what} carries coordinate ({x}, {y}) dbu, which is not on the "
+            f"{what} carries {detail} dbu, which is not on the "
             f"ratio-{ratio} ({composed_dbu_um}um) grid -- composing would "
             "silently round it, so the request is refused and no output is "
             "written"
