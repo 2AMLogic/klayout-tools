@@ -199,7 +199,19 @@ class ParasiticsDeck:
     which levels are uncurated rather than leaving them silently zero. The
     high/low metal sheet-resistance corners live on :class:`LayerRC`.
     ``klt power --deck`` defaults a spec via's ``resistance_ohm`` from ``cuts``
-    (issue #3400); ``klt extract`` does not consume them yet.
+    (issue #3400); ``klt extract --resistance-graph`` resolves each landing's
+    per-cut resistance from ``cuts`` and ``poly_contact`` (issue #6917).
+
+    ``poly_contact`` (issue #6917) curates the per-cut resistance of the poly
+    contact -- the cut joining ``poly`` to ``metals[0]`` (sky130's licon,
+    gf180mcu's Contact) -- as one :class:`CutRC`. A separate field, not a
+    ``cuts`` row: ``cuts`` is keyed by ``lower_metal_index`` between two
+    *metals* of the stack, and poly is not one, so its ``lower_metal_index``
+    is unused here. ``None`` (the default, and every deck that has not
+    curated one) keeps a poly landing on the ``via_resistance_unknown``
+    diagnostic rather than an assumed value. The diffusion contacts stay
+    uncurated everywhere: diffusion is a terminal, not a landing, in the
+    shipped decks.
     """
 
     diffusion: LayerRC | None = None
@@ -209,6 +221,7 @@ class ParasiticsDeck:
     metal_sidewalls: tuple[float | None, ...] = ()
     metal_sidewall_lookback_um: tuple[float | None, ...] = ()
     cuts: tuple[CutRC, ...] = ()
+    poly_contact: CutRC | None = None
 
 
 def describe_cut_resistance_gaps(
