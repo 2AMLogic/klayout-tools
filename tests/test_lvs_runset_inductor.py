@@ -88,10 +88,8 @@ def deck() -> str:
 def test_asdrawn_matches(deck):
     report = run_lvs(_request(deck, "ind2_asdrawn.gds", "ind2.cdl"))
     assert report["status"] == "match"
-    assert report["device_census"] == {
-        "layout": {"inductor": 1},
-        "reference": {"INDUCTOR": 1},
-    }
+    assert report["device_census"]["layout"] == {"inductor": 1}
+    assert report["device_census"]["reference"] == {"INDUCTOR": 1}
     assert not [
         m
         for m in report["mismatches"]

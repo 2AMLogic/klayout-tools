@@ -12,11 +12,10 @@ from unittest.mock import Mock
 import pytest
 
 from klayout_tools import signoff_runset
-from klayout_tools.signoff import build_tier_report
+from klayout_tools.signoff import build_tier_report, describe_grader
 from test_signoff import (
     LVS_MATCH_ENVELOPE,
     LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
-    LVS_MISMATCH_ENVELOPE,
     _item_11,
     _manifest,
     _power_delivery_evidence,
@@ -48,7 +47,12 @@ def _runset_envelope(base: dict, deck, **overrides) -> dict:
             "engine": "klayout-runset",
             "deck_file": str(deck),
             "coverage": {"declared_not_recognized": []},
-            "device_census": {"layout": {"NMOS": 2}, "reference": {"NMOS": 2}},
+            "device_census": {
+                "layout": {"NMOS": 2},
+                "reference": {"NMOS": 2},
+                # Issue #6902: the engine's reference-source evidence.
+                "reference_source": {"NMOS": 2},
+            },
         }
     )
     envelope["provenance"]["runset"] = {"content_hash": _sha(deck)}
@@ -171,31 +175,121 @@ def test_runset_file_drift_with_pinned_recorded_hash_is_a_mismatch(tmp_path, run
     assert item["reason"] == "runset_hash_mismatch"
 
 
-def test_one_unrecognised_device_class_fails(tmp_path, runset):
+def test_zero_instance_declared_classes_do_not_fail_a_matching_report(tmp_path, runset):
+    """Issue #6902 corrects the #2870 proxy: ``declared_not_recognized``
+    names classes the runset declares with zero instances *anywhere* (the
+    layout, the converted reference and the reference source all lack them),
+    which no real block can avoid on a PDK runset that declares the whole
+    device list. Disclosure, not a failure."""
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
         runset,
         deck_file=str(tmp_path / "missing.lvs"),
-        coverage={"declared_not_recognized": ["RES"]},
+        coverage={"declared_not_recognized": ["RES", "sky130_fd_pr__cap_var_hvt"]},
     )
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "met", item
+
+
+def test_report_without_reference_source_evidence_fails_closed(tmp_path, runset):
+    """The both-sides-drop guard needs positive evidence a pre-#6902 report
+    does not carry; without it the report cannot prove the runset's reader
+    kept every reference device (issue #6902's fail-closed decision)."""
+    envelope = _runset_envelope(LVS_MATCH_ENVELOPE, runset)
+    del envelope["device_census"]["reference_source"]
 
     item = _item_4(tmp_path, envelope)
 
     assert item["status"] == "unmet"
     assert item["reason"] == "runset_unrecognised_device"
+    assert any(
+        "re-run 'klt lvs'" in gap for gap in item["detail"]["runset_device_gaps"]
+    ), item["detail"]
+
+
+@pytest.mark.parametrize(
+    ("side", "counts"),
+    [
+        ("layout", []),
+        ("reference", {"NMOS": 2, "CAP": True}),
+        ("reference_source", {"NMOS": 2, "CAP": "3"}),
+        ("layout", {"NMOS": 2, "CAP": -1}),
+    ],
+)
+def test_invalid_census_cannot_prove_device_recognition(tmp_path, runset, side, counts):
+    envelope = _runset_envelope(LVS_MATCH_ENVELOPE, runset)
+    envelope["device_census"][side] = counts
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "runset_unrecognised_device"
+    assert any(
+        f"device_census.{side}" in gap for gap in item["detail"]["runset_device_gaps"]
+    )
 
 
 def test_census_disagreement_fails_even_with_match_status(tmp_path, runset):
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
         runset,
-        device_census={"layout": {"NMOS": 3}, "reference": {"NMOS": 2}},
+        device_census={
+            "layout": {"NMOS": 3},
+            "reference": {"NMOS": 2},
+            "reference_source": {"NMOS": 2},
+        },
     )
 
     item = _item_4(tmp_path, envelope)
 
     assert item["status"] == "unmet"
     assert item["reason"] == "runset_unrecognised_device"
+
+
+@pytest.mark.parametrize("converted", [2, 3])
+def test_reference_class_counted_only_in_the_source_fails(tmp_path, runset, converted):
+    """Issue #6902's both-sides-drop case: the reference source names a
+    device the runset's reader dropped, so it survives in neither census and
+    layout and converted reference agree. Three converted NMOS also make the
+    total equal, disguising the missing resistor."""
+    envelope = _runset_envelope(
+        LVS_MATCH_ENVELOPE,
+        runset,
+        device_census={
+            "layout": {"NMOS": converted},
+            "reference": {"NMOS": converted},
+            "reference_source": {"NMOS": 2, "RES_XHIGH_PO": 1},
+        },
+    )
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "runset_unrecognised_device"
+    assert any(
+        "RES_XHIGH_PO" in gap and "dropped on both sides" in gap
+        for gap in item["detail"]["runset_device_gaps"]
+    ), item["detail"]
+
+
+def test_census_compare_is_case_insensitive(tmp_path, runset):
+    """A sky130 ``convert_subckts`` report reads its layout census lower and
+    its reference census upper; equal counts must agree (issue #6902)."""
+    envelope = _runset_envelope(
+        LVS_MATCH_ENVELOPE,
+        runset,
+        device_census={
+            "layout": {"sky130_fd_pr__pfet_g5v0d10v5": 36},
+            "reference": {"SKY130_FD_PR__PFET_G5V0D10V5": 36},
+            "reference_source": {"SKY130_FD_PR__PFET_G5V0D10V5": 36},
+        },
+    )
+
+    item = _item_4(tmp_path, envelope)
+
+    assert item["status"] == "met", item
 
 
 def test_item_11_accepts_runset_report_with_populated_net_correspondence(
@@ -251,7 +345,11 @@ def _npn_envelope(deck_file) -> dict:
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
         stand_in,
-        device_census={"layout": {"npn13G2": 1}, "reference": {"npn13G2": 1}},
+        device_census={
+            "layout": {"npn13G2": 1},
+            "reference": {"npn13G2": 1},
+            "reference_source": {"npn13G2": 1},
+        },
     )
     envelope["deck_file"] = str(deck_file)
     envelope["provenance"]["runset"] = {"content_hash": SG13G2_RUNSET_HASH}
@@ -304,117 +402,90 @@ def test_shipped_gf180mcu_pin_rejects_a_modified_runset_file(tmp_path):
     assert item["reason"] == "runset_hash_mismatch"
 
 
-# --- Issue #6903: the mirrored-inductor2 terminal-order named reason ----
+SKY130_RUNSET_HASH = (
+    "sha256:5b4ede4bdb4744b60e42c9b29baa93f40bb24430fb8f3a48a276a712a492ac38"
+)
 
 
-def _mirrored_inductor_envelope(base: dict, deck) -> dict:
-    """A failing ``klayout-runset`` report whose only extra finding is the
-    mirrored-``inductor2`` terminal-order known limitation."""
-    envelope = _runset_envelope(base, deck)
-    limit = {
-        "category": "topology.known_limitation",
-        "severity": "warning",
-        "description": "inductor '1' extracts with its LB terminal first",
-        "side": "layout",
-        "details": {
-            "limitation": signoff_runset.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER,
-            "layout_terminal_1_net": "LB",
-            "layout_terminal_2_net": "LA",
-            "reference_terminal_1_net": "LA",
+def _sky130_envelope(deck_file) -> dict:
+    """The 2AMLogic/sky130-usb2-phy ``differential_driver`` report shape
+    (2026-11-17): a genuine match whose census sides differ only in case and
+    whose ``declared_not_recognized`` is 100 zero-instance classes."""
+    stand_in = deck_file.parent / "stand-in.lvs"
+    stand_in.write_text("# stand-in\n")
+    envelope = _runset_envelope(
+        LVS_MATCH_ENVELOPE,
+        stand_in,
+        coverage={
+            "declared_not_recognized": [
+                "sky130_fd_pr__cap_var_hvt",
+                "sky130_fd_bs_flash__special_sonosfet_star",
+            ]
         },
-    }
-    port = {
-        "category": "port.name_mismatch",
-        "severity": "error",
-        "description": "Port mismatch 'LA' vs. 'LB'",
-        "side": "both",
-        "net": {"layout": "LA", "reference": "LB"},
-        "device": None,
-        "property": None,
-    }
-    envelope["status"] = "mismatch"
-    envelope["mismatches"] = [port, limit]
-    envelope["mismatch_count"] = 2
-    envelope["category_counts"] = {
-        "port.name_mismatch": 1,
-        "topology.known_limitation": 1,
+        device_census={
+            "layout": {
+                "sky130_fd_pr__pfet_g5v0d10v5": 36,
+                "sky130_fd_pr__nfet_g5v0d10v5": 37,
+                "sky130_fd_pr__res_generic_po": 2,
+                "sky130_fd_pr__res_xhigh_po_1p41": 1,
+                "sky130_fd_pr__model__cap_mim": 4,
+            },
+            "reference": {
+                "SKY130_FD_PR__PFET_G5V0D10V5": 36,
+                "SKY130_FD_PR__NFET_G5V0D10V5": 37,
+                "SKY130_FD_PR__RES_GENERIC_PO": 2,
+                "SKY130_FD_PR__RES_XHIGH_PO_1P41": 1,
+                "SKY130_FD_PR__MODEL__CAP_MIM": 4,
+            },
+            "reference_source": {
+                "SKY130_FD_PR__PFET_G5V0D10V5": 36,
+                "SKY130_FD_PR__NFET_G5V0D10V5": 37,
+                "SKY130_FD_PR__RES_GENERIC_PO": 2,
+                "SKY130_FD_PR__RES_XHIGH_PO_1P41": 1,
+                "SKY130_FD_PR__MODEL__CAP_MIM": 4,
+            },
+        },
+    )
+    envelope["deck_file"] = str(deck_file)
+    envelope["provenance"]["runset"] = {"content_hash": SKY130_RUNSET_HASH}
+    envelope["deck_vars"] = {
+        "convert_subckts": "true",
+        "scale": "true",
+        "thr": "2",
     }
     return envelope
 
 
-def test_limit_token_is_pinned_between_engine_and_signoff():
-    from klayout_tools import lvs_runset_ports as ports
+def test_shipped_sky130_pin_grades_a_real_report_shape_met(tmp_path):
+    """AC 1 of issue #6902: the sky130 shape -- status ``match``, census
+    sides differing only in case, 100 zero-instance declared classes, the
+    pinned runset hash -- grades item 4 ``met``. Uses the real shipped pin
+    (no monkeypatch); the runset itself was not run here (needs klayout +
+    the PDK)."""
+    pin = signoff_runset.PINNED_RUNSETS[SKY130_RUNSET_HASH]
+    assert pin["pdk"] == "sky130"
+    assert pin["commit"] == "13d2572144450daba6a9f3508ae4c6e93e852466"
+    assert pin["path"] == "tech/sky130/lvs/sky130.lvs"
 
-    assert (
-        signoff_runset.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER
-        == ports.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER
-    )
+    item = _item_4(tmp_path, _sky130_envelope(tmp_path / "absent.lvs"))
 
-
-def test_mirrored_inductor_limitation_reader(tmp_path):
-    deck = tmp_path / "pdk.lvs"
-    deck.write_text("# runset\n")
-    envelope = _mirrored_inductor_envelope(LVS_MISMATCH_ENVELOPE, deck)
-    found = signoff_runset.mirrored_inductor_limitation(envelope)
-    assert found is not None
-    assert found["details"]["limitation"] == (
-        signoff_runset.LIMIT_MIRRORED_INDUCTOR2_TERMINAL_ORDER
-    )
-    # Without the entry (the negative controls' shape) there is nothing to
-    # name, and a non-runset report never carries it.
-    plain = _runset_envelope(LVS_MISMATCH_ENVELOPE, deck)
-    plain["mismatches"] = LVS_MISMATCH_ENVELOPE["mismatches"]
-    assert signoff_runset.mirrored_inductor_limitation(plain) is None
-    curated = {**LVS_MISMATCH_ENVELOPE, "engine": "klayout"}
-    curated["mismatches"] = envelope["mismatches"]
-    assert signoff_runset.mirrored_inductor_limitation(curated) is None
+    assert item["status"] == "met", item
+    assert item["citation"]["pdk_pin"]["pdk"] == "sky130"
 
 
-def test_item_4_names_the_mirrored_inductor_limit(tmp_path, runset):
-    item = _item_4(tmp_path, _mirrored_inductor_envelope(LVS_MATCH_ENVELOPE, runset))
-    assert item["status"] == "unmet", item
-    assert item["reason"] == "runset_inductor_terminal_order"
-    assert item["citation"] is None
-    assert item["detail"]["cited_evidence"]["check_status"] == "mismatch"
+def test_sky130_pin_digest_is_the_one_committed_reports_record():
+    """The committed 2AMLogic/sky130-usb2-phy reports record this digest for
+    a ciel-installed ``sky130A/libs.tech/klayout/lvs/sky130.lvs``; the pin
+    entry must carry exactly it so those reports need no re-run for the pin
+    (they do need one for the evidence field, which they predate)."""
+    assert SKY130_RUNSET_HASH in signoff_runset.PINNED_RUNSETS
 
 
-def test_item_4_plain_runset_mismatch_stays_check_failed(tmp_path, runset):
-    envelope = _runset_envelope(LVS_MISMATCH_ENVELOPE, runset)
-    envelope["mismatches"] = list(LVS_MISMATCH_ENVELOPE["mismatches"])
-    item = _item_4(tmp_path, envelope)
-    assert item["status"] == "unmet", item
-    assert item["reason"] == "check_failed"
-
-
-def test_item_11_lvs_half_names_the_limit(tmp_path):
-    from klayout_tools.signoff_power_delivery import _failed_lvs_verdict
-
-    deck = tmp_path / "pdk.lvs"
-    deck.write_text("# runset\n")
-    envelope = _mirrored_inductor_envelope(LVS_MATCH_ENVELOPE, deck)
-    # No supply evidence resolved: was a bare check_failed, now the name.
-    reason, detail = _failed_lvs_verdict(envelope, None)
-    assert reason == "runset_inductor_terminal_order"
-    assert detail["inductor_terminal_order"]["layout_terminal_1_net"] == "LB"
-    # ERC half complete: was lvs_did_not_pass, now the name, and the
-    # power_delivery block the reason carried is kept.
-    reason, detail = _failed_lvs_verdict(envelope, {"supply_nets": ["VDD"], "ties": []})
-    assert reason == "runset_inductor_terminal_order"
-    assert detail["power_delivery"]["supply_nets"] == ["VDD"]
-    # Without the limit entry both branches render exactly as before.
-    plain = _runset_envelope(LVS_MISMATCH_ENVELOPE, deck)
-    assert _failed_lvs_verdict(plain, None)[0] == "check_failed"
-    assert _failed_lvs_verdict(plain, {"supply_nets": ["VDD"]})[0] == (
-        "lvs_did_not_pass"
-    )
-
-
-def test_item_11_renders_the_named_reason_end_to_end(tmp_path, runset):
-    envelope = _mirrored_inductor_envelope(
-        LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE, runset
-    )
-    parts = _power_delivery_evidence(tmp_path, lvs_envelope=envelope)
-    result = build_tier_report(_manifest(evidence={"11": parts}))
-    item = _item_11(result)
-    assert item["status"] == "unmet", item
-    assert item["reason"] == "runset_inductor_terminal_order"
+def test_describe_grader_lists_pinned_runsets():
+    result = describe_grader()
+    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
+        "ihp-sg13g2",
+        "ihp-sg13cmos5l",
+        "gf180mcu",
+        "sky130",
+    }
