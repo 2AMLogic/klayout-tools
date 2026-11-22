@@ -883,7 +883,9 @@ real open_pdks install never pays for the extra probe.
   `["[#RATIO] float: 16"]`. The strings preserve KLayout's tags and
   formatting. A finding with only geometry omits the field. With
   `--engine both`, look under `reports.native.violations[]`.
-  `--check --rerun` detects changed values. The deck supplies these strings
+  `--check --rerun` compares this ordered list. KLayout 0.30.12 can emit
+  multiple `put()` properties in different orders on repeated runs, so a
+  reorder alone can appear as drift. The deck supplies these strings
   as evidence only. They have no effect on coverage, `coverage_unknown`,
   or the meaning of `--expect-rule-categories`.
 - **Deck stdout as additive evidence (issue #6613).** Every `--engine
