@@ -218,6 +218,13 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   install the extraction read (`variant`, `root` as `{path, scope}`,
   `version`; `null` without `--pdk`), so a run with two installs of one
   variant shows which was used.
+- `--schematic-top NAME` selects the subcircuit called by the testbench when
+  its name differs from the layout cell. For example,
+  `--top LAYOUT_RES --schematic-top RES` keeps `RES` callable on the schematic
+  leg and retargets its instances to `LAYOUT_RES` in the extracted testbench
+  copy. The two interfaces still need matching positional pins. This works
+  with schematic flattening enabled or disabled. An unresolved binding
+  reports both names before either leg runs.
 - `--flatten-schematic` — flatten the schematic DUT to PDK leaf devices
   before the schematic-side run (issue #2889) — the `klt pex` counterpart of
   `klt lvs`'s `options.flatten_reference`. Off by default — byte-identical

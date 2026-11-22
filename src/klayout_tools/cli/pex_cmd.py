@@ -272,6 +272,7 @@ def run(args: argparse.Namespace) -> int:
                 reference_netlist=args.reference_netlist,
                 measure_timeout_s=args.measure_timeout_s,
                 flatten_schematic=args.flatten_schematic,
+                schematic_top=args.schematic_top,
                 device_only_leg=args.device_only_leg,
                 extract_only=args.extract_only,
                 submit_only=args.submit_only,
@@ -370,6 +371,7 @@ def run(args: argparse.Namespace) -> int:
             # when the flag was never given, unchanged from every call site
             # that predates it.
             flatten_schematic=args.flatten_schematic,
+            schematic_top=args.schematic_top,
             # `--device-only-leg` (issue #3298): a parasitic-free third leg
             # splitting `delta[]` into representation and parasitic parts.
             # `False` when the flag was never given.

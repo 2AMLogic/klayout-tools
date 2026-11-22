@@ -652,6 +652,7 @@
         "klayout_tools.cli.pex_cmd",
         "klayout_tools.pex",
         "klayout_tools.pex_async",
+        "klayout_tools.pex_binding",
         "klayout_tools.pex_merged_leg",
         "klayout_tools.pex_net_correspondence",
         "klayout_tools.pex_netlist_text",
