@@ -160,3 +160,75 @@ def test_klayout_engine_allow_deck_errors_records_abort_and_decks(
     errs = report["engine_deck_errors"]
     assert errs["decks_executed"] == ["antenna", "mslot1"]
     assert errs["abort"]["location"] == "/pdk/tech/drc/gf180mcu.drc:191"
+
+
+@pytest.mark.parametrize("tolerate", [False, True])
+def test_selected_abort_reports_started_failed_not_reached_and_omitted(
+    tmp_path, monkeypatch, tolerate
+):
+    from klayout_tools import drc_klayout_selection
+
+    monkeypatch.setattr(
+        drc_klayout_selection,
+        "_registry",
+        lambda *args: (
+            ["early", "mslot1", "later", "excluded"],
+            ["early", "mslot1", "later"],
+        ),
+    )
+    prefix = "2026-11-20 09:15:00 +0000: Memory Usage (1000K) : "
+    out = prefix + "Starting DRC: executing 3 deck(s).\n"
+    out += prefix + "Executing deck early from /deck/early.rb\n"
+    out += "an intermediate rule\n" * 550
+    out += prefix + "Executing deck mslot1 from /deck/mslot.rb\n"
+    err = "ERROR: undefined local variable or method 'metal4_drawn'\n"
+    _stub_klayout_drc_subprocess(monkeypatch, stdout=out, stderr=err, returncode=1)
+    gds = _write_gds(tmp_path / "test.gds")
+    script = _write_deck_file(tmp_path / "gf180mcu.drc")
+    kwargs = {"deck_vars": {"decks": "all,-excluded"}, "allow_deck_errors": tolerate}
+    if tolerate:
+        report = run_drc_klayout_engine(gds, script, **kwargs)
+        assert report["status"] != "clean" and report["deck_output"]["truncated"]
+        details = report["engine_deck_errors"]
+        assert details["deck_selection"] == report["native_deck"]["deck_selection"]
+    else:
+        with pytest.raises(DrcError) as exc:
+            run_drc_klayout_engine(gds, script, **kwargs)
+        details = exc.value.details
+    assert details["decks_executed"] == ["early", "mslot1"]
+    assert (
+        details["abort"]["deck"] == "mslot1"
+        and "all,-mslot" in details["abort"]["hint"]
+    )
+    assert details["deck_selection"] == {
+        "requested": "all,-excluded",
+        "narrowed": True,
+        "selected": ["early", "mslot1", "later"],
+        "started": ["early", "mslot1"],
+        "omitted": ["excluded"],
+        "not_reached": ["later"],
+    }
+
+
+def test_native_unknown_tag_keeps_the_pdk_error_alongside_startup_output(
+    tmp_path, monkeypatch
+):
+    from klayout_tools import drc_klayout_selection
+
+    monkeypatch.setattr(drc_klayout_selection, "_registry", lambda *args: None)
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        write_report=False,
+        stdout="Starting GF180 DRC\n",
+        stderr="ERROR: Unknown tag: missing_tag\n",
+        returncode=1,
+    )
+    with pytest.raises(DrcError, match="Unknown tag: missing_tag") as exc:
+        run_drc_klayout_engine(
+            _write_gds(tmp_path / "test.gds"),
+            _write_deck_file(tmp_path / "gf180mcu.drc"),
+            deck_vars={"decks": "missing_tag"},
+        )
+    selection = exc.value.details["deck_selection"]
+    assert selection["requested"] == "missing_tag" and selection["omitted"] is None
+    assert selection["started"] == [] and selection["not_reached"] is None

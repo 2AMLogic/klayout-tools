@@ -17,7 +17,9 @@ from .drc import DrcError
 CODE_KLAYOUT_DECK_ABORTED = "klayout_deck_aborted"
 
 _EXECUTING_DECK_RE = re.compile(
-    r"^Executing deck\s+(?P<name>\S+)(?:\s+from\s+(?P<path>\S+))?\s*$", re.MULTILINE
+    r"^(?:[^\n]*?Memory Usage \([^\n()]*\)\s*:\s*)?Executing deck[ \t]+(?::[ \t]*)?"
+    r"(?P<name>\S+)(?:[ \t]+from[ \t]+(?P<path>[^\n]+?))?[ \t]*$",
+    re.MULTILINE,
 )
 _RUBY_UNDEFINED_SYMBOL_RE = re.compile(
     r"undefined (?:local variable or )?method [`'‘\"]?(?P<symbol>[^`'’\"\s]+)"
@@ -86,6 +88,37 @@ def _klayout_deck_error_detail(
     return "\n".join(head + kept)
 
 
+#: KLayout's own error prefix for a deck-script failure, as emitted by
+#: ``klayout -b -r`` (verified against a real 0.28.16 run for issue #1941:
+#: ``ERROR: In <deck>: undefined local variable or method '...'`` followed by
+#: ``ERROR: NameError: ... in Executable::execute``). Anchored at column 0:
+#: the backtrace lines KLayout prints after each ``ERROR:`` line are indented,
+#: and a deck's own rule names/progress output (``Executing rule
+#: ERROR_CHECK.1``) never starts a line with the bare prefix -- so the anchor
+#: is what keeps this from misreading ordinary deck output as a failure.
+_KLAYOUT_ERROR_LINE_RE = re.compile(r"^ERROR\b.*$", re.MULTILINE)
+
+
+def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
+    """Every ``ERROR``-prefixed line in the given ``klayout`` output streams
+    (issue #1941), in order, stdout before stderr.
+
+    ``klayout -b -r`` writes its deck-script diagnostics to one or the other
+    depending on build/platform, so both are scanned. An empty list means
+    KLayout itself reported no error -- not that the deck necessarily ran to
+    completion (see :func:`run_drc_klayout_engine`, which pairs this with the
+    exit status).
+    """
+    lines: list[str] = []
+    for stream in streams:
+        if not stream:
+            continue
+        lines.extend(
+            match.group(0).rstrip() for match in _KLAYOUT_ERROR_LINE_RE.finditer(stream)
+        )
+    return lines
+
+
 class KlayoutDeckAborted(DrcError):
     """A native deck aborted part-way. ``vars(exc)`` is exactly the
     ``emit_error`` keyword set (``code``, ``details``), so ``klt drc`` can
@@ -94,6 +127,10 @@ class KlayoutDeckAborted(DrcError):
     def __init__(self, message: str, details: dict[str, Any] | None) -> None:
         super().__init__(message, code=CODE_KLAYOUT_DECK_ABORTED)
         self.details = details
+
+
+def deck_starts(stream: str) -> list[tuple[str, str | None]]:
+    return [(m["name"], m["path"]) for m in _EXECUTING_DECK_RE.finditer(stream)]
 
 
 def deck_abort_info(
@@ -107,17 +144,18 @@ def deck_abort_info(
     the truncated error detail) and never raises.
     """
     combined = "\n".join(stream for stream in (stdout, stderr) if stream)
-    decks = [
-        (m.group("name"), m.group("path"))
-        for m in _EXECUTING_DECK_RE.finditer(combined)
-    ]
+    decks = deck_starts(combined)
     info: dict[str, Any] = {}
     if decks:
         info["decks_executed"] = [name for name, _ in decks]
     if not error_lines and not decks:
         return info
     abort: dict[str, Any] = {}
-    if decks and error_lines:
+    if (
+        decks
+        and error_lines
+        and "Starting DRC in isolated parallel mode" not in combined
+    ):
         name, path = decks[-1]
         abort["deck"] = name
         if path:
@@ -134,6 +172,11 @@ def deck_abort_info(
         location = _RUBY_FILE_LINE_RE.search(tail)
         if location:
             abort["location"] = location.group("loc")
+    if abort.get("deck") == "mslot1" and abort.get("symbol") == "metal4_drawn":
+        abort["hint"] = (
+            "For the GF180 3LM stack, see docs/cli/drc.md#gf180-3lm-deck-selection "
+            "for the metaltop_30k and all,-mslot selectors and their coverage."
+        )
     if abort:
         info["abort"] = abort
     return info

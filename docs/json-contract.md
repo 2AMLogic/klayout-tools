@@ -1782,6 +1782,30 @@ convention).
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
 
+### GF180 native DRC deck selection
+
+The native GF180 verdict exposes `native_deck.deck_selection`. Fatal deck
+errors expose `error.deck_selection`. A tolerated abort carries the same
+object in `engine_deck_errors.deck_selection`.
+
+| Field | Meaning |
+|---|---|
+| `requested` | The supplied `decks` string, or `null` for the PDK default. |
+| `selected` | Registry IDs resolved by the installed PDK for this selector, in runner order. |
+| `omitted` | Sorted default registry IDs excluded by selection. Explicit `all` has an empty omission array. |
+| `narrowed` | Whether the resolved selector omits any default IDs. |
+| `started` | Registry IDs observed starting in the full run log, in observation order. |
+| `not_reached` | Selected IDs outside the observed starts when the start log accounts for the full selection or a sequential abort prefix. |
+
+If the registry cannot be resolved, `selected`, `omitted` and `narrowed` are
+`null`. Missing or incomplete start evidence leaves `not_reached` null.
+The report records unknown scope in `coverage.unknown`. Known exclusions
+appear in `coverage.skipped` as namespaced `native_deck` work IDs with
+reason `not_selected`. Unreached selected IDs use reason `not_reached`.
+Narrowed reports also expose a top-level `rule_selection` for signoff.
+These arrays name native registry IDs. `coverage.rule_categories` names
+RDB categories, which can differ from the deck that emits them.
+
 ## Path fields: envelope vs. plain string (issue #2073)
 
 `klt` reports a path — an output artifact it just wrote (a netlist, a DEF, a
