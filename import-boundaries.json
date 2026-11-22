@@ -1072,6 +1072,7 @@
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
         "klayout_tools._sta_timing_derate",
+        "klayout_tools._sta_wire_load",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
