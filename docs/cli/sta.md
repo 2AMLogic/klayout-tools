@@ -154,7 +154,8 @@ The optional `sdc_check` field (see "SDC drift check") compares a committed
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
 | `constraints.input_delays` / `.output_delays` | object \| omitted | Additive fields (issue #2740). Per-port maps `{"<port>": {"min_ns": n, "max_ns": n}}` → `set_input_delay -min/-max` / `set_output_delay -min/-max` on exactly that port. Each bound is independently optional (at least one per entry); a missing bound is left **unconstrained**, never copied from the other. Values are finite numbers and may be negative; `min_ns <= max_ns` when both are given. Keys are literal names of one scalar port or one bus bit (`data[3]`) — no wildcards, no whole buses, no Tcl. The scalar `input_delay_ns`/`output_delay_ns` above become the **default for ports absent from the map**. Missing, ambiguous and wrong-direction keys, and the clock port, are request errors. See "Per-port I/O delays and worst-path identity" below. |
 | `constraints.input_transition_ns` / `.input_transitions` | number / object \| omitted | Additive fields (issue #3227). `input_transition_ns` is the default input slew (ns) → `set_input_transition` on every **non-clock** input not named in `input_transitions`; `input_transitions` is a literal `{"<port>": ns}` map (one scalar port or one bus bit, e.g. `data[3]`) whose values **override** the scalar for that port. Every value is a finite, non-boolean number `>= 0` (`0` is valid). Keys follow the per-port delay rules: no wildcards, no whole buses, no Tcl; the clock port, a missing/ambiguous port or an output-only port is a request error. Omitted fields (and an empty map) emit no Tcl — the generated script stays byte-identical. See "Input transitions" below. |
-| `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
+| `constraints.driving_cell` / `.driving_cells` / `.output_load_pf` / `.output_loads` | object / number \| omitted | Additive fields (issue #3742). `driving_cell` is `{"cell": "<lib cell>", "pin": "<out pin>"}` (optional `"input_pin"`) → `set_driving_cell -lib_cell … -pin … [-from_pin …]` on every non-clock input not named in `driving_cells` or `input_transitions`; `driving_cells` is a literal `{"<port>": {…}}` override map. `output_load_pf` (pF, `>= 0`) → `set_load` on every output not named in `output_loads`, a literal `{"<port>": pF}` map. Same literal-port rules as `input_transitions`; a port in both `driving_cells` and `input_transitions`, or `input_transition_ns` together with a data driving-cell field, is a request error. Omitted fields emit no Tcl. See "Driving cell and output load" below. |
+| `constraints.clock_driving_cell` | object or omitted | Optional Liberty driver for the primary clock input. Uses the same `cell`, `pin` and optional `input_pin` fields as `driving_cell`. |
 | `constraints.report_instances` | list of strings \| omitted | Additive field (issue #5754). Literal hierarchical **instance** names (e.g. `ff_a`, `u_macro/u_core`) whose own worst setup and hold paths are reported as `instance_paths` — per instance, the worst path **into** its input pins and **out of** its output pins. Same literal-name rules as `report_ports`: no wildcards, whole buses or Tcl; entries must be unique non-empty strings. Names are verified against the loaded design's instance enumeration in-session before any timing is reported (an unknown name is a request error, `constraints.report_instances rejected: ...`). Omitted or `[]` emits nothing. See "Per-instance path queries" below. |
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.report_path_stages` | boolean \| omitted | Additive field (issue #5783). `true` makes each `worst_setup_path` / `worst_hold_path` record also carry a `stages` block — that one path's own per-stage `{pin, cell, incr_ns, path_ns}` table (launch-to-capture order), so a failing path can be split for retiming from the committed record instead of endpoints-and-a-total. Works in both `def` and `verilog` modes, per corner on a `pdk.corners` response. Omitted or `false` emits no Tcl and leaves the response byte-identical. Any non-boolean value is a request error. See "Per-stage delay breakdown" below. |
@@ -1781,13 +1782,24 @@ set with `set_input_transition`:
 }
 ```
 
+Use `constraints.clock_driving_cell` to model the primary clock input. For
+example, `{"cell": "sky130_fd_sc_hd__buf_2", "pin": "X", "input_pin": "A"}`
+selects that Liberty driver and its input-to-output arc. Each corner applies
+the driver to `clock_port` or the first port in `constraints.clocks`.
+Both ideal and propagated clocks support it. A data driver or a data-input
+transition can be supplied alongside it.
+
+Single- and multi-corner responses echo the validated object once in the
+top-level `clock_driving_cell` field. Omitting the constraint or setting it
+to `null` omits the command and the response field.
+
 - **Override semantics** are the same as `input_transitions`: the scalar-style
   default (`driving_cell`, `output_load_pf`) covers every non-clock input /
   every output not named in the map; a mapped port gets exactly its own entry.
 - **Driving cell vs. input transition.** A driving cell sets the input slew
   itself, so a port may carry one or the other. A port named in both
   `driving_cells` and `input_transitions`, or `input_transition_ns` combined
-  with a driving-cell field, is a request error naming the keys; the default
+  with a data driving-cell field, is a request error naming the keys; the default
   `driving_cell` skips ports named in `input_transitions`.
 - **Validation.** `cell` / `pin` / `input_pin` are literal liberty names
   (`[A-Za-z0-9_$.]+`, never Tcl or a pattern); loads are finite, non-boolean
