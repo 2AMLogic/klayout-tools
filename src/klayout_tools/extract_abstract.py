@@ -1095,8 +1095,7 @@ def _lef_port_access_points(
 
 
 # Only a nonempty base followed entirely by numeric index groups is a bus bit.
-_BUS_BIT_GROUP_RE = re.compile(r"[<(\[{](\d+)[>)\]}]")
-_ALL_BUS_BIT_GROUPS_RE = re.compile(r"^([^<(\[{]+?)(?:[<(\[{]\d+[>)\]}])+$")
+_BUS_BIT_RE = re.compile(r"([^<>()\[\]{}]+)((?:<\d+>|\(\d+\)|\[\d+\]|\{\d+\})+)")
 
 
 def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
@@ -1105,12 +1104,12 @@ def _bus_bit_alias_key(pin_name: str) -> tuple[str, tuple[int, ...]]:
     For example, ``A[01][0]`` and ``A<1><0>`` share a key. A literal name
     such as ``A<B>`` keeps its spelling and has an empty index tuple.
     """
-    match = _ALL_BUS_BIT_GROUPS_RE.match(pin_name)
+    match = _BUS_BIT_RE.fullmatch(pin_name)
     if match is None:
         return (pin_name, ())
     return (
         match.group(1),
-        tuple(int(index) for index in _BUS_BIT_GROUP_RE.findall(pin_name)),
+        tuple(int(index) for index in re.findall(r"\d+", match.group(2))),
     )
 
 

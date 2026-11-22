@@ -11,6 +11,7 @@ conductor joins the deck's substrate global net.
 from pathlib import Path
 
 import klayout.db as kdb
+import pytest
 
 from klayout_tools.extract import run_extract
 from test_extract import _make_abstract_cells_layout, _write_gds
@@ -156,6 +157,8 @@ def _bus_bit_lef(pins: list[tuple[str, str]]) -> str:
     )
 
 
+_SECOND_PAD_RECT = "1.600 0.200 2.000 0.800"
+
 #: The supply pad of :func:`_make_bus_macro_layout`'s three-labelled-pad
 #: variant (x = 3200..3600 nm): a pin wrongly appended from a rectangle here
 #: resolves onto ``VPWR`` -- the emulator's 96 SRAM pins tied to power in
@@ -213,15 +216,21 @@ def _run_bus_macro_extract(tmp_path, tag, layout, lef=None):
     return report, Path(report["netlist_path"]).read_text()
 
 
-def test_lef_bus_bit_alias_of_a_labelled_pin_is_not_appended(tmp_path):
+@pytest.mark.parametrize(
+    ("gds_pin", "lef_pin"),
+    [("DATA<0>", "DATA[0]"), ("D2{01}(2)", "D2[1]<2>")],
+)
+def test_lef_bus_bit_alias_of_a_labelled_pin_is_not_appended(
+    tmp_path, gds_pin, lef_pin
+):
     """A LEF ``PIN DATA[0]`` and an in-cell ``DATA<0>`` label are one bus bit
     in two spellings: appending the LEF spelling as a *second* pin ties that
     copy to whatever its own PORT rectangle probes -- the supply net, in
     issue #6843's fixture -- and is the two-pin miniature of the emulator's
     96 SRAM pins duplicated onto ``VPWR``. The merge must recognise the two
     spellings as one bit and keep the label's pin and its connection."""
-    layout = _make_bus_macro_layout([("DATA<0>", "SIG", 0), ("VDD", "VPWR", 1600)])
-    lef = _bus_bit_lef([("DATA[0]", _SUPPLY_PAD_RECT)])
+    layout = _make_bus_macro_layout([(gds_pin, "SIG", 0), ("VDD", "VPWR", 1600)])
+    lef = _bus_bit_lef([(lef_pin, _SECOND_PAD_RECT)])
 
     # Control: GDS labels alone -- the extraction the LEF must not disturb.
     _, labels_only = _run_bus_macro_extract(tmp_path, "labels_only", layout)
@@ -229,7 +238,10 @@ def test_lef_bus_bit_alias_of_a_labelled_pin_is_not_appended(tmp_path):
 
     for text in (labels_only, spice):
         (subckt,) = [x for x in text.splitlines() if x.startswith(".SUBCKT MAC")]
-        assert subckt.split()[2:] == ["DATA<0>", "VDD"]
+        pins = [
+            pin.encode("ascii").decode("unicode_escape") for pin in subckt.split()[2:]
+        ]
+        assert pins == [gds_pin, "VDD"]
         (x_line,) = [x for x in text.splitlines() if x.startswith("X")]
         assert x_line.split() == ["XMAC_0", "SIG", "VPWR", "MAC"]
 
@@ -275,3 +287,35 @@ def test_bus_bits_of_distinct_indices_and_lef_only_bits_stay_distinct(tmp_path):
     assert entry["pin_count"] == 4
     assert entry["lef_path"] is not None  # DATA[2] was merged
     assert not [w for w in report["warnings"] if "tied" in w or "collapsed" in w]
+
+
+@pytest.mark.parametrize(
+    ("literal", "valid"),
+    [
+        (f"DATA{opening}0{closing}", "DATA[0]")
+        for opening, paired in ("[]", "<>", "()", "{}")
+        for closing in "]>)}"
+        if closing != paired
+    ]
+    + [("DATA[0]<1]", "DATA[0][1]"), ("DATA[0>(1)", "DATA[0][1]")],
+)
+def test_malformed_gds_index_keeps_its_connection_and_the_lef_pin(
+    tmp_path, literal, valid
+):
+    layout = _make_bus_macro_layout(
+        [(literal, "SIG_LITERAL", 0), (None, "SIG_LEF", 1600), ("VDD", "VPWR", 3200)]
+    )
+    # A single mismatched pair anywhere in the index suffix makes it literal.
+    report, spice = _run_bus_macro_extract(
+        tmp_path, "literal", layout, _bus_bit_lef([(valid, _SECOND_PAD_RECT)])
+    )
+    header = next(line for line in spice.splitlines() if line.startswith(".SUBCKT MAC"))
+    instance = next(line for line in spice.splitlines() if line.startswith("XMAC_0"))
+    # KLayout hex-escapes parentheses and braces in SPICE pin names.
+    pins = [pin.encode("ascii").decode("unicode_escape") for pin in header.split()[2:]]
+    assert dict(zip(pins, instance.split()[1:-1], strict=True)) == {
+        literal: "SIG_LITERAL",
+        valid: "SIG_LEF",
+        "VDD": "VPWR",
+    }
+    assert report["abstracted_cells"][0]["pin_count"] == 3
