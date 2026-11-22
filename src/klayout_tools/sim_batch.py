@@ -126,6 +126,7 @@ from .sim_batch_features import (
     collected_report_env,
     gap_note,
     refusal_diagnostic,
+    warn_unverified_features,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
 from .sim_batch_reattach import (
@@ -729,22 +730,9 @@ def dry_run_runner_check(
     submit makes, so a request using a feature every published image predates
     is refused (or, under ``warn``, diagnosed) without any S3 write or launch.
 
-    Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
-    host with no resolvable batch configuration (no bucket, no provision
-    script) cannot run the check and is left to dry-run clean, as before;
-    runner version, feature and engine-pin refusals propagate, as do
-    invalid ceiling/split combinations (``batch_max_units_per_job_invalid``).
-    When ``runner_out`` is given it is filled with the published runner
-    identity (``status``, ``client_klt_version``, ``images``) for ``match``,
-    ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
-    the report can answer "which ``klt`` does the fleet accept" without a
-    submit (issue #4675); a ``mismatch`` under the default ``"enforce"`` is
-    refused with ``BATCH_RUNNER_MISMATCH_CODE`` before ``runner_out`` is
-    filled, both versions in the error's message (issue #4680). When
-    ``config_out`` is given it is filled with ``{"config": config}`` once
-    the config resolves, so the caller can run the ceiling/split plan
-    (:func:`sim_batch_plan.plan_batch_job`) on the config already in hand --
-    re-resolving it would resolve and warn twice (issue #5674).
+    Returns a feature warning, if present. Unconfigured hosts can still dry
+    run. With a resolvable configuration, populate the supplied runner/config
+    outputs and propagate version, feature, engine and job-size refusals.
     """
     from .sim import ENGINE_VERSION_UNMET_CODE, SimError
 
@@ -888,17 +876,18 @@ def _feature_diagnostic(
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Refuse before any S3 write or launch when *every* image the AMI
-    manifest publishes predates a request feature (issue #3249). An unknown
-    runner version, a legacy entry, or one image that has the feature leaves
-    the decision to the runner-side preflight. ``warn`` reports: it returns
-    the :func:`_feature_diagnostic` the report carries (issue #2901), else
-    ``None``."""
+    """Check mandatory features before upload. A missing candidate list warns;
+    a known unsupported mandatory feature refuses submission under either policy."""
     from .sim import SimError
 
     features = _request_features(request)
     images = assessment["images"]
-    if not features or not images:
+    if not images:
+        return warn_unverified_features(
+            sorted(_MANDATORY_RUNNER_FEATURES.intersection(features)),
+            assessment.get("client_klt_version"),
+        )
+    if not features:
         return None
     gaps = [
         _missing_runner_features(features, image["klt_version"]) for image in images
