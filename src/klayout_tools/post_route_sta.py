@@ -254,6 +254,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
+from . import _sta_clock_transition as _transition
 from . import _sta_timing_derate as _derate
 from . import _sta_wire_load, env_provenance
 from . import macros as macro_spec
@@ -285,6 +286,9 @@ from ._provenance import (
     sha256_file,
 )
 from ._request_fields import check_known_fields
+from ._sta_clock_transition import (
+    validate_propagated_clock as _validate_propagated_clock,
+)
 from ._sta_clock_uncertainty import (
     clock_uncertainty_block as _clock_uncertainty_block,
 )
@@ -676,6 +680,7 @@ def run_sta(
     wire_load_model, wire_load_mode = _validate_wire_load_estimate(
         request["constraints"], has_verilog
     )
+    clock_transition = _transition.validate_clock_transition(request["constraints"])
     propagated_clock = _validate_propagated_clock(request["constraints"], has_def)
     power_activity = _validate_power_activity(request["constraints"])
     clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
@@ -774,6 +779,7 @@ def run_sta(
             clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
+            clock_transition=clock_transition,
             timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -957,6 +963,7 @@ def _dispatch_sta(
     clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
+    clock_transition: float | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
@@ -1007,6 +1014,7 @@ def _dispatch_sta(
             clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
+            clock_transition=clock_transition,
             timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
@@ -1046,6 +1054,7 @@ def _dispatch_sta(
         clock_extras=clock_extras,
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
+        clock_transition=clock_transition,
         timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
@@ -1115,6 +1124,7 @@ def _dispatch_sta(
         "clock_mode": "propagated" if propagated_clock else "ideal",
         "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
+        "clock_transition": _transition.transition_block(clock_transition),
         "timing_derate": _derate.timing_derate_block(timing_derate),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
@@ -1210,6 +1220,7 @@ def _run_corner_session(
     clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
+    clock_transition: float | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
@@ -1325,6 +1336,7 @@ def _run_corner_session(
             clock_extras=clock_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
+            clock_transition=clock_transition,
             timing_derate=timing_derate,
             sdf_path=sdf_path,
         )
@@ -1357,6 +1369,7 @@ def _run_corner_session(
             power_activity=power_activity,
             clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
+            clock_transition=clock_transition,
             timing_derate=timing_derate,
         )
     _write_script(script_path, lines)
@@ -1519,6 +1532,7 @@ def _run_multi_corner(
     clock_extras: dict[str, Any] | None,
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
+    clock_transition: float | None,
     timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
@@ -1610,6 +1624,7 @@ def _run_multi_corner(
             clock_extras=corner_extras,
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
+            clock_transition=clock_transition,
             timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
@@ -1696,6 +1711,7 @@ def _run_multi_corner(
         "clock_mode": "propagated" if propagated_clock else "ideal",
         "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
+        "clock_transition": _transition.transition_block(clock_transition),
         "timing_derate": _derate.timing_derate_block(timing_derate),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
@@ -2628,46 +2644,6 @@ def _validate_geometry_source(geometry_source: Any) -> str:
             "request.geometry_source must be one of: " + ", ".join(_GEOMETRY_SOURCES)
         )
     return geometry_source
-
-
-def _validate_propagated_clock(constraints: dict[str, Any], has_def: bool) -> bool:
-    """Validate ``constraints.propagated_clock`` (issue #2739), returning the
-    validated boolean (``False`` when omitted or ``null`` -- the ideal-clock
-    default this command has always run, byte-for-byte).
-
-    Only a JSON boolean is accepted; every other non-null value is a request
-    error. ``True`` is **def-mode only**: a ``verilog``-mode request links a
-    structural netlist with no placement at all, so there is no placed clock
-    tree to propagate through and the option is rejected with an actionable
-    error rather than silently ignored.
-
-    Meaningful is not the same as *correct* for a ``def``-mode request: the
-    option is only worth what the DEF's clock tree is worth (a pre-CTS DEF
-    propagates through plain wires, arriving with ~no insertion delay), and
-    this module cannot infer tree presence from ``geometry_source`` or from
-    a non-null ``clock_skew_ns`` -- the response's ``clock_propagation``
-    evidence block is what says what propagation actually reached.
-
-    ``constraints`` is already known to be a JSON object by the time this is
-    called -- :func:`_validate_constraints` (always called first) raises
-    otherwise.
-    """
-    value = constraints.get("propagated_clock")
-    if value is None:
-        return False
-    if not isinstance(value, bool):
-        raise PostRouteStaError(
-            "constraints.propagated_clock must be a boolean (true enables "
-            "propagated-clock timing in def mode; omit or false keeps the "
-            "ideal-clock default)"
-        )
-    if value and not has_def:
-        raise PostRouteStaError(
-            "constraints.propagated_clock is only valid in def mode -- a "
-            "verilog-mode request links a netlist with no placed clock tree "
-            "to propagate through"
-        )
-    return value
 
 
 def _validate_power_activity(constraints: dict[str, Any]) -> dict[str, float] | None:
@@ -3670,6 +3646,7 @@ def _sta_script_lines(
     sdf_path: str | None = None,
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
+    clock_transition: float | None = None,
     timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
@@ -3729,6 +3706,7 @@ def _sta_script_lines(
     ]
     lines += [f"read_liberty {_tcl_literal(lib)}" for lib in macro_liberty_paths or []]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _transition.transition_lines(clock_port, clock_transition)
     lines += _extra_clock_lines(clock_extras)
     if propagated_clock:
         lines += _propagated_clock_lines(clock_port)
@@ -3813,6 +3791,7 @@ def _sta_netlist_script_lines(
     power_activity: dict[str, float] | None = None,
     clock_extras: dict[str, Any] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
+    clock_transition: float | None = None,
     timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
@@ -3855,6 +3834,7 @@ def _sta_netlist_script_lines(
         f"link_design {_tcl_literal(hdl_toplevel)}",
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
+    lines += _transition.transition_lines(clock_port, clock_transition)
     lines += _extra_clock_lines(clock_extras)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
     lines += _derate.timing_derate_lines(timing_derate)
