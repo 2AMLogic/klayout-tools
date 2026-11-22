@@ -292,6 +292,47 @@ class TestInstallXschem:
         assert not (prefix / "keep.txt").exists()
         assert (prefix / "bin" / "xschem").is_file()
 
+    def test_failed_directory_inspection_preserves_files(self, tmp_path, monkeypatch):
+        asset = _fake_asset(tmp_path)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        prefix = tmp_path / "prefix"
+        prefix.mkdir()
+        keep = prefix / "keep.txt"
+        keep.write_bytes(b"existing contents")
+        # Force the same empty stdout and error status as an unreadable
+        # directory, including on runners where root could list a mode-000 dir.
+        ls = tmp_path / "ls"
+        ls.write_text("#!/bin/sh\nexit 2\n")
+        ls.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+        proc, _ = _run_install(tmp_path, asset, digest, prefix=prefix)
+        assert proc.returncode != 0
+        assert keep.read_bytes() == b"existing contents"
+        assert "cannot inspect" in proc.stderr
+        assert not (tmp_path / "curl-url").exists()
+
+    def test_preserves_a_regular_file_at_the_install_path(self, tmp_path):
+        asset = _fake_asset(tmp_path)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        prefix = tmp_path / "prefix"
+        prefix.write_bytes(b"existing contents")
+
+        proc, _ = _run_install(tmp_path, asset, digest, prefix=prefix)
+        assert proc.returncode != 0
+        assert prefix.read_bytes() == b"existing contents"
+        assert not (tmp_path / "curl-url").exists()
+
+    def test_installs_into_an_existing_empty_directory(self, tmp_path):
+        asset = _fake_asset(tmp_path)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        prefix = tmp_path / "prefix"
+        prefix.mkdir()
+
+        proc, _ = _run_install(tmp_path, asset, digest, prefix=prefix)
+        assert proc.returncode == 0, proc.stderr
+        assert (prefix / "bin" / "xschem").read_bytes() == _FAKE_BINARY
+
     @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
     def test_an_unwritable_prefix_is_installed_through_sudo(self, tmp_path):
         """`/opt/eda` is root-owned: every write step goes through `sudo -n`."""
@@ -314,7 +355,7 @@ class TestInstallXschem:
         assert (prefix / "bin" / "xschem").read_bytes() == _FAKE_BINARY
         logged = (tmp_path / "sudo-log").read_text().splitlines()
         assert all(line.startswith("-n ") for line in logged), logged
-        for verb in ("rm", "mkdir", "tar", "tee"):
+        for verb in ("mkdir", "tar", "tee"):
             used = any(line.startswith(f"-n {verb} ") for line in logged)
             assert used, (verb, logged)
         assert any("--no-same-owner" in line for line in logged)

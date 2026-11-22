@@ -115,7 +115,8 @@ fi
 # Write steps run through `sudo -n` when the nearest existing ancestor of the
 # prefix is not writable (the default prefix is under root-owned /opt).
 as_root=()
-probe="$(dirname "$prefix")"
+parent="$(dirname "$prefix")"
+probe="$parent"
 while [[ ! -e "$probe" ]]; do probe="$(dirname "$probe")"; done
 if [[ ! -w "$probe" ]]; then
     command -v sudo > /dev/null \
@@ -130,11 +131,16 @@ if [[ -f "$marker" && "$FORCE" -eq 0 && "$(cat "$marker")" == "$want" ]]; then
     exit 0
 fi
 
-# The replace step below removes the prefix, possibly as root: never do that to
-# a non-empty directory this script did not create (a mistyped
-# XSCHEM_INSTALL_PREFIX) unless --force says so.
-if [[ "$FORCE" -eq 0 && -d "$prefix" && ! -f "$marker" && -n "$(ls -A "$prefix" 2> /dev/null)" ]]; then
-    die "$prefix exists and was not installed by this script; refusing to replace it (use --force)"
+# Reserve recursive removal for a managed install or an explicit --force.
+remove_prefix=()
+if [[ "$FORCE" -eq 1 || ( ! -L "$prefix" && -f "$marker" ) ]]; then
+    remove_prefix=(rm -rf)
+elif [[ -e "$prefix" || -L "$prefix" ]]; then
+    [[ -d "$prefix" && ! -L "$prefix" ]] || die "$prefix is not a plain directory; refusing to replace it (use --force)"
+    # -q keeps a name made entirely of newlines visible in command substitution.
+    entries="$(ls -Aq -- "$prefix")" || die "cannot inspect $prefix; refusing to replace it"
+    [[ -z "$entries" ]] || die "$prefix exists and was not installed by this script; refusing to replace it (use --force)"
+    remove_prefix=(rmdir)
 fi
 
 # -- download, verify, THEN unpack -------------------------------------------
@@ -152,8 +158,13 @@ if [[ "$actual_sha256" != "$expected_sha256" ]]; then
 fi
 
 echo "Installing into $prefix ..."
-priv rm -rf "$prefix" || die "could not clear $prefix"
-priv mkdir -p "$prefix" || die "could not create $prefix"
+# rmdir fails if an inspected directory gained a file during the download.
+# Exclusive creation also preserves a destination that appeared in the meantime.
+if (( ${#remove_prefix[@]} )); then
+    priv "${remove_prefix[@]}" -- "$prefix" || die "could not clear $prefix"
+fi
+priv mkdir -p -- "$parent" || die "could not create $parent"
+priv mkdir -- "$prefix" || die "could not create $prefix"
 # --no-same-owner: under sudo the files belong to root, not to whatever uid the
 # build runner had when it packed the tarball.
 priv tar -C "$prefix" --no-same-owner -xzf "$work/$asset" || die "could not unpack into $prefix"
