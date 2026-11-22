@@ -162,6 +162,43 @@ def test_check_multi_corner_names_the_moved_corner(tmp_path, monkeypatch, capsys
     ]
 
 
+@pytest.mark.parametrize("scalar", [False, True], ids=["list", "scalar"])
+def test_check_names_corner_removed_from_request(tmp_path, monkeypatch, capsys, scalar):
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request_path)
+    request = Path(request_path)
+    data = json.loads(request.read_text())
+    removed = data["pdk"]["corners"].pop()
+    if scalar:
+        data["pdk"]["corner"] = data["pdk"].pop("corners")[0]
+    request.write_text(json.dumps(data))
+
+    code, result = _verify(capsys, request_path, report)
+    assert code == 3
+    moved = {check["field"]: check for check in result["checks"] if not check["match"]}
+    field = f"corners[{removed}].deck.content_hash"
+    assert set(moved) == (
+        {field, "provenance.deck.content_hash"} if scalar else {field}
+    )
+    assert moved[field]["expected"] is not None
+    assert moved[field]["actual"] is None
+
+
+def test_check_refuses_conflicting_corner_selectors(tmp_path, monkeypatch, capsys):
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request_path)
+    request = Path(request_path)
+    data = json.loads(request.read_text())
+    data["pdk"]["corner"] = data["pdk"]["corners"][0]
+    request.write_text(json.dumps(data))
+
+    code = main(["sta", request_path, "--check", report, "--format", "json"])
+    assert code == 1
+    assert "mutually exclusive" in capsys.readouterr().err
+
+
 def test_check_null_recorded_hash_never_matches(tmp_path, monkeypatch, capsys):
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch)

@@ -45,8 +45,8 @@ from .post_route_sta import (
     PostRouteStaError,
     _resolve_def,
     _resolve_liberty,
+    _resolve_pdk_selection,
     _resolve_verilog,
-    _validate_corners,
     load_request,
     run_sta,
 )
@@ -107,14 +107,7 @@ def _sta_provenance_hashes(
         else _resolve_verilog(request["verilog"], request_dir)
     )
 
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PostRouteStaError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PostRouteStaError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    requested_corners = _validate_corners(pdk_spec.get("corners"))
+    cell_library, requested_corner, requested_corners = _resolve_pdk_selection(request)
     multi_corner = requested_corners is not None or isinstance(
         request.get("spef"), dict
     )
@@ -160,6 +153,7 @@ def check_sta_report(
             input_hash,
         )
     ]
+    entries = committed.get("corners")
     if not multi_corner:
         (deck_hash,) = deck_hashes.values()
         checks.append(
@@ -169,20 +163,21 @@ def check_sta_report(
                 deck_hash,
             )
         )
-        return build_check_result(report_path=report_path, checks=checks)
+        if not isinstance(entries, list):
+            return build_check_result(report_path=report_path, checks=checks)
 
-    entries = committed.get("corners")
     by_corner = {
-        entry.get("corner"): entry
+        entry["corner"]: entry
         for entry in (entries if isinstance(entries, list) else [])
-        if isinstance(entry, dict)
+        if isinstance(entry, dict) and isinstance(entry.get("corner"), str)
     }
-    for corner, deck_hash in deck_hashes.items():
+    # Include corners that the committed report still claims after a request edit.
+    for corner in dict.fromkeys([*deck_hashes, *by_corner]):
         checks.append(
             hash_check(
                 f"corners[{corner}].deck.content_hash",
                 get_path(by_corner.get(corner, {}), ("deck", "content_hash")),
-                deck_hash,
+                deck_hashes.get(corner),
             )
         )
     return build_check_result(report_path=report_path, checks=checks)

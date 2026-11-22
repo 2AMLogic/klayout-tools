@@ -640,36 +640,7 @@ def run_sta(
             "request.hdl_toplevel must be a non-empty string when given"
         )
 
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PostRouteStaError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PostRouteStaError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PostRouteStaError(
-            "request.pdk.corner must be a non-empty string when given"
-        )
-    # Issue #1871: `pdk.corners` (a list) is the additive, multi-corner
-    # alternative to the scalar `pdk.corner` above -- see this module's own
-    # docstring "Multi-corner characterization" section. Shape-validated
-    # here; membership needs no further validation (unlike
-    # `place_and_route.py`'s `sweep_corners`, which narrows an
-    # already-derived shipped-corner set, `corners` here *is* the full
-    # corner selection, and an unresolvable name simply fails the same way
-    # an unresolvable scalar `pdk.corner` already does, per-corner, inside
-    # the run loop below).
-    requested_corners = _validate_corners(pdk_spec.get("corners"))
-    if requested_corner is not None and requested_corners is not None:
-        raise PostRouteStaError(
-            "request.pdk.corner and request.pdk.corners are mutually "
-            "exclusive -- give at most one: a single scalar corner for the "
-            "existing single-corner response shape, or a list for "
-            "multi-corner characterization (see docs/cli/sta.md)"
-        )
+    cell_library, requested_corner, requested_corners = _resolve_pdk_selection(request)
 
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # before any PDK resolution or engine invocation; the corner-dependent
@@ -2541,6 +2512,34 @@ def _validate_false_path_from(
             raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
         seen.add(port)
     return list(value) or None
+
+
+def _resolve_pdk_selection(
+    request: dict[str, Any],
+) -> tuple[str, str | None, list[str] | None]:
+    """Resolve the library and validate the two alternative corner selectors."""
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PostRouteStaError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PostRouteStaError("request.pdk.cell_library is required")
+    requested_corner = pdk_spec.get("corner")
+    if requested_corner is not None and not (
+        isinstance(requested_corner, str) and requested_corner
+    ):
+        raise PostRouteStaError(
+            "request.pdk.corner must be a non-empty string when given"
+        )
+    requested_corners = _validate_corners(pdk_spec.get("corners"))
+    if requested_corner is not None and requested_corners is not None:
+        raise PostRouteStaError(
+            "request.pdk.corner and request.pdk.corners are mutually "
+            "exclusive -- give at most one: a single scalar corner for the "
+            "existing single-corner response shape, or a list for "
+            "multi-corner characterization (see docs/cli/sta.md)"
+        )
+    return cell_library, requested_corner, requested_corners
 
 
 def _validate_corners(value: Any) -> list[str] | None:
