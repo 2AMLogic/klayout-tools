@@ -88,6 +88,7 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 from .gen_compose_landing_pads import (
     _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
 )
+from .gen_compose_landing_pads import _landing_pad_box
 from .gen_compose_landing_pads import (
     _marked_via_drop_entry as _marked_via_drop_entry,
 )
@@ -1764,6 +1765,7 @@ def _drawn_leg_footprint_region(
     dbu: float,
     route_layer: tuple[int, int] | None = None,
     side_for_pair: Any = None,
+    cut_side_um: Any = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
@@ -1819,20 +1821,9 @@ def _drawn_leg_footprint_region(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
     region = _drawn_route_region(points_um, width_um, dbu)
 
     for drop in via_drops:
-        if side_for_pair is not None and route_layer is not None:
-            # The drop rides along (#6058): the resolver, not the caller,
-            # classifies this landing from the drop's own marking.
-            side_um = side_for_pair(route_layer, drop["via_layer"], drop)
-        else:
-            side_um = _VIA_LANDING_SIZE_UM
-        landing_half_dbu = int(
-            round((side_um + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -1840,15 +1831,8 @@ def _drawn_leg_footprint_region(
             and route_layer not in landing_layers
         ):
             continue  # this hop's pads are on a different layer than route_layer
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
         region.insert(
-            kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
+            _landing_pad_box(drop, route_layer, dbu, side_for_pair, cut_side_um)
         )
 
     for widen in stub_widen:

@@ -41,7 +41,12 @@ from functools import partial
 from typing import Any, NamedTuple
 
 from .decks import ExtractionDeck
-from .gen_compose_layer_rules import _min_width_um_for_layer, _port_own_layer
+from .gen_compose_layer_rules import (
+    _is_gf180_9k_11k_top,
+    _min_width_um_for_layer,
+    _port_own_layer,
+    _route_spacing_rule,
+)
 
 #: Rejection-reason fragments a higher plane can lift. The #1895 far-side
 #: ("from behind") family and the block-interior crossings come from
@@ -248,12 +253,14 @@ class PlaneClimbContext(NamedTuple):
         drop: dict[str, Any],
         layer: tuple[int, int],
         plane: tuple[int, int],
+        spacing: float,
     ) -> bool:
         """On the port plane, only metal connected at the declared port may overlap."""
         import klayout.db as kdb
 
+        search = box.enlarged(spacing)
         for block, bbox in self.placed_bboxes_um.items():
-            if block != drop["block_id"] and not box.touches(
+            if block != drop["block_id"] and not search.touches(
                 kdb.DBox(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
             ):
                 continue
@@ -262,18 +269,23 @@ class PlaneClimbContext(NamedTuple):
                 continue
             unit = geometry["dbu"]
             pad = kdb.Region(box.to_itype(unit))
-            touched = geometry["region"].interacting(pad)
-            if touched.is_empty():
-                continue
-            # Only the declared port plane establishes pin ownership.
+            nearby = geometry["region"].interacting(kdb.Region(search.to_itype(unit)))
+            # Only the merged source conductor containing the pin owns the pad.
             if (
-                block != drop["block_id"]
-                or layer == plane
-                or layer not in drop["terminal_landing_layers"]
+                block == drop["block_id"]
+                and layer != plane
+                and layer in drop["terminal_landing_layers"]
             ):
+                pin = kdb.Point(round(drop["x_um"] / unit), round(drop["y_um"] / unit))
+                nearby = kdb.Region(
+                    [p for p in nearby.each_merged() if not p.inside(pin)]
+                )
+            if not nearby.interacting(pad).is_empty():
                 return False
-            pin = kdb.Point(round(drop["x_um"] / unit), round(drop["y_um"] / unit))
-            if any(not polygon.inside(pin) for polygon in touched.each_merged()):
+            if (
+                spacing
+                and not nearby.separation_check(pad, round(spacing / unit)).is_empty()
+            ):
                 return False
         return True
 
@@ -316,7 +328,10 @@ class PlaneClimbContext(NamedTuple):
                     (cx + half) * dbu,
                     (cy + half) * dbu,
                 )
-                if not self._pad_is_clear(box, drop, layer, plane):
+                rule = _route_spacing_rule(self.pdk_variant, layer)
+                if not self._pad_is_clear(
+                    box, drop, layer, plane, rule[0] if rule else 0.0
+                ):
                     return False
         return True
 
@@ -347,11 +362,7 @@ class PlaneClimbContext(NamedTuple):
             floor = _min_width_um_for_layer(self.pdk_variant, plane)
             if floor is not None and width_um < floor[0]:
                 width_um = floor[0]
-        if (self.pdk_variant, plane) in {
-            ("gf180mcuB", (46, 0)),
-            ("gf180mcuC", (81, 0)),
-            ("gf180mcuD", (81, 0)),
-        }:
+        if _is_gf180_9k_11k_top(self.pdk_variant, plane):
             # The native 9K and 11K options both require 0.44 um (MT.1).
             width_um = max(width_um, 0.44)
         conflict_check = (

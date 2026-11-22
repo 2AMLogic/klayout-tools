@@ -1408,8 +1408,10 @@ largest floor — like any other
 below-deck-floor override.
 Pads round outward onto the output grid, preserving their margin against
 the rounded via cut as well as their minimum size.
-These floors affect the drawn pads; the router's spacing pre-checks retain
-their existing baseline footprint, as for the prior area and via-width floors.
+Compose uses these rounded pad footprints when checking a leg against accepted
+routes on each landing layer. Automatic climbs also check clearance to placed
+metal around every landing. On gf180mcuB Metal4 and gf180mcuC/D Metal5, the
+9K/11K top-metal spacing rule (MT.2a) requires at least 0.46 µm.
 
 ```json
 {
