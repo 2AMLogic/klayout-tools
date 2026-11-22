@@ -10,11 +10,7 @@ and the deck lookups they build on (width / area / plain and
 two-adjacent-edges enclosure) stay in ``gen_compose_layer_rules``, which this
 module imports at module scope; that module never imports this one.
 
-Same convention as ``gen_compose_layer_rules.py`` itself:
-``gen_compose.py``'s module-scope names (``_VIA_LANDING_SIZE_UM``,
-``_VIA_DROP_SIZE_UM``) are imported *inside* the functions that use them, so
-there is no load-time dependency back on it. ``gen_compose.py`` re-exports
-``_resolve_intermediate_landing_pad_sizes``.
+The composition API re-exports ``_resolve_intermediate_landing_pad_sizes``.
 """
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM
 from .gen_compose_layer_rules import (
     _min_area_um2_for_layer,
     _min_enclosing_adjacent_margin_um_for_layer,
@@ -59,7 +56,6 @@ def _intermediate_landing_pad_floor_um(
     justify shrinking"). Same for an unresolvable family/deck -- the
     mode-off size is the conservative answer there too.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     floor_side = 0.0
     floors: list[tuple[str, float]] = []
@@ -113,7 +109,6 @@ def _resolve_intermediate_landing_pad_sizes(
     its own cut; the concentric squares merge in the drawn GDS, and the
     union encloses both cuts.
     """
-    from .gen_compose import _VIA_DROP_SIZE_UM
 
     sizes: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:

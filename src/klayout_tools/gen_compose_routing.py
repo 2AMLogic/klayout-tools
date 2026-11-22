@@ -69,6 +69,14 @@ from .decks import (
     get_extraction_deck,
 )
 from .gen import RING_SIDE_DIRECTIONS, _pdk_family
+from .gen_compose_base import (
+    _DIRECTION_VECTORS,
+    _ORIENTATION_KDB_ARGS,
+    _VIA_LANDING_SIZE_UM,
+    GenComposeError,
+    _port_has_geometry,
+)
+from .gen_compose_base import _drop_array_extra_um as _drop_array_extra_um
 
 # Layer-rule resolution (``routing.layer_role`` -> ``(layer, datatype)`` and
 # the deck floors that pair implies) lives in ``gen_compose_layer_rules``
@@ -414,7 +422,6 @@ def _resolve_cross_block_route_layer(
     issue #1567 removed the earlier single-hop-only restriction here, the
     same as it did for :func:`_resolve_via_drop_layer` itself).
     """
-    from .gen_compose import GenComposeError
 
     route_layer = _resolve_route_layer(variant, layer_role)
     try:
@@ -669,7 +676,6 @@ def manhattan_backbone(
     renders each interior corner as a square miter that fully fills the bend,
     so no separate bend-insertion pass is needed -- the corner *is* the bend.
     """
-    from .gen_compose import _DIRECTION_VECTORS
 
     ax, ay = a
     bx, by = b
@@ -1295,7 +1301,6 @@ def _leg_plane_clears_ring(
     ring_half_um = _ring_trace_half_width_um(block)
     if ring_half_um is None:
         return False  # the ring does not say how wide its trace is
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     # A via-drop's landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
     # sized from the PDK's own contact-enclosure convention), independent of
@@ -1718,11 +1723,7 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import (
-        _ORIENTATION_KDB_ARGS,
-        _load_block_cell,
-        _rescale_block_layout,
-    )
+    from .gen_compose import _load_block_cell, _rescale_block_layout
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
@@ -2037,8 +2038,6 @@ def _self_net_drawn_short(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _port_has_geometry
-
     region = geometry["region"]
     dbu = geometry["dbu"]
 
@@ -2142,7 +2141,6 @@ def _same_layer_short_reason(
 ) -> str | None:
     # Looked up at call time, as ``route_two_pin`` does: the test suite's
     # ``klayout_tools.gen_compose.<name>`` re-export takes effect here.
-    from .gen_compose import _port_has_geometry
 
     # Self-net pad-crossing check (#433): the whole-block bbox check below
     # skips a self-net's own block entirely (a same-block net's backbone
@@ -3734,7 +3732,6 @@ def route_two_pin(
     # looked up dynamically inside `_endpoint_stub_widen_entries`/
     # `_same_block_cross_layer_retry` (see their comments) so a monkeypatch of
     # `klayout_tools.gen_compose.<name>` still takes effect.
-    from .gen_compose import _DIRECTION_VECTORS
 
     block_a = blocks[pin_a["block"]]
     block_b = blocks[pin_b["block"]]
@@ -4290,7 +4287,6 @@ def route_bundle(
     not part of the ``klt gen-compose`` response (``compose()`` projects
     every leg down to ``pins``/``routed``/``route_length_um``/``reason``).
     """
-    from .gen_compose import GenComposeError
 
     if len(pins) < 2:
         raise GenComposeError("route_bundle() needs at least 2 pins")
@@ -4830,12 +4826,3 @@ def _drop_array(
     if pitch is None:
         return None
     return {"rows": spec["rows"], "cols": spec["cols"], "pitch_um": pitch}
-
-
-def _drop_array_extra_um(drop: dict[str, Any]) -> float:
-    """Extra side length (um) a drop's cut array adds to its landing pad over
-    the single-cut pad: ``(max(rows, cols) - 1) * pitch``; ``0.0`` without one."""
-    array = drop.get("array")
-    if not array:
-        return 0.0
-    return (max(array["rows"], array["cols"]) - 1) * array["pitch_um"]

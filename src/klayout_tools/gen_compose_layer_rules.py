@@ -8,15 +8,7 @@ and landing-pad sizes that pair implies, all out of the resolved PDK
 family's own curated deck -- it calls nothing else in
 ``gen_compose_routing``, and five functions there call into it.
 
-Same conventions as the module it came from (and as
-``gen_compose_via_cuts.py``, the earlier split of the same file):
-``gen_compose.py``'s own module-scope names (``GenComposeError``,
-``_VIA_LANDING_SIZE_UM``, ``_VIA_DROP_SIZE_UM``) are imported *inside* the
-functions that use them, so this module never has a load-time dependency
-back on ``gen_compose.py``. ``gen_compose_routing`` re-imports every name
-below at module scope, so each pre-existing
-``from klayout_tools.gen_compose_routing import <name>`` path -- and
-``gen_compose``'s own re-export of it -- keeps resolving unchanged.
+The router and composition API re-export these rule lookups for existing callers.
 """
 
 from __future__ import annotations
@@ -28,6 +20,7 @@ from typing import Any
 from . import gen_compose_top_metal_floors as _top_metal_floors
 from .decks import UnknownDeckError, get_deck, get_nominal_dbu
 from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
+from .gen_compose_base import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM, GenComposeError
 
 
 def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
@@ -42,7 +35,6 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     is not a known role, or the resolved family's curated deck has no layer
     for the role (``None`` entry).
     """
-    from .gen_compose import GenComposeError
 
     try:
         family = _pdk_family(variant)
@@ -280,7 +272,6 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     Drawing and the own-block self-notch check use the resolved side. The
     router’s other spacing checks retain their search footprint (#6469).
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     area_floor = _min_area_um2_for_layer(variant, layer)
     if area_floor is None:
@@ -400,7 +391,6 @@ def _landing_pad_side_um_for_pair(
     via_side: float,
 ) -> float:
     """Default drawn side of one landing pad, before via-array growth."""
-    from .gen_compose import _VIA_LANDING_SIZE_UM
 
     floor, _ = _landing_pad_floor_um(variant, pad_layer, via_layer, via_side)
     return max(_VIA_LANDING_SIZE_UM, floor)
@@ -435,7 +425,6 @@ def _resolve_landing_pad_sizes(
     Resolve once per distinct pair for drawing. Route conflict checks use
     the same floors and round the pad onto the output grid.
     """
-    from .gen_compose import _VIA_DROP_SIZE_UM, GenComposeError
 
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
