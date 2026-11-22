@@ -21,6 +21,7 @@ from test_post_route_sta import (
     _base_request,
     _setup_multi_corner_env,
     _setup_success_env,
+    _stub_openroad_matrix,
     _stub_openroad_multi_corner,
     _stub_openroad_success,
     _write_request,
@@ -159,6 +160,57 @@ def test_check_multi_corner_names_the_moved_corner(tmp_path, monkeypatch, capsys
     assert code == 3
     assert [c["field"] for c in out["checks"] if not c["match"]] == [
         "corners[ss_100C_1v60].deck.content_hash"
+    ]
+
+
+def test_check_map_spef_without_pdk_corners(tmp_path, monkeypatch, capsys):
+    request = _setup_success_env(
+        tmp_path, monkeypatch, spef={"min": "fast.spef", "max": "slow.spef"}
+    )
+    for name in ("fast.spef", "slow.spef"):
+        (tmp_path / name).write_text("*D_NET clk 0.01\n*END\n")
+    _stub_openroad_matrix(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request)
+    fields = [
+        f"corners[tt_025C_1v80,{axis}].deck.content_hash" for axis in ("min", "max")
+    ]
+
+    code, result = _verify(capsys, request, report)
+    assert code == 0
+    assert [c["field"] for c in result["checks"]] == [
+        "provenance.input.content_hash",
+        *fields,
+    ]
+
+    with _find_lib(tmp_path, "tt_025C_1v80").open("a") as stream:
+        stream.write("/* edited */\n")
+    code, result = _verify(capsys, request, report)
+    assert code == 3 and result["status"] == "drifted"
+    assert [c["field"] for c in result["checks"] if not c["match"]] == fields
+
+
+@pytest.mark.parametrize("damage", ["hash", "missing_entry", "removed_axis"])
+def test_check_map_spef_names_only_the_affected_entry(
+    tmp_path, monkeypatch, capsys, damage
+):
+    request = _setup_success_env(
+        tmp_path, monkeypatch, spef={"min": "x.spef", "max": "x.spef"}
+    )
+    (tmp_path / "x.spef").write_text("*D_NET clk 0.01\n*END\n")
+    _stub_openroad_matrix(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request)
+    if damage == "hash":
+        _edit_report(
+            report, lambda d: d["corners"][0]["deck"].update(content_hash=None)
+        )
+    elif damage == "missing_entry":
+        _edit_report(report, lambda d: d["corners"].pop(0))
+    else:
+        _edit_report(request, lambda d: d["spef"].pop("min"))
+    code, result = _verify(capsys, request, report)
+    assert code == 3 and result["status"] == "drifted"
+    assert [c["field"] for c in result["checks"] if not c["match"]] == [
+        "corners[tt_025C_1v80,min].deck.content_hash"
     ]
 
 
