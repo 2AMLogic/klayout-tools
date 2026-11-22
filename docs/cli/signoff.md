@@ -869,7 +869,14 @@ grades `input_verified: null` **by design**, identically on the host that
 happens to have the file and in a fresh clone; for the artifact-anchored
 generic items (T1 1/2/9/10) that means the `unverifiable_provenance`
 refusal renders the same everywhere too, instead of the block grading T1
-on the producing host and not-T1 in CI. The `.git`-less fallback: a tree
+on the producing host and not-T1 in CI. The index also covers *how* the
+candidate is reached (issue #7195, the input side of #6139's yield
+contract): every symlink in the chain and every directory a `dir/..`
+step traverses must itself be tracked by its checkout's index, so a
+purely local link to committed bytes grades exactly like a local copy of
+them, and a name no filesystem call can represent (an embedded NUL byte)
+grades unresolvable instead of aborting the render. The `.git`-less
+fallback: a tree
 with no functioning checkout above the candidate — a
 `/archive/<sha>.tar.gz` unpack, a vendored copy, a `--repo-root` tree
 without VCS metadata — keeps the filesystem-presence behaviour, since
