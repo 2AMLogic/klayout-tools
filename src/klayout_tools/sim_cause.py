@@ -1,6 +1,7 @@
 """Cause text for ngspice diagnostics: fatal-error cause lines (issues #4623,
-#4924), the netlist title-line cause (issue #5433) and the ``measurement``
-suffix for a ``.meas`` reason (issues #2925, #5415).
+#4924), the netlist title-line cause (issue #5433), the ``measurement``
+suffix for a ``.meas`` reason (issues #2925, #5415) and the benign
+measure-substitute exemption for a completed run (issue #6401).
 
 Split out of sim.py to keep it under its per-file size ceiling.
 """
@@ -8,6 +9,7 @@ Split out of sim.py to keep it under its per-file size ceiling.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 #: A log line that names the cause behind a bare ``fatal error in ngspice``
 #: (issue #4623): a missing model, an undefined parameter, or any ``Error`` /
@@ -181,6 +183,100 @@ def _with_netlist_error_cause(message: str, log_text: str, start: int) -> str:
     if following and following[0].strip():
         return f"{message} {following[0].strip()}"
     return message
+
+
+# --------------------------------------------------------------------------- #
+# Benign measure-substitute errors in a completed run (issue #6401)
+# --------------------------------------------------------------------------- #
+
+
+#: What ngspice prints once an analysis actually begins (or has produced
+#: data); absent from a run that died in the deck parser. Lived in sim.py
+#: until issue #6401's exemption helper needed it here too.
+_ANALYSIS_STARTED_RE = re.compile(
+    r"Doing analysis at TEMP|No\. of Data Rows|Initial Transient Solution",
+    re.IGNORECASE,
+)
+
+#: The one ``ngspice_fatal`` alternative ngspice-47 also prints mid-analysis
+#: for a benign cause: a ``.meas ... param='...'`` whose referenced measure
+#: produced no value, where the block reads ``Error in netlist line no. N``
+#: followed by ``Cannot compute substitute`` (issue #6401). Its genuine
+#: reading -- the deck/library parse abort of #4603 -- never coexists with a
+#: run that completed.
+_NETLIST_LINE_ERROR_RE = re.compile(
+    r"^[ \t]*Error in netlist line no\. \d+", re.IGNORECASE | re.MULTILINE
+)
+
+#: The ``ngspice_fatal`` alternatives that always mean an aborted run:
+#: ``Error on line N`` (deck abort, #3879), ``Simulation interrupted due to
+#: error`` and ``fatal error in ngspice``. Any one of these anywhere in the
+#: log keeps the fatal reading even when the netlist-line form is present too.
+_FATAL_ABORT_ALTERNATIVES_RE = re.compile(
+    r"^[ \t]*Error on line \d+"
+    r"|Simulation interrupted due to error"
+    r"|fatal error in ngspice",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+#: ngspice's batch completion banner -- ``ngspice-47 done`` -- printed on
+#: exit after a run ran to completion, and absent from one that died in the
+#: deck parser or was interrupted mid-analysis.
+_RUN_FINISHED_RE = re.compile(r"ngspice-\d+\s+done", re.IGNORECASE)
+
+
+def _benign_netlist_line_fatal(log_text: str) -> bool:
+    """Whether ``log_text``'s ``ngspice_fatal`` evidence is the benign
+    measure-substitute block of a *completed* run (issue #6401) and so must
+    not be graded fatal.
+
+    True only when all of these hold: the ``Error in netlist line no. N``
+    alternative is the log's only fatal evidence (no ``Error on line N``, no
+    ``Simulation interrupted due to error``, no ``fatal error in ngspice``);
+    the analysis started (:data:`_ANALYSIS_STARTED_RE`); and the run printed
+    its completion banner (:data:`_RUN_FINISHED_RE`). Anything less keeps
+    today's fatal reading, so a genuine abort -- with or without a
+    benign-looking line -- still classifies ``ngspice_fatal``. The failed
+    measures keep surfacing through the per-measurement no-value path, which
+    this exemption never touches.
+    """
+    if not _NETLIST_LINE_ERROR_RE.search(log_text):
+        return False
+    if _FATAL_ABORT_ALTERNATIVES_RE.search(log_text):
+        return False
+    return bool(
+        _ANALYSIS_STARTED_RE.search(log_text) and _RUN_FINISHED_RE.search(log_text)
+    )
+
+
+#: Codes that mean ngspice aborted while reading the deck (issue #3879). When
+#: one of them is classified and the log shows no analysis banner, the run
+#: never started: its per-measurement "produced no value" errors are
+#: consequences and are collapsed (`sim._demote_abort_cascade`). Lived in
+#: sim.py until issue #6401's :func:`_netlist_fatal_message` needed it here;
+#: aliased there and imported from there by ``sim_batch``.
+_NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
+    {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
+) | {NETLIST_TITLE_LINE_CODE}
+
+
+def _netlist_fatal_message(
+    message: str, log_text: str, start: int, classified: list[dict[str, Any]]
+) -> str | None:
+    """The ``ngspice_fatal`` message for ``log_text``, or ``None`` to drop the
+    diagnostic entirely.
+
+    ``None`` in two cases: a specific fatal code was already classified (the
+    generic reading is only the fallback cause), or the whole evidence is the
+    benign measure-substitute block of a completed run (issue #6401,
+    :func:`_benign_netlist_line_fatal`). Otherwise the message gains its
+    netline cause via :func:`_with_netlist_error_cause` as before.
+    """
+    if any(d["code"] in _NGSPICE_FATAL_CODES for d in classified):
+        return None
+    if _benign_netlist_line_fatal(log_text):
+        return None
+    return _with_netlist_error_cause(message, log_text, start)
 
 
 # --------------------------------------------------------------------------- #
