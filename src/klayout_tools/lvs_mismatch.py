@@ -23,18 +23,10 @@ classification.
 :func:`_make_compare_logger`, plus a handful of the classification helpers
 below) exactly as they called the same functions when this was one file.
 
-Dependency surface is intentionally narrow: this module calls out to only
-three helpers defined in ``lvs.py`` (``_name_or_none``,
-``_subcircuit_parent_name``, ``_subcircuit_ref_name``) plus ``lvs.py``'s own
-``LvsError``/``CATEGORY_*``/parameter-tolerance constants -- imported *inside*
-the handful of functions that use them (the same deferred-import discipline
-``gen_compose_routing.py`` uses to depend on ``gen_compose.py``) rather than
-at module scope, so this module never has a load-time dependency back on
-``lvs.py`` -- only ``lvs.py`` depends on this module at import time.
-``lvs.py`` in turn imports this module's entry points back (module scope, no
-cycle -- this module never imports ``lvs`` at its own module scope) to
-preserve ``klayout_tools.lvs.<name>`` as a working import path for every name
-the test suite/callers used before this split.
+Finding categories, errors and parameter tolerances come from
+``lvs_base``. The classification functions resolve the runner's net and
+subcircuit naming helpers when they need them. The runner re-exports
+these classification helpers for existing callers.
 """
 
 from __future__ import annotations
@@ -44,6 +36,25 @@ from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
 
 from ._unionfind import UnionFind
+from .lvs_base import (
+    _COLLATERAL_NET_DESCRIPTION,
+    _PARAM_ABS_EPSILON,
+    _PARAM_DISPLAY_NAMES,
+    _PARAM_REL_EPSILON,
+    CATEGORY_DEVICE_CLASS,
+    CATEGORY_DEVICE_CLASS_ARITY,
+    CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE,
+    CATEGORY_DEVICE_FLAVOUR_MISMATCH,
+    CATEGORY_DEVICE_PROPERTY,
+    CATEGORY_DEVICE_UNMATCHED,
+    CATEGORY_HINTS_REJECTED,
+    CATEGORY_NET_MERGED,
+    CATEGORY_NET_SPLIT,
+    CATEGORY_NET_UNMATCHED,
+    CATEGORY_PIN_UNMATCHED,
+    CATEGORY_TOPOLOGY,
+    CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
+)
 from .lvs_mismatch_tolerance import (  # noqa: F401  (re-exported)
     _apply_tolerance_snaps,
     _collect_tolerance_snaps,
@@ -427,7 +438,7 @@ def _device_class_arity_mismatch(a: Any, b: Any) -> dict[str, Any] | None:
     terminal lists already agree (the ordinary both-sided
     ``device.unmatched`` case, if it ever arises).
     """
-    from .lvs import CATEGORY_DEVICE_CLASS_ARITY, _name_or_none
+    from .lvs import _name_or_none
 
     if a is None or b is None:
         return None
@@ -521,7 +532,6 @@ def _flavour_selection_warnings(
     value that would select the reference's class. Warning only: it never
     changes ``status`` and the verdict is unaffected.
     """
-    from .lvs import CATEGORY_DEVICE_FLAVOUR_MISMATCH
 
     if reference_netlist is None or deck is None:
         return []
@@ -612,7 +622,6 @@ def _device_class_family_findings(
     is purely *diagnostic*: it never changes ``status`` on its own (the
     compare this run performed already reported the mismatch it explains).
     """
-    from .lvs import CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE
 
     if reference_netlist is None or deck is None:
         return []
@@ -724,12 +733,7 @@ def _split_dangling_output_ambiguity(logger: Any) -> _DanglingSplit:
       net event is dangling-only: a swap on a connected net, or an extra
       instance whose own dangling nets are mere collateral, stays an error.
     """
-    from .lvs import (
-        CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS,
-        _name_or_none,
-        _subcircuit_parent_name,
-        _subcircuit_ref_name,
-    )
+    from .lvs import _name_or_none, _subcircuit_parent_name, _subcircuit_ref_name
 
     net_events: list[tuple[Any, Any]] = list(logger.net_mismatches)
     event_keys = getattr(logger, "net_mismatch_keys", None)
@@ -824,15 +828,7 @@ def _build_mismatches(
     constant_bindings: Sequence[tuple[str, str, str]] | None = None,
     excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
-    from .lvs import (
-        CATEGORY_DEVICE_CLASS,
-        CATEGORY_DEVICE_UNMATCHED,
-        CATEGORY_PIN_UNMATCHED,
-        CATEGORY_TOPOLOGY,
-        _name_or_none,
-        _subcircuit_parent_name,
-        _subcircuit_ref_name,
-    )
+    from .lvs import _name_or_none, _subcircuit_parent_name, _subcircuit_ref_name
 
     mismatches: list[dict[str, Any]] = []
 
@@ -1263,7 +1259,6 @@ def _same_nets_rejections(
     (whose ``details`` stays ``null``, exactly as before this distinction
     existed).
     """
-    from .lvs import CATEGORY_HINTS_REJECTED
 
     net_ids = getattr(logger, "net_ids", None)
     top_scope = getattr(logger, "top_scope", None)
@@ -1701,7 +1696,7 @@ def _classify_param_mismatch(
     disclosed as ``device.placeholder_value``/``device.parameter_excluded``,
     and the engine never compared it, so an error-severity finding on it
     would contradict the same report's own disclosure."""
-    from .lvs import _PARAM_DISPLAY_NAMES, CATEGORY_DEVICE_PROPERTY, _name_or_none
+    from .lvs import _name_or_none
 
     class_name = a.device_class().name
     entries: list[dict[str, Any]] = []
@@ -1766,7 +1761,6 @@ def _param_values_differ(a_value: float, b_value: float, exact: bool) -> bool:
 
 
 def _values_differ(a_value: float, b_value: float) -> bool:
-    from .lvs import _PARAM_ABS_EPSILON, _PARAM_REL_EPSILON
 
     return abs(a_value - b_value) > max(
         _PARAM_ABS_EPSILON, _PARAM_REL_EPSILON * max(abs(a_value), abs(b_value))
@@ -2059,13 +2053,6 @@ def _classify_net_mismatch_pool(
 ) -> list[dict[str, Any]]:
     """Apply the merge/split pattern match to one pool of co-located
     ``net_mismatch`` events (see :func:`_net_mismatch_pools`)."""
-    from .lvs import (
-        _COLLATERAL_NET_DESCRIPTION,
-        CATEGORY_NET_MERGED,
-        CATEGORY_NET_SPLIT,
-        CATEGORY_NET_UNMATCHED,
-        CATEGORY_TOPOLOGY,
-    )
 
     one_sided_layout = [
         (a, key) for (a, b), key in tagged if a is not None and b is None

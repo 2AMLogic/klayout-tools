@@ -44,6 +44,7 @@ from . import macros as macro_spec
 from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
+from . import place_and_route_route_overflow as _route_overflow
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -53,11 +54,7 @@ from ._openroad_engine import (
     container_runtime_hint,
 )
 from ._paths import _count_spef_nets_annotated as _count_spef_nets_annotated
-from ._paths import (
-    _load_request_json,
-    _reject_unknown_keys,
-    validate_request_shape,
-)
+from ._paths import _load_request_json, _reject_unknown_keys, validate_request_shape
 from ._paths import _tcl_net_list as _tcl_net_list
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
@@ -136,6 +133,15 @@ from .place_and_route_power_audit import (
 from .place_and_route_power_audit import (
     row_rail_fallback_warning as row_rail_fallback_warning,
 )
+
+# The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
+# `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
+# per-stage script assembly. Everything is re-exported (redundant `X as X`
+# aliases, same convention as the blocks above) so
+# `klayout_tools.place_and_route.<name>` keeps resolving for the stage runners
+# below and for the test suite's `monkeypatch`/direct calls.
+from .place_and_route_power_pins import _POWER_PIN_PATTERNS as _POWER_PIN_PATTERNS
+from .place_and_route_power_pins import rail_label_evidence
 from .place_and_route_reports import (
     build_congestion,
     detailed_route_convergence,
@@ -249,7 +255,6 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
-from .place_and_route_route_overflow import grt_overflow
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -632,90 +637,6 @@ _ANTENNA_DIODE_CELLS: dict[str, tuple[str, str]] = {
     "sg13g2_stdcell": ("sg13g2_antennanp", "A"),
 }
 
-#: Per-cell-library ``add_global_connection`` pin-pattern rules for the
-#: optional ``request.power`` PDN stage (issue #1091) -- same not-derivable-
-#: from-the-install, verified-not-guessed posture as
-#: :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE`/
-#: :data:`_ANTENNA_DIODE_CELLS` above, but sourced from each platform's own
-#: PDN grid config rather than `config.mk`: `add_global_connection`'s own
-#: `-pin_pattern` alias list (`VDDPE`/`VDDCE`/etc.) is a *platform*
-#: convention describing how real macro/IO-ring instances name their PG
-#: pins, not something derivable from a standard cell's own LEF `PIN ...
-#: USE POWER/GROUND` entries.
-#:
-#: Each tuple is `(net_role, pin_pattern, is_primary)`. `net_role` selects
-#: which of `request.power.power_net`/`.ground_net` the generated
-#: `add_global_connection -net {...}` call names; exactly one entry per role
-#: carries `is_primary=True`, emitting that call's `-power`/`-ground` flag --
-#: the pin `pdngen` treats as that net's primary, connectivity-defining
-#: port, mirroring `add_global_connection`'s own flag semantics (confirmed
-#: live, `openroad -no_init`, `help add_global_connection`, this repo's own
-#: sandboxed OpenROAD 26Q3-1278-g4421880472 install, 2026-08-17). The
-#: pattern list itself is copied verbatim from each platform's own PDN
-#: config, fetched 2026-08-17 from
-#: `The-OpenROAD-Project/OpenROAD-flow-scripts` @ `master`:
-#: - `sky130_fd_sc_hd` -> `platforms/sky130hd/pdn.tcl`
-#: - `gf180mcu_fd_sc_mcu9t5v0` ->
-#:   `platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg`
-#: - `gf180mcu_fd_sc_mcu7t5v0` (issue #1649) ->
-#:   `platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg`'s `global
-#:   connections` section -- byte-for-byte the same `add_global_connection`
-#:   pattern list as the `9t` config above (`PDN_TCL ?= .../pdn_grid_strategy_
-#:   $(TRACK_OPTION)_6M.cfg` selects the sibling file per `TRACK_OPTION`, but
-#:   both files' global-connection rules are identical), fetched 2026-09-11
-#:   from the same `OpenROAD-flow-scripts` @ `master`.
-#: - `sg13g2_stdcell` (issue #1784) -> IHP's own LibreLane platform config
-#:   (`libs.tech/librelane/config.tcl`, IHP-Open-PDK v0.3.0) names exactly
-#:   `SCL_POWER_PINS "VDD"` / `SCL_GROUND_PINS "VSS"` -- no macro/IO-ring
-#:   pin-alias list at all, unlike sky130/gf180mcu's `VDDPE`/`VDDCE`/etc
-#:   families (this platform's own PDN config has no macro-power-domain
-#:   convention to alias). Cross-checked against the installed
-#:   `libs.ref/sg13g2_stdcell/lef/sg13g2_stdcell.lef`: every standard cell's
-#:   only power/ground pins are `VDD` (`USE POWER`) / `VSS` (`USE GROUND`),
-#:   with no other `USE POWER`/`USE GROUND` pin name anywhere in the file --
-#:   so this entry is deliberately just the two primary patterns, no
-#:   `is_primary=False` aliases.
-_POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
-    "sky130_fd_sc_hd": (
-        ("power", "^VDD$", True),
-        ("power", "^VDDPE$", False),
-        ("power", "^VDDCE$", False),
-        ("power", "VPWR", False),
-        ("power", "VPB", False),
-        ("ground", "^VSS$", True),
-        ("ground", "^VSSE$", False),
-        ("ground", "VGND", False),
-        ("ground", "VNB", False),
-    ),
-    "gf180mcu_fd_sc_mcu9t5v0": (
-        ("power", "^VDD$", True),
-        ("power", "^VDDPE$", False),
-        ("power", "^VDDCE$", False),
-        ("power", "^VDDP$", False),
-        ("power", "^VDDC$", False),
-        ("power", "^VNW$", False),
-        ("ground", "^VSS$", True),
-        ("ground", "^VSSE$", False),
-        ("ground", "^VSSC$", False),
-        ("ground", "^VPW$", False),
-    ),
-    "gf180mcu_fd_sc_mcu7t5v0": (
-        ("power", "^VDD$", True),
-        ("power", "^VDDPE$", False),
-        ("power", "^VDDCE$", False),
-        ("power", "^VDDP$", False),
-        ("power", "^VDDC$", False),
-        ("power", "^VNW$", False),
-        ("ground", "^VSS$", True),
-        ("ground", "^VSSE$", False),
-        ("ground", "^VSSC$", False),
-        ("ground", "^VPW$", False),
-    ),
-    "sg13g2_stdcell": (
-        ("power", "^VDD$", True),
-        ("ground", "^VSS$", True),
-    ),
-}
 
 #: Per-cell-library `tapcell` call arguments for the optional
 #: `request.power` PDN stage (issue #1091). Same posture as the tables
@@ -886,10 +807,7 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
         "gf180mcu_fd_sc_mcu7t5v0__fill_2",
         "gf180mcu_fd_sc_mcu7t5v0__fill_1",
     ),
-    "sg13g2_stdcell": (
-        "sg13g2_fill_1",
-        "sg13g2_fill_2",
-    ),
+    "sg13g2_stdcell": ("sg13g2_fill_1", "sg13g2_fill_2"),
 }
 
 
@@ -897,9 +815,8 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
 #: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
-#: Like :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above, this
-#: bridges LEF/liberty cell-library names to ``klayout_tools.decks`` family
-#: keys, matching ``get_parasitics_deck``'s own accepted names exactly.
+#: The keys are LEF/Liberty library names; their values are curated
+#: extraction deck names accepted by ``get_parasitics_deck``.
 #:
 #: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
 #: family already registered in ``klayout_tools.decks.__init__`` (used
@@ -914,6 +831,7 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
     "asap7sc7p5t_rvt": "asap7",
+    "asap7sc7p5t_28_R": "asap7",
 }
 
 
@@ -1933,6 +1851,7 @@ def _run_single_corner(
             previous_hash = stage_hash
             continue
         logs_before = len(engine_logs)
+        _route_overflow.clear_congestion_report(stage, output_dir, hdl_toplevel)
 
         completed = _run_openroad(
             script_path,
@@ -1949,7 +1868,14 @@ def _run_single_corner(
                         pdk_info=pdk_info,
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
-                    )
+                    ),
+                    details=_route_overflow.route_failure_congestion(
+                        stage,
+                        completed,
+                        output_dir,
+                        hdl_toplevel,
+                        macros,
+                    ),
                 )
 
             metrics = _read_metrics(metrics_path, stage)
@@ -1990,7 +1916,7 @@ def _run_single_corner(
                 completeness=parse_routing_completeness(completed.stdout),
                 placement=placement_routability,
                 detailed=detailed_route_convergence(metrics),
-                overflow=grt_overflow(output_dir, hdl_toplevel, macros),
+                overflow=_route_overflow.grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for
@@ -2285,6 +2211,8 @@ def _run_single_corner(
             "connects": _pdn_connects_applied(power),
             "row_rail": row_rail_info,
         }
+
+        power_info.update(rail_label_evidence(power, cell_library, library))
 
     # Additive field (issue #2086): what this run's own DEF says was
     # *actually placed*, as opposed to the fields above, which report what
@@ -2989,10 +2917,10 @@ def _extract_stage_metrics(
     congestion: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
-    contract's field names -- see this module's docstring
-    "``-metrics <file>.json`` confirmed working end-to-end" for the exact
-    key mapping, verified live. Only includes keys that stage's own report
-    calls actually populate (contract spike section 5: "each with whatever
+    contract's field names. See "Stage granularity and invocation shape"
+    in ``docs/cli/place-and-route.md`` for how each stage produces the dump.
+    This function defines the key mapping and includes only the keys that
+    the stage's reports populate (contract spike section 5: "each with whatever
     subset of the top-level metric fields that stage's own OpenROAD reports
     provide")."""
     entry: dict[str, Any] = {"name": stage}
