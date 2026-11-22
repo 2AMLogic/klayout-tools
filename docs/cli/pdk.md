@@ -241,16 +241,27 @@ directory itself, or a named subdirectory of it). When present it wins over
   `lib/<cell_library>__<corner>.lib` convention; unmapped libraries keep the
   convention. With several mapped corners, pass the corner explicitly.
 - `liberty.<cell_library>.<corner>` may also be a **list** of `.lib` files (a
-  library split into cell-group files whose headers match apart from the
-  `library (<name>)` name and comments). klt merges them
-  into one content-addressed `.lib` under `$KLT_CACHE_DIR` (default
-  `~/.cache/klt/liberty-merged`, never inside the PDK tree) and hands that single
-  path to Yosys/OpenROAD/OpenSTA. Top-level `lu_table_template` and
+  library split into cell-group files). klt compares their headers field by
+  field: the `library (<name>)` name, lexical comments, and the free-text
+  `date`, `revision` and `comment` attributes are ignored; every other header
+  field must match exactly, and a difference (units, operating conditions,
+  `default_max_transition`, ...) is an error naming the conflicting field
+  and both files' values. Matching files are merged into one
+  content-addressed `.lib` under `$KLT_CACHE_DIR` (default
+  `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
+  that single path to Yosys/OpenROAD/OpenSTA. A containerized
+  `openroad`/OpenSTA can only read that path if its wrapper mounts the cache
+  root (`$KLT_CACHE_DIR` itself when set, else
+  `${XDG_CACHE_HOME:-$HOME/.cache}/klt`) — the wrapper
+  `scripts/install-openroad-docker.sh` writes does (issue #5626); see
+  [`place-and-route.md`](place-and-route.md) § "Installing OpenROAD".
+  Top-level `lu_table_template` and
   `power_lut_template` groups are unioned by name (same name with different
-  content is an error). Any other header difference (units, operating
-  conditions) or a duplicate cell name is an error; the merged header is the
-  first file's plus any templates it lacks; a one-element list equals the
-  string form.
+  content is an error). A duplicate cell name is an error; the merged header
+  is the first file's plus any templates it lacks; a one-element list equals
+  the string form. The place-and-route timing sweep uses these corner keys in
+  descriptor order. Each list contributes one merged deck and a single report
+  entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
@@ -1109,9 +1120,10 @@ library's) to extract from the way `klt pdk cells` extracts from
 ## `klt pdk decks`
 
 Lists the KLayout DRC deck files a variant ships under
-`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`), and the LVS
+runsets under `libs.tech/klayout/lvs/` (or `tech/lvs/`), with the `-rd`
 globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
-exactly one of them (`is_default`); the siblings (for sky130A,
+exactly one DRC deck (`is_default`); the siblings (for sky130A,
 `sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
 sibling passed via `--deck-file` without the globals it gates on silently
 runs zero rules (`coverage_unknown`, issue #1302).
@@ -1148,21 +1160,40 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 }
 ```
 
-- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), `helper` (`*.rb.drc`,
   Ruby helper scripts that merely carry the `.drc` extension; listed but not
-  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
-  are not listed.
+  scanned, `globals: []`), or `lvs` (`*.lvs`, the directly-runnable LVS
+  runset). Other files in the directories (Python drivers, `*.lylvs`
+  wrappers, `rule_decks/` fragments) are not listed.
+- **LVS entries.** `decks[]` lists the DRC entries first, then one `kind:
+  "lvs"` entry per runset; `is_default` on an LVS entry marks the runset
+  `klt lvs --engine klayout-runset --pdk <variant>` runs, and is independent of
+  the DRC `is_default` (a variant can have an LVS default and no DRC one).
+  Exactly one entry carries it: it is the path the resolver returns, so an
+  alias symlink to that runset is listed but not flagged. A
+  caller that only wants DRC decks must filter on `kind`. `schema_version`
+  stays `1`: no existing field changed, and `kind` gained one member. LVS
+  globals are verdict-affecting (an unset `simplify`/`combine`/
+  `implicit_connect` yields a well-formed but wrong `mismatch`), so read the
+  defaults. The variables `klt lvs --engine klayout-runset` sets itself
+  (`input`, `schematic`, `report`, `top`, `topcell`) are not listed.
 - `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
   `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
   globals. A global assigned under `if not defined? $x`, `... unless defined?
-  $x` or `||=` is `required_by_caller: false` with its literal `default`;
-  any other `$name` mentioned outside a comment is `required_by_caller: true`.
-  Literal `require`/`load` includes are followed.
+  $x` or `||=` is `required_by_caller: false` with its literal `default`; any
+  other `$name` mentioned outside a comment is `required_by_caller: true`.
+  **LVS entries only** also detect a global read through a deck-level
+  `<helper>?($x)` / `<helper>?($x, default: V)` call (default `false` / `V`;
+  a receiver-qualified call such as `File.exist?($f)` is not a helper) or as
+  `CONST = $x || '<literal>'`, matched on the code before any trailing `#`
+  comment. DRC entries keep reporting those globals as required. Literal
+  `require`/`load` includes are followed.
 - **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
   proof a deck ignores a variable, and a defaulted global (e.g. `feol`
   defaulting to `"false"`) can still silently disable whole rule groups —
   read the defaults, not just the `required_by_caller` flag.
-- A variant with no `drc/` directory is a successful empty `decks` list.
+- A variant with neither a `drc/` nor an `lvs/` directory is a successful empty
+  `decks` list.
   Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`

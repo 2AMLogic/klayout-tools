@@ -4,8 +4,7 @@ functional-verification flow.
 Split out of ``functional_verification.py`` (the #1909 SDF-split precedent).
 Names that stay in ``functional_verification.py`` are reached as
 ``_fv.<name>`` at call time, so monkeypatching them on
-``klayout_tools.functional_verification`` still takes effect; every name is
-re-exported from there.
+``klayout_tools.functional_verification`` still takes effect.
 """
 
 from __future__ import annotations
@@ -14,8 +13,10 @@ import os
 import subprocess
 from typing import Any
 
+from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._verilog_top import plusargs, require_module_declared
+from .functional_verification_initial_state import resolve_module_plusargs
 
 VERILOG_TOP_FIELDS = (
     "verilog_top",
@@ -93,7 +94,7 @@ def _reject_verilog_top_options(engine: str, options: Any) -> None:
 
 
 def _resolve_verilog_top(
-    testbench: Any, sources: list[str], engine: str, options: Any
+    testbench: Any, sources: list[str] | None, engine: str, options: Any
 ) -> dict[str, Any] | None:
     """Validate the Verilog-bench form of ``request.testbench`` (issue #4083).
 
@@ -110,19 +111,25 @@ def _resolve_verilog_top(
     _reject_verilog_top_options(engine, options)
     top = resolved["verilog_top"]
     assert top is not None
-    require_module_declared(top, sources, _fv.FunctionalVerificationError)
+    if sources is not None:  # During a run, also check the module declaration.
+        require_module_declared(top, sources, _fv.FunctionalVerificationError)
     return resolved
 
 
 def _resolve_testbench_target(
     verilog_tb: dict[str, Any] | None, testbench: Any, request_dir: str
-) -> tuple[str, str, str | list[str] | None]:
-    """``(module, module_dir, testcase)`` for either testbench form."""
+) -> tuple[str, str, str | list[str] | None, list[str]]:
+    """``(module, module_dir, testcase, plusargs)`` for either testbench
+    form. On the cocotb path the plusargs are the user's validated
+    ``testbench.plusargs`` (issue #6906); on a Verilog bench they are the
+    form's own already-validated entries."""
     if verilog_tb is None:
-        return _fv._resolve_testbench(testbench, request_dir)
+        module, module_dir, testcase = _fv._resolve_testbench(testbench, request_dir)
+        plusargs = resolve_module_plusargs(testbench, _fv.FunctionalVerificationError)
+        return module, module_dir, testcase, plusargs
     top = verilog_tb["verilog_top"]
     assert top is not None
-    return top, request_dir, None
+    return top, request_dir, None, verilog_tb["plusargs"]
 
 
 def _sdf_annotate_scope(
@@ -197,7 +204,7 @@ def _check_verilog_top_sdf(
 
 
 def _verilog_top_sdf_gate(
-    sdf: dict[str, str] | None,
+    sdf: dict[str, Any] | None,
     engine: str,
     build_log: str,
     test_log: str,
@@ -208,14 +215,17 @@ def _verilog_top_sdf_gate(
 
     Issue #5854: the raised error carries the same ``sdf.dropped`` accounting
     the success-path report emits -- both refusal sites build it through the
-    shared helper in ``functional_verification_sdf_steps``."""
+    shared helper in ``functional_verification_sdf_steps``, which (issue
+    #5769) also reads the annotation context stashed into the resolved
+    ``sdf`` dict to name confirmed-rejected non-zero bit-selected-input
+    arcs in the message."""
     if sdf is None:
         return {}
     diagnostics, scanned = _fv._scan_sdf_diagnostics(build_log, test_log)
     merged = {**sdf_pre_dropped_counts, **scanned}
     if diagnostics:
         raise _fv._sdf_refusal_error(
-            sdf["file"],
+            sdf,
             engine,
             diagnostics,
             _fv._sdf_dropped_report(merged, sdf_pre_dropped_arcs),
@@ -257,9 +267,12 @@ def _run_verilog_top(
     sdf_renamed: list[dict[str, str]],
     source_defines: dict[str, Any],
     tools: list[dict[str, Any]],
+    repo_root: RepoRoot,
 ) -> dict[str, Any]:
     """Build the bench with ``iverilog``, run it with ``vvp`` and assemble the
-    ordinary report (issue #4083). No cocotb is involved.
+    ordinary report (issue #4083). No cocotb is involved. ``repo_root`` is the
+    request's repo, which the report's artifact envelopes are relative to
+    (issue #6762).
 
     The verdict never trusts an exit code alone: the run passes only when
     ``vvp`` exits 0, no ``fail_marker`` substring appears in the transcript
@@ -347,9 +360,9 @@ def _run_verilog_top(
                 "engine_version": _fv._engine_version(engine),
                 "tools": tools,
                 "cocotb_version": None,
-                "results_xml": _hashed_path_envelope(None),
-                "test_log": _hashed_path_envelope(test_log),
-                "build_log": _hashed_path_envelope(build_log),
+                "results_xml": _hashed_path_envelope(None, repo_root=repo_root),
+                "test_log": _hashed_path_envelope(test_log, repo_root=repo_root),
+                "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": None,
                 "source_defines": source_defines,
                 "parameters": {},  # issue #5697; always `{}` -- rejected upstream

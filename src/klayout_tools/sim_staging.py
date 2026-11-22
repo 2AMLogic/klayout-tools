@@ -419,22 +419,21 @@ def netlist_closure(
     return entries
 
 
-_INLINE_COMMENT_RE = re.compile(r"(?:^|\s)[;$].*$")
-
-
 def _normalized_netlist_text(text: str) -> str:
     """One netlist file reduced to the lines that define the circuit
     (issue #3074): ``*`` comment lines and trailing ``;``/``$`` comments
-    dropped, blank lines dropped, ``+`` continuations folded, whitespace
-    collapsed, case folded, and the target of an ``.include``/``.inc``
-    replaced by its directive name (location is not content; the included
-    file's own text is hashed in its place). Line order is left untouched:
-    ``.param``/``.model`` order can matter, so a reorder is a mismatch."""
-    from ._paths import fold_spice_continuations
+    (the shared :func:`~klayout_tools._spice_text.strip_spice_inline_comment`
+    rule, issue #5438) dropped, blank lines dropped, ``+`` continuations
+    folded, whitespace collapsed, case folded, and the target of an
+    ``.include``/``.inc`` replaced by its directive name (location is not
+    content; the included file's own text is hashed in its place). Line order
+    is left untouched: ``.param``/``.model`` order can matter, so a reorder
+    is a mismatch."""
+    from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 
     lines: list[str] = []
     for raw in text.splitlines():
-        line = _INLINE_COMMENT_RE.sub("", raw).strip()
+        line = strip_spice_inline_comment(raw).strip()
         if not line or line.startswith("*"):
             continue
         lines.append(line)

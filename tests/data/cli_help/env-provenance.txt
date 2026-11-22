@@ -64,4 +64,5 @@ positional arguments:
 options:
   -h, --help show this help message and exit
   --allow-prefix PREFIX an absolute install prefix that may legitimately appear (e.g. --allow-prefix /usr/share/pdk). Matched on a path-component boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not /opt/pdk-scratch/... Repeatable.
+  --json-stream treat each FILE as whitespace-separated JSON documents (default: each FILE is a single JSON document); findings gain a 0-based `document` index
   --format {text,json} output format (default: text)

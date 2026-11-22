@@ -459,9 +459,11 @@ def native_offgrid_aliases() -> dict[str, str]:
     ``provenance.rule_id``, but the native ``.output()`` id is
     ``<layer>_OFFGRID`` / ``<layer>_angle``, so the native-vs-deck coverage diff
     (``tests/test_drc_sky130_unmodeled_vs_native.py``) needs this map to see the
-    rule as implemented. Derived from ``sky130._OFFGRID_ROWS``, never hand-listed.
+    rule as implemented. Derived from ``sky130_offgrid._OFFGRID_ROWS``, never
+    hand-listed.
     """
-    from .sky130 import _OFFGRID_ROWS  # lazy: sky130 imports this module
+    # lazy: sky130_offgrid imports this module
+    from .sky130_offgrid import _OFFGRID_ROWS
 
     return {
         **{f"{stem}_OFFGRID": f"{stem}.ongrid.1" for stem, *_ in _OFFGRID_ROWS},
