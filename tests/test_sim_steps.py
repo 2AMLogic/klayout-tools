@@ -1691,7 +1691,6 @@ _TRAN = '(kind "tran")'
         ("search", {}, "for a bisection/threshold-search measurement"),
         ("optional", True, "for a measurement that may legitimately be absent"),
         ("cycle_mean", {}, f"{_TRAN} for a cycle-aligned mean"),
-        ("eye", {}, f"{_TRAN} for an eye measurement"),
         ("noise", {}, '(kind "noise") for a noise-spectrum measurement'),
     ],
 )

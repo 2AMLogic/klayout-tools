@@ -2092,15 +2092,13 @@ def _run_decks_offhost(
     """The ``remote`` / ``batch`` leg of :func:`run_deck_request`."""
     from .sim import apply_engine_host
 
-    # Validate the whole staged closure before anything billable: an
-    # unstageable include or missing file is a submit-time SimError,
-    # never a launched job that cannot run.
-    files, worker_request = stage_deck_job(request, request_dir=request_dir)
     if backend == "remote":
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
         report = _run_decks_remote(request, files, worker_request, outdir=outdir)
     elif submit_only:
         from . import sim_decks_split
 
+        files, worker_request = stage_deck_job(request, request_dir=request_dir)
         sim_decks_split.refuse_submit_only(request, units)
         return _submit_decks_batch_only(
             request, files, worker_request, artifacts_dir=artifacts_dir
@@ -2108,6 +2106,7 @@ def _run_decks_offhost(
     elif attach_job_id is not None:
         from . import sim_decks_split
 
+        _, worker_request = stage_deck_job(request, request_dir=request_dir)
         report = sim_decks_split.attach(
             request,
             worker_request,
