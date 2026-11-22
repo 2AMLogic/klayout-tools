@@ -446,9 +446,10 @@ an output low moves the same way the pin does, so `positive_unate`.
 Which way each output is forced is **measured, not inferred from `kind`**:
 the deck probes both primings of every (output, pin) pair — the clock sets
 the output high in one and low in the other — and asserts the pin in each.
-Exactly one produces an output edge; the other is already at the forced level
-and its `.meas` finds no crossing. If both or neither answer, that is a named
-error rather than a fabricated arc.
+For a forced output, exactly one priming produces an edge at every grid point.
+An unaffected output has no crossing in either priming and receives no arc
+from that pin. A declared pin must force at least one output. Conflicting
+directions or incomplete measurements across the grid produce a named error.
 
 **Recovery and removal** ride the same bisection as setup/hold, with the
 pin's *release* edge as the constrained edge and the other async pins held

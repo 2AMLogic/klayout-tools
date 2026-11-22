@@ -339,7 +339,7 @@ def run_constraints(
     rounds beyond the ones setup/hold already pays for.
     """
     cases = derive_cases(cell, arcs)
-    if async_entries:
+    if async_entries is not None:
         cases = cases + derive_async_cases(cell, async_entries)
     if not cases:
         return {"liberty": {}, "entries": []}

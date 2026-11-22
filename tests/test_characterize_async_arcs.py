@@ -400,6 +400,45 @@ def test_dffsr_async_arcs_end_to_end(tmp_path):
 
 
 @_SKIP_NO_NGSPICE
+def test_async_pin_only_characterizes_outputs_it_forces(tmp_path):
+    example = Path(__file__).parent.parent / "examples" / "characterize"
+    request = json.loads((example / "request-dffsr.json").read_text())
+    # Both outputs capture D on CLK. Only Q is connected to the async pins.
+    netlist = tmp_path / "pair.spice"
+    netlist.write_text(
+        (example / "dffsr.spice").read_text()
+        + "\n"
+        + (example / "dff.spice").read_text()
+        + "\n.subckt pair Q Q2 CLK D R S VDD VSS\n"
+        "Xreset Q qn CLK D R S VDD VSS dffsr_demo\n"
+        "Xplain Q2 CLK D VDD VSS dff_demo\n"
+        ".ends pair\n"
+    )
+    request["cell"].update(name="pair", netlist=str(netlist))
+    second = next(pin for pin in request["cell"]["pins"] if pin["name"] == "QN")
+    second.update(name="Q2", function="D")
+    request["models"]["lib"] = str(example / "models.lib")
+    request["grid"] = {"input_transition_ns": [0.08], "output_load_pf": [0.01]}
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(request))
+
+    report = characterize.run_characterize(
+        str(path), outdir=str(tmp_path / "out"), backend="local"
+    )
+    cell = report["cells"][0]
+    assert {a["output_pin"] for a in cell["arcs"]} == {"Q", "Q2"}
+    assert {
+        (a["pin"], a["output_pin"], a["timing_type"]) for a in cell["async_arcs"]
+    } == {
+        ("R", "Q", "clear"),
+        ("S", "Q", "preset"),
+    }
+    assert {(c["pin"], c["kind"]) for c in cell["constraints"]} == {
+        (pin, kind) for pin in ("R", "S") for kind in ("recovery", "removal")
+    }
+
+
+@_SKIP_NO_NGSPICE
 def test_a_request_without_async_pins_keeps_its_response_shape(tmp_path):
     """AC2's other half: nothing is added to a cell that declares none."""
     example = Path(__file__).parent.parent / "examples" / "characterize"

@@ -10,6 +10,7 @@ import pytest
 from klayout_tools import characterize, liberty_writer
 from klayout_tools import characterize_async as ca
 from klayout_tools import characterize_bisect as bisect
+from klayout_tools import characterize_constraints as cc
 from klayout_tools import characterize_sequential as cs
 from klayout_tools.characterize_cards import spice_number
 
@@ -316,7 +317,7 @@ def test_an_active_high_pin_inverts_the_reported_sense():
 @pytest.mark.parametrize(
     "answering,match",
     [
-        ({}, "does not force this output"),
+        ({}, "async pin 'R' forces no output"),
         ({0: (True, False)}, "one consistent direction"),
     ],
 )
@@ -325,7 +326,7 @@ def test_an_unresolvable_direction_is_a_named_error(answering, match):
     cases = ca.derive_async_cases(cell, _arcs(cell))
     probes = _probes(cases)
     with pytest.raises(bisect.ConstraintError, match=match):
-        ca.build_async_arcs(
+        entries = ca.build_async_arcs(
             cases=cases,
             raw=_raw(probes, answering),
             probes=probes,
@@ -334,6 +335,7 @@ def test_an_unresolvable_direction_is_a_named_error(answering, match):
             thresholds=liberty_writer.Thresholds(),
             clock_pin="CLK",
         )
+        cc.derive_async_cases(cell, entries)
 
 
 def test_a_forced_arc_carries_one_direction_only():

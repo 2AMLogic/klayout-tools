@@ -19,8 +19,8 @@ at the forced level, so its ``.meas`` finds no crossing. Which one answered
 *is* the forced direction, so ``timing_type`` follows the output
 (``preset`` where the output is driven high, ``clear`` where it is driven
 low) with nothing guessed: a clear pin gives ``clear`` on ``Q`` and
-``preset`` on an inverted ``QN``. If both or neither answer, that is a
-named error, never a fabricated arc.
+``preset`` on an inverted ``QN``. A pin can leave other outputs unaffected.
+An inconsistent direction across primings or grid points is a named error.
 """
 
 from __future__ import annotations
@@ -235,13 +235,11 @@ def resolve_direction(
     case_index: int,
     slews: int,
     loads: int,
-) -> bool:
+) -> bool | None:
     """Which way ``case``'s output is forced, read off the two primings.
 
-    Returns ``out_rising``. Raises :class:`ConstraintError` when the two
-    primings disagree with "exactly one of them moves": no edge at all means
-    the pin does not reach this output, both means the probe is not
-    measuring a forced level.
+    Return ``out_rising`` for a forced output, or ``None`` if neither
+    priming moves it anywhere on the grid.
     """
     answered: dict[bool, int] = {}
     for out_rising in (True, False):
@@ -256,15 +254,9 @@ def resolve_direction(
     complete = [edge for edge, count in answered.items() if count == total]
     partial = [edge for edge, count in answered.items() if 0 < count < total]
     where = f"async pin '{case.pin}' -> output '{case.output_pin}'"
+    if not any(answered.values()):
+        return None
     if partial or len(complete) != 1:
-        if not complete and not partial:
-            raise ConstraintError(
-                f"{where}: asserting the pin moved the output from neither "
-                "the output-high nor the output-low priming, so the pin "
-                "does not force this output -- remove it from "
-                "cell.async_pins, or check the cell's netlist and the "
-                "output's next-state function"
-            )
         raise ConstraintError(
             f"{where}: asserting the pin did not force one consistent "
             f"direction over the whole grid (output-rise answered "
@@ -295,6 +287,8 @@ def build_async_arcs(
         out_rising = resolve_direction(
             case, raw, index_of, case_index, len(grid_ns), len(loads_pf)
         )
+        if out_rising is None:
+            continue
         delay_rows: list[tuple[float, ...]] = []
         transition_rows: list[tuple[float, ...]] = []
         for si in range(len(grid_ns)):
