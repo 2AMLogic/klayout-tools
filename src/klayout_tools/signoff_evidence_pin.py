@@ -21,12 +21,16 @@ PIN_UNVERIFIABLE = "unverifiable"
 
 
 def common_input_hash(value: Any) -> str | None:
-    """The input digest shared by every shard, or the original scalar digest."""
+    """The digest shared by every shard of a merged sim report.
+
+    Only a *list* reduces to ``None`` (empty or non-uniform). A scalar comes
+    back untouched, ``""`` included: a declared empty-string ``content_hash``
+    is echoed verbatim (#6403)."""
     if isinstance(value, list):
         if not value or not all(member == value[0] for member in value):
             return None
-        value = value[0]
-    return value if isinstance(value, str) and value else None
+        return value[0]
+    return value
 
 
 def content_hash_pin_state(

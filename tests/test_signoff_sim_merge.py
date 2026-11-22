@@ -10,6 +10,7 @@ import pytest
 from klayout_tools import sim, sim_merge
 from klayout_tools.cli import main
 from klayout_tools.signoff import build_signoff, build_tier_report
+from klayout_tools.signoff_evidence_pin import common_input_hash
 from klayout_tools.signoff_repin import repin_manifest
 from test_sim_merge import _plan, _write, _write_grid_request
 from test_sim_merge import stub_ngspice as stub_ngspice
@@ -158,3 +159,37 @@ def test_missing_provenance_keeps_the_missing_shards_slot(tmp_path, grid, missin
     assert (
         _item5(tmp_path, _manifest(path, digest))["reason"] == "unverifiable_provenance"
     )
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("sha256:a", "sha256:a"),
+        ("", ""),
+        (None, None),
+        (["sha256:a", "sha256:a"], "sha256:a"),
+        (["", ""], ""),
+        (["sha256:a", "sha256:b"], None),
+        (["sha256:a", None], None),
+        ([None, None], None),
+        ([], None),
+    ],
+)
+def test_common_input_hash_only_a_list_reduces_to_none(value, expected):
+    """A scalar -- ``""`` included -- is echoed back verbatim (#6403); only an
+    empty or non-uniform shard list collapses to ``None``."""
+    assert common_input_hash(value) == expected
+
+
+def test_empty_string_digest_is_not_a_provenance_mismatch(tmp_path, grid):
+    """``_check_input_hashes`` must not read a consistent ``""`` digest -- one
+    report, or the same ``""`` on every shard -- as a mismatch with itself."""
+    plan, members = grid
+    for report in members.values():
+        report["provenance"]["input"]["content_hash"] = ""
+    single = _write(tmp_path, "single.json", members["tt"])
+    merged = _write(tmp_path, "merged.json", _merge(tmp_path, plan, members))
+    for paths in ([single], [merged], [single, merged]):
+        consistency = build_signoff(paths)["provenance_consistency"]
+        assert consistency["mismatches"] == []
+        assert consistency["ok"]
