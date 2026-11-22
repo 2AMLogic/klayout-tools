@@ -777,7 +777,7 @@ def test_attach_shard_map_reports_a_lost_shard_and_the_others(tmp_path, monkeypa
 
     def _lose(argv, timeout_s):
         joined = " ".join(argv)
-        if lost in joined and joined.endswith("job.json -"):
+        if lost in joined and "head-object" in argv:
             return fake_completed("", returncode=1, stderr="404 Not Found")
         return inner(argv, timeout_s)
 

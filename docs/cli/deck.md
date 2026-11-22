@@ -310,6 +310,7 @@ The example uses a placeholder hash and shows selected device classes.
         "diode_pd2nw_06v0"
       ],
       "provides": ["curated_drc", "extraction"],
+      "enforced_rule_count": 127,
       "released": false,
       "release": null,
       "unmodeled_rules": ["CO.6a", "MSLOT.1", "MT.2b", "MT30.1a"]
@@ -320,7 +321,14 @@ The example uses a placeholder hash and shows selected device classes.
 
 - `deck` — the deck name.
 - `content_hash` — this install's own `sha256:`-prefixed deck source hash
-  (the same computation and shape as `provenance.deck.content_hash`).
+  (the same computation and shape as `provenance.deck.content_hash`). For a
+  deck whose `provides` includes `curated_drc` (sky130, gf180mcu, sg13g2,
+  sg13cmos5l) the hash covers the primary module and its declared
+  DRC rule sources — it is the identical value `klt deck hash` and
+  `klt deck rules` report, and `deck info` alone is therefore sufficient
+  for a provenance citation (issue #5843); no second command is needed.
+  Only `asap7` ships a second, separate artifact, reported as `drc_deck`
+  below.
 - `device_classes` — the device-class roles this deck is *structurally
   capable* of recognising (`ExtractionDeck.device_classes`) — independent of
   whether a given layout actually contains any device of that class. This is
@@ -338,6 +346,13 @@ The example uses a placeholder hash and shows selected device classes.
   `klt drc --deck asap7` and `klt deck rules --deck asap7` exit 1 (never a
   false `clean`) and point at the KLayout-script route. The field is
   additive; `schema_version` stays 1.
+- `enforced_rule_count` — how many rules the deck's curated DRC rule table
+  enforces (issue #5843), the same count as the `rules:` header of
+  [`klt deck rules`](#klt-deck-rules). `null` — present, never omitted and
+  never `0` — for a deck with no curated rule table (`asap7`), so "a rule
+  table that enforces nothing" stays distinct from "no rule table at all"
+  (`provides` carries the same distinction). Additive; `schema_version`
+  stays 1.
 - `released` / `release` — the same tri-state signal as
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
