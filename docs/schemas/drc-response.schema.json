@@ -267,6 +267,12 @@
           },
           "additionalProperties": true
         },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"},
+          "description": "Verbatim non-geometry RDB item values in document order, including any KLayout tags. Omitted when the finding has none. Rerun comparison includes these evidence strings."
+        },
         "polygon": {
           "type": ["array", "null"],
           "items": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2}
