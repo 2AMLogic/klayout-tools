@@ -105,16 +105,21 @@ def grt_overflow(
     }
 
 
-#: Why a report file that *is* on disk still yields no regions or path: it was
-#: written by an earlier attempt into a reused output directory, and only this
-#: attempt's evidence is ever named (issue #6952's test plan).
-_STALE_REPORT_REASON = (
-    "the report file on disk predates this attempt's route invocation "
-    "(reused output directory); only this attempt's report is evidence"
-)
 _NO_REPORT_REASON = (
     "the route exited before `global_route -congestion_report_file` wrote a report"
 )
+
+
+def clear_congestion_report(stage: str, output_dir: str, hdl_toplevel: str) -> None:
+    """Remove any pre-existing ``*_route_congestion.rpt`` before the route
+    stage launches OpenROAD, so a leftover report in a reused output directory
+    can never be mistaken for this attempt's evidence (issue #6952)."""
+    if stage != "route":
+        return
+    try:
+        os.unlink(congestion_report_path(output_dir, hdl_toplevel))
+    except FileNotFoundError:
+        pass
 
 
 def route_failure_congestion(
@@ -128,10 +133,9 @@ def route_failure_congestion(
     ``PlaceAndRouteError.details`` payload (issue #6952); ``None`` for any
     other stage, whose error envelope stays byte-identical.
 
-    ``completed`` is the stage's ``_OpenRoadResult`` (duck-typed: the
-    captured ``stdout`` plus the retained ``engine_log`` record -- typed
-    ``Any`` because the engine module's result type is private to its own
-    import-boundary group).
+    ``completed`` is the stage's ``_OpenRoadResult`` (duck-typed for
+    ``stdout`` -- typed ``Any`` because the engine module's result type is
+    private to its own import-boundary group).
 
     The two evidence sources are independent, and each is ``null`` with a
     field-specific reason in ``null_reasons`` when this attempt did not
@@ -139,9 +143,10 @@ def route_failure_congestion(
     per-layer table parsed from this attempt's captured stdout, and the
     worst overflow regions from the ``-congestion_report_file`` report this
     stage's own script writes -- whose raw location is exposed alongside as
-    ``congestion_report_path``. A report file that predates the invocation
-    (``engine_log["started_at"]``, retained by the engine wrapper) is not
-    evidence and is never named. Field names match the success response's
+    ``congestion_report_path``. :func:`clear_congestion_report` removes any
+    leftover report from an earlier attempt before OpenROAD launches, so
+    file presence on disk is this attempt's evidence without cross-clock
+    timestamp comparisons. Field names match the success response's
     ``congestion.global_route`` block by construction -- ``build_congestion``
     assembles both -- so a caller diffing a failed attempt against a
     successful one reads the same shape.
@@ -149,11 +154,7 @@ def route_failure_congestion(
     if stage != "route":
         return None
     report_path = congestion_report_path(output_dir, hdl_toplevel)
-    started_at = (completed.engine_log or {}).get("started_at")
-    produced = os.path.exists(report_path) and (
-        started_at is None or os.path.getmtime(report_path) >= started_at
-    )
-    stale = not produced and os.path.exists(report_path)
+    produced = os.path.isfile(report_path)
     block = build_congestion(
         global_route=parse_global_route_congestion(completed.stdout or ""),
         completeness=None,
@@ -171,9 +172,5 @@ def route_failure_congestion(
         global_route["congestion_report_path"] = report_path
     else:
         global_route["congestion_report_path"] = None
-        reason = _STALE_REPORT_REASON if stale else _NO_REPORT_REASON
-        reasons["global_route.congestion_report_path"] = reason
-        if stale:
-            reasons["global_route.overflow_regions"] = reason
-            reasons["global_route.overflow_by_region"] = reason
+        reasons["global_route.congestion_report_path"] = _NO_REPORT_REASON
     return {"congestion": {"global_route": global_route, "null_reasons": reasons}}

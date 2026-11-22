@@ -24,7 +24,6 @@ import json
 import os
 import re
 import subprocess
-import time
 import uuid
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -357,8 +356,6 @@ class _LiveLogs:
             Path(script_path).absolute().parent / "openroad-logs" / invocation_id
         )
         self.record: dict[str, Any] = {
-            # Launch wall clock, fencing prior-attempt files (#6952).
-            "started_at": time.time(),
             "invocation_id": invocation_id,
             "script_name": Path(script_path).name,
             "script_path": _log_path(Path(script_path)),

@@ -44,6 +44,7 @@ from . import macros as macro_spec
 from . import output_lock
 from . import place_and_route_rerun as _place_and_route_rerun
 from . import place_and_route_resume as _resume
+from . import place_and_route_route_overflow as _route_overflow
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
@@ -245,7 +246,6 @@ from .place_and_route_request import (
 from .place_and_route_request import (
     validate_tech_lef_track_offsets as validate_tech_lef_track_offsets,
 )
-from .place_and_route_route_overflow import grt_overflow, route_failure_congestion
 
 # The OpenROAD Tcl script-generation subsystem (issue #3904 split) lives in
 # `place_and_route_script.py`: the `*_lines(...) -> list[str]` emitters and the
@@ -1923,6 +1923,7 @@ def _run_single_corner(
             previous_hash = stage_hash
             continue
         logs_before = len(engine_logs)
+        _route_overflow.clear_congestion_report(stage, output_dir, hdl_toplevel)
 
         completed = _run_openroad(
             script_path,
@@ -1940,7 +1941,7 @@ def _run_single_corner(
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
                     ),
-                    details=route_failure_congestion(
+                    details=_route_overflow.route_failure_congestion(
                         stage,
                         completed,
                         output_dir,
@@ -1987,7 +1988,7 @@ def _run_single_corner(
                 completeness=parse_routing_completeness(completed.stdout),
                 placement=placement_routability,
                 detailed=detailed_route_convergence(metrics),
-                overflow=grt_overflow(output_dir, hdl_toplevel, macros),
+                overflow=_route_overflow.grt_overflow(output_dir, hdl_toplevel, macros),
             )
 
             # Issue #949: sweep every corner `cell_library` ships for

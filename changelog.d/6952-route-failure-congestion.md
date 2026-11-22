@@ -8,9 +8,9 @@
   the success response's `congestion` block, plus `congestion_report_path`
   naming the raw report. The table and the report are independent inputs,
   each `null` with a field-specific reason when that attempt did not produce
-  it; a report file left by a prior attempt in a reused output directory is
-  fenced out by the invocation record's new `started_at` field and never
-  named. The OpenROAD wrapper also now preserves structured error fields
+  it; any report file left by a prior attempt in a reused output directory is
+  cleared before the route stage launches OpenROAD and never named as this
+  attempt's evidence. The OpenROAD wrapper also now preserves structured error fields
   (`code`/`job_id`/`details`) when it appends the invocation record to a
   stage error, where they were previously dropped. Additive; the error
   message, exit code and stdout are unchanged for every non-route failure.

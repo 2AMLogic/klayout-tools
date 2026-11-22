@@ -313,25 +313,28 @@ def test_cli_reused_output_dir_ignores_prior_attempt_report(
         route_stdout=_GRT_0116_TABLE,
         report_text=_CONGESTION_REPORT_FIXTURE.read_text(encoding="utf-8"),
     )
+    first_report_path = error["congestion"]["global_route"]["congestion_report_path"]
+    assert first_report_path is not None and os.path.isfile(first_report_path)
     assert error["congestion"]["global_route"]["overflow_regions"] is not None
 
     # Second attempt in the same (default-root) output directory fails with
     # the table printed but never rewriting that report: the prior attempt's
-    # file is on disk yet must not be named as this attempt's evidence.
+    # file is cleared before OpenROAD launches and never named as evidence.
     error = _run_cli_json(tmp_path, monkeypatch, capsys, route_stdout=_GRT_0116_TABLE)
 
+    assert not os.path.exists(first_report_path)
     gr = error["congestion"]["global_route"]
     assert gr["total_overflow"] == 12  # stdout evidence is this attempt's
     assert gr["overflow_regions"] is None
+    assert gr["overflow_by_region"] is None
     assert gr["congestion_report_path"] is None
     reasons = error["congestion"]["null_reasons"]
-    assert gr["overflow_by_region"] is None
+    assert "route exited before" in reasons["global_route.congestion_report_path"]
     for key in (
         "global_route.overflow_regions",
         "global_route.overflow_by_region",
-        "global_route.congestion_report_path",
     ):
-        assert "predates this attempt" in reasons[key]
+        assert "no `global_route -congestion_report_file` report" in reasons[key]
 
 
 def test_route_failure_congestion_is_none_off_the_route_stage(tmp_path):
