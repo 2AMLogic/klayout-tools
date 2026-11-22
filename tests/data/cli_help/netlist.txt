@@ -15,6 +15,7 @@ positional arguments:
 options:
   -h, --help show this help message and exit
   -o, --output OUTPUT path to write the SPICE netlist to (the committed artifact). Under --check this file is read and compared, never written
+  --output-dir DIR export the top-level and split SPICE netlists with their original names and bytes (local generate only)
   --check do not write anything: regenerate the netlist into a temp directory and diff it against the committed file at --output, reporting status 'match' (exit 0) or 'drifted' (exit 3). This is the staleness gate for a committed netlist -- a netlist that has silently drifted from its schematics attributes simulation results to a schematic that no longer exists. An absent --output file is reported as 'drifted', not as an error
   --timeout-s TIMEOUT_S wall-clock bound on the xschem run in seconds (default: 120). A real batch netlist takes well under a second; this bound exists for the hang described above, and exceeding it is an error (exit 1), never a silent empty result
   --rcfile RCFILE project-local xschemrc to load (symbol search path, PDK root). Passed through to xschem as --rcfile verbatim. With --pdk/--pdk-root (or $PDK/$PDK_ROOT), the PDK root the xschemrc declares is cross-checked against the resolved PDK and a mismatch is reported (issue #2680)

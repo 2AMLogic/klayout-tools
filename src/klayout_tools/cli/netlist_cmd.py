@@ -71,7 +71,10 @@ def run(args: argparse.Namespace) -> int:
         canonical_wrap = bool(getattr(args, "canonical_wrap", False))
         erc = bool(getattr(args, "erc", False))
         no_header = bool(getattr(args, "no_provenance_header", False))
+        output_dir = getattr(args, "output_dir", None)
         if backend == "batch":
+            if output_dir is not None:
+                raise NetlistError("--output-dir requires --backend local")
             if erc:
                 raise NetlistError(
                     "--erc is not supported with --backend batch; use --backend local"
@@ -110,6 +113,7 @@ def run(args: argparse.Namespace) -> int:
             report = run_netlist(
                 args.schematic,
                 args.output,
+                output_dir=output_dir,
                 check=args.check,
                 timeout_s=args.timeout_s,
                 xschem_binary=args.xschem_binary,
@@ -131,7 +135,7 @@ def run(args: argparse.Namespace) -> int:
         )
 
     for entry in report.get("warnings") or ():
-        if entry["code"] == PDK_VARIANT_UNESTABLISHED_CODE:
+        if entry["code"] in (PDK_VARIANT_UNESTABLISHED_CODE, "split_netlists_omitted"):
             _warn(entry["message"])
             continue
         _warn(
@@ -180,6 +184,8 @@ def _print_check_hashes(report: dict) -> None:
         f"{label}: {netlist['lines']} lines, {netlist['bytes']} bytes, "
         f"{netlist['content_hash']}"
     )
+    if "produced_files" in report:
+        print(f"produced files: {', '.join(report['produced_files'])}")
     drift = report.get("drift")
     if drift is not None:
         print(f"committed: {drift['committed_content_hash'] or '-'} (the -o file)")

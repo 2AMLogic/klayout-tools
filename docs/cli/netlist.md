@@ -7,14 +7,18 @@ on the SPICE side: it produces the netlist `klt sim` simulates and (eventually)
 `klt lvs` compares a layout against.
 
 ```
-klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--symbol-path <dir>]... [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
+klt netlist <schematic> (-o <netlist> | --output-dir <dir>) [--check] [--block] [--timeout-s <s>] [--rcfile <path>] [--symbol-path <dir>]... [--pdk <variant>] [--pdk-root <path>] [--xschem-binary <path>] [--backend local|batch] [--batch-root <dir>] [--batch-include <glob>]... [--batch-exclude <glob>]... [--format text|json]
 ```
 
 - `<schematic>` — path to the xschem schematic to netlist (`.sch`). Checked
   for existence/readability **before** any subprocess is launched.
-- `-o`, `--output` — **required**. Where the SPICE netlist goes: the artifact
-  a repo commits. Under `--check` this file is *read and compared*, never
+- `-o`, `--output` — write the top-level SPICE netlist to this file. Under `--check` this file is *read and compared*, never
   written. Parent directories are created as needed.
+- `--output-dir DIR` — publish the original bytes of the top-level netlist and
+  any fresh per-symbol `.spice` files under their xschem basenames. Choose one
+  destination. Directory export requires local generation and accepts
+  `--no-provenance-header`. It rejects `--check`, `--block`,
+  `--relative-paths`, and `--canonical-wrap`.
 - `--check` — do not write anything. Regenerate into a temp directory and
   diff against the committed file at `--output`, reporting `status: "match"`
   (exit `0`) or `"drifted"` (exit `3`). See
@@ -53,6 +57,26 @@ klt netlist <schematic> -o <netlist> [--check] [--block] [--timeout-s <s>] [--rc
   only, repeatable: narrow the uploaded set to the files a schematic needs
   while keeping a repo-level root (see "What is uploaded").
 - `--format` — `text` (default, a human-readable summary) or `json`.
+
+### Export a split hierarchy
+
+For a project rcfile with `set split_files 1`, use the directory destination
+to keep the subcircuit definitions alongside the top-level deck.
+
+```bash
+klt netlist driver.sch --rcfile project.xschemrc --backend local \
+  --output-dir build/netlists --format json
+```
+
+A run that generates `driver.spice`, `a.spice`, and `b.spice` reports
+`"produced_files": ["a.spice", "b.spice", "driver.spice"]`. The `output` and
+`netlist.path` fields name `build/netlists/driver.spice`. Its size and hash
+describe xschem's original bytes. No provenance header or port rewrite is
+applied. Other files already in the destination stay in place.
+
+With `--output FILE`, local generation still post-processes the top-level
+netlist. If xschem also writes split siblings, the `split_netlists_omitted`
+warning lists their basenames in `files` and echoes them to stderr.
 
 ## Why this verb exists
 
@@ -343,7 +367,7 @@ different xschem builds differ on that line whatever the wrapping. Without
 the flags the written netlist keeps the generating host's form, and
 `--check` still forgives all three surfaces when comparing.
 
-**Generation inputs are recorded** (issue #4945). The line is a stable, strippable contract; pass `--no-provenance-header` (issue #5085) to omit it, so the written netlist is byte-identical to xschem's own export (for projects that hash-pin committed netlists). The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
+**Single-file generation records its inputs** (issue #4945). Pass `--no-provenance-header` (issue #5085) to omit the header. Single-file generation still rewrites comma-joined bus ports. Use `--output-dir` for exact xschem bytes. The payload reports `provenance_header` (`true` by default), and `netlist.content_hash` and `netlist.bytes` describe the bytes actually written. `--check` is unaffected, and a headerless committed netlist still checks cleanly. Not supported with `--backend batch`. A written netlist starts with
 one comment line, `** klt-netlist-inputs: {"pdk_variant": ..., "rcfile": ...,
 "xschem_version": ...}`: the xschem version, the `--rcfile` *basename* (its
 directory is checkout-specific) and the PDK variant that produced it —
@@ -809,7 +833,8 @@ rcfile declaring the other variant's directory fires both.
 | --- | --- | --- |
 | `schema_version` | integer | Version of this command's JSON shape (starts at `1`). |
 | `schematic` | string | The input schematic path exactly as provided on the command line. |
-| `output` | string | The `--output` path exactly as provided. Written in `generate` mode; read and compared in `check` mode. |
+| `output` | string | The supplied `--output` path, or the top-level netlist path in `--output-dir`. |
+| `produced_files` | array of strings | Directory generation only. Sorted basenames of the netlists delivered by this run. |
 | `mode` | `"generate"` \| `"check"` | Which mode ran (`"check"` iff `--check` was passed). |
 | `status` | `"generated"` \| `"match"` \| `"drifted"` | `"generated"` in `generate` mode; `"match"`/`"drifted"` in `check` mode. |
 | `canonical_wrap` | boolean | **`generate` mode only**: whether `--canonical-wrap` folded the written netlist onto the layout `--check` compares (issue #5715). Absent in `check` mode. |
