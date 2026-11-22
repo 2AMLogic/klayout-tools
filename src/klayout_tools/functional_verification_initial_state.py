@@ -40,8 +40,31 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ._verilog_top import plusargs
+
 INITIAL_STATE_MODULE = "klt_initial_state"
 SEED_PLUSARG = "klt_init_seed"
+
+
+def resolve_module_plusargs(testbench: Any, error: type[Exception]) -> list[str]:
+    """``testbench.plusargs`` on the cocotb path (issue #6906): the same
+    shape the Verilog-bench path validates
+    (:func:`klayout_tools._verilog_top.plusargs`), plus a reservation of
+    ``klt_init_seed`` -- the name this module's own generated
+    ``+klt_init_seed=<n>`` plusarg owns -- so a user entry can never shadow
+    or be shadowed by it. Refused whether or not ``options.initial_state``
+    is set: a request's validity must not depend on an unrelated option.
+    ``[]`` when the field is absent."""
+    entries = plusargs(testbench.get("plusargs"), error)
+    for index, entry in enumerate(entries):
+        if entry[1:].split("=", 1)[0] == SEED_PLUSARG:
+            raise error(
+                f"request.testbench.plusargs[{index}] uses the klt-reserved "
+                f"name '{SEED_PLUSARG}' (options.initial_state's own plusarg) "
+                "-- choose another name"
+            )
+    return entries
+
 
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 

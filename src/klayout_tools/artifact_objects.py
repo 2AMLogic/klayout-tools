@@ -26,7 +26,9 @@ Broker wire contract (the broker is not part of this repo):
   ``stat`` answers ``{exists, size}``. ``delete`` takes the ``stat`` body and
   answers any 200 JSON object; the broker owns authorization and retention.
 - A refusal is ``{"error", "message"}`` with a 4xx/5xx status, surfaced
-  verbatim as :class:`ArtifactError` code ``broker_refused``. HTTP 429 is
+  verbatim as :class:`ArtifactError` code ``broker_refused`` -- except a
+  route-level 404/405/501 on ``delete`` (no ``/v1/delete``), re-raised as
+  ``unsupported_operation``. HTTP 429 is
   retried with bounded backoff (honoring ``Retry-After``); when the retries run
   out it is code ``broker_rate_limited`` instead. There is no
   local fallback and no direct object-store path (no cloud SDK, no cloud
@@ -395,6 +397,28 @@ def referenced_digests(keep_manifests: list[str]) -> dict[str, str]:
     return referenced
 
 
+UNIMPLEMENTED_DELETE_STATUSES = (404, 405, 501)
+
+
+def _delete_failure(exc: ArtifactError, objects: list[dict[str, Any]]) -> ArtifactError:
+    """Keep the broker details and identify any deletes confirmed before the refusal."""
+    code, message = exc.code, str(exc)
+    status = exc.details.get("broker_status")
+    if code == "broker_refused" and status in UNIMPLEMENTED_DELETE_STATUSES:
+        code = "unsupported_operation"
+        message = (
+            "the artifact broker does not implement the delete op for this object "
+            f"(HTTP {status}: {exc.details.get('broker_error')}: "
+            f"{exc.details.get('broker_message')})"
+        )
+    deleted = [row["sha256"] for row in objects if row["status"] == "deleted"]
+    if deleted:
+        message += "; previously deleted: " + ", ".join(deleted)
+    elif code == "unsupported_operation":
+        message += "; nothing was deleted"
+    return ArtifactError(message, code, dict(exc.details))
+
+
 def delete_objects(
     client: BrokerClient,
     targets: list[FetchTarget],
@@ -410,6 +434,12 @@ def delete_objects(
     referenced target refuses the whole batch with ``still_referenced``
     unless ``force_referenced``. An absent object is success. The client
     cannot enumerate the store, so only objects the caller names are touched.
+
+    A route-level 404/405/501 refusal on the ``delete`` call (no
+    ``/v1/delete`` route; ``stat`` had already confirmed the object present)
+    is re-raised as code ``unsupported_operation``; other refusals (403
+    authorization, 5xx) stay ``broker_refused``. A stat→delete race would be
+    misreported as it -- acceptable, since such a race deletes nothing anyway.
     """
     unique: dict[tuple[str, str, str], FetchTarget] = {}
     for target in targets:
@@ -448,10 +478,11 @@ def delete_objects(
             )
             continue
         if stat.exists:
-            client.call(
-                "delete",
-                {"kind": target.kind, "repo": target.repo, "sha256": target.sha256},
-            )
+            body = {"kind": target.kind, "repo": target.repo, "sha256": target.sha256}
+            try:
+                client.call("delete", body)
+            except ArtifactError as exc:
+                raise _delete_failure(exc, objects) from exc
         objects.append({**item, "status": "deleted" if stat.exists else "absent"})
     return {
         "status": "deleted" if yes else "dry_run",
