@@ -2866,10 +2866,14 @@ letting a `"valid"` status imply more than it earned. See
 
 `extraction.resistance_graph.nets[]` entries — present only with
 `--resistance-graph` — additively gain `terminals` and `pair_resistance_ohm`,
-copied verbatim from `klt extract`'s own per-net `resistance_graph` (the
-sorted geometry-derived terminal names and the full symmetric
-effective-resistance matrix, `null` for a disconnected pair, `[]` on an
-`unsupported`/`skipped` net). This closes an honesty gap in the
+copied verbatim from `klt extract`'s per-net `resistance_graph`.
+`terminals` lists the sorted geometry-derived names available when the
+calculation stopped. A skipped net with one terminal retains that name.
+An unsupported solve can retain both terminal names, while a graph that
+failed before terminal discovery has an empty list.
+`pair_resistance_ohm` is the symmetric effective-resistance matrix. A
+solved matrix uses `null` for a disconnected pair. A `skipped` or
+`unsupported` net has an empty matrix (`[]`). This closes an honesty gap in the
 extraction-to-simulation loop: the lumped `resistance_ohm` a `legacy` net
 keeps is a series sum of *all* the net's fragments, so a tree-routed net's
 total overstates the terminal-to-terminal path (stub arms to terminals
