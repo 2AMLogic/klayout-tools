@@ -163,8 +163,12 @@ def _selected_probes(group: dict[str, Any], prefix: str, *, omit: bool) -> list[
                 f"measurement {name!r} (measurements[{index}].sides) needs a "
                 "name and the side selection 'schematic'"
             )
-        if not spec.get("intermediate"):
-            selected.append(prefix + name)
+        if spec.get("intermediate"):
+            raise PexError(
+                f"measurement {name!r} (measurements[{index}]) is 'intermediate' "
+                "(never reported or graded), so it cannot declare 'sides'"
+            )
+        selected.append(prefix + name)
     if omit and len(portable) != len(specs):
         group["measurements"] = portable
     return selected
