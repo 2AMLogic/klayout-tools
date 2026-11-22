@@ -275,3 +275,43 @@ def test_canonicalize_keeps_same_spelling_outside_top_level_nets():
     assert normalized["devices"][0]["nets"] == {"structural_id": "A"}
     assert normalized["provenance"]["runset"]["deck_vars"] == {"structural_id": "A"}
     assert normalized != _canonicalize_extract_report_for_rerun_diff(report("B"))
+
+
+@pytest.mark.parametrize(
+    ("source_layer", "include_texts", "expected"),
+    [(2, True, True), (24, True, False), (2, False, False)],
+)
+def test_numbered_label_belongs_to_the_serialized_net(
+    tmp_path, source_layer, include_texts, expected
+):
+    from klayout_tools.extract_runset_labels import (
+        numbered_label_net_ids,
+        numbered_labels,
+    )
+
+    layout = kdb.Layout()
+    cell = layout.create_cell("TOP")
+    child = layout.create_cell("LABELS")
+    wire = layout.layer(2, 0)
+    cell.shapes(wire).insert(kdb.Box(0, 0, 1000, 1000))
+    child.shapes(layout.layer(source_layer, 0)).insert(kdb.Text("$1", 0, 0))
+    cell.insert(kdb.CellInstArray(child.cell_index(), kdb.Trans(500, 500)))
+    labels = numbered_labels(layout, cell)
+    cell.flatten(-1, True)
+    db = kdb.LayoutVsSchematic(kdb.RecursiveShapeIterator(layout, cell, []))
+    conductor = (
+        db.make_layer(wire, "wire")
+        if include_texts
+        else db.make_polygon_layer(wire, "wire")
+    )
+    db.connect(conductor)
+    db.extract_netlist()
+    path = str(tmp_path / "labels.lvsdb")
+    db.write(path)
+    restored = kdb.LayoutVsSchematic()
+    restored.read(path)
+    circuit = restored.netlist().top_circuit()
+    net = circuit.net_by_name("$1")
+    assert net is not None and net.pin_count() == 0
+    found = numbered_label_net_ids(restored, circuit, labels)
+    assert (net.cluster_id in found) is expected

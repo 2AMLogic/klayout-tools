@@ -1076,12 +1076,13 @@ resolves to a plausible-but-wrong measurement). Two extractions of one GDS
 differing only in numbering report the same value per corresponding net; a
 genuine connectivity change reports a different one.
 
-An external runset's LVS database serializes an unnamed net as `$<cluster_id>`.
-The runset engine treats that spelling as generated when the net has no pin and
-the selected layout hierarchy contains no text with that spelling. Ambiguous
-numbered labels receive `null`. A name supplied only by a custom deck that
-exactly matches the generated spelling has no separate identity marker in the
-database.
+An external runset's LVS database can give an unnamed net a generated `$N`
+name and renumber its clusters when the database is read. The runset engine
+identifies numbered pins and labels attached to the individual net. It checks
+retained text and, for polygon layers, the label's recorded point on its
+original stream layer. An unrelated drawing note can share the same spelling.
+A numeric name supplied only by a custom deck can be indistinguishable from a
+generated name when the database contains no pin or label evidence.
 
 The field is `null` when no structural identity is derivable: a **named**
 net (its `name` is the label a consumer already joins on — and, per the

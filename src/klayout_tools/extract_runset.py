@@ -112,6 +112,11 @@ from .extract_runset_flags import (
 from .extract_runset_flags import (
     validate_engine as validate_engine,
 )
+from .extract_runset_labels import (
+    NumberedLabels,
+    numbered_label_net_ids,
+    numbered_labels,
+)
 from .extract_runset_spice import (
     DeviceParams,
     _check_device_params,
@@ -311,7 +316,7 @@ def run_extract_klayout_runset(
     # The top cell has to be known before the runset runs: the stub schematic
     # is named after it, and the runset is told which cell to extract.
     with stage("layout_load"):
-        top_cell_name, dbu_um, numbered_labels = _layout_identity(path, top)
+        top_cell_name, dbu_um, labels = _layout_identity(path, top)
 
     binary = _resolve_binary(klayout_binary, base_dir)
 
@@ -368,7 +373,10 @@ def run_extract_klayout_runset(
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
         instantiated = _instantiated_device_counts(circuit)
         nets = _staged(
-            "describe_nets", _describe_nets, circuit, runset_labels=numbered_labels
+            "describe_nets",
+            _describe_nets,
+            circuit,
+            runset_label_ids=numbered_label_net_ids(lvsdb, circuit, labels),
         )
         runset_block = {
             "deck_file": deck_file,
@@ -472,24 +480,13 @@ def run_extract_klayout_runset(
     return result
 
 
-def _layout_identity(path: str, top: str | None) -> tuple[str, float, set[str]]:
+def _layout_identity(path: str, top: str | None) -> tuple[str, float, NumberedLabels]:
     """Resolve the top, units and labels which can resemble serialized net numbers."""
-    import klayout.db as kdb
-
     from ._layout import load_layout, resolve_top_cell
 
     layout = load_layout(path, ExtractError)
     cell = resolve_top_cell(layout, top, ExtractError, path=path)
-    # An LVS database materializes an unnamed net's expanded name as "$<cluster_id>".
-    # Drawn names take precedence, including labels in a child the runset flattened.
-    labels = {
-        shape.text_string
-        for index in (cell.cell_index(), *cell.called_cells())
-        for layer in layout.layer_indexes()
-        for shape in layout.cell(index).shapes(layer).each(kdb.Shapes.STexts)
-        if shape.text_string.startswith("$") and shape.text_string[1:].isdigit()
-    }
-    return cell.name, layout.dbu, labels
+    return cell.name, layout.dbu, numbered_labels(layout, cell)
 
 
 def _schema_version() -> int:

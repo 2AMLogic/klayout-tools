@@ -483,7 +483,7 @@ def test_runset_nets_expose_terminal_identity(tmp_path, fake_klayout, no_netlist
     }
 
 
-def test_runset_withholds_an_ambiguous_numbered_label(tmp_path, fake_klayout):
+def test_unused_numbered_label_preserves_gate_identity(tmp_path, fake_klayout):
     gds, deck = _inputs(tmp_path)
     layout = kdb.Layout()
     layout.read(gds)
@@ -496,4 +496,4 @@ def test_runset_withholds_an_ambiguous_numbered_label(tmp_path, fake_klayout):
     )
     gate = next(net for net in result["nets"] if net["net_id"] == 1)
     assert gate["device_count"] == 1
-    assert gate["structural_id"] is None
+    assert gate["structural_id"] == "$anon<$1.g>"

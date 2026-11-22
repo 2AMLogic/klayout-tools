@@ -33,6 +33,7 @@ circular import evaluated mid-load.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -455,15 +456,14 @@ def _pin_index_by_net_id(circuit: kdb.Circuit) -> dict[int, int]:
     return result
 
 
-def _net_structural_id(net: kdb.Net, runset_labels: set[str] | None) -> str | None:
+def _net_structural_id(net: kdb.Net, runset_label_ids: set[int] | None) -> str | None:
     """Identify an unnamed net by its own device terminals, even if names collide."""
-    if net.name and (
-        runset_labels is None
-        or net.name != f"${net.cluster_id}"
-        or net.name in runset_labels
-        or net.pin_count()
-    ):
-        return None
+    if net.name:
+        if runset_label_ids is None or net.pin_count():
+            return None
+        numbered = re.fullmatch(r"\$[1-9][0-9]*", net.name)
+        if not numbered or net.cluster_id in runset_label_ids:
+            return None
     attachments = sorted(
         f"{ref.device().expanded_name()}.{ref.terminal_def().name.lower()}"
         for ref in net.each_terminal()
@@ -475,7 +475,7 @@ def _describe_nets(
     circuit: kdb.Circuit,
     net_label_positions: Mapping[int, list[dict[str, Any]]] | None = None,
     *,
-    runset_labels: set[str] | None = None,
+    runset_label_ids: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Describe top-level nets, including their drawn labels and SPICE pin positions.
 
@@ -494,7 +494,7 @@ def _describe_nets(
                 "name": spice_safe_net_name(raw_name),
                 "pin": raw_name in pin_nets,
                 "device_count": net.terminal_count(),
-                "structural_id": _net_structural_id(net, runset_labels),
+                "structural_id": _net_structural_id(net, runset_label_ids),
                 "net_id": net.cluster_id,
                 "pin_index": pin_index_by_net_id.get(net.cluster_id),
                 "label_positions_um": label_positions.get(net.cluster_id, []),
