@@ -949,7 +949,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   **Re-baseline note**: this moves the header once more for joined-label
   layouts, so a committed extracted netlist produced with `--pins` on such a
   layout needs regenerating once; after that the header depends only on
-  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  `--pins`, subject to the #2000 disconnected-label exception. A single
+  drawn `Y|ybar` label orders its escaped token `Y\x7cybar` (#6021).
+  With two distinct labels `Y` and `ybar`, declare a component to promote
+  the net and order its `Y|ybar` token.
+  `docs/cli/extract.md` also now records that *without* `--pins` the
   top-level port order is the extractor's own and is not a cross-build
   contract, alongside the existing `$N` caveat (#1063). Additive; no
   `schema_version` bump.
