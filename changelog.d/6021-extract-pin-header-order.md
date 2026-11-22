@@ -1,15 +1,9 @@
-- **`klt extract --pins` hoists a header token on a whole-token match too**
-  (#6021, 2026-11-17): #5534 made the top `.SUBCKT` header ordering match
-  per component label, but that rule alone cannot match a declared name
-  that itself contains `|` -- a caller may declare a two-label net by its
-  joined spelling (`a|b`), and the header token's *parts* (`a`, `b`) are
-  neither equal to it, so the declared pin silently stayed in its old
-  position. The pre-#5534 whole-token comparison is restored alongside the
-  per-label one, making the match a true superset: pipe-free headers
-  behave exactly as before, since the two comparisons coincide there.
-  `docs/cli/extract.md` also qualifies its "fully determined by `--pins`"
-  wording for the #2000 duplicate-label carve-out: a declared name
-  matching 2+ physically disconnected same-label nets keeps all of them
-  promoted, hoisted in their existing header order, so `pin_count` can
-  exceed the declared set's size. No JSON field or `schema_version`
-  change.
+- **`klt extract --pins` orders a drawn pin label containing a literal pipe**
+  (#6021, 2026-11-17). A single label drawn as `Y|ybar` can be declared as
+  `Y|ybar`; its escaped SPICE token `Y\x7cybar` occupies the declared slot.
+  When `Y` and `ybar` are two labels on one net, declare either component
+  to promote it. Declaring only their joined display spelling leaves it
+  internal. The promoted pin keeps the writer's `Y|ybar` token. Ordering
+  also accepts whole tokens already present in the header. For disconnected
+  same-label nets (#2000), all matching ports stay promoted in their existing
+  relative order, so `pin_count` can exceed the number of declared pins.

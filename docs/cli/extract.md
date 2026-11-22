@@ -146,16 +146,15 @@ two disagree, this document (and the code) win.
   given is also the order of the top `.SUBCKT` header (issue #5255): declared
   pins come first, in the given order, and any remaining ports follow in the
   existing deterministic order — so `klt pex --pins` can match a schematic
-  header without a wrapper subcircuit. That ordering uses the *same*
-  any-component-label match as promotion above (issue #5534) plus a
-  whole-token comparison (issue #6021 — a declared name that itself
-  contains `|`, e.g. a two-label net declared by its joined spelling,
-  also matches the header token it names whole): a joined-label port is
-  hoisted into the slot of the earliest declared name it carries, keeping
-  its joined spelling intact (`Y|ybar` moves, but is still written
-  `Y|ybar`), and a port carrying two declared names appears once, at the
-  earlier of them. Because a net none of whose labels is declared is
-  demoted, a header written *with* `--pins` is fully determined by
+  header without a wrapper subcircuit. A port with two distinct drawn labels,
+  `Y` and `ybar`, is promoted by declaring either label. Its header token `Y|ybar`
+  occupies the earliest matching slot and appears once (#5534). Declaring
+  only the joined spelling `Y|ybar` leaves that two-label net internal.
+  For a single drawn label whose text is literally `Y|ybar`, declare
+  `Y|ybar`. KLayout emits the token `Y\x7cybar`, and the extractor places
+  that token in the declared slot (#6021). Header ordering also accepts a
+  whole-token match for a port already promoted when no remaining drawn
+  label matches. Because a net none of whose labels is declared is demoted, a header written *with* `--pins` is fully determined by
   `--pins` — with one exception (issue #2000): a declared name matching
   2+ physically disconnected nets that share the identical drawn label
   keeps every matching net promoted, and the ordering hoists them all at

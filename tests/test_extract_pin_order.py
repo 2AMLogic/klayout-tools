@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from klayout_tools.cli import main
 from klayout_tools.cli._parsing import parse_declared_pins
 from klayout_tools.extract_pin_order import _apply_pin_order_to_spice
@@ -91,14 +93,16 @@ def test_pin_matching_two_declared_names_is_emitted_once_at_earliest(tmp_path):
 
 
 def test_whole_token_pipe_declared_name_hoists(tmp_path):
-    """Issue #6021: a declared name that itself contains `|` (a caller may
-    declare a two-label net by its joined spelling) hoists the header token
-    it names whole -- the pre-#5534 comparison -- which the per-component
-    rule alone cannot match (the token's *parts* are `a` and `b`, neither of
-    which equals `a|b`)."""
+    """A header token already present may also be matched by its full spelling."""
     path = _write(tmp_path, ".SUBCKT top z a|b y")
     _apply_pin_order_to_spice(path, "top", ("a|b",))
     assert ".SUBCKT top a|b z y\n" in open(path).read()
+
+
+def test_literal_label_wins_over_another_ports_joined_spelling(tmp_path):
+    path = _write(tmp_path, r".SUBCKT top gnd Y|ybar Y\x7cybar vpwr")
+    _apply_pin_order_to_spice(path, "top", ("gnd", "Y|ybar", "vpwr", "ybar"))
+    assert r".SUBCKT top gnd Y\x7cybar vpwr Y|ybar" in open(path).read()
 
 
 def test_whole_token_match_stays_case_insensitive(tmp_path):
@@ -137,6 +141,52 @@ def test_cli_pins_order_holds_for_joined_label_nets(tmp_path, capsys):
     # `Y|ybar` matches declared `ybar` through its component label, so it is
     # hoisted into the declared slot rather than trailing the whole-name hits.
     assert header.split()[2:] == ["VPWR", "Y|ybar", "VGND"]
+
+
+@pytest.mark.parametrize(
+    ("literal", "declared", "expected"),
+    [
+        (True, "Y|ybar", ["VGND", r"Y\x7cybar", "VPWR"]),
+        (False, "Y|ybar", ["VGND", "VPWR"]),
+        (False, "ybar", ["VGND", "Y|ybar", "VPWR"]),
+    ],
+    ids=["literal-pipe", "two-labels-joined-spelling", "two-labels-component"],
+)
+def test_cli_pipe_label_promotion_and_order(
+    tmp_path, capsys, literal, declared, expected
+):
+    layout = _make_inverter_layout(extra_y_label=None if literal else "ybar")
+    if literal:
+        # Replace the existing label on the PMOS drain with one string.
+        (drain_label,) = (
+            shape
+            for shape in layout.top_cell().shapes(layout.layer(67, 5)).each()
+            if shape.is_text() and shape.text.string == "Y" and shape.text.y == 2500
+        )
+        drain_label.text_string = "Y|ybar"
+    path = _write_gds(layout, tmp_path / "inv.gds")
+    spice = tmp_path / "inv.spice"
+    code = main(
+        [
+            "extract",
+            str(path),
+            "--deck",
+            "sky130",
+            "--pins",
+            f"VGND,{declared},VPWR",
+            "-o",
+            str(spice),
+            "--format",
+            "json",
+        ]
+    )
+    assert code == 0, capsys.readouterr().err
+    header = next(
+        line
+        for line in spice.read_text().splitlines()
+        if line.upper().startswith(".SUBCKT TOP ")
+    )
+    assert header.split()[2:] == expected
 
 
 def test_cli_rename_declared_pins_keeps_declared_order(tmp_path, capsys):
