@@ -92,18 +92,6 @@ unchanged); an inherited `COLUMNS=80` from an interactive shell is
 overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
 inherited unchanged.
 
-### Watchdog timeouts ("did not complete within")
-
-Each `yosys -s` invocation uses `request.yosys_timeout_s` (default 300 s).
-When the watchdog kills the process group, the error names the budget,
-the script, and the sibling `.log` file containing both output streams.
-
-When the last non-empty stdout line is the ABC gate-netlist extraction
-banner, the error reports that ABC produced no output after extraction.
-Check the ABC build bundled with the `yosys` on `$PATH` and the selected
-liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
-Other timeouts suggest raising `request.yosys_timeout_s` to allow more time.
-
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
 install --user` and installed to `~/.local/bin/yosys`, shadowing a native
@@ -138,6 +126,18 @@ optional and additive: a missing extension reports `"sta": null` and changes
 nothing else about the run. The extension is not shipped with the published
 `klayout-tools` package, so an installed package always reports `"sta": null`
 (see "`sta` is `null`" below).
+
+### Watchdog timeouts ("did not complete within")
+
+Each `yosys -s` invocation uses `request.yosys_timeout_s` (default 300 s).
+When the watchdog kills the process group, the error names the budget,
+the script, and the sibling `.log` file containing both output streams.
+
+When the last non-empty stdout line is the ABC gate-netlist extraction
+banner, the error reports that ABC produced no output after extraction.
+Check the ABC build bundled with the `yosys` on `$PATH` and the selected
+liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
+Other timeouts suggest raising `request.yosys_timeout_s` to allow more time.
 
 ## Generated `.ys` script
 
