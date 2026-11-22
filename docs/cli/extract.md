@@ -1119,6 +1119,7 @@ two things let a caller tell a slow run from a hang and budget the step:
   `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
   `unsupported_devices` (the #2919 diagnostic re-runs the recogniser walks
   to find device markers the deck could not classify),
+  `unmodeled_marker_diagnostic` (the #3858 prose-only marker scan),
   `parasitics_inject` (building the parasitics report and injecting the R/C
   elements into the netlist, issue #5716; present only with `--parasitics`),
   `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
@@ -1169,6 +1170,24 @@ and grew close to linearly, so those measurements did not warrant splitting
 the stage further. On a 1,600-cell gf180mcu flat array, the unsupported-device
 diagnostic alone accounted for 123 s of `unattributed_seconds` before #5807
 rewrote the recogniser walks and timed the diagnostic as `unsupported_devices`.
+
+**gf180mcu flavour/marker decks** (issue #5893, measured 2026-11-17 on the
+shared 8-vCPU dispatch host, one serial run per row): the Python-level
+per-island scans around the L2N pass were the cliff, not the engine. On the
+166 KB ttgf0p2 `tt_um_MATTHIAS_M_PAL_TOP_WRAPPER` block (33,582 devices,
+19,638 nets), before the fix: 2,262.7 s total, `device_extraction` 674.9 s,
+and ~1,586 s unattributed (all of it in the unstaged unsupported-device
+diagnostic, py-spy attributed). After the candidate-restricted MOS-capacitor
+claim scan and the per-gate flavour split's whole-island shortcut: 83.6 s
+total, `device_extraction` 80.4 s (of which `l2n.extract_netlist()` — the
+KLayout C++ engine — is the bulk; the remaining Python leg is
+`apportion_shared_sd`'s per-device pass over mixed S/D polygons), ~1.3 s
+unattributed, netlist byte-identical (same SHA-256), warnings identical.
+The 2x2 `tt_um_2048_vga_game` (66,459 devices) took 112.0 s on that host.
+Both layouts had previously timed out at 250–300 s. The PAL netlist is
+5.2 MB, and its `netlist_normalized_hash` took less than a second.
+The current extractor combines the flavour-island shortcuts with the bulk
+MOS-capacitor classification from #5807 and its per-layer cache from #6527.
 
 ### Reserved annotation layer
 
@@ -2276,6 +2295,7 @@ passes LVS silently.
 | `gf180mcu` | `rm1` | `gf180mcu_fd_pr__rm1` (drawn Metal1 resistor, issue #1640) | `Metal1` 34/0 | `metal1_res` 110/11 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm2` | `gf180mcu_fd_pr__rm2` | `Metal2` 36/0 | `metal2_res` 110/12 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `efuse` | `gf180mcu_fd_pr__efuse` (eFuse, issue #4312; link `Poly2 & plfuse` inside `efuse_mk`, anode = `Poly2 & lvs_source` 100/8, cathode = the rest of that shape; `A` is always the anode net and `B` the cathode net, whatever the orientation; `klt lvs` leaves `R` out of the compare by default, as the PDK does) | `Poly2` 30/0 | `plfuse` 125/5 | `efuse_mk` 80/5 (scope) | **28.5714 Ω/□** | — |
 | `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
 
 sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
@@ -3450,11 +3470,11 @@ source/drain nets and the same `L`, summing `nfin`, `w_um` and `fingers`.
 That is the only combination performed. Series stacks stay as drawn.
 
 **Polarity, body, connectivity.** Polarity comes from `Nselect`/`Pselect`
-(12/0, 13/0), not from the well. The ASAP7 cells draw no substrate or well
-tie (the CDL simply ties bulk to `VSS`/`VDD`). So the NMOS bulk is the
-synthesized `vsubs` global, and the PMOS bulk is the well net, named by
-its `well pin` text (1/251). Neither is joined to a metal supply of the same
-name, and a `warnings[]` entry says so. Diffusion reaches `LISD` (17/0) only
+(12/0, 13/0). NMOS bulk is the synthesized `vsubs` global. PMOS bulk follows
+the drawn well, named by its `well pin` text (1/251). N-selected active inside
+the well forms a tap. A complete contact path connects that well island to
+metal. Without the path, even a rail bearing the same label remains separate.
+Diffusion reaches `LISD` (17/0) only
 through the `SDT` source/drain trench (88/0). `LIG` (16/0) lands on the gate
 (after `GCut` 10/0 is subtracted). `LIG` and `LISD` conduct where they
 overlap. `V0` (18/0) joins both to `M1`, and `V1`..`V8` climb to `M9`. The
@@ -8145,13 +8165,16 @@ without the flag — output is byte-identical to a run that never had it):
   pieces of its own in the mesh. A net with thousands of such landings may
   exceed the decomposition or node caps and report `graph_too_large`, keeping
   the legacy scalar.
-- The per-cut resistance is **caller-supplied** via
-  `--resistance-graph-r-cut`: the shipped decks do curate a per-cut table
-  (`ParasiticsDeck.cuts`, issue #3053), but `klt extract` does not consume it
-  yet. Without the flag, a net with a contact/via landing joining two
-  *modelled* roles reports `via_resistance_unknown` rather than an assumed
-  ideal via. Diffusion has no coefficient in the shipped decks, so a contact
-  onto diffusion is a terminal, not a landing.
+- Each landing's per-cut resistance resolves from the deck (issue #6917):
+  `poly`->`metals[0]` from `ParasiticsDeck.poly_contact` (sky130 curates the
+  licon at 152 ohm nominal), `metals[i]`->`metals[i+1]` from
+  `ParasiticsDeck.cuts` (issue #3053), nominal corner only --
+  `--parasitics` has no corner axis. `--resistance-graph-r-cut OHM` overrides
+  every landing uniformly (`0` = ideal via). A landing type the deck does not
+  curate (gf180mcu's poly contact, every sg13g2 cut) reports
+  `via_resistance_unknown` rather than an assumed ideal via. Diffusion has no
+  coefficient in the shipped decks, so a contact onto diffusion is a
+  terminal, not a landing.
 - Terminals come from geometry (landings onto an unmodelled role and
   device-body cut edges), not from `terminals[]` device pins, which carry only
   a per-device position.
@@ -8174,14 +8197,16 @@ default. The selected value is reported only in the additive
   `pair_resistance_unavailable` (disconnected pair). The graph's own
   `diagnostics` still say why the graph was unsupported or disconnected.
 
-Because the shipped decks give no per-cut via resistance, a cross-level net
-falls back to `legacy` by default, never to an assumed ideal via. The value is
-supplied explicitly with `--resistance-graph-r-cut OHM` (request key
-`resistance_graph_r_cut`; `0` is an ideal via, must be finite and `>= 0`,
-requires `--resistance-graph`). With it, a strapped conductor (two levels
-joined at both ends) selects a resistance no larger than the single level
-alone, and a single-landing series conductor selects the sum of the two levels
-plus the via; overlap without a landing adds no path.
+A cross-level net whose landing types the deck curates solves on those
+nominal per-cut values (issue #6917); a landing the deck does not curate keeps
+the net on `legacy`, never on an assumed ideal via. The caller-supplied
+`--resistance-graph-r-cut OHM` (request key `resistance_graph_r_cut`; `0` is
+an ideal via, must be finite and `>= 0`, requires `--resistance-graph`)
+overrides every landing uniformly. With a finite per-cut value, a strapped
+conductor (two levels joined at both ends) selects a resistance no larger
+than the single level alone, and a single-landing series conductor selects
+the sum of the two levels plus the via; overlap without a landing adds no
+path.
 
 **Ladder.** `--distributed-rc` keeps redistributing the legacy
 `resistance_ohm` total; it does not consume `selected_resistance_ohm`, so the
@@ -9090,10 +9115,13 @@ legitimately (and unhelpfully) show drift in the corresponding fields under
 
 ### Exit codes for `--check` / `--rerun`
 
-Both modes use the same 0/3 split described below: `0` when `status` is
-`"match"`, `3` when it is `"drifted"`. A missing or unparseable
-`<report.json>` exits `1` with a clean error message, same as any other
-application-level failure.
+Both modes return 0 for `match` and 3 for `drifted`. In cheap mode, a
+recorded digest whose input is unavailable on this checkout gives its
+`checks[]` entry `status: "unverifiable"`, `actual: null`, and `match: false`.
+Text output marks that field `[UNVERIFIABLE]`. If every other input matches
+or is also unavailable, the overall status is `unverifiable` (exit 4).
+A changed digest takes precedence (exit 3), with both field results visible.
+A missing or unparseable report is a command error (exit 1).
 
 Both modes accept plain JSON and gzip-compressed reports, such as
 `report.json.gz`. Compression is detected by the file's contents, so a
@@ -9109,6 +9137,7 @@ error envelope under `--format json`.
 | `1`  | Failed to run — bad file, missing/unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). Under `--check`: a missing/unparseable committed report, or `--rerun` given without `--check`. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Under `--check`: the committed report drifted from the current deck/input (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
+| `4`  | Under cheap `--check`, a recorded input is unavailable and every comparable hash matches (`status: "unverifiable"`). |
 
 Outside `--check`, there is no "ran but found problems" outcome for a fresh
 extraction; it either produces a netlist or it fails (matching `klt gen`'s
