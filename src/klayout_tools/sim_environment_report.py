@@ -9,11 +9,8 @@ helpers -- :func:`~klayout_tools.sim._portable_environment`,
 but eleven were still written inline in the sweep function's epilogue, as a
 flat append-point that every feature needing to disclose something extended
 in place. This module holds those eleven, in the same shape the pattern
-already used (and, since issue #5663, also
-:func:`corner_coverage_environment` with its ``_corner_process_sections``
-helper -- moved here from ``sim.py``, whose ``file-size-baseline.json`` debt
-ceiling cannot grow; ``sim.py`` self-aliases the import so its historical
-attribute and existing tests keep working):
+already used. The corner coverage helper shares the PDK's per-flavour
+classification with the sweep report (#5663).
 
 * each takes only the two-to-five values it actually needs, never the
   sweep function's ambient locals;
@@ -87,12 +84,7 @@ def netlist_closure_environment(
 
 
 def _corner_process_sections(corner_points: list[Any]) -> list[str]:
-    """Every process section the run's corner points exercise, in order.
-
-    Moved verbatim from ``sim.py`` together with
-    :func:`corner_coverage_environment` (issue #5663 -- ``sim.py`` cannot
-    grow past its ``file-size-baseline.json`` ceiling); ``sim.py`` imports
-    it back for its other consumer, the Monte Carlo mismatch family report."""
+    """List process sections in sweep order for coverage and Monte Carlo reports."""
     return [
         name
         for point in corner_points
@@ -107,21 +99,12 @@ def _corner_process_sections(corner_points: list[Any]) -> list[str]:
 def corner_coverage_environment(
     request: dict[str, Any], corner_points: list[Any]
 ) -> dict[str, Any]:
-    """``environment.corner_coverage`` (issues #3794 and #5663): per requested
-    non-typical process section, the device flavours the PDK deck leaves at
-    their typical model -- and, since #5663, the ones whose state the deck
-    evidence cannot decide -- so a multi-corner sweep never reads as skewing
-    devices it does not. Empty (key absent) when there is no resolvable PDK,
-    no per-flavour corner data, or nothing to report.
+    """Report typical and unknown device flavours at requested non-typical corners.
 
-    Two **disjoint** lists per section, never folded together:
-    ``unmoved_devices`` are flavours reported ``skew: "typical"`` --
-    provably at their typical model; ``unknown_devices`` are flavours
-    reported ``skew: "unknown"`` (unresolvable sub-library with differing
-    ``.param`` values attributable to it by neither consumption nor name
-    prefix) -- which are *not* claimed as unmoved. Either key is omitted
-    when empty. Consumes :func:`klayout_tools.pdk.list_corners`'s output
-    directly (one classifier, no second code path).
+    Use :func:`klayout_tools.pdk.list_corners`'s classification (#3794, #5663).
+    Each section lists proven typical flavours in ``unmoved_devices`` and
+    inconclusive ones in ``unknown_devices``. Omit empty lists, empty sections,
+    and the whole fragment when no PDK data or reportable sections remain.
     """
     models = request.get("models") or {}
     if not (models.get("pdk") or models.get("pdk_root")):
