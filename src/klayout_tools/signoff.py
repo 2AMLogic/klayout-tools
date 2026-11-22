@@ -54,6 +54,7 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._git_tracked import is_untracked_yield_sample
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -4821,10 +4822,9 @@ def _yield_samples_content_hash(
     null``. A declared store pin that fails to resolve extends that
     disclosure with the manifest path and a named ``reason`` (issue #5963).
 
-    Follow-up reconciliation: if a later #710 phase adds its own
-    ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
-    generic ``input_block`` lookup in :func:`_grade_evidence` finds it first
-    and this fallback simply never fires again -- no change needed here.
+    Drop untracked candidates before hashing and from ``searched`` so both
+    disclosures use the same git-index basis (issue #6139). A future
+    ``provenance.input.content_hash`` takes precedence in :func:`_grade_evidence`.
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
@@ -4837,7 +4837,7 @@ def _yield_samples_content_hash(
     cwd_relative = _resolve_relative_to_spec(samples, spec)
     if cwd_relative not in candidates:
         candidates.append(cwd_relative)
-
+    candidates = [c for c in candidates if not is_untracked_yield_sample(c)]
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
