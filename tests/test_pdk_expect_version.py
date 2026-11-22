@@ -354,6 +354,9 @@ def test_bundle_flat_install_stamp_at_parent_matches(capsys, tmp_path):
     (tmp_path / ".pdk-store.json").write_text(
         json.dumps({"version": OTHER, "sha256": BUNDLE}), encoding="utf-8"
     )
+    child = root / "sg13g2"
+    child.mkdir()
+    (child / ".pdk-store.json").write_text(json.dumps({"sha256": BUNDLE_OTHER}))
     code = main(
         [
             "pdk",
@@ -380,3 +383,38 @@ def test_bundle_flat_install_stamp_at_parent_matches(capsys, tmp_path):
         "expected": BUNDLE,
         "installed": BUNDLE,
     }
+
+
+@pytest.mark.parametrize("suffix", ["b", "0123456789abcdef01234567"])
+def test_pin_longer_than_installed_store_commit_mismatches(capsys, tmp_path, suffix):
+    _install(tmp_path / "r", store={"version": SHA})
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-version", SHA + suffix)
+    assert code == 6
+    assert report["version_expectation"]["status"] == "mismatch"
+
+
+@pytest.mark.parametrize("entry", ["dangling", "directory", "oversize"])
+def test_unusable_nearest_stamp_fails_both_expectations(capsys, tmp_path, entry):
+    root = tmp_path / "r"
+    _install(root)
+    record = json.dumps({"version": SHA, "sha256": BUNDLE})
+    (root / ".pdk-store.json").write_text(record)
+    nearest = root / "sky130A" / ".pdk-store.json"
+    if entry == "dangling":
+        nearest.symlink_to("missing-stamp")
+    elif entry == "directory":
+        nearest.mkdir()
+    else:
+        nearest.write_text(record.ljust(65536) + "invalid")
+    code, report, _ = _run(
+        capsys,
+        tmp_path,
+        "check",
+        "--expect-version",
+        SHA,
+        "--expect-bundle-sha256",
+        BUNDLE,
+    )
+    assert code == 6
+    assert report["version_expectation"]["status"] == "unknown"
+    assert report["bundle_expectation"]["status"] == "unknown"

@@ -9,9 +9,9 @@ it in. See ``docs/cli/pdk.md``.
 """
 
 import argparse
-import os
 import sys
 
+from ..pdk import variant_dir_of
 from ..pdk_compat import check_expected_bundle
 
 
@@ -51,19 +51,14 @@ def bundle_expectation(report: dict, expected: str | None) -> None:
     """Add ``bundle_expectation`` to a resolved report when ``klt pdk check``
     was given ``--expect-bundle-sha256`` (``check`` only; ``find`` never
     registers the flag). ``expected`` is compared with the ``sha256`` the
-    install's nearest ``.pdk-store.json`` records (issue #5624). The variant
-    directory is resolved the way :func:`klayout_tools.pdk.find_pdk`'s probe
-    chose it: ``root``/``variant`` when that directory exists, else ``root``
-    itself -- a flat single-PDK install's variant directory is the root, not
-    the join (issue #522; see ``pdk._probe_root``'s flat fallback), so both
-    expectation legs read the same directory and stamp placements.
+    install's nearest ``.pdk-store.json`` records (issue #5624). Resolve the variant
+    directory using the same layout checks as the PDK report.
     """
     if expected is None:
         return
-    variant_dir = os.path.join(report["root"], report["variant"])
-    if not os.path.isdir(variant_dir):
-        variant_dir = report["root"]
-    report["bundle_expectation"] = check_expected_bundle(variant_dir, expected)
+    report["bundle_expectation"] = check_expected_bundle(
+        variant_dir_of(report), expected
+    )
 
 
 #: The expectation objects ``find``/``check`` may carry, in report order:

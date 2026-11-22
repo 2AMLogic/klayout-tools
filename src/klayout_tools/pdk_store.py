@@ -43,20 +43,30 @@ def _store_field(variant_dir: str, field: str) -> str | None:
         os.path.join(variant_dir, PDK_STORE_MARKER),
         os.path.join(os.path.dirname(os.path.realpath(variant_dir)), PDK_STORE_MARKER),
     ]
-    for index, path in enumerate(candidates):
-        if index and path == candidates[0]:
-            continue
-        if not os.path.isfile(path):
-            continue
+    for path in dict.fromkeys(candidates):
         try:
-            with open(path, "rb") as handle:
-                raw = handle.read(_STORE_FILE_MAX + 1)[:_STORE_FILE_MAX]
-            data = json.loads(raw.decode("utf-8", "replace"))
-        except (OSError, ValueError):
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
             return None
-        value = data.get(field) if isinstance(data, dict) else None
-        return value if isinstance(value, str) else None
+        return _read_store_field(path, field)
     return None
+
+
+def _read_store_field(path: str, field: str) -> str | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_STORE_FILE_MAX + 1)
+        if len(raw) > _STORE_FILE_MAX:
+            return None
+        data = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get(field) if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
 
 
 def read_store_version(variant_dir: str) -> str | None:

@@ -123,8 +123,9 @@ def _sha_equal(expected: str, installed: str) -> bool:
     are compared exactly."""
     if not (_BARE_HEX.fullmatch(expected) and _BARE_HEX.fullmatch(installed)):
         return expected == installed
-    short, long_ = sorted((expected.lower(), installed.lower()), key=len)
-    return len(short) >= _MIN_SHORT_HASH and long_.startswith(short)
+    return len(expected) >= _MIN_SHORT_HASH and installed.lower().startswith(
+        expected.lower()
+    )
 
 
 def read_fetched_marker(variant_dir: str) -> str | None:
@@ -342,7 +343,7 @@ def check_expected_version(
     }
 
 
-def check_expected_bundle(variant_dir: str, expected: str) -> dict[str, Any]:
+def check_expected_bundle(variant_dir: str | None, expected: str) -> dict[str, Any]:
     """Compare a caller-supplied bundle sha256 pin (``klt pdk check
     --expect-bundle-sha256``, issue #5624) against the ``sha256`` the nearest
     ``.pdk-store.json`` records.
@@ -359,7 +360,7 @@ def check_expected_bundle(variant_dir: str, expected: str) -> dict[str, Any]:
     provisioned from a bundle other than the one the pin names -- not
     in-place corruption of already-unpacked files.
     """
-    installed = read_store_sha256(variant_dir)
+    installed = read_store_sha256(variant_dir) if variant_dir is not None else None
     if installed is None:
         status = "unknown"
     elif installed == expected:
