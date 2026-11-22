@@ -174,6 +174,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
+from .ngspice_build import ENGINE_BANNER_MAX
 from .ngspice_build import (
     engine_version as _extract_engine_version,
 )
@@ -9771,6 +9772,9 @@ def _write_xyce_deck(
 
     with open(deck_path, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
+
+
+_ENGINE_BANNER_MAX = ENGINE_BANNER_MAX
 
 
 def _engine_build_with_comparison(
