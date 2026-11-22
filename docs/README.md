@@ -149,6 +149,7 @@ docs/
     siliconcompiler-core-survey.md
     sim-corner-reached-s.md
     sim-evidence-discipline-spike.md
+    site-eslint-evaluation.md
     sky130-modexp-canary-openroad-ground-truth.md
     sky130-modexp-canary-signoff-status.md
     spice-corner-runner-spike.md
