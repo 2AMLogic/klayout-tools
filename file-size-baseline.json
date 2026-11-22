@@ -337,7 +337,7 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2888
+      "lines": 2820
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",

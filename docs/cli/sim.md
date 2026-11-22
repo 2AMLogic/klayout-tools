@@ -2828,6 +2828,10 @@ comparison's status, so a divergence can be attributed from the report alone:
 | Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
 | Runner's OSDI objects | `environment.remote.runner_osdi_preload` (`[{name, sha256}]`), joined onto `environment.osdi_preload_runner_resolved[].sha256`. |
 
+On a new run, the submitter hashes the top model library, `osdi_preload`
+files, and `corner_section_libs` before dispatch. A collection-only attach
+or resume hashes the files available to the collecting client.
+
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
 `environment.staged_model_inputs` digests with the worker's `model_inputs`
