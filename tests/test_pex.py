@@ -3003,7 +3003,7 @@ def test_run_pex_parasitic_integrity_none_without_the_field(
                 entry.pop("integrity", None)
         return report
 
-    monkeypatch.setattr(pex_module, "run_extract", strip_integrity)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", strip_integrity)
 
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
@@ -3084,7 +3084,7 @@ def test_run_pex_substrate_tie_ohms_forwarded_to_extraction(
         seen.append(kwargs.get("substrate_tie_ohms", "missing"))
         return real_run_extract(*args, **kwargs)
 
-    monkeypatch.setattr(pex_module, "run_extract", _spy)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", _spy)
     dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
     tb = _write_testbench(tmp_path / "testbench.spice", dut)
     request = _write_request(tmp_path / "request.json", tb)
@@ -5061,8 +5061,8 @@ def resistor_layout_unread_purpose(tmp_path):
 
 
 def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
-    """Wrap `pex.run_extract` (still calling the real one) and record every
-    call's keyword arguments."""
+    """Wrap the extracted leg's `run_extract` (still calling the real one)
+    and record its kwargs -- dispatched via `pex_runset` since #6606."""
     import klayout_tools.pex as pex_module
 
     real = pex_module.run_extract
@@ -5072,7 +5072,7 @@ def _capture_run_extract_kwargs(monkeypatch) -> list[dict]:
         calls.append(kwargs)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(pex_module, "run_extract", _recording_run_extract)
+    monkeypatch.setattr(pex_module.pex_runset, "run_extract", _recording_run_extract)
     return calls
 
 

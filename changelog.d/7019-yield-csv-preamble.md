@@ -1,0 +1,1 @@
+- **`klt yield-csv` accepts leading `#` metadata lines in per-draw CSVs** (#7019, 2026-11-21). The provenance hash covers the full input. Unquoted comment records after the header report an error.
