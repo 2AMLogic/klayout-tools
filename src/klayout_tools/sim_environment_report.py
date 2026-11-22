@@ -40,8 +40,10 @@ from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._provenance import sha256_file
 from .pdk import PdkNotFoundError, list_corners
+from .sim_model_digests import ModelInputDigests
 
 __all__ = [
+    "ModelInputDigests",
     "NetlistDigests",
     "backend_environment",
     "budget_environment",

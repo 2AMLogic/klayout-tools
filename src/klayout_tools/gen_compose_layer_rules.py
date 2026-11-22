@@ -421,9 +421,9 @@ def _resolve_landing_pad_sizes(
     shaping rule draws at exactly the override; the default (``None``) is
     byte-for-byte the pre-#5803 resolution.
 
-    Resolve once per distinct pair and pass the result into drawing; the
-    router's existing spacing pre-checks keep their baseline footprint,
-    as with the area and via-width floors described above.
+    Drawing and the own-block self-notch check use the resolved pair size.
+    The separate routing spacing pre-checks retain their baseline footprint
+    when the request supplies no override.
     """
     from .gen_compose import _VIA_DROP_SIZE_UM, GenComposeError
 
