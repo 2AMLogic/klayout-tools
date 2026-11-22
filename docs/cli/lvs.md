@@ -5224,7 +5224,10 @@ input resolved, its bytes moved):
   "input_not_found": {
     "path": "design.gds",
     "resolved": "/work/design.gds",
-    "found_relative_to_report": "/work/pair/design.gds"
+    "found_relative_to_report": "/work/pair/design.gds",
+    "resolved_against": "/work",
+    "resolved_repo_root": null,
+    "hint": "run --check from the report's directory, or pass --layout/an absolute path; request-file-relative paths resolve against /work/pair"
   }
 }
 ```
@@ -5241,6 +5244,9 @@ input resolved, its bytes moved):
 - `resolved_against` — the directory a relative recorded path was anchored
   to (the current working directory); `null` for an absolute path, which
   has no anchor.
+- `hint` — when the input exists alongside the report, names the report
+  directory and the override for the missing input. Otherwise the value is
+  `null`.
 - `resolved_repo_root` (issue #5845) — when `--check` resolves a repo-scoped
   input, this names the repo root it discovered from the committed report's
   directory. On a nested-repo report, use this field to check which tree
@@ -5269,8 +5275,8 @@ when present:
       repo root: /work/outer/repo
 ```
 
-`klt drc --check` does not (yet) carry this block — its `provenance.input`
-path resolution is unchanged by this issue.
+`klt drc --check` and `klt erc --check` use the shared missing-input
+diagnostic. Their remediation text reflects the inputs each command accepts.
 
 ### Full mode (`--rerun`)
 

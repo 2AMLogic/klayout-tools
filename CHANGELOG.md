@@ -14,6 +14,16 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **`klt sim` `options.ngspice_options` accepts `chgtol` and `trtol`** (#7007,
+  2026-11-21): the solver-option allowlist gains ngspice's two remaining
+  transient tolerance knobs, so a request can carry the common
+  `reltol`/`abstol`/`vntol`/`chgtol` quartet and `environment.ngspice_options`
+  echoes the run's full tolerance set. Additive; a misspelt key is still an
+  application error naming it. `NGSPICE_SOLVER_OPTIONS` moved to
+  `klayout_tools.sim_corner_axes` and is re-exported from `klayout_tools.sim`.
+  Off-host runners that predate this release reject the new keys with the same
+  named error (a loud failure, not a silent drop).
+
 - **Changed** (#5784, breaking — `klt functional-verification` `schema_version`
   2 → 3): the three request-resolved *input* paths the response echoes no
   longer leak the producing checkout's absolute layout. `environment.sdf.file`
