@@ -27,6 +27,8 @@ import os
 import re
 import tempfile
 
+from .liberty_header_diff import header_mismatch
+
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
 CACHE_ENV = "KLT_CACHE_DIR"
@@ -120,7 +122,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            _compare_headers(first_path, header_fields, path, fields)
+            mismatch = header_mismatch(first_path, header_fields, path, fields)
+            if mismatch:
+                raise LibertyMergeError(mismatch)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -232,116 +236,6 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
         return
     prior = fields.get(_RESIDUE_KEY)
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
-
-
-#: Most header deltas listed in one refusal before the rest are summarised.
-_MAX_REPORTED_DELTAS = 10
-
-
-def _compare_headers(
-    first_path: str, first: dict[str, str], path: str, other: dict[str, str]
-) -> None:
-    """Raise :class:`LibertyMergeError` listing every header field that
-    differs (issue #7011), so a multi-delta pair is fixed in one pass.
-
-    A field present in one header and absent from the other is reported as
-    missing rather than as a value difference, except that a group present
-    as ``name(A)`` in one header and ``name(B)`` in the other -- the only
-    ``name(...)`` group of that base name on each side without a counterpart
-    -- is reported once as the same group under a different name. A single
-    delta keeps the one-line message form.
-    """
-    renamed = _pair_renamed_groups(first, other)
-    renamed_other = set(renamed.values())
-    deltas: list[str] = []
-    for key, value in first.items():
-        if key in renamed:
-            new_key = renamed[key]
-            entry = (
-                f"'{key}' in '{first_path}' is '{new_key}' in '{path}' "
-                "(same group, different name"
-            )
-            if other[new_key] != value:
-                shown_a, shown_b = _clip_around_diff(value, other[new_key])
-                entry += f"; body also differs: {shown_a} vs {shown_b}"
-            deltas.append(entry + ")")
-        elif key not in other:
-            deltas.append(f"'{key}' present in '{first_path}', missing in '{path}'")
-        elif other[key] != value:
-            shown_a, shown_b = _clip_around_diff(value, other[key])
-            deltas.append(
-                f"'{key}' differs: {shown_a} in '{first_path}', {shown_b} in '{path}'"
-            )
-    for key in other:
-        if key not in first and key not in renamed_other:
-            deltas.append(f"'{key}' missing in '{first_path}', present in '{path}'")
-    if not deltas:
-        return
-    if len(deltas) == 1:
-        raise LibertyMergeError(f"cannot merge: {deltas[0]}")
-    lines = [
-        f"cannot merge: {len(deltas)} header fields differ between "
-        f"'{first_path}' and '{path}':"
-    ]
-    lines += [f"  - {d}" for d in deltas[:_MAX_REPORTED_DELTAS]]
-    if len(deltas) > _MAX_REPORTED_DELTAS:
-        lines.append(f"  ... and {len(deltas) - _MAX_REPORTED_DELTAS} more")
-    raise LibertyMergeError("\n".join(lines))
-
-
-def _pair_renamed_groups(
-    first: dict[str, str], other: dict[str, str]
-) -> dict[str, str]:
-    """Map a ``name(A)`` group key only in ``first`` to the ``name(B)`` key
-    only in ``other`` when each is the sole unmatched group of that base
-    name on its side. Complex attributes (``name (args) ;``, whose stored
-    value is their args) are not groups and are never paired."""
-
-    def unmatched(
-        fields: dict[str, str], against: dict[str, str]
-    ) -> dict[str, list[str]]:
-        by_base: dict[str, list[str]] = {}
-        for key, value in fields.items():
-            if key in against or "(" not in key or not key.endswith(")"):
-                continue
-            base, args = key[:-1].split("(", 1)
-            if value == args:
-                continue  # complex attribute, not a group
-            by_base.setdefault(base, []).append(key)
-        return by_base
-
-    mine, theirs = unmatched(first, other), unmatched(other, first)
-    return {
-        keys[0]: theirs[base][0]
-        for base, keys in mine.items()
-        if len(keys) == 1 and len(theirs.get(base, ())) == 1
-    }
-
-
-def _clip_around_diff(a: str, b: str, limit: int = 80) -> tuple[str, str]:
-    """Both values clipped to windows around their first differing
-    character, so two long values that share a prefix print visibly
-    different. Values within ``limit`` print unchanged."""
-    if len(a) <= limit and len(b) <= limit:
-        return a, b
-    common = 0
-    for ca, cb in zip(a, b, strict=False):
-        if ca != cb:
-            break
-        common += 1
-    start = max(0, common - 20)
-
-    def window(value: str) -> str:
-        if len(value) <= limit and start == 0:
-            return value
-        head = "..." if start else ""
-        width = limit - len(head)
-        seg = value[start : start + width]
-        if start + width < len(value):
-            seg = seg[:-3] + "..."
-        return head + seg
-
-    return window(a), window(b)
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
