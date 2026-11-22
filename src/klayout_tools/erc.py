@@ -2965,11 +2965,9 @@ def run_erc(
     # region regardless of `active_layer` -- only the area used for
     # membership/the antenna-ratio denominator below changes with the fix.
     gate_regions: list[Any] = []
-    # Parallel to `gates` too -- the `erc.floating_gate` predicate for each
-    # gate, computed from the accumulated `levels[]` on the normal path and
-    # directly off the connectivity graph on the `findings_only` one (issue
-    # #2219). Same answer either way; see `_gate_is_floating`.
+    # The full run and findings-only path compute the same floating-gate predicate.
     gate_floating: list[bool] = []
+    gf180_violations: list[tuple[dict[str, Any], Any]] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -2979,21 +2977,16 @@ def run_erc(
         # and is correctly excluded below by the existing zero-area skip.
         # Falls back to raw poly-net area (today's behaviour) when
         # `active_layer` is omitted.
-        if active_index is not None:
-            gate_area_region = active_index.intersect(gate_poly_region)
-        else:
-            gate_area_region = gate_poly_region
+        gate_area_region = (
+            active_index.intersect(gate_poly_region)
+            if active_index
+            else gate_poly_region
+        )
         gate_area_um2 = gate_area_region.area() * dbu2_um2
         if gate_area_um2 <= 0:
             continue
 
-        # The expensive part (issue #2219): one
-        # `polygons_of_net(...).merged().area()` per stackup role per gate
-        # net. A `findings_only` run never needs those numbers -- none of
-        # the `nets[]`/`ties[]`-driven findings read them, and the one rule
-        # that does (`erc.floating_gate`) has a cheaper equivalent
-        # predicate -- so it is skipped outright rather than computed and
-        # then reported `"unchecked"`.
+        # Findings-only needs only the floating-gate predicate, not all layer areas.
         if findings_only:
             levels = _skipped_accumulation_levels(stackup)
             is_floating = _gate_is_floating(l2n, net, stackup, layer_index, dbu2_um2)
@@ -3021,6 +3014,12 @@ def run_erc(
         )
         gate_regions.append(gate_poly_region)
         gate_floating.append(is_floating)
+        if pdk == "gf180mcu" and gates[-1]["antenna_verdict"] == "violate":
+            gf180_violations.append((gates[-1], net))
+
+    _gf180.annotate_contacted_diffusion(
+        gf180_violations, layout, top_cell, stackup, vias, active_region, l2n
+    )
 
     # (issue #2896) A passive-only cell (poly resistors, MoM/MiM caps, no
     # transistor) has no gates by construction, but its declared supplies and

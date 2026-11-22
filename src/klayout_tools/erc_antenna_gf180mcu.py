@@ -6,6 +6,10 @@ it alongside the sky130 and ihp-sg13g2 tables.
 
 from __future__ import annotations
 
+from typing import Any
+
+from ._layout import region
+
 #: gf180mcu antenna-ratio limit (maximum ratio *without* a protection diode),
 #: from google/gf180mcu-pdk at commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
 #: (the same pin as `decks/gf180mcu.py`'s `_GF180MCU_KLAYOUT_DRC_DECK_COMMIT`),
@@ -47,3 +51,41 @@ ANTENNA_SOURCE_URL = (
 ANTENNA_SOURCE_NOTE = (
     "gf180mcu-pdk f6eeac7, w/o-diode limit (area approximates perimeter)"
 )
+
+
+def annotate_contacted_diffusion(
+    violations: list[tuple[dict[str, Any], Any]],
+    layout: Any,
+    top: Any,
+    stackup: list[dict[str, Any]],
+    vias: list[dict[str, Any]],
+    active: Any,
+    l2n: Any,
+) -> None:
+    """Measure contacted COMP beyond all drawn Poly2 on each violating final net."""
+    if not violations:
+        return
+    for gate, _ in violations:
+        gate["has_contacted_diffusion"] = None
+    poly = stackup[0]
+    if poly["layer"] != (30, 0) or poly["active_layer"] != (22, 0) or active is None:
+        return
+    metals = {entry["name"] for entry in stackup if entry["layer"] == (34, 0)}
+    pairs = [
+        (l2n.layer_index(metal), l2n.layer_index(via["name"]))
+        for metal in metals
+        for via in vias
+        if via["layer"] == (33, 0) and set(via["between"]) == {poly["name"], metal}
+    ]
+    if not pairs:
+        return
+    outside_channel = active - region(layout, top, poly["layer"])
+    for gate, net in violations:
+        gate["has_contacted_diffusion"] = any(
+            not (
+                l2n.polygons_of_net(net, metal)
+                & l2n.polygons_of_net(net, cut)
+                & outside_channel
+            ).is_empty()
+            for metal, cut in pairs
+        )

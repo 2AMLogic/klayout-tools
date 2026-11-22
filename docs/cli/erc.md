@@ -2489,6 +2489,17 @@ the with-diode credit (`klt erc` does not model protection diodes). A spec that
 names its layers differently (e.g. `met1`) leaves those levels `unchecked` and
 rolls up to `clean_partial`.
 
+On a violating GF180 gate, `gates[].has_contacted_diffusion` records whether
+the completed net's Metal1 reaches COMP outside drawn Poly2 through a Contact.
+A gate contact alone or active underneath an insulated strap yields `false`.
+A missing or incompatible Poly2, COMP, Metal1 or Contact declaration yields
+`null`. The field is present only for a violating GF180 antenna verdict.
+
+The measurement identifies nets for comparison with the foundry deck. The ERC
+area ratio, limit and verdict still describe the uncredited accumulation. The
+amount of diode credit at a particular fabrication stage requires the foundry
+deck's geometry and connectivity rules.
+
 ### Caller-supplied antenna limits (`antenna_limits`, issue #4090)
 
 A process with no built-in `--pdk` table (ASAP7 and sg13cmos5l) can still be antenna-graded: the
