@@ -1,4 +1,4 @@
-"""Route-stage global-route overflow regions (issue #5313).
+"""Route-stage global-route overflow regions (issues #5313, #6949).
 
 Kept out of ``place_and_route.py`` / ``place_and_route_script.py`` (per-file
 size ratchet): resolves the ``-congestion_report_file`` path, builds the macro
@@ -15,10 +15,22 @@ from typing import Any
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_reports import (
     build_congestion,
-    parse_congestion_report,
+    parse_congestion_report_records,
     parse_global_route_congestion,
+    rank_overflow_regions,
 )
 from .place_and_route_script import _macro_footprint
+
+#: Issue #6949: the region frame `overflow_by_region` always carries -- a
+#: group with no record reads as all-zero counters, never as a missing key.
+OVERFLOW_REGION_NAMES = ("inside_footprint", "keepout_band", "elsewhere")
+_OVERFLOW_DIRECTIONS = ("horizontal", "vertical")
+_OVERFLOW_GROUP_COUNTERS = (
+    "overflow_sum",
+    "violation_tile_count",
+    "zero_capacity_tile_count",
+    "zero_capacity_overflow_sum",
+)
 
 
 def congestion_report_path(output_dir: str, hdl_toplevel: str) -> str:
@@ -46,13 +58,51 @@ def _macro_boxes(macros: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return boxes
 
 
+def overflow_by_region(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Group every parsed congestion record by direction and region (issue
+    #6949), using the GCell-centre attribution each record already carries
+    (``inside_footprint`` wins over any ``keepout_band``; an unattributed
+    record is ``elsewhere``). Each record lands in exactly one group -- a
+    GCell shared by both directions contributes once per directional record
+    -- so sums over all groups are the full-report totals, the denominator
+    the worst-20 ``overflow_regions`` sample cannot provide. Zero-capacity
+    tiles are counted apart: on them all tracked usage sits over a capacity
+    of 0, the floorplan comparison's "how much of the overflow cannot be
+    fixed by widening channels" share."""
+    groups = {
+        direction: {
+            region: dict.fromkeys(_OVERFLOW_GROUP_COUNTERS, 0)
+            for region in OVERFLOW_REGION_NAMES
+        }
+        for direction in _OVERFLOW_DIRECTIONS
+    }
+    for record in records:
+        counters = groups[record["direction"]][record["where"] or "elsewhere"]
+        counters["overflow_sum"] += record["overflow"]
+        counters["violation_tile_count"] += 1
+        if record["capacity"] == 0:
+            counters["zero_capacity_tile_count"] += 1
+            counters["zero_capacity_overflow_sum"] += record["overflow"]
+    return groups
+
+
 def grt_overflow(
     output_dir: str, hdl_toplevel: str, macros: list[dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """Worst overflow regions of this run's congestion report (or ``None``)."""
-    return parse_congestion_report(
+) -> dict[str, Any] | None:
+    """The route stage's congestion-report digest (issue #6949), from one
+    read of the report: ``overflow_regions`` (the capped worst-N list) and
+    ``overflow_by_region`` (aggregates over *every* record, computed before
+    truncation). ``None`` when the report is absent, unreadable or holds no
+    parsable violation."""
+    records = parse_congestion_report_records(
         congestion_report_path(output_dir, hdl_toplevel), _macro_boxes(macros)
     )
+    if records is None:
+        return None
+    return {
+        "overflow_regions": rank_overflow_regions(records),
+        "overflow_by_region": overflow_by_region(records),
+    }
 
 
 #: Why a report file that *is* on disk still yields no regions or path: it was
@@ -109,9 +159,7 @@ def route_failure_congestion(
         completeness=None,
         placement={},
         detailed={},
-        overflow_regions=(
-            grt_overflow(output_dir, hdl_toplevel, macros) if produced else None
-        ),
+        overflow=(grt_overflow(output_dir, hdl_toplevel, macros) if produced else None),
     )
     global_route = block["global_route"]
     reasons = {
@@ -127,4 +175,5 @@ def route_failure_congestion(
         reasons["global_route.congestion_report_path"] = reason
         if stale:
             reasons["global_route.overflow_regions"] = reason
+            reasons["global_route.overflow_by_region"] = reason
     return {"congestion": {"global_route": global_route, "null_reasons": reasons}}

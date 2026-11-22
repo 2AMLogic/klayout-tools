@@ -198,6 +198,11 @@ def test_cli_grt_0116_exposes_congestion_on_the_error_envelope(
 
     regions = gr["overflow_regions"]
     assert len(regions) == 20
+    groups = [
+        g for direction in gr["overflow_by_region"].values() for g in direction.values()
+    ]
+    assert sum(g["violation_tile_count"] for g in groups) == 217
+    assert sum(g["overflow_sum"] for g in groups) == 847
     overflows = [region["overflow"] for region in regions]
     assert overflows == sorted(overflows, reverse=True)
     assert regions[0]["overflow"] == 7
@@ -320,7 +325,12 @@ def test_cli_reused_output_dir_ignores_prior_attempt_report(
     assert gr["overflow_regions"] is None
     assert gr["congestion_report_path"] is None
     reasons = error["congestion"]["null_reasons"]
-    for key in ("global_route.overflow_regions", "global_route.congestion_report_path"):
+    assert gr["overflow_by_region"] is None
+    for key in (
+        "global_route.overflow_regions",
+        "global_route.overflow_by_region",
+        "global_route.congestion_report_path",
+    ):
         assert "predates this attempt" in reasons[key]
 
 
