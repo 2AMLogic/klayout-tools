@@ -22,7 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from .gen_compose_routing import _polyline_midpoint_um as _polyline_midpoint_um
-from .gen_compose_via_cuts import landing_pad_half_dbu
+from .gen_compose_via_cuts import drawn_landing_box
 
 
 def _insert_via_cuts(
@@ -72,7 +72,6 @@ def _draw_routed_entry(
     import klayout.db as kdb
 
     from .gen_compose import _VIA_DROP_SIZE_UM, _VIA_LANDING_SIZE_UM
-    from .gen_compose_routing import _drop_array_extra_um
 
     points = route["points_um"]
     if not points or len(points) < 2:
@@ -151,7 +150,6 @@ def _draw_routed_entry(
         # rows x cols cut array centred on the pin; pads below grow
         # to enclose it.
         _insert_via_cuts(top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu)
-        array_extra_um = _drop_array_extra_um(drop)
         # Issue #6058: which of this hop's two landing layers are terminal
         # planes for the endpoint this drop serves -- recorded by
         # ``_resolve_via_drops`` when it still knew the endpoint's port
@@ -176,18 +174,8 @@ def _draw_routed_entry(
                 landing_size_um = (landing_pad_size_um or {}).get(
                     (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
                 )
-            landing_size_um += array_extra_um
-            # Outward rounding keeping the *rounded* via's margin; the
-            # access search sizes its pad with the same helper (#6572).
-            landing_half_dbu = landing_pad_half_dbu(landing_size_um, via_size_um, dbu)
-            landing_box = kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
-            top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
-                landing_box
+            top.shapes(layout.layer(*landing_pair)).insert(
+                drawn_landing_box(drop, landing_size_um, via_size_um, dbu)
             )
 
     # Stub-widen (#496): each entry (route_two_pin's own

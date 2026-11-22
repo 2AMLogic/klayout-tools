@@ -142,3 +142,27 @@ def test_only_one_member_inherits_the_default(tmp_path, reverse):
     assert "cell 'X_B' output 'Y'" in message
     assert "is limited by 4000" in message
     assert "no single shared header" not in message
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_multiple_deltas_retain_the_inherited_output(tmp_path, reverse):
+    explicit = _group_lib("explicit", max_trans="320", output_limit="150").replace(
+        "  delay_model", '  time_unit : "1ns";\n  delay_model'
+    )
+    inherited = _group_lib("inherited", max_trans="4000").replace(
+        "  delay_model", '  time_unit : "2ns";\n  delay_model'
+    )
+    files = [
+        _write(tmp_path, "explicit.lib", explicit),
+        _write(tmp_path, "inherited.lib", inherited),
+    ]
+    if reverse:
+        files.reverse()
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty(files)
+    message = str(exc.value)
+    assert "2 header fields differ" in message
+    assert "'time_unit' differs" in message
+    assert "'default_max_transition' differs" in message
+    assert "cell 'X_inherited' output 'Y'" in message
+    assert "limited by 4000" in message

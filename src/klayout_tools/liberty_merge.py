@@ -10,8 +10,8 @@ Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
-(units, operating conditions, ``default_*``, ...) is an error naming the
-conflicting field and both values. Top-level ``lu_table_template`` and
+(units, operating conditions, ``default_*``, ...) is an error naming every
+conflicting field and both values (issue #7011). Top-level ``lu_table_template`` and
 ``power_lut_template`` groups are the exception: they are unioned by name
 (same name with different content is an error) and the ones the first file
 lacks are appended after its header. Each file's cell groups are appended in
@@ -26,6 +26,7 @@ import hashlib
 import os
 import tempfile
 
+from .liberty_header_diff import header_mismatch
 from .liberty_merge_syntax import (
     _CELL_NAME_RE,
     _find_matching,
@@ -35,7 +36,6 @@ from .liberty_merge_syntax import (
     _scan_cells,
     _skip_ws,
     _tokens,
-    _uncovered_output,
 )
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
@@ -48,21 +48,6 @@ _TEMPLATE_KINDS = ("lu_table_template", "power_lut_template")
 #: no electrical content (a per-file timestamp, a version string, a vendor
 #: note). This is a closed set -- every other header field must agree.
 _IGNORED_HEADER_ATTRS = frozenset({"date", "revision", "comment"})
-
-#: The one header field whose value conflict gets a field-specific
-#: explanation and recovery hint (issue #6933): it is the fallback slew
-#: limit for every output pin without an explicit ``max_transition``.
-_DEFAULT_MAX_TRANSITION = "default_max_transition"
-
-#: Recovery hint appended to a ``default_max_transition`` conflict; the
-#: descriptor resolver prefixes the library and corner around it.
-_TRANSITION_RECOVERY = (
-    "Recovery: supply a single plain .lib that preserves each output's "
-    "original effective limit and set liberty.<cell_library>.<corner> to its "
-    "root-relative path (a prepared cell group can instead carry an explicit "
-    "pin max_transition wherever changing the shared header would change "
-    "that output's limit)"
-)
 
 #: Key carrying header text that is neither an attribute nor a group, so
 #: unrecognised residue still participates in the comparison (fail closed).
@@ -143,7 +128,11 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            _compare_headers(first_path, header_fields, texts[0], path, fields, text)
+            mismatch = header_mismatch(
+                first_path, header_fields, texts[0], path, fields, text
+            )
+            if mismatch:
+                raise LibertyMergeError(mismatch)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -255,87 +244,6 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
         return
     prior = fields.get(_RESIDUE_KEY)
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
-
-
-def _compare_headers(
-    first_path: str,
-    first: dict[str, str],
-    first_text: str,
-    path: str,
-    other: dict[str, str],
-    other_text: str,
-) -> None:
-    """Raise :class:`LibertyMergeError` on the first header field that
-    differs; a field present in one header and absent from the other is
-    reported as missing rather than as a value difference. A differing
-    ``default_max_transition`` instead raises the field-specific
-    explanation of :func:`_transition_conflict` (issue #6933)."""
-    for key, value in first.items():
-        if key not in other:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' present in '{first_path}', missing in '{path}'"
-            )
-        if other[key] != value:
-            if key == _DEFAULT_MAX_TRANSITION:
-                raise LibertyMergeError(
-                    _transition_conflict(
-                        first_path, value, first_text, path, other[key], other_text
-                    )
-                )
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' differs: {_clip(value)} in "
-                f"'{first_path}', {_clip(other[key])} in '{path}'"
-            )
-    for key in other:
-        if key not in first:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' missing in '{first_path}', present in '{path}'"
-            )
-
-
-def _transition_conflict(
-    first_path: str,
-    first_value: str,
-    first_text: str,
-    other_path: str,
-    other_value: str,
-    other_text: str,
-) -> str:
-    """Message for a differing ``default_max_transition`` (issue #6933).
-
-    An output pin without its own ``max_transition`` is limited by its
-    source library's default, so which header survives changes that pin's
-    effective limit: name one such output when the conflicting members
-    contain one (the later file's first -- the merged header would be the
-    first file's, so its uncovered outputs are the ones that would silently
-    change), else make no claim about any particular pin.
-    """
-    head = (
-        f"cannot merge: 'default_max_transition' differs: {_clip(first_value)} "
-        f"in '{first_path}', {_clip(other_value)} in '{other_path}'"
-        " -- an output pin without its own max_transition uses its source "
-        "library's default_max_transition"
-    )
-    for path, value, text in (
-        (other_path, other_value, other_text),
-        (first_path, first_value, first_text),
-    ):
-        witness = _uncovered_output(text)
-        if witness is not None:
-            cell, pin = witness
-            return (
-                f"{head}: cell '{cell}' output '{pin}' in '{path}' has none "
-                f"and is limited by {value}. {_TRANSITION_RECOVERY}"
-            )
-    return (
-        f"{head}. No output pin inheriting the default was identified in "
-        f"these members. {_TRANSITION_RECOVERY}"
-    )
-
-
-def _clip(value: str, limit: int = 80) -> str:
-    """Value truncated so an error message stays readable."""
-    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
