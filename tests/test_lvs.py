@@ -12660,8 +12660,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
-    # (issue #5491, antenna-diode keys); both curated decks: no derived entry.
+    # For sg13g2's keys see test_extract_sg13g2_antenna_diodes.py (#5491).
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
@@ -12685,6 +12684,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        "efuse",  # read-only: `_RESISTOR_READ_ONLY_TABLE` (issue #4312)
         # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
