@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Any
 
+from .sim_batch_contract import BATCH_RUNNER_FEATURE_UNVERIFIED_CODE
 from .sim_batch_corner_libs import (
     _compare_corner_section_libs,
     _lib_pairs,
@@ -29,6 +31,29 @@ from .sim_exit_reason import exit_reason_env
 #: :mod:`klayout_tools.sim_batch_worker_engine_build` (size ratchet) and is
 #: re-exported above -- self-aliased -- so ``sim.apply_engine_host``'s
 #: existing imports keep working.
+
+
+def warn_unverified_features(
+    features: list[str], client: str | None
+) -> dict[str, Any] | None:
+    """Report mandatory features the client could not check against an image."""
+    if not features:
+        return None
+    message = (
+        f"the client could not verify support for {', '.join(features)} before "
+        "launch because the AMI manifest has no candidate images. The worker "
+        "will check these mandatory features when it starts."
+    )
+    print(f"klt sim: warning: {message}", file=sys.stderr)
+    return {
+        "code": BATCH_RUNNER_FEATURE_UNVERIFIED_CODE,
+        "severity": "warning",
+        "message": message,
+        "features": features,
+        "runner_klt_version": None,
+        "client_klt_version": client,
+        "source": "manifest",
+    }
 
 
 def missing_features(identity: dict[str, Any]) -> list[str]:

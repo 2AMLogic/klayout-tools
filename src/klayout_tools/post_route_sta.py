@@ -331,6 +331,7 @@ from .post_route_sta_electrical import (
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
+from .post_route_sta_errors import PostRouteStaError as PostRouteStaError
 from .post_route_sta_instance_paths import (
     _instance_check_lines,
     _instance_path_lines,
@@ -540,18 +541,6 @@ _INPUT_PORT_DIRECTIONS = ("input", "inout", "bidirect")
 _OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
 #: Issue #3042: ``constraints.report_ports`` accepts a port of any direction.
 _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
-
-
-class PostRouteStaError(Exception):
-    """Raised when a standalone STA run cannot be completed: a missing/
-    malformed request file, an unresolvable DEF/``pdk.cell_library``/
-    ``corner``/LEF/SPEF, a missing clock constraint, or an OpenROAD engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other ``klt`` verb's own module-specific
-    error class (``PlaceAndRouteError``, ``SynthesizeError``, ...).
-    """
 
 
 def load_request(request_path: str) -> dict[str, Any]:
