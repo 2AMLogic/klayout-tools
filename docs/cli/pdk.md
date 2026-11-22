@@ -248,9 +248,8 @@ directory itself, or a named subdirectory of it). When present it wins over
   `default_max_transition`, ...) is an error naming the conflicting field
   and both files' values. A differing `default_max_transition` is refused
   with an explanation: an output pin without its own `max_transition` is
-  limited by its source library's default, so no single shared header
-  preserves both files' effective output limits — the error names one such
-  cell/output from the conflicting files when they contain one. Recovery:
+  limited by its source library's default. The error names a cell and output
+  that inherit that limit when it finds one. To use the files together,
   supply a single plain `.lib` that preserves each output's original
   effective limit and set `liberty.<cell_library>.<corner>` to its
   root-relative path (a prepared cell group can carry an explicit pin
