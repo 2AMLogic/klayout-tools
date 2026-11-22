@@ -1550,6 +1550,7 @@ def run_lvs(
     import klayout.db as kdb
 
     from .lvs_layout_stage import _resolve_layout_stage
+    from .lvs_passive_pairing import curated_pairing
 
     layout_stage = _resolve_layout_stage(
         layout_spec, reference_spec, request_dir, opts, progress
@@ -1645,11 +1646,10 @@ def run_lvs(
     # the other request-side disclosures further down.
     anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
-    # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
-    # roles as `anchored_pins`/`anchor_warnings` above.
     constant_bindings: list[_ConstantNetBinding] = []
     constant_warnings: list[dict[str, Any]] = []
 
+    passive_pairing = None
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
         # trim) reference's behavioural option construct to one concrete drawn
@@ -1820,8 +1820,6 @@ def run_lvs(
                 # state, so the second pass would otherwise compare on
                 # topology alone and could reach a `"match"` the first,
                 # anchored pass had already refused.
-                # Issue #3014: bindings are comparer state too, so they are
-                # re-applied on the fresh comparer exactly like the hints.
                 constant_bindings, constant_warnings = _apply_constant_nets(
                     comparer,
                     request.get("hints") or {},
@@ -1888,15 +1886,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
-            # Issue #2692: an anchored pin pairing the comparer refused is a
-            # real finding, reported through the same reconciliation a
-            # hand-written `hints.same_nets` refusal goes through.
             anchored_pins=[
                 (anchor.layout_net, anchor.reference_net, anchor.pin)
                 for anchor in anchored_pins
             ],
-            # Issue #3014: a refused constant binding is a `hints.rejected`
-            # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
@@ -1953,9 +1946,14 @@ def run_lvs(
                 "matched": logger.matched_pins,
             },
         }
+        passive_pairing = curated_pairing(
+            (layout_deck_name, reference_spec.get("deck")),
+            logger,
+            counts["devices"],
+            status,
+            (layout_netlist, reference_netlist),
+        )
     else:
-        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member;
-        # see `_run_netgen_engine_branch`.
         (
             status,
             mismatches,
@@ -2024,6 +2022,7 @@ def run_lvs(
     )
 
     return assemble_lvs_report(
+        passive_pairing=passive_pairing,
         mismatches=mismatches,
         omit_mismatches=omit_mismatches,
         status=status,
@@ -2626,6 +2625,7 @@ def rerun_lvs_report(
             # (the replay above leaves such a report uncompacted, so the
             # only difference would be the fresh run's new `false` echo).
             "mismatches_omitted",
+            "sg13g2_passive_pairing",
         )
         if field not in committed
     )
