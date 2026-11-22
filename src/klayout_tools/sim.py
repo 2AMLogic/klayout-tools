@@ -3640,9 +3640,6 @@ def _run_sim_corners(
         pdk_root=pdk_root,
         timeout_s=timeout_s,
     )
-    netlist_digests = sim_env_report.NetlistDigests.capture(  # #5569: pre-dispatch
-        resolved.request, resolved.netlist_path, repo_root=resolved.repo_root
-    )
     analysis = resolved.analysis
     artifacts_dir = resolved.artifacts_dir
     backend = resolved.backend
@@ -3797,6 +3794,14 @@ def _run_sim_corners(
         )
         if yielded_on_host and osdi_runner_environment
         else (osdi_preload, osdi_runner_environment)
+    )
+    # The final backend determines which OSDI files are local. Freeze all
+    # input digests together before the probe or any corner can run.
+    netlist_digests = sim_env_report.NetlistDigests.capture(
+        request, netlist_path, repo_root=repo_root
+    )
+    model_digests = sim_env_report.ModelInputDigests.capture(
+        models_lib, osdi_preload, corner_section_libs
     )
     # Issue #5500: this is the *last* yield, so `backend` is final here. Both
     # version pins are settled against it when the yield just moved the run
@@ -4322,7 +4327,7 @@ def _run_sim_corners(
         "models_lib": env_provenance.repo_relative_path(
             models_lib, repo_root=repo_root
         ),
-        "models_lib_sha256": sha256_file(models_lib),
+        "models_lib_sha256": model_digests.models_lib_sha256,
         # Additive: `models_lib_sha256` is always hashed on the submitting
         # host, so for an off-host backend it is the *client's* resolution,
         # not necessarily what the runner loaded (see
@@ -4348,19 +4353,7 @@ def _run_sim_corners(
         environment, netlist_identity, netlist_identity_error
     )
     environment.update(sim_env_report.netlist_source_environment(netlist_source))
-    # Additive/optional, one key each and only when the request declared that
-    # kind of input: `osdi_preload` (issue #2513) and `corner_section_libs`
-    # (issue #2522 -- `models_lib_sha256` alone no longer pins "which models
-    # produced this result" once a corner reads sections from other files, and
-    # may pin none of it: a bundle whose every section names its own library
-    # needs no `models.lib`). See `_model_inputs_environment`.
-    environment.update(
-        _model_inputs_environment(
-            osdi_preload=osdi_preload,
-            corner_section_libs=corner_section_libs,
-            repo_root=repo_root,
-        )
-    )
+    environment.update(model_digests.environment(repo_root=repo_root))
     # Additive/optional (issue #3819): `.osdi` entries the executing host
     # resolved itself -- named, never hashed; the worker's own report is
     # the source of what actually loaded.
@@ -4485,6 +4478,7 @@ def _run_sim_corners(
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),
             deck_path=models_lib,
+            deck_sha256=model_digests.models_lib_sha256,
             pdk=provenance_pdk,
             input_path=netlist_path,
             input_role=INPUT_ROLE_NETLIST,
@@ -5011,56 +5005,6 @@ def _needs_models_lib(point: CornerPoint) -> bool:
     if declared is None:
         return True
     return any(lib is None for lib in declared)
-
-
-def _model_inputs_environment(
-    *,
-    osdi_preload: tuple[str, ...],
-    corner_section_libs: tuple[str, ...],
-    repo_root: str | None,
-) -> dict[str, list[dict[str, Any]]]:
-    """The optional ``environment`` keys pinning the model input files a run
-    read *besides* ``models.lib`` -- ``osdi_preload`` (issue #2513, in load
-    order) and ``corner_section_libs`` (issue #2522, in first-appearance
-    order). An ``.osdi`` binary and a per-device-family corner library are
-    each as much a part of "which models produced this result" as
-    ``models.lib`` is, and their hashes are what pin them when their paths
-    are not reported.
-
-    Each key is present **only** when the request declared that kind of
-    input, so a request declaring neither leaves the ``environment`` block
-    exactly as it was before either issue.
-    """
-    entries: dict[str, list[dict[str, Any]]] = {}
-    for key, paths in (
-        ("osdi_preload", osdi_preload),
-        ("corner_section_libs", corner_section_libs),
-    ):
-        if paths:
-            entries[key] = _model_file_entries(paths, repo_root=repo_root)
-    return entries
-
-
-def _model_file_entries(
-    paths: tuple[str, ...], *, repo_root: str | None
-) -> list[dict[str, Any]]:
-    """One ``{name, path, scope, sha256}`` entry per model input file, in the
-    order given -- the shared shape behind ``environment.osdi_preload``
-    (issue #2513) and ``environment.corner_section_libs`` (issue #2522).
-    ``path``/``scope`` are normalised exactly like
-    ``environment.models_lib``, so a file inside a PDK under the user's home
-    directory reports ``{"path": null, "scope": "external"}`` rather than an
-    absolute host path, and ``sha256`` is what pins it when the path itself
-    is not reported.
-    """
-    return [
-        {
-            "name": os.path.basename(path),
-            **env_provenance.repo_relative_path(path, repo_root=repo_root),
-            "sha256": sha256_file(path),
-        }
-        for path in paths
-    ]
 
 
 # --------------------------------------------------------------------------- #
