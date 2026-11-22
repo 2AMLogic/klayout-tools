@@ -907,7 +907,13 @@ def validate_alter_targets(
         }
     )
     params = _param_only_targets(netlist_path, step_targets) if step_targets else {}
-    _check_ac_alter_targets_exist(analysis, netlist_path)
+    ac_targets = [
+        (target[: -len(_AC_SUFFIX)], f"step {step['name']!r}: alter target {target!r}")
+        for step in analysis["steps"]
+        for target, _value in step["alter"]
+        if is_ac_alter_target(target)
+    ]
+    check_ac_alter_targets_exist(netlist_path, ac_targets)
     for step in analysis["steps"]:
         for target, _value in step["alter"]:
             if target in params:
@@ -920,18 +926,12 @@ def validate_alter_targets(
                 )
 
 
-def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -> None:
-    """Refuse an ``"<SRC>.ac"`` key naming no element of the netlist: ngspice
-    would log ``no such device`` and the step would solve at the nominal
-    excitation. Same conclusiveness rule as ``_param_only_targets`` -- an
-    unreadable file or unresolvable ``.include``/``.lib`` reports nothing."""
-    pairs = [
-        (step["name"], target)
-        for step in analysis["steps"]
-        for target, _value in step["alter"]
-        if is_ac_alter_target(target)
-    ]
-    if not pairs:
+def check_ac_alter_targets_exist(
+    netlist_path: str, targets: list[tuple[str, str]]
+) -> None:
+    """Reject a missing AC source only when the whole include tree was readable.
+    Each pair gives the source name and its request location for diagnostics."""
+    if not targets:
         return
     from .sim import _included_elements, _netlist_declarations
 
@@ -946,10 +946,10 @@ def _check_ac_alter_targets_exist(analysis: dict[str, Any], netlist_path: str) -
         if included is None:
             return
         known |= included
-    for step, target in pairs:
-        if target[: -len(_AC_SUFFIX)].strip().lower() not in known:
+    for source, location in targets:
+        if source.strip().lower() not in known:
             raise SimError(
-                f"step {step!r}: alter target {target!r} names no element in "
+                f"{location} names no element in "
                 "the netlist -- ngspice would ignore it and solve at the "
                 "nominal AC magnitude"
             )
