@@ -20,6 +20,7 @@ from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
     _parse_tap_boxes,
     _parse_um_boxes,
     _parse_well_boxes,
+    validate_common_native_substrate,
 )
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
@@ -91,6 +92,7 @@ _SPEC_KEYS = (
     "nets",
     "ties",
     "ties_disclosure",
+    "common_native_substrate",
     "devices",
     "antenna_limits",
 )
@@ -966,15 +968,8 @@ def _validate_ties(
     tap must ultimately reach. Omitted or empty -> no missing-tie findings
     are computed.
 
-    ``tap_requires`` (optional array of ``"<layer>/<datatype>"``, issue
-    #2169) intersects further layers into the tap, so the spec can express
-    the *boolean* a real PDK tap is drawn as -- ``Comp ∩ Nplus`` inside an
-    n-well, ``Comp ∩ Pplus`` inside a p-well -- rather than a single layer
-    that is either an implant (not a conductor) or a diffusion/cut shared
-    with every source/drain in the same well. Same "second plain layer
-    field, intersected at use time" shape as ``stackup[0].active_layer``
-    (issue #1979), generalised to a list; omitted -> ``tap_layer`` alone,
-    unchanged.
+    ``tap_requires`` intersects the drawn tap with each required layer
+    (e.g. ``Comp ∩ Nplus`` in an n-well). Omit it to use ``tap_layer`` alone.
 
     ``tap_is_dedicated`` (optional boolean, issue #2199) is the other way
     to say the same thing for a PDK that draws taps on their own layer:
@@ -1094,6 +1089,7 @@ def _validate_ties(
                 "net": net,
             }
         )
+    validate_common_native_substrate(spec, spec_path, entries)
     return entries
 
 
