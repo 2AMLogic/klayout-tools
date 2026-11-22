@@ -8509,11 +8509,6 @@ _ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
-#: ngspice's data-row count line, e.g. ``No. of Data Rows : 1`` (verified on
-#: ngspice-46). An ``ac lin 2 ...`` sweep leaves one row, so ``.meas ac ...
-#: AT=`` cannot interpolate and fails without an ``Error: measure`` line
-#: (issue #4084).
-_DATA_ROWS_RE = re.compile(r"No\. of Data Rows\s*:\s*(\d+)", re.IGNORECASE)
 _AC_TOO_FEW_POINTS_HINT = (
     " -- the ac sweep produced fewer than 2 data points, so AT=/interpolation "
     "has nothing to interpolate between: use a denser sweep (e.g. `dec`)"
@@ -8522,7 +8517,7 @@ _AC_TOO_FEW_POINTS_HINT = (
 
 def _ac_sweep_too_few_points(log_text: str) -> bool:
     """Whether the log's (last) ``No. of Data Rows`` is below 2."""
-    rows = _DATA_ROWS_RE.findall(log_text or "")
+    rows = sim_ac_waveform.DATA_ROWS_RE.findall(log_text or "")
     return bool(rows) and int(rows[-1]) < 2
 
 
@@ -9573,6 +9568,8 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        if analysis["kind"] == "ac" and not measurements_spec:
+            lines.append("display frequency")  # Record the original AC point count.
     if analysis.get("linearize") is True:
         # Issue #4014: resample onto a uniform grid, after any rawfile
         # `write` (which keeps the solver's own points) and before the
@@ -10724,10 +10721,7 @@ def _capture_only_waveform_complete(
     ):
         return False
     if analysis["kind"] == "ac" and engine == "ngspice":
-        rows = _DATA_ROWS_RE.findall(log_text)
-        return sim_ac_waveform.complete(
-            raw_path, analysis.get("args", ""), rows[0] if len(rows) == 1 else None
-        )
+        return sim_ac_waveform.complete(raw_path, analysis.get("args", ""), log_text)
     try:
         waveform = parse_ascii_rawfile(raw_path)
     except (SimError, ValueError):

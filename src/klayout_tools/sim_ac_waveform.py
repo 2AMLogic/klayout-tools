@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import math
+import re
 
 from . import _spice_number, sim_raw
+
+DATA_ROWS_RE = re.compile(r"No\. of Data Rows\s*:\s*(\d+)", re.IGNORECASE)
+_SCALE_LENGTH_RE = re.compile(
+    r"^[ \t]*frequency[ \t]*:[ \t]*frequency, complex, (\d+) long\b", re.MULTILINE
+)
 
 
 def _increments(
@@ -60,38 +66,35 @@ def _next_frequency(
     return expected
 
 
-def _matches_grid(
-    raw: sim_raw.ComplexRawfile, args: str, reported_rows: str | None
-) -> bool:
+def _matches_grid(raw: sim_raw.ComplexRawfile, args: str, log_text: str) -> bool:
     mode, count, start, stop = _parse_grid(args)
     step, ratio = _increments(mode, count, start, stop)
     following = _next_frequency(raw, start, step, ratio)
     if following is None:
         return False
-    if reported_rows is not None and len(raw.points) != int(reported_rows):
+    rows = DATA_ROWS_RE.findall(log_text)
+    counts = _SCALE_LENGTH_RE.findall(log_text)
+    if len(rows) == 1:
+        counts.extend(rows)
+    if any(int(count) != len(raw.points) for count in counts):
         return False
     if mode == "lin":
         return len(raw.points) == (count if step else 1)
     if ratio == 1:
         return len(raw.points) == 1
-    # AC includes points up to stop + a tolerance based on the deck's RELTOL.
-    # A row count from the engine confirms any extra tolerance-dependent rows.
-    # Without it, use ngspice's default RELTOL and require the exact last row.
-    tolerance = 1e-3 * stop * ratio
-    if raw.points[-1][0].real > stop + tolerance:
-        return False
-    if reported_rows is not None:
-        return following > stop and not math.isclose(following, stop, rel_tol=1e-12)
-    return following > stop + tolerance
+    # The last logarithmic point depends on ngspice's effective RELTOL. Its
+    # original frequency-vector length identifies the exact endpoint even
+    # when the generic analysis row reports are missing or ambiguous.
+    return bool(counts) and following > stop
 
 
-def complete(raw_path: str, args: str, reported_rows: str | None) -> bool:
+def complete(raw_path: str, args: str, log_text: str | None) -> bool:
     """True only for a decoded AC plot covering the requested frequency grid."""
     try:
         raw = sim_raw.read_complex_ascii_rawfile(raw_path)
         if raw.plotname.lower() != "ac analysis" or raw.names[:1] != ["frequency"]:
             return False
-        return bool(raw.points) and _matches_grid(raw, args, reported_rows)
+        return bool(raw.points) and _matches_grid(raw, args, log_text or "")
     except (ValueError, OverflowError):
         # Malformed rawfiles and extents for which no grid can be established.
         return False

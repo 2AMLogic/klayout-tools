@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -41,11 +42,14 @@ def _rawfile(path, frequencies, plot="AC Analysis", axis="frequency"):
 def test_frequency_grid(tmp_path, args, frequencies):
     path = tmp_path / "waveform.raw"
     _rawfile(path, frequencies)
-    assert sim_ac_waveform.complete(str(path), args, None)
-    assert sim_ac_waveform.complete(str(path), args, str(len(frequencies)))
+    length = len(frequencies)
+    scale = f"    frequency : frequency, complex, {length} long, grid = xlog"
+    rows = f"No. of Data Rows : {length}"
+    for log in (scale, rows, rows + "\n" + scale):
+        assert sim_ac_waveform.complete(str(path), args, log)
     _rawfile(path, frequencies[:-1])
-    assert not sim_ac_waveform.complete(str(path), args, None)
-    assert not sim_ac_waveform.complete(str(path), args, str(len(frequencies)))
+    for log in (scale, rows, rows + "\n" + scale):
+        assert not sim_ac_waveform.complete(str(path), args, log)
 
 
 @pytest.mark.parametrize(
@@ -65,15 +69,15 @@ def test_frequency_grid(tmp_path, args, frequencies):
 def test_unknown_extent(tmp_path, args):
     path = tmp_path / "waveform.raw"
     _rawfile(path, [10])
-    assert not sim_ac_waveform.complete(str(path), args, None)
+    assert not sim_ac_waveform.complete(str(path), args, "")
 
 
 def test_requires_readable_ac_plot_and_intact_axis(tmp_path):
     path = tmp_path / "waveform.raw"
     args = "lin 3 1 3"
-    assert not sim_ac_waveform.complete(str(path), args, None)
+    assert not sim_ac_waveform.complete(str(path), args, "")
     path.write_bytes(b"invalid")
-    assert not sim_ac_waveform.complete(str(path), args, None)
+    assert not sim_ac_waveform.complete(str(path), args, "")
     for frequencies, plot, axis in (
         ([1, 2, 3], "Noise Spectral Density Curves", "frequency"),
         ([1, 2, 3], "AC Analysis", "time"),
@@ -82,10 +86,12 @@ def test_requires_readable_ac_plot_and_intact_axis(tmp_path):
         ([1, 2, 3, 4], "AC Analysis", "frequency"),
     ):
         _rawfile(path, frequencies, plot, axis)
-        assert not sim_ac_waveform.complete(str(path), args, str(len(frequencies)))
+        assert not sim_ac_waveform.complete(
+            str(path), args, f"No. of Data Rows : {len(frequencies)}"
+        )
 
 
-def _run(tmp_path, options):
+def _run(tmp_path, options, args="dec 10 10 100k"):
     (tmp_path / "body.spice").write_text(
         "Vdrive in 0 DC 0 AC 1\nC1 in out 1n\nC2 out 0 1n\n"
     )
@@ -94,8 +100,13 @@ def _run(tmp_path, options):
         json.dumps(
             {
                 "netlist": "body.spice",
-                "analysis": {"kind": "ac", "args": "dec 10 10 100k"},
-                "options": {"waveforms": True, "capture_only": True, **options},
+                "analysis": {"kind": "ac", "args": args},
+                "options": {
+                    "waveforms": True,
+                    "capture_only": True,
+                    "ngspice_init": [],
+                    **options,
+                },
             }
         )
     )
@@ -155,3 +166,65 @@ def test_complete_vector_alone_cannot_rescue_corner(tmp_path, monkeypatch, fault
         "singular_matrix",
         "nonconvergence",
     }
+
+
+@real_ngspice
+@pytest.mark.parametrize(
+    ("mode", "shortened", "row_reports", "status"),
+    [
+        ("oct", False, 1, "pass"),
+        ("dec", False, 1, "pass"),
+        ("oct", False, 0, "pass"),
+        ("dec", False, 2, "pass"),
+        ("oct", True, 0, "error"),
+        ("dec", True, 2, "error"),
+        ("oct", True, 1, "error"),
+    ],
+)
+def test_nondefault_logarithmic_endpoint(
+    tmp_path, monkeypatch, mode, shortened, row_reports, status
+):
+    original_run = sim.subprocess.run
+
+    def adjust_engine_artifacts(cmd, *args, **kwargs):
+        result = original_run(cmd, *args, **kwargs)
+        if "-o" in cmd and "-b" in cmd:
+            log = Path(cmd[cmd.index("-o") + 1])
+            text = log.read_text()
+            (row_report,) = re.findall(r"No\. of Data Rows[^\n]*", text)
+            log.write_text(
+                text.replace(row_report, "\n".join([row_report] * row_reports))
+            )
+            if shortened:
+                raw = log.parent / "waveform.raw"
+                keep = 1002 if mode == "oct" else 302
+                head, tail = raw.read_text().split("Values:\n")
+                head = re.sub(r"No\. Points: \d+", f"No. Points: {keep}", head)
+                tail = re.split(rf"^ *{keep}\t", tail, flags=re.MULTILINE)[0]
+                raw.write_text(head + "Values:\n" + tail)
+        return result
+
+    monkeypatch.setattr(sim.subprocess, "run", adjust_engine_artifacts)
+    report = _run(tmp_path, {"ngspice_options": {"reltol": 0.01}}, f"{mode} 1000 10 20")
+    (corner,) = report["corners"]
+    assert report["status"] == corner["status"] == status
+    assert {
+        d["code"]
+        for d in corner["diagnostics"]
+        if d["severity"] == ("warning" if status == "pass" else "error")
+    } >= {"singular_matrix", "nonconvergence"}
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        "",
+        None,
+        "No. of Data Rows : 1002\nNo. of Data Rows : 1002",
+        "frequency : frequency, complex, 1015 long",
+    ],
+)
+def test_logarithmic_endpoint_needs_the_original_length(tmp_path, log):
+    path = tmp_path / "waveform.raw"
+    _rawfile(path, [10 * 2 ** (i / 1000) for i in range(1002)])
+    assert not sim_ac_waveform.complete(str(path), "oct 1000 10 20", log)

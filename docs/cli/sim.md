@@ -9604,14 +9604,17 @@ For waveform capture without `measurements[]`, the original `waveform.raw`
 can establish that the analysis completed. A transient must reach the stop
 time in `analysis.args`. For ngspice AC, the frequency samples must cover the
 requested linear, decade or octave grid. For example, `oct 3 10 850` ends at
-approximately 806.35 Hz. The check works with or without `complex_vectors`.
+approximately 806.35 Hz. For logarithmic grids, the check uses the length of
+ngspice’s original frequency vector, including any extra points selected by
+the effective `reltol`. It works with or without `complex_vectors`.
 A missing, unreadable, wrong-axis or truncated waveform leaves the stepping
 errors fatal. The abort trailer also keeps them fatal.
 
 The warning message identifies the completed analysis. Other errors, including
-a missing requested vector, still fail the corner. An explicit
-`options.fail_on_diagnostic` selection still grades an otherwise recovered
-corner as inconclusive.
+a missing requested vector, still fail the corner. The `netlist`, `timeout`,
+`measurement`, `unknown`, and `timestep_too_small` errors remain fatal. An
+explicit `options.fail_on_diagnostic` selection still grades an otherwise
+recovered corner as inconclusive.
 
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`
