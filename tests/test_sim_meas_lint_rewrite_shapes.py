@@ -241,3 +241,49 @@ def test_validate_meas_card_fuzz_finds_no_value_changing_suggestion():
         checked += 1
     # the corpus must actually exercise refused shapes, not skip them all
     assert checked > 200
+
+
+@pytest.mark.parametrize("operator", ["+", "-", "*", "/"])
+@pytest.mark.parametrize("signs", ["--", "+-", "-+", "++"])
+@pytest.mark.parametrize(
+    ("space", "between_signs"), [("", ""), (" ", ""), ("", " "), (" ", " ")]
+)
+@pytest.mark.parametrize("left", ["(v(a)-v(b))", "abs(v(a)-v(b))", "abs(v(a,b))"])
+def test_chained_signs_on_right_operand(left, operator, signs, space, between_signs):
+    right = between_signs.join(signs) + "v(a)"
+    expression = f"{left}{space}{operator}{space}{right}"
+    quoted = expression.replace("v(a,b)", "v(a)-v(b)")
+    rewrite = _file_scope_rewrite(f".meas tran t when {expression}=0.1")
+    assert rewrite == f".meas tran t when par('{quoted}')=0.1"
+    sim._validate_meas_card("t", rewrite)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (" * --v(a)", -3),
+        (" / --v(a)", 7 / 3),
+        (" * +-v(a)", 9),
+        (" * -+v(a)", 9),
+        (" * ++v(a)", -3),
+        (" * - - v(a)", -3),
+        (" * ---v(a)", 9),
+        (" * --(v(a)+v(b))", -7),
+        (" * --2", -1),
+    ],
+)
+def test_chained_signs_preserve_precedence_in_first_suggestion(
+    suffix, expected, monkeypatch
+):
+    monkeypatch.setitem(_FUZZ_NODES, "a", 3)
+    monkeypatch.setitem(_FUZZ_NODES, "b", 2)
+    expression = "v(a)-v(b)" + suffix
+    card = f".meas tran t when {expression}=0.1"
+    rewrite = _file_scope_rewrite(card)
+    assert rewrite == f".meas tran t when par('{expression}')=0.1"
+    assert _fuzz_value(expression) == pytest.approx(expected)
+    sim._validate_meas_card("t", rewrite)
+    with pytest.raises(sim.SimError) as excinfo:
+        sim._validate_meas_card("t", card, control_scope=True)
+    assert f'"expr": "{expression}"' in str(excinfo.value)
+    assert "`.meas tran t when vdiff=0.1`" in str(excinfo.value)

@@ -304,7 +304,7 @@ def _extend_left_over_operand(spice: str, start: int) -> tuple[int, str]:
 
 def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
     """Widen *end* over one operand bound by an arithmetic operator, which
-    may carry a leading unary sign (``* -v(a)``, issue #6622), returning
+    may carry chained unary signs (``* - -v(a)``), returning
     whether the walk may continue."""
     right = end
     while right < len(spice) and spice[right].isspace():
@@ -312,12 +312,8 @@ def _extend_right_over_operand(spice: str, end: int) -> tuple[int, bool]:
     if right >= len(spice) or spice[right] not in _MEAS_ARITH_OPS:
         return end, False
     cursor = right + 1
-    while cursor < len(spice) and spice[cursor].isspace():
+    while cursor < len(spice) and (spice[cursor].isspace() or spice[cursor] in "+-"):
         cursor += 1
-    if cursor < len(spice) and spice[cursor] in "+-":
-        cursor += 1
-        while cursor < len(spice) and spice[cursor].isspace():
-            cursor += 1
     found = _token_end(spice, cursor)
     return (end, False) if found is None else (found, True)
 
