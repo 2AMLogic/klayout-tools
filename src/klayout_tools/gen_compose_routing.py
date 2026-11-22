@@ -112,14 +112,19 @@ from .gen_compose_layer_rules import (
     _resolve_landing_pad_sizes as _resolve_landing_pad_sizes,
 )
 from .gen_compose_plane_change import (
+    RouteConflict as RouteConflict,
+)
+from .gen_compose_plane_change import (
     _changes_plane,
     _leg_conflict_reason,
+    _normalize_leg_conflict,
     _pin_failed_pair,
     _pin_position_um,
     _pin_ref,
     _PlaneChangeContext,
     _route_plane_change_leg,
     _segments_field,
+    _unrouted_leg_record,
 )
 from .gen_compose_plane_climb import PlaneClimbContext
 
@@ -2073,20 +2078,22 @@ def _self_net_drawn_short(
     return overlap_um2, crossed
 
 
-def _unroutable(reason: str) -> dict[str, Any]:
+def _unroutable(reason: str, blocking_net: str | None = None) -> dict[str, Any]:
     """Build ``route_two_pin``'s minimal 4-key rejection result.
 
     Every rejection path inside ``route_two_pin`` returns this exact shape
     (``routed``/``route_length_um``/``points_um``/``reason``) -- a
     deliberately minimal contract distinct from the function's 9-key success
     return, not a partial version of it. Factored into one helper so the 12
-    call sites can't drift from each other.
+    call sites can't drift from each other. Since #6961 a rejection
+    naming an already-routed net also carries a ``blocking_net`` key.
     """
     return {
         "routed": False,
         "route_length_um": None,
         "points_um": None,
         "reason": reason,
+        **({} if blocking_net is None else {"blocking_net": blocking_net}),
     }
 
 
@@ -3296,7 +3303,7 @@ def _same_block_cross_layer_retry(
     unroutable wording), ``None`` when it is not armed or the fixed shape has
     no conflict. ``leg_conflict`` is an optional callable with the same
     signature as :func:`route_bundle`'s own ``leg_conflict`` parameter
-    (``(points_um, via_drops, stub_widen, route_layer) -> str | None``).
+    (``(points_um, via_drops, stub_widen, route_layer) -> str | RouteConflict | None``).
 
     Only armed when ``leg_conflict`` was supplied AND this leg is a
     same-block self-net's fixed-shape attempt that resolved on
@@ -3339,12 +3346,14 @@ def _same_block_cross_layer_retry(
         and cross_block_route_layer is not None
         and effective_route_layer == cross_block_route_layer
     )
-    conflict_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+    conflict = (
+        _normalize_leg_conflict(
+            leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        )
         if retry_eligible
         else None
     )
-    if conflict_reason is None:
+    if conflict is None:
         return None
     lanes = _self_net_cross_layer_lane_waypoints_um(
         a, b, own_bbox_um, effective_width_um
@@ -3362,10 +3371,11 @@ def _same_block_cross_layer_retry(
         if lane_conflict is None:
             return retry
     return _unroutable(
-        conflict_reason + " -- a bounded same-block cross-layer detour "
+        conflict.reason + " -- a bounded same-block cross-layer detour "
         f"({len(lanes)} alternate lane{'' if len(lanes) == 1 else 's'} "
         "looped clear of the block's own bbox) was tried first, and "
-        "each one still conflicted"
+        "each one still conflicted",
+        blocking_net=conflict.blocking_net,
     )
 
 
@@ -3430,12 +3440,14 @@ def _channel_track_retry(
         and vb[1] != 0
         and va[1] == vb[1]
     )
-    channel_track_reason = (
-        leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+    conflict = (
+        _normalize_leg_conflict(
+            leg_conflict(points, via_drops, stub_widen, effective_route_layer)
+        )
         if channel_track_eligible
         else None
     )
-    if channel_track_reason is None:
+    if conflict is None:
         return None
     pitch_um = _CHANNEL_TRACK_PITCH_WIDTHS * effective_width_um
     direction_sign = 1 if va[1] > 0 else -1
@@ -3463,11 +3475,11 @@ def _channel_track_retry(
             points, via_drops, stub_widen, effective_route_layer, effective_width_um
         )
     return _unroutable(
-        channel_track_reason
-        + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
+        conflict.reason + f" -- {_MAX_CHANNEL_TRACKS} alternate channel tracks (this "
         "leg's shared-channel horizontal jog shifted farther from "
         "the row, one route width's worth of clearance per track) "
-        "were tried first, and each one still conflicted"
+        "were tried first, and each one still conflicted",
+        blocking_net=conflict.blocking_net,
     )
 
 
@@ -3694,8 +3706,9 @@ def route_two_pin(
     cross-layer conflict retry (#1393, :func:`_same_block_cross_layer_retry`)
     and the channel track retry (#1467, :func:`_channel_track_retry`).
     ``leg_conflict`` has :func:`route_bundle`'s own signature (``(points_um,
-    via_drops, stub_widen, route_layer) -> str | None``); ``channel_offset_um``
-    is the track offset the channel track retry supplies.
+    via_drops, stub_widen, route_layer) -> str | RouteConflict | None``);
+    a rejection its retries produce can carry a ``blocking_net`` (#6961).
+    ``channel_offset_um`` is the track offset the channel track retry supplies.
 
     Returns ``{"routed": bool, "route_length_um": float | None,
     "points_um": list | None, "via_drops": list, "stub_widen": list,
@@ -4111,7 +4124,9 @@ def route_bundle(
     and, when it has a same-layer minimum-spacing rule to consult, reject a
     leg that comes too *close* to an already-accepted one, not only one that
     literally overlaps it) and returning a rejection reason (or ``None`` to
-    accept) -- ``compose()`` passes its route-vs-route collision check
+    accept) -- since #6961 a RouteConflict verdict may also name the
+    blocking net, reported on the rejected leg as ``blocking_net``.
+    ``compose()`` passes its route-vs-route collision check
     (#1057) here, so a leg colliding with an *already-routed other net* is
     rejected as a candidate and an alternative leg is tried, rather than
     failing the whole net. The identical callable is also threaded straight
@@ -4448,7 +4463,7 @@ def route_bundle(
             # Plane-bearing waypoints (#2930): pinned to its named planes
             # like any layer-pinned leg -- no cross-block retry, no automatic
             # re-pickup of the pin pair if a segment is rejected.
-            result, reason = _route_plane_change_leg(
+            result, conflict = _route_plane_change_leg(
                 plane_change_ctx,
                 i,
                 j,
@@ -4492,8 +4507,8 @@ def route_bundle(
                 block_geometry_for=override_geometry_for,
                 grid_um=grid_um,
             )
-            reason = _leg_conflict_reason(result, leg_conflict)
-            if reason is not None or not result["routed"]:
+            conflict = _leg_conflict_reason(result, leg_conflict)
+            if conflict is not None or not result["routed"]:
                 # "Explicit wins, no retry" is only a real guarantee if the
                 # automatic candidate loop below cannot quietly reconnect the
                 # very pins this override just failed on -- on the *net's*
@@ -4529,8 +4544,8 @@ def route_bundle(
                 cross_block_geometry_for=cross_block_geometry_for,
                 grid_um=grid_um,
             )
-            reason = _leg_conflict_reason(result, leg_conflict)
-            if reason is not None:
+            conflict = _leg_conflict_reason(result, leg_conflict)
+            if conflict is not None:
                 retry = climb_ctx.retry_rejected_leg(
                     i,
                     j,
@@ -4538,11 +4553,13 @@ def route_bundle(
                     leg_effective_width_um,
                     cross_geometry,
                     result,
-                    reason,
+                    conflict.reason,
                 )
                 if retry is not None:
                     result = retry
-                    reason = None
+                    conflict = None
+        reason = conflict.reason if conflict is not None else None
+        blocking_net = conflict.blocking_net if conflict is not None else None
         if reason is None and result["routed"]:
             if uf.union(i, j):
                 components -= 1
@@ -4566,17 +4583,7 @@ def route_bundle(
             )
         else:
             legs.append(
-                {
-                    "pins": [pins[i], pins[j]],
-                    "pin_indices": (i, j),
-                    "explicit": True,
-                    "routed": False,
-                    "route_length_um": None,
-                    "reason": reason,
-                    "points_um": None,
-                    "via_drops": [],
-                    "stub_widen": [],
-                }
+                _unrouted_leg_record(pins, i, j, reason, blocking_net, explicit=True)
             )
 
     for i, j in candidates:
@@ -4621,14 +4628,16 @@ def route_bundle(
             cross_block_geometry_for=cross_block_geometry_for,
             grid_um=grid_um,
         )
-        reason = _leg_conflict_reason(result, leg_conflict)
-        if reason is not None:
+        conflict = _leg_conflict_reason(result, leg_conflict)
+        if conflict is not None:
             retry = climb_ctx.retry_rejected_leg(
-                i, j, waypoints_um, width_um, cross_geometry, result, reason
+                i, j, waypoints_um, width_um, cross_geometry, result, conflict.reason
             )
             if retry is not None:
                 result = retry
-                reason = None
+                conflict = None
+        reason = conflict.reason if conflict is not None else None
+        blocking_net = conflict.blocking_net if conflict is not None else None
 
         if reason is None and result["routed"]:
             uf.union(i, j)
@@ -4650,18 +4659,7 @@ def route_bundle(
                 }
             )
         else:
-            legs.append(
-                {
-                    "pins": [pins[i], pins[j]],
-                    "pin_indices": (i, j),
-                    "routed": False,
-                    "route_length_um": None,
-                    "reason": reason,
-                    "points_um": None,
-                    "via_drops": [],
-                    "stub_widen": [],
-                }
-            )
+            legs.append(_unrouted_leg_record(pins, i, j, reason, blocking_net))
 
     if components == 1:
         return {

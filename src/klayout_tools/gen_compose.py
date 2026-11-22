@@ -220,6 +220,7 @@ from .gen_compose_landing_pads import (
     _parse_landing_pad_override,
 )
 from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
+from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
 # The rest of this module never calls these directly -- they are re-exported
@@ -266,10 +267,7 @@ from .gen_compose_routing import (
 )
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
-from .gen_compose_via_cuts import (
-    own_via_cut_clearance_reason,
-    via_drop_cut_side_um,
-)
+from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
 
@@ -3810,7 +3808,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
-        ) -> str | None:
+        ) -> RouteConflict | None:
             """Route-vs-route collision check (#1057, spacing-aware since
             #1386) for one candidate leg.
 
@@ -3892,7 +3890,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             true` legs that still failed `klt drc`'s
             `li1.space.1`/`met1.space.1`) that the overlap-only version of
             this check could not see. A layer with no known ``"space"`` rule
-            keeps the overlap-only test.
+            keeps the overlap-only test (#6961: verdict is a ``RouteConflict``).
             """
             # A new automatic via ladder must clear other nets on every plane.
             automatic = candidate_width_um is not None
@@ -3934,7 +3932,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         or _is_gf180_9k_11k_top(pdk_info["variant"], cand_layer),
                     )
                     if message is not None:
-                        return message
+                        return RouteConflict(message, other_net)  # #6961
 
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
@@ -3984,7 +3982,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     box, pad_geometry, pad_spacing_um
                 )
                 if violation_um is not None:
-                    return (
+                    return RouteConflict(
                         f"draws a pad ({box[0]:.4g}, {box[1]:.4g}) - "
                         f"({box[2]:.4g}, {box[3]:.4g}) on layer {pad_layer} "
                         f"that comes within {violation_um:.4g}um of block "
@@ -4059,7 +4057,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         own_spacing_um,
                     )
                     if violation_um is not None:
-                        return (
+                        return RouteConflict(
                             f"this leg's drawn {candidate_width_um:.4g}um metal "
                             f"comes within {violation_um:.4g}um of block "
                             f"'{block_id}''s own drawn geometry on layer "
@@ -4171,7 +4169,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                                 "landed_on_block": landed,
                             }
                             if leg["routed"]
-                            else {}
+                            else _blocking_net_field(leg)  # blocking_net (#6961)
                         ),
                     }
                     for leg, landed in zip(
