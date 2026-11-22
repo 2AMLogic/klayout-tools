@@ -3152,20 +3152,10 @@ def _run_batch_job(
     and poll timeouts yield unrun corner reports; transport errors raise
     :class:`BatchError`.
 
-    ``attach=True`` (issue #2978) resumes an *existing* ``job_id``: nothing
-    is staged, submitted or launched -- the job must already have a
-    ``job.json`` (else :data:`BATCH_UNKNOWN_JOB_CODE`) and the call goes
-    straight to polling and collecting. A job Spot-reclaimed mid-run is
-    still waited on, never re-launched (see :func:`poll_status`).
-    ``launch_if_unlaunched`` (issue #3896; attach only) is for a job the
-    shard map records as submitted but never launched: it is launched first,
-    but only while the fleet has published no ``status.json`` -- one that
-    exists means a launch already happened, and a second would double-bill.
-    ``on_phase`` is told ``"submitted"``, ``"launching"`` and ``"launched"``
-    as the job reaches each, so a shard map can record them durably; a launch
-    the fleet refused for capacity is told ``"launch_refused"`` (issue #4018).
-    ``launch_kwargs`` is forwarded to :func:`launch_job` (``sleep``,
-    ``on_refusal``).
+    Attach polls an existing job with a job.json (#2978). It launches only
+    when the shard map records an unlaunched job and status.json is absent
+    (#3896). Spot-reclaimed jobs keep polling. The phase hook records submit,
+    launch and capacity refusal (#4018); launch_kwargs is passed to launch_job.
 
     The returned environment also carries client-observed wall-clock
     timestamps (``client_submitted_at``, ``client_launched_at``,
@@ -3206,6 +3196,9 @@ def _run_batch_job(
             measurements_spec=measurements_spec,
             runner=runner,
             sleep=sleep,
+            expected_netlist=lambda: sim_batch_receipt.attached_netlist_sha256(
+                request, netlist_path
+            ),
             timestamps=attach_timestamps,
             now=now,
             attach=True,
@@ -3227,6 +3220,7 @@ def _run_batch_job(
         "client_status_terminal_at": None,
         "client_collected_at": None,
     }
+    staged_digest = sim_batch_receipt.submitted_netlist_sha256(spec, netlist_sha256)
     submit_job(config, job_id, spec, runner=runner)
     notify("submitted")
     sim_batch_observer.report_submitted(job_id)
@@ -3260,6 +3254,7 @@ def _run_batch_job(
         sleep=sleep,
         timestamps=timestamps,
         now=now,
+        expected_netlist=lambda: staged_digest,
         receipt_path=receipt_path,
         receipt=receipt,
     )
@@ -3277,6 +3272,7 @@ def _poll_and_collect(
     runner: remote_transport.CommandRunner | None,
     sleep: Any,
     timestamps: dict[str, str | None],
+    expected_netlist: Callable[[], str],
     now: Callable[[], str],
     receipt_path: str | None = None,
     receipt: dict[str, Any] | None = None,
@@ -3357,6 +3353,7 @@ def _poll_and_collect(
         environment["client_collected_at"] = now()
         report = read_collected_report(collected)
         check_ngspice_options_echo(request, report)
+        sim_batch_receipt.check_collected_netlist(job_id, report, expected_netlist)
         environment = {
             **environment,
             **_read_job_identity(collected, request, report=report),
