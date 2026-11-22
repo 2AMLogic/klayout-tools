@@ -6,6 +6,8 @@ from typing import Any
 
 from .lvs_pin_anchors import _ANCHORED_PIN_SAMPLE_LIMIT
 
+REFERENCE_PORT_ALIAS_CATEGORY = "topology.reference_port_alias_joined"
+
 
 def _ports(circuit: Any, aliases: dict[str, str]) -> dict[str, str]:
     names: dict[str, str] = {}
@@ -23,7 +25,7 @@ def pin_set_difference(
     aliases = {}
     for finding in findings:
         if (
-            finding["category"] == "topology.reference_port_alias_joined"
+            finding["category"] == REFERENCE_PORT_ALIAS_CATEGORY
             and finding["circuit"]["reference"].upper() == reference.name.upper()
         ):
             details = finding["details"]

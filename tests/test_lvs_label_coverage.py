@@ -1,10 +1,12 @@
 """LVS diagnostic coverage on the stream and circuits actually compared."""
 
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
 
+from klayout_tools.cli.lvs_cmd import _print_text
 from klayout_tools.extract import run_extract
 from klayout_tools.lvs import rerun_lvs_report, run_lvs
 from klayout_tools.lvs_label_coverage import pin_set_difference
@@ -41,7 +43,7 @@ def _stream(tmp_path, *, other_text=True, child_text=True):
 
 
 @pytest.mark.parametrize("use_override", [False, True])
-def test_inline_label_coverage_agrees_with_extract(tmp_path, use_override):
+def test_inline_label_coverage_agrees_with_extract(tmp_path, use_override, capsys):
     moved, ref = _stream(tmp_path)
     mapping = {"metal0": [67, 10]} if use_override else None
     report = run_lvs(json.dumps(_label_layers_request(moved, ref, mapping)))
@@ -52,6 +54,11 @@ def test_inline_label_coverage_agrees_with_extract(tmp_path, use_override):
         label_layers={"metal0": (67, 10)} if use_override else None,
     )
     assert report["ignored_layers"] == extract["ignored_layers"]
+    _print_text(report)
+    text = capsys.readouterr().out.splitlines()
+    assert [line for line in text if line.startswith("warning: ")] == [
+        f"warning: {w}" for w in report["warnings"]
+    ]
     if use_override:
         assert report["warnings"] == []
         assert report["counts"]["pins"]["layout"] > 1
@@ -131,8 +138,15 @@ def test_case_fold_and_full_counts_with_bounded_samples():
         left.create_pin(f"L{i:02}")
         right.create_pin(f"R{i:02}")
     diff = pin_set_difference(left, right, None, [])
+    schema_path = (
+        Path(__file__).resolve().parents[1] / "docs/schemas/lvs-response.schema.json"
+    )
+    fields = json.loads(schema_path.read_text())["properties"]["pin_set_difference"][
+        "properties"
+    ]
     for side, stem in [("layout", "L"), ("reference", "R")]:
         key = f"{side}_only_pins"
         assert diff[key] == [f"{stem}{i:02}" for i in range(20)]
+        assert len(diff[key]) == fields[key]["maxItems"]
         assert diff[key + "_count"] == 25
         assert diff[key + "_truncated"] is True

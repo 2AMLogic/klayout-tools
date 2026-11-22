@@ -206,11 +206,12 @@ def _run_check(args: argparse.Namespace) -> int:
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
 
 
-def _print_mismatches_omitted(report: dict) -> None:
-    """The ``--omit-mismatches`` note (issue #5610), printed only when the
-    flag was used."""
+def _print_report_notices(report: dict) -> None:
+    """Show optional mismatch-compaction and extraction notices."""
     if report.get("mismatches_omitted"):
         print("mismatches_omitted: True (--omit-mismatches)")
+    for warning in report.get("warnings", []):
+        print(f"warning: {warning}")
 
 
 def _print_excluded_pins(power: dict) -> None:
@@ -251,7 +252,7 @@ def _print_text(report: dict) -> None:
     # was used -- without it, a compacted report's per-entry section is
     # empty and would be indistinguishable from a clean report's tail (the
     # renderer returns early on an empty list, after the counts above).
-    _print_mismatches_omitted(report)
+    _print_report_notices(report)
     # Issue #1132: printed unconditionally (like `mismatches` above), even
     # when 0, so a caller skimming text output can tell "0 mismatches" and
     # "N mismatches, 0 of them errors" apart from "no report at all".

@@ -208,6 +208,7 @@ from .lvs_gate_level_convert import (
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
+from .lvs_label_coverage import REFERENCE_PORT_ALIAS_CATEGORY
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -476,7 +477,7 @@ CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguou
 #: The alias pin's net was joined onto its canonical target's net (`Circuit
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
-CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
+CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = REFERENCE_PORT_ALIAS_CATEGORY
 #: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
 #: declared on *both* sides to its own net on the other side
 #: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
