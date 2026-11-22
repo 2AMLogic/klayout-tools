@@ -33,6 +33,14 @@ def _masked_body(text: str) -> str:
     return "\n".join(lines)
 
 
+def _node_count(nodes: list[str]) -> int:
+    # The shared lexer keeps a parenthesized pin list together. Its original
+    # token is still needed to find the target's byte offset in the input.
+    if len(nodes) == 1 and nodes[0].startswith("(") and nodes[0].endswith(")"):
+        return len(split_spice_tokens(nodes[0][1:-1].replace(",", " ")))
+    return len(nodes)
+
+
 def retarget_calls(
     text: str, schematic: str, physical: str, pin_count: int | None
 ) -> str | None:
@@ -48,9 +56,10 @@ def retarget_calls(
             continue
         if target.casefold() != schematic.casefold():
             continue
-        if pin_count is not None and len(nodes) != pin_count:
+        actual_pins = _node_count(nodes)
+        if pin_count is not None and actual_pins != pin_count:
             raise ValueError(
-                f"instance '{tokens[0]}' has {len(nodes)} nodes for {pin_count} pins"
+                f"instance '{tokens[0]}' has {actual_pins} nodes for {pin_count} pins"
             )
         # Walk past the positional tokens so a node named like the DUT or a
         # parameter value containing its name cannot be mistaken for the target.

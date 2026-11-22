@@ -44,8 +44,10 @@ def _kwargs(tmp_path):
 
 @real_ngspice
 @pytest.mark.parametrize("flatten", [False, True])
-def test_real_resistor_measures_both_sides(tmp_path, design, flatten):
+@pytest.mark.parametrize("pin_list", ["RA RB", "(RA RB)", "(RA,RB)"])
+def test_real_resistor_measures_both_sides(tmp_path, design, flatten, pin_list):
     gds, dut, tb, request = design
+    tb.write_text(tb.read_text().replace("Xres RA RB rEs", f"Xres {pin_list} rEs"))
     original = {path: path.read_bytes() for path in design}
     report = pex.run_pex(
         str(gds),
@@ -64,6 +66,15 @@ def test_real_resistor_measures_both_sides(tmp_path, design, flatten):
     if flatten:
         assert report["schematic_flatten"]["subckts"] == ["RES"]
         assert report["schematic_flatten"]["inlined_subckts"] == ["leaf"]
+
+
+def test_parenthesized_pin_list_validation_preserves_target_offset():
+    body = "Xcall (RES RES) RES params: m=2 ; RES\n"
+    assert pex_binding.retarget_calls(body, "RES", "LAYOUT", 2) == body.replace(
+        ") RES", ") LAYOUT"
+    )
+    with pytest.raises(ValueError, match="3 nodes for 2 pins"):
+        pex_binding.retarget_calls("Xcall (a b c) RES", "RES", "LAYOUT", 2)
 
 
 def test_only_instance_target_tokens_change():
