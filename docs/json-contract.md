@@ -245,7 +245,10 @@ request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
 member, `"not_reached"` (with `value: null`), an `info` diagnostic
 `measurement_not_reached`, and a top-level `not_reached` count present only
-for a request that declared the field. Consumers that switch on measurement
+for a request that declared the field. The same opt-in on a step-scoped
+`analysis_steps[].measurements[].spice` card (issue #7072) reports the
+identical members under the qualified `<step>.<name>` result, which also
+carries its `step` provenance field. Consumers that switch on measurement
 `status` already must tolerate unknown members per the rule above. No
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
 `.meas` targets (`measurements[].on_unreached`)".
@@ -1809,7 +1812,12 @@ GF180 main script carries the same selection as its target.
 
 When the parallel runner names failed workers, `error.abort.decks` lists their
 distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
-A single identified failure also supplies `abort.deck`. The parallel runner
+A single identified failure also supplies `abort.deck`. For the recognized GF180
+3LM abort (`deck: "mslot1"`, `symbol: "metal4_drawn"`), the optional
+`error.abort.hint` points to the [deck selectors and their coverage](cli/drc.md#gf180-3lm-deck-selection).
+A tolerated report carries that hint at `engine_deck_errors.abort.hint`.
+
+The parallel runner
 can start several decks before reporting a failure.
 
 | Field | Meaning |

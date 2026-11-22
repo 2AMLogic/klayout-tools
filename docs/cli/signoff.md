@@ -1342,6 +1342,48 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   the bare key, so the qualified form never borrows the other partition's
   evidence: `"7.analog"` on a `"digital"` manifest matches nothing and the
   item falls through to `"7"` (and, absent that, to `unmet`/`no_evidence`).
+- `disclosed_evidence` — optional (default absent, issue #6953), a map from
+  item key to a **local file path**, disclosing evidence produced *outside*
+  `klt` that this grader cannot read but the maintainer attests exists:
+
+  ```json
+  {
+    "block": "demo",
+    "kind": "digital",
+    "disclosed_evidence": {
+      "1": "netlist/demo.v",
+      "5.digital": "reports/sta.json"
+    }
+  }
+  ```
+
+  A block whose flow legitimately ran through external scripts — OpenROAD
+  STA results, a synthesized netlist from RTL pinned in another repository —
+  has no `evidence` form for those artifacts (citing a foreign document
+  renders `unreadable_evidence`/`unrecognized_envelope`), so its rows read
+  `unmet`/`no_evidence`: a reason asserting *no evidence exists*, which a
+  fleet reader mistakes for "the work was never done". A disclosure fixes
+  the *record*, not the verdict: the grader's only statement about a
+  disclosed path is that it names a readable local file — the contents are
+  never parsed, classified, executed, or interpreted as a grading envelope —
+  and the row stays `unmet` with `reason: "evidence_not_klt_native"` and the
+  declared path in `detail.disclosed_evidence`. No T1 credit, no
+  `citation`, no exit-code change; a disclosure is identification, never a
+  verdict, so a valid native envelope at a disclosed path still cannot
+  confer credit. Paths resolve against the process working directory, the
+  same convention as a local file-backed `evidence` citation; a path that
+  is missing, a directory, or unreadable renders
+  `unmet`/`unreadable_evidence` instead, still naming the path. Keys use
+  the `evidence` map's grammar (`"<item id>"` or
+  `"<item id>.<analog|digital>"`) and its precedence — the qualifier for
+  the partition being graded first, then the bare key — so a disclosure
+  keyed only to `5.digital` on a mixed-signal block affects only the
+  digital row. A disclosure applies only to a row this build graded whose
+  verdict would otherwise be `unmet`/`no_evidence`; a native pass, a native
+  citation failure, or a spec-row verdict keeps its original status and
+  reason. A malformed declaration (a non-object map, a key that is not an
+  item key, a value that is not a non-empty string path) is a validation
+  error, not a silent no-op.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
@@ -1389,10 +1431,10 @@ manifest. **Phase 1 (issue #825)** wires the actual DRC/LVS/netlist-
 regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
-statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way — the one
-bound verb that is not reachable from a published release (see "Item 6's
-evidence needs a from-source toolchain" below). **Phase 2b
+statistical-evidence item, by binding a [`klt yield` campaign report](yield.md)
+(epic #710). For installation instructions, see
+[Item 6's evidence needs the `[yield]` extra (issue #2466)](#item-6s-evidence-needs-the-yield-extra-issue-2466).
+**Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
@@ -5829,6 +5871,7 @@ actually ran and failed):
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
+| `"evidence_not_klt_native"` | yes | **(issue #6953)** The item has no `evidence` entry, but the manifest's `disclosed_evidence` map named a local artifact for it that this grader cannot read — evidence produced outside `klt` (an OpenROAD STA report, a netlist synthesized from foreign RTL) which no T1 item accepts as a citation. The grader's only claim is that the disclosed path names a readable file (`detail.disclosed_evidence`); its contents are never parsed or interpreted as a grading envelope, and the item still grades `unmet` with no `citation` and no credit — a disclosure is identification, never a verdict. Distinct from `"no_evidence"` (whose meaning, "the manifest has no entry for the item", would otherwise read as "the work was never done"); an unreadable disclosed path renders `"unreadable_evidence"` instead. See the `disclosed_evidence` manifest field above. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
 | `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |
