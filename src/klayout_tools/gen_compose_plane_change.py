@@ -62,22 +62,64 @@ def _pin_position_um(
     return (float(x_um) + offset["x"], float(y_um) + offset["y"])
 
 
-def _leg_conflict_reason(result: dict[str, Any], leg_conflict: Any) -> str | None:
+class RouteConflict(NamedTuple):
+    """A ``leg_conflict`` verdict (issue #6961).
+
+    The rejection wording plus, when the rejection names one, the label of
+    the already-routed net whose accepted geometry blocked the leg --
+    ``None`` for every rejection that is not a route-vs-route collision
+    (a block-geometry, ring, channel or via-drop rejection names no net).
+    ``reason`` is byte-identical to the pre-#6961 string the hook returned;
+    consumers that only want the wording read ``.reason`` and behave exactly
+    as before.
+
+    The pre-#6961 hook contract returned the bare wording string, and a
+    direct :func:`route_bundle` caller's own hook may still do so --
+    consumers normalise through :func:`_normalize_leg_conflict`, which wraps
+    a bare ``str`` as a blocker-less verdict, never the other way round.
+    """
+
+    reason: str
+    blocking_net: str | None = None
+
+
+def _normalize_leg_conflict(verdict: Any) -> RouteConflict | None:
+    """Normalise a ``leg_conflict`` return value (issue #6961).
+
+    ``None`` (no conflict) passes through; a :class:`RouteConflict` passes
+    through unchanged; a bare ``str`` -- the hook contract every pre-#6961
+    direct ``route_bundle()`` caller and test hook still speaks -- is
+    wrapped as a blocker-less verdict, so those callers keep working
+    unchanged and simply report no ``blocking_net``.
+    """
+    if verdict is None:
+        return None
+    if isinstance(verdict, RouteConflict):
+        return verdict
+    return RouteConflict(verdict)
+
+
+def _leg_conflict_reason(
+    result: dict[str, Any], leg_conflict: Any
+) -> RouteConflict | None:
     """Why a :func:`route_two_pin` result cannot stand as a bundle leg, else ``None``.
 
-    The router's own rejection reason when it did not route; otherwise the
-    caller-supplied ``leg_conflict`` verdict on the drawn geometry (``None``
-    when there is no conflict hook).
+    The router's own rejection when it did not route -- carrying that
+    rejection's ``blocking_net`` when it names an already-routed net (issue
+    #6961) -- otherwise the caller-supplied ``leg_conflict`` verdict on the
+    drawn geometry (``None`` when there is no conflict hook).
     """
     if not result["routed"]:
-        return result["reason"]
+        return RouteConflict(result["reason"], result.get("blocking_net"))
     if leg_conflict is None:
         return None
-    return leg_conflict(
-        result["points_um"],
-        result.get("via_drops", []),
-        result.get("stub_widen", []),
-        result.get("route_layer"),
+    return _normalize_leg_conflict(
+        leg_conflict(
+            result["points_um"],
+            result.get("via_drops", []),
+            result.get("stub_widen", []),
+            result.get("route_layer"),
+        )
     )
 
 
@@ -106,6 +148,50 @@ def _pin_failed_pair(
 def _segments_field(result: dict[str, Any]) -> dict[str, Any]:
     """Per-plane drawing payloads of a plane-changing leg (#2930), if any."""
     return {"segments": result["segments"]} if result.get("segments") else {}
+
+
+def _blocking_net_field(leg: dict[str, Any]) -> dict[str, Any]:
+    """The ``blocking_net`` split for an unrouted leg's report record (#6961).
+
+    ``{"blocking_net": <label>}`` when the leg's rejection named an
+    already-routed net, ``{}`` otherwise -- the omit-when-absent convention
+    ``channel_track`` uses, so a successful leg and a geometry-based
+    rejection carry no field at all.
+    """
+    blocking_net = leg.get("blocking_net")
+    return {} if blocking_net is None else {"blocking_net": blocking_net}
+
+
+def _unrouted_leg_record(
+    pins: list[dict[str, Any]],
+    i: int,
+    j: int,
+    reason: str | None,
+    blocking_net: str | None,
+    explicit: bool = False,
+) -> dict[str, Any]:
+    """The shared ``legs[]`` record shape for a rejected leg (#1073, #6961).
+
+    One builder for both of ``route_bundle``'s rejection sites (an
+    auto-selected candidate and a caller-named explicit leg) so the two
+    cannot drift; ``blocking_net`` is included only when the rejection
+    names an already-routed net (#6961).
+    """
+    record: dict[str, Any] = {
+        "pins": [pins[i], pins[j]],
+        "pin_indices": (i, j),
+        "routed": False,
+        "route_length_um": None,
+        "reason": reason,
+        "points_um": None,
+        "via_drops": [],
+        "stub_widen": [],
+    }
+    if explicit:
+        record["explicit"] = True
+    if blocking_net is not None:
+        record["blocking_net"] = blocking_net
+    return record
 
 
 # Plane-bearing waypoints (#2930): a leg whose `waypoints_um` carries a
@@ -264,8 +350,14 @@ def _route_plane_segment(
     ends: tuple[dict[str, str], dict[str, str]],
     junction_blocks: set[str],
     pin_indices: tuple[int, int],
-) -> tuple[dict[str, Any], str | None]:
-    """Route one same-plane segment; returns ``(route_two_pin result, reason)``."""
+) -> tuple[dict[str, Any], RouteConflict | None]:
+    """Route one same-plane segment.
+
+    Returns ``(route_two_pin result, conflict)`` -- the conflict is
+    ``None`` when the segment can stand, otherwise the verdict whose
+    ``.reason`` gains the waypoint context (issue #6961 keeps its
+    ``.blocking_net`` intact through that wrapping).
+    """
     seg_a, seg_b = ends
     plane_fetch = (
         ctx.block_geometry_for
@@ -305,17 +397,19 @@ def _route_plane_change_leg(
     leg_spec: dict[str, Any],
     start_layer: tuple[int, int] | None,
     start_width_um: float,
-) -> tuple[dict[str, Any] | None, str | None]:
+) -> tuple[dict[str, Any] | None, RouteConflict | None]:
     """Route a leg split at its plane-bearing waypoints (#2930).
 
     Returns ``(result, None)`` with ``result["segments"]`` carrying each
-    plane's drawing payload, or ``(None, reason)`` when the pinned leg cannot
-    be routed.
+    plane's drawing payload, or ``(None, conflict)`` when the pinned leg
+    cannot be routed -- the rejecting segment's verdict, its ``reason``
+    prefixed with the plane-change context and its ``blocking_net`` (issue
+    #6961) preserved unchanged.
     """
     waypoints = list(leg_spec["waypoints_um"])
     waypoint_layers = leg_spec["waypoint_layers"]
     if start_layer is None or ctx.extraction_deck is None:
-        return None, (
+        return None, RouteConflict(
             "a plane-bearing waypoint needs a resolved routing layer and "
             "PDK extraction deck to build the via ladder between planes"
         )
@@ -354,11 +448,14 @@ def _route_plane_change_leg(
             anchor_k = start_k if start_k is not None else end_k
             assert anchor_k is not None  # a plane-changing leg has a junction
             seg = {**seg, "waypoints": [waypoints[anchor_k]]}
-        result, reason = _route_plane_segment(
+        result, conflict = _route_plane_segment(
             ctx, scoped, seg, (seg_a, seg_b), junction_blocks, (i, j)
         )
-        if reason is not None:
-            return None, _plane_change_failure(reason, start_k, end_k, waypoints)
+        if conflict is not None:
+            return None, RouteConflict(
+                _plane_change_failure(conflict.reason, start_k, end_k, waypoints),
+                conflict.blocking_net,
+            )
         total_um += result["route_length_um"]
         drawn.append(
             {
