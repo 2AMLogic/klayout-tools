@@ -1433,10 +1433,11 @@ def _run_corner_session(
         # Additive field (issue #3744): the assumptions behind that figure.
         "power_basis": _power_basis_block(power_activity, spef_path is not None),
     }
-    if not has_def:
-        corner_fields["wire_load"] = _sta_wire_load.evidence(
-            stdout, wire_load_model, wire_load_mode
+    corner_fields.update(
+        _sta_wire_load.corner_fields(
+            stdout, wire_load_model, wire_load_mode, has_def=has_def
         )
+    )
     # Additive field (issue #3042): only present when the request named
     # `constraints.report_ports`, so an unrequested response is unchanged.
     if report_ports:

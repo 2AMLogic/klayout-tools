@@ -17,20 +17,23 @@ SESSION_MARKER_TCL = (
 _VERIFIED_UNSET_BUILD = "26Q3-1510-g6cb3f2b704"
 
 
-def evidence(stdout: str, model: str | None, mode: str | None) -> dict[str, str | None]:
-    """Describe the effective settings independently of the two request echoes."""
+def corner_fields(
+    stdout: str, model: str | None, mode: str | None, *, has_def: bool
+) -> dict[str, dict[str, str | None]]:
+    """Record the effective wire-load settings of a Verilog timing session."""
+    if has_def:
+        return {}
     marker = re.search(r"^KLT_WIRE_LOAD_SESSION ([^\s]+)[ \t]*$", stdout, re.MULTILINE)
     if marker is None:
-        return {
-            "model": None,
-            "model_source": "unknown",
-            "mode": None,
-            "mode_source": "unknown",
-        }
-    unset_source = "none" if marker[1] == _VERIFIED_UNSET_BUILD else "unknown"
+        model = mode = None
+    unset_source = (
+        "none" if marker and marker[1] == _VERIFIED_UNSET_BUILD else "unknown"
+    )
     return {
-        "model": model,
-        "model_source": "request" if model is not None else unset_source,
-        "mode": mode,
-        "mode_source": "request" if mode is not None else unset_source,
+        "wire_load": {
+            "model": model,
+            "model_source": "request" if model is not None else unset_source,
+            "mode": mode,
+            "mode_source": "request" if mode is not None else unset_source,
+        }
     }
