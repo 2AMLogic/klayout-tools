@@ -529,6 +529,7 @@
         "klayout_tools.cli._lvs_parser_args",
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_base",
         "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
