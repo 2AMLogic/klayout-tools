@@ -253,6 +253,7 @@ from .extract_flavour import (
     _flavour_split_island,
     apportion_shared_sd,
 )
+from .extract_layer_coverage import capture_layout_coverage
 from .extract_mos_capacitor import _resolve_mos_capacitors
 
 # Moved out (issue #5481) and re-exported, so every existing
@@ -4319,6 +4320,7 @@ def extract_netlist_from_layout(
     missing_flavour_markers: list[dict[str, Any]] | None = None,
     unsupported_devices: list[dict[str, Any]] | None = None,
     dotted_renames_out: list[tuple[str, str, str]] | None = None,
+    layout_coverage: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -4531,11 +4533,7 @@ def extract_netlist_from_layout(
     ``deck_options``/``label_layers`` entry, or missing/ambiguous top cell --
     identical error semantics to ``run_extract``.
     """
-    # Issue #5464: the engine-free prefix (file checks, deck resolution, the
-    # layout read, top-cell resolution and the FinFET option refusal) lives
-    # in `extract_preflight` so `klt pex --dry-run` runs exactly these checks
-    # without starting the extraction engine -- one helper, two callers, so
-    # the two can never drift.
+    # The preflight checks are shared with the engine-free PEX dry run.
     deck, layout, top_cell = preflight_layout(
         path,
         deck_name,
@@ -4563,6 +4561,7 @@ def extract_netlist_from_layout(
         },
     )
 
+    capture_layout_coverage(layout_coverage, layout, top_cell, deck)
     _validate_probes(deck, probes)
 
     # `--hierarchical-cells` (issue #2722): selection validated against the

@@ -105,6 +105,33 @@
       },
       "additionalProperties": true
     },
+    "ignored_layers": {
+      "type": "array",
+      "description": "Inline extraction coverage, using the same full-stream counts as klt extract. Empty for pre-extracted netlists.",
+      "items": {
+        "type": "object",
+        "properties": {"layer": {"type": "integer"}, "datatype": {"type": "integer"}, "shapes": {"type": "integer", "minimum": 1}},
+        "required": ["layer", "datatype", "shapes"]
+      }
+    },
+    "warnings": {
+      "type": "array", "items": {"type": "string"},
+      "description": "Advisory extraction coverage messages. A top cell with text exclusively outside its effective label layers names those layer/datatype pairs."
+    },
+    "pin_set_difference": {
+      "type": "object",
+      "description": "Top-level pin-name differences after case and applied reference-port alias normalization. Each list of one-sided ports is sampled to 20 entries.",
+      "required": ["layout_only_pins", "layout_only_pins_count", "layout_only_pins_truncated", "reference_only_pins", "reference_only_pins_count", "reference_only_pins_truncated", "deck_synthesized_layout_pins"],
+      "properties": {
+        "layout_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "layout_only_pins_count": {"type": "integer", "minimum": 0},
+        "layout_only_pins_truncated": {"type": "boolean"},
+        "reference_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "reference_only_pins_count": {"type": "integer", "minimum": 0},
+        "reference_only_pins_truncated": {"type": "boolean"},
+        "deck_synthesized_layout_pins": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "device_classes": {
       "type": ["array", "null"],
       "description": "The layout-side deck's device classes; null when no layout.deck was given.",

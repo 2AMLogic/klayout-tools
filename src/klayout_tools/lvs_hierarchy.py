@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .lvs_base import CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
 from .lvs_mismatch import _mismatch
 
 if TYPE_CHECKING:
@@ -54,8 +55,6 @@ def _hierarchy_mismatch_warnings(
     a one-entry list, else an empty one. Warning-only: never changes
     ``status``.
     """
-
-    from .lvs import CATEGORY_TOPOLOGY_HIERARCHY_MISMATCH
 
     layout_circuits = sum(1 for _ in layout_netlist.each_circuit())
     reference_circuits = sum(1 for _ in reference_netlist.each_circuit())

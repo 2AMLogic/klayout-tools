@@ -21,6 +21,7 @@ from .place_and_route_fences import placement_fence_lines
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
+from .place_and_route_power_pins import applied_power_pins
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_unconstrained import (
@@ -536,8 +537,6 @@ def _power_delivery_lines(
     (``define_pdn_grid -macro``) are deliberately out of scope for this v1
     -- see the module docstring.
     """
-    from .place_and_route import _POWER_PIN_PATTERNS
-
     power_net = power["power_net"]
     ground_net = power["ground_net"]
 
@@ -548,12 +547,7 @@ def _power_delivery_lines(
         cell_library, power.get("tapcell_distance_um"), library
     )
 
-    pin_patterns = (
-        library["power_pins"]
-        if library is not None and "power_pins" in library
-        else _POWER_PIN_PATTERNS[cell_library]
-    )
-    for net_role, pin_pattern, is_primary in pin_patterns:
+    for net_role, pin_pattern, is_primary in applied_power_pins(cell_library, library):
         net = power_net if net_role == "power" else ground_net
         flag = ""
         if is_primary:
