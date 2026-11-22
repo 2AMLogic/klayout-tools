@@ -646,30 +646,7 @@ def run_sta(
     cell_library = pdk_spec.get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
         raise PostRouteStaError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PostRouteStaError(
-            "request.pdk.corner must be a non-empty string when given"
-        )
-    # Issue #1871: `pdk.corners` (a list) is the additive, multi-corner
-    # alternative to the scalar `pdk.corner` above -- see this module's own
-    # docstring "Multi-corner characterization" section. Shape-validated
-    # here; membership needs no further validation (unlike
-    # `place_and_route.py`'s `sweep_corners`, which narrows an
-    # already-derived shipped-corner set, `corners` here *is* the full
-    # corner selection, and an unresolvable name simply fails the same way
-    # an unresolvable scalar `pdk.corner` already does, per-corner, inside
-    # the run loop below).
-    requested_corners = _validate_corners(pdk_spec.get("corners"))
-    if requested_corner is not None and requested_corners is not None:
-        raise PostRouteStaError(
-            "request.pdk.corner and request.pdk.corners are mutually "
-            "exclusive -- give at most one: a single scalar corner for the "
-            "existing single-corner response shape, or a list for "
-            "multi-corner characterization (see docs/cli/sta.md)"
-        )
+    requested_corner, requested_corners = _validate_corner_selection(pdk_spec)
 
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # before any PDK resolution or engine invocation; the corner-dependent
@@ -803,6 +780,8 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        if boundary and "clock_driving_cell" in boundary:
+            response["clock_driving_cell"] = boundary["clock_driving_cell"]
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -2212,20 +2191,11 @@ def _validate_boundary(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
 ) -> dict[str, Any] | None:
-    """``constraints.driving_cell`` / ``.driving_cells`` and
-    ``.output_load_pf`` / ``.output_loads`` (issue #3742): the boundary
-    conditions an SDC flow expresses with ``set_driving_cell`` / ``set_load``.
-    Returns a dict holding only the supplied keys (``driving_cell``,
-    ``driving_cells``, ``output_load_pf``, ``output_loads``), or ``None`` when
-    none was given -- which leaves the generated Tcl byte-identical.
+    """Validate the optional driving cells and output loads for a timing boundary.
 
-    ``driving_cell`` is the default for non-clock inputs absent from
-    ``driving_cells`` and from ``input_transitions``; a port may not carry both
-    a driving cell and an input transition (the two would silently override
-    each other), so any such overlap -- or ``input_transition_ns`` together
-    with a driving-cell field -- is a request error. Load values are finite
-    non-boolean numbers ``>= 0`` (pF). Port existence and direction are
-    verified in the engine session (:func:`_port_check_lines`).
+    The data driver and input transitions must target disjoint ports. The
+    primary clock driver is independent of those data-port constraints.
+    Port existence and direction are checked in the engine session.
     """
     prefix = "request.constraints."
     boundary = _validate_driving_cells(constraints, clock_port, prefix)
@@ -2243,11 +2213,9 @@ def _validate_driving_cells(
     """The ``driving_cell`` / ``driving_cells`` half of
     :func:`_validate_boundary` (only the supplied, non-empty keys)."""
     boundary: dict[str, Any] = {}
-    default_cell = constraints.get("driving_cell")
-    if default_cell is not None:
-        boundary["driving_cell"] = _validate_driving_cell(
-            default_cell, f"{prefix}driving_cell"
-        )
+    for key in ("driving_cell", "clock_driving_cell"):
+        if constraints.get(key) is not None:
+            boundary[key] = _validate_driving_cell(constraints[key], f"{prefix}{key}")
     field = f"{prefix}driving_cells"
     cells = constraints.get("driving_cells")
     if cells is not None:
@@ -2541,6 +2509,28 @@ def _validate_false_path_from(
             raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
         seen.add(port)
     return list(value) or None
+
+
+def _validate_corner_selection(
+    pdk_spec: dict[str, Any],
+) -> tuple[str | None, list[str] | None]:
+    """Validate the mutually exclusive scalar and multi-corner request forms."""
+    requested_corner = pdk_spec.get("corner")
+    if requested_corner is not None and not (
+        isinstance(requested_corner, str) and requested_corner
+    ):
+        raise PostRouteStaError(
+            "request.pdk.corner must be a non-empty string when given"
+        )
+    requested_corners = _validate_corners(pdk_spec.get("corners"))
+    if requested_corner is not None and requested_corners is not None:
+        raise PostRouteStaError(
+            "request.pdk.corner and request.pdk.corners are mutually "
+            "exclusive -- give at most one: a single scalar corner for the "
+            "existing single-corner response shape, or a list for "
+            "multi-corner characterization (see docs/cli/sta.md)"
+        )
+    return requested_corner, requested_corners
 
 
 def _validate_corners(value: Any) -> list[str] | None:
@@ -3287,6 +3277,12 @@ def _boundary_lines(
             args += f" -from_pin {_tcl_literal(cell['input_pin'])}"
         return args
 
+    clock_cell = boundary.get("clock_driving_cell")
+    if clock_cell is not None:
+        lines.append(
+            f"set_driving_cell {drive_args(clock_cell)} "
+            f"[get_ports {_tcl_literal(clock_port)}]"
+        )
     default_cell = boundary.get("driving_cell")
     if default_cell is not None:
         mapped = " ".join(
