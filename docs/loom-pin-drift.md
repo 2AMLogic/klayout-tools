@@ -12,6 +12,50 @@ Tracking issue: #2501. The curator/judge/doctor pins (#668) were retired by
 #1966: their frozen-timeline protection now lives in the pinned
 `scripts/claim-staleness.sh`. This page does not cover them.
 
+## Pin audit 2026-11-17 (#6236)
+
+All five pins made by the 2026-10-14 re-port (`d532f8e94`, 2am#4345) were
+re-audited against upstream tag `v0.19.1306` (`e7af83ea2`, the version
+`.loom/install-metadata.json` records). Method: the local delta and the
+upstream drift were separated by diffing the pinned files against both the
+re-port base and `v0.19.1306`, porting every upstream hunk that does not touch
+the protected delta. Every file below was **re-ported** (pin kept); none was
+unpinned, because each still carries its protected delta. Upstream issues for
+the four retained deltas do not exist yet and cannot be filed from this repo
+(the `rjwalters` owner gh token is invalid; `create-issue.sh` write-scope
+refuses cross-repo filing) — the filings are tracked in #6306.
+
+| Pinned file | Protected delta | Upstream drift found (v0.19.1306) | Disposition |
+|---|---|---|---|
+| `scripts/pr-worktree.sh` | #2020 post-worktree hook call | #11194 header/help rework; #10120 emitter **removed** upstream (`cfcb24902`) | re-ported: drift in, stale emitter out |
+| `scripts/claim-staleness.sh` (+ test) | #1966 frozen-timeline guard | #11947 PR-lease outranks clocks; #13134 marker fallback; stale-minute defaults 30→45 (already present locally) | re-ported; test T16 aligned to #13134 |
+| `.claude/commands/loom/builder-pr.md` | #1674 quoted-keyword section; #2237 `--sweep-id` call site | #13089 DCO rewrite; #12759 conflict stacking; remainder-hold wording; trailer note | re-ported |
+| `.loom/roles/builder-pr.md` | same as its commands twin (upstream `defaults/roles/builder-pr.md` is a symlink to the commands file) | same | re-ported (identical to twin) |
+| `scripts/sweep-lease-fence.sh` (+ test) | #2237 `--sweep-id` | `LOOM_LEASE_HOST_ID` resolution and more | **not re-ported here** — owned by #6108 / PR #6222 |
+
+Notable findings:
+
+- The pinned `builder-pr.md` still taught `git commit --signoff` under a
+  `commit.signoff` knob; upstream's #13089 operator ruling (2026-10-25, no
+  role attests a DCO sign-off) had never arrived through the pin. Ported.
+- The pinned `pr-worktree.sh` carried the #10120 `live-output-attend` emitter
+  that upstream itself has since deleted; the re-port drops it (nothing else
+  in this tree referenced it).
+- `claim-staleness.sh`'s `_usage` uses an anchored `sed` range instead of
+  upstream's fixed line numbers — that is part of the #1966 delta (the local
+  header grew), kept.
+
+Verification: `test-claim-staleness.sh` 104/104 (was 102/103 before the T16
+alignment), `test-pr-worktree-post-hook.sh` 14/14,
+`test-pr-worktree-isolation.sh` 38/38, `test-sweep-lease-publish.sh` 81/81.
+After #6222 merged, `test-sweep-lease-fence.sh` passed 110/110 on the updated
+audit branch. This completes the #6236 fence drift check with the
+`LOOM_LEASE_HOST_ID` fix from #6108.
+
+Per-pin retirement conditions are unchanged and now also require the matching
+upstream issue from #6306 to exist and be resolved.
+
+
 ## `commands/loom/champion-epic.md`
 
 > **RETIRED 2026-10-15** (2AMLogic/2am#4345, operator ruling Q5 option 1).
@@ -150,6 +194,67 @@ local cases fail against upstream's script.
 Upstream resolves bare `name.ext:L` citations, with unique-basename
 resolution and MISSING/AMBIGUOUS reporting, and the local fixtures pass
 against the upstream script.
+
+## `scripts/pr-worktree.sh`
+
+Checked **2026-11-17** against `rjwalters/loom` @
+`92556a147b18e43d0763c94f396e1aa68f81a5e2`. Re-ported in #6009: the installed
+file now differs from that upstream script only by the local hook helper and
+its two call sites. The whole-file pin remains in `.loom/resync-ignore`.
+
+### Protected local behavior
+
+#2020: `run_post_worktree_hook` invokes the repo-owned
+`.loom/hooks/post-worktree.sh` after both fresh creation and reuse of a PR
+review worktree. The hook runs `uv sync --extra dev` to give the worktree its
+own virtual environment and editable install. Without it, tests in a review
+worktree can silently import the main checkout's `src/`, hiding regressions
+or missing fixes. Hook failure warns without aborting worktree creation.
+
+### Upstream differences observed (2026-11-17)
+
+The previous re-port (`d532f8e94`, upstream v0.19.1160) retained stale header
+and help text that redirected issue PRs to `worktree.sh`, contradicting the
+Judge's supported fallback. Upstream #11194 (`e9d652800`, tightened by
+`3883cf25e`) documents `pr-worktree.sh` as the review checkout for any PR
+shape, and says to reuse the named holder or stop after a branch collision.
+#6009 takes that text unchanged.
+
+The old pin also retained the #10120 `live-output-attend --pr` block. Upstream
+deliberately removed it in
+[`cfcb24902`](https://github.com/rjwalters/loom/commit/cfcb24902f2956edf52db51c27f7c06b5ec2349f)
+(#12536, 2026-10-16), retiring attended-session telemetry emitters and their
+callers. It was removed here too; it was not moved elsewhere.
+
+### Reproduction
+
+```bash
+SHA=92556a147b18e43d0763c94f396e1aa68f81a5e2
+mkdir -p /tmp/pr-worktree-pin-drift
+gh api "repos/rjwalters/loom/contents/defaults/scripts/pr-worktree.sh?ref=$SHA" \
+  -H 'Accept: application/vnd.github.raw' > /tmp/pr-worktree-pin-drift/upstream.sh
+# Only run_post_worktree_hook and its reuse/fresh-creation calls should differ.
+diff -u /tmp/pr-worktree-pin-drift/upstream.sh .loom/scripts/pr-worktree.sh
+
+bash .loom/scripts/pr-worktree.sh --help
+bash -n .loom/scripts/pr-worktree.sh
+bash .loom/scripts/tests/test-pr-worktree-isolation.sh
+bash .loom/scripts/tests/test-pr-worktree-post-hook.sh
+```
+
+The isolation suite reported 36/38 before this re-port (the two help checks
+failed) and 38/38 afterward. The post-hook suite still passes. These are
+targeted local checks; this repo's CI does not run `.loom/scripts/tests`.
+The fixture suites require an executable temporary directory and no inherited
+`LOOM_WORKTREE_ROOT` override; the post-hook suite's missing-uv case also
+requires a test PATH without a real `uv` binary.
+
+### Conditions to retire the pin
+
+Drop the pin when upstream `pr-worktree.sh` invokes an equivalent
+post-worktree hook on both the fresh and reuse paths, and the local post-hook
+suite passes against the upstream file. Upstreaming that generic hook call
+would permit retirement; it is separate work in `rjwalters/loom`.
 
 ## Upstream proposal: section-scoped resync (PROPOSED, not shipped)
 

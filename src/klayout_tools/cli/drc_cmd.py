@@ -446,9 +446,9 @@ def _run_klayout_engine(args: argparse.Namespace) -> dict:
         )
     if args.waivers is not None:
         raise DrcError(
-            "--waivers is not supported with --engine klayout: waivers "
-            "match a marker's source_cell, which only the curated engine "
-            "attributes (see docs/cli/drc.md, 'Waivers')"
+            "--waivers is not supported with --engine klayout: "
+            "only the curated engine matches waivers and reports waived violations "
+            "(see docs/cli/drc.md, 'Waivers')"
         )
     if args.rules is not None:
         # Issue #2768: a native runset's rules are not the curated
