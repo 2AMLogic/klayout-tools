@@ -55,7 +55,7 @@ def test_cli_info_text_curated_deck_labels_hash_and_enforced_count(capsys):
 
     assert exit_code == 0
     out = capsys.readouterr().out
-    # For a curated deck the module hash covers both roles (#5843) -- the
+    # For a curated deck the source hash covers both roles (#5843) -- the
     # bare "extraction deck" label sent provenance authors hunting for a
     # DRC hash that is this identical value.
     assert "deck content_hash (extraction + curated DRC rule table):" in out

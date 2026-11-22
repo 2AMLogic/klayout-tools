@@ -24,11 +24,13 @@ to get a simulatable extracted netlist for a block whose core devices live in
 such a family. This engine closes exactly that gap.
 
 **What it does NOT do.** No parasitics (``--parasitics`` and everything built
-on it is refused by name, not silently ignored), so ``klt pex`` cannot use this
-engine: joining runset devices with curated-deck parasitics would need a
-geometric net correspondence between two independent, independently-numbered
-extractions, which nothing in this repo provides. See ``docs/cli/extract.md``'s
-"Engine" section.
+on it is refused by name, not silently ignored): joining runset devices with
+curated-deck parasitics would need a geometric net correspondence between two
+independent, independently-numbered extractions, which nothing in this repo
+provides. ``klt pex`` can still drive this engine parasitics-free (``klt pex
+--engine klayout-runset``, issue #6559 -- :mod:`klayout_tools.pex_runset`),
+and its report discloses the gap as ``extraction.parasitics_carried: false``.
+See ``docs/cli/extract.md``'s "Engine" section.
 
 How a netlist is obtained
 -------------------------
@@ -129,6 +131,8 @@ from .extract_runset_spice import (
     _check_device_params,
     _device_params_echo,
     _dropped_parameter_warnings,
+    _instantiated_device_counts,
+    _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
 )
@@ -283,6 +287,7 @@ def run_extract_klayout_runset(
     runset_timeout_s: float | None = None,
     klayout_binary: str | None = None,
     request_dir: str | None = None,
+    lvsdb_out: str | None = None,
 ) -> dict[str, Any]:
     """Extract ``path`` by running the PDK runset ``deck_file`` and return the
     ``klt extract`` report. See this module's docstring for the mechanism and
@@ -292,6 +297,11 @@ def run_extract_klayout_runset(
     binary, a runset that wrote no database, a timeout, an unreadable
     database -- reusing ``klt lvs``'s own message text wherever the shared
     launcher produces it.
+
+    ``lvsdb_out`` (issue #6606, internal -- no CLI flag) copies the runset's
+    ``.lvsdb`` to that path before the scratch work directory is removed, so
+    a caller (:mod:`klayout_tools.pex_net_correspondence`) can read the
+    database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
     from .extract import _build_metrics, _normalized_netlist_sha256, _staged
@@ -330,6 +340,8 @@ def run_extract_klayout_runset(
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
+        if lvsdb_out is not None:
+            shutil.copy2(lvsdb_path, lvsdb_out)
 
         with stage("lvsdb_read"):
             # `lvsdb` is the owner of `netlist`; it must stay referenced for
@@ -353,6 +365,7 @@ def run_extract_klayout_runset(
 
         # Checked before anything is written: an unknown `--device-param`
         # parameter is an error, never a device silently left at its default.
+        aliases = _prepare_merged_node_names(circuit) if lvsdb_out else []
         declared_warnings = _check_device_params(netlist, declared)
         uncarried = _uncarried_parameters(netlist, declared)
         reported_netlist_path, netlist_sha256 = _write_netlist(
@@ -367,6 +380,7 @@ def run_extract_klayout_runset(
         )
 
         devices, device_counts = _staged("describe_devices", _describe_devices, circuit)
+        instantiated = _instantiated_device_counts(circuit)
         nets = _staged("describe_nets", _describe_nets, circuit)
         runset_block = {
             "deck_file": deck_file,
@@ -388,12 +402,13 @@ def run_extract_klayout_runset(
         warnings.append(
             f"the runset's netlist holds {len(extra_circuits) + 1} circuits "
             f"({', '.join([circuit_name] + extra_circuits)}); all of them are "
-            f"written, but devices[]/nets[] and every count describe "
-            f"'{circuit_name}' alone. Re-run the runset in flat mode (for "
+            f"written, but devices[]/nets[] and every count other than "
+            f"instantiated_device_counts describe '{circuit_name}' alone. "
+            "Re-run the runset in flat mode (for "
             "sg13cmos5l.lvs: --deck-var run_mode=flat) for the single-circuit "
             "shape the curated engine always produces"
         )
-    if not devices:
+    if not instantiated:
         warnings.append(
             "the runset recognised no devices in this layout -- an empty "
             "extraction is not evidence. Check that the runset matches this "
@@ -441,11 +456,25 @@ def run_extract_klayout_runset(
         "device_classes": sorted(device_counts),
         "devices": devices,
         "nets": nets,
+        **({"runset_node_renames": aliases} if aliases else {}),
         "device_models": dict(sorted(models.items())) if models else None,
         # Additive (issue #5513): present only when `--device-param` was given.
         **_device_params_echo(declared),
-        # This engine extracts devices and connectivity only; `klt pex`
-        # therefore cannot use it (docs/cli/extract.md, "Engine").
+        # Additive (issue #6559): the measured parameters each X call does NOT
+        # carry, per class -- the structured form of the `warnings[]` prose,
+        # `{}` once every parameter is declared. `klt pex` copies it.
+        "params_not_carried": {k: sorted(v) for k, v in sorted(uncarried.items())},
+        # Additive (issue #6559, hierarchical runsets): `device_counts` covers
+        # the selected circuit alone, so these two say what is outside it --
+        # the devices instantiated through every called circuit, and the
+        # circuits written besides the selected one (`[]` for a flat runset,
+        # where the former equals `device_counts`).
+        "instantiated_device_counts": instantiated,
+        "extra_circuits": extra_circuits,
+        # This engine extracts devices and connectivity only, so there are no
+        # parasitics; `klt pex --engine klayout-runset` reports that as
+        # `extraction.parasitics_carried: false` (docs/cli/pex.md, "Runset
+        # engine").
         "parasitics": None,
         "pdk": None,
         "warnings": warnings,
