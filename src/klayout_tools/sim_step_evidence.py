@@ -38,6 +38,49 @@ _CONTROL_MEAS_FAILED_RE = re.compile(
     r"^\s*meas\s+\S+\s+(\S+)\b.*\bfailed!\s*$", re.IGNORECASE
 )
 
+# ngspice evaluates WHEN before looking up FIND's operand. Capture the
+# current plot at the card itself: earlier intermediate lets can add vectors,
+# and later siblings can create names that were missing when the card ran.
+_FIND_VECTORS_RE = re.compile(
+    r"^klt_find_vectors (\w+)\n(.*?)^klt_find_vectors_end$", re.MULTILINE | re.DOTALL
+)
+_DISPLAY_VECTOR_RE = re.compile(
+    r"^[ \t]+(\S+)[ \t]+: [^\n]+, (?:real|complex), \d+ long", re.MULTILINE
+)
+
+
+def _find_when_operand(card: str) -> str | None:
+    """Read the signal position in a control command or its failed echo."""
+    words = card.lower().split()
+    if (
+        len(words) > 5
+        and words[3].strip("'\"") == "find"
+        and words[5].strip("'\"") == "when"
+    ):
+        return words[4].strip("'\"")
+    return None
+
+
+def find_vector_lines(spec: dict[str, Any]) -> list[str]:
+    """Inventory the current plot's vector names; display omits sample data."""
+    if spec.get("on_unreached") != "null" or _find_when_operand(spec["spice"]) is None:
+        return []
+    return [
+        f"echo klt_find_vectors {spec['name']}",
+        "display",
+        "echo klt_find_vectors_end",
+    ]
+
+
+def _display_name(operand: str, kind: str) -> str:
+    """Map a measurement accessor to the vector name printed by display."""
+    voltage = r"v(?:m|r|i|p|db)?" if kind in ("ac", "sp") else "v"
+    if match := re.fullmatch(voltage + r"\(([^()]+)\)", operand):
+        return match.group(1)
+    if match := re.fullmatch(r"i\(([^()]+)\)", operand):
+        return match.group(1) + "#branch"
+    return operand
+
 
 def step_outcomes(analysis: dict[str, Any], log_text: str) -> dict[str, bool]:
     """``{step name: completed}`` from the ``echo`` markers in the log. A
@@ -63,18 +106,27 @@ def step_unreached_locals(
     failure evidence, the ``out of interval`` reason line and the failed
     control-command echo. The step-scope twin of
     ``sim._parse_meas_unreached_names``, intersected per region so a local
-    name two steps share is never confirmed from the other step's output."""
+    name two steps share is never confirmed from the other step's output.
+    FIND ... WHEN also needs its FIND operand in the card's plot inventory."""
     from .sim import _MEAS_UNREACHED_RE
 
     regions = _step_regions(log_text)
     confirmed: dict[str, set[str]] = {}
     for index, step in enumerate(analysis["steps"]):
         region = regions.get(index, "")
-        failed = {
-            match.group(1).lower()
-            for raw in region.splitlines()
-            if (match := _CONTROL_MEAS_FAILED_RE.match(raw.strip()))
+        vectors = {
+            local.lower(): set(_DISPLAY_VECTOR_RE.findall(listing.lower()))
+            for local, listing in _FIND_VECTORS_RE.findall(region)
         }
+        failed = set()
+        for raw in region.splitlines():
+            if not (match := _CONTROL_MEAS_FAILED_RE.match(raw.strip())):
+                continue
+            local = match.group(1).lower()
+            operand = _find_when_operand(raw)
+            available = vectors.get(local, set())
+            if operand is None or _display_name(operand, step["kind"]) in available:
+                failed.add(local)
         confirmed[step["name"]] = {
             match.group(1).lower()
             for match in _MEAS_UNREACHED_RE.finditer(region)

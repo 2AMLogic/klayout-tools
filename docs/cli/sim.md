@@ -4815,6 +4815,11 @@ skipped-limit coverage and rollup semantics as the scalar form above —
 including `pass_partial` for a run that mixes checked bounds with unreached
 ones, and `not_checked` (exit `4`) when every requested bound was unreached.
 
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
 What stays an error on the step path, even with the opt-in:
 
 - a step that failed or never ran (`step_failed`): its measurements keep

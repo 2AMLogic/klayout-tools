@@ -17,6 +17,7 @@ from klayout_tools.cli.sim_cmd import _exit_code_for
 from test_sim_steps_unreached import (
     _HIT_CARD,
     _MISSING_CARD,
+    _PULSE_BODY,
     _edge_step,
     _request,
     _write_body,
@@ -74,6 +75,67 @@ def test_real_ngspice_unreached_step_card_grades_not_reached(tmp_path):
     assert report["not_reached"] == 1
     assert report["status"] == "pass_partial"
     assert _exit_code_for(report, deck_mode=False) == 0
+
+
+@_SKIP_NO_NGSPICE
+@pytest.mark.parametrize(
+    ("operand", "measurement_status", "report_status", "exit_code"),
+    [
+        ("v(absent)", "error", "error", 4),
+        ("v(unsaved)", "error", "error", 4),
+        ("v(x)", "not_reached", "pass_partial", 0),
+        ("i(vx)", "not_reached", "pass_partial", 0),
+    ],
+)
+def test_find_when_miss_requires_its_operand_on_the_step_plot(
+    tmp_path, operand, measurement_status, report_status, exit_code
+):
+    card = f".meas tran suspect find {operand} when v(x)=2 rise=1"
+    request = _request(
+        [
+            _edge_step(
+                [
+                    {"name": "hit", "spice": _HIT_CARD, "limits": {"max": 1e-8}},
+                    {
+                        "name": "suspect",
+                        "spice": card,
+                        "on_unreached": "null",
+                        "limits": {"max": 1},
+                    },
+                ]
+            )
+        ]
+    )
+    request["options"] = {"save_mode": "netlist"}
+    _write_body(tmp_path, _PULSE_BODY + "Ry unsaved 0 1k\n.save v(x) i(vx)\n")
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+    hit, suspect = report["corners"][0]["measurements"]
+    assert hit["status"] == "pass"
+    assert suspect["status"] == measurement_status
+    assert report["status"] == report_status
+    assert _exit_code_for(report, deck_mode=False) == exit_code
+
+
+@_SKIP_NO_NGSPICE
+def test_find_operand_is_checked_on_the_plot_at_the_time_of_the_card(tmp_path):
+    intermediate = {"name": "wave", "expr": "v(x)", "intermediate": True}
+    find = {
+        "name": "sample",
+        "spice": ".meas tran sample find wave when v(x)=2 rise=1",
+        "on_unreached": "null",
+    }
+    request = _request(
+        [
+            {**_edge_step([intermediate, find]), "name": "first"},
+            {**_edge_step([find, intermediate]), "name": "second"},
+        ]
+    )
+    _write_body(tmp_path)
+    report = sim.run_sim(str(_write_request(tmp_path, request)))
+    assert [(m["name"], m["status"]) for m in report["corners"][0]["measurements"]] == [
+        ("first.sample", "not_reached"),
+        ("second.sample", "error"),
+    ]
 
 
 @_SKIP_NO_NGSPICE

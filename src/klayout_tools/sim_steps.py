@@ -560,6 +560,7 @@ def _flatten_step_measurement(
     if spec.get("spice") is not None:
         flat["meas_card"] = spec["spice"]
         first = _meas_command(spec["spice"], local, step)
+        deck_lines = [*sim_step_evidence.find_vector_lines(spec), first]
         derived_from: list[str] = []
         spectrum_steps: list[str] = []
     else:
@@ -568,12 +569,10 @@ def _flatten_step_measurement(
         deck_expr, derived_from, spectrum_steps = _substitute_refs(
             expr, known, owner=f"{step['name']}.{local}"
         )
-        first = f"let {local} = {deck_expr}"
-    if spec.get("intermediate"):
-        flat["intermediate"] = True
-        flat["deck_lines"] = [first]
-    else:
-        flat["deck_lines"] = [first, f"let {log_key} = {local}", f"print {log_key}"]
+        deck_lines = [f"let {local} = {deck_expr}"]
+    if not spec.get("intermediate"):
+        deck_lines.extend([f"let {log_key} = {local}", f"print {log_key}"])
+    flat["deck_lines"] = deck_lines
     if derived_from:
         flat["derived_from"] = derived_from
     if spectrum_steps:
