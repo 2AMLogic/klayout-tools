@@ -118,11 +118,13 @@ def test_gf180_bare_guard_ring_opening_is_drc_clean(
             "options": {"output": str(output)},
         }
     )
-    assert report["dbu_um"] == (0.0005 if side == "E" else 0.001)
+    # GF180 streams use 1 nm DBU even when the tech LEF resolves to 0.5 nm.
+    assert report["dbu_um"] == 0.001
     assert run_drc(str(output), "gf180mcu")["violations"] == []
 
     layout = kdb.Layout()
     layout.read(str(output))
+    assert layout.dbu == report["dbu_um"]
     top = layout.top_cell()
     for layer, expected_gap in (
         (22, comp_opening_um),  # Comp
