@@ -1437,8 +1437,9 @@ the engine's raw values:
     "failed"` and exit 1 with the route report and artifacts available.
   - `unchecked` means coverage is incomplete. The partial count is `null`,
     and `reason` explains the gap. `unresolved_nets` names terminals when pin
-    geometry could not be identified. The check also compares the number of
-    wired multi-terminal DEF signal nets with the OpenDB counters. Confirmed
+    geometry could not be identified. The check also compares
+    `def_wired_signal_net_count`, the number of wired multi-terminal DEF
+    signal nets, with the OpenDB counters. Confirmed
     opens on other nets still fail the run.
   - On the archived GF180 `ext_mem_instr` stream, the `I` labels on
     `_10285_`, `clkload1`, `clkload2` and `clkload3` lie on pads with no
