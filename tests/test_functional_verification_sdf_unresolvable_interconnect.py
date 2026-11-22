@@ -12,7 +12,6 @@ named `FunctionalVerificationError` before `vvp` starts.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import types
 from pathlib import Path
@@ -20,14 +19,13 @@ from pathlib import Path
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.tool_probes import SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf as fvs
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
 )
-
-HAVE_ICARUS = shutil.which("iverilog") is not None and shutil.which("vvp") is not None
 
 _CELLS_V = """\
 module klt_buf (A, Z);
@@ -179,7 +177,7 @@ def test_run_rejects_before_launching_the_simulator(tmp_path, monkeypatch):
         run_functional_verification(str(request))
 
 
-@pytest.mark.skipif(not HAVE_ICARUS, reason="Icarus Verilog not installed")
+@SKIP_NO_ICARUS
 @pytest.mark.parametrize(
     "entry", [_IC.format(a="top/a", b="u1/A"), _IC.format(a="u1/Z", b="nosuch/A")]
 )

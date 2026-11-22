@@ -1789,7 +1789,7 @@ def test_cli_drc_klayout_engine_malformed_deck_var_raises(
 
     assert exit_code == 1
     payload = capsys.readouterr().err
-    assert "invalid --deck-var" in payload
+    assert "--deck-var entry 'feol_no_equals' is not KEY=VALUE" in payload
 
 
 def test_cli_drc_deck_var_ignored_for_curated_engine(tmp_path, capsys):
@@ -1805,7 +1805,7 @@ def test_cli_drc_deck_var_ignored_for_curated_engine(tmp_path, capsys):
     assert exit_code == 1
     payload = capsys.readouterr().err
     assert "--deck is required" in payload
-    assert "invalid --deck-var" not in payload
+    assert "--deck-var" not in payload
 
 
 # --------------------------------------------------------------------------- #
