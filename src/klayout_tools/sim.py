@@ -4780,10 +4780,8 @@ def _build_dry_run_report(
         _validate_batch_models_lib(request)
         # Issue #5449: and the same for a `models.pdk_root` that is a
         # directory on *this* host (issue #4097's refusal). The real submit
-        # raises it from `_resolve_batch_config`, which the dry run reaches
-        # through `dry_run_runner_check` -- whose swallow-all-but-runner-
-        # refusals filter keeps such a host dry-running clean. Re-applying
-        # it here, beside the #3917 check, refuses what the submit refuses
+        # makes this check during config resolution. Validate directly here
+        # so a dry run refuses a host-local path just like a submit does
         # whether or not this host can resolve a bucket or provision script.
         _validate_batch_pdk_root(request)
     units: list[dict[str, Any]] = []
