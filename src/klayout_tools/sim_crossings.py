@@ -59,6 +59,7 @@ from .sim_crossings_reduce import (
     validate_value_from,
 )
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
 CROSSING_EDGES = ("rise", "fall", "either")
@@ -430,8 +431,6 @@ def _extract_one(
     supply_v: dict[str, Any] | None = None,
     kind: Any = "tran",
 ) -> CrossingsOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["crossings"]
     signal = body["signal"]
     if not os.path.isfile(raw_path):

@@ -1547,6 +1547,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   aggregate envelope (and each request's `dir` in `set-manifest.json`) is
   the authoritative path to a member's `report.json` -- read it from the
   envelope rather than re-deriving the stem.
+- **Netlist identity.** For each corner batch job, collection compares the
+  runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
+  bytes, including rewritten include paths. A mismatch rejects the result
+  and marks that set member as an error (exit code 4). Older runners that
+  omit the digest remain supported. The outer report records the original
+  request netlist's digest.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -2459,6 +2465,13 @@ established. `runner_compatibility` itself stays a major.minor gate.
   `runner_version_check: "warn"` reports without refusing.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
+
+When the AMI manifest has no candidate images, the client cannot verify
+mandatory features before launch. A configured batch dry-run reports
+`batch_runner_request_feature_unverified` with the affected feature names.
+Submission prints the warning before upload and proceeds under either
+`enforce` or `warn`. The worker can then refuse an unsupported request after
+the instance launches.
 
 **Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
@@ -4919,9 +4932,46 @@ missing vector, or a failed solve still grades `error` even with
 byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
-and for any value other than `"error"`/`"null"`. It is not applied to
-`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+and for any value other than `"error"`/`"null"`. It is not applied to the
+Xyce engine (no ngspice `.meas` evidence to read).
 `"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
+### Step-scoped cards (`analysis_steps[].measurements[].spice`)
+
+A step-scoped `.meas` card gets the same opt-in
+([#7072](https://github.com/2AMLogic/klayout-tools/issues/7072)). `klt sim`
+evaluates the card as a `meas` control command right after that step's own
+analysis, so ngspice prints both evidence lines *after* the step's
+`klt_step_end` marker and before the next step's `klt_step_begin` — and the
+classification is scoped to exactly that log region, matched under the
+card's **local** name. Two steps may therefore reuse a local measurement
+name: a miss confirmed in one step's region never classifies the other
+step's card, and a sibling measurement in the same step is unaffected. The
+graded result carries the qualified name (`edge.missing`) with its `step`
+provenance field, `value: null`, `margin: null`, `status: "not_reached"`,
+and the same `measurement_not_reached` info diagnostic, top-level count,
+skipped-limit coverage and rollup semantics as the scalar form above —
+including `pass_partial` for a run that mixes checked bounds with unreached
+ones, and `not_checked` (exit `4`) when every requested bound was unreached.
+
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
+What stays an error on the step path, even with the opt-in:
+
+- a step that failed or never ran (`step_failed`): its measurements keep
+  `status: "error"`, and a value is never read from a step that produced no
+  plot of its own;
+- a derived measurement (or a later step's `${...}` sweep window) reading
+  the unreached result: `derived_input_unavailable`, and the corner grades
+  `error` while the source keeps `not_reached`;
+- a `.meas` failure whose logged reason is anything other than
+  `out of interval`, an engine echo without the matching `failed!` line (or
+  vice versa), an error-severity engine diagnostic (diverged solve,
+  timeout, …), or a request without the opt-in — each keeps today's
+  `measurement` error and exit `4`.
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
@@ -7198,7 +7248,11 @@ error, exit 1).
     read an **earlier** step's result as `<step>.<name>`.
   - `spice`: a `.meas` card whose type matches the step's `kind` and whose
     card name equals the measurement `name`. It runs as a `meas` control
-    command right after that step's analysis.
+    command right after that step's analysis. It may declare `on_unreached:
+    "null"`: a target the step's completed analysis never reaches then
+    grades `not_reached` under the qualified name, on evidence scoped to
+    that step's own log region — see
+    [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached).
 
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
@@ -9655,6 +9709,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
@@ -9711,18 +9766,21 @@ measurement that produced no value, or that trailer, keeps
 `singular_matrix`/`nonconvergence` at `severity: "error"` and the corner at
 `status: "error"`, exactly as before.
 
-A waveform-capture-only request (no `measurements[]`, issue #3246) has no
-measurement to confirm completion, so the captured waveform is the recovery
-basis instead: for a `tran` analysis with `options.waveforms: true`, the
-downgrade applies when the trailer is absent *and* the parsed waveform's last
-time point reaches the `tran` stop time (the second `analysis.args` token). A
-missing or truncated waveform, an unparseable `args`, or any non-`tran`
-analysis keeps the diagnostic at `severity: "error"`. When the waveform was
-the basis, the downgraded diagnostic's `message` says so. Declaring a dummy
-completion measurement is no longer needed to get this behavior.
-`options.fail_on_diagnostic` is unaffected (it matches on `code`).
-`netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
-downgraded.
+For waveform capture without `measurements[]`, the original `waveform.raw`
+can establish that the analysis completed. A transient must reach the stop
+time in `analysis.args`. For ngspice AC, the frequency samples must cover the
+requested linear, decade or octave grid. For example, `oct 3 10 850` ends at
+approximately 806.35 Hz. For logarithmic grids, the check uses the length of
+ngspice’s original frequency vector, including any extra points selected by
+the effective `reltol`. It works with or without `complex_vectors`.
+A missing, unreadable, wrong-axis or truncated waveform leaves the stepping
+errors fatal. The abort trailer also keeps them fatal.
+
+The warning message identifies the completed analysis. Other errors, including
+a missing requested vector, still fail the corner. The `netlist`, `timeout`,
+`measurement`, `unknown`, and `timestep_too_small` errors remain fatal. An
+explicit `options.fail_on_diagnostic` selection still grades an otherwise
+recovered corner as inconclusive.
 
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`

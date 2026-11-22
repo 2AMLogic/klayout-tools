@@ -337,11 +337,11 @@
     },
     {
       "path": "src/klayout_tools/functional_verification.py",
-      "lines": 2820
+      "lines": 2686
     },
     {
       "path": "src/klayout_tools/functional_verification_sdf.py",
-      "lines": 2530
+      "lines": 2488
     },
     {
       "path": "src/klayout_tools/gen.py",
@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4882
+      "lines": 4835
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
@@ -401,35 +401,35 @@
     },
     {
       "path": "src/klayout_tools/lvs.py",
-      "lines": 6315
+      "lines": 5993
     },
     {
       "path": "src/klayout_tools/lvs_combine.py",
-      "lines": 1568
+      "lines": 1557
     },
     {
       "path": "src/klayout_tools/lvs_finfet.py",
-      "lines": 538
+      "lines": 534
     },
     {
       "path": "src/klayout_tools/lvs_gate_level.py",
-      "lines": 960
+      "lines": 957
     },
     {
       "path": "src/klayout_tools/lvs_mismatch.py",
-      "lines": 2207
+      "lines": 2194
     },
     {
       "path": "src/klayout_tools/lvs_netgen.py",
-      "lines": 910
+      "lines": 896
     },
     {
       "path": "src/klayout_tools/lvs_power.py",
-      "lines": 734
+      "lines": 725
     },
     {
       "path": "src/klayout_tools/lvs_runset.py",
-      "lines": 774
+      "lines": 759
     },
     {
       "path": "src/klayout_tools/macros.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4569
+      "lines": 4535
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11962
+      "lines": 11727
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

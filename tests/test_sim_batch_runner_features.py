@@ -20,12 +20,16 @@ from klayout_tools import sim_batch as sb
 from test_sim_batch import (
     _PRELAUNCH_CLIENT,
     FAKE_BUCKET,
+    _batch_request,
     _config,
+    _FakeRunner,
     _image,
+    _install_fake_batch_transport,
     _pin_client_version,
     _provision_script,
     _publish_manifest,
     _write_body,
+    _write_request,
 )
 
 # --- the #5645 five: post-run echo fields become pre-launch refusals -------
@@ -155,6 +159,84 @@ def test_dry_run_check_refuses_op_check_on_an_all_predating_manifest(
         )
     assert raised.value.code == sb.BATCH_RUNNER_FEATURE_CODE
     assert "analysis.op_check" in str(raised.value)
+
+
+_UNVERIFIED = "batch_runner_request_feature_unverified"
+
+
+def _overrides_request(tmp_path, policy):
+    _write_body(tmp_path)
+    req = _batch_request(
+        tmp_path, analysis_overrides=[{"match": {"temperature_c": 27}, "args": "2n 2u"}]
+    )
+    req["batch"]["runner_version_check"] = policy
+    return req
+
+
+@pytest.mark.parametrize("policy", ["enforce", "warn"])
+def test_unknown_manifest_warns_on_batch_dry_run(tmp_path, monkeypatch, policy):
+    _pin_client_version(monkeypatch, "0.9.2")
+    _publish_manifest(tmp_path, monkeypatch, [])
+    path = _write_request(tmp_path, _overrides_request(tmp_path, policy))
+    report = sim.run_sim(str(path), dry_run=True)
+    (warning,) = [d for d in report["diagnostics"] if d["code"] == _UNVERIFIED]
+    assert warning["severity"] == "warning"
+    assert warning["features"] == ["analysis_overrides"]
+    assert "before launch" in warning["message"]
+    published = report["published_runner"]
+    assert published["status"] == "unknown" and published["images"] == []
+    assert report["status"] == "valid"
+
+
+@pytest.mark.parametrize("policy", ["enforce", "warn"])
+def test_unknown_manifest_warns_before_submission(
+    tmp_path, monkeypatch, capsys, policy
+):
+    _pin_client_version(monkeypatch, "0.9.2")
+    _publish_manifest(tmp_path, monkeypatch, [])
+    runner = _FakeRunner()
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    first_upload = []
+
+    def record(argv, timeout_s):
+        if not first_upload and "cp" in argv and "--recursive" in argv:
+            first_upload.append(capsys.readouterr().err)
+        return runner(argv, timeout_s)
+
+    monkeypatch.setattr(sb, "_run_subprocess", record)
+    path = _write_request(tmp_path, _overrides_request(tmp_path, policy))
+    submitted = sim.run_sim(
+        str(path), submit_only=True, artifacts_dir=str(tmp_path / "out")
+    )
+    assert submitted["status"] == "submitted"
+    (stderr,) = first_upload
+    assert "analysis_overrides" in stderr and "before launch" in stderr
+
+
+@pytest.mark.parametrize(("version", "overrides"), [(None, False), ("0.9.2", True)])
+def test_no_unverified_warning_for_plain_or_supported_request(
+    tmp_path, monkeypatch, version, overrides
+):
+    _pin_client_version(monkeypatch, "0.9.2")
+    _publish_manifest(
+        tmp_path, monkeypatch, [_image(klt_version=version)] if version else []
+    )
+    req = _overrides_request(tmp_path, "enforce")
+    if not overrides:
+        req["analysis_overrides"] = []
+    assert sb.dry_run_runner_check(req, corner_count=1, timeout_s=30) is None
+
+
+def test_known_old_image_refuses_mandatory_overrides_even_with_warn(
+    tmp_path, monkeypatch
+):
+    _pin_client_version(monkeypatch, "0.9.2")
+    _publish_manifest(tmp_path, monkeypatch, [_image(klt_version="0.9.0")])
+    with pytest.raises(sim.SimError, match="analysis_overrides") as error:
+        sb.dry_run_runner_check(
+            _overrides_request(tmp_path, "warn"), corner_count=1, timeout_s=30
+        )
+    assert error.value.code == sb.BATCH_RUNNER_FEATURE_CODE
 
 
 # --- measurements[].crossings.value_from (issue #6913) ---------------------
