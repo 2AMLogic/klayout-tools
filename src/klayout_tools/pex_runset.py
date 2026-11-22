@@ -51,6 +51,7 @@ from .extract_runset_flags import (
 )
 from .extract_runset_spice import DeviceParams
 from .extract_spef import ExtractError
+from .pex_errors import PexError
 
 
 @dataclass(frozen=True)
@@ -143,8 +144,6 @@ def refuse_unsupported(
     ]
     if not refused:
         return
-    from .pex import PexError  # lazy: `pex` imports this module
-
     raise PexError(
         f"engine '{RUNSET_ENGINE}' cannot honour {', '.join(refused)} -- "
         f"{'these flags are' if len(refused) > 1 else 'this flag is'} specific "
