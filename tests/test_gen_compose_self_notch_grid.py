@@ -1,4 +1,4 @@
-"""Compare own-block landing checks against the written SKY130 metal geometry."""
+"""Compare own-block landing checks against the written metal geometry."""
 
 import klayout.db as kdb
 import pytest
@@ -12,6 +12,7 @@ from klayout_tools.gen_compose_landing_pads import (
 from klayout_tools.gen_compose_via_cuts import via_drop_cut_side_um
 from test_gen_compose import _isolate as _isolate
 from test_gen_compose import _l_wire_compose_request
+from test_gen_compose import both_pdk_root as both_pdk_root
 from test_gen_compose import pdk_root as pdk_root
 
 
@@ -47,6 +48,44 @@ def test_met3_notch_uses_the_output_grid(
     if unrouted:
         assert "0.299um" in report["nets"][0]["legs"][0]["reason"]
     assert "met3.space.1" not in run_drc(str(output), "sky130")["rule_counts"]
+
+
+@pytest.mark.parametrize(("pad_side", "unrouted"), [(0.420, []), (0.4204, ["N1"])])
+def test_gf180_notch_uses_required_stream_grid(
+    tmp_path, both_pdk_root, pad_side, unrouted
+):
+    output = tmp_path / "gf180.gds"
+    request = _l_wire_compose_request(
+        tmp_path, both_pdk_root, 2.320, "wire", output, layer=(34, 0), width=0.28
+    )
+    request["pdk"]["variant"] = "gf180mcuD"
+    request["routing"].update(width_um=0.28, landing_pad_size_um=pad_side)
+    request["placement"]["origins_um"]["u1"]["x"] = 5.0004
+
+    # Route from GF180 Metal2 onto the L-shaped Metal1 wire.
+    source = request["blocks"][0]["cell"]
+    source["ports"][0].update(layer={"layer": 36, "datatype": 0}, width_um=0.28)
+    layout = kdb.Layout()
+    layout.read(source["gds_path"])
+    layout.set_info(layout.layer(67, 20), kdb.LayerInfo(36, 0))
+    layout.write(source["gds_path"])
+
+    # Encode the same wire at 0.5 nm. Its origin and landing snap at 1 nm.
+    path = request["blocks"][1]["cell"]["gds_path"]
+    wire = kdb.Layout()
+    wire.read(path)
+    wire.transform(kdb.ICplxTrans(2))
+    wire.dbu = 0.0005
+    wire.write(path)
+
+    report = compose(request)
+    assert report["unrouted_nets"] == unrouted
+    if unrouted:
+        assert "0.229um" in report["nets"][0]["legs"][0]["reason"]
+    written = kdb.Layout()
+    written.read(str(output))
+    assert written.dbu == pytest.approx(0.001)
+    assert "metal1.space.1" not in run_drc(str(output), "gf180mcu")["rule_counts"]
 
 
 def test_odd_width_wire_path_keeps_the_legal_met3_gap(tmp_path, pdk_root):

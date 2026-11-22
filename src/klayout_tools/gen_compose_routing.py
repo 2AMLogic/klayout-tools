@@ -1729,7 +1729,7 @@ def read_block_layer_geometry(
     if layer_index is None:
         return None
 
-    _rescale_block_layout(src_layout, dbu, block_id, block["gds_path"])
+    _rescale_block_layout(src_layout, src_cell, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
