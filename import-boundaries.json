@@ -157,6 +157,7 @@
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
         "klayout_tools._drc_edge_pair_hull",
+        "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
         "klayout_tools.drc_check_kinds",
@@ -273,6 +274,7 @@
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
+        "klayout_tools.extract_fragment_resistance",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
@@ -364,6 +366,7 @@
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_params_checks",
         "klayout_tools.gen_layer_mv_ring",
+        "klayout_tools.gen_pitch",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_res_head",
         "klayout_tools.gen_pcells",
@@ -525,6 +528,7 @@
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_reference_stage",
         "klayout_tools.lvs_report",
+        "klayout_tools.lvs_replay",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
@@ -614,10 +618,14 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cell_models",
         "klayout_tools.pdk_cells",
+        "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_corner_skew",
+        "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
+        "klayout_tools.pdk_model_aliases",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
@@ -916,6 +924,7 @@
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
         "klayout_tools.sim_batch_warn",
+        "klayout_tools.sim_batch_worker_engine_build",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_case_names",
@@ -936,6 +945,7 @@
         "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
+        "klayout_tools.sim_echo_checks",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_environment_report",
@@ -953,6 +963,7 @@
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_netlist_identity",
+        "klayout_tools.sim_netlist_includes",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",
@@ -975,6 +986,7 @@
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
+        "klayout_tools.sim_save_diagnostic",
         "klayout_tools.sim_search",
         "klayout_tools.sim_search_analysis",
         "klayout_tools.sim_search_param",
@@ -1048,11 +1060,13 @@
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
+        "klayout_tools._sta_timing_derate",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
-        "klayout_tools.post_route_sta_stages"
+        "klayout_tools.post_route_sta_stages",
+        "klayout_tools.post_route_sta_verify"
       ]
     },
     "stats": {
@@ -1160,7 +1174,8 @@
       "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.yield_threshold_cmd",
-        "klayout_tools.probit"
+        "klayout_tools.probit",
+        "klayout_tools.probit_document"
       ]
     }
   },
@@ -1599,6 +1614,11 @@
       "consumer": "pdk",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "lvs",
+      "reason": "Issue #5827: `klt pdk decks` reports LVS runset globals with the runset harness's own reserved names (lvs_runset.RESERVED_RUNSET_VARS) folded in, so a deck listing cannot disagree with what `klt lvs` requires; imported lazily."
     },
     {
       "consumer": "pex",

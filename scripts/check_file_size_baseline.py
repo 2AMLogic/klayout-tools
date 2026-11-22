@@ -567,8 +567,8 @@ def _mirror_failures(
             )
         elif lines != size and not (lines == carry_forward.get(path) and lines > size):
             failures.append(
-                f"{path}: baseline ceiling {lines} lines must equal the "
-                f"file's current size ({size} lines); set it to {size}"
+                f"{path}: ledger ({lines} lines) must equal file size ({size} lines). "
+                "Compare them at the base and merge SHAs in the PR checkout log."
             )
     for path in sorted(expected_debts):
         if path not in proposed.debts:

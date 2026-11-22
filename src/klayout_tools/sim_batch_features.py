@@ -17,18 +17,18 @@ from .sim_batch_corner_libs import (
     _lib_pairs,
     runner_corner_section_libs,
 )
-
-#: Moved to the ``sim_batch_engine_build`` module (size ratchet, the merge of
-#: main into #5457 pushed this file past its 500-line limit); re-exported here
-#: -- self-aliased, nothing below calls them -- so
-#: ``klayout_tools.sim_batch_features.<name>`` keeps working.
-from .sim_batch_engine_build import (
+from .sim_batch_worker_engine_build import (
     apply_worker_engine_build as apply_worker_engine_build,
 )
-from .sim_batch_engine_build import (
+from .sim_batch_worker_engine_build import (
     worker_ngspice_binary as worker_ngspice_binary,
 )
 from .sim_exit_reason import exit_reason_env
+
+#: The worker-observed simulator cluster (issues #3110, #5566) moved to
+#: :mod:`klayout_tools.sim_batch_worker_engine_build` (size ratchet) and is
+#: re-exported above -- self-aliased -- so ``sim.apply_engine_host``'s
+#: existing imports keep working.
 
 
 def missing_features(identity: dict[str, Any]) -> list[str]:
