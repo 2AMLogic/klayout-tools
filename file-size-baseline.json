@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2873
+      "lines": 2831
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -385,7 +385,7 @@
     },
     {
       "path": "src/klayout_tools/layout_plan_execute.py",
-      "lines": 1223
+      "lines": 1222
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12335
+      "lines": 12251
     },
     {
       "path": "src/klayout_tools/sim_batch.py",

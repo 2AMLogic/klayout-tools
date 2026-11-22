@@ -2595,10 +2595,10 @@ def run_pex(
     ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
     legacy scalar). ``extraction.resistance_graph`` echoes the request and one
     ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm}`` entry per net, only when the flag was given --
-    otherwise the report and netlist are byte-identical. Combining it with
-    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`` entry,
+    only when the flag was given -- otherwise the report and netlist are
+    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
+    (the ladder stays on the legacy scalar, so a critical net would mix sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,

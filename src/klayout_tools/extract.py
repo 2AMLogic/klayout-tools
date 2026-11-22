@@ -219,7 +219,7 @@ from .extract_assemble import assemble_extract_report
 
 # The pre-report detection/warning run also moved out of `run_extract`
 # (issue #5196, stage 7) -- see `extract_detect_block.py`'s module docstring.
-from .extract_detect_block import build_detection_findings
+from .extract_detect_block import build_detection_findings, refuse_case_fold_nets
 
 # The layout-geometry device-recognition diagnostics (diode near-miss,
 # unmodelled poly / flavour-marker / unsupported-device / voltage-domain
@@ -3124,8 +3124,7 @@ def run_extract(
 
     # `_purge_preserving_named_nets()` (in `_extract_netlist`) still drops a
     # circuit entirely when it has no devices, no named/labelled nets, and no
-    # subcircuits -- e.g. a layout with no extractable devices and no named
-    # nets. That is a legitimate "nothing extracted" result, not an error:
+    # subcircuits -- a legitimate "nothing extracted" result, not an error:
     # report zero devices/nets rather than dereferencing a `None` circuit. A
     # circuit with named/labelled nets but zero devices survives with those
     # nets/pins intact instead (issue #539) -- `circuit` below is only ever
@@ -3161,6 +3160,7 @@ def run_extract(
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
+    refuse_case_fold_nets(nets, parasitics and not no_netlist)
 
     # Snapshotted *here* -- before `_inject_parasitics` below can add a single
     # R/C/L -- so `--subcircuit` (issue #2245) can tell a real device from an
