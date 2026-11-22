@@ -175,6 +175,10 @@ def test_isolated_substrate_global_warns(tmp_path):
     assert "'vsubs'" in warning
     assert "2 instances" in warning
     assert "1 cell type: SC_BUF" in warning
+    # The fixture contains only the two buffer instances. Its LEF pins
+    # establish isolation, while a physical connection needs separate evidence.
+    assert "the one cell that physically ties" not in warning
+    assert "verified the physical tie" in warning
     assert "hints.layout_short_nets" in warning
     # Status and exit are unchanged: a normal extracted report with the
     # substrate pin still tied to vsubs (the pin-merge assertions above).

@@ -416,15 +416,10 @@ def isolated_substrate_global_warning(
         f"{', '.join(cells)}) onto the deck's synthesized substrate global "
         f"'{deck.substrate_net}', and that net carries no other connection "
         "in the emitted netlist -- no device terminal and no other "
-        "subcircuit pin -- so it is an isolated node: the one cell that "
-        "physically ties substrate to ground is abstracted, and its LEF "
-        "declares no body pin. A downstream `klt lvs` compare against a "
-        "PG-pin reference that ties body pins to the rails will not match "
-        f"(topology errors on every body-pinned instance plus an unmatched "
-        f"'{deck.substrate_net}'). Assert the tie in the request with "
-        'hints.layout_short_nets {"nets": [["' + deck.substrate_net + '", '
-        '"<ground net>"]]} -- disclosed as a warning, never silently '
-        "assumed -- or draw and label a substrate tie in the cells. See "
-        "docs/cli/extract.md's 'Cell-level (black-box + pins) abstraction' "
-        "section."
+        "subcircuit pin -- so it is an isolated node. If you have "
+        "verified the physical tie to a ground rail, disclose it for LVS "
+        'with hints.layout_short_nets {"nets": [["' + deck.substrate_net + '", '
+        '"<ground net>"]]}. To represent a tie in extraction, draw and label '
+        "it in the cells. See docs/cli/extract.md's "
+        "'Cell-level (black-box + pins) abstraction' section."
     ]
