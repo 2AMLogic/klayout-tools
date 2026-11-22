@@ -1163,6 +1163,7 @@
       "modules": [
         "klayout_tools.cli.yield_cmd",
         "klayout_tools.yield_analysis",
+        "klayout_tools.yield_csv_control",
         "klayout_tools.yield_csv_reader",
         "klayout_tools.yield_provenance",
         "klayout_tools.yield_sampling_fields"
