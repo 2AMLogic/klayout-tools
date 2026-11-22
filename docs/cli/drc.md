@@ -878,7 +878,8 @@ runner entered a deck. The default buck run started 161 decks, including
 the failing `mslot1`, and never reached the remaining 16. On an abort,
 `error.deck_selection` accompanies the existing `abort` and `decks_executed`
 fields. Tolerating an abort with `--allow-deck-errors` also records the
-selection under `engine_deck_errors`. See the [JSON contract](../json-contract.md#gf180-native-drc-deck-selection).
+selection under `engine_deck_errors`. When a parallel run fails, `abort.decks`
+lists the workers the runner identified as failed. See the [JSON contract](../json-contract.md#gf180-native-drc-deck-selection).
 
 A flat, single-PDK install (IHP-Open-PDK's SG13G2/SG13CMOS5L, see
 [`docs/cli/pdk.md`](pdk.md)'s "Scope") nests its native deck one directory
@@ -4768,7 +4769,7 @@ carries `error.code` (exit stays `1`, so no contract break):
 | `klayout_unavailable` | the standalone `klayout` binary is missing or could not be launched |
 | `klayout_version_too_old` | the detected version is below `--min-klayout-version` |
 | `negative_control_failed` | see "Negative control" |
-| `klayout_deck_aborted` | the native deck aborted part-way (issue #5091). `error.abort` names the failing deck (`deck`, `deck_file`, from the last `Executing deck <name> from <path>` line), the Ruby `message`, the offending `symbol` and `location` (`file:line`) when klayout printed them; `error.decks_executed` lists decks klayout logged as started, the last being the one that aborted. Fields are omitted when the output has none to parse. |
+| `klayout_deck_aborted` | The native deck aborted part-way (issue #5091). For a sequential run, `error.abort` names the last started `deck` and its `deck_file` when logged. For a parallel run, `decks` lists explicitly failed workers and `deck` names a sole failure. The Ruby `message`, offending `symbol` and `location` are included when available. `error.decks_executed` lists observed starts. |
 
 Any other failure carries no code. Exit `1` is deliberate: an exit-0 "could
 not run" is what a CI script could mistake for clean.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 import pytest
 
@@ -21,6 +22,24 @@ def _install(tmp_path, variant: str, drc_files: tuple[str, ...]) -> str:
     for name in drc_files:
         (drc / name).write_text("# stub\n")
     return str(root)
+
+
+def _installed_gf180_script(tmp_path):
+    root = _install(tmp_path, "gf180mcuA", ("gf180mcu.drc",))
+    return str(Path(root) / "gf180mcuA/libs.tech/klayout/tech/drc/gf180mcu.drc")
+
+
+def test_symlink_to_copied_gf180_runner_uses_framework_context(tmp_path):
+    from klayout_tools.pdk_native_drc import gf180_main_path
+
+    target = tmp_path / "gf180mcu.drc"
+    target.touch()
+    alias = tmp_path / "foundry.drc"
+    alias.symlink_to(target)
+    assert gf180_main_path(str(alias)) is None
+    for name in ("options.rb", "rule_framework.rb"):
+        (tmp_path / name).touch()
+    assert gf180_main_path(str(alias)) == str(target)
 
 
 def _args(root, pdk_name, **kw):
@@ -45,9 +64,12 @@ def test_main_script_resolved_with_variant_default(tmp_path):
     assert pdk.drc_deck_file(variant="gf180mcuD", root=root) is None
 
 
-def test_missing_main_script_returns_none(tmp_path):
-    root = _install(tmp_path, "gf180mcuD", ())
-    assert native_drc_main_script(variant="gf180mcuD", root=root) is None
+@pytest.mark.parametrize(
+    "asset_dir", ["libs.tech", "libs.tech/klayout", "libs.tech/klayout/tech/drc"]
+)
+def test_missing_main_script_returns_none(tmp_path, asset_dir):
+    (tmp_path / "gf180mcuD" / asset_dir).mkdir(parents=True)
+    assert native_drc_main_script(variant="gf180mcuD", root=str(tmp_path)) is None
 
 
 def test_sky130_resolution_unchanged(tmp_path):
@@ -189,7 +211,7 @@ def test_explicit_pdk_family_mismatch_and_deck_file_bypass(tmp_path, monkeypatch
     assert native_family_error(bypass) is None
 
 
-def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
+def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path, capsys):
     """Check registry IDs against the installed default, and grade the real envelope."""
     import os
     import shutil
@@ -248,11 +270,27 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
     layout.write(str(gds))
     wide = run("metaltop_30k", 8)
     assert wide["status"] == "clean_partial" and wide["violation_count"] == 0
+    copied = shutil.copytree(Path(deck["deck_file"]).parent, tmp_path / "runner")
+    capsys.readouterr()
+    alias_reports = []
+    for alias in (copied / "foundry.drc", tmp_path / "foundry.drc"):
+        alias.symlink_to(copied / "gf180mcu.drc")
+        args = ["drc", str(gds), "--engine", "klayout", "--deck-file", str(alias)]
+        args.extend(
+            ["--deck-var", "variant=gf180mcuA", "--deck-var", "decks=metaltop_30k"]
+        )
+        args.extend(["--expect-rule-categories", "8", "--format", "json"])
+        assert main(args) == 0
+        alias_report = json.loads(capsys.readouterr().out)
+        assert alias_report["status"] == "clean_partial"
+        assert alias_report["rule_selection"] == wide["rule_selection"]
+        alias_reports.append(alias_report)
     from klayout_tools.coverage import build_check_coverage
 
     path = tmp_path / "wide.drc.json"
     for report in [
         wide,
+        *alias_reports,
         {
             **wide,
             "status": "clean",
@@ -286,8 +324,6 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
 def test_registry_subprocess_contract(
     tmp_path, monkeypatch, selector, payload, expected
 ):
-    from pathlib import Path
-
     from klayout_tools import drc_klayout_selection as selection
 
     directory = tmp_path / "installed deck"
@@ -371,14 +407,13 @@ def test_native_zero_finding_envelope_with_uncertified_scope(
     tmp_path, monkeypatch, registry, log
 ):
     import subprocess
-    from pathlib import Path
 
     from klayout_tools import drc_klayout_engine as engine
     from klayout_tools import drc_klayout_selection
     from klayout_tools.coverage import build_check_coverage, work_id
     from klayout_tools.drc_klayout_engine import run_drc_klayout_engine
     from klayout_tools.signoff import build_signoff
-    from test_drc_klayout_engine import _write_deck_file, _write_gds
+    from test_drc_klayout_engine import _write_gds
     from test_signoff import _item_3
 
     monkeypatch.setattr(drc_klayout_selection, "_registry", lambda *args: registry)
@@ -395,7 +430,7 @@ def test_native_zero_finding_envelope_with_uncertified_scope(
     monkeypatch.setattr(engine, "_preflight_klayout_version", lambda *args: "0.30.12")
     report = run_drc_klayout_engine(
         _write_gds(tmp_path / "test.gds"),
-        _write_deck_file(tmp_path / "gf180mcu.drc"),
+        _installed_gf180_script(tmp_path),
         deck_vars={"decks": "mt" if registry and len(registry[1]) == 1 else "all"},
         expected_rule_categories=1,
     )
@@ -418,3 +453,21 @@ def test_native_zero_finding_envelope_with_uncertified_scope(
     assert build_signoff([str(path)])["checks"][0]["passed"] is False
     item = _item_3(str(path))
     assert item["status"] == "unmet" and item["citation"] is None
+
+
+def test_unrelated_gf180_named_script_retains_its_own_coverage(tmp_path, capsys):
+    import shutil
+
+    from test_drc_klayout_engine import _write_gds
+
+    if not shutil.which("klayout"):
+        pytest.skip("needs a KLayout Ruby interpreter")
+    gds = _write_gds(tmp_path / "top.gds")
+    script = tmp_path / "gf180mcu.drc"
+    script.write_text(
+        'source($input)\nreport("one", $report)\ninput(42, 0).output("one")\n'
+    )
+    args = ["drc", gds, "--engine", "klayout", "--deck-file", str(script)]
+    assert main([*args, "--expect-rule-categories", "1", "--format", "json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "clean" and "rule_selection" not in report

@@ -15,6 +15,7 @@ from klayout_tools.drc_klayout_abort import (
     deck_abort_info,
 )
 from klayout_tools.drc_klayout_engine import _klayout_deck_error_lines
+from test_drc_gf180mcu_native_deck import _installed_gf180_script
 from test_drc_klayout_engine import (
     _EMPTY_RDB,
     _stub_klayout_drc_subprocess,
@@ -184,7 +185,7 @@ def test_selected_abort_reports_started_failed_not_reached_and_omitted(
     err = "ERROR: undefined local variable or method 'metal4_drawn'\n"
     _stub_klayout_drc_subprocess(monkeypatch, stdout=out, stderr=err, returncode=1)
     gds = _write_gds(tmp_path / "test.gds")
-    script = _write_deck_file(tmp_path / "gf180mcu.drc")
+    script = _installed_gf180_script(tmp_path)
     kwargs = {"deck_vars": {"decks": "all,-excluded"}, "allow_deck_errors": tolerate}
     if tolerate:
         report = run_drc_klayout_engine(gds, script, **kwargs)
@@ -226,9 +227,70 @@ def test_native_unknown_tag_keeps_the_pdk_error_alongside_startup_output(
     with pytest.raises(DrcError, match="Unknown tag: missing_tag") as exc:
         run_drc_klayout_engine(
             _write_gds(tmp_path / "test.gds"),
-            _write_deck_file(tmp_path / "gf180mcu.drc"),
+            _installed_gf180_script(tmp_path),
             deck_vars={"decks": "missing_tag"},
         )
     selection = exc.value.details["deck_selection"]
     assert selection["requested"] == "missing_tag" and selection["omitted"] is None
     assert selection["started"] == [] and selection["not_reached"] is None
+
+
+@pytest.mark.parametrize("write_report", [True, False])
+@pytest.mark.parametrize("ids", [("mslot1",), ("mslot2", "mslot1")])
+def test_failed_workers_are_named_in_fatal_and_partial_reports(
+    tmp_path, monkeypatch, write_report, ids
+):
+    from klayout_tools import drc_klayout_selection
+
+    selected = [*ids, "other"]
+    monkeypatch.setattr(
+        drc_klayout_selection, "_registry", lambda *a: (selected, selected)
+    )
+    header = (
+        f"Starting DRC in isolated parallel mode: executing {len(selected)} deck(s).\n"
+    )
+    progress = "".join(f"Executing deck : {name}\n" for name in selected)
+    failures = "".join(
+        f"Deck {name} failed: undefined method 'metal4_drawn'\n" for name in ids
+    )
+    err = f"ERROR: In gf180mcu.drc: DRC failed for decks: {', '.join(ids)}\n"
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        write_report=write_report,
+        stdout=header + progress + failures,
+        stderr=err,
+        returncode=1,
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    script = _installed_gf180_script(tmp_path)
+    if write_report:
+        details = run_drc_klayout_engine(gds, script, allow_deck_errors=True)[
+            "engine_deck_errors"
+        ]
+    else:
+        with pytest.raises(DrcError) as exc:
+            run_drc_klayout_engine(gds, script)
+        details = exc.value.details
+    assert details["abort"]["decks"] == list(ids)
+    assert details["abort"].get("deck") == (ids[0] if len(ids) == 1 else None)
+
+
+def test_parallel_failure_summary_names_workers_without_start_records():
+    err = "ERROR: DRC failed for decks: mslot2, mslot1 in Executable::execute"
+    assert deck_abort_info(None, err, [err])["abort"]["decks"] == ["mslot2", "mslot1"]
+
+
+def test_parallel_starts_without_explicit_failure_do_not_blame_a_worker():
+    progress = "Starting DRC in isolated parallel mode: executing 1 deck(s).\n"
+    info = deck_abort_info(progress + "Executing deck : scheduled\n", "ERROR: stopped")
+    assert info["decks_executed"] == ["scheduled"]
+    assert info["abort"] == {"message": "ERROR: stopped"}
+
+
+def test_parallel_fatal_summary_identifies_a_sole_worker_and_preserves_the_message():
+    error = "ERROR: DRC failed for decks: mslot1"
+    assert deck_abort_info(None, error)["abort"] == {
+        "decks": ["mslot1"],
+        "deck": "mslot1",
+        "message": error,
+    }

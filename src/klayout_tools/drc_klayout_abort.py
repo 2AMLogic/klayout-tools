@@ -21,6 +21,15 @@ _EXECUTING_DECK_RE = re.compile(
     r"(?P<name>\S+)(?:[ \t]+from[ \t]+(?P<path>[^\n]+?))?[ \t]*$",
     re.MULTILINE,
 )
+_WORKER_FAILURE_RE = re.compile(
+    r"^(?:[^\n]*?Memory Usage \([^\n()]*\)[ \t]*:[ \t]*)?"
+    r"Deck ([\w.-]+) failed:[ \t]*(.*)$",
+    re.MULTILINE,
+)
+_WORKER_SUMMARY_RE = re.compile(
+    r"^(?:ERROR\b[^\n]*?)?DRC failed for decks:[ \t]*([\w.-]+(?:,[ \t]*[\w.-]+)*)",
+    re.MULTILINE,
+)
 _RUBY_UNDEFINED_SYMBOL_RE = re.compile(
     r"undefined (?:local variable or )?method [`'‘\"]?(?P<symbol>[^`'’\"\s]+)"
 )
@@ -133,8 +142,37 @@ def deck_starts(stream: str) -> list[tuple[str, str | None]]:
     return [(m["name"], m["path"]) for m in _EXECUTING_DECK_RE.finditer(stream)]
 
 
+def _worker_abort(text: str) -> dict[str, Any]:
+    failures = dict(_WORKER_FAILURE_RE.findall(text))
+    for summary in _WORKER_SUMMARY_RE.findall(text):
+        for name in summary.split(","):
+            failures.setdefault(name.strip(), "")
+    if not failures:
+        return {}
+    abort: dict[str, Any] = {"decks": list(failures)}
+    if len(failures) == 1:
+        name, message = next(iter(failures.items()))
+        abort["deck"] = name
+        if message:
+            abort["message"] = message
+    return abort
+
+
+def _abort_diagnostic(message: str, combined: str) -> dict[str, str]:
+    diagnostic = {"message": message}
+    symbol = _RUBY_UNDEFINED_SYMBOL_RE.search(message)
+    if symbol:
+        diagnostic["symbol"] = symbol.group("symbol")
+    # Look for the location at or after the causal line, including the Ruby backtrace.
+    start = combined.find(message)
+    location = _RUBY_FILE_LINE_RE.search(combined[start:] if start >= 0 else message)
+    if location:
+        diagnostic["location"] = location.group("loc")
+    return diagnostic
+
+
 def deck_abort_info(
-    stdout: str | None, stderr: str | None, error_lines: list[str]
+    stdout: str | None, stderr: str | None, error_lines: list[str] | None = None
 ) -> dict[str, Any]:
     """Structured abort cause of a failed native-deck run.
 
@@ -148,11 +186,12 @@ def deck_abort_info(
     info: dict[str, Any] = {}
     if decks:
         info["decks_executed"] = [name for name, _ in decks]
-    if not error_lines and not decks:
-        return info
-    abort: dict[str, Any] = {}
+    if error_lines is None:
+        error_lines = _klayout_deck_error_lines(combined)
+    abort = _worker_abort(combined)
     if (
-        decks
+        not abort
+        and decks
         and error_lines
         and "Starting DRC in isolated parallel mode" not in combined
     ):
@@ -160,18 +199,9 @@ def deck_abort_info(
         abort["deck"] = name
         if path:
             abort["deck_file"] = path
-    if error_lines:
-        abort["message"] = error_lines[0]
-        symbol = _RUBY_UNDEFINED_SYMBOL_RE.search(error_lines[0])
-        if symbol:
-            abort["symbol"] = symbol.group("symbol")
-        # The Ruby backtrace line (``file:line:in ...``) usually follows the
-        # first ERROR line; fall back to the ERROR line itself.
-        start = combined.find(error_lines[0])
-        tail = combined[start:] if start >= 0 else error_lines[0]
-        location = _RUBY_FILE_LINE_RE.search(tail)
-        if location:
-            abort["location"] = location.group("loc")
+    message = abort.get("message") or next(iter(error_lines), "")
+    if message:
+        abort.update(_abort_diagnostic(message, combined))
     if abort.get("deck") == "mslot1" and abort.get("symbol") == "metal4_drawn":
         abort["hint"] = (
             "For the GF180 3LM stack, see docs/cli/drc.md#gf180-3lm-deck-selection "

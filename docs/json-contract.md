@@ -1800,7 +1800,13 @@ convention).
 
 The native GF180 verdict exposes `native_deck.deck_selection`. Fatal deck
 errors expose `error.deck_selection`. A tolerated abort carries the same
-object in `engine_deck_errors.deck_selection`.
+object in `engine_deck_errors.deck_selection`. A symlink to the installed
+GF180 main script carries the same selection as its target.
+
+When the parallel runner names failed workers, `error.abort.decks` lists their
+distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
+A single identified failure also supplies `abort.deck`. The parallel runner
+can start several decks before reporting a failure.
 
 | Field | Meaning |
 |---|---|

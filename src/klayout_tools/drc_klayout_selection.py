@@ -10,6 +10,7 @@ from typing import Any
 
 from .coverage import work_id
 from .drc_klayout_abort import _klayout_deck_error_lines, deck_starts
+from .pdk_native_drc import gf180_main_path
 
 # Use the same KLayout Ruby as the real run. Register the installed rules
 # without opening a layout or invoking any registered block.
@@ -89,7 +90,7 @@ def native_selection(
     work_dir: str,
     timeout_s: float,
 ) -> dict[str, Any] | None:
-    if Path(deck_file).name != "gf180mcu.drc":
+    if gf180_main_path(deck_file) is None:
         return None
     requested = (deck_vars or {}).get("decks")
     registry = _registry(exe, deck_file, requested, work_dir, timeout_s)

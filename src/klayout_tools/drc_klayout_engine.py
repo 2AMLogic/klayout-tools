@@ -1458,10 +1458,10 @@ def run_drc_klayout_engine(
         except DrcError as exc:
             if selection is not None:
                 envelope = vars(exc)
-                envelope["details"] = {
-                    **(envelope.get("details") or {}),
-                    "deck_selection": selection,
-                }
+                details = envelope.get("details") or deck_abort_info(
+                    completed.stdout, completed.stderr
+                )
+                envelope["details"] = {**details, "deck_selection": selection}
             raise
 
         violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
