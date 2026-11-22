@@ -128,6 +128,22 @@ def test_census_counts_hierarchy_multiplicity_and_skips_unused_definitions():
     }
 
 
+def test_census_skips_an_unbound_instance_without_losing_resolved_siblings(monkeypatch):
+    netlist = _read_spice(_CENSUS_SPICE)
+    native_instances = kdb.Circuit.each_subcircuit
+
+    def instances(circuit):
+        if circuit.name == "TOP":
+            yield kdb.SubCircuit()  # No referenced master.
+        yield from native_instances(circuit)
+
+    monkeypatch.setattr(kdb.Circuit, "each_subcircuit", instances)
+    assert count_unsupported_asap7_instances(netlist, "TOP") == {
+        "AOI21x1_ASAP7_75t_R": 2,
+        "OAI21x1_ASAP7_75t_R": 2,
+    }
+
+
 def test_census_scopes_to_the_selected_root():
     netlist = _read_spice(_CENSUS_SPICE)
     assert count_unsupported_asap7_instances(netlist, "wrapper") == {
@@ -137,6 +153,12 @@ def test_census_scopes_to_the_selected_root():
     # circuit selection's own authoritative error rather than raising here.
     assert count_unsupported_asap7_instances(netlist, "OAI21x1_ASAP7_75t_R") == {}
     assert count_unsupported_asap7_instances(netlist, "NOSUCH") == {}
+    # TOP and the unused XOR are independent roots until the latter is removed.
+    assert count_unsupported_asap7_instances(netlist, None) == {}
+    netlist.remove(netlist.circuit_by_name("XOR2X1_ASAP7_75T_R"))
+    assert count_unsupported_asap7_instances(netlist, None) == (
+        count_unsupported_asap7_instances(netlist, "TOP")
+    )
 
 
 def test_census_ignores_pinned_master_placed_beside_the_top():
@@ -204,9 +226,8 @@ def test_block_warnings_gated_on_mismatching_finfet_and_instantiation():
             reference_counts=counts,
         )
         assert out == []
-    # A zero-count master (an entry the censuses did not instantiate) emits
-    # nothing, and the single-cell warning is preserved unchanged beside the
-    # block entries when both conditions hold at once.
+    # A supported master and a pinned master with no placements emit nothing.
+    # A single-cell warning can still coexist with block warnings below.
     out = []
     note_known_limit(
         out,
@@ -214,8 +235,8 @@ def test_block_warnings_gated_on_mismatching_finfet_and_instantiation():
         "mismatch",
         {"top": "TOPBLOCK"},
         {},
-        layout_counts={},
-        reference_counts={},
+        layout_counts={"INVx1_ASAP7_75t_R": 1, "OAI21x1_ASAP7_75t_R": 0},
+        reference_counts={"OAI21x1_ASAP7_75t_R": 0},
     )
     assert out == []
     out = []
