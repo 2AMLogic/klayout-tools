@@ -37,6 +37,7 @@ from .liberty_scan import (
     _find_terminator,
     _next_significant,
     _skip_ws,
+    _starts_group,
     _tokens,
 )
 
@@ -121,20 +122,27 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
     header = ""
     header_fields: dict[str, str] = {}
     first_path = paths[0]
+    first_condition_count = 0
     seen: dict[str, str] = {}
     templates: dict[str, tuple[str, str, str]] = {}  # name -> (norm, raw, path)
     extra: list[str] = []
     bodies: list[str] = []
     for path, text in zip(paths, texts, strict=True):
-        file_header, body, cells = _split(path, text)
+        file_header, body, cells, condition_count = _split(path, text)
         stripped, file_templates = _extract_templates(file_header)
         fields = _header_fields(path, stripped)
         if path is first_path:
             header, header_fields = file_header, fields
+            first_condition_count = condition_count
         else:
             retained = "".join(raw for _, raw in file_templates) + body
             first_fields, other_fields = _reconcile_conditions(
-                first_path, header_fields, path, fields, retained
+                first_path,
+                header_fields,
+                path,
+                fields,
+                retained,
+                single_condition=first_condition_count == condition_count == 1,
             )
             _compare_headers(first_path, first_fields, path, other_fields)
         for name, raw in file_templates:
@@ -272,13 +280,32 @@ def _local_condition(fields: dict[str, str]) -> tuple[str, str, str] | None:
     return key, name, body
 
 
-def _references_identifier(text: str, name: str) -> bool:
-    """Whether ``name`` occurs in ``text`` as a whole Liberty identifier,
-    not as a substring of a longer one."""
-    return (
-        re.search(rf"(?<![A-Za-z0-9_.$]){re.escape(name)}(?![A-Za-z0-9_.$])", text)
-        is not None
-    )
+def _references_condition(text: str, name: str) -> bool:
+    """Look for the discarded condition in retained Liberty references."""
+    value_attrs = {
+        "related_condition",
+        "default_operating_conditions",
+        "operating_conditions",
+    }
+    for kind, start, end in _tokens(text):
+        keyword = text[start:end]
+        if kind != "ident" or keyword not in value_attrs and keyword != "scaled_cell":
+            continue
+        pos, char = _next_significant(text, end)
+        if keyword in value_attrs and char == ":":
+            stop = _find_terminator(text, pos + 1)
+            value = _normalize_header(text[pos + 1 : stop])
+        elif keyword == "scaled_cell" and char == "(":
+            stop = _find_matching(text, pos, "(", ")")
+            args = _normalize_header(text[pos + 1 : stop])
+            # scaled_cell(existing_cell, operating_conditions_group)
+            match = re.fullmatch(r'(?:"(?:[^"\\]|\\.)*"|[^",]+)\s*,\s*(.+)', args)
+            value = match[1] if match else ""
+        else:
+            continue
+        if _unquote(value) == name:
+            return True
+    return False
 
 
 def _reconcile_conditions(
@@ -287,6 +314,8 @@ def _reconcile_conditions(
     path: str,
     other: dict[str, str],
     retained: str,
+    *,
+    single_condition: bool,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """The header field maps with the operating-condition pair removed when
     the two headers differ only by its local name (issue #6940).
@@ -298,6 +327,8 @@ def _reconcile_conditions(
     a reference would dangle in the output). Anything else about the pair
     (content, count, a foreign or missing default) is left in place for the
     normal field-by-field comparison to refuse."""
+    if not single_condition:
+        return first, other
     a = _local_condition(first)
     b = _local_condition(other)
     if a is None or b is None or a[1] == b[1]:
@@ -307,7 +338,7 @@ def _reconcile_conditions(
             f"cannot merge: 'operating_conditions({a[1]})' differs: {_clip(a[2])} "
             f"in '{first_path}', {_clip(b[2])} in '{path}'"
         )
-    if _references_identifier(retained, b[1]):
+    if _references_condition(retained, b[1]):
         raise LibertyMergeError(
             f"cannot merge: '{path}' references operating condition '{b[1]}' "
             f"outside its header, but the merged header keeps only "
@@ -422,23 +453,24 @@ def _read(path: str) -> str:
         raise LibertyMergeError(f"cannot read Liberty file '{path}': {exc}") from exc
 
 
-def _split(path: str, text: str) -> tuple[str, str, list[str]]:
-    """``(header, body, cell names)`` for one ``library(){}`` file.
+def _split(path: str, text: str) -> tuple[str, str, list[str], int]:
+    """Split a library and report its cell names and condition count.
 
     ``body`` runs from the first top-level ``cell (`` to just before the
     library's closing brace.
     """
     first_ident = next((text[p:e] for k, p, e in _tokens(text) if k == "ident"), None)
-    first_cell, cells, close = _scan_cells(text)
+    first_cell, cells, close, conditions = _scan_cells(text)
     if close is None or first_ident != "library":
         raise LibertyMergeError(f"'{path}' is not a complete Liberty library group")
     if first_cell is None:
         raise LibertyMergeError(f"'{path}' defines no cells")
-    return text[:first_cell], text[first_cell:close], cells
+    return text[:first_cell], text[first_cell:close], cells, conditions
 
 
-def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
-    """``(first top-level cell offset, cell names, closing-brace offset)``."""
+def _scan_cells(text: str) -> tuple[int | None, list[str], int | None, int]:
+    """Locate cells and count top-level operating-condition declarations."""
+    conditions = 0
     first_cell: int | None = None
     cells: list[str] = []
     depth = 0
@@ -448,11 +480,13 @@ def _scan_cells(text: str) -> tuple[int | None, list[str], int | None]:
         elif kind == "}":
             depth -= 1
             if depth == 0:
-                return first_cell, cells, pos
+                return first_cell, cells, pos, conditions
+        elif depth == 1 and text[pos:end] == "operating_conditions":
+            conditions += _starts_group(text, end)
         elif depth == 1 and text[pos:end] == "cell":
             match = _CELL_NAME_RE.match(text, _skip_ws(text, end))
             if match:
                 cells.append(match.group(1))
                 if first_cell is None:
                     first_cell = pos
-    return first_cell, cells, None
+    return first_cell, cells, None, conditions

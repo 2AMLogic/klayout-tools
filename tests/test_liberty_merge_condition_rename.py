@@ -215,3 +215,66 @@ def test_renamed_condition_with_default_max_transition_equal_merges(tmp_path):
     text = _read(liberty_merge.merge_liberty([a, b]))
     assert "cell (INV_A)" in text and "cell (INV_B)" in text
     assert "typ25" not in text
+
+
+@pytest.mark.parametrize("extra_in_first", [False, True])
+@pytest.mark.parametrize("after_cell", [False, True])
+def test_rename_counts_all_condition_declarations(tmp_path, extra_in_first, after_cell):
+    inputs = [_lib("A", condition="keep"), _lib("B", condition="typ25")]
+    index = 0 if extra_in_first else 1
+    local = "keep" if extra_in_first else "typ25"
+    # A repeated header key would be lost in a dict. A late group would
+    # be copied verbatim with the cell body, even if it redefines the kept name.
+    name = "keep" if after_cell else local
+    extra = f'  operating_conditions ("{name}") {{ voltage : 2; }}\n'
+    if after_cell:
+        inputs[index] = inputs[index][:-2] + extra + "}\n"
+    else:
+        inputs[index] = inputs[index].replace(
+            "  operating_conditions", extra + "  operating_conditions", 1
+        )
+    a = _write(tmp_path, "groupA.lib", inputs[0])
+    b = _write(tmp_path, "groupB.lib", inputs[1])
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    assert "groupA.lib" in str(exc.value) and "groupB.lib" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "cell_content",
+    [
+        "/* characterized at typ25 */\n    // related_condition : typ25;\n",
+        "pin (typ25) { direction : input; }",
+        'comment : "related_condition : typ25;";',
+    ],
+)
+def test_rename_preserves_unrelated_cell_text(tmp_path, cell_content):
+    a = _write(tmp_path, "groupA.lib", _lib("A", condition="keep"))
+    text = _lib("B", condition="typ25").replace("area : 1.0;", cell_content)
+    b = _write(tmp_path, "groupB.lib", text)
+    assert cell_content in _read(liberty_merge.merge_liberty([a, b]))
+
+
+def test_rename_preserves_new_header_template_with_same_name(tmp_path):
+    a = _write(tmp_path, "groupA.lib", _lib("A", condition="keep"))
+    template = "lu_table_template (typ25) { variable_1 : input_net_transition; }"
+    text = _lib("B", condition="typ25").replace("  cell (", template + "\n  cell (")
+    b = _write(tmp_path, "groupB.lib", text)
+    assert template in _read(liberty_merge.merge_liberty([a, b]))
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        'scaled_cell (INV_B, /* selected */ "typ25") { area : 2.0; }',
+        "cell (AUX) { related_condition /* selected */ : typ25; }",
+    ],
+)
+def test_rename_refuses_condition_reference_in_retained_syntax(tmp_path, snippet):
+    a = _write(tmp_path, "groupA.lib", _lib("A", condition="keep"))
+    b = _write(
+        tmp_path, "groupB.lib", _lib("B", condition="typ25", body_extra=snippet + "\n")
+    )
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    assert "groupA.lib" in str(exc.value) and "groupB.lib" in str(exc.value)

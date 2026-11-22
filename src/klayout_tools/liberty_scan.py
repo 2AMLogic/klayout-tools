@@ -127,3 +127,12 @@ def _tokens(text: str):
                 i = match.end()
             else:
                 i += 1
+
+
+def _starts_group(text: str, end: int) -> bool:
+    """Whether the identifier ending here opens a named Liberty group."""
+    pos, char = _next_significant(text, end)
+    if char != "(":
+        return False
+    close = _find_matching(text, pos, "(", ")")
+    return _next_significant(text, close + 1)[1] == "{"
