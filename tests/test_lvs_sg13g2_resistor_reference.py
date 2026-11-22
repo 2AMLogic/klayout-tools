@@ -318,9 +318,36 @@ def test_sg13g2_resistor_value_drift_reports_the_class_cascade(tmp_path, monkeyp
 
     assert report["status"] == "mismatch"
     assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 0}
+    assert report["sg13g2_passive_pairing"] == {
+        "status": "insufficient_evidence",
+        "findings": [],
+    }
     unmatched_classes = {
         m["device"]["class"]
         for m in report["mismatches"]
         if m["category"] == "device.unmatched"
     }
     assert unmatched_classes == {"rppd", "RPPD"}
+
+
+def test_missing_bulk_on_mixed_case_class_is_a_terminal_discrepancy(
+    tmp_path, monkeypatch
+):
+    root = _sg13g2_res_pdk_setup(monkeypatch, tmp_path)
+    gds = _gen_res_array(root, tmp_path, "rppd", "bulk")
+    ref = _write(tmp_path / "ref.spice", _sg13g2_plain_res_reference("rppd", 2, 260))
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": str(gds), "deck": "sg13g2"},
+                "reference": {"netlist": ref, "top": "res_array_0"},
+            },
+        )
+    )
+    assert report["status"] == "mismatch"
+    (finding,) = report["sg13g2_passive_pairing"]["findings"]
+    assert (finding["layout_model"], finding["reference_model"]) == ("rppd", "RPPD")
+    assert finding["differences"] == ["terminal_list"]
+    assert finding["layout_terminals"] == ["A", "B", "W"]
+    assert finding["reference_terminals"] == ["A", "B"]

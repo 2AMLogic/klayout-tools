@@ -1,10 +1,16 @@
 """Tests for ``measurements[].eye`` -- the built-in eye / phase-fold
-measurement (issue #4292). Everything runs without ngspice."""
+measurement and transient step integration."""
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+
 import pytest
 
+from helpers.tool_probes import SKIP_NO_NGSPICE
 from klayout_tools import sim, sim_batch, sim_eye, sim_validate
 from klayout_tools.sim_errors import SimError
 
@@ -143,25 +149,179 @@ def test_runner_feature_gate_registered():
     assert not detect({"measurements": [{"name": "e", "expr": "v(a)"}]})
 
 
-def test_refused_with_analysis_steps(tmp_path):
-    import json
+@pytest.mark.parametrize(("phase", "height"), [(None, 1.0), (0, 1.0), (0.25, 7 / 12)])
+def test_sampling_phase_uses_interpolation_relative_to_window(phase, height):
+    start = 2.5
+    scale = [
+        start + t for t in [0.0, 1.0, 1.1, 2.0, 2.6, 3.0, 3.1, 4.0, 4.6, 5.0, 5.1, 6.0]
+    ]
+    values = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    out = sim_eye.compute_eye(scale, values, ui=1, uis=6, start=start, phase=phase)
+    assert out.height == pytest.approx(height)
+    assert out.width == pytest.approx(0.75)
+    assert out.best_phase == pytest.approx(0.675)
+    assert out.report().get("sampling_phase") == phase
 
-    (tmp_path / "body.spice").write_text("R1 a 0 1k\n")
-    spec = {"name": "e", "eye": {"signal": "v(a)", "ui": "1n", "uis": 4}}
-    request = tmp_path / "request.json"
-    request.write_text(
-        json.dumps(
+
+def _step(name, level):
+    return {
+        "name": name,
+        "analysis": {"kind": "tran", "args": "10p 8n"},
+        "alter": {"Vrail": level},
+        "measurements": [
             {
-                "netlist": "body.spice",
-                "analysis_steps": [
-                    {
-                        "name": "s1",
-                        "analysis": {"kind": "tran", "args": "1n 1u"},
-                        "measurements": [spec],
-                    }
-                ],
+                "name": "opening",
+                "unit": "V",
+                "eye": {
+                    "signal": "v(rx)",
+                    "ui": "1n",
+                    "uis": 6,
+                    "from": "1n",
+                    "phase": "500p",
+                },
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("phase", [-0.1, "1n", "2n", True])
+def test_out_of_range_or_non_numeric_phase(phase):
+    body = _step("lo", 1)["measurements"][0]["eye"]
+    body["phase"] = phase
+    with pytest.raises(SimError, match="phase"):
+        sim_eye.validate_eye_spec("opening", body)
+
+
+def test_step_eye_validation_and_derived_references():
+    from klayout_tools.sim_steps import resolve_analysis_steps
+
+    lo, hi = _step("lo", 1), _step("hi", 2)
+    with pytest.raises(SimError, match="derived expression"):
+        resolve_analysis_steps(
+            {"analysis_steps": [lo], "measurements": lo["measurements"]}
+        )
+    with pytest.raises(SimError, match="postprocessed eye 'lo.opening'"):
+        resolve_analysis_steps(
+            {
+                "analysis_steps": [lo],
+                "measurements": [{"name": "out", "expr": "lo.opening"}],
             }
         )
+    hi["analysis"]["args"] = "10p ${lo.opening}"
+    with pytest.raises(SimError, match="postprocessed eye 'lo.opening'"):
+        resolve_analysis_steps({"analysis_steps": [lo, hi]})
+    lo["analysis"] = {"kind": "op", "args": ""}
+    with pytest.raises(SimError, match="tran"):
+        resolve_analysis_steps({"analysis_steps": [lo]})
+    lo["analysis"] = {"kind": "tran", "args": "10p 4n"}
+    with pytest.raises(SimError, match="window ends"):
+        resolve_analysis_steps({"analysis_steps": [lo]})
+
+
+def test_step_failure_does_not_grade_an_eye_from_another_plot():
+    from klayout_tools import sim_steps
+
+    analysis, specs = sim_steps.resolve_analysis_steps(
+        {"analysis_steps": [_step("lo", 1), _step("hi", 2)]}
     )
-    with pytest.raises(SimError, match="not supported with analysis_steps"):
-        sim.run_sim(str(request))
+    scale, values = _nrz(_BITS)
+    eye = sim_eye.compute_eye(scale, values, ui=1, uis=10, start=1)
+    log = (
+        "klt_step_begin 0 unknown1\nklt_step_end 0 tran1\n"
+        "klt_step_begin 1 unknown2\nklt_step_end 1 unknown2"
+    )
+    rows, diags, _ = sim_steps.grade_step_measurements(
+        {},
+        specs,
+        analysis=analysis,
+        log_text=log,
+        save_mode="all",
+        eyes={0: eye, 1: eye},
+    )
+    assert [(r["step"], r["status"], r["value"]) for r in rows] == [
+        ("lo", "pass", 1),
+        ("hi", "error", None),
+    ]
+    assert [d["code"] for d in diags] == ["step_failed"]
+
+
+def test_extended_feature_detection_distinguishes_legacy_eyes():
+    check = sim_batch._RUNNER_REQUEST_FEATURES["eye_step_or_phase"][1]
+    lo = _step("lo", 1)
+    assert check({"analysis_steps": [lo]})
+    assert check({"measurements": lo["measurements"]})
+    del lo["measurements"][0]["eye"]["phase"]
+    assert not check({"measurements": lo["measurements"]})
+    assert "eye_step_or_phase" in sim_batch._MANDATORY_RUNNER_FEATURES
+
+
+@SKIP_NO_NGSPICE
+@pytest.mark.parametrize("fail_high", [False, True])
+def test_public_step_eyes_are_bound_to_their_own_waveforms(tmp_path, fail_high):
+    netlist = tmp_path / "eye.sp"
+    netlist.write_text(
+        "Vpattern data 0 PULSE(0 1 0 100p 100p 900p 2n)\n"
+        "Vrail rail 0 1\nBreceive rx 0 V=V(data)*V(rail)\nRload rx 0 1k\n"
+    )
+    lo, hi = _step("low", 1), _step("high", 2)
+    # Intermediate lets change a step's measurement emission path. The
+    # corner's two rawfile indices must still agree with result harvesting.
+    lo["measurements"].insert(
+        0, {"name": "railvalue", "expr": "v(rail)", "intermediate": True}
+    )
+    lo["measurements"].append({"name": "saved", "expr": "railvalue[0]"})
+    if fail_high:
+        hi["analysis"]["args"] = "10p 8n 9n"
+    spec = {
+        "netlist": str(netlist),
+        "analysis_steps": [lo, hi],
+        "options": {"ngspice_init": []},
+    }
+    path = tmp_path / "steps.json"
+    path.write_text(json.dumps(spec))
+    corner = sim.run_sim(str(path))["corners"][0]
+    rows = {r["name"]: r for r in corner["measurements"]}
+    low = rows["low.opening"]
+    assert low["step"] == "low"
+    assert low["eye"]["height"] == low["value"] == 1
+    assert low["eye"]["width"] == pytest.approx(1e-9, abs=1e-18)
+    assert low["eye"]["sampling_phase"] == pytest.approx(5e-10, abs=1e-18)
+    assert rows["low.saved"]["value"] == 1
+    high = rows["high.opening"]
+    assert high["step"] == "high"
+    if fail_high:
+        assert high["status"] == "error" and high["value"] is None
+        assert "step_failed" in [d["code"] for d in corner["diagnostics"]]
+    else:
+        assert high["eye"]["height"] == high["value"] == 2
+        assert high["eye"]["width"] == pytest.approx(low["eye"]["width"], abs=1e-18)
+
+
+@pytest.mark.parametrize("supported", [False, True])
+def test_same_release_runner_must_accept_the_step_eye_request(tmp_path, supported):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _mandatory_feature_probe_shell,
+    )
+
+    runner = tmp_path / "klt"
+    runner.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "request = Path(sys.argv[2])\n"
+        "doc = json.loads(request.read_text())\n"
+        "assert (request.parent / doc['netlist']).is_file()\n"
+        "assert doc['analysis_steps'][0]['measurements'][0]['eye']['phase'] == '500p'\n"
+        "assert '--dry-run' in sys.argv\n"
+        f"sys.exit({0 if supported else 1})\n"
+    )
+    runner.chmod(0o755)
+    shell = "rv=0.9.3.dev10; " + _mandatory_feature_probe_shell(("eye_step_or_phase",))
+    proc = subprocess.run(
+        ["bash", "-c", shell + 'printf "%s" "$mmiss"'],
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout == ("" if supported else "eye_step_or_phase")

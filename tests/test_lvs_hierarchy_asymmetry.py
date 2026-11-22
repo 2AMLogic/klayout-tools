@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from klayout_tools import lvs
 from klayout_tools.lvs import run_lvs
 
@@ -171,3 +173,42 @@ def test_inverse_warning_absent_when_flatten_reference_unset(tmp_path):
     report = _run_divider(tmp_path, _HIERARCHICAL_DIVIDER_SPICE, _FLAT_DIVIDER_SPICE)
 
     assert _hierarchy_mismatch_entries(report) == []
+
+
+@pytest.mark.parametrize(
+    ("flatten", "layout"),
+    [(True, _FLAT_DIVIDER_SPICE), (["le*"], _HIERARCHICAL_DIVIDER_SPICE)],
+    ids=["flatten-leaf", "keep-leaf"],
+)
+def test_flatten_selected_interior_reference(tmp_path, monkeypatch, flatten, layout):
+    (tmp_path / ".git").mkdir()
+    monkeypatch.chdir(tmp_path)
+    wrapper = ".subckt outer A B C\nX0 A B C top\n.ends\n"
+    report = _run_divider(
+        tmp_path,
+        layout,
+        wrapper + _HIERARCHICAL_DIVIDER_SPICE,
+        {"flatten_reference": flatten},
+    )
+    assert report["status"] == "match"
+    assert report["reference_top"] == "TOP"
+    # The keep-list preserves the leaf; the boolean form inlines it.
+    assert report["category_counts"].get("topology.flattened", 0) == int(
+        flatten is True
+    )
+    path = tmp_path / "lvs.json"
+    path.write_text(json.dumps(report))
+    rerun = lvs.rerun_lvs_report(str(path))
+    assert rerun["status"] == "match"
+    assert rerun["drift"] == []
+
+
+def test_flatten_missing_reference_top_preserves_error(tmp_path):
+    with pytest.raises(lvs.LvsError) as exc:
+        _run_divider(
+            tmp_path,
+            _FLAT_DIVIDER_SPICE,
+            _HIERARCHICAL_DIVIDER_SPICE.replace("subckt top ", "subckt other "),
+            {"flatten_reference": True},
+        )
+    assert str(exc.value) == "top cell/subcircuit 'top' not found in reference netlist"
