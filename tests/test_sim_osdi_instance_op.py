@@ -10,24 +10,49 @@ import pytest
 from klayout_tools.cli import main
 
 
+def _psp103_files(repo: Path, override: str | None) -> tuple[Path, Path] | None:
+    if override is not None:
+        roots = [Path(override).resolve()]
+    else:
+        variant = Path("pdks/ihp-open-pdk/ihp-sg13g2")
+        roots = [repo / variant]
+        if repo.parent.name == "worktrees" and repo.parent.parent.name == ".loom":
+            roots.append(repo.parents[2] / variant)
+    for root in roots:
+        assets = root / "libs.tech/ngspice"
+        card = assets / "models/cornerMOSlv.lib"
+        model = assets / "osdi/psp103.osdi"
+        if card.is_file() and model.is_file():
+            return card, model
+    return None
+
+
+def test_psp103_discovery_in_a_loom_worktree(tmp_path, monkeypatch):
+    repo = tmp_path / ".loom/worktrees/worker"
+    variant = Path("pdks/ihp-open-pdk/ihp-sg13g2")
+    card = Path("libs.tech/ngspice/models/cornerMOSlv.lib")
+    model = Path("libs.tech/ngspice/osdi/psp103.osdi")
+    local, shared = repo / variant, tmp_path / variant
+    for file in (local / card, shared / card, shared / model):
+        file.parent.mkdir(parents=True)
+        file.touch()
+    assert _psp103_files(repo, None) == (shared / card, shared / model)
+    (local / model).parent.mkdir(parents=True)
+    (local / model).touch()
+    assert _psp103_files(repo, None) == (local / card, local / model)
+    monkeypatch.chdir(tmp_path)
+    assert _psp103_files(repo, str(variant)) == (shared / card, shared / model)
+
+
 @pytest.fixture
 def psp103_request(tmp_path):
     if shutil.which("ngspice") is None:
         pytest.skip("requires ngspice")
     repo = Path(__file__).resolve().parents[1]
-    checkout = (
-        repo.parents[2]
-        if repo.parent.name == "worktrees" and repo.parent.parent.name == ".loom"
-        else repo
-    )
-    root = Path(
-        os.environ.get("KLT_IHP_SG13G2_ROOT", checkout / "pdks/ihp-open-pdk/ihp-sg13g2")
-    )
-    assets = root / "libs.tech/ngspice"
-    card = assets / "models/cornerMOSlv.lib"
-    model = assets / "osdi/psp103.osdi"
-    if not card.is_file() or not model.is_file():
+    files = _psp103_files(repo, os.environ.get("KLT_IHP_SG13G2_ROOT"))
+    if files is None:
         pytest.skip("requires IHP cornerMOSlv.lib and compiled psp103.osdi")
+    card, model = files
 
     (tmp_path / "body.spice").write_text(
         "* Nested PSP103 device\nVdrain d 0 0.6\nVgate g 0 0.7\n"
