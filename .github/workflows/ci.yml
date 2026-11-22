@@ -309,16 +309,17 @@ jobs:
             group: yield
             timeout_minutes: 20
             cargo_test_args: ""
-            # The yield, campaign and sensitivity statistics tests share this
-            # extension. tests/test_yield_provenance.py covers their report metadata.
+            # Provenance and grading paired CSV controls also use the yield extension.
             test_paths: >-
               tests/test_yield.py tests/test_yield_campaign.py
               tests/test_yield_sensitivity.py tests/test_yield_provenance.py
+              tests/test_yield_csv_control.py
             extension_module: klt_yield_native
             no_skip_message: >-
               klt_yield_native did not install -- the statistics tiers in
               tests/test_yield.py, tests/test_yield_campaign.py,
-              tests/test_yield_sensitivity.py and tests/test_yield_provenance.py
+              tests/test_yield_sensitivity.py, tests/test_yield_provenance.py
+              and tests/test_yield_csv_control.py
               would have skipped
     defaults:
       run:
