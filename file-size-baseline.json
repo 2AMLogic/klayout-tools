@@ -561,7 +561,7 @@
     },
     {
       "path": "src/klayout_tools/signoff.py",
-      "lines": 7126
+      "lines": 6956
     },
     {
       "path": "src/klayout_tools/signoff_attest.py",
@@ -577,11 +577,11 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12335
+      "lines": 12251
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4318
+      "lines": 4314
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
