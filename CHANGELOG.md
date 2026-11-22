@@ -14,6 +14,9 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
+
 - **`klt extract --deck gf180mcu` resolves marker-scoped MOS capacitors ~2x
   faster on marker-rich layouts** (#6527, 2026-11-20): the bulk-algebra
   resolver #5807 introduced memoized its layer *read* (`region_of`) but not
