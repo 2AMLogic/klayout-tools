@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 # Data tables live in gen_layer_tables.py (#3722); re-exported here.
-from .gen_layer_mv_ring import apply_mos_array_mv_ring_margins
+from .gen_layer_mv_ring import apply_hv_mark_margins, apply_mos_array_mv_ring_margins
 from .gen_layer_tables import (  # noqa: F401
     _CAP_GEOMETRY_MIN_KEYS,
     _PDK_CAP_GEOMETRY_MIN_UM,
@@ -2538,7 +2538,7 @@ def _diff_pair_layer_params(
     layer_params.update(
         _ring_layer_params(pdk_info, params, generator_name="diff_pair")
     )
-    return layer_params
+    return apply_hv_mark_margins(layer_params, _pdk_family(pdk_info["variant"]), params)
 
 
 def _mos_array_layer_params(
@@ -2573,7 +2573,7 @@ def _mos_array_layer_params(
         )
     else:
         layer_params.setdefault("tap_layer", kdb.LayerInfo(0, 0))
-    return apply_mos_array_mv_ring_margins(layer_params, family)
+    return apply_mos_array_mv_ring_margins(layer_params, family, params)
 
 
 def _bjt_layer_params(
