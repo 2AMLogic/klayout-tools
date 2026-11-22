@@ -42,7 +42,7 @@ def add_expect_bundle_arg(parser: argparse.ArgumentParser) -> None:
             "recorded sha256 this is (full 64-hex digest, compared exactly "
             "with the nearest .pdk-store.json; the stamp is trusted, the "
             "tree is not rehashed). Exit 6 (payload still emitted) on "
-            "mismatch or unknown (no recorded sha256)"
+            "mismatch or unknown (no valid recorded sha256)"
         ),
     )
 

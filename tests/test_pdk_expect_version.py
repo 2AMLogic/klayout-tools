@@ -235,6 +235,40 @@ def test_bundle_unknown_fails_closed_exit_6(capsys, tmp_path, store):
     assert report["bundle_expectation"]["installed"] is None
 
 
+@pytest.mark.parametrize("at_variant_root", [True, False])
+@pytest.mark.parametrize(
+    "value", ["pending", "12ab", "g" * 64, "１" * 64, BUNDLE + " "]
+)
+def test_malformed_matching_bundle_is_unknown(capsys, tmp_path, at_variant_root, value):
+    root = tmp_path / "r"
+    _install(root)
+    stamp = root / ".pdk-store.json"
+    if at_variant_root:
+        # A valid farther stamp cannot override a malformed nearer one.
+        stamp.write_text(json.dumps({"sha256": BUNDLE}))
+        stamp = root / "sky130A" / ".pdk-store.json"
+    stamp.write_text(json.dumps({"sha256": value}))
+
+    code, report, err = _run(capsys, tmp_path, "check", "--expect-bundle-sha256", value)
+    assert code == 6 and "unknown" in err
+    assert report["bundle_expectation"] == {
+        "status": "unknown",
+        "expected": value,
+        "installed": None,
+    }
+
+
+def test_valid_bundle_comparison_is_exact(capsys, tmp_path):
+    _install(tmp_path / "r", store={"sha256": BUNDLE.upper()})
+    code, report, _ = _run(capsys, tmp_path, "check", "--expect-bundle-sha256", BUNDLE)
+    assert code == 6
+    assert report["bundle_expectation"] == {
+        "status": "mismatch",
+        "expected": BUNDLE,
+        "installed": BUNDLE.upper(),
+    }
+
+
 def test_bundle_absent_from_payload_without_flag(capsys, tmp_path):
     _install(tmp_path / "r", store={"version": OTHER, "sha256": BUNDLE})
     code, report, _ = _run(capsys, tmp_path, "check")

@@ -594,15 +594,15 @@ the store namespace.
 klt pdk check --pdk sky130A --expect-bundle-sha256 64-hex-digest || exit 1
 ```
 
-The value is compared exactly with the string `sha256` the install's nearest
-`.pdk-store.json` records — the digest of the bundle the provisioner
-installed from. With the flag, `--format json` adds an additive
-`bundle_expectation` object of the same shape as `version_expectation`
-(absent otherwise; no paths, no `schema_version` change); text output adds a
-`bundle_expectation:` line. Exit `0` on a match; `6` on a mismatch and on
-`unknown` (no stamp, or none recording a string `sha256` — fail closed), with
-one stderr line per failing expectation. Precedence is unchanged: dangling
-symlinks still win with `4`, and both flags may be given together.
+The nearest `.pdk-store.json` records the provisioned bundle’s SHA-256 digest
+in its `sha256` field. The field must contain exactly 64 ASCII hexadecimal
+digits. Comparison with the supplied pin is case-sensitive. With the flag,
+JSON output includes a `bundle_expectation` object with the same fields as
+`version_expectation`, and text output includes a `bundle_expectation:` line.
+A match exits `0`. A mismatch or an absent, unreadable, or malformed digest
+exits `6`, with one stderr line per failed expectation. An unusable recorded
+digest yields `status: "unknown"` and `installed: null`. Both expectation
+flags may be given together. Dangling symlinks take precedence with exit `4`.
 
 **Limitation — the stamp is trusted, the tree is not rehashed.** This
 compares the install's *recorded* bundle hash, so it detects "provisioned

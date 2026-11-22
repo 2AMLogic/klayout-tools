@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
 #: Upper bound on bytes read from ``.pdk-store.json``.
@@ -29,7 +30,7 @@ PDK_STORE_MARKER = ".pdk-store.json"
 
 
 def _store_field(variant_dir: str, field: str) -> str | None:
-    """The stripped string ``field`` of the nearest ``.pdk-store.json``.
+    """The string ``field`` of the nearest ``.pdk-store.json``.
 
     Searched at ``<variant_dir>/.pdk-store.json`` (the variant root, where
     the fleet's provisioner writes it, issue #5624) and then one level above
@@ -54,9 +55,7 @@ def _store_field(variant_dir: str, field: str) -> str | None:
         except (OSError, ValueError):
             return None
         value = data.get(field) if isinstance(data, dict) else None
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        return None
+        return value if isinstance(value, str) else None
     return None
 
 
@@ -65,18 +64,18 @@ def read_store_version(variant_dir: str) -> str | None:
 
     Missing/unreadable/non-object/non-string/empty → ``None`` (never guessed).
     """
-    return _store_field(variant_dir, "version")
+    value = _store_field(variant_dir, "version")
+    return (value or "").strip() or None
 
 
 def read_store_sha256(variant_dir: str) -> str | None:
-    """The string ``sha256`` of the nearest ``.pdk-store.json`` (the recorded
-    bundle hash, issue #5624).
+    """Return the nearest stamp's 64-digit ASCII hex digest, preserving case.
 
-    Missing/unreadable/non-object/non-string/empty → ``None`` (never guessed;
-    the unpacked tree is never rehashed -- an install cannot be hashed back
-    to its tar bytes reproducibly).
+    A missing or malformed digest is unknown. The unpacked tree cannot be
+    hashed back to the original tar bytes.
     """
-    return _store_field(variant_dir, "sha256")
+    value = _store_field(variant_dir, "sha256")
+    return value if re.fullmatch(r"[0-9a-fA-F]{64}", value or "") else None
 
 
 def read_store_stamp(variant_dir: str) -> str | None:

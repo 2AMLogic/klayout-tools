@@ -350,8 +350,8 @@ def check_expected_bundle(variant_dir: str, expected: str) -> dict[str, Any]:
     Shape: ``{"status": "match"|"mismatch"|"unknown", "expected": str,
     "installed": str | None}`` -- the same shape as
     :func:`check_expected_version`. The full 64-hex digest is compared
-    exactly. A stamp that is absent, unreadable, or records no string
-    ``sha256`` is ``unknown`` -- callers gating on this must fail closed.
+    exactly. A stamp that is absent, unreadable, or records no valid
+    64-digit ASCII hexadecimal ``sha256`` is ``unknown``.
 
     This compares the install's *recorded* bundle hash: it trusts the stamp
     and never rehashes the unpacked tree (an unpacked tree cannot be hashed
@@ -362,7 +362,7 @@ def check_expected_bundle(variant_dir: str, expected: str) -> dict[str, Any]:
     installed = read_store_sha256(variant_dir)
     if installed is None:
         status = "unknown"
-    elif installed == expected.strip():
+    elif installed == expected:
         status = "match"
     else:
         status = "mismatch"

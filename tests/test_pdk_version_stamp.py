@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 
@@ -202,10 +203,11 @@ def test_store_sha256_reader(tmp_path):
     from klayout_tools import pdk_store
 
     v = _variant(tmp_path / "r" / "v")
+    digest = "9F2c0A5b" * 8
     (v / ".pdk-store.json").write_text(
-        '{"version": "1", "sha256": "9f2c0a5b"}', encoding="utf-8"
+        json.dumps({"version": "1", "sha256": digest}), encoding="utf-8"
     )
-    assert pdk_store.read_store_sha256(str(v)) == "9f2c0a5b"
+    assert pdk_store.read_store_sha256(str(v)) == digest
     (tmp_path / "r" / ".pdk-store.json").write_text(
         '{"version": "2"}', encoding="utf-8"
     )
