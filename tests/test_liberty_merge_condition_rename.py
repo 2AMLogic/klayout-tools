@@ -217,6 +217,25 @@ def test_refused_rename_keeps_the_other_header_differences(tmp_path, dangling):
         assert "body also differs" in message
 
 
+def test_compatible_rename_keeps_the_effective_output_limit_diagnostic(tmp_path):
+    first = _lib("A", max_trans="320").replace(
+        "area : 1.0;", "pin (Y) { direction : output; max_transition : 150; }"
+    )
+    second = _lib("B", condition="typ25", max_trans="4000").replace(
+        "area : 1.0;", "pin (Y) { direction : output; }"
+    )
+    a = _write(tmp_path, "first.lib", first)
+    b = _write(tmp_path, "second.lib", second)
+    for order in ([a, b], [b, a]):
+        with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+            liberty_merge.merge_liberty(order)
+        message = str(exc.value)
+        assert "cannot merge: 'default_max_transition' differs" in message
+        assert "cell 'INV_B' output 'Y'" in message
+        assert "limited by 4000" in message
+        assert "operating_conditions" not in message
+
+
 def test_body_reference_to_renamed_condition_refuses(tmp_path):
     a = _write(tmp_path, "groupA.lib", _lib("A"))
     b = _write(
