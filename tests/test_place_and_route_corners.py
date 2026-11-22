@@ -55,7 +55,7 @@ def _fail_corner(monkeypatch, corner: str) -> None:
     inner = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
-        if cmd[:2] != ["openroad", "-version"] and f"/{corner}/" in cmd[5]:
+        if cmd[:2] != ["openroad", "-version"] and f"/{corner}/" in cmd[-1]:
             return fake_completed(returncode=1, stderr="boom")
         return inner(cmd, **kwargs)
 

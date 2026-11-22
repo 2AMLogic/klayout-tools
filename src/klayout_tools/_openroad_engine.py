@@ -447,20 +447,10 @@ def _run_openroad(
     *,
     error_cls: type[Exception],
     engine_logs: list[dict[str, Any]] | None = None,
+    threads: int | None = None,
 ) -> _OpenRoadResult:
-    """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    streaming raw stdout/stderr into separately retained log files *while the
-    process runs* (``tail -f`` shows progress; an interrupted run keeps
-    whatever OpenROAD had flushed). The result exposes UTF-8 text
-    (replacement decoding) for existing parsers; an invalid output byte
-    cannot mask the engine failure or lose its logs.
-    Raises ``error_cls`` if the ``openroad``
-    binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
-    from a successfully-launched run is left for the caller to inspect via
-    returned result's ``returncode``. No timeout is introduced. If a runner
-    supplies a timeout exception, its available partial streams are retained;
-    KeyboardInterrupt retains available data and keeps its interruption type.
-    Logs are local debugging evidence, not a successful-stage signal."""
+    """Stream both logs to disk, retaining partial output on interruption.
+    Raise ``error_cls`` for launch failures and return exit status otherwise."""
     invocation_id = uuid.uuid4().hex
     script_hash = sha256_file(script_path)
     logs = _LiveLogs(
@@ -478,9 +468,18 @@ def _run_openroad(
             engine_logs.append(record)
         return data, record
 
+    thread_args = [] if threads is None else ["-threads", str(threads)]
     try:
         completed = subprocess.run(
-            ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
+            [
+                "openroad",
+                "-no_init",
+                "-exit",
+                *thread_args,
+                "-metrics",
+                metrics_path,
+                script_path,
+            ],
             **logs.popen_streams(),
         )
     except OSError as exc:

@@ -66,6 +66,22 @@ RERUN_HELP_EXTRA = (
 )
 
 
+def add_threads_argument(parser: argparse.ArgumentParser) -> None:
+    def argument(value: str) -> int | str:
+        # Preserve invalid tokens so all modes emit the same JSON request error.
+        try:
+            return int(value) if value.isascii() and value.isdecimal() else value
+        except ValueError:
+            return value
+
+    parser.add_argument(
+        "--threads",
+        type=argument,
+        metavar="N|max",
+        help="OpenROAD threads per process (overrides request.threads, default 1)",
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     if args.check is not None:
         if args.resume:
@@ -84,6 +100,7 @@ def run(args: argparse.Namespace) -> int:
     try:
         report = run_place_and_route(
             args.request,
+            threads=getattr(args, "threads", None),
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             backend=args.backend,
@@ -140,6 +157,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = rerun_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
                 backend=args.backend,
@@ -148,6 +166,7 @@ def _run_check(args: argparse.Namespace) -> int:
             result = check_place_and_route_report(
                 args.check,
                 args.request,
+                threads=getattr(args, "threads", None),
                 pdk_variant=args.pdk,
                 pdk_root=args.pdk_root,
             )
