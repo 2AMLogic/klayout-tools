@@ -206,3 +206,36 @@ def test_batch_without_resume_submits_fresh(tmp_path, monkeypatch):
     _receipt(tmp_path)
     seen = _run_batch_with(tmp_path, monkeypatch, checkpoint=None)
     assert seen["job_id"] == "fresh-job" and seen["attach"] is False
+
+
+def test_equal_size_resume_slices_require_the_same_ordered_draws(tmp_path):
+    from types import SimpleNamespace
+
+    def units(start):
+        return [SimpleNamespace(corner_id=f"mc{i}") for i in range(start, start + 10)]
+
+    tail = units(20)
+    receipt = sim_batch_receipt.new_receipt(_config(), "tail-job", REQUEST, tail)
+    receipt_path = tmp_path / sim_batch.BATCH_RECEIPT_FILENAME
+    receipt_path.write_text(json.dumps(receipt))
+
+    def resume(points, *, partial=True):
+        return sim_batch_receipt.resumable_job_id(
+            str(tmp_path),
+            REQUEST,
+            len(points),
+            True,
+            units_sha256=sim_batch_receipt.units_digest(points),
+            require_units_digest=partial,
+        )
+
+    assert resume(tail) == "tail-job"
+    assert resume(units(0)) is None
+    assert resume(list(reversed(tail))) is None
+    del receipt["units_sha256"]
+    receipt_path.write_text(json.dumps(receipt))
+    assert resume(tail) is None
+    assert resume(tail, partial=False) == "tail-job"
+    assert "units_sha256" not in sim_batch_receipt.new_receipt(
+        _config(), "stub", REQUEST, [object()]
+    )
