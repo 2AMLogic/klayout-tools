@@ -726,12 +726,12 @@ def dry_run_runner_check(
     runner_out: dict[str, Any] | None = None,
     config_out: dict[str, BatchConfig] | None = None,
 ) -> dict[str, Any] | None:
-    """Apply submit preflight to a batch dry run (#4120). An unconfigured host returns ``None``.
-    Return the feature diagnostic for a warned gap or unverified mandatory feature, else ``None``.
-    ``runner_out`` records ``status``, ``client_klt_version`` and ``images`` for match, unknown
-    and warn-mode mismatch (#4675). An enforce mismatch raises ``BATCH_RUNNER_MISMATCH_CODE``
-    before filling ``runner_out`` (#4680). Feature, engine-pin and job-size refusals also propagate.
-    ``config_out`` saves the resolved configuration so the caller avoids resolving and warning twice (#5674)."""
+    """Run submit preflight for batch dry runs (#4120). Unconfigured hosts return None.
+    Return a warned or unverified feature diagnostic, otherwise None. runner_out stores
+    status, client_klt_version and images for match, unknown and warn-mode mismatch
+    (#4675). An enforce mismatch raises BATCH_RUNNER_MISMATCH_CODE first (#4680).
+    Feature, engine-pin and job-size refusals propagate. config_out saves the resolved
+    configuration so the caller avoids resolving and warning twice (#5674)."""
     from .sim import ENGINE_VERSION_UNMET_CODE, SimError
 
     try:
@@ -874,11 +874,11 @@ def _feature_diagnostic(
 def _enforce_published_runner_features(
     request: dict[str, Any], assessment: dict[str, Any]
 ) -> dict[str, Any] | None:
-    """Check all request features before upload or launch (#3249). An unknown runner version,
-    legacy entry or capable image leaves the decision to runner-side preflight. With no images,
-    ``warn_unverified_features`` warns about mandatory features (#7062). When every image has a gap,
-    missing mandatory features refuse under either policy. Other gaps refuse under ``enforce``
-    or emit a stderr warning and return ``_feature_diagnostic`` under ``warn`` (#2901)."""
+    """Check all features before upload or launch (#3249). A legacy entry, unknown
+    runner version or capable image defers to runner preflight. With no images,
+    warn_unverified_features warns for mandatory features (#7062). If all images lack
+    features, mandatory gaps always refuse. Other gaps refuse under enforce or warn
+    on stderr and return the _feature_diagnostic result under warn (#2901)."""
     from .sim import SimError
 
     features = _request_features(request)
