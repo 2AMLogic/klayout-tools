@@ -82,29 +82,11 @@ def resettle_osdi_preload_for_local(
     engine: str,
     engine_binary: str,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
-    """Re-settle the OSDI list after a *late* host-default yield landed the
-    run on this host (issue #5492).
+    """Resolve the whole list after an off-host default yields to local execution.
 
-    :func:`finalize_osdi_preload` answers once, early, against the backend as
-    it stands at that point. Two yields run after it -- the resume yield in
-    ``sim._prepare_sim_request`` and the single-unit yield in
-    ``sim._run_sim_corners`` (the unit count is only known after shard/resume
-    scoping) -- and either can step an env-sourced off-host default back to
-    ``local``. Without this, the deck that actually runs here carries no
-    ``pre_osdi`` line for the runner-resolved entries (issue #3819): the
-    report says ``backend.resolved: "local"`` while still listing them under
-    ``environment.osdi_preload_runner_resolved``, and the only symptom is an
-    ngspice ``Unknown model type`` error deep in a per-corner log.
-
-    The caller applies this exactly when the yield moved an off-host run
-    on-host **and** the request deferred at least one entry to the runner (a
-    non-empty ``osdi_runner_environment``, which is the off-host settling's
-    own record of that);
-    the on-host settling then applies in full, so a missing image-baked
-    ``.osdi`` raises the same ``SimError`` a ``--backend local`` run raises,
-    before any corner is dispatched. The OSDI-ABI pre-check (issue #4438) is
-    re-applied over the re-settled entries for the same reason: it was a
-    no-op while the backend still looked off-host.
+    Both staged files and runner-resolved references now execute on this host.
+    Check their existence, declared order, and compatibility with local ngspice
+    before dispatching any corner.
     """
     osdi_preload = resolve_request_osdi(request, request_dir)
     # Deferred import: ``sim`` imports this module at import time, and the

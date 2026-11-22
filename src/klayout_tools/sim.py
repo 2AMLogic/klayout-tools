@@ -3469,7 +3469,7 @@ def _prepare_sim_request(
         resettle_osdi_preload_for_local(
             request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
         )
-        if yielded_on_host and osdi_runner_environment
+        if yielded_on_host and (osdi_preload or osdi_runner_environment)
         else (osdi_preload, osdi_runner_environment)
     )
     # Issue #5500: the same yield decides which engine and PDK the
@@ -3752,7 +3752,7 @@ def _run_sim_corners(
         resettle_osdi_preload_for_local(
             request, request_dir, backend, engine, ngspice_binary or XYCE_BINARY
         )
-        if yielded_on_host and osdi_runner_environment
+        if yielded_on_host and (osdi_preload or osdi_runner_environment)
         else (osdi_preload, osdi_runner_environment)
     )
     # The final backend determines which OSDI files are local. Freeze all

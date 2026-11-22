@@ -6,6 +6,7 @@ preload resolution applies the pin the same way the batch runner does.
 
 from __future__ import annotations
 
+import ntpath
 import os
 from pathlib import PureWindowsPath
 from typing import Any
@@ -44,18 +45,15 @@ def _preload_ref(entry: Any, field: str, pdk_variant: str | None) -> str:
     ref = entry["pdk_relative"]
     if not isinstance(ref, str) or not ref.strip():
         raise SimError(f"{field}.pdk_relative must be a non-empty relative path")
-    normalized = os.path.normpath(ref)
-    if (
-        PureWindowsPath(ref).anchor
-        or normalized == ".."
-        or normalized.startswith("../")
-    ):
+    # A portable request must stay relative under either host's path rules.
+    windows_path = PureWindowsPath(ntpath.normpath(ref))
+    if windows_path.anchor or windows_path.parts[:1] == ("..",):
         raise SimError(
             f"{field}.pdk_relative must stay within the selected PDK variant"
         )
     if not isinstance(pdk_variant, str) or not pdk_variant.strip():
         raise SimError(f"{field}.pdk_relative requires models.pdk")
-    return normalized
+    return os.path.normpath(ref)
 
 
 def resolve_osdi_preload(

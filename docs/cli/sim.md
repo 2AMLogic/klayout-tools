@@ -2263,6 +2263,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.nodeset` | 0.8.0 |
 | `options.initial_conditions` | 0.8.0 |
 | `options.osdi_preload` | 0.7.0 |
+| `options.osdi_preload[].pdk_relative` | unreleased |
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_overrides` | 0.9.1 |
 | `analysis.op_check` | 0.9.2 |
@@ -2411,6 +2412,7 @@ release segment:
 | `options.ngspice_init` | `options.ngspice_init` is set and non-empty | `0.7.0` |
 | `options.ngspice_options` ([#4212](https://github.com/2AMLogic/klayout-tools/issues/4212)) | `options.ngspice_options` is set and non-empty | `0.8.0` |
 | `options.osdi_preload` | `options.osdi_preload` is set and non-empty | `0.7.0` |
+| `osdi_pdk_relative` | The worker receives a PDK-relative preload object. The mandatory preflight checks the installed CLI. | `0.9.3` release segment |
 | `options.stage_model_inputs` | `options.stage_model_inputs` is set | `0.7.0` |
 
 The rows from `measurements[].expr` down are the released entries of
@@ -7953,7 +7955,9 @@ loads the staged filename. Lists preserve order and repeated entries.
   `local`/`local-parallel` are unchanged: every entry is expanded and
   existence-checked on this host. For string entries, a
   runner that predates this loads the same image-baked file through
-  `options.osdi_preload`'s existing 0.7.0 support.
+  `options.osdi_preload`'s existing 0.7.0 support. An unstaged object requires
+  a worker with the `osdi_pdk_relative` capability. Staging sends ordinary
+  filenames and retains the string form's minimum.
 - **Client-side ABI preflight (local backends).** On `local`/`local-parallel`
   with ngspice, klt reads each host-local `.osdi`'s exported
   `OSDI_VERSION_MAJOR`/`OSDI_VERSION_MINOR` before any corner runs. A module

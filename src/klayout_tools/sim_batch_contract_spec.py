@@ -229,6 +229,18 @@ def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], 
     return lambda request: bool(finder(request.get("measurements") or []))
 
 
+def _uses_pdk_relative_osdi(request: dict[str, Any]) -> bool:
+    options = request.get("options") or {}
+    entries = options.get("osdi_preload")
+    return (
+        isinstance(entries, list)
+        and options.get("stage_model_inputs") is not True
+        and any(
+            isinstance(entry, dict) and "pdk_relative" in entry for entry in entries
+        )
+    )
+
+
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
@@ -240,6 +252,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     ),
     "eye": ((0, 8, 1), _declared(sim_eye.eye_measurements)),
     "eye_step_or_phase": ((0, 9, 3), _uses_extended_eye),
+    "osdi_pdk_relative": ((0, 9, 3), _uses_pdk_relative_osdi),
     "step_resolution": ((0, 8, 1), _step_res_declared),
     "settled": ((0, 8, 1), _declared(sim_settled.settled_measurements)),
     "stress": ((0, 8, 1), _declared(sim_stress.stress_measurements)),
@@ -323,6 +336,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "transfer",
         "snm",
         "slope_band",
+        "osdi_pdk_relative",
         "search",
         "search_param",
         "eye",

@@ -9,6 +9,7 @@ import pytest
 from klayout_tools import sim, sim_batch, sim_osdi_settle, sim_remote, sim_staging
 from klayout_tools.sim_errors import SimError
 from klayout_tools.sim_osdi_pin import resolve_request_osdi
+from test_sim import _abi_probe
 from test_sim_batch_osdi_digest import _join, _resolved
 from test_sim_osdi_settle import _capture_decks, _osdi_request
 
@@ -57,6 +58,7 @@ def test_pinned_pdk_and_request_relative_strings_load_different_files(
         ({"pdk_relative": ""}, {"pdk": VARIANT}, "non-empty relative"),
         ({"pdk_relative": True}, {"pdk": VARIANT}, "non-empty relative"),
         ({"pdk_relative": "/lib/d.osdi"}, {"pdk": VARIANT}, "within"),
+        ({"pdk_relative": r"..\model.osdi"}, {"pdk": VARIANT}, "within"),
         ({"pdk_relative": "foo/../../d.osdi"}, {"pdk": VARIANT}, "within"),
     ],
 )
@@ -184,3 +186,45 @@ def test_batch_digest_requires_the_worker_slot_and_matching_basename(name):
     assert _join([_resolved(ENTRY, 0, "pdk_relative")], worker) == [
         digest if name == "device.osdi" else None
     ]
+
+
+@pytest.mark.usefixtures("real_build_identity_git")
+@pytest.mark.parametrize("resume", [False, True])
+def test_staged_object_checks_local_abi_after_host_default_yields(
+    tmp_path, monkeypatch, resume
+):
+    root = tmp_path / "pdk"
+    _install(root)
+    request = _osdi_request(
+        tmp_path, [ENTRY], models={"pdk": VARIANT, "pdk_root": str(root)}
+    )
+    spec = json.loads(request.read_text())
+    spec["options"]["stage_model_inputs"] = True
+    if resume:
+        spec["options"]["resume"] = True
+        spec["corners"] = {"temperature_c": [25, 70]}
+    request.write_text(json.dumps(spec))
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    attempts = _abi_probe(monkeypatch, abi=(0, 4), banner="** ngspice-42 : x\n")
+    with pytest.raises(SimError) as err:
+        sim.run_sim(str(request))
+    assert err.value.code == "osdi_abi_mismatch"
+    assert attempts == []
+
+
+@pytest.mark.parametrize(
+    "entry,stage,missing",
+    [(ENTRY, False, ["osdi_pdk_relative"]), (ENTRY, True, []), (REL, False, [])],
+)
+def test_older_worker_identity_distinguishes_preload_forms(
+    tmp_path, entry, stage, missing
+):
+    (tmp_path / sim_batch.BATCH_RUNNER_IDENTITY_FILENAME).write_text(
+        json.dumps({"runner_klt_version": "0.9.2"})
+    )
+    request = {"options": {"osdi_preload": [entry], "stage_model_inputs": stage}}
+    report = sim_batch._read_runner_identity(str(tmp_path), request)[
+        "runner_request_features"
+    ]
+    assert report["missing"] == missing
+    assert report["status"] == ("unsupported" if missing else "supported")
