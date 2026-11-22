@@ -3428,15 +3428,12 @@ def _run_batch(
     collect_partial: bool = False,
     shard_fingerprint: str | None = None,
     netlist_sha256: str | None = None,
+    explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
 
-    Like ``remote``, this is **the same code path as ``local-parallel``, run
-    on a different box** -- the job command is a plain
-    ``klt sim ... --backend local-parallel --format json`` invocation on the
-    fleet's own pinned image, so corner expansion, ordering, measurement
-    extraction, and pass/fail classification are never reimplemented here.
+    The pinned worker runs ``klt sim ... --backend local-parallel --format json``.
     Unlike ``remote``, this process provisions nothing, holds no SSH key,
     and needs no ``RunInstances`` authority: it writes an S3 job contract
     and asks 2am's launch script to acquire diversified Spot capacity for
@@ -3567,8 +3564,11 @@ def _run_batch(
                 len(corner_points),
                 checkpoint is not None,
                 netlist_sha256,
+                units_sha256=sim_batch_receipt.units_digest(corner_points),
+                require_units_digest=explicit_points is not None,
             ),
             corner_points=corner_points,
+            explicit_points=explicit_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
