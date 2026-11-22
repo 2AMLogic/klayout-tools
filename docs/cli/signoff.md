@@ -586,6 +586,11 @@ carry `foundry_cell_exceptions` (issue #4530, operator ruling 2026-10-28; see
  "layout": "block.gds"}
 ```
 
+To obtain `cell_hash`, run `klt cell-hash --cell PAD bare-pad.gds` and copy
+the printed digest into the exception. Running the command on the containing
+block yields the same digest when the cell and its descendants have matching
+geometry. [Cell-hash command](cell-hash.md)
+
 `layout` is optional (default: the DRC envelope's `file`). `cell_hash` is
 `klayout_tools._provenance.cell_geometry_digest` of the cell and everything
 beneath it. A `violations` report is graded `met` only if, for every
