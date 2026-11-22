@@ -228,9 +228,13 @@ from .functional_verification_initial_state import (
 from .functional_verification_pdk import (
     _resolve_defines,
 )
-from .functional_verification_results import (
-    _executed_result_counts,  # noqa: F401 -- used by functional_verification_run_results
+from .functional_verification_results import (  # noqa: F401 -- preserve earlier import paths
+    _SIM_TIME_UNIT_NS_EXPONENT,
+    _executed_result_counts,
     _extract_random_seed_property,
+    _maybe_float,
+    _testcase_properties,
+    _testcase_sim_time_ns,
     parse_results_xml,
 )
 from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
