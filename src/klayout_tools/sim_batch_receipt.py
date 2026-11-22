@@ -132,6 +132,15 @@ def check_attach_receipt(
         )
 
 
+def units_digest(corner_points: list[Any]) -> str | None:
+    """Use the same ordered corner identity as the fleet shard manifest."""
+    from .sim_batch import _units_digest
+
+    if all(hasattr(point, "corner_id") for point in corner_points):
+        return _units_digest(corner_points)
+    return None
+
+
 def new_receipt(
     config: Any,
     job_id: str,
@@ -143,7 +152,8 @@ def new_receipt(
     best-effort and must never break a run; no bucket (its name carries the
     cloud account id, issue #4079). ``unit_count`` (issue #5350) lets
     ``--resume`` re-attach only to a job that covered exactly the units it is
-    about to dispatch."""
+    about to dispatch. The digest distinguishes equal-sized subsets."""
+    digest = units_digest(corner_points)
     return {
         "job_id": job_id,
         "jobs_prefix": getattr(config, "jobs_prefix", None),
@@ -152,6 +162,7 @@ def new_receipt(
         "launched_at": datetime.now(timezone.utc).isoformat(),
         **corner_receipt_identity(request, netlist_sha256),
         "unit_count": len(corner_points),
+        **({"units_sha256": digest} if digest is not None else {}),
         "state": None,
     }
 
@@ -162,6 +173,9 @@ def resumable_job_id(
     unit_count: int,
     resume: bool,
     netlist_sha256: str | None = None,
+    *,
+    units_sha256: str | None = None,
+    require_units_digest: bool = False,
 ) -> str | None:
     """The job id ``--resume`` should re-attach to instead of resubmitting
     (issue #5350): the one a prior unsharded submit recorded in the local
@@ -186,6 +200,11 @@ def resumable_job_id(
     if receipt.get("netlist_sha256", netlist_sha256) != netlist_sha256:
         return None
     if receipt.get("unit_count") != unit_count:
+        return None
+    # A legacy whole-grid job is identified by request and count. On a
+    # partial resume its count alone cannot distinguish two different slices.
+    legacy_units = None if require_units_digest else units_sha256
+    if receipt.get("units_sha256", legacy_units) != units_sha256:
         return None
     accepted = {receipt_request_sha256(request)}
     if "netlist_sha256" not in receipt:
