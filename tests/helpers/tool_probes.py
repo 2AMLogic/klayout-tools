@@ -19,7 +19,10 @@ real-binary gates keep probing the true ``$PATH``.
 """
 
 import os
+import re
 import shutil
+import subprocess
+from functools import cache
 
 import pytest
 
@@ -31,7 +34,8 @@ import pytest
 #: `npm run check:ci`'s local-only test script, never by CI) lets a host with
 #: ngspice installed still skip this tier locally, mirroring what already
 #: happens for free on a host with no ngspice at all.
-NGSPICE_ON_PATH = shutil.which("ngspice") is not None
+NGSPICE_BINARY = shutil.which("ngspice")
+NGSPICE_ON_PATH = NGSPICE_BINARY is not None
 NGSPICE_TESTS_SKIPPED = os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1"
 HAVE_NGSPICE = NGSPICE_ON_PATH and not NGSPICE_TESTS_SKIPPED
 
@@ -40,6 +44,44 @@ HAVE_NGSPICE = NGSPICE_ON_PATH and not NGSPICE_TESTS_SKIPPED
 SKIP_NO_NGSPICE = pytest.mark.skipif(
     not HAVE_NGSPICE, reason="ngspice is not installed on this machine"
 )
+
+
+def read_ngspice_version(binary: str | None) -> str | None:
+    """Read the full version string from an ngspice binary's own banner."""
+    if binary is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"ngspice-([\w.]+)", completed.stdout or "")
+    return match.group(1) if match else None
+
+
+@cache
+def ngspice_major() -> int | None:
+    """Installed ngspice major, probed once when a version-gated test asks."""
+    version = read_ngspice_version(NGSPICE_BINARY)
+    major = (version or "").partition(".")[0]
+    return int(major) if major.isascii() and major.isdigit() else None
+
+
+def requires_ngspice(*, min_major: int) -> pytest.MarkDecorator:
+    """Skip unless the installed ngspice meets the test's minimum major."""
+    if NGSPICE_TESTS_SKIPPED:
+        return pytest.mark.skipif(True, reason="KLT_SKIP_NGSPICE_TESTS=1")
+    if NGSPICE_BINARY is None:
+        return pytest.mark.skipif(
+            True, reason=f"ngspice is not installed (requires major {min_major})"
+        )
+    major = ngspice_major()
+    installed = "unknown" if major is None else str(major)
+    return pytest.mark.skipif(
+        major is None or major < min_major,
+        reason=f"installed ngspice major {installed}, requires major {min_major}",
+    )
 
 
 # Icarus simulation needs both the compiler and its runtime. The SDF bus,

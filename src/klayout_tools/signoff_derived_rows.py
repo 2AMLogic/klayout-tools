@@ -14,6 +14,17 @@ its size ratchet:
     coverage *asserted*. :func:`multi_row_info` reports the split per row
     under ``row_sources``.
 
+A ``reported`` yield campaign (issue #5490)
+    A `klt yield` measurement that declares no ``target_yield`` has
+    ``status: "reported"`` -- it made no claim, so nothing could fail -- and
+    the ``pass``-only reader above credited it with nothing, so a row
+    honestly declared ``ratified: false`` and cited with a real campaign
+    read as unmeasured. Such a measurement now covers its row **when the row
+    is unratified**, which is exactly the row for which declaring a
+    ``target_yield`` would mean inventing a claim. See
+    :func:`envelope_tagged_rows` for why it is confined to unratified rows
+    and keyed on the citation's ``yield`` kind.
+
 ``require_derived_rows`` (issue #5462)
     ``row_sources`` is report-only by itself, so an item whose coverage is
     entirely asserted grades exactly like a fully tagged one. A manifest that
@@ -222,15 +233,19 @@ def _failed_envelope_rows(
 
 
 def envelope_tagged_rows(
-    envelope: dict[str, Any], *, failed: bool = False
+    envelope: dict[str, Any],
+    *,
+    kind: str | None = None,
+    unratified: frozenset[str] = frozenset(),
+    failed: bool = False,
 ) -> tuple[bool, set[str]]:
-    """``(has_tags, covering)`` for a ``klt sim`` envelope (issue #3778):
-    whether any ``measurements[]`` entry declares a ``spec_row``, and the
-    rows with a passing measurement that is tagged with them and has
-    ``limits`` (a tag without limits grades nothing).
+    """Return whether the envelope has tagged measurements and which rows they cover.
 
-    ``failed`` (issue #6027) is for an envelope whose citation did not pass:
-    its aggregate ``pass`` is then not enough, see :func:`_failed_envelope_rows`."""
+    A passing measurement with limits credits its tagged row. A failed sim
+    citation also needs evidence that every bound was checked at every corner
+    (#6027). Only a yield citation can credit a ``reported`` measurement,
+    and only for an unratified row (#5490).
+    """
     raw = envelope.get("measurements")
     entries = [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
     tagged = [
@@ -239,39 +254,70 @@ def envelope_tagged_rows(
     if failed:
         return bool(tagged), _failed_envelope_rows(tagged, envelope)
     covering = {
-        m["spec_row"] for m in tagged if m.get("status") == "pass" and m.get("limits")
+        m["spec_row"]
+        for m in tagged
+        if m.get("limits")
+        and (
+            m.get("status") == "pass"
+            or (
+                kind == "yield"
+                and m.get("status") == "reported"
+                and m["spec_row"] in unratified
+            )
+        )
     }
     return bool(tagged), covering
 
 
 def credited_rows(
-    rows: list[str] | None, envelope: dict[str, Any] | None, *, failed: bool = False
+    rows: list[str] | None,
+    envelope: dict[str, Any] | None,
+    *,
+    failed: bool = False,
+    kind: str | None = None,
+    unratified: frozenset[str] = frozenset(),
 ) -> tuple[list[str] | None, bool]:
-    """The rows a member is credited with and whether they were ``derived``
-    from its envelope's ``spec_row`` tags (issue #3778). Untagged (or
-    unavailable) envelopes keep the manifest-asserted ``rows``. Since issue
-    #6027 the envelope may also come from a ``check_failed`` ``sim`` grading
-    (``failed=True``); :func:`multi_row_info` credits the result only when it
-    is derived.
-    """
+    """The rows a ``met`` member is credited with and whether they were
+    ``derived`` from its envelope's ``spec_row`` tags (issue #3778). Untagged
+    (or unavailable) envelopes keep the manifest-asserted ``rows``.
+    ``kind``/``unratified`` are forwarded to :func:`envelope_tagged_rows` for
+    its issue-#5490 ``reported`` case."""
     if not rows or envelope is None:
         return rows, False
-    has_tags, covering = envelope_tagged_rows(envelope, failed=failed)
+    has_tags, covering = envelope_tagged_rows(
+        envelope, failed=failed, kind=kind, unratified=unratified
+    )
     if not has_tags:
         return rows, False
     return [r for r in rows if r in covering], True
 
 
-def member_credits(
-    graded: list[Any], envelopes: dict[int, dict[str, Any]] | None
+def member_credited_rows(
+    graded: list[Any],
+    met_envelopes: dict[int, dict[str, Any]] | None,
+    spec_rows: list[dict[str, Any]] | None,
 ) -> dict[int, tuple[list[str] | None, bool]]:
-    """Rows each graded member is credited with, and whether that credit was
-    machine-derived, keyed by the member spec's identity -- the ``credited``
-    argument of :func:`multi_row_info`. A member that did not grade ``met``
-    (issue #6027) is credited by the stricter failed-envelope rule."""
+    """:func:`credited_rows` for every member of a graded multi-citation
+    entry, keyed by ``id()`` of the member's citation spec -- the mapping
+    :func:`multi_row_info` reads.
+
+    Each member is credited against its own citation ``kind`` and the set of
+    rows declared ``ratified: false``, which is what lets a ``reported``
+    yield measurement cover an unratified row (issue #5490). That set is the
+    same one :func:`multi_row_info` renders as ``unratified_rows``.
+    """
+    unratified = frozenset(
+        row["id"]
+        for row in (spec_rows or [])
+        if row["gap"] is None and not row["ratified"]
+    )
     return {
         id(spec): credited_rows(
-            rows, (envelopes or {}).get(id(spec)), failed=g[0] != "met"
+            rows,
+            (met_envelopes or {}).get(id(spec)),
+            failed=g[0] != "met",
+            kind=(g[2] or {}).get("kind"),
+            unratified=unratified,
         )
         for spec, rows, g in graded
     }
