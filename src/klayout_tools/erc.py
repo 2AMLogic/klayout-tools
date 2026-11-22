@@ -87,6 +87,7 @@ from .erc_disclosure import (
     floating_gate_work,
     validate_floating_gate_allowed,
 )
+from .erc_keepouts import KeepoutOutcome, evaluate_keepouts, parse_keepouts
 from .erc_spec import (
     _SPEC_KEYS,
     ErcError,
@@ -568,6 +569,7 @@ def _connectivity_coverage(
     compact: bool = False,
     excused_gates: frozenset[str] | set[str] = frozenset(),
     substrate: SubstrateOutcome | None = None,
+    keepouts: KeepoutOutcome | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -710,7 +712,9 @@ def _connectivity_coverage(
     well_asserted = well_asserted_ties or set()
     # (issues #2965, #4820) Excused gates are disclosed (`inapplicable`), not checked.
     checked, inapplicable = floating_gate_work(gates, excused_gates, compact)
-    skipped: list[dict[str, str]] = []
+    if keepouts is not None:
+        checked.extend(keepouts.checked)
+    skipped: list[dict[str, str]] = list(keepouts.skipped) if keepouts else []
     checked_by_assertion: list[str] = []
     checked_by_well_assertion: list[str] = []
 
@@ -2325,6 +2329,7 @@ def _extract_connectivity(
     device_cuts: dict[str, Any],
     verb: str | None,
     label_layers: list[dict[str, Any]] | None = None,
+    allow_empty: bool = False,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -2542,7 +2547,7 @@ def _extract_connectivity(
         raise ErcError(f"connectivity extraction failed: {exc}") from exc
 
     circuit = l2n.netlist().circuit_by_name(top_cell.name)
-    if circuit is None:
+    if circuit is None and not allow_empty:
         raise ErcError(
             f"no circuit named '{top_cell.name}' in the extracted connectivity graph"
         )
@@ -2555,7 +2560,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     the two entry points cannot drift.
 
     Returns ``(spec, stackup, stackup_names, vias, nets_decl, ties,
-    ties_disclosure, devices, spec_antenna_limits)``; raises :class:`ErcError`
+    ties_disclosure, devices, spec_antenna_limits, keepouts)``; raises :class:`ErcError`
     on any defect.
     """
     spec = _load_spec_json(spec_path, ErcError)
@@ -2595,6 +2600,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
         ties_disclosure,
         devices,
         spec_antenna_limits,
+        parse_keepouts(spec, spec_path, stackup_names),
     )
 
 
@@ -2608,7 +2614,9 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
     :class:`ErcError` (with the same field-path message ``run_erc`` gives)
     for a missing/unreadable file or any malformed declaration.
     """
-    _, stackup, _, vias, nets_decl, ties, _, devices, _ = _parse_erc_spec(spec_path)
+    _, stackup, _, vias, nets_decl, ties, _, devices, _, keepouts = _parse_erc_spec(
+        spec_path
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "mode": "validate_spec",
@@ -2620,6 +2628,7 @@ def validate_erc_spec(spec_path: str) -> dict[str, Any]:
             "nets": len(nets_decl),
             "ties": len(ties),
             "devices": len(devices),
+            **({"keepouts": len(keepouts)} if keepouts is not None else {}),
         },
     }
 
@@ -2846,6 +2855,7 @@ def run_erc(
         ties_disclosure,
         devices,
         spec_antenna_limits,
+        keepouts,
     ) = _parse_erc_spec(spec_path)
     fg_allowed = validate_floating_gate_allowed(spec, spec_path)
     antenna_limits = _merge_antenna_limits(antenna_limits, pdk, spec_antenna_limits)
@@ -2860,24 +2870,8 @@ def run_erc(
     top_cell = top_cells[0]
     dbu = layout.dbu
 
-    # Two graphs, deliberately (issue #2169). The *primary* graph carries
-    # only what the caller declared as real routing -- `stackup` + `vias` --
-    # and is the sole source of `gates[]`, the antenna-ratio model, and the
-    # `nets[]`-driven findings. The `ties[]` declarations are extracted
-    # separately below, so a mis-declared well/tap layer can no longer
-    # silently collapse `gates[]` (and with it every antenna ratio in the
-    # same report) or invent an `erc.supply_short` between two rails that
-    # are not actually shorted: with `ties` omitted or declared, these
-    # outputs are identical by construction, not merely by convention.
-    # `devices[]` (issue #2183): the declared device bodies, resolved once
-    # and subtracted from their own role in *both* graphs below -- a drawn
-    # resistor body is not a wire in the tie graph either. Empty (and so a
-    # no-op) whenever the spec declares no `devices`.
-    # `role_layers` (role name -> its declared `(layer, datatype)`) is what
-    # lets `_device_body_cuts` report the area each declaration *actually*
-    # subtracted -- `marker ∩ that role's own drawn region` -- rather than
-    # the marker layer's own area (issue #2226). `--deck` reuses the same
-    # map below for its exact-layer-equality matching rule.
+    # The antenna/net graph and the separate tie graph both subtract device
+    # bodies from their own role. Geometry keepouts inspect the raw role layers.
     role_layers = _conductor_role_layers(stackup, vias)
     device_cuts, devices_applied = _device_body_cuts(
         layout, top_cell, devices, role_layers, verb="klt erc"
@@ -2921,6 +2915,7 @@ def run_erc(
         device_cuts,
         verb="klt erc",
         label_layers=label_layers,
+        allow_empty=keepouts is not None and not nets_decl and not ties,
     )
 
     gate_role = stackup[0]["name"]
@@ -2953,8 +2948,9 @@ def run_erc(
     # `power_nets`, no name match is needed to find "a gate": any net whose
     # geometry touches the declared gate role qualifies. Sorted by
     # `cluster_id` for deterministic, reproducible output.
+    nets = circuit.each_net() if circuit is not None else ()
     candidates = sorted(
-        (net for net in circuit.each_net() if net.cluster_id != 0),
+        (net for net in nets if net.cluster_id != 0),
         key=lambda net: net.cluster_id,
     )
 
@@ -3026,7 +3022,7 @@ def run_erc(
     # transistor) has no gates by construction, but its declared supplies and
     # ties are still worth checking. Zero gates is an error only when the
     # spec asks for nothing but antenna work.
-    if not gates and not nets_decl and not ties:
+    if not gates and not nets_decl and not ties and keepouts is None:
         raise ErcError(
             f"no net in '{file}' has any geometry on the declared gate role "
             f"{gate_role!r} (stackup[0], layer {stackup[0]['layer'][0]}/"
@@ -3039,7 +3035,8 @@ def run_erc(
 
     # ERC finding checks (issue #861, Phase 1c) -- see this module's
     # docstring, "ERC finding checks", for what each rule detects.
-    erc_findings: list[dict[str, Any]] = []
+    keepout_outcome = evaluate_keepouts(layout, top_cell, role_layers, keepouts)
+    erc_findings = list(keepout_outcome.findings)
     floating = list(zip(gates, gate_regions, gate_floating, strict=True))
     excused, fg_echo = excuse_floating_gates(floating, fg_allowed, dbu, _bbox_dict)
     erc_findings.extend(_floating_gate_findings(floating, gate_role, excused))
@@ -3210,6 +3207,7 @@ def run_erc(
         compact,
         excused,
         substrate_outcome,
+        keepout_outcome,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
@@ -3333,6 +3331,7 @@ def run_erc(
         "file": env_provenance.repo_relative_path(
             file, repo_root=env_provenance.repo_root_for(file)
         ),
+        "top": top_cell.name,
         "spec": spec_path,
         "pdk": pdk,
         # (issue #2219) Whether the per-gate antenna accumulation was
@@ -3454,23 +3453,11 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
 
 def rerun_erc_report(report_path: str) -> dict[str, Any]:
-    """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
-    previously committed ``klt erc --format json`` report by re-running ERC
-    from the ``file``/``spec``/``pdk``/``findings_only``/``antenna_tables_omitted``
-    it echoes (and the
-    ``--deck`` named by ``provenance.deck``, when there is one) and diffing
-    the fresh report against the committed one.
+    """Rerun the saved file, spec, PDK, top, deck and report options (#3060).
 
-    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
-    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`.
-
-    **Known limitation**: ``--top`` is not echoed in the report, so ``--rerun``
-    always runs with ``top=None``; a report from a multi-top-cell stream then
-    fails with the ordinary ambiguous-top-cell :class:`ErcError`. Use
-    ``--check`` (cheap mode) in that case.
-
-    Raises :class:`ErcError` for a missing/unparseable committed report, one
-    missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
+    Reports written before #7022 use automatic top selection. They can
+    replay a single-top stream and omit the new top field from their diff.
+    Missing inputs and cell lookup failures raise :class:`ErcError`.
     """
     committed = _load_committed_report(report_path, ErcError)
     file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
@@ -3478,15 +3465,23 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         raise ErcError(f"committed report has no 'file' field to rerun: {report_path}")
     if not committed.get("spec"):
         raise ErcError(f"committed report has no 'spec' field to rerun: {report_path}")
+    if "top" in committed and not isinstance(committed["top"], str):
+        raise ErcError("committed report field 'top' must name a cell")
     deck = get_path(committed, ("provenance", "deck"))
     fresh = run_erc(
         file_path,
         committed["spec"],
-        top=None,
+        top=committed.get("top"),
         pdk=committed.get("pdk"),
         deck=deck.get("name") if isinstance(deck, dict) else None,
         findings_only=bool(committed.get("findings_only")),
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)
+    return rerun_result_for(
+        "erc",
+        report_path,
+        committed=committed,
+        fresh=fresh,
+        extra_exclude=() if "top" in committed else (("top",),),
+    )

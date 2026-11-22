@@ -2,7 +2,9 @@
 
 Kept out of ``place_and_route.py`` / ``place_and_route_script.py`` (per-file
 size ratchet): resolves the ``-congestion_report_file`` path, builds the macro
-boxes congestion regions are attributed to, and parses the report.
+boxes congestion regions are attributed to, and parses the report. Issue
+#6952 adds the failure-path assembly: the congestion evidence a route stage
+that exits nonzero leaves behind, exposed as ``PlaceAndRouteError.details``.
 """
 
 from __future__ import annotations
@@ -12,7 +14,9 @@ from typing import Any
 
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_reports import (
+    build_congestion,
     parse_congestion_report_records,
+    parse_global_route_congestion,
     rank_overflow_regions,
 )
 from .place_and_route_script import _macro_footprint
@@ -99,3 +103,74 @@ def grt_overflow(
         "overflow_regions": rank_overflow_regions(records),
         "overflow_by_region": overflow_by_region(records),
     }
+
+
+_NO_REPORT_REASON = (
+    "the route exited before `global_route -congestion_report_file` wrote a report"
+)
+
+
+def clear_congestion_report(stage: str, output_dir: str, hdl_toplevel: str) -> None:
+    """Remove any pre-existing ``*_route_congestion.rpt`` before the route
+    stage launches OpenROAD, so a leftover report in a reused output directory
+    can never be mistaken for this attempt's evidence (issue #6952)."""
+    if stage != "route":
+        return
+    try:
+        os.unlink(congestion_report_path(output_dir, hdl_toplevel))
+    except FileNotFoundError:
+        pass
+
+
+def route_failure_congestion(
+    stage: str,
+    completed: Any,
+    output_dir: str,
+    hdl_toplevel: str,
+    macros: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """The congestion evidence a failed route stage left behind, as a
+    ``PlaceAndRouteError.details`` payload (issue #6952); ``None`` for any
+    other stage, whose error envelope stays byte-identical.
+
+    ``completed`` is the stage's ``_OpenRoadResult`` (duck-typed for
+    ``stdout`` -- typed ``Any`` because the engine module's result type is
+    private to its own import-boundary group).
+
+    The two evidence sources are independent, and each is ``null`` with a
+    field-specific reason in ``null_reasons`` when this attempt did not
+    produce it while the other's data is still returned: the ``GRT-0096``
+    per-layer table parsed from this attempt's captured stdout, and the
+    worst overflow regions from the ``-congestion_report_file`` report this
+    stage's own script writes -- whose raw location is exposed alongside as
+    ``congestion_report_path``. :func:`clear_congestion_report` removes any
+    leftover report from an earlier attempt before OpenROAD launches, so
+    file presence on disk is this attempt's evidence without cross-clock
+    timestamp comparisons. Field names match the success response's
+    ``congestion.global_route`` block by construction -- ``build_congestion``
+    assembles both -- so a caller diffing a failed attempt against a
+    successful one reads the same shape.
+    """
+    if stage != "route":
+        return None
+    report_path = congestion_report_path(output_dir, hdl_toplevel)
+    produced = os.path.isfile(report_path)
+    block = build_congestion(
+        global_route=parse_global_route_congestion(completed.stdout or ""),
+        completeness=None,
+        placement={},
+        detailed={},
+        overflow=(grt_overflow(output_dir, hdl_toplevel, macros) if produced else None),
+    )
+    global_route = block["global_route"]
+    reasons = {
+        key: reason
+        for key, reason in block["null_reasons"].items()
+        if key.startswith("global_route.")
+    }
+    if produced:
+        global_route["congestion_report_path"] = report_path
+    else:
+        global_route["congestion_report_path"] = None
+        reasons["global_route.congestion_report_path"] = _NO_REPORT_REASON
+    return {"congestion": {"global_route": global_route, "null_reasons": reasons}}

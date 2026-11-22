@@ -1547,6 +1547,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   aggregate envelope (and each request's `dir` in `set-manifest.json`) is
   the authoritative path to a member's `report.json` -- read it from the
   envelope rather than re-deriving the stem.
+- **Netlist identity.** For each corner batch job, collection compares the
+  runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
+  bytes, including rewritten include paths. A mismatch rejects the result
+  and marks that set member as an error (exit code 4). Older runners that
+  omit the digest remain supported. The outer report records the original
+  request netlist's digest.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -3646,7 +3652,9 @@ not just equivalent.
   whether it failed mid-run or was submitted but never launched (an
   unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
   see "Unlaunched shards are a resumable signal" above). The array is
-  positional: index *i* is shard *i*, in the shard map's order, so a client
+  positional: index *i* is shard *i*, in the shard map's order. On the batch
+  backend, a null slot has only unrun error corners, even if the collector
+  returned measurements without a remote block. A client
   collecting per-job metadata across `fleet[]` must skip the `null` slots
   rather than dereference them, and read job identity and runner skew from
   the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
@@ -4917,9 +4925,46 @@ missing vector, or a failed solve still grades `error` even with
 byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
-and for any value other than `"error"`/`"null"`. It is not applied to
-`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+and for any value other than `"error"`/`"null"`. It is not applied to the
+Xyce engine (no ngspice `.meas` evidence to read).
 `"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
+### Step-scoped cards (`analysis_steps[].measurements[].spice`)
+
+A step-scoped `.meas` card gets the same opt-in
+([#7072](https://github.com/2AMLogic/klayout-tools/issues/7072)). `klt sim`
+evaluates the card as a `meas` control command right after that step's own
+analysis, so ngspice prints both evidence lines *after* the step's
+`klt_step_end` marker and before the next step's `klt_step_begin` — and the
+classification is scoped to exactly that log region, matched under the
+card's **local** name. Two steps may therefore reuse a local measurement
+name: a miss confirmed in one step's region never classifies the other
+step's card, and a sibling measurement in the same step is unaffected. The
+graded result carries the qualified name (`edge.missing`) with its `step`
+provenance field, `value: null`, `margin: null`, `status: "not_reached"`,
+and the same `measurement_not_reached` info diagnostic, top-level count,
+skipped-limit coverage and rollup semantics as the scalar form above —
+including `pass_partial` for a run that mixes checked bounds with unreached
+ones, and `not_checked` (exit `4`) when every requested bound was unreached.
+
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
+What stays an error on the step path, even with the opt-in:
+
+- a step that failed or never ran (`step_failed`): its measurements keep
+  `status: "error"`, and a value is never read from a step that produced no
+  plot of its own;
+- a derived measurement (or a later step's `${...}` sweep window) reading
+  the unreached result: `derived_input_unavailable`, and the corner grades
+  `error` while the source keeps `not_reached`;
+- a `.meas` failure whose logged reason is anything other than
+  `out of interval`, an engine echo without the matching `failed!` line (or
+  vice versa), an error-severity engine diagnostic (diverged solve,
+  timeout, …), or a request without the opt-in — each keeps today's
+  `measurement` error and exit `4`.
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
@@ -6335,7 +6380,7 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
     "limits": {"min": 0.1}}]}
 ```
 
-- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+- **Form.** `eye` is an object `{signal, ui, uis, from?, phase?, level?, metric?}`.
   `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
   works); `ui` is the unit interval (seconds or a SPICE literal such as
   `"100p"`); `uis` is the integer number of unit intervals in the window
@@ -6350,13 +6395,16 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   folded to its phase within a unit interval. `width` is the widest circular
   gap between folded crossing phases (the UI minus the crossing spread -- the
   horizontal opening at the level), `best_phase` is the middle of that gap
-  (seconds from the start of a UI), and `height` is read there: the minimum of
-  the samples above the level minus the maximum of those at or below it, one
-  sample per UI. The data pattern is not known, so decisions are threshold
-  decisions at the sampling phase.
+  (seconds from the start of a UI). Folded width describes the whole pattern.
+  Individual edges can be several UIs apart. For height, omit `phase` to sample
+  at `best_phase`, or supply an offset in seconds or SPICE time with
+  `0 <= phase < ui`. Height is the minimum high sample minus the maximum low
+  sample, interpolating once per UI at `from + k * ui + phase`. Width and
+  best phase use all folded crossings for either choice.
 - **Value.** `value` is the selected metric, graded against `limits` like any
   scalar. An additive `eye` sibling carries
-  `{height, width, best_phase, level, ui, uis}`.
+  `{height, width, best_phase, level, ui, uis}`. Explicit phase also records
+  `sampling_phase` in seconds.
 - **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
   diagnostic whose message starts with a reason token:
 
@@ -6364,12 +6412,15 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   |---|---|
   | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
   | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
-  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the sampling phase |
 - **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
   and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
   and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
   first `klt` release segment `0.8.1`): see "Mandatory features" under
   "Runner/client `klt` version skew".
+  Step eyes and explicit phase require the `eye_step_or_phase` runner capability
+  (release segment `0.9.3`). The worker preflight exercises its installed CLI
+  on a small request to distinguish development builds.
 - **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Edge-window step report (`measurements[].step_resolution`)
@@ -6961,6 +7012,40 @@ top-level `measurements[]` then become **derived** expressions over
 step-qualified results, graded through `limits` like any other measurement.
 `klt` composes the deck itself. There is no raw `.control` escape hatch.
 
+A transient step can measure the eye on its own waveform. Save this circuit
+as `eye.sp` and the request below as `steps.json`, then run
+`klt sim steps.json --backend local --format json`.
+
+```spice
+Vpattern data 0 PULSE(0 1 0 100p 100p 900p 2n)
+Vrail rail 0 1
+Breceive rx 0 V=V(data)*V(rail)
+Rload rx 0 1k
+```
+
+```json
+{
+  "netlist": "eye.sp",
+  "options": {"ngspice_init": []},
+  "analysis_steps": [
+    {"name": "low", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 1},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]},
+    {"name": "high", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 2},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]}
+  ]
+}
+```
+
+`low.opening` measures 1 V and `high.opening` measures 2 V. Both report a
+folded width of 1 ns. Each result records its step. A failed solve returns a
+null measurement for that step. Python reduces these waveforms after
+ngspice finishes, so a deck expression or a later step's analysis arguments
+can reference only measurements computed within ngspice.
+
 Worked example: a two-point load-regulation figure:
 
 ```json
@@ -7087,7 +7172,11 @@ error, exit 1).
     read an **earlier** step's result as `<step>.<name>`.
   - `spice`: a `.meas` card whose type matches the step's `kind` and whose
     card name equals the measurement `name`. It runs as a `meas` control
-    command right after that step's analysis.
+    command right after that step's analysis. It may declare `on_unreached:
+    "null"`: a target the step's completed analysis never reaches then
+    grades `not_reached` under the qualified name, on evidence scoped to
+    that step's own log region — see
+    [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached).
 
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
@@ -9519,7 +9608,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `netlist_title_line` | [#5433](https://github.com/2AMLogic/klayout-tools/issues/5433). The request's `netlist` starts with a SPICE **title line**, which `.include` parses as circuit content (see "Netlist convention" above). Classified from the log after the fact: ngspice echoes the offending source line under its `Error on line N ...` location line, and this code is emitted when that echo is the netlist's own first non-blank line (compared case-insensitively, with internal whitespace folded the way ngspice folds it) and that line is not a `*`/`.`/`+` card. The message names the netlist **file and the line number in it** — not the composed deck's `line N`, which is what ngspice reports — and gives the fix (prefix the line with `*`). Being a deck abort it also carries `analysis_started: false` and collapses the measurement cascade, and it replaces the `ngspice_fatal` and `model_bin_range` readings of the same abort (a title beginning with `m` otherwise surfaces as a BSIM bin-range problem). Never fires when the netlist is unreadable where classification runs, when the echo is some other line, or when line 1 is a comment/dot/continuation card — each falls through to the classification it had before. A title that parses as a *valid* card is undetectable by construction: there is no abort to classify. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). The `Error in netlist line no. N` reading is dropped when that alternative is the log's only fatal evidence *and* the run demonstrably completed (an analysis banner plus the `ngspice-N done` exit banner): ngspice-47 prints that line mid-analysis for a `.meas ... param='...'` whose referenced measure produced no value ("Cannot compute substitute"), so the corner fails only through its per-measurement diagnostics ([#6401](https://github.com/2AMLogic/klayout-tools/issues/6401)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
