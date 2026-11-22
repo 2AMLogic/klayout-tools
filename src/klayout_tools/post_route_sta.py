@@ -254,6 +254,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import _macros_blackbox as macro_blackbox
+from . import _sta_timing_derate as _derate
 from . import env_provenance
 from . import macros as macro_spec
 from ._jsonnum import is_finite_number
@@ -285,8 +286,10 @@ from ._provenance import (
 )
 from ._request_fields import check_known_fields
 from ._sta_clock_uncertainty import (
-    _clock_uncertainty_block,
-    _clock_uncertainty_lines,
+    clock_uncertainty_block as _clock_uncertainty_block,
+)
+from ._sta_clock_uncertainty import (
+    clock_uncertainty_lines as _clock_uncertainty_lines,
 )
 from ._sta_clock_uncertainty import (
     validate_clock_uncertainty as _validate_clock_uncertainty,
@@ -341,19 +344,17 @@ from .post_route_sta_instance_paths import (
     _validate_report_instances,
 )
 from .post_route_sta_multicycle import (
-    multicycle_corner_field as _multicycle_corner_field,
+    check_multicycle_errors as _check_multicycle_errors,
 )
 from .post_route_sta_multicycle import (
-    multicycle_request_error as _multicycle_request_error,
+    multicycle_session_fields as _multicycle_session_fields,
 )
 from .post_route_sta_path_groups import (  # noqa: F401 -- re-exported names
     _PORT_PATHS_BEGIN,
     _PORT_PATHS_END,
     _WORST_PATHS_BEGIN,
     _WORST_PATHS_END,
-    _apply_port_record,
     _empty_path_record,
-    _parse_port_path_rows,
     _port_paths,
     _worst_path_record,
     _worst_paths,
@@ -659,36 +660,7 @@ def run_sta(
             "request.hdl_toplevel must be a non-empty string when given"
         )
 
-    pdk_spec = request["pdk"]
-    if not isinstance(pdk_spec, dict):
-        raise PostRouteStaError("request.pdk must be a JSON object")
-    cell_library = pdk_spec.get("cell_library")
-    if not isinstance(cell_library, str) or not cell_library:
-        raise PostRouteStaError("request.pdk.cell_library is required")
-    requested_corner = pdk_spec.get("corner")
-    if requested_corner is not None and not (
-        isinstance(requested_corner, str) and requested_corner
-    ):
-        raise PostRouteStaError(
-            "request.pdk.corner must be a non-empty string when given"
-        )
-    # Issue #1871: `pdk.corners` (a list) is the additive, multi-corner
-    # alternative to the scalar `pdk.corner` above -- see this module's own
-    # docstring "Multi-corner characterization" section. Shape-validated
-    # here; membership needs no further validation (unlike
-    # `place_and_route.py`'s `sweep_corners`, which narrows an
-    # already-derived shipped-corner set, `corners` here *is* the full
-    # corner selection, and an unresolvable name simply fails the same way
-    # an unresolvable scalar `pdk.corner` already does, per-corner, inside
-    # the run loop below).
-    requested_corners = _validate_corners(pdk_spec.get("corners"))
-    if requested_corner is not None and requested_corners is not None:
-        raise PostRouteStaError(
-            "request.pdk.corner and request.pdk.corners are mutually "
-            "exclusive -- give at most one: a single scalar corner for the "
-            "existing single-corner response shape, or a list for "
-            "multi-corner characterization (see docs/cli/sta.md)"
-        )
+    cell_library, requested_corner, requested_corners = _resolve_pdk_selection(request)
 
     # Issue #2635: the shared hard-macro declaration. Shape-validated here,
     # before any PDK resolution or engine invocation; the corner-dependent
@@ -724,6 +696,7 @@ def run_sta(
     power_activity = _validate_power_activity(request["constraints"])
     clock_uncertainty = _validate_clock_uncertainty(request["constraints"])
     multicycle = _validate_multicycle_paths(request["constraints"])
+    timing_derate = _derate.validate_timing_derate(request["constraints"])
     sdc_path = resolve_sdc_check(request.get("sdc_check"), request_dir)
 
     spef_map: dict[str, str] | None = None
@@ -819,11 +792,14 @@ def run_sta(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             multicycle=multicycle,
+            timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
             basename=basename,
         )
+        if boundary and "clock_driving_cell" in boundary:
+            response["clock_driving_cell"] = boundary["clock_driving_cell"]
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -1000,6 +976,7 @@ def _dispatch_sta(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     multicycle: list[dict[str, Any]] | None,
+    timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -1050,6 +1027,7 @@ def _dispatch_sta(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             multicycle=multicycle,
+            timing_derate=timing_derate,
             write_sdf=write_sdf,
             output_dir=output_dir,
             input_path=input_path,
@@ -1089,6 +1067,7 @@ def _dispatch_sta(
         power_activity=power_activity,
         clock_uncertainty=clock_uncertainty,
         multicycle=multicycle,
+        timing_derate=timing_derate,
         output_dir=output_dir,
         script_tag=basename,
         scrub=report_paths.scrub,
@@ -1157,6 +1136,7 @@ def _dispatch_sta(
         "clock_mode": "propagated" if propagated_clock else "ideal",
         "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
+        "timing_derate": _derate.timing_derate_block(timing_derate),
         "spef_path": report_paths.spef_path,
         "worst_slack_ns": corner_fields["worst_slack_ns"],
         "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
@@ -1220,39 +1200,6 @@ def _dispatch_sta(
     return response
 
 
-def _check_multicycle_errors(
-    completed: _OpenRoadResult, multicycle: list[dict[str, Any]] | None
-) -> None:
-    """Issue #6921: a rejected entry stops the session before any
-    timing is reported, like a rejected per-port map key above."""
-    if multicycle is None:
-        return
-    errors = _multicycle_request_error(completed.stdout or "")
-    if errors is not None:
-        raise PostRouteStaError(errors)
-
-
-def _multicycle_session_fields(
-    completed: _OpenRoadResult,
-    multicycle: list[dict[str, Any]] | None,
-    lines: list[str],
-    output_dir: str,
-    script_tag: str,
-    has_def: bool,
-) -> dict[str, Any]:
-    """The multicycle corner fields of one finished with-run (issue #6921):
-    ``{"multicycle_paths": [...]}``, the per-entry with/without measurement
-    (the "without" baseline keeps every other entry applied) -- ``{}`` for
-    a request without entries."""
-    if multicycle is None:
-        return {}
-    return {
-        "multicycle_paths": _multicycle_corner_field(
-            completed.stdout or "", multicycle, lines, output_dir, script_tag, has_def
-        )
-    }
-
-
 def _run_corner_session(
     *,
     corner_name: str | None,
@@ -1285,6 +1232,7 @@ def _run_corner_session(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     multicycle: list[dict[str, Any]] | None,
+    timing_derate: dict[str, float | None] | None,
     output_dir: str,
     script_tag: str,
     scrub: Callable[[str], str] = _identity,
@@ -1401,6 +1349,7 @@ def _run_corner_session(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             multicycle_lines=mcp_lines,
+            timing_derate=timing_derate,
             sdf_path=sdf_path,
         )
     else:
@@ -1433,6 +1382,7 @@ def _run_corner_session(
             clock_extras=clock_extras,
             clock_uncertainty=clock_uncertainty,
             multicycle_lines=mcp_lines,
+            timing_derate=timing_derate,
         )
     _write_script(script_path, lines)
 
@@ -1444,7 +1394,7 @@ def _run_corner_session(
         port_errors = _parse_port_check_errors(completed.stdout or "")
         if port_errors:
             raise PostRouteStaError(_port_check_error_message(port_errors))
-        _check_multicycle_errors(completed, multicycle)
+        _check_multicycle_errors(completed.stdout or "", multicycle)
         if completed.returncode != 0:
             raise PostRouteStaError(
                 _engine_error_message(completed, verilog_mode=not has_def)
@@ -1556,7 +1506,7 @@ def _run_corner_session(
     # stay applied in each "without" baseline).
     corner_fields.update(
         _multicycle_session_fields(
-            completed, multicycle, lines, output_dir, script_tag, has_def
+            completed.stdout or "", multicycle, lines, output_dir, script_tag, has_def
         )
     )
 
@@ -1598,6 +1548,7 @@ def _run_multi_corner(
     power_activity: dict[str, float] | None,
     clock_uncertainty: dict[str, float | None] | None,
     multicycle: list[dict[str, Any]] | None,
+    timing_derate: dict[str, float | None] | None,
     output_dir: str,
     input_path: str,
     basename: str,
@@ -1689,6 +1640,7 @@ def _run_multi_corner(
             power_activity=power_activity,
             clock_uncertainty=clock_uncertainty,
             multicycle=multicycle,
+            timing_derate=timing_derate,
             output_dir=output_dir,
             script_tag=script_tag,
             scrub=report_paths.scrub,
@@ -1774,6 +1726,7 @@ def _run_multi_corner(
         "clock_mode": "propagated" if propagated_clock else "ideal",
         "clock_targets": clock_targets(clock_port, clock_period_ns, clock_extras),
         "clock_uncertainty": _clock_uncertainty_block(clock_uncertainty),
+        "timing_derate": _derate.timing_derate_block(timing_derate),
         "spef_path": report_paths.spef_path,
         "provenance": provenance,
         # Additive field (issue #1871): one entry per requested
@@ -2285,20 +2238,11 @@ def _validate_boundary(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
 ) -> dict[str, Any] | None:
-    """``constraints.driving_cell`` / ``.driving_cells`` and
-    ``.output_load_pf`` / ``.output_loads`` (issue #3742): the boundary
-    conditions an SDC flow expresses with ``set_driving_cell`` / ``set_load``.
-    Returns a dict holding only the supplied keys (``driving_cell``,
-    ``driving_cells``, ``output_load_pf``, ``output_loads``), or ``None`` when
-    none was given -- which leaves the generated Tcl byte-identical.
+    """Validate the optional driving cells and output loads for a timing boundary.
 
-    ``driving_cell`` is the default for non-clock inputs absent from
-    ``driving_cells`` and from ``input_transitions``; a port may not carry both
-    a driving cell and an input transition (the two would silently override
-    each other), so any such overlap -- or ``input_transition_ns`` together
-    with a driving-cell field -- is a request error. Load values are finite
-    non-boolean numbers ``>= 0`` (pF). Port existence and direction are
-    verified in the engine session (:func:`_port_check_lines`).
+    The data driver and input transitions must target disjoint ports. The
+    primary clock driver is independent of those data-port constraints.
+    Port existence and direction are checked in the engine session.
     """
     prefix = "request.constraints."
     boundary = _validate_driving_cells(constraints, clock_port, prefix)
@@ -2316,11 +2260,9 @@ def _validate_driving_cells(
     """The ``driving_cell`` / ``driving_cells`` half of
     :func:`_validate_boundary` (only the supplied, non-empty keys)."""
     boundary: dict[str, Any] = {}
-    default_cell = constraints.get("driving_cell")
-    if default_cell is not None:
-        boundary["driving_cell"] = _validate_driving_cell(
-            default_cell, f"{prefix}driving_cell"
-        )
+    for key in ("driving_cell", "clock_driving_cell"):
+        if constraints.get(key) is not None:
+            boundary[key] = _validate_driving_cell(constraints[key], f"{prefix}{key}")
     field = f"{prefix}driving_cells"
     cells = constraints.get("driving_cells")
     if cells is not None:
@@ -2575,6 +2517,34 @@ def _validate_report_path_stages(constraints: dict[str, Any]) -> bool:
     if not isinstance(value, bool):
         raise PostRouteStaError(f"{field} must be a boolean")
     return value
+
+
+def _resolve_pdk_selection(
+    request: dict[str, Any],
+) -> tuple[str, str | None, list[str] | None]:
+    """Resolve the library and validate the two alternative corner selectors."""
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PostRouteStaError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PostRouteStaError("request.pdk.cell_library is required")
+    requested_corner = pdk_spec.get("corner")
+    if requested_corner is not None and not (
+        isinstance(requested_corner, str) and requested_corner
+    ):
+        raise PostRouteStaError(
+            "request.pdk.corner must be a non-empty string when given"
+        )
+    requested_corners = _validate_corners(pdk_spec.get("corners"))
+    if requested_corner is not None and requested_corners is not None:
+        raise PostRouteStaError(
+            "request.pdk.corner and request.pdk.corners are mutually "
+            "exclusive -- give at most one: a single scalar corner for the "
+            "existing single-corner response shape, or a list for "
+            "multi-corner characterization (see docs/cli/sta.md)"
+        )
+    return cell_library, requested_corner, requested_corners
 
 
 def _validate_corners(value: Any) -> list[str] | None:
@@ -3281,6 +3251,12 @@ def _boundary_lines(
             args += f" -from_pin {_tcl_literal(cell['input_pin'])}"
         return args
 
+    clock_cell = boundary.get("clock_driving_cell")
+    if clock_cell is not None:
+        lines.append(
+            f"set_driving_cell {drive_args(clock_cell)} "
+            f"[get_ports {_tcl_literal(clock_port)}]"
+        )
     default_cell = boundary.get("driving_cell")
     if default_cell is not None:
         mapped = " ".join(
@@ -3677,6 +3653,7 @@ def _sta_script_lines(
     power_activity: dict[str, float] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
     multicycle_lines: list[str] | None = None,
+    timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for the single, from-scratch OpenSTA session
     this verb runs: load the LEF/DEF pair directly (no netlist, no
@@ -3742,6 +3719,7 @@ def _sta_script_lines(
             for extra in clock_extras["clocks"]:
                 lines += _propagated_clock_lines(extra["port"])
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
+    lines += _derate.timing_derate_lines(timing_derate)
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,
@@ -3822,6 +3800,7 @@ def _sta_netlist_script_lines(
     clock_extras: dict[str, Any] | None = None,
     clock_uncertainty: dict[str, float | None] | None = None,
     multicycle_lines: list[str] | None = None,
+    timing_derate: dict[str, float | None] | None = None,
 ) -> list[str]:
     """Build the Tcl script for a from-scratch, netlist-input OpenSTA
     session (issue #1825): no DEF, no placement, no routing. Links a
@@ -3875,6 +3854,7 @@ def _sta_netlist_script_lines(
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _extra_clock_lines(clock_extras)
     lines += _clock_uncertainty_lines(clock_port, clock_uncertainty)
+    lines += _derate.timing_derate_lines(timing_derate)
     lines += _request_io_delay_lines(
         clock_port,
         input_delay_ns,

@@ -339,3 +339,36 @@ def multicycle_corner_field(
             has_def=has_def,
         )[index]
     return multicycle_response(entries, measurements, without)
+
+
+def check_multicycle_errors(
+    stdout: str, multicycle: list[dict[str, Any]] | None
+) -> None:
+    """Issue #6921: a rejected entry stops the session before any
+    timing is reported, like a rejected per-port map key above."""
+    if multicycle is None:
+        return
+    errors = multicycle_request_error(stdout)
+    if errors is not None:
+        raise _error(errors)
+
+
+def multicycle_session_fields(
+    stdout: str,
+    multicycle: list[dict[str, Any]] | None,
+    lines: list[str],
+    output_dir: str,
+    script_tag: str,
+    has_def: bool,
+) -> dict[str, Any]:
+    """The multicycle corner fields of one finished with-run (issue #6921):
+    ``{"multicycle_paths": [...]}``, the per-entry with/without measurement
+    (the "without" baseline keeps every other entry applied) -- ``{}`` for
+    a request without entries."""
+    if multicycle is None:
+        return {}
+    return {
+        "multicycle_paths": multicycle_corner_field(
+            stdout, multicycle, lines, output_dir, script_tag, has_def
+        )
+    }
