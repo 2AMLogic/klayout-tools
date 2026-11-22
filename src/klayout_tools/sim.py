@@ -1274,20 +1274,12 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: already matched" rule below cannot drop it.
 _BIN_RANGE_SUPERSEDERS = frozenset({"unsupported_model_level", "netlist_title_line"})
 
-#: Codes that mean ngspice aborted while reading the deck (issue #3879). When
-#: one of them is classified and the log shows no analysis banner, the run
-#: never started: its per-measurement "produced no value" errors are
-#: consequences and are collapsed (`_demote_abort_cascade`).
-_NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
-    {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
-) | {sim_cause.NETLIST_TITLE_LINE_CODE}
+#: Moved to :mod:`sim_cause` (issue #6401); aliased for the callers here and
+#: in :mod:`sim_batch`.
+_NGSPICE_FATAL_CODES = sim_cause._NGSPICE_FATAL_CODES
 
-#: What ngspice prints once an analysis actually begins (or has produced
-#: data); absent from a run that died in the deck parser.
-_ANALYSIS_STARTED_RE = re.compile(
-    r"Doing analysis at TEMP|No\. of Data Rows|Initial Transient Solution",
-    re.IGNORECASE,
-)
+#: Moved to :mod:`sim_cause` (issue #6401's helper shares it); aliased below.
+_ANALYSIS_STARTED_RE = sim_cause._ANALYSIS_STARTED_RE
 
 #: Appended to the cause diagnostic of a run that never started analysis.
 _NO_ANALYSIS_NOTE = (
@@ -10485,11 +10477,14 @@ def _classify_diagnostics(
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         if code == "ngspice_fatal":
-            if any(d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics):
-                continue
-            message = sim_cause._with_netlist_error_cause(
-                message, log_text, match.start()
+            fatal = sim_cause._netlist_fatal_message(
+                message, log_text, match.start(), diagnostics
             )
+            if fatal is None:
+                # Superseded by a specific fatal code, or the benign
+                # measure-substitute block of a completed run (#6401).
+                continue
+            message = fatal
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 

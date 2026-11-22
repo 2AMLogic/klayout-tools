@@ -415,7 +415,7 @@
             "required": ["parameter", "reason"],
             "properties": {
               "parameter": {"type": "string"},
-              "reason": {"enum": ["secondary", "placeholder_value", "compare_parameters"]}
+              "reason": {"enum": ["secondary", "placeholder_value", "compare_parameters", "deck"]}
             },
             "additionalProperties": true
           }

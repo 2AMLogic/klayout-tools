@@ -10,6 +10,9 @@ conductor joins the deck's substrate global net.
 
 from pathlib import Path
 
+import klayout.db as kdb
+import pytest
+
 from klayout_tools.extract import run_extract
 from test_extract import _make_abstract_cells_layout, _write_gds
 
@@ -131,3 +134,188 @@ def test_routed_conductor_over_lef_substrate_box_does_not_capture_the_pin(tmp_pa
     assert len(x_lines) == 2
     for x_line in x_lines:
         assert x_line.split()[1 + idx] == "vsubs", x_line
+
+
+def _bus_bit_lef(pins: list[tuple[str, str]]) -> str:
+    """A ``MAC`` LEF declaring one ``PORT`` rectangle per given
+    ``(pin name, RECT arguments in um)`` pair -- issue #6843's bus-bit
+    spellings (``DATA[0]`` et al.) travel through the parser verbatim."""
+    blocks = []
+    for name, rect in pins:
+        blocks.append(
+            f"  PIN {name}\n"
+            "    PORT\n"
+            "      LAYER li1 ;\n"
+            f"        RECT {rect} ;\n"
+            "    END\n"
+            f"  END {name}\n"
+        )
+    return (
+        "VERSION 5.7 ;\nMACRO MAC\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 5.400 BY 1.000 ;\n" + "".join(blocks) + "END MAC\n"
+    )
+
+
+_SECOND_PAD_RECT = "1.600 0.200 2.000 0.800"
+
+#: The supply pad of :func:`_make_bus_macro_layout`'s three-labelled-pad
+#: variant (x = 3200..3600 nm): a pin wrongly appended from a rectangle here
+#: resolves onto ``VPWR`` -- the emulator's 96 SRAM pins tied to power in
+#: miniature. The LEF-only ``DATA[2]`` bit sits over its own parent-routed
+#: pad at x = 4800..5200 nm.
+_SUPPLY_PAD_RECT = "3.200 0.200 3.600 0.800"
+_LEF_ONLY_PAD_RECT = "4.800 0.200 5.200 0.800"
+
+
+def _make_bus_macro_layout(
+    pads: list[tuple[str | None, str, int]],
+) -> kdb.Layout:
+    """One ``MAC`` hard-macro instance in a ``TOP`` cell, with numbered li1
+    pads (issue #6843's reproduction shape).
+
+    Each ``pads`` entry is ``(pin label drawn in ``MAC`` -- or ``None`` for a
+    pad the macro itself leaves unlabelled, ``(parent met1 net name)``,
+    ``(pad x offset in nm)``)``. Pad ``i`` spans ``x .. x+400`` nm at ``y =
+    200..800``: inside ``MAC`` an li1 pad labelled on li1.pin (67/5); in
+    ``TOP`` an mcon+met1 landing labelled on met1.pin (68/5) that routes the
+    pad to its own parent net -- the same pad/wiring shape
+    ``_wire_abstract_instance_pins`` uses, so the parent's routing genuinely
+    reaches each pin location through ordinary connectivity.
+    """
+    layout = kdb.Layout()
+    mac = layout.create_cell("MAC")
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(mac.cell_index(), kdb.Trans(0, 0)))
+    for label, net, x in pads:
+        if label is not None:
+            mac.shapes(layout.layer(67, 20)).insert(kdb.Box(x, 200, x + 400, 800))
+            mac.shapes(layout.layer(67, 5)).insert(
+                kdb.Text(label, kdb.Trans(x + 200, 500))
+            )
+        top.shapes(layout.layer(67, 44)).insert(kdb.Box(x + 100, 300, x + 300, 700))
+        top.shapes(layout.layer(68, 20)).insert(kdb.Box(x, 200, x + 400, 800))
+        top.shapes(layout.layer(68, 5)).insert(kdb.Text(net, kdb.Trans(x + 200, 500)))
+    return layout
+
+
+def _run_bus_macro_extract(tmp_path, tag, layout, lef=None):
+    path = _write_gds(layout, tmp_path / f"{tag}.gds")
+    kwargs = {}
+    if lef is not None:
+        lef_path = tmp_path / f"{tag}.lef"
+        lef_path.write_text(lef)
+        kwargs["abstract_cell_lef_paths"] = (str(lef_path),)
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / f"{tag}.spice"),
+        abstract_cell_patterns=("MAC",),
+        **kwargs,
+    )
+    return report, Path(report["netlist_path"]).read_text()
+
+
+@pytest.mark.parametrize(
+    ("gds_pin", "lef_pin"),
+    [("DATA<0>", "DATA[0]"), ("D2{01}(2)", "D2[1]<2>")],
+)
+def test_lef_bus_bit_alias_of_a_labelled_pin_is_not_appended(
+    tmp_path, gds_pin, lef_pin
+):
+    """A LEF ``PIN DATA[0]`` and an in-cell ``DATA<0>`` label are one bus bit
+    in two spellings: appending the LEF spelling as a *second* pin ties that
+    copy to whatever its own PORT rectangle probes -- the supply net, in
+    issue #6843's fixture -- and is the two-pin miniature of the emulator's
+    96 SRAM pins duplicated onto ``VPWR``. The merge must recognise the two
+    spellings as one bit and keep the label's pin and its connection."""
+    layout = _make_bus_macro_layout([(gds_pin, "SIG", 0), ("VDD", "VPWR", 1600)])
+    lef = _bus_bit_lef([(lef_pin, _SECOND_PAD_RECT)])
+
+    # Control: GDS labels alone -- the extraction the LEF must not disturb.
+    _, labels_only = _run_bus_macro_extract(tmp_path, "labels_only", layout)
+    report, spice = _run_bus_macro_extract(tmp_path, "with_lef", layout, lef)
+
+    for text in (labels_only, spice):
+        (subckt,) = [x for x in text.splitlines() if x.startswith(".SUBCKT MAC")]
+        pins = [
+            pin.encode("ascii").decode("unicode_escape") for pin in subckt.split()[2:]
+        ]
+        assert pins == [gds_pin, "VDD"]
+        (x_line,) = [x for x in text.splitlines() if x.startswith("X")]
+        assert x_line.split() == ["XMAC_0", "SIG", "VPWR", "MAC"]
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 2
+    assert entry["resolution_source"] == "in_cell_labels"
+    assert not [w for w in report["warnings"] if "tied" in w or "collapsed" in w]
+
+
+def test_bus_bits_of_distinct_indices_and_lef_only_bits_stay_distinct(tmp_path):
+    """The alias comparison is per *bit*, not per bus: ``DATA[1]`` must not be
+    swallowed by ``DATA<0>``'s label, and ``DATA[2]`` -- a bit no label
+    spells -- must still be merged in on its own PORT, exactly as #3749
+    merges any LEF-only port. A key that collapsed the whole bus to one pin
+    fails here in both directions at once."""
+    layout = _make_bus_macro_layout(
+        [
+            ("DATA<0>", "SIG", 0),
+            ("DATA<1>", "SIG2", 1600),
+            ("VDD", "VPWR", 3200),
+            (None, "SIG3", 4800),
+        ]
+    )
+    report, spice = _run_bus_macro_extract(
+        tmp_path,
+        "distinct",
+        layout,
+        _bus_bit_lef(
+            [
+                ("DATA[0]", _SUPPLY_PAD_RECT),
+                ("DATA[1]", _SUPPLY_PAD_RECT),
+                ("DATA[2]", _LEF_ONLY_PAD_RECT),
+            ]
+        ),
+    )
+
+    (subckt,) = [x for x in spice.splitlines() if x.startswith(".SUBCKT MAC")]
+    assert subckt.split()[2:] == ["DATA<0>", "DATA<1>", "DATA[2]", "VDD"]
+    (x_line,) = [x for x in spice.splitlines() if x.startswith("X")]
+    assert x_line.split() == ["XMAC_0", "SIG", "SIG2", "SIG3", "VPWR", "MAC"]
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 4
+    assert entry["lef_path"] is not None  # DATA[2] was merged
+    assert not [w for w in report["warnings"] if "tied" in w or "collapsed" in w]
+
+
+@pytest.mark.parametrize(
+    ("literal", "valid"),
+    [
+        (f"DATA{opening}0{closing}", "DATA[0]")
+        for opening, paired in ("[]", "<>", "()", "{}")
+        for closing in "]>)}"
+        if closing != paired
+    ]
+    + [("DATA[0]<1]", "DATA[0][1]"), ("DATA[0>(1)", "DATA[0][1]")],
+)
+def test_malformed_gds_index_keeps_its_connection_and_the_lef_pin(
+    tmp_path, literal, valid
+):
+    layout = _make_bus_macro_layout(
+        [(literal, "SIG_LITERAL", 0), (None, "SIG_LEF", 1600), ("VDD", "VPWR", 3200)]
+    )
+    # A single mismatched pair anywhere in the index suffix makes it literal.
+    report, spice = _run_bus_macro_extract(
+        tmp_path, "literal", layout, _bus_bit_lef([(valid, _SECOND_PAD_RECT)])
+    )
+    header = next(line for line in spice.splitlines() if line.startswith(".SUBCKT MAC"))
+    instance = next(line for line in spice.splitlines() if line.startswith("XMAC_0"))
+    # KLayout hex-escapes parentheses and braces in SPICE pin names.
+    pins = [pin.encode("ascii").decode("unicode_escape") for pin in header.split()[2:]]
+    assert dict(zip(pins, instance.split()[1:-1], strict=True)) == {
+        literal: "SIG_LITERAL",
+        valid: "SIG_LEF",
+        "VDD": "VPWR",
+    }
+    assert report["abstracted_cells"][0]["pin_count"] == 3

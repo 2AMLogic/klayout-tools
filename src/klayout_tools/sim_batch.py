@@ -129,6 +129,7 @@ from .sim_batch_features import (
     warn_unverified_features,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_log import read_collected_log
 from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
     _resume_attach_config,
@@ -2359,16 +2360,6 @@ def _find_engine_logs(collected: str) -> list[str]:
     return sorted(found)
 
 
-def _read_log_head(path: str) -> str:
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
-                "utf-8", errors="replace"
-            )
-    except OSError:
-        return ""
-
-
 def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
     ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
@@ -2421,7 +2412,8 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _fatal_log_diagnostic(_read_log_head(log_path))
+        _, evidence = read_collected_log(log_path, _BATCH_ENGINE_LOG_HEAD_BYTES)
+        found = _fatal_log_diagnostic(evidence)
         if found is not None:
             diagnostics.append(found)
 
@@ -2438,11 +2430,11 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
             "outputs (engine logs are retrieved only when artifacts are kept)",
             None,
         )
-    text = _read_log_head(logs[0])
+    text, evidence = read_collected_log(logs[0], _BATCH_ENGINE_LOG_HEAD_BYTES)
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(evidence)
 
 
 def _job_failure_corners(

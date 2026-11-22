@@ -32,6 +32,19 @@ class _ReferenceStage(NamedTuple):
     reference_netlist: Any
 
 
+def _flatten_reference(
+    netlist: Any, top: str | None, flatten: bool | list[str]
+) -> dict[str, Any] | None:
+    """Make a selected interior circuit the root before inlining its descendants."""
+    if top is not None:
+        selected = netlist.circuit_by_name(top)
+        if selected is not None and any(selected.each_ref()):
+            _lvs._prune_extra_top_circuits(netlist, selected)
+    return _lvs._flatten_netlist_safely(
+        netlist, "reference", keep=flatten if isinstance(flatten, list) else None
+    )
+
+
 def _read_reference_stage(
     reference_spec: dict[str, Any],
     layout_spec: dict[str, Any],
@@ -326,12 +339,8 @@ def _read_reference_stage(
                 combine_per_circuit_warnings.append(reference_parameter_correction)
 
     if opts.flatten_reference:
-        reference_flatten_warning = _lvs._flatten_netlist_safely(
-            reference_netlist,
-            "reference",
-            keep=opts.flatten_reference
-            if isinstance(opts.flatten_reference, list)
-            else None,
+        reference_flatten_warning = _flatten_reference(
+            reference_netlist, reference_spec.get("top"), opts.flatten_reference
         )
         if reference_flatten_warning is not None:
             flatten_warnings.append(reference_flatten_warning)
