@@ -1268,6 +1268,55 @@ always assuming SI metres:
   suffix or exponent literal (`L=0.5u` / `L=0.15e-6`), either of which is
   unambiguous and unaffected by `reference.deck` either way.
 
+#### SG13G2 poly resistor and MIM capacitor references
+
+For a three-terminal `rppd` resistor, put the actual substrate net after
+the two resistor ends. A `cap_cmim` capacitor takes two plate nets. For
+example, this reference connects the resistor substrate to VSS.
+Declare that net as a top port only if it is a port of the circuit.
+
+```spice
+.SUBCKT FILTER IN OUT VSS
+XR1 IN OUT VSS rppd w=0.5u l=2u
+XC1 OUT VSS cap_cmim w=1u l=1u m=12
+.ENDS FILTER
+```
+
+```json
+{
+  "layout": {"file": "filter.gds", "deck": "sg13g2", "top": "FILTER"},
+  "reference": {"netlist": "filter.cdl", "form": "subckt-call",
+                "deck": "sg13g2", "top": "FILTER"}
+}
+```
+
+With the native runset, set `engine` to `klayout-runset`, supply
+`deck_file` pointing to `sg13g2.lvs`, and omit `layout.deck`. Both
+engines accept the same reference X cards. The converter expands `m=12`
+on the capacitor to twelve parallel capacitors with the specified per-unit
+geometry. For parallel resistors, write one uniquely named three-node X
+card per unit on the same nets. A resistor multiplier greater than one
+raises a conversion error. A native runset can simplify devices after
+conversion. Its reported reference census describes the devices it read.
+A source count and a compared count can differ for several reasons.
+
+The optional `sg13g2_passive_pairing` object describes the two
+engines' comparison of `rppd` and `cap_cmim`. Each finding lists the
+actual model names and ordered device terminals. `compare_event` means
+both devices occurred in the same failed comparison. `unmatched_classes`
+compares observed signatures for the same underlying model across failed
+devices, including a literal CDL token such as `$[RPPD]`. Model and
+terminal spelling are compared case-insensitively. A finding identifies a
+specific discrepancy and can accompany other unresolved mismatches.
+
+The status is `discrepancy_observed` for a model or terminal discrepancy,
+`all_devices_paired` when the device counts and comparison confirm pairing,
+or `insufficient_evidence` otherwise. A census difference alone cannot
+identify a multiplier as the cause. Check `device.placeholder_value` and
+`device.geometry_not_compared` for the extent of parameter checking.
+A topology match with placeholder R/C values and unchecked geometry
+establishes connectivity only.
+
 ## Custom device classes round-tripped through an `X` card (issue #1942)
 
 Every device class `klt extract` recognises through a native

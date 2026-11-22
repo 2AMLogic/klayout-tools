@@ -535,6 +535,7 @@
         "klayout_tools.lvs_net_identity",
         "klayout_tools.lvs_netgen",
         "klayout_tools.lvs_netgen_branch",
+        "klayout_tools.lvs_passive_pairing",
         "klayout_tools.lvs_pin_anchors",
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_reference_stage",

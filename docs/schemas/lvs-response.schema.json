@@ -75,6 +75,24 @@
     "mismatch_count": {"type": "integer", "minimum": 0},
     "mismatches_omitted": {"type": "boolean"},
     "error_count": {"type": "integer", "minimum": 0},
+    "sg13g2_passive_pairing": {
+      "type": "object",
+      "required": ["status", "findings"],
+      "properties": {
+        "status": {"enum": ["discrepancy_observed", "insufficient_evidence", "all_devices_paired"]},
+        "findings": {"type": "array", "items": {
+          "type": "object",
+          "required": ["differences", "evidence", "layout_model", "reference_model", "layout_terminals", "reference_terminals"],
+          "properties": {
+            "differences": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["class_model", "terminal_list"]}},
+            "evidence": {"enum": ["compare_event", "unmatched_classes"]},
+            "layout_model": {"type": "string"}, "reference_model": {"type": "string"},
+            "layout_terminals": {"type": "array", "items": {"type": "string"}},
+            "reference_terminals": {"type": "array", "items": {"type": "string"}}
+          }
+        }}
+      }
+    },
     "category_counts": {"$ref": "#/$defs/count_map"},
     "category_error_counts": {"$ref": "#/$defs/count_map"},
     "counts": {
