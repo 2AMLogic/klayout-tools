@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from ._digest import content_hash_required
@@ -36,7 +38,7 @@ def resolve_spef_map(spef_field: dict[str, Any], request_dir: str) -> dict[str, 
         path = value if os.path.isabs(value) else os.path.join(request_dir, value)
         if not os.path.isfile(path):
             raise PostRouteStaError(f"spef not found for request.spef.{key}: {value}")
-        resolved[key] = os.path.abspath(path)
+        resolved[key] = os.path.realpath(path)
     return resolved
 
 
@@ -52,23 +54,40 @@ def resolve_spef(spef_field: Any, request_dir: str) -> str | None:
     )
     if not os.path.isfile(path):
         raise PostRouteStaError(f"spef not found: {spef_field}")
-    return os.path.abspath(path)
+    return os.path.realpath(path)
 
 
-def input_hashes(
+def _file_state(path: str) -> tuple[int, ...]:
+    stat = os.stat(path)
+    # Ignore access time, which OpenROAD's own reads may advance.
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+@contextmanager
+def stable_input_hashes(
     scalar: str | None, mapped: dict[str, str] | None
-) -> dict[str | None, str]:
-    """Hash each distinct engine path before dispatch. None denotes a shared SPEF."""
+) -> Iterator[dict[str | None, str]]:
+    """Hash each input once and guard its identity from hashing through engine exit."""
     paths: dict[str | None, str] = dict((mapped or {}).items())
     if scalar is not None:
         paths[None] = scalar
     try:
-        by_path = {
-            path: content_hash_required(path) for path in dict.fromkeys(paths.values())
-        }
+        before = {path: _file_state(path) for path in dict.fromkeys(paths.values())}
+        by_path = {path: content_hash_required(path) for path in before}
     except OSError as exc:
         raise PostRouteStaError(f"could not hash SPEF input: {exc}") from exc
-    return {corner: by_path[path] for corner, path in paths.items()}
+
+    yield {corner: by_path[path] for corner, path in paths.items()}
+
+    for path, initial in before.items():
+        try:
+            current = _file_state(path)
+        except OSError as exc:
+            raise PostRouteStaError(
+                f"could not recheck SPEF input '{path}': {exc}"
+            ) from exc
+        if current != initial:
+            raise PostRouteStaError(f"SPEF input '{path}' changed during STA")
 
 
 def attach_hashes(response: dict[str, Any], hashes: dict[str | None, str]) -> None:

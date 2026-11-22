@@ -717,10 +717,8 @@ def run_sta(
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
 
-    # Issue #2879: the absolute `def_path`/`verilog_path`/`spef_path` above
-    # are *engine* paths -- what `read_def`/`read_verilog`/`read_spef` and
-    # the hashing below consume. What the response persists is derived from
-    # them exactly once, here, and never fed back to the engine.
+    # Build the report's path envelopes once. Hashing and OpenROAD use the
+    # original absolute paths, including when the report redacts them.
     report_paths = _ReportPaths.build(
         def_path=def_path,
         verilog_path=verilog_path,
@@ -728,8 +726,10 @@ def run_sta(
         spef_map=spef_map,
         repo_root=env_provenance.find_repo_root(request_dir),
     )
-    with report_paths.scrubbing_errors():
-        spef_hashes = _sta_spef_inputs.input_hashes(spef_path, spef_map)
+    with (
+        report_paths.scrubbing_errors(),
+        _sta_spef_inputs.stable_input_hashes(spef_path, spef_map) as spef_hashes,
+    ):
         response = _dispatch_sta(
             requested_corner=requested_corner,
             requested_corners=requested_corners,

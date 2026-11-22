@@ -1,8 +1,10 @@
 """Identify caller-supplied SPEF bytes at the scope where STA consumes them."""
 
+from pathlib import Path
+
 import pytest
 
-from klayout_tools import _sta_spef_inputs
+from klayout_tools import _sta_spef_inputs, post_route_sta
 from klayout_tools.post_route_sta import PostRouteStaError, run_sta
 from test_post_route_sta import (
     _checkout,
@@ -84,6 +86,55 @@ def test_shared_map_input_is_read_once_for_hash(tmp_path, monkeypatch):
     assert {row["spef_content_hash"] for row in result["corners"]} == {
         _sha256_of(tmp_path / "nom.spef")
     }
+
+
+@pytest.mark.parametrize(
+    "spef", ["nom.spef", {"nom": "nom.spef"}], ids=["scalar", "map"]
+)
+def test_replacing_spef_between_liberty_corners_rejects_run(
+    tmp_path, monkeypatch, spef
+):
+    request = _setup_matrix_env(tmp_path, monkeypatch, spef)
+    scripts = _stub_openroad_matrix(monkeypatch)
+    run_engine = post_route_sta._run_openroad
+    replacement = tmp_path / "new.spef"
+    replacement.write_text(_spef_text("rst"), encoding="utf-8")
+
+    def replace_after_first_corner(*args, **kwargs):
+        result = run_engine(*args, **kwargs)
+        if len(scripts) == 1:
+            replacement.replace(tmp_path / "nom.spef")
+        return result
+
+    monkeypatch.setattr(post_route_sta, "_run_openroad", replace_after_first_corner)
+    with pytest.raises(PostRouteStaError, match="SPEF input.*changed") as error:
+        run_sta(request)
+    assert "<outside repo>" in str(error.value)
+    assert str(tmp_path) not in str(error.value)
+
+
+def test_switching_spef_symlink_keeps_engine_on_original_target(tmp_path, monkeypatch):
+    request = _setup_matrix_env(tmp_path, monkeypatch, "current.spef")
+    link = tmp_path / "current.spef"
+    link.symlink_to("nom.spef")
+    (tmp_path / "max.spef").write_text(_spef_text("rst"), encoding="utf-8")
+    scripts = _stub_openroad_matrix(monkeypatch)
+    run_engine = post_route_sta._run_openroad
+
+    def switch_target(*args, **kwargs):
+        result = run_engine(*args, **kwargs)
+        link.unlink()
+        link.symlink_to("max.spef" if len(scripts) == 1 else "nom.spef")
+        return result
+
+    monkeypatch.setattr(post_route_sta, "_run_openroad", switch_target)
+    report = run_sta(request)
+    target = tmp_path / "nom.spef"
+    assert report["spef_content_hash"] == _sha256_of(target)
+    assert len(scripts) == 2
+    read_spef = f"read_spef {post_route_sta._tcl_literal(str(target))}"
+    for script in scripts:
+        assert read_spef in Path(script).read_text(encoding="utf-8").splitlines()
 
 
 def test_external_hash_error_is_scrubbed_before_dispatch(tmp_path, monkeypatch):
