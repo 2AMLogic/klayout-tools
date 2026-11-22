@@ -9,7 +9,8 @@ keep in agreement (issue #5452).
 
 Detection is by the gzip magic bytes, never the ``.gz`` suffix: one rule
 covers every caller, and a renamed file still reads. ``klt yield``'s
-``yield_analysis._load_json`` applies the same rule inline. Callers keep their
+``yield_analysis._load_json`` reads through :func:`open_text` too, spreading
+:data:`READ_ERRORS` into its own ``except`` tuple. Callers keep their
 own exception type and message wording, since those are part of each verb's
 JSON-contract ``error`` text -- from here they need only :data:`READ_ERRORS`.
 Following the precedent set by ``_jsonnum.py`` and ``_text.py``.
