@@ -48,7 +48,9 @@ from .sim_batch import (
 )
 from .sim_batch_plan import plan_batch_job
 from .sim_batch_shards import (  # noqa: F401
+    ShardFingerprint,
     request_sha256,
+    resolve_fingerprint,
     shard_map_request_fields,
     shard_scoped_points,
 )
@@ -117,7 +119,7 @@ def submit_only(
     request_dir: str | None = None,
     artifacts_dir: str | None = None,
     runner: remote_transport.CommandRunner | None = None,
-    shard_fingerprint: str | None = None,
+    shard_fingerprint: ShardFingerprint | None = None,
     hosts: int | None = None,
     netlist_sha256: str | None = None,
 ) -> dict[str, Any]:
@@ -139,8 +141,7 @@ def submit_only(
     ``manifest_path`` -- the ``batch-shards.json`` shard map under
     ``artifacts_dir`` that ``--attach`` takes -- and has no single
     ``job_id``. It needs ``artifacts_dir`` and ``shard_fingerprint``.
-    A client ``hosts`` > 1 (``--hosts`` / ``remote.hosts``, issue #5281) takes
-    the same path with that many shards.
+    An explicit host count above one also selects the sharded path.
     """
     from .sim import SimError
 
@@ -150,7 +151,6 @@ def submit_only(
     job_ceiling, planned_hosts = plan_batch_job(
         config, unit_count=len(corner_points), timeout_s=timeout_s
     )
-    # Issue #5281: a client-chosen --hosts/remote.hosts shards the submit too.
     hosts = max(planned_hosts, hosts or 1)
     if hosts > 1:
         return _submit_sharded(
@@ -164,7 +164,7 @@ def submit_only(
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
             runner=runner,
-            shard_fingerprint=shard_fingerprint,
+            shard_fingerprint=resolve_fingerprint(shard_fingerprint),
             hosts=hosts,
             job_ceiling=job_ceiling,
         )

@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 from . import _batch_common, sim_batch
@@ -16,6 +17,14 @@ from . import _batch_common, sim_batch
 #: ``--submit-only --wait-for-capacity`` can be collected by an
 #: ``--attach <map>`` that (by design) cannot repeat that flag (issue #4878).
 _SUBMISSION_ONLY_BATCH_FIELDS = ("capacity_wait_s", "max_concurrent_jobs")
+
+
+ShardFingerprint = str | Callable[[], str]
+
+
+def resolve_fingerprint(value: ShardFingerprint | None) -> str | None:
+    """Read the fingerprint inputs once dispatch has selected a shard map."""
+    return value() if callable(value) else value
 
 
 def _canonical_sha256(document: Any) -> str:
@@ -243,7 +252,7 @@ def attach_batch_shards(
     request: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
     request_dir: str | None,
-    shard_fingerprint: str | None,
+    shard_fingerprint: ShardFingerprint | None,
     collect_partial: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """``--attach <shard map>`` (issue #4620): wait for every shard a
@@ -290,7 +299,7 @@ def attach_batch_shards(
             measurements_spec=measurements_spec,
             request_dir=request_dir,
             config=config,
-            shard_fingerprint=shard_fingerprint or fingerprint,
+            shard_fingerprint=resolve_fingerprint(shard_fingerprint) or fingerprint,
             resume=True,
             attach_only=True,
             collect_partial=collect_partial,

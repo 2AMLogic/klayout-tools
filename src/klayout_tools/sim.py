@@ -4010,6 +4010,9 @@ def _run_sim_corners(
             staged_model_environment=staged_model_environment,
         )
 
+    def shard_fingerprint() -> str:
+        return _checkpoint_fingerprint(**fingerprint_inputs)
+
     if submit_only:
         _refuse_unsupported_submit_only(backend, hosts, resume, plot_dir)
         refuse_hosts_over_units(hosts, len(dispatch_points))
@@ -4024,7 +4027,7 @@ def _run_sim_corners(
             want_waveforms=want_waveforms,
             request_dir=request_dir,
             artifacts_dir=artifacts_dir,
-            shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
+            shard_fingerprint=shard_fingerprint,
         )
 
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
@@ -4051,11 +4054,9 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
-            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
-            # map even without --resume (no checkpoint to take it from).
             **(
                 {
-                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "shard_fingerprint": shard_fingerprint,
                     "netlist_sha256": netlist_digests.sha256,
                 }
                 if backend == "batch"
@@ -4073,9 +4074,7 @@ def _run_sim_corners(
         # needs its own S3 job contract and launch. See this function's
         # docstring on `hosts`.
         fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
-        # Issue #3300: a sharded batch run keeps a shard-to-job-id map keyed
-        # by the resume fingerprint, so `--resume` re-attaches to shards that
-        # already ran instead of paying for them again.
+        # The explicit fleet needs its fingerprint for the shard-to-job-id map.
         shard_kwargs: dict[str, Any] = (
             {
                 "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
