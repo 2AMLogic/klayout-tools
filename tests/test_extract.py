@@ -35,6 +35,7 @@ from helpers.extract_inverter_fixtures import (
     _make_gf180mcu_inverter_layout,
     _make_sg13g2_inverter_layout,
 )
+from helpers.resistance_graph_fixtures import make_gf180mcu_poly_contact_layout
 from helpers.tool_probes import SKIP_NO_NGSPICE as _SKIP_NO_NGSPICE
 from klayout_tools import extract_abstract, pdk
 from klayout_tools._layout import region_expr as _region_expr
@@ -18004,11 +18005,10 @@ def test_gf180mcu_dummy_marker_does_not_collide_with_any_read_layer():
         deck, dummy=None
     ).connectivity_layers
     assert deck.dummy not in layers_read_for_other_roles
-    # ...and the marker is the *only* layer-100 member of the full set: this
-    # deck reads nothing else on that number at all.
-    assert [layer for layer in deck.connectivity_layers if layer[0] == 100] == [
-        (100, 50)
-    ]
+    # ...and the marker is the only layer-100 member besides the eFuse anode
+    # marker `lvs_source` (100/8, issue #4312): nothing else on that number.
+    layers_100 = sorted(layer for layer in deck.connectivity_layers if layer[0] == 100)
+    assert layers_100 == [(100, 8), (100, 50)]
     # No DRC rule in this family's curated deck references layer 100 either,
     # so `klt drc --deck gf180mcu` never checks the convention layer.
     from klayout_tools.decks.gf180mcu import DECK as GF180MCU_DRC_DECK
@@ -23676,7 +23676,7 @@ def test_check_extract_report_reports_an_external_file_as_unverifiable(
     ]
     assert input_check["actual"] is None
     assert input_check["match"] is False
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
 
 
 def test_rerun_extract_report_refuses_an_external_file_cleanly(tmp_path_factory):
@@ -25977,8 +25977,8 @@ def test_resistance_graph_requires_parasitics():
 
 
 def test_resistance_graph_off_adds_no_key_and_on_changes_nothing_else(tmp_path):
-    """Default output carries no `resistance_graph` key; turning the flag on
-    changes only that additive key (and not the written netlist)."""
+    """Default output carries no `resistance_graph` key; the flag changes
+    only that additive key (and not the written netlist)."""
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     base = run_extract(
         path, "sky130", output=str(tmp_path / "base.spice"), parasitics=True
@@ -26001,7 +26001,7 @@ def test_resistance_graph_off_adds_no_key_and_on_changes_nothing_else(tmp_path):
 
 def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
     """F1: the graph's terminal-pair resistance is the strip's `Rs * L / W`
-    between its two end edges, while the legacy scalar keeps its meaning."""
+    between its two end edges; the legacy scalar keeps its meaning."""
     path = _write_gds(_make_li1_strip_layout(), tmp_path / "strip.gds")
     base = run_extract(
         path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
@@ -26029,17 +26029,16 @@ def test_resistance_graph_two_terminal_strip_matches_analytic(tmp_path):
 
 
 def test_resistance_graph_unsupported_net_keeps_the_legacy_scalar(tmp_path):
-    """No `--resistance-graph-r-cut` is supplied here, so a net containing a
-    poly->li1 landing reports `unsupported` (with an explicit
-    `via_resistance_unknown` diagnostic) and the legacy scalar stays exactly
-    as it was."""
-    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    """A deck with no value for the landing type (gf180mcu curates no poly
+    contact): the poly->metal0 landing reports `unsupported` with an explicit
+    `via_resistance_unknown` and the legacy scalar stays as it was."""
+    path = _write_gds(make_gf180mcu_poly_contact_layout(), tmp_path / "pc.gds")
     base = run_extract(
-        path, "sky130", output=str(tmp_path / "b.spice"), parasitics=True
+        path, "gf180mcu", output=str(tmp_path / "b.spice"), parasitics=True
     )
     report = run_extract(
         path,
-        "sky130",
+        "gf180mcu",
         output=str(tmp_path / "g.spice"),
         parasitics=True,
         resistance_graph=True,
@@ -26127,9 +26126,8 @@ def _graph_report_regions():
 )
 def test_resistance_graph_report_two_level_series_matches_analytic(r_cut, expected):
     """F5/F5v at adapter level: a metal0 strip (Rs = 10, 20 x 2 um) and a
-    metal1 strip (10 x 2 um) joined by one landing at their shared end edge
-    (x = 20 um), terminals at the two far ends: `Rs * 20 / 2` on level 0, the
-    single cut, `Rs * 10 / 2` on level 1."""
+    metal1 strip (10 x 2 um) joined by one landing at their shared end edge:
+    `Rs * 20 / 2` on level 0, the single cut, `Rs * 10 / 2` on level 1."""
     from klayout_tools.extract_parasitics import _resistance_graph_report
 
     um, region = _graph_report_regions()
@@ -26219,8 +26217,8 @@ def test_cli_resistance_graph_json(tmp_path, capsys):
 
 # ---------------------------------------------------------------------------
 # Scalar selection from the resistance graph (issue #2983, final increment of
-# #2458). `resistance_ohm` is never replaced; the graph value is reported in the
-# additive `selected_resistance_ohm` with `resistance_source` provenance.
+# #2458): `resistance_ohm` is never replaced; the graph value is reported in
+# the additive `selected_resistance_ohm` with `resistance_source` provenance.
 # ---------------------------------------------------------------------------
 
 _STRAP_FIXTURES = Path(__file__).parent / "fixtures" / "resistance_graph_strap"
@@ -26236,10 +26234,10 @@ def _strap_fixture(name: str) -> str:
     return str(path)
 
 
-def _selected(path, tmp_path, r_cut):
+def _selected(path, tmp_path, r_cut, deck="sky130"):
     report = run_extract(
         path,
-        "sky130",
+        deck,
         output=str(tmp_path / "sel.spice"),
         parasitics=True,
         resistance_graph=True,
@@ -26250,8 +26248,8 @@ def _selected(path, tmp_path, r_cut):
 
 
 def _make_two_level_series_layout() -> kdb.Layout:
-    """F5: li1 0..4 um, met1 2..4 um, one mcon landing at their shared end
-    edge, terminals at the li1 far end (licon1) and the met1 far end (via)."""
+    """F5: li1 0..4 um, met1 2..4 um, one mcon landing at the shared end
+    edge, terminals at the li1 and met1 far ends (licon1 / via)."""
     layout = kdb.Layout()
     top = layout.create_cell("TOP")
     top.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, 4000, 170))
@@ -26274,11 +26272,12 @@ def test_selected_resistance_graph_value_for_a_two_terminal_net(tmp_path):
 
 
 def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_path):
-    """No `--resistance-graph-r-cut` is supplied and no value is assumed:
-    a cross-level net keeps the legacy scalar and says why."""
-    entry, graph = _selected(_strap_fixture("strapped"), tmp_path, None)
+    """A deck with no value for the landing type (gf180mcu's poly contact)
+    and no `--resistance-graph-r-cut`: nothing is assumed; legacy is kept."""
+    path = _write_gds(make_gf180mcu_poly_contact_layout(), tmp_path / "pc.gds")
+    entry, graph = _selected(path, tmp_path, None, deck="gf180mcu")
     assert graph["status"] == "unsupported"
-    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"] * 2
+    assert [d["code"] for d in graph["diagnostics"]] == ["via_resistance_unknown"]
     assert graph["resistance_source"] == "legacy"
     assert graph["resistance_source_reason"] == "graph_status_unsupported"
     assert graph["selected_resistance_ohm"] == entry["resistance_ohm"]
@@ -26286,9 +26285,9 @@ def test_selection_without_r_cut_falls_back_to_legacy_never_an_ideal_via(tmp_pat
 
 def test_strapping_both_ends_never_raises_the_selected_resistance(tmp_path):
     """Measured-layout regression for the #2458 defect, on committed hashed
-    GDS: the legacy series-sum scalar rises when the same conductor is strapped
-    across a second level; the selected graph value falls (ideal via) and stays
-    below the single-level value for a finite per-cut resistance."""
+    GDS: the legacy series-sum scalar rises when the same conductor is
+    strapped across a second level; the selected graph value (ideal via)
+    stays below the single-level value for a finite per-cut resistance."""
     base_entry, base = _selected(_strap_fixture("single_level"), tmp_path, 0.0)
     strapped_entry, ideal = _selected(_strap_fixture("strapped"), tmp_path, 0.0)
     _, finite = _selected(_strap_fixture("strapped"), tmp_path, 10.0)
@@ -26703,8 +26702,8 @@ def test_cli_extract_check_rerun_with_explicit_input_on_external_report(
         assert code == 0
         assert json.loads(capsys.readouterr().out)["status"] == "match"
 
-    # Without the explicit input the honest drift/error is unchanged.
-    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 3
+    # A report with an external layout needs an explicit input for verification.
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 4
     capsys.readouterr()
     assert (
         main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])

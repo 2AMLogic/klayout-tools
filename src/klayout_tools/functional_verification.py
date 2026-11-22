@@ -201,19 +201,17 @@ import importlib.metadata
 import json  # noqa: F401 -- tests reach it as fv.json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import xml.etree.ElementTree as ElementTree
 from typing import Any
 
 from ._artifact_envelope import ANCHOR_CWD, RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
+from ._artifact_envelope import source_defines_envelope as _source_defines_envelope
 from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import sha256_file
 from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
@@ -227,6 +225,15 @@ from .functional_verification_initial_state import (
 )
 from .functional_verification_pdk import (
     _resolve_defines,
+)
+from .functional_verification_results import (  # noqa: F401 -- preserve earlier import paths
+    _SIM_TIME_UNIT_NS_EXPONENT,
+    _executed_result_counts,
+    _extract_random_seed_property,
+    _maybe_float,
+    _testcase_properties,
+    _testcase_sim_time_ns,
+    parse_results_xml,
 )
 from .functional_verification_run_inputs import resolve_run_inputs, with_run_inputs
 from .functional_verification_sdf import (
@@ -271,12 +278,16 @@ from .functional_verification_sdf_steps import (
     _sdf_refusal_attribution,
     _sdf_refusal_error,
 )
+from .functional_verification_tools import (
+    _ENGINE_VERSION_COMMANDS,
+    _check_required_tool,
+)
 from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -622,11 +633,6 @@ DEFAULT_MUTATION_TIMEOUT_S = 600.0
 #: never itself a source of an unbounded wait.
 _MUTATION_KILL_GRACE_S = 5.0
 
-_ENGINE_VERSION_COMMANDS = {
-    "icarus": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
-    "verilator": (["verilator", "--version"], re.compile(r"Verilator (\S+)")),
-}
-
 _COVERAGE_SUMMARY_RE = re.compile(
     r"^\s*(line|toggle|branch|expr)\s*:\s*([0-9.]+)%", re.MULTILINE
 )
@@ -734,6 +740,9 @@ def _resolve_testbench(
 
     A run needs the module file under ``testbench.search_path`` (defaulting
     to the request directory). An offline check only validates the declaration.
+    During execution this check catches a missing module before cocotb imports
+    it inside the simulator. In that case cocotb can exit zero and write no
+    ``results.xml``, leaving no test results to grade.
     """
     if not isinstance(testbench, dict):
         raise FunctionalVerificationError("request.testbench must be a JSON object")
@@ -1014,6 +1023,7 @@ def _path_envelope(
 
 def _initial_state_run_specs(
     initial_state: dict[str, Any] | None,
+    plusargs: list[str],
     *,
     engine: str,
     output_dir: str,
@@ -1021,17 +1031,12 @@ def _initial_state_run_specs(
     test_log: str,
 ) -> list[dict[str, Any]]:
     """One regression normally; one per seed for ``initial_state.mode:
-    "random"`` -- same build, a different ``+klt_init_seed`` plusarg and its
-    own results/transcript files."""
+    "random"``. Per-spec ``plusargs``: user entries, then ``+klt_init_seed``."""
     if initial_state is None or initial_state["mode"] != "random":
-        return [
-            {
-                "seed": None,
-                "results_xml": results_xml,
-                "test_log": test_log,
-                "plusargs": [],
-            }
-        ]
+        single = dict(
+            seed=None, results_xml=results_xml, test_log=test_log, plusargs=plusargs
+        )
+        return [single]
     return [
         {
             "seed": seed,
@@ -1039,7 +1044,7 @@ def _initial_state_run_specs(
                 output_dir, f"results_{engine}_init_seed{seed}.xml"
             ),
             "test_log": os.path.join(output_dir, f"test_{engine}_init_seed{seed}.log"),
-            "plusargs": [f"+{SEED_PLUSARG}={seed}"],
+            "plusargs": [*plusargs, f"+{SEED_PLUSARG}={seed}"],
         }
         for seed in initial_state["seeds"]
     ]
@@ -1093,16 +1098,16 @@ def _initial_state_echo(
     initial_state: dict[str, Any] | None,
     info: dict[str, Any],
     runs: list[dict[str, Any]],
+    repo_root: RepoRoot,
 ) -> dict[str, Any] | None:
     """``environment.initial_state`` (additive, issue #2998): ``None`` unless
-    requested; ``seeds`` is the effective seed list (empty for mode "x") and
-    ``runs`` has one entry per seed."""
+    requested; ``seeds`` the effective seeds (empty for "x"), ``runs`` per seed."""
     if initial_state is None:
         return None
     return {
         "mode": initial_state["mode"],
         "seeds": initial_state["seeds"],
-        "netlist": initial_state["netlist"],
+        "netlist": _hashed_path_envelope(initial_state["netlist"], repo_root=repo_root),
         "clock": info["clock"],
         "state_elements": info["state_elements"],
         "d_nets": info["d_nets"],
@@ -1454,9 +1459,11 @@ def _resolve_requires_tools(
     Each entry is ``{"name": str, "version": str|null, "sha256": str|null}``.
     ``name`` is looked up with ``shutil.which`` on ``request.env["PATH"]`` when
     that is set (else the ambient ``PATH``); ``version`` is a substring match on
-    the tool's ``--version`` output; ``sha256`` is compared with the resolved
-    binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
-    Returns the ``environment.tools`` echo (``[]`` when omitted).
+    the first non-empty line from the probe (``-V`` for Icarus, otherwise
+    ``--version``; issue #7094); ``sha256`` is
+    compared with the resolved binary's digest. Every unmet tool is listed in
+    one ``missing_tool`` error. Returns the ``environment.tools`` echo (``[]``
+    when omitted).
     """
     entries = _requires_tool_entries(requires_tools)
     search_path = env.get("PATH")
@@ -1521,73 +1528,6 @@ def _parse_requires_tool_entry(
     return name, entry.get("version"), entry.get("sha256")
 
 
-def _check_required_tool(
-    name: str,
-    want_version: str | None,
-    want_sha256: str | None,
-    search_path: str | None,
-    run_env: dict[str, str],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Resolve one tool; return ``(tool_echo, unmet)``. ``tool_echo`` is
-    ``None`` when the binary was not found; ``unmet`` is ``None`` when every
-    requested constraint holds."""
-    resolved = shutil.which(name, path=search_path)
-    if resolved is None:
-        missing: dict[str, Any] = {
-            "name": name,
-            "wanted": "on PATH",
-            "found": None,
-            "reason": "not found",
-        }
-        return None, missing
-    observed = _tool_version_output(resolved, run_env)
-    try:
-        digest = sha256_file(resolved)
-    except OSError:
-        digest = None
-    tool: dict[str, Any] = {
-        "name": name,
-        "path": resolved,
-        "version": observed,
-        "sha256": digest,
-    }
-    problems = []
-    if want_version is not None and (observed is None or want_version not in observed):
-        problems.append(f"version {want_version!r} not in --version output")
-    if want_sha256 is not None and digest != want_sha256.lower():
-        problems.append(f"sha256 {want_sha256} != {digest}")
-    if not problems:
-        return tool, None
-    unmet: dict[str, Any] = {
-        "name": name,
-        "wanted": {"version": want_version, "sha256": want_sha256},
-        "found": {"path": resolved, "version": observed, "sha256": digest},
-        "reason": "; ".join(problems),
-    }
-    return tool, unmet
-
-
-def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
-    """First non-empty line of ``<path> --version`` (stdout, else stderr);
-    ``None`` if it cannot run. A non-zero exit still counts when it printed."""
-    try:
-        proc = subprocess.run(
-            [path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for stream in (proc.stdout, proc.stderr):
-        for line in (stream or "").splitlines():
-            if line.strip():
-                return line.strip()
-    return None
-
-
 class _MissingToolError(FunctionalVerificationError):
     """``missing_tool``: one or more ``request.requires_tools`` unmet. The CLI
     surfaces ``details`` flat on ``error`` (``error.unmet_tools``)."""
@@ -1599,222 +1539,6 @@ class _MissingToolError(FunctionalVerificationError):
             code="missing_tool",
         )
         self.details = {"unmet_tools": unmet}
-
-
-# ---------------------------------------------------------------------------
-# `results.xml` parsing -- the only source of truth for the verdict
-# ---------------------------------------------------------------------------
-
-
-def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
-    """Parse a cocotb ``results.xml`` into the contract's ``tests[]`` list.
-
-    A testcase passes unless it contains a failure or skip. Only failures
-    carry an error type and message. The parser reads the raw diagnostic
-    from the failure attributes or element text.
-
-    Simulated time comes from :func:`_testcase_sim_time_ns`, which reads
-    *both* JUnit shapes cocotb has emitted (the 2.0.x ``sim_time_ns``
-    attribute and the 2.1.0 ``<properties>`` block) -- see that function.
-
-    Raises :class:`FunctionalVerificationError` if the file is missing or
-    unparseable -- either means the run produced no trustworthy evidence.
-    """
-    if not os.path.isfile(results_xml):
-        raise FunctionalVerificationError(
-            f"simulation produced no results file '{results_xml}' -- the "
-            "regression did not run to completion"
-        )
-    try:
-        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
-    except ElementTree.ParseError as exc:
-        raise FunctionalVerificationError(
-            f"results file '{results_xml}' is not parseable XML: {exc}"
-        ) from exc
-    except OSError as exc:
-        raise FunctionalVerificationError(
-            f"could not read results file '{results_xml}': {exc}"
-        ) from exc
-
-    tests: list[dict[str, Any]] = []
-    for testsuite in tree.iter("testsuite"):
-        for testcase in testsuite.iter("testcase"):
-            entry: dict[str, Any] = {
-                "name": testcase.get("name"),
-                "status": "passed",
-                "sim_time_ns": _testcase_sim_time_ns(testcase),
-                "real_time_s": _maybe_float(testcase.get("time")),
-            }
-            failure = testcase.find("failure")
-            skipped = testcase.find("skipped")
-            if failure is not None:
-                entry["status"] = "failed"
-                entry["error_type"] = failure.get("error_type") or failure.get("type")
-                entry["error_message"] = (
-                    failure.get("error_msg")
-                    or failure.get("message")
-                    or (failure.text or "").strip()
-                    or None
-                )
-            elif skipped is not None:
-                entry["status"] = "skipped"
-            tests.append(entry)
-    return tests
-
-
-def _executed_result_counts(
-    tests: list[dict[str, Any]], module: str
-) -> tuple[int, int, int]:
-    """Count parsed outcomes, refusing regressions that verified nothing."""
-    if not tests:
-        raise FunctionalVerificationError(
-            f"testbench module '{module}' registered no tests -- the run "
-            "verified nothing (a regression with zero @cocotb.test() "
-            "functions is not a pass)"
-        )
-    passed = sum(1 for test in tests if test["status"] == "passed")
-    failed = sum(1 for test in tests if test["status"] == "failed")
-    skipped = sum(1 for test in tests if test["status"] == "skipped")
-    if passed + failed == 0:
-        raise FunctionalVerificationError(
-            f"testbench module '{module}': all tests were skipped -- "
-            "zero executed tests verified nothing; this regression is not a pass"
-        )
-    return passed, failed, skipped
-
-
-def _maybe_float(value: str | None) -> float | None:
-    """``float(value)``, or ``None`` when the attribute is absent or not a
-    number -- an unparseable timing attribute must never sink a run whose
-    pass/fail verdict is otherwise perfectly well defined."""
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-# cocotb's own simulator-time unit tokens, as they appear in the
-# `<property name="sim_time_unit" value="..."/>` element of a cocotb >= 2.1.0
-# `results.xml`, mapped to the power of ten that converts that unit to
-# nanoseconds. `sec` is cocotb's own spelling for seconds; `s` is accepted
-# too so a future/alternate spelling still resolves rather than nulling out.
-_SIM_TIME_UNIT_NS_EXPONENT: dict[str, int] = {
-    "fs": -6,
-    "ps": -3,
-    "ns": 0,
-    "us": 3,
-    "ms": 6,
-    "s": 9,
-    "sec": 9,
-}
-
-
-def _testcase_properties(testcase: ElementTree.Element) -> dict[str, str]:
-    """``{name: value}`` for the ``<properties>`` block cocotb >= 2.1.0 hangs
-    off each ``<testcase>``.
-
-    Only the testcase's *own* direct ``<properties>/<property>`` children are
-    read -- never a ``<testsuite>``-level property (where cocotb 2.0.x put
-    ``random_seed``, see :func:`_extract_random_seed_property`) -- so a
-    per-suite property can never be mistaken for a per-test one. A property
-    missing either attribute is skipped rather than raising.
-    """
-    properties: dict[str, str] = {}
-    for prop in testcase.iterfind("properties/property"):
-        name = prop.get("name")
-        value = prop.get("value")
-        if name is not None and value is not None:
-            properties[name] = value
-    return properties
-
-
-def _testcase_sim_time_ns(testcase: ElementTree.Element) -> float | None:
-    """Simulated time for one ``<testcase>``, in nanoseconds, across both
-    JUnit XML shapes cocotb has emitted (issue #2592).
-
-    cocotb 2.0.x put the value on the element itself::
-
-        <testcase name="test_gcd_known_pairs" time="0.0056" sim_time_ns="520.0" />
-
-    cocotb 2.1.0 restructured its JUnit writer and moved the timing facts into
-    a child ``<properties>`` block instead, with the unit reported separately::
-
-        <testcase name="test_gcd_known_pairs" time="0.014">
-          <properties>
-            <property name="sim_time_unit" value="ns" />
-            <property name="sim_time_duration" value="520.0" />
-          </properties>
-        </testcase>
-
-    The 2.0.x attribute is tried **first** and used unchanged when present, so
-    nothing that parses today -- including stored historical ``results.xml``
-    evidence -- changes behaviour. Only when the attribute is absent is
-    ``sim_time_duration`` read and scaled by the sibling ``sim_time_unit``;
-    the unit is never assumed to be ``ns``, since cocotb reports whatever
-    unit the run actually used.
-
-    Never raises. A ``<testcase>`` carrying neither the attribute nor a
-    usable ``<properties>`` block (a test that never ran, or a unit token
-    this mapping does not recognise -- guessing a scale would be worse than
-    reporting nothing) degrades to ``None``, exactly as before: a purely
-    informational timing field must never sink a run whose pass/fail verdict
-    is otherwise perfectly well defined.
-    """
-    attribute = _maybe_float(testcase.get("sim_time_ns"))
-    if attribute is not None:
-        return attribute
-
-    properties = _testcase_properties(testcase)
-    duration = _maybe_float(properties.get("sim_time_duration"))
-    if duration is None:
-        return None
-    unit = (properties.get("sim_time_unit") or "").strip().lower()
-    exponent = _SIM_TIME_UNIT_NS_EXPONENT.get(unit)
-    if exponent is None:
-        return None
-    if exponent == 0:
-        return duration
-    if exponent > 0:
-        return duration * float(10**exponent)
-    # Divide rather than multiply by a fractional scale: `520000 / 1000` is
-    # exact where `520000 * 1e-3` is not.
-    return duration / float(10**-exponent)
-
-
-def _extract_random_seed_property(results_xml: str) -> int | None:
-    """The effective ``random_seed`` cocotb's regression manager used for
-    this run, read back out of ``results.xml``'s own
-    ``<property name="random_seed" value="...">`` element (spike section 4,
-    captured live -- every ``results.xml`` this verb produces carries one).
-
-    This is the authoritative echo for ``environment.random_seed``: cocotb
-    always logs the seed it actually used, whether or not
-    ``request.options.random_seed`` pinned one explicitly (an unpinned run
-    still gets a randomly-generated seed, itself worth knowing so that
-    *specific* run can be reproduced later by feeding this value back in as
-    ``request.options.random_seed``).
-
-    Never raises -- a missing/unparseable/absent property degrades to
-    ``None``, since this purely-informational field must never sink a run
-    whose pass/fail verdict (from :func:`parse_results_xml`) is otherwise
-    perfectly well defined.
-    """
-    try:
-        tree = ElementTree.parse(results_xml)  # noqa: S314 - cocotb results.xml generated in the verb-owned sim build dir
-    except (ElementTree.ParseError, OSError):
-        return None
-    for prop in tree.iter("property"):
-        if prop.get("name") == "random_seed":
-            value = prop.get("value")
-            if value is None:
-                return None
-            try:
-                return int(value)
-            except ValueError:
-                return None
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2135,7 +1859,7 @@ def _find_coverage_dat(test_dir: str, build_dir: str) -> str | None:
 
 
 def collect_coverage(
-    *, test_dir: str, build_dir: str, info_path: str
+    *, test_dir: str, build_dir: str, info_path: str, repo_root: str | None = None
 ) -> dict[str, Any]:
     """Post-process Verilator's ``coverage.dat`` into the contract's
     ``coverage`` block (spike section 5).
@@ -2192,7 +1916,7 @@ def collect_coverage(
         "toggle_pct": percentages.get("toggle"),
         "branch_pct": percentages.get("branch"),
         "expr_pct": percentages.get("expr"),
-        "info_path": info_path,
+        "info_path": _hashed_path_envelope(info_path, repo_root=repo_root),
     }
 
 
@@ -2248,17 +1972,8 @@ def _find_trace_artifact(
 def _resolve_trace(
     *, hdl_toplevel: str, build_dir: str, test_dir: str
 ) -> dict[str, Any]:
-    """Build the response's ``trace`` block -- ``{"path", "format",
-    "size_bytes"}``, the identical shape ``klt wave build``'s own ``trace``
-    field already uses (``docs/schemas/wave-build-response.schema.json``),
-    so the object this verb hands back can be dropped straight into a
-    ``klt wave build`` request's own ``trace`` field unchanged.
-
-    Raises :class:`FunctionalVerificationError` when ``options.trace`` was
-    requested but the run produced no waveform file -- a requested-and-
-    missing trace would otherwise be indistinguishable from "not requested"
-    (``null``), the same posture :func:`collect_coverage` already takes for
-    a requested-and-missing ``coverage.dat``.
+    """Report waveform path, format and byte count. A wave-build request
+    takes the path and format. A requested but missing waveform is an error.
     """
     found = _find_trace_artifact(
         hdl_toplevel=hdl_toplevel, build_dir=build_dir, test_dir=test_dir
@@ -2516,7 +2231,7 @@ def run_functional_verification(
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
     )
-    module, module_dir, testcase = _resolve_testbench_target(
+    module, module_dir, testcase, plusargs = _resolve_testbench_target(
         verilog_tb, request_doc["testbench"], request_dir
     )
     (
@@ -2530,8 +2245,10 @@ def run_functional_verification(
         trace_requested,
     ) = _resolve_options(request_doc.get("options"), engine, request_dir)
     run_inputs.pin_sdf(sdf)
-    # Caller defines override PDK defaults. Derived FUNCTIONAL only applies
-    # when the request has no SDF (#5782).
+    # Caller defines override PDK defaults (#5782). _resolve_options checked
+    # only caller-supplied defines for a conflict with SDF. A derived
+    # FUNCTIONAL exists only when sdf is None, so merging unconditionally
+    # cannot reintroduce that conflict.
     defines = {**run_inputs.pdk_defines, **defines}
     _check_verilog_top_sdf(verilog_tb, sdf, request_doc.get("parameters"))
     initial_state = _resolve_initial_state(
@@ -2890,6 +2607,7 @@ def run_functional_verification(
     )
     run_specs = _initial_state_run_specs(
         initial_state,
+        plusargs,
         engine=engine,
         output_dir=output_dir,
         results_xml=results_xml,
@@ -2950,19 +2668,17 @@ def run_functional_verification(
     run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
+    coverage_info_path = None
     if coverage_requested:
+        coverage_info_path = os.path.join(output_dir, "coverage.info")
         coverage = collect_coverage(
             test_dir=output_dir,
             build_dir=build_dir,
-            info_path=os.path.join(output_dir, "coverage.info"),
+            info_path=coverage_info_path,
+            repo_root=repo_root,
         )
 
-    # Additive (Epic #1585 Phase 3, issue #1845): `null` on a run that did
-    # not ask for a trace, an object -- `{"path", "format", "size_bytes"}`,
-    # the identical shape `klt wave build`'s own `trace` field already uses
-    # -- on one that did. Resolved *after* the verdict/coverage above so a
-    # missing waveform (options.trace requested but unproducible) is never
-    # mistaken for the run's own pass/fail outcome.
+    # Resolve a requested waveform after the run verdict and coverage are known.
     trace = None
     if trace_requested:
         trace = _resolve_trace(
@@ -2994,27 +2710,24 @@ def run_functional_verification(
                 "test_log": _hashed_path_envelope(test_log, repo_root=repo_root),
                 "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": _extract_random_seed_property(results_xml),
-                # Additive (issue #3290): `options.source_defines` keyed by the
-                # request.sources entry as resolved; `{}` when absent.
-                "source_defines": source_defines,
+                # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
+                "source_defines": _source_defines_envelope(source_defines, repo_root),
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
                 # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
                 "parameters": parameters,
-                # Additive (issue #2998): `null` unless the request set
-                # `options.initial_state`. `seeds` echoes the effective seeds
-                # (empty for mode "x"); `runs` has one entry per seed.
+                "plusargs": plusargs,  # additive, issue #6906; `[]` when absent
+                # Additive (#2998): `null` unless `options.initial_state` was set;
+                # `seeds` the effective seeds (empty for mode "x"), `runs` one per seed.
                 "initial_state": _initial_state_echo(
-                    initial_state, initial_state_info, run_reports
+                    initial_state, initial_state_info, run_reports, repo_root
                 ),
                 # Additive (issue #1002, spike §4.2 item 5): `null` on an
                 # ordinary run, an object on an SDF-annotated one -- so a caller
                 # can tell an annotated run from an unannotated one *from the
                 # JSON*, without reading a transcript. `annotated: true` is
-                # load-bearing rather than redundant: reaching this point at all
-                # means the diagnostic scan above found nothing *actionable*,
-                # i.e. every non-benign diagnostic class applied cleanly.
-                #
+                # load-bearing: reaching this point means the diagnostic scan
+                # above found nothing *actionable* (nothing non-benign left).
                 # `annotated: true` alone cannot distinguish "every delay and
                 # every timing check applied" from "every IOPATH applied and
                 # every TIMINGCHECK section was dropped" -- the normal case on
@@ -3022,15 +2735,14 @@ def run_functional_verification(
                 # #1102). `partial`/`dropped` make that distinction
                 # machine-readable: `partial` is true whenever any benign class
                 # was filtered out of the diagnostic gate above, and `dropped`
-                # names each such class with the count of diagnostic lines
-                # filtered and a human-readable reason
-                # (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`). An ordinary fully
-                # -clean run reports `partial: false` and `dropped: {}`.
+                # names each class with its filtered-line count and a
+                # human-readable reason (:data:`SDF_BENIGN_DIAGNOSTIC_REASONS`).
                 "sdf": (
                     None
                     if sdf is None
                     else {
-                        "file": sdf["file"],
+                        # Retyped to the hashed envelope (issue #5784).
+                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
                         "corner": sdf["corner"],
                         # Additive (issue #2364): echoes the request's entry
                         # population -- "all" (every delay entry) or
@@ -3056,9 +2768,14 @@ def run_functional_verification(
     )
     with_run_inputs(report, run_inputs)
     report.local_paths = {
+        "coverage_info_path": coverage_info_path,
         "results_xml": results_xml,
         "test_log": test_log,
         "build_log": build_log,
+        "sdf": None if sdf is None else sdf["file"],
+        "initial_state_netlist": (
+            None if initial_state is None else initial_state["netlist"]
+        ),
     }
     return report
 

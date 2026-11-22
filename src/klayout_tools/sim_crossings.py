@@ -53,6 +53,7 @@ from . import sim_crossings_dc, sim_measurement_kind, sim_supply_relative, sim_w
 from ._jsonnum import is_finite_number
 from .sim_crossings_reduce import reduce_crossings, validate_reduce
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
 CROSSING_EDGES = ("rise", "fall", "either")
@@ -417,8 +418,6 @@ def _extract_one(
     supply_v: dict[str, Any] | None = None,
     kind: Any = "tran",
 ) -> CrossingsOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["crossings"]
     signal = body["signal"]
     if not os.path.isfile(raw_path):
