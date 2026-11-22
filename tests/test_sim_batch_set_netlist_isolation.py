@@ -142,6 +142,39 @@ def test_attach_verifies_the_original_staging_rules(tmp_path, monkeypatch, echo)
     assert not runner.argvs_matching("launch", "--apply")
 
 
+@pytest.mark.parametrize("digest", ["present", "absent", "null"])
+def test_attach_after_submitted_include_disappears(tmp_path, monkeypatch, digest):
+    runner = _EchoNetlist()
+    _install_fake_batch_transport(monkeypatch, runner=runner)
+    path = _netlist_member(tmp_path, 0)
+    kwargs = _receipt_job_kwargs(
+        tmp_path, runner, netlist_path=str(path.with_suffix(".spice"))
+    )
+    submitted, _, _ = sim_batch._run_batch_job(**kwargs)
+    measurement = submitted[0]["measurements"]
+    assert measurement[0]["value"] == 1.8
+    launches = runner.argvs_matching("launch", "--apply")
+    (path.parent.parent / "dut.spice").unlink()
+
+    outputs = runner.outputs_by_job["job-1"]
+    report = json.loads(outputs["report.json"])
+    if digest == "present":
+        with pytest.raises(
+            sim.SimError, match="cannot verify staged batch netlist"
+        ) as exc:
+            sim_batch._run_batch_job(**kwargs, attach=True)
+        assert "dut.spice" in str(exc.value)
+    else:
+        if digest == "absent":
+            del report["environment"]["netlist_sha256"]
+        else:
+            report["environment"]["netlist_sha256"] = None
+        outputs["report.json"] = json.dumps(report)
+        collected, _, _ = sim_batch._run_batch_job(**kwargs, attach=True)
+        assert collected[0]["measurements"] == measurement
+    assert runner.argvs_matching("launch", "--apply") == launches
+
+
 def test_resume_rejects_a_swapped_report_without_launching_again(tmp_path, monkeypatch):
     from test_sim_batch_resume_interrupted import _one_job_resume_fixture
 
