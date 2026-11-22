@@ -343,6 +343,7 @@
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
+        "klayout_tools.functional_verification_base",
         "klayout_tools.functional_verification_check",
         "klayout_tools.functional_verification_from_synthesize",
         "klayout_tools.functional_verification_initial_state",
@@ -529,6 +530,7 @@
         "klayout_tools.cli._lvs_parser_args",
         "klayout_tools.cli.lvs_cmd",
         "klayout_tools.lvs",
+        "klayout_tools.lvs_base",
         "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
@@ -952,6 +954,7 @@
         "klayout_tools.sim_batch_contract_spec",
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_reattach",
+        "klayout_tools.sim_ac_waveform",
         "klayout_tools.sim_batch_resume",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
@@ -1183,6 +1186,7 @@
       "modules": [
         "klayout_tools.cli.yield_cmd",
         "klayout_tools.yield_analysis",
+        "klayout_tools.yield_csv_control",
         "klayout_tools.yield_csv_reader",
         "klayout_tools.yield_provenance",
         "klayout_tools.yield_sampling_fields"

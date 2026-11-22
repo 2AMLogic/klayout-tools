@@ -1812,7 +1812,12 @@ GF180 main script carries the same selection as its target.
 
 When the parallel runner names failed workers, `error.abort.decks` lists their
 distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
-A single identified failure also supplies `abort.deck`. The parallel runner
+A single identified failure also supplies `abort.deck`. For the recognized GF180
+3LM abort (`deck: "mslot1"`, `symbol: "metal4_drawn"`), the optional
+`error.abort.hint` points to the [deck selectors and their coverage](cli/drc.md#gf180-3lm-deck-selection).
+A tolerated report carries that hint at `engine_deck_errors.abort.hint`.
+
+The parallel runner
 can start several decks before reporting a failure.
 
 | Field | Meaning |
