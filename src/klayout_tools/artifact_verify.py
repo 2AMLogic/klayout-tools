@@ -251,13 +251,7 @@ class BrokerClient:
         any object with ``presign`` and ``fetch_into`` -- an in-process fake
         for offline CI -- in place of a :class:`BrokerClient`."""
         answer = self.presign("get", target.kind, target.repo, target.sha256)
-        _check_key(answer.key, target.sha256)
-        if target.key is not None and answer.key != target.key:
-            raise ArtifactError(
-                "the artifact broker's key differs from the manifest uri's",
-                "key_mismatch",
-                {"key": answer.key, "manifest_key": target.key},
-            )
+        _check_key(answer.key, target.sha256, target.key)
         hasher = hashlib.sha256()
         count = 0
 
@@ -443,12 +437,18 @@ def uri_key(uri: str) -> str:
     return match.group(1)
 
 
-def _check_key(key: str, sha256: str) -> None:
+def _check_key(key: str, sha256: str, expected_key: str | None = None) -> None:
     if key_digest(key) != sha256:
         raise ArtifactError(
             "the artifact broker's key does not name the requested digest",
             "key_mismatch",
             {"key": key, "sha256": sha256},
+        )
+    if expected_key is not None and key != expected_key:
+        raise ArtifactError(
+            "the artifact broker's key differs from the key in the requested URI",
+            "key_mismatch",
+            {"key": key, "manifest_key": expected_key},
         )
 
 

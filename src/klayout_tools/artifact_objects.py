@@ -433,11 +433,10 @@ def delete_objects(
 ) -> dict[str, Any]:
     """Delete the named objects through the broker's ``delete`` op.
 
-    Without ``yes`` only ``stat`` is called (a dry run). Every target is
-    checked against the ``keep_manifests`` before the first delete call; one
-    referenced target refuses the whole batch with ``still_referenced``
-    unless ``force_referenced``. An absent object is success. The client
-    cannot enumerate the store, so only objects the caller names are touched.
+    Without ``yes`` only ``stat`` is called (a dry run). Before any deletion,
+    each supplied key must match the broker's stat. A target referenced by a
+    keep manifest refuses the batch with ``still_referenced`` unless
+    ``force_referenced``. An absent object is success.
 
     A route-level 404/405/501 refusal on the ``delete`` call (no
     ``/v1/delete`` route; ``stat`` had already confirmed the object present)
@@ -445,15 +444,10 @@ def delete_objects(
     authorization, 5xx) stay ``broker_refused``. A stat→delete race would be
     misreported as it -- acceptable, since such a race deletes nothing anyway.
     """
-    unique: dict[tuple[str, str, str], FetchTarget] = {}
-    for target in targets:
-        unique.setdefault((target.kind, target.repo, target.sha256), target)
     referenced = referenced_digests(keep_manifests)
     if not force_referenced:
         hits = {
-            t.sha256: referenced[t.sha256]
-            for t in unique.values()
-            if t.sha256 in referenced
+            t.sha256: referenced[t.sha256] for t in targets if t.sha256 in referenced
         }
         if hits:
             first = next(iter(hits))
@@ -464,12 +458,15 @@ def delete_objects(
                 "still_referenced",
                 {"referenced": [{"sha256": s, "manifest": m} for s, m in hits.items()]},
             )
-    stats = [
-        (t, client.presign("stat", t.kind, t.repo, t.sha256)) for t in unique.values()
-    ]
+    stats: dict[tuple[str, str, str], Presigned] = {}
+    for target in targets:
+        identity = (target.kind, target.repo, target.sha256)
+        if identity not in stats:
+            stats[identity] = client.presign("stat", *identity)
+        _check_key(stats[identity].key, target.sha256, target.key)
     objects: list[dict[str, Any]] = []
-    for target, stat in stats:
-        item: dict[str, Any] = {"sha256": target.sha256, "key": stat.key}
+    for (kind, repo, sha256), stat in stats.items():
+        item: dict[str, Any] = {"sha256": sha256, "key": stat.key}
         if not yes:
             objects.append(
                 {
@@ -482,7 +479,7 @@ def delete_objects(
             )
             continue
         if stat.exists:
-            body = {"kind": target.kind, "repo": target.repo, "sha256": target.sha256}
+            body = {"kind": kind, "repo": repo, "sha256": sha256}
             try:
                 client.call("delete", body)
             except ArtifactError as exc:

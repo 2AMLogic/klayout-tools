@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import artifact_objects as store
-from test_artifact_store import REPO, _key, _put, _run, _sha
+from test_artifact_store import REPO, _key, _ops, _put, _run, _sha
 
 # Fixtures pytest must find in *this* module's namespace: `broker` and `report`
 # are requested by name below, `no_url_leak` is autouse (the secret-leak guard
@@ -247,3 +247,74 @@ def test_delete_artifact_uri_resolves_to_the_same_target_as_get(
     ]
     assert stored_key in broker.objects  # a dry run deletes nothing
     assert _sha(report.read_bytes()) == sha256
+
+
+@pytest.mark.parametrize("flags", [[], ["--yes"]], ids=["preview", "confirmed"])
+def test_delete_refuses_a_different_uri_key(broker, report, tmp_path, capsys, flags):
+    sha256, _ = _stored(report, tmp_path / "m.json", capsys)
+    other_uri = f"artifact:evidence/acme__widgets/zz/{sha256}"
+
+    code, _, err = _run(
+        ["artifact", "delete", other_uri, *flags, "--format", "json"], capsys
+    )
+
+    assert code == 1
+    assert json.loads(err)["error"]["code"] == "key_mismatch"
+    assert not _ops(broker, "delete")
+
+
+@pytest.mark.parametrize("first_ref", ["uri", "digest"])
+def test_delete_checks_duplicate_refs_before_deleting_any_object(
+    broker, report, tmp_path, capsys, first_ref
+):
+    _, first_uri = _stored(report, tmp_path / "first.json", capsys)
+    report.write_bytes(b"second object")
+    sha256, second_uri = _stored(report, tmp_path / "second.json", capsys)
+    other_uri = f"artifact:evidence/acme__widgets/zz/{sha256}"
+    duplicate = second_uri if first_ref == "uri" else sha256
+
+    code, _, err = _run(
+        [
+            "artifact",
+            "delete",
+            first_uri,
+            duplicate,
+            other_uri,
+            "--repo",
+            REPO,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        capsys,
+    )
+
+    assert code == 1
+    assert json.loads(err)["error"]["code"] == "key_mismatch"
+    assert not _ops(broker, "delete")
+    assert len(broker.objects) == 2
+
+
+def test_delete_matching_uri_and_digest_only_deletes_once(
+    broker, report, tmp_path, capsys
+):
+    sha256, uri = _stored(report, tmp_path / "m.json", capsys)
+
+    code, out, err = _run(
+        [
+            "artifact",
+            "delete",
+            sha256,
+            uri,
+            "--repo",
+            REPO,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        capsys,
+    )
+
+    assert code == 0, err
+    assert [obj["status"] for obj in json.loads(out)["objects"]] == ["deleted"]
+    assert len(_ops(broker, "stat")) == len(_ops(broker, "delete")) == 1
