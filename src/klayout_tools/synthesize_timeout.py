@@ -115,7 +115,7 @@ def timeout_diagnostic(stdout: str | bytes | None) -> str:
 def timeout_message(
     timeout_s: float | None, script_path: str, log_path: str, stdout: str | bytes | None
 ) -> str:
-    """Keep the watchdog message and log location, then suggest a phase-specific action."""
+    """Name the timeout, saved log and the next step for the observed phase."""
     message = (
         f"yosys did not complete within {timeout_s}s (script '{script_path}')"
         " -- process killed (a run hung on yosys-abc's stdout has its abc"
