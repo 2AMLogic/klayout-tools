@@ -176,6 +176,33 @@ def test_prefix_fallback_when_sublib_unresolvable(tmp_path):
     assert _devices(report, "ss") == {"06v0": "param"}
 
 
+@pytest.mark.parametrize(
+    ("changed", "visible_use", "has_sibling", "expected"),
+    [
+        ("hidden_vto", "0.5", False, "unknown"),
+        ("hidden_vto", "{hidden_vto}", False, "param"),
+        ("nfet_06v0_vth0", "0.5", False, "param"),
+        ("nfet_06v0_vth0", "0.5", True, "typical"),
+    ],
+)
+def test_two_sub_libraries_contribute_evidence(
+    tmp_path, changed, visible_use, has_sibling, expected
+):
+    tokens = (
+        ".lib 'sm141064.ngspice' nfet_06v0_t\n.lib 'sm141064.ngspice' pfet_06v0_t\n"
+    )
+    deck = (
+        f".lib typical\n{tokens}.param {changed}=0.5\n.endl\n"
+        f".lib ss\n{tokens}.param {changed}=0.9\n.endl\n"
+        f".lib nfet_06v0_t\n.model visible nmos(vto={visible_use})\n.endl\n"
+    )
+    if has_sibling:
+        deck += ".lib pfet_06v0_t\n.model sibling pmos(vto=-0.5)\n.endl\n"
+    report = pdk.list_corners(root=str(_install(tmp_path, deck)), variant="gf180mcuD")
+    assert _devices(report, "ss") == {"06v0": expected}
+    assert _devices(report, "typical") == {"06v0": "typical"}
+
+
 # The undecidable case (AC3): identical tokens, `.param` values differ, but
 # the flavour's sub-library is unresolvable and no differing param's prefix
 # maps to it -- a distinct "unknown", never folded into "typical" nor

@@ -1422,7 +1422,7 @@ classified against that flavour's own typical-corner evidence:
   differs from typical at all or the flavour's resolvable sub-libraries
   consume none of the differing values;
 - `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
-  do differ, but the flavour's sub-library is unresolvable in the deck and
+  do differ, but one or more of the flavour's sub-libraries are unresolved and
   no differing `.param`'s name-prefix maps to it. `klt sim` reports these
   under `environment.corner_coverage`'s `unknown_devices` key, never folded
   into `unmoved_devices`;

@@ -28,7 +28,7 @@ The ``devices[].skew`` values a flavour can take:
   is word-matched against the sub-library bodies the flavour's include
   tokens point at (``_parse_named_lib_blocks`` already parsed every
   bare-name block in the deck, sub-libraries included -- no new parsing).
-  When a flavour's sub-library body is not resolvable in the deck (e.g.
+  When any of a flavour's sub-library bodies is unresolved in the deck (e.g.
   pulled in by ``.include`` from another file), a **name-prefix fallback**
   attributes instead: a differing ``nfet_06v0_vth0``-shaped param maps to
   the ``06v0`` flavour by the same shape rule
@@ -170,23 +170,16 @@ def _unchanged_token_skew(
         # exactly as before).
         return "typical"
     bodies = [blocks[name] for _, name in tokens if name in blocks]
-    if bodies:
-        consumed = {
-            name
-            for name in differing
-            if any(
-                re.search(rf"\b{re.escape(name)}\b", body, re.IGNORECASE)
-                for body in bodies
-            )
-        }
-        # Resolvable sub-library bodies are direct consumption evidence:
-        # consuming a differing param is a real skew; consuming none is
-        # proof of unmoved (a differing param this deck's other blocks
-        # reference cannot reach a card that never names it).
-        return "param" if consumed else "typical"
-    # Sub-library bodies unresolvable in this deck (e.g. pulled in by
-    # `.include` from another file): the documented name-prefix fallback,
-    # then the undecidable answer.
+    if any(
+        re.search(rf"\b{re.escape(name)}\b", body, re.IGNORECASE)
+        for body in bodies
+        for name in differing
+    ):
+        return "param"
+    # An omitted sibling can still consume a changed parameter. Only a
+    # complete set of bodies can establish the absence of consumption.
+    if tokens and len(bodies) == len(tokens):
+        return "typical"
     if any(_prefix_flavour(name) == flavour for name in differing):
         return "param"
     return "unknown"
