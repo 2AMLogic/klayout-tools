@@ -23683,7 +23683,7 @@ def test_check_extract_report_reports_an_external_file_as_unverifiable(
     ]
     assert input_check["actual"] is None
     assert input_check["match"] is False
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
 
 
 def test_rerun_extract_report_refuses_an_external_file_cleanly(tmp_path_factory):
@@ -26709,8 +26709,8 @@ def test_cli_extract_check_rerun_with_explicit_input_on_external_report(
         assert code == 0
         assert json.loads(capsys.readouterr().out)["status"] == "match"
 
-    # Without the explicit input the honest drift/error is unchanged.
-    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 3
+    # A report with an external layout needs an explicit input for verification.
+    assert main(["extract", "--check", str(report_path), "--format", "json"]) == 4
     capsys.readouterr()
     assert (
         main(["extract", "--check", str(report_path), "--rerun", "--format", "json"])

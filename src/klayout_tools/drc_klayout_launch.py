@@ -14,6 +14,7 @@ from __future__ import annotations
 import subprocess
 
 from .drc import CODE_KLAYOUT_UNAVAILABLE, DrcError
+from .pdk_native_drc import gf180_main_path
 
 
 def launch_klayout_deck(
@@ -46,7 +47,8 @@ def launch_klayout_deck(
     cmd.extend(
         [
             "-r",
-            deck_file,
+            # GF180 loads sibling Ruby files relative to this exact script path.
+            gf180_main_path(deck_file) or deck_file,
             "-rd",
             f"input={input_path}",
             "-rd",

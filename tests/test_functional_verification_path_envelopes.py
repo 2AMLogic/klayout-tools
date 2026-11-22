@@ -119,7 +119,7 @@ def test_sdf_file_and_source_defines_are_enveloped_inside_a_repo(tmp_path, monke
         output_dir="out",
     )
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["environment"]["sdf"]["file"] == {
         "path": "route.sdf",
         "scope": "repo",
@@ -369,7 +369,7 @@ def test_verilog_top_builder_reports_the_envelopes(tmp_path, monkeypatch):
 
     report = run_functional_verification(request_path, output_dir="out")
 
-    assert report["schema_version"] == 3
+    assert report["schema_version"] == 4
     assert report["environment"]["sdf"]["file"] == {
         "path": "route.sdf",
         "scope": "repo",
@@ -414,3 +414,77 @@ def test_text_format_prints_the_absolute_sdf_path(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert f"sdf: {tmp_path / 'route.sdf'}" in out
     assert "scope" not in out
+
+
+@pytest.mark.parametrize(
+    "out_inside, trace", [(True, False), (False, False), (True, True)]
+)
+def test_coverage_artifact_in_serialized_report(
+    tmp_path, monkeypatch, capsys, out_inside, trace
+):
+    import hashlib
+
+    import jsonschema
+
+    from helpers.subprocess_fakes import _stub_verilator_coverage
+    from klayout_tools.cli.functional_verification_cmd import _print_text
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _fake_repo(repo, monkeypatch)
+    _stage(repo)
+    req = Path(_request(repo, coverage=True, trace=trace))
+    document = json.loads(req.read_text())
+    document["engine"] = "verilator"
+    req.write_text(json.dumps(document))
+    monkeypatch.chdir(tmp_path)
+    outdir = (repo if out_inside else tmp_path) / "artifacts"
+    _stub(
+        monkeypatch,
+        FakeCocotbRunner(
+            RESULTS_XML, coverage_dat_text="coverage", trace_bytes=b"wave"
+        ),
+    )
+    _stub_verilator_coverage(monkeypatch)
+
+    report = run_functional_verification(str(req), output_dir=str(outdir))
+    info = outdir / "coverage.info"
+    envelope = report["coverage"]["info_path"]
+    assert envelope == {
+        "scope": "repo" if out_inside else "external",
+        "path": "artifacts/coverage.info" if out_inside else None,
+        "sha256": "sha256:" + hashlib.sha256(info.read_bytes()).hexdigest(),
+    }
+    assert report.local_paths["coverage_info_path"] == str(info)
+    _print_text(report)
+    assert f"info_path: {info}" in capsys.readouterr().out
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    assert main(["env-provenance", "lint-envelope", str(path), "--format", "json"]) == (
+        3 if trace else 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    findings = [finding["field"] for finding in result["files"][0]["findings"]]
+    assert findings == (["trace.path"] if trace else [])
+    if trace:
+        waveform = report["trace"]
+        assert waveform["size_bytes"] == len(b"wave")
+        schema = (
+            Path(__file__).resolve().parents[1]
+            / "docs/schemas/wave-build-request.schema.json"
+        )
+        jsonschema.validate(
+            {
+                "trace": {key: waveform[key] for key in ("path", "format")},
+                "store": {"path": "out.store"},
+            },
+            json.loads(schema.read_text()),
+        )
+    plain = json.loads(path.read_text())
+    _print_text(plain)
+    assert (
+        f"info_path: {envelope['path'] or '<outside repo>'}" in capsys.readouterr().out
+    )
+    plain["coverage"]["info_path"] = str(info)
+    _print_text(plain)
+    assert f"info_path: {info}" in capsys.readouterr().out

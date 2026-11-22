@@ -106,5 +106,5 @@ def resolve_native_deck(
 def attach_native_deck(result: dict, native: dict | None) -> dict:
     """Add the additive ``native_deck`` report block when one was resolved."""
     if native is not None and isinstance(result, dict):
-        result["native_deck"] = native
+        result["native_deck"] = {**native, **result.get("native_deck", {})}
     return result

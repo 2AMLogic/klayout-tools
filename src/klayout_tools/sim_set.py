@@ -43,6 +43,7 @@ from .sim_batch import (
 )
 from .sim_batch_observer import JobObserver, observe_batch_jobs
 from .sim_batch_plan import preflight_batch_request
+from .sim_batch_receipt import COLLECTED_NETLIST_MISMATCH
 from .sim_set_runtime import (
     NOT_LAUNCHED_CODE,  # noqa: F401  (re-exported)
     SET_INTERRUPTED_CODE,  # noqa: F401  (re-exported)
@@ -103,9 +104,11 @@ def _request_dirs(paths: list[str], outdir: str | None) -> list[str]:
             else os.path.join(os.path.dirname(os.path.abspath(path)), ".klt", "sim")
         )
         candidate = os.path.join(base, stem)
-        if os.path.abspath(candidate) in seen:
-            candidate = os.path.join(base, f"{stem}-{index}")
-        seen.add(os.path.abspath(candidate))
+        suffix = index
+        while os.path.realpath(candidate) in seen:
+            candidate = os.path.join(base, f"{stem}-{suffix}")
+            suffix += 1
+        seen.add(os.path.realpath(candidate))
         dirs.append(candidate)
     return dirs
 
@@ -197,6 +200,7 @@ def _run_one(
             if code in CAPACITY_CODES and attempt <= capacity_retries:
                 sleep(CAPACITY_RETRY_BACKOFF_S * 2 ** (attempt - 1))
                 continue
+            entry["exit_code"] = 4 if code == COLLECTED_NETLIST_MISMATCH else 1
             entry["error"] = {"message": str(exc), "code": code}
         except Exception as exc:  # one request must never sink its siblings
             entry["error"] = {"message": f"{type(exc).__name__}: {exc}", "code": None}
