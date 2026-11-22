@@ -199,6 +199,54 @@ def test_inline_request_without_base_dir_follows_the_cwd(tmp_path, monkeypatch):
         assert (got[key]["path"], got[key]["scope"]) == (None, "external"), key
 
 
+@pytest.mark.parametrize(
+    ("scope", "envelope_path", "message"),
+    [
+        ("repo", "proj/gcd.v", "see proj/gcd.v:17"),
+        ("external", None, "see gcd.v:17"),
+    ],
+    ids=["in-a-repo", "outside-every-checkout"],
+)
+def test_source_envelope_and_failure_message_agree_in_one_report(
+    tmp_path, monkeypatch, scope, envelope_path, message
+):
+    """#6769, the #6762 criterion PR #6766 left open: within a *single*
+    report, the envelope's ``sources[0].{path,scope}`` and the failure
+    message the #6760/#6761 normalizer renders tell the same story. In a
+    repo the diagnostic quotes the envelope path verbatim (``message`` is
+    ``see {envelope_path}:17``); outside every repo the envelope says
+    ``external``/``null`` (#6762 criterion 2) while the diagnostic falls
+    back to a request-dir-relative path -- a deliberate divergence to pin,
+    not collapse."""
+    if envelope_path is not None:
+        proj, request = _staged_project(tmp_path)
+        source = proj / "gcd.v"
+    else:
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        _setup_inputs(loose)
+        request = _write_request(loose / "request.json", _base_request())
+        source = loose / "gcd.v"
+    xml = (
+        f'<testsuite><testcase name="test_gcd">'
+        f'<failure message="see {source}:17"/></testcase></testsuite>'
+    )
+    _stub_runner(monkeypatch, _FakeRunner(xml))
+    monkeypatch.chdir(_checkout(tmp_path / "checkout-b"))
+
+    report = run_functional_verification(request)
+
+    assert report["status"] == "fail"
+    assert (report["test_count"], report["failed_count"]) == (1, 1)
+    rendered = report["environment"]["sources"][0]
+    assert (rendered["path"], rendered["scope"]) == (envelope_path, scope)
+    (test,) = report["tests"]
+    # Exact equality: an absolute prefix or a basename-only rendering of the
+    # in-repo case both fail here.
+    assert test["error_message"] == message
+    assert str(tmp_path) not in test["error_message"]
+
+
 def test_mutation_log_paths_do_not_depend_on_the_invoking_directory(
     tmp_path, monkeypatch
 ):

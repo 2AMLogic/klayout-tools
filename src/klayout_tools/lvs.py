@@ -156,6 +156,7 @@ from .extract import (
     extract_netlist_from_layout,
     spice_safe_net_name,
 )
+from .extract_netlist_write import write_spice_netlist
 from .extract_progress import StageTimer, active_timer, stage
 from .lvs_body import (
     _body_net_warnings,
@@ -3322,11 +3323,10 @@ def _resolve_layout(
             os.makedirs(os.path.dirname(extracted_netlist_path), exist_ok=True)
             writer = kdb.NetlistSpiceWriter()
             writer.use_net_names = True
+            description = f"extracted by klt lvs (deck {deck_name})"
             try:
-                netlist.write(
-                    extracted_netlist_path,
-                    writer,
-                    f"extracted by klt lvs (deck {deck_name})",
+                write_spice_netlist(
+                    netlist, extracted_netlist_path, writer, description
                 )
             except Exception as exc:
                 raise LvsError(
