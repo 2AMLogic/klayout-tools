@@ -2042,6 +2042,28 @@ def test_run_size_topology_invalid_max_joint_iterations_raises(tmp_path):
         size.run_size(str(path))
 
 
+def test_run_size_topology_sweep_points_below_minimum_raises(tmp_path):
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(options={"sweep_points": 2})
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="sweep_points"):
+        size.run_size(str(path))
+
+
+def test_run_size_topology_sweep_points_error_precedes_max_joint_iterations(tmp_path):
+    """Shared sweep validation runs before the topology-specific joint-
+    iteration check (issue #7090), so a request invalid on both still
+    reports the sweep-point error first -- the same first error either
+    mode would give."""
+    _write_models_lib(tmp_path)
+    request = _base_topology_request(
+        options={"sweep_points": 2, "max_joint_iterations": 0}
+    )
+    path = _write_request(tmp_path, request)
+    with pytest.raises(size.SizeError, match="sweep_points"):
+        size.run_size(str(path))
+
+
 # --- coupled-budget / joint-solve helpers (pure functions) ----------------- #
 
 

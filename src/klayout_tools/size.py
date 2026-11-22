@@ -566,6 +566,56 @@ def _parse_target(target: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
+def _resolve_size_models(
+    request: dict[str, Any], request_dir: str
+) -> tuple[str, dict[str, Any] | None]:
+    """Resolve ``request.models`` for either sizing mode (single-device and
+    topology): the model library path, plus the optional PDK provenance
+    lookup. A :class:`SimError` from the resolver becomes the
+    :class:`SizeError` both modes report; an unresolvable PDK is *not*
+    fatal -- it just falls back to deck-only provenance (``None``)."""
+    models = request.get("models") or {}
+    try:
+        models_lib = _resolve_models_lib(models, request_dir)
+    except SimError as exc:
+        raise SizeError(str(exc)) from exc
+
+    provenance_pdk: dict[str, Any] | None = None
+    if models.get("pdk") or models.get("pdk_root"):
+        try:
+            provenance_pdk = find_pdk(
+                variant=models.get("pdk"), root=models.get("pdk_root")
+            )
+        except PdkNotFoundError:
+            provenance_pdk = None
+
+    return models_lib, provenance_pdk
+
+
+def _parse_sweep_settings(request: dict[str, Any]) -> tuple[float, int]:
+    """Validate the gm/Id tolerance and sweep-point settings the sizing
+    contract (``docs/cli/size.md``) gives the same shape and defaults in
+    both modes: a positive ``request.tolerance.gm_id_rel`` and an integer
+    ``request.options.sweep_points`` >= :data:`MIN_SWEEP_POINTS`."""
+    tolerance = request.get("tolerance") or {}
+    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
+    gm_id_rel_tol = _require_positive_number(
+        gm_id_rel_tol, "request.tolerance.gm_id_rel"
+    )
+
+    options = request.get("options") or {}
+    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
+    if (
+        isinstance(sweep_points, bool)
+        or not isinstance(sweep_points, int)
+        or sweep_points < MIN_SWEEP_POINTS
+    ):
+        raise SizeError(
+            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
+        )
+    return gm_id_rel_tol, sweep_points
+
+
 #: ``method.name``/``method.bias`` text for the two single-device bias
 #: modes (issue #1015) -- shared by every response-building site
 #: (:func:`run_size`'s own success/fail path, :func:`_error_payload`, and
@@ -780,38 +830,10 @@ def _run_single_device_size(
         corner_points, sizing_index, hold_across_corners, objective
     )
 
-    models = request.get("models") or {}
-    try:
-        models_lib = _resolve_models_lib(models, request_dir)
-    except SimError as exc:
-        raise SizeError(str(exc)) from exc
-
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
-    tolerance = request.get("tolerance") or {}
-    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
-    gm_id_rel_tol = _require_positive_number(
-        gm_id_rel_tol, "request.tolerance.gm_id_rel"
-    )
+    models_lib, provenance_pdk = _resolve_size_models(request, request_dir)
+    gm_id_rel_tol, sweep_points = _parse_sweep_settings(request)
 
     options = request.get("options") or {}
-    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
-    if (
-        isinstance(sweep_points, bool)
-        or not isinstance(sweep_points, int)
-        or sweep_points < MIN_SWEEP_POINTS
-    ):
-        raise SizeError(
-            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
-        )
-
     timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")
     timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
     timeout_s = _require_positive_number(timeout_s, "request.options.timeout_s")
