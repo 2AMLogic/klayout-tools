@@ -269,6 +269,48 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("selector", "payload", "expected"),
+    [
+        (
+            None,
+            '[["mt", "mslot1"], ["mt", "mslot1"]]',
+            (["mt", "mslot1"], ["mt", "mslot1"]),
+        ),
+        ("mt", '[["mt", "mslot1"], ["mt"]]', (["mt", "mslot1"], ["mt"])),
+        ("mt", "null", None),
+        ("mt", '[["mt"], [1]]', None),
+        ("mt", "truncated", None),
+    ],
+)
+def test_registry_subprocess_contract(
+    tmp_path, monkeypatch, selector, payload, expected
+):
+    from pathlib import Path
+
+    from klayout_tools import drc_klayout_selection as selection
+
+    directory = tmp_path / "installed deck"
+    deck_file = directory / "gf180mcu.drc"
+
+    def run(command, *, capture_output, check, timeout):
+        assert command[:3] == ["klayout", "-b", "-r"]
+        assert Path(command[3]).is_file()
+        fields = dict(arg.split("=", 1) for arg in command[5::2])
+        assert command[4::2] == ["-rd"] * len(fields)
+        assert fields.pop("directory") == str(directory)
+        output = Path(fields.pop("output"))
+        assert fields == ({} if selector is None else {"selector": selector})
+        assert capture_output and check and timeout == 30
+        output.write_text(payload)
+
+    monkeypatch.setattr(selection.subprocess, "run", run)
+    assert (
+        selection._registry("klayout", str(deck_file), selector, str(tmp_path), 60)
+        == expected
+    )
+
+
 def test_registry_expands_installed_ids_without_running_drc(tmp_path):
     import shutil
 

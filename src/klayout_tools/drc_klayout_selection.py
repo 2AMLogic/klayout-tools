@@ -49,7 +49,10 @@ def _registry(
     try:
         script.write_text(_REGISTRY)
         subprocess.run(cmd, capture_output=True, check=True, timeout=min(timeout_s, 30))
-        default, selected = json.loads(result.read_text())
+        registry = json.loads(result.read_text())
+        if not isinstance(registry, list) or len(registry) != 2:
+            return None
+        default, selected = registry
         if not all(
             isinstance(ids, list) and all(isinstance(i, str) for i in ids)
             for ids in (default, selected)
