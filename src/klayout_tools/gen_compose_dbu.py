@@ -32,8 +32,7 @@ class DbuReconcileError(Exception):
 def _integer_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     """Whether ``coarse_dbu`` is an exact whole-number multiple of
     ``fine_dbu`` -- returning that integer multiplier, or ``None`` when it is
-    not. Mirrors ``gen_compose._integer_dbu_ratio`` (issue #1514); kept local
-    so this module stays a leaf over ``klayout.db`` only."""
+    not (issue #1514)."""
     if fine_dbu <= 0:
         return None
     ratio = coarse_dbu / fine_dbu

@@ -358,7 +358,11 @@ capture records no digest. With no usable worker banner, `version_banner` is
 `null` and `probe`/`reason` say why (`"absent"` for a runner that predates
 #2834 or the SSH `remote` backend, the worker's own `version_probe` code for
 a probe that failed there, `"disagreement"` for sharded members that do not
-agree) — never the submitter's banner. The submitting host's probe is kept
+agree, and `"error"` with every member's code named in `reason` when sharded
+members each failed the probe for *different* reasons, issue
+[#6260](https://github.com/2AMLogic/klayout-tools/issues/6260)) — never the
+submitter's banner. `"absent"` therefore always means no worker probe code was
+reported at all. The submitting host's probe is kept
 verbatim under `environment.client_engine_build`, with the same four keys and
 present only on off-host reports. `worker_environment.engine_build_comparison`
 (below) compares the two for you. A `local` report is unchanged: there
@@ -1376,9 +1380,14 @@ terminal (or `batch.poll_timeout_s` elapses), and collects and grades it
 exactly as the original invocation would have. Pass the **same request** the
 job was submitted from — the request supplies the unit list and the
 measurement limits; it is not re-uploaded. A job id with no `job.json` in the
-bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
-applies to a single-job `batch` run only: it is refused for other backends,
-for sharded (`hosts > 1`) runs, and with `--batch-set` or `--submit-only`.
+bucket fails with exit `1` and `error.code: "batch_unknown_job"`. That code is
+reserved for a plain "not found" answer: a lookup that fails any other way
+(expired or missing credentials, `AccessDenied`, S3 throttling, a timeout) is
+reported as a `batch backend failed: …` error carrying the AWS CLI's message,
+never as `batch_unknown_job`, so it is not mistaken for a job that was never
+submitted. `--attach` applies to a single-job `batch` run only: it is refused
+for other backends, for sharded (`hosts > 1`) runs, and with `--batch-set` or
+`--submit-only`.
 For a deck-list request, `--attach` returns the same deck report a blocking
 run would (unit trees installed under the outdir, `environment.remote` filled
 in); the request must declare the same decks the job ran, or it fails with
@@ -2704,19 +2713,59 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the submitting client's own `environment.client_engine_build.version_banner` (whitespace-normalised; issue #5566 — on an off-host report `environment.engine_build` is the worker's, so the client's probe is the one kept under `client_engine_build`). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
-Two sibling fields sit on `environment.remote` itself (issue #5321), for a
-runner whose image has no readable `SOURCES` stamp:
+Four sibling fields sit on `environment.remote` itself (and on each `fleet[]`
+member), for a runner whose image has no readable `SOURCES` stamp. The first
+pair (issue #5321) attests the `models.lib`; the second (issue #5457) attests
+the per-section corner libraries, which carry the identity when there is no
+`models.lib` to attest:
 
 - `runner_models_lib_sha256`: the `environment.models_lib_sha256` the runner's
   own `klt sim` reported, i.e. the model card the worker actually loaded;
   `null` when absent or malformed (older runner, error envelope), so
   "unknown" is distinguishable from a value.
 - `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
-  `not_comparable` (with `reason`: `runner_hash_unavailable`,
+  `not_comparable` (with `reason`: `no_models_lib`, `runner_hash_unavailable`,
   `client_hash_unavailable` or `models_staged`) comparing it with the client's
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+- `runner_corner_section_libs` (issue #5457): one `{name, sha256}` per
+  per-section corner library the runner's own `klt sim` reported in its
+  `environment.corner_section_libs`, i.e. the libraries the worker actually
+  resolved. `null` when the runner reported none (a runner predating #2522,
+  an error envelope, a malformed report), and `null` for an ordinary request
+  that named no per-section libraries. The runner's `path`/`scope` are
+  dropped: the path is the worker's and carries no comparable identity, the
+  hash does.
+- `corner_section_libs_comparison` (issue #5457): `status` of `match`,
+  `mismatch` (with `warning` and the unmatched `names`) or `not_comparable`
+  (with `reason`: `runner_libs_unavailable`, `client_libs_unavailable` or
+  `models_staged`), comparing that list with the client's
+  `environment.corner_section_libs`. **Present only when the client or the
+  runner actually reported per-section libraries** — an ordinary request gains
+  nothing but `runner_corner_section_libs: null`. Text output prints a
+  `corner_section_libs:` line next to `models_lib:`.
+
+Entries compare as **`(name, sha256)` pair membership**, not per name and not
+positionally: `name` is a basename, so two libraries in different directories
+can share one, and a `--batch-set` shard need only be handed the libraries its
+own corners name — a subset of the client's. A runner entry is accounted for
+when the client resolved a library of the same basename *and* the same bytes,
+so neither a shared basename nor a shard subset reads as a mismatch. As with
+`models_lib_comparison`, missing data is never a proven mismatch and klt never
+fails the run on the verdict.
+
+**Why `no_models_lib` is its own reason.** A request whose every selected
+section names its own `lib` declares no `models.lib` at all (see "Per-section
+corner libraries"), so `environment.models_lib` is
+`{"path": null, "scope": "absent"}` and `models_lib_sha256` is `null` on
+*both* sides by construction. Before #5457 that reported
+`runner_hash_unavailable` — indistinguishable from an older or broken runner,
+and so read as an image problem no image update could ever fix. It now
+reports `no_models_lib`, and `corner_section_libs_comparison` carries the
+answer instead. This matters because the request shape these docs recommend
+*for* off-host portability (PDK-relative `models.pdk` + a relative `lib`) is
+exactly the shape that has no all-device library to point `models.lib` at.
 
 A third sibling covers the OSDI objects the runner loaded (issue #5562):
 
@@ -10656,25 +10705,44 @@ equal by construction, including for a mid-run edit, so `klt signoff
 --manifest`'s staleness gate and the environment block can never disagree
 inside the drift window.
 
-### `environment.corner_coverage` (issue #3794)
+### `environment.corner_coverage` (issue #3794; `unknown_devices` issue #5663)
 
-A multi-corner sweep can look complete while some device flavours never move:
-gf180mcu's deck binds its 5/6V MOSFETs (`06v0`, `06v0_nvt`) to the typical
-model in every process section. When `models.pdk` resolves to a PDK whose
-corner data is per-flavour (see [`klt pdk corners`](pdk.md#klt-pdk-corners))
-and the request has non-typical process corners, `environment.corner_coverage`
-lists, per requested process section, the flavours that do **not** move:
+A multi-corner sweep can look complete while some device flavours never move —
+or while the deck evidence cannot decide. When `models.pdk` resolves to a PDK
+whose corner data is per-flavour (see
+[`klt pdk corners`](pdk.md#klt-pdk-corners) and its `devices[].skew` for the
+classification evidence) and the request has non-typical process corners,
+`environment.corner_coverage` lists, per requested process section, two
+**disjoint** flavour lists (`<flavour>` placeholders — on today's supported
+PDKs both lists are empty, so the key is absent; see below):
 
 ```json
 "corner_coverage": {
   "pdk": "gf180mcuD",
-  "sections": [{"process": "ss", "unmoved_devices": ["06v0", "06v0_nvt"]}]
+  "sections": [
+    { "process": "ss", "unmoved_devices": ["<flavour>"] },
+    { "process": "ff", "unknown_devices": ["<flavour>"] }
+  ]
 }
 ```
 
+`unmoved_devices` are flavours `klt pdk corners` reports as
+`skew: "typical"` — provably bound to their typical model at that corner.
+`unknown_devices` are flavours it reports as `skew: "unknown"` (issue
+#5663): `.param` values differ from typical but the flavour's sub-library
+body cannot be resolved in the deck, so whether it skews is undecidable —
+reported here rather than silently claimed as unmoved. Either key is
+omitted when empty.
+
 Additive: absent when there is no `models.pdk`, the PDK is not found, it has
-no per-flavour corner data (e.g. sky130), or nothing is unmoved. No
-`schema_version` bump (docs/json-contract.md: new fields are additive).
+no per-flavour corner data (e.g. sky130), or nothing is unmoved or
+undecidable. On gf180mcuD as of issue #5663 that is the common case: its
+5/6V MOSFETs (`06v0`, `06v0_nvt`) are skewed *by `.param` overrides* the
+corner sections apply (reported `"param"`, not `"typical"` — the tokens
+still point at typical-named sub-libraries, but those sub-libraries consume
+the overridden parameters), so they no longer appear here.
+No `schema_version` bump (docs/json-contract.md: new fields and enum values
+are additive pre-1.0).
 
 ### `environment.netlist_identity` (issue #3074)
 

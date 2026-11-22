@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
+  `environment.corner_coverage` no longer claim a device flavour sits at its
+  typical model when only its include tokens are unchanged. gf180mcuD's
+  `06v0`/`06v0_nvt` MOSFETs are now reported `"param"` at `ff`/`ss`/`fs`/`sf`
+  (their typical-named sub-libraries consume `.param` values the corner
+  sections override; attribution is by consumption, with a name-prefix
+  fallback for unresolvable sub-libraries), a differing `.param`
+  attributable by neither rule reports the new `"unknown"` value (surfaced
+  as `environment.corner_coverage`'s `unknown_devices` key, never folded
+  into `unmoved_devices`), and non-device flavours (`fets_mm`,
+  `noise_corner`) are no longer listed in `devices[]` at all.
+  **Additive-compatible — `schema_version` unchanged:** the
+  `devices[].skew` value set grows and `"typical"` narrows per
+  docs/json-contract.md's pre-1.0 caveat (the old answer was factually
+  wrong about the deck), but consumers pinning on `"typical"` will see
+  different output for the same PDK.
+
 - **`klt sim` `options.ngspice_options` accepts `chgtol` and `trtol`** (#7007,
   2026-11-21): the solver-option allowlist gains ngspice's two remaining
   transient tolerance knobs, so a request can carry the common
@@ -147,6 +164,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   An nfet MV ring gets the marker growth too, and still draws no Nwell.
   Other families resolve no ring margin; 3.3V-only gf180mcu rings and
   tap pads keep their 0.15um default.
+- **`klt deck info` reports `enforced_rule_count`, and labels a curated
+  deck's hash truthfully** (#5843, 2026-11-17): each entry gains an additive
+  `enforced_rule_count` field — how many rules the deck's curated DRC rule
+  table enforces, the same count as the `rules:` header of `klt deck rules`
+  — so a provenance row built from `deck info` alone can state deck
+  coverage, not just its `NOT ENFORCED` remainder. It is `null` (present,
+  never omitted, never `0`) for a deck with no curated rule table
+  (`asap7`), keeping "enforces nothing" distinct from "has no rule table".
+  Text output prints `enforced_rules: N` directly above the existing
+  `NOT ENFORCED` line, and for a deck whose `provides` includes
+  `curated_drc` (sky130, gf180mcu, sg13g2, sg13cmos5l) relabels the deck
+  source hash `deck content_hash (extraction + curated DRC rule table)` — the pin
+  covers the primary module and its declared rule sources, so the hash is the identical value `klt deck
+  hash` and `klt deck rules` report and `deck info` alone is sufficient for
+  a provenance citation. `asap7`'s two-artifact rendering is unchanged. The
+  JSON field name `content_hash` does not change; `schema_version` stays
+  `1`.
+
 
 - **`environment.netlist_identity` no longer truncates cards that use KLayout
   `$N` anonymous-net names** (#5438, 2026-11-18): the normaliser behind `klt
@@ -806,6 +841,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+
+- **`klt lvs --omit-mismatches`: a compact-response mode for failing
+  compares** (#5610, 2026-11-15): the verb had no way to bound, summarise or
+  omit the top-level `mismatches[]` array, so on a failing compare of a
+  flattened gate-level block the array *is* the report — the only workflow
+  for committing it verbatim was post-processing with `jq`, which leaves the
+  committed document something other than what the tool emitted. The new
+  `--omit-mismatches` flag (and the request document's top-level boolean
+  `omit_mismatches`; the flag wins when both name it, mirroring `klt erc
+  --omit-antenna-tables` / `antenna_tables_omitted`) emits `mismatches` as
+  `[]` — the key stays present, it is schema-required — beside an
+  always-present `mismatches_omitted` echo (`false` without the flag),
+  while `status`, `mismatch_count`, `error_count`, `category_counts`,
+  `category_error_counts` and every exit code keep their full-run values:
+  the compare still runs in full and the per-category tally still runs over
+  the complete list, so a reader reaches the same verdict from kilobytes
+  instead of tens of megabytes. Applied for all three engines. Text mode
+  prints a `mismatches_omitted: True (--omit-mismatches)` line rather than
+  degrading into a clean report's tail. Cheap `klt lvs --check` verifies a
+  compacted report as-is (it never reads `mismatches[]`), and
+  `--check --rerun` replays the omission from the report's own echo, both
+  in `_reconstruct_lvs_request` and — explicitly, so a runset report does
+  not rerun uncompacted — in `_reconstruct_runset_request`; a report
+  committed before the echo existed has the field excluded from its drift
+  diff. `docs/schemas/lvs-response.schema.json` gains the required
+  `mismatches_omitted` boolean; `schema_version` stays `3` (additive,
+  opt-in). The committed `examples/signoff/` evidence was regenerated for
+  the new echo field.
+
 - **`klt functional-verification` reports name what they simulated** (#5771,
   2026-11-17): the report recorded the engine, results and environment but not
   the simulated files, so an RTL run and a gate-level run of the same testbench

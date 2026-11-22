@@ -1686,6 +1686,7 @@ def read_block_layer_geometry(
     block: dict[str, Any],
     offset_um: dict[str, float],
     layer: tuple[int, int],
+    target_dbu: float | None = None,
 ) -> dict[str, Any] | None:
     """Read ``block``'s **drawn** shapes on ``layer`` into the composed frame.
 
@@ -1693,10 +1694,8 @@ def read_block_layer_geometry(
     geometry on the ``(layer, datatype)`` pair the route is drawn on, mirrored/
     rotated per the block's own ``orientation`` (#1166) and translated by the
     block's placed ``offset_um``, in integer database units -- or ``None``
-    when the block draws nothing there. The same ``kdb.Trans`` (mirror-then-
-    translate) is applied here as :func:`_write_composed_gds` applies to this
-    block's actual cell instance, so this obstacle geometry always agrees
-    with what the composed GDS actually draws.
+    when the block draws nothing there. With ``target_dbu``, scale the block
+    and snap its placement on the output grid just as the GDS writer does.
 
     This is the one place this module looks at a block's *shapes* rather than
     at its ``generator_report``. It exists because a ``klt gen`` port's
@@ -1712,28 +1711,28 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _ORIENTATION_KDB_ARGS, _load_block_cell
+    from .gen_compose import (
+        _ORIENTATION_KDB_ARGS,
+        _load_block_cell,
+        _rescale_block_layout,
+    )
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
-    dbu = src_layout.dbu
+    dbu = target_dbu or src_layout.dbu
     layer_index = src_layout.find_layer(layer[0], layer[1])
     if layer_index is None:
         return None
 
+    _rescale_block_layout(src_layout, src_cell, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
         return None
     rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
-    region.transform(
-        kdb.Trans(
-            rot,
-            mirrx,
-            int(round(offset_um["x"] / dbu)),
-            int(round(offset_um["y"] / dbu)),
-        )
-    )
+    ox = round(offset_um["x"] / dbu)
+    oy = round(offset_um["y"] / dbu)
+    region.transform(kdb.Trans(rot, mirrx, ox, oy))
     return {"region": region, "dbu": dbu}
 
 
