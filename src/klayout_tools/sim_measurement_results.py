@@ -114,6 +114,7 @@ def _corner_measurement_results(
             log_text=log_text,
             save_mode=save_mode,
             engine_diagnostics=engine_diagnostics,
+            eyes=eyes,
         )
     measurement_results: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []

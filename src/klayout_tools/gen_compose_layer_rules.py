@@ -22,6 +22,7 @@ below at module scope, so each pre-existing
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Any
 
 from . import gen_compose_top_metal_floors as _top_metal_floors
@@ -64,25 +65,35 @@ def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
     return pair
 
 
+# Native GF180 metaltop.rb selects the 9K/11K MT.1 and MT.2a rules on
+# these physical planes. Variant A uses a separate 30K rule table.
+def _is_gf180_9k_11k_top(variant: str | None, layer: tuple[int, int] | None) -> bool:
+    return (variant, layer) in {
+        ("gf180mcuB", (46, 0)),
+        ("gf180mcuC", (81, 0)),
+        ("gf180mcuD", (81, 0)),
+    }
+
+
+@lru_cache(maxsize=256)
+def _route_spacing_rule(
+    variant: str, layer: tuple[int, int] | None
+) -> tuple[float, str] | None:
+    if _is_gf180_9k_11k_top(variant, layer):
+        return (0.46, "MT.2a")
+    return _min_rule_um_for_layer(variant, layer, "space")
+
+
 def _min_width_um_for_layer(
     variant: str, layer: tuple[int, int] | None
 ) -> tuple[float, str] | None:
-    """Resolve the tightest applicable minimum-*width* DRC rule for ``layer``
-    from the resolved PDK family's own curated deck -- the *same*
-    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
-    with, never a private, hard-coded threshold (issue #1501).
+    return _min_rule_um_for_layer(variant, layer, "width")
 
-    Mirrors ``compose()``'s own same-layer minimum-*spacing* lookup (issue
-    #1386's ``_min_spacing_um_for_layer``), generalised to ``"width"`` rules
-    and lifted to module scope so both the ``routing.width_um`` validation
-    and the via-drop square sizing below can share it. Returns
-    ``(threshold_um, rule_id)`` for the widest matching ``"width"`` rule on
-    ``layer`` (a layer can carry more than one width rule from different DRM
-    sections; the widest is the true floor), or ``None`` when ``layer`` is
-    ``None``, the layer has no such rule in the resolved deck, or the PDK
-    family/deck cannot be resolved at all -- an unresolvable family degrades
-    this check to a no-op, exactly like #1386's spacing lookup does.
-    """
+
+def _min_rule_um_for_layer(
+    variant: str, layer: tuple[int, int] | None, check: str
+) -> tuple[float, str] | None:
+    """Largest plain same-layer width or spacing threshold from the curated deck."""
     if layer is None:
         return None
     try:
@@ -94,7 +105,7 @@ def _min_width_um_for_layer(
     best: tuple[float, str] | None = None
     for rule in deck_rules:
         if (
-            rule.check == "width"
+            rule.check == check
             and rule.layer == layer
             and rule.other_layer is None
             and rule.derived_layer is None
@@ -421,9 +432,8 @@ def _resolve_landing_pad_sizes(
     shaping rule draws at exactly the override; the default (``None``) is
     byte-for-byte the pre-#5803 resolution.
 
-    Resolve once per distinct pair and pass the result into drawing; the
-    router's existing spacing pre-checks keep their baseline footprint,
-    as with the area and via-width floors described above.
+    Resolve once per distinct pair for drawing. Route conflict checks use
+    the same floors and round the pad onto the output grid.
     """
     from .gen_compose import _VIA_DROP_SIZE_UM, GenComposeError
 

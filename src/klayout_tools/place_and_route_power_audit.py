@@ -56,6 +56,8 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
+from ._text import read_text
+
 #: ``power.placed.evidence`` when the DEF was read and parsed: every count
 #: in the block is a real measurement, and a ``0`` means zero.
 EVIDENCE_DEF = "def"
@@ -120,11 +122,7 @@ def read_def_text(def_path: str) -> str | None:
     stray non-UTF-8 byte in a comment must not turn a readable file into
     "no evidence".
     """
-    try:
-        with open(def_path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
+    return read_text(def_path)
 
 
 def parse_def_component_masters(text: str) -> dict[str, int] | None:
