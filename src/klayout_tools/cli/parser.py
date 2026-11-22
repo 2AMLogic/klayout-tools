@@ -2404,15 +2404,9 @@ def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``pdk`` verb with nested ``find``/``list``/``env``/
-    ``cells``/``macros``/``decks``/``corners``/``em-limits``/``pcell-check``/``stackup``
-    subcommands.
+    """Register PDK discovery, model verification and inspection commands."""
+    from . import pdk_osdi_cmd
 
-    The other verbs are flat; ``pdk`` groups discovery operations under one
-    verb (kicad-tools convention for multi-operation capabilities), so it uses
-    argparse sub-subparsers. Each ``--format`` stays a per-subcommand option,
-    matching the flat verbs.
-    """
     pdk_parser = subparsers.add_parser(
         "pdk",
         help="discover and resolve an installed PDK",
@@ -2505,6 +2499,7 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_expect_version_arg(check_parser)
     _add_format_arg(check_parser)
     check_parser.set_defaults(func=pdk_cmd.run_check)
+    pdk_osdi_cmd.add_parser(pdk_sub, _add_pdk_args, _add_format_arg)
 
     cells_parser = pdk_sub.add_parser(
         "cells",
