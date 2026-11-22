@@ -302,6 +302,7 @@
         "klayout_tools.extract_netselect",
         "klayout_tools.extract_orient",
         "klayout_tools.extract_cap_top_plate",
+        "klayout_tools.extract_cut_resistance",
         "klayout_tools.extract_passive_regions",
         "klayout_tools.extract_progress",
         "klayout_tools.extract_dead_metal",
@@ -309,6 +310,7 @@
         "klayout_tools.extract_resistance_graph",
         "klayout_tools.extract_spef",
         "klayout_tools.extract_spef_block",
+        "klayout_tools.extract_split_terminal",
         "klayout_tools.extract_subcircuit",
         "klayout_tools.extract_warnings",
         "klayout_tools.parasitic_integrity",
@@ -414,6 +416,7 @@
         "klayout_tools.cli.gen_compose_cmd",
         "klayout_tools.gen_compose",
         "klayout_tools.gen_compose_boundary",
+        "klayout_tools.gen_compose_dbu",
         "klayout_tools.gen_compose_derived_frame",
         "klayout_tools.gen_compose_draw",
         "klayout_tools.gen_compose_ladder_floors",
@@ -421,6 +424,7 @@
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_pad_conflicts",
         "klayout_tools.gen_compose_plane_change",
+        "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing",
@@ -520,6 +524,7 @@
         "klayout_tools.lvs_body",
         "klayout_tools.lvs_combine",
         "klayout_tools.lvs_coverage",
+        "klayout_tools.lvs_deck_defaults",
         "klayout_tools.lvs_finfet",
         "klayout_tools.lvs_finfet_flatten",
         "klayout_tools.lvs_finfet_power",
@@ -625,6 +630,7 @@
         "klayout_tools.decks.sky130_unmodeled",
         "klayout_tools.liberty_header_diff",
         "klayout_tools.liberty_merge",
+        "klayout_tools.liberty_merge_syntax",
         "klayout_tools.pdk",
         "klayout_tools.pdk_ambiguity",
         "klayout_tools.pdk_capabilities",
@@ -640,6 +646,7 @@
         "klayout_tools.pdk_model_aliases",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
+        "klayout_tools.pdk_output_dbu",
         "klayout_tools.pdk_pcell",
         "klayout_tools.pdk_pcell_checks",
         "klayout_tools.pdk_stackup",
@@ -808,6 +815,7 @@
         "klayout_tools._version_scheme",
         "klayout_tools._verilog_params",
         "klayout_tools._verilog_top",
+        "klayout_tools._warn",
         "klayout_tools._yosys_error_messages",
         "klayout_tools.build_identity",
         "klayout_tools.coverage",
@@ -936,6 +944,7 @@
         "klayout_tools.sim_batch_corner_libs",
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
+        "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
@@ -1074,11 +1083,13 @@
       "description": "`klt sta` implementation: core modules plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.sta_cmd",
+        "klayout_tools._sta_clock_transition",
         "klayout_tools._sta_clock_uncertainty",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
         "klayout_tools._sta_timing_derate",
+        "klayout_tools._sta_wire_load",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
@@ -1105,6 +1116,7 @@
         "klayout_tools.restructure",
         "klayout_tools.sta",
         "klayout_tools.synthesize",
+        "klayout_tools.synthesize_abc",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_driving_cell",
@@ -1780,6 +1792,11 @@
       "reason": "Issue #2839: T1 item 11 re-grades a cited klt socket-check envelope's power_ports facts with the verb's own public grading function (grade_power_ports/assess_power_port), so the verb and signoff can never disagree about edge accessibility."
     },
     {
+      "consumer": "signoff",
+      "exporter": "synthesize",
+      "reason": "Signoff checks a custom ABC mapping's recorded cell types with the same predicate used by synthesis (#6915)."
+    },
+    {
       "consumer": "sim",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -2372,6 +2389,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_abc",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Validate the synthesis subobject with the same request-key rules as its parent (issue #6915)."
     },
     {
       "consumer": "klayout_tools.synthesize",

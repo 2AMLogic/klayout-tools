@@ -84,8 +84,8 @@ def _sta_provenance_hashes(
     *,
     pdk_variant: str | None,
     pdk_root: str | None,
-) -> tuple[str | None, dict[str, str | None], bool]:
-    """Re-derive ``(input_content_hash, {resolved corner: deck_content_hash},
+) -> tuple[str | None, dict[tuple[str, str | None], str | None], bool]:
+    """Re-derive ``(input_content_hash, {(liberty, interconnect): deck_content_hash},
     multi_corner)`` for the request at ``request_path`` without invoking
     OpenROAD, mirroring :func:`post_route_sta.run_sta`'s own resolution.
 
@@ -108,17 +108,19 @@ def _sta_provenance_hashes(
     )
 
     cell_library, requested_corner, requested_corners = _resolve_pdk_selection(request)
-    multi_corner = requested_corners is not None or isinstance(
-        request.get("spef"), dict
-    )
+    spef = request.get("spef")
+    multi_corner = requested_corners is not None or isinstance(spef, dict)
+    axes: list[str | None] = list(spef) if isinstance(spef, dict) and spef else [None]
     names = requested_corners if requested_corners is not None else [requested_corner]
 
-    deck_hashes: dict[str, str | None] = {}
+    deck_hashes: dict[tuple[str, str | None], str | None] = {}
     for name in names:
         liberty_path, corner, _info = _resolve_liberty(
             cell_library, name, variant=pdk_variant, root=pdk_root
         )
-        deck_hashes[corner] = content_hash(liberty_path)
+        digest = content_hash(liberty_path)
+        for axis in axes:
+            deck_hashes[corner, axis] = digest
     return content_hash(input_path), deck_hashes, multi_corner
 
 
@@ -167,17 +169,21 @@ def check_sta_report(
             return build_check_result(report_path=report_path, checks=checks)
 
     by_corner = {
-        entry["corner"]: entry
+        (entry["corner"], entry.get("interconnect_corner")): entry
         for entry in (entries if isinstance(entries, list) else [])
-        if isinstance(entry, dict) and isinstance(entry.get("corner"), str)
+        if isinstance(entry, dict)
+        and isinstance(entry.get("corner"), str)
+        and isinstance(entry.get("interconnect_corner"), (str, type(None)))
     }
-    # Include corners that the committed report still claims after a request edit.
-    for corner in dict.fromkeys([*deck_hashes, *by_corner]):
+    # Include entries present on only one side when the request or report changes.
+    for cell in dict.fromkeys([*by_corner, *deck_hashes]):
+        corner, axis = cell
+        label = corner if axis is None else f"{corner},{axis}"
         checks.append(
             hash_check(
-                f"corners[{corner}].deck.content_hash",
-                get_path(by_corner.get(corner, {}), ("deck", "content_hash")),
-                deck_hashes.get(corner),
+                f"corners[{label}].deck.content_hash",
+                get_path(by_corner.get(cell, {}), ("deck", "content_hash")),
+                deck_hashes.get(cell),
             )
         )
     return build_check_result(report_path=report_path, checks=checks)

@@ -88,6 +88,7 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 from .gen_compose_landing_pads import (
     _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
 )
+from .gen_compose_landing_pads import _landing_pad_box
 from .gen_compose_landing_pads import (
     _marked_via_drop_entry as _marked_via_drop_entry,
 )
@@ -125,6 +126,7 @@ from .gen_compose_plane_change import (
     _segments_field,
     _unrouted_leg_record,
 )
+from .gen_compose_plane_climb import PlaneClimbContext
 
 #: ``direction_deg`` values a *stub-widen* (#496) applies to -- a port's own
 #: outward-facing north/south stub, never an east/west one. Scoped this
@@ -1729,7 +1731,7 @@ def read_block_layer_geometry(
     if layer_index is None:
         return None
 
-    _rescale_block_layout(src_layout, dbu, block_id, block["gds_path"])
+    _rescale_block_layout(src_layout, src_cell, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
@@ -1767,6 +1769,7 @@ def _drawn_leg_footprint_region(
     dbu: float,
     route_layer: tuple[int, int] | None = None,
     side_for_pair: Any = None,
+    cut_side_um: Any = None,
 ):
     """The full metal one routed leg draws on its own route layer, as a
     ``kdb.Region`` -- the bare backbone (:func:`_drawn_route_region`) plus
@@ -1822,20 +1825,9 @@ def _drawn_leg_footprint_region(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-
     region = _drawn_route_region(points_um, width_um, dbu)
 
     for drop in via_drops:
-        if side_for_pair is not None and route_layer is not None:
-            # The drop rides along (#6058): the resolver, not the caller,
-            # classifies this landing from the drop's own marking.
-            side_um = side_for_pair(route_layer, drop["via_layer"], drop)
-        else:
-            side_um = _VIA_LANDING_SIZE_UM
-        landing_half_dbu = int(
-            round((side_um + _drop_array_extra_um(drop)) / 2.0 / dbu)
-        )
         landing_layers = drop.get("landing_layers")
         if (
             route_layer is not None
@@ -1843,15 +1835,8 @@ def _drawn_leg_footprint_region(
             and route_layer not in landing_layers
         ):
             continue  # this hop's pads are on a different layer than route_layer
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
         region.insert(
-            kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
+            _landing_pad_box(drop, route_layer, dbu, side_for_pair, cut_side_um)
         )
 
     for widen in stub_widen:
@@ -4044,6 +4029,11 @@ def route_bundle(
     explicit_legs: list[dict[str, Any]] | None = None,
     geometry_for_layer: Any = None,
     grid_um: float = 0.0,
+    pdk_variant: str | None = None,
+    auto_plane_climb: bool = True,
+    width_aware_conflict: Any = None,
+    landing_pad_side: Any = None,
+    route_dbu: Any = None,
 ) -> dict[str, Any]:
     """Route one ``connectivity[]`` net of *any* pin count (issue #1073).
 
@@ -4074,6 +4064,15 @@ def route_bundle(
     accepted, and the *next* candidate that would join the same two components
     is tried -- so an N-pin net routes around an individually unroutable pair
     whenever another spanning tree exists, rather than failing outright.
+
+    **Automatic plane climb (issue #6920).** Before a rejected leg gives up,
+    ``PlaneClimbContext.climb_leg``
+    (:mod:`klayout_tools.gen_compose_plane_climb`) retries it, plane by plane
+    up the resolved PDK's own metals stack, on the obstacle- and
+    conflict-class rejections a higher plane can lift; each attempt is a full
+    :func:`route_two_pin` pass plus the ``leg_conflict`` gate on that plane's
+    own geometry. Off for a net whose plane the caller named (#1655) and for
+    caller-supplied ``waypoints_um`` paths.
 
     **Partial routing when no spanning tree exists (issue #1169).** A net
     whose pins cannot all be joined into one component still gets every leg
@@ -4375,61 +4374,31 @@ def route_bundle(
             _endpoint_geometry(i, j, cross_block_geometry_for),
         )
 
-    # Route-vs-route cross-layer retry (issue #1680): `leg_conflict` (#1057)
-    # only ever runs *after* `route_two_pin()` has already returned
-    # `routed: True` on the primary `route_layer` -- so, unlike checks 3/4's
-    # own same-layer-short retry inside that function (#1168/#1393), a
-    # rejection here never got a chance to try `cross_block_route_layer`
-    # before failing the whole net. This closure re-runs the identical pin
-    # pair with the primary/cross layer roles swapped -- `cross_geometry`
-    # (this leg's own drawn-geometry cache for `cross_block_route_layer`,
-    # the same one checks 3/4's own retry already uses) standing in for
-    # `block_geometry`, `cross_block_geometry_for` standing in for
-    # `block_geometry_for` -- so every one of `route_two_pin`'s own checks
-    # (including its own via-drop resolution for a port whose reported
-    # layer differs from this new "primary") runs exactly as they would for
-    # a leg drawn on `cross_block_route_layer` from the start, not only the
-    # narrower same-block short case #1393 already covers. No further
-    # fallback layer is offered to this retried call (`cross_block_route_
-    # layer=None`) -- one level of retry, mirroring the bound every other
-    # detour search in this module already enforces (#1167/#1393).
-    def _retry_leg_on_cross_layer(
-        i: int,
-        j: int,
-        cross_geometry: Any,
-        leg_waypoints_um: list[tuple[float, float]] | None,
-        primary: dict[str, Any],
-        conflict: RouteConflict,
-    ) -> tuple[dict[str, Any], RouteConflict | None]:
-        if cross_block_route_layer is None or leg_conflict is None:
-            return primary, conflict
-        retry_width_um = (
-            cross_block_width_um if cross_block_width_um is not None else width_um
-        )
-        retry = route_two_pin(
-            pins[i],
-            pins[j],
-            blocks,
-            offsets_um,
-            placed_bboxes_um,
-            retry_width_um,
-            cross_block_route_layer,
-            extraction_deck,
-            cross_geometry,
-            waypoints_um=leg_waypoints_um,
-            leg_conflict=leg_conflict,
-            block_geometry_for=cross_block_geometry_for,
-            grid_um=grid_um,
-        )
-        if not retry["routed"]:
-            return primary, conflict
-        fallback = _leg_conflict_reason(retry, leg_conflict)
-        if fallback is not None:
-            return primary, RouteConflict(
-                f"{conflict.reason}; cross-block fallback {fallback.reason}",
-                conflict.blocking_net or fallback.blocking_net,
-            )
-        return retry, None
+    # Cross-plane leg retries: the request-configured cross_block_route_layer
+    # retry (#1680) and the automatic metals-stack plane climb (#6920) live in
+    # gen_compose_plane_climb.PlaneClimbContext (relocated out of this module
+    # at its size-ratchet ceiling) -- every attempt is a full route_two_pin()
+    # pass plus the leg_conflict gate, never a waived check.
+    climb_ctx = PlaneClimbContext(
+        pins=pins,
+        blocks=blocks,
+        offsets_um=offsets_um,
+        placed_bboxes_um=placed_bboxes_um,
+        width_um=width_um,
+        route_layer=route_layer,
+        pdk_variant=pdk_variant,
+        extraction_deck=extraction_deck,
+        cross_block_route_layer=cross_block_route_layer,
+        cross_block_width_um=cross_block_width_um,
+        cross_block_geometry_for=cross_block_geometry_for,
+        geometry_for_layer=geometry_for_layer,
+        leg_conflict=leg_conflict,
+        grid_um=grid_um,
+        auto=auto_plane_climb,
+        width_aware_conflict=width_aware_conflict,
+        landing_pad_side=landing_pad_side,
+        route_dbu=route_dbu,
+    )
 
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
@@ -4576,14 +4545,15 @@ def route_bundle(
                 grid_um=grid_um,
             )
             conflict = _leg_conflict_reason(result, leg_conflict)
-            if (
-                result["routed"]
-                and leg_conflict is not None
-                and conflict is not None
-                and result.get("route_layer") != cross_block_route_layer
-            ):
-                result, conflict = _retry_leg_on_cross_layer(
-                    i, j, cross_geometry, leg_spec.get("waypoints_um"), result, conflict
+            if conflict is not None:
+                result, conflict = climb_ctx.retry_rejected_leg(
+                    i,
+                    j,
+                    leg_spec.get("waypoints_um"),
+                    leg_effective_width_um,
+                    cross_geometry,
+                    result,
+                    conflict,
                 )
         reason = conflict.reason if conflict is not None else None
         blocking_net = conflict.blocking_net if conflict is not None else None
@@ -4656,13 +4626,9 @@ def route_bundle(
             grid_um=grid_um,
         )
         conflict = _leg_conflict_reason(result, leg_conflict)
-        if (
-            conflict is not None
-            and result["routed"]
-            and result.get("route_layer") != cross_block_route_layer
-        ):
-            result, conflict = _retry_leg_on_cross_layer(
-                i, j, cross_geometry, waypoints_um, result, conflict
+        if conflict is not None:
+            result, conflict = climb_ctx.retry_rejected_leg(
+                i, j, waypoints_um, width_um, cross_geometry, result, conflict
             )
         reason = conflict.reason if conflict is not None else None
         blocking_net = conflict.blocking_net if conflict is not None else None
