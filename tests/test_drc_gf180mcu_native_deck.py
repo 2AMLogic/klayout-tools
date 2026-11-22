@@ -221,13 +221,14 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
     layout.write(str(gds))
     from klayout_tools.drc_klayout_engine import run_drc_klayout_engine
 
-    def run(selector, expected=None):
+    def run(selector, expected=None, *, tolerate=False):
         return run_drc_klayout_engine(
             str(gds),
             deck["deck_file"],
             klayout_binary=binary,
             deck_vars={"variant": "gf180mcuA", "decks": selector},
             expected_rule_categories=expected,
+            allow_deck_errors=tolerate,
         )
 
     narrow = run("metaltop_30k")
@@ -236,11 +237,12 @@ def test_real_gf180_mt30_subset_cannot_earn_full_drc_credit(tmp_path):
     s = narrow["native_deck"]["deck_selection"]
     b = broad["native_deck"]["deck_selection"]
     assert s["selected"] == s["started"] == ["metaltop_30k"]
-    assert len(b["selected"]) == 171 and b["selected"] == b["started"]
+    full = run("all", tolerate=True)["native_deck"]["deck_selection"]
+    assert full["narrowed"] is False and full["omitted"] == []
+    assert b["selected"] == b["started"]
     assert b["omitted"] == [f"mslot{i}" for i in range(1, 7)]
-    assert set(s["omitted"]) == (set(b["selected"]) | set(b["omitted"])) - {
-        "metaltop_30k"
-    }
+    assert set(b["selected"]) == set(full["selected"]) - set(b["omitted"])
+    assert set(s["omitted"]) == set(full["selected"]) - {"metaltop_30k"}
     metal.clear()
     metal.insert(kdb.Box(0, 0, 4000, 10000))
     layout.write(str(gds))
