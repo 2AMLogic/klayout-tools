@@ -226,15 +226,14 @@ terminals' suffixes.
 | `res_array` | `A`, `B` | `_A`, `_B` |
 | `cap_array` | `A`, `B` | `_BOT`, `_TOP` |
 
-**`diff_pair` legs must be electrically distinct (#5765).** The two devices
-a `diff_pair` group declares are its two legs, so they must differ on both
-their gate and their drain nets. A group whose declared devices share their
-`G` net or their `D` net is an application error (exit 1) naming both
-devices, the shared terminal and net, and the remedy — two devices that
-agree on either are parallel fingers of one schematic instance or a
-duplicate declaration, never two legs, and binding both as legs shorts the
-pair (the shared net lands on both legs' ports while the second leg's own
-nets stay unmapped).
+**`diff_pair` legs must be electrically distinct (#5765).** Differential
+inputs need distinct gate and drain nets. With `params.mirror: true`, a
+current mirror may share its gate when one device is diode-connected and
+the other has a distinct drain. The reference netlist in
+`examples/signoff/schematic.spice` connects both gates and the input
+device's drain to `VIN` and the output drain to `VOUT`. A shared drain,
+a repeated device or a shared differential input produces an application
+error (exit 1) naming both devices and the shared terminal and net.
 
 The usual way to hit this is a **folded MOS**: a `form: "subckt-call"`
 digest expands `XM1 ... nf=2` into per-finger devices `1_F0` and `1_F1`

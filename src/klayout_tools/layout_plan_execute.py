@@ -1027,18 +1027,17 @@ def execute_layout_plan(
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
         family = None
         for group in device_groups:
-            # diff_pair legs must be electrically distinct (#5765): two
-            # digest devices sharing a gate or drain net are parallel
-            # fingers (typically of one folded nf>1 MOS) or a duplicate
-            # declaration, and binding both as legs shorts the pair. An
-            # application error, before any generation work.
-            leg_error = diff_pair_leg_error(group, digest_devices_by_key)
+            raw_params = raw_params_by_id.get(group["id"], {})
+            # Check the declared legs before generating the pair or mirror.
+            leg_error = diff_pair_leg_error(
+                group, digest_devices_by_key, mirror=raw_params.get("mirror") is True
+            )
             if leg_error:
                 raise LayoutPlanExecuteError(leg_error)
             params, param_warnings = _resolve_group_params(
                 group,
                 digest_devices_by_key,
-                raw_params_by_id.get(group["id"], {}),
+                raw_params,
                 digest,
             )
             warnings.extend(param_warnings)

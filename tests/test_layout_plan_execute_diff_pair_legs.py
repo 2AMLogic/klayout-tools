@@ -1,13 +1,8 @@
 """diff_pair distinct-legs guard in ``layout-plan execute`` (issue #5765).
 
-A ``diff_pair`` group's two declared devices are its two legs, so they
-must be electrically distinct: two digest devices that share their ``G``
-net or their ``D`` net are parallel fingers of one schematic instance --
-typically a folded ``nf > 1`` MOS, which a ``form: "subckt-call"`` digest
-expands into per-finger devices named ``<instance>_F0``, ``<instance>_F1``
-... (issue #1487) -- or the same device declared twice, never two legs.
-Binding such a pair as legs shorts the pair's gates and/or drains and
-leaves the second leg's own nets unmapped, with no ``warnings[]`` entry.
+Differential inputs need distinct gate and drain nets. A current mirror
+intentionally shares its diode-connected input's gate with the output.
+Folded fingers of one MOS or a repeated device cannot supply both legs.
 
 This file pins the application error (``LayoutPlanExecuteError``, exit 1)
 for every sharing shape -- the ``["1_F0", "1_F1"]`` repro (shared G *and*
@@ -15,11 +10,13 @@ D), shared-D-only, shared-G-only, and the same device declared twice --
 plus the declarations that must keep executing: one finger per leg (the
 ``["1_F0", "2_F0"]`` negative control, across the default/``mirror``/
 ``splits: 1`` param variants), an unfolded ``["1", "2"]`` pair, a single
-declared device, and a shared-gate ``mos_array`` group (a bias rail is
-legitimate there -- the guard is scoped to ``diff_pair`` only).
+declared device, a diode-connected current mirror, and a shared-gate
+``mos_array`` group.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -156,11 +153,12 @@ def test_shared_drain_only_rejected(tmp_path, pdk_root):
     assert "terminal G" not in message
 
 
-def test_shared_gate_only_rejected(tmp_path, pdk_root):
-    """Two legs sharing only their gate net (one input driving both) is
-    the classic mis-declaration. The error names the shared G terminal
-    and net, and does not claim the distinct drain is shared."""
-    request = _request(tmp_path, pdk_root, _SHARED_GATE_NETLIST, ["1", "2"])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_shared_gate_only_rejected(tmp_path, pdk_root, mirror):
+    """A shared gate without a diode-connected leg cannot identify a mirror."""
+    request = _request(
+        tmp_path, pdk_root, _SHARED_GATE_NETLIST, ["1", "2"], params={"mirror": mirror}
+    )
     with pytest.raises(LayoutPlanExecuteError) as excinfo:
         execute_layout_plan_document(request, request_dir=str(tmp_path))
     message = str(excinfo.value)
@@ -218,6 +216,38 @@ def test_unfolded_pair_still_executes(tmp_path, pdk_root):
     response = execute_layout_plan_document(request, request_dir=str(tmp_path))
     assert response["schema_version"] == 1
     assert [d["name"] for d in response["device_groups"][0]["devices"]] == ["1", "2"]
+
+
+@pytest.mark.parametrize("devices", [["1", "2"], ["2", "1"]])
+def test_signoff_current_mirror_routes_shared_gate(tmp_path, pdk_root, devices):
+    schematic = Path(__file__).resolve().parents[1] / "examples/signoff/schematic.spice"
+    request = _request(
+        tmp_path,
+        pdk_root,
+        schematic.read_text(),
+        devices,
+        params={"mirror": True, "splits": 1},
+        top="current_mirror",
+    )
+    request["netlist"].update(path=str(schematic), form="plain-element")
+    request["routing"]["cross_block_layer_role"] = "metal2"
+    response = execute_layout_plan_document(request, request_dir=str(tmp_path))
+
+    assert response["unmapped_netlist_nets"] == []
+    assert response["unrouted_nets"] == []
+    vin = next(net for net in response["nets"] if net["net"] == "VIN")
+    input_leg = devices.index("1") + 1
+    output_leg = devices.index("2") + 1
+    assert vin["routed"] is True
+    assert {pin["port"] for pin in vin["pins"]} == {
+        "M1_1_G",
+        "M2_1_G",
+        f"M{input_leg}_1_D",
+    }
+    assert any(
+        pin["net"] == "VOUT" and pin["port"] == f"M{output_leg}_1_D"
+        for pin in response["pins"]
+    )
 
 
 def test_single_declared_device_unchanged(tmp_path, pdk_root):

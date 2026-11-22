@@ -115,24 +115,13 @@ def _netlist_derived_size_params(
 def diff_pair_leg_error(
     group: dict[str, Any],
     digest_devices_by_key: dict[tuple[str, str], dict[str, Any]],
+    *,
+    mirror: bool,
 ) -> str | None:
-    """Application-error text when a ``diff_pair`` group's declared devices
-    are not two electrically distinct legs (#5765), else ``None``.
+    """Reject a repeated MOS, folded fingers or shorted differential inputs.
 
-    A differential pair's two legs necessarily differ on their gate *and*
-    drain nets; two digest devices that agree on either are parallel
-    fingers of one schematic instance -- typically a folded ``nf > 1`` MOS,
-    which a ``form: "subckt-call"`` digest expands into per-finger devices
-    named ``<instance>_F0``, ``<instance>_F1``, ... (issue #1487) -- or the
-    same device declared twice, and binding both as legs shorts the pair
-    (the k-th-device binding ties the legs' shared net to both legs' ports
-    and leaves the second leg's own nets unmapped). Scoped to ``diff_pair``
-    only: a ``mos_array`` group legitimately declares devices that share a
-    gate net (a bias rail), and every other generator has no ``G``/``D``
-    terminals at all. The caller raises the error with the returned text --
-    this module cannot import
-    :class:`klayout_tools.layout_plan_execute.LayoutPlanExecuteError`
-    without a circular import.
+    The mirror form may share a gate when the two drains are distinct and one
+    is tied to that gate. Other generators use their own terminal conventions.
     """
     if group["generator"] != "diff_pair" or len(group["devices"]) < 2:
         return None
@@ -150,25 +139,30 @@ def diff_pair_leg_error(
                 # validation error (exit 1, "does not resolve"); skip it
                 # here exactly like derive_gate_contact does.
                 continue
-            shared = [
-                f"terminal {terminal} on net '{device_i['terminals'][terminal]}'"
-                for terminal in ("G", "D")
-                if device_i["terminals"].get(terminal) is not None
-                and device_i["terminals"].get(terminal)
-                == device_j["terminals"].get(terminal)
-            ]
+            left, right = device_i["terminals"], device_j["terminals"]
+            shared = {
+                t: left[t]
+                for t in ("G", "D")
+                if left.get(t) is not None and left.get(t) == right.get(t)
+            }
+            if (
+                mirror
+                and shared.keys() == {"G"}
+                and shared["G"] in (left.get("D"), right.get("D"))
+            ):
+                continue
             if shared:
+                terminals = " and ".join(
+                    f"terminal {t} on net '{net}'" for t, net in shared.items()
+                )
                 return (
                     f"device_groups (id '{group['id']}'): declared diff_pair "
                     f"devices '{name_i}' and '{name_j}' are not electrically "
-                    f"distinct legs -- they share {' and '.join(shared)}. Two "
-                    "devices that agree on their gate or drain net are parallel "
-                    "fingers of one schematic instance (a folded nf>1 MOS "
-                    "digests as per-finger devices '<instance>_F0', "
-                    "'<instance>_F1', ...), not two legs of a differential "
-                    "pair, and binding both shorts the pair. Declare one "
-                    "digest device per leg -- write the reference netlist's "
-                    "matched pair with no nf (or nf=1) and let params.splits "
+                    f"distinct legs -- they share {terminals}. Differential "
+                    "inputs need separate gates and drains. A current mirror "
+                    "may share its diode-connected gate with params.mirror=true. "
+                    "Declare one digest device per leg, write the matched pair "
+                    "with no nf (or nf=1) and let params.splits "
                     "do the folding -- or drive klt gen-compose directly with "
                     "explicit connectivity[] (see "
                     "docs/cli/layout-plan-execute.md)."
