@@ -3657,7 +3657,9 @@ not just equivalent.
   whether it failed mid-run or was submitted but never launched (an
   unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
   see "Unlaunched shards are a resumable signal" above). The array is
-  positional: index *i* is shard *i*, in the shard map's order, so a client
+  positional: index *i* is shard *i*, in the shard map's order. On the batch
+  backend, a null slot has only unrun error corners, even if the collector
+  returned measurements without a remote block. A client
   collecting per-job metadata across `fleet[]` must skip the `null` slots
   rather than dereference them, and read job identity and runner skew from
   the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
