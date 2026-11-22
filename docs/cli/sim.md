@@ -4922,10 +4922,20 @@ rawfile `write` and `linearize`, and before the `expr` lets. A two-tone bench:
 ```
 
 After `fft` the current plot is the spectrum, so `expr` measurements read
-spectrum bins (`a`, `b` here), not time-domain vectors. Each entry's first
-token must be `linearize` or `fft` -- an allowlist, not a control-line
-passthrough. Refused with exit 1 (naming `analysis.post_commands[i]` where an
-entry is at fault): a non-list or empty value, a non-string entry, an entry
+spectrum bins (`a`, `b` here). Bare `linearize` resamples all vectors. To
+select vectors, give it a space-separated list such as `v(out) i(V1)`. Both
+commands accept bare vector names, numeric nodes, branch currents such as
+`v1#branch`, and device parameters such as `@m1[id]`. Names may contain
+letters, digits, underscores, periods and colons.
+
+`fft` requires at least one waveform expression. It also accepts differential
+voltage (`v(a,b)`), numeric factors, arithmetic (`+ - * / ^ %`), grouping
+parentheses and the functions `mag`, `abs`, `real`, `imag`, `db` and `ph`.
+For example, `fft v(a) mag(v(a) - v(b))` transforms two waveforms. Invalid
+arguments produce an indexed `analysis.post_commands[i]` error before the
+deck is composed.
+
+The following are also refused with exit 1: a non-list or empty value, a non-string entry, an entry
 containing a newline or `;`, a first token outside the allowlist, a non-`tran`
 analysis, use inside `analysis_steps[]`, `engine: "xyce"`, and any measurement
 other than `expr`/`spice` (crossings, energy, eye, ... read the transient plot,

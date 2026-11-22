@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from klayout_tools import sim
+from klayout_tools import sim, sim_post_commands
 from klayout_tools import sim_batch_contract_spec as spec
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
@@ -87,17 +87,64 @@ def test_deck_is_unchanged_without_post_commands():
         ("fft v(a)", "must be a list"),
         ([], "must not be empty"),
         ([7], r"post_commands\[0\] must be a string"),
-        (["fft v(a)", "echo hi"], r"post_commands\[1\] must start with"),
-        (["fft v(a)\nquit"], r"post_commands\[0\] must be a single"),
-        (["fft v(a); quit"], r"post_commands\[0\] must be a single"),
+        (["fft v(a)", "unknown"], r"post_commands\[1\] must start with"),
+        (["fft v(a)\n"], r"post_commands\[0\] must be a single"),
+        (["fft v(a);"], r"post_commands\[0\] must be a single"),
         ([""], r"post_commands\[0\] must start with"),
         (["fftx v(a)"], r"post_commands\[0\] must start with"),
     ],
 )
-def test_bad_post_commands_are_refused(tmp_path, post, match):
+def test_bad_post_commands_are_refused(post, match):
     analysis = {**_TRAN, "post_commands": post}
     with pytest.raises(sim.SimError, match=match):
-        sim.run_sim(str(_request(tmp_path, analysis)))
+        sim_post_commands.validate(analysis, [_EXPR])
+
+
+@pytest.mark.parametrize("verb", ["linearize", "fft"])
+@pytest.mark.parametrize(
+    "args", ["v(a) >", "v(a) <", "v(a) ?", "v()", "v(a)\v", "v(a)\x00"]
+)
+def test_invalid_waveform_arguments_name_the_entry(verb, args):
+    analysis = {**_TRAN, "post_commands": ["linearize", f"{verb} {args}"]}
+    with pytest.raises(sim.SimError, match=r"analysis\.post_commands\[1\].*waveform"):
+        sim_post_commands.validate(analysis, [_EXPR])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "fft",
+        "fft (v(a)",
+        "fft v(a) +",
+        "fft v(a))",
+        "fft mag()",
+        "fft v(a)v(b)",
+        "fft unknown(v(a))",
+        "fft unknown (v(a))",
+        "linearize v(a,b)",
+    ],
+)
+def test_malformed_or_unsupported_expressions_are_refused(command):
+    with pytest.raises(sim.SimError, match=r"post_commands\[0\].*waveform"):
+        sim_post_commands.validate({**_TRAN, "post_commands": [command]}, [_EXPR])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "linearize",
+        "linearize V(x1.out) i(V1) 3 time v1#branch @m1[id]",
+        "fft V(a, b) mag(v(a) - v(b))",
+        "fft (v(a) + i(V1)) / 2",
+        "fft -v(a) * 2e-3 + .5m",
+        "fft REAL(MAG(v(x1.out)))",
+        "fft @m1[id] va#branch",
+    ],
+)
+def test_supported_waveform_arguments_are_preserved(command):
+    analysis = {**_TRAN, "post_commands": [f" \t{command}  "]}
+    sim_post_commands.validate(analysis, [_EXPR])
+    assert sim_post_commands.control_lines(analysis) == [command]
 
 
 def test_post_commands_refused_on_non_tran(tmp_path):
@@ -143,14 +190,39 @@ def test_post_commands_gate_requires_runner_0_9_3():
 
 
 @pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed")
-def test_real_ngspice_reads_spectrum_bin_after_fft(tmp_path):
-    analysis = {**_TRAN, "post_commands": _POST}
+@pytest.mark.parametrize(
+    ("post", "readout"),
+    [
+        (_POST, "mag(a[20])"),
+        (
+            ["linearize", "fft v(a) v(b) mag(v(a) - v(b))"],
+            'mag("mag(v(a) - v(b))"[20])',
+        ),
+    ],
+)
+def test_real_ngspice_reads_spectrum_bin_after_fft(tmp_path, post, readout):
+    analysis = {**_TRAN, "post_commands": post}
+    measurements = [
+        {"name": name, "expr": f"mag({node}[{index}])", "unit": "V"}
+        for node, index, name in [
+            ("a", 20, "a10k"),
+            ("a", 24, "a12k"),
+            ("b", 20, "b10k"),
+            ("b", 24, "b12k"),
+        ]
+    ]
+    measurements.append({"name": "readout", "expr": readout, "unit": "V"})
     report = sim.run_sim(
-        str(_request(tmp_path, analysis, options={"keep_artifacts": True})),
+        str(
+            _request(tmp_path, analysis, measurements, options={"keep_artifacts": True})
+        ),
         artifacts_dir=str(tmp_path / "a"),
     )
     assert report["status"] == "pass", [c["diagnostics"] for c in report["corners"]]
     (corner,) = report["corners"]
-    assert corner["measurements"][0]["value"] > 0
+    values = {m["name"]: m["value"] for m in corner["measurements"]}
+    assert values["readout"] > 0
+    assert values["a10k"] > 10 * values["a12k"] > 0
+    assert values["b12k"] > 10 * values["b10k"] > 0
     deck = Path(corner["artifacts"]["deck"]).read_text().splitlines()
-    assert deck.index("fft v(a) v(b)") < deck.index(f"let m = {_EXPR['expr']}")
+    assert deck.index(post[-1]) < deck.index("let a10k = mag(a[20])")
