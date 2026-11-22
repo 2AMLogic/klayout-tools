@@ -46,6 +46,11 @@ def test_attach_reports_a_non_404_probe_failure_as_a_transport_error(tmp_path, s
     "stderr",
     [
         "404",
+        "404 Not Found",
+        "NoSuchKey",
+        "aws: [ERROR]: An error occurred (404) when calling the HeadObject operation "
+        "(reached max retries: 0): Not Found",
+        "An error occurred (NotFound) when calling the HeadObject operation: Not Found",
         "An error occurred (404) when calling the HeadObject operation: Not Found",
         "An error occurred (NoSuchKey) when calling the HeadObject operation",
     ],
@@ -58,6 +63,30 @@ def test_attach_still_reports_a_404_as_an_unknown_job(tmp_path, stderr):
         _attach(tmp_path, runner)
 
     assert excinfo.value.code == sb.BATCH_UNKNOWN_JOB_CODE
+
+
+@pytest.mark.parametrize("job_id", ["a" * 32, "a" * 12 + "404" + "a" * 17])
+def test_job_id_in_connection_error_does_not_imply_a_missing_object(tmp_path, job_id):
+    detail = (
+        "aws: [ERROR]: Connect timeout on endpoint URL: "
+        f'"http://127.0.0.1:8080/example/jobs/{job_id}/job.json"'
+    )
+    runner = _FakeRunner()
+    runner.queue("job.json", fake_completed(returncode=255, stderr=detail))
+    with pytest.raises(sb.BatchError) as error:
+        sb.job_exists(_config(tmp_path), job_id, runner=runner)
+    assert detail in str(error.value)
+
+
+def test_job_exists_uses_the_service_code_even_when_detail_mentions_a_missing_key(
+    tmp_path,
+):
+    detail = "An error occurred (403) when calling the HeadObject operation: Not Found"
+    runner = _FakeRunner()
+    runner.queue("job.json", fake_completed(returncode=254, stderr=detail))
+    with pytest.raises(sb.BatchError) as error:
+        sb.job_exists(_config(tmp_path), "job-1", runner=runner)
+    assert detail in str(error.value)
 
 
 def test_job_exists_probes_with_head_object_not_a_body_download(tmp_path):
