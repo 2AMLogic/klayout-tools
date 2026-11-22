@@ -16,14 +16,19 @@ _DYNAMIC = (
 )
 # The same deck with gminsteps=2 (ngspice-47 prints this method in lowercase).
 _SPICE3 = "Note: Starting spice3 gmin stepping\nNote: spice3 gmin stepping completed\n"
-# The failure line is not a captured run: no simple deck made spice3 gmin fail, so it
-# joins ngspice-47's own "spice3 gmin stepping failed" string to the "Warning: "
-# prefix the engine uses for the dynamic and true gmin failures in _PRIOR.
-_SPICE3_FAILED = (
-    "Note: Starting spice3 gmin stepping\nWarning: spice3 gmin stepping failed\n"
-)
 # The same deck with gminsteps=0.
 _SOURCE = "Note: Starting source stepping\nNote: Source stepping completed\n"
+# Captured during a single ngspice-47 .op run on this nonlinear circuit:
+# V1 in 0 2
+# R1 out 0 1k
+# B1 out 0 I=v(out)*v(out)*v(out)-2*v(out)+v(in)
+# .options noopiter gminsteps=2 itl1=10
+_SPICE3_TO_SOURCE = (
+    "Note: Starting spice3 gmin stepping\n"
+    "Warning: spice3 gmin stepping failed\n"
+    "Note: Starting source stepping\n"
+    "Note: Source stepping completed\n"
+)
 _PRIOR = (
     "Note: Starting dynamic gmin stepping\nWarning: Dynamic gmin stepping failed\n"
     "Note: Starting true gmin stepping\nWarning: True gmin stepping failed\n"
@@ -38,7 +43,7 @@ _CODE = "dc_homotopy_recovery"
         (_DYNAMIC, "dynamic gmin", ""),
         (_SOURCE, "source", ""),
         (_SPICE3, "spice3 gmin", ""),
-        (_SPICE3_FAILED + _SOURCE, "source", " after spice3 gmin stepping failed"),
+        (_SPICE3_TO_SOURCE, "source", " after spice3 gmin stepping failed"),
         (
             _PRIOR + _SOURCE,
             "source",
