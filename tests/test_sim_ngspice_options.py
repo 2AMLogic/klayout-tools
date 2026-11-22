@@ -283,7 +283,7 @@ def test_batch_job_with_stale_runner_echo_fails_loudly(tmp_path, monkeypatch):
         "read_collected_report",
         lambda _d: {"corners": [], "environment": {"engine_version": "ngspice-46"}},
     )
-    monkeypatch.setattr(sim_batch, "_build_batch_job_spec", lambda *a, **k: {})
+    (tmp_path / "body.spice").write_text("R1 out 0 1k\n")
     monkeypatch.setattr(sim_batch, "_batch_environment", lambda *a, **k: {})
     monkeypatch.setattr(sim_batch, "_read_job_identity", lambda *a, **k: {})
 

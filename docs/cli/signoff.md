@@ -806,7 +806,7 @@ a second input the envelope happens to mention:
 | `sim` | `netlist` | The SPICE deck it simulated. |
 | `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
 | `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. Since `klt sta` schema 2 (issue #2879) both are `{path, scope}` envelopes, so a repo-scoped input verifies from any checkout; an older absolute string can also verify against a same-named file beside the evidence when its content hash matches. |
-| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. Exception (issue #5963): when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
+| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` when a tracked or non-checkout samples file is hashed. In a functioning checkout the index excludes untracked samples (#6139). Without another source, both fields are then `null`. With a store pin (issue #5963), when the samples document is store-pinned through a committed `artifact_manifest` (see "Citing an object in the artifact store" above), the hash is the manifest's recorded `sha256`, not a re-hash — `input_verified` is `null` and the citation says so via `content_hash_basis: "artifact_manifest"`. |
 
 **`klt pex` schematic-side inputs (issue #2875).** A `pex` envelope that
 records `testbenches[].{request,netlist,schematic_netlist}_sha256` and/or
@@ -1342,6 +1342,48 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
   the bare key, so the qualified form never borrows the other partition's
   evidence: `"7.analog"` on a `"digital"` manifest matches nothing and the
   item falls through to `"7"` (and, absent that, to `unmet`/`no_evidence`).
+- `disclosed_evidence` — optional (default absent, issue #6953), a map from
+  item key to a **local file path**, disclosing evidence produced *outside*
+  `klt` that this grader cannot read but the maintainer attests exists:
+
+  ```json
+  {
+    "block": "demo",
+    "kind": "digital",
+    "disclosed_evidence": {
+      "1": "netlist/demo.v",
+      "5.digital": "reports/sta.json"
+    }
+  }
+  ```
+
+  A block whose flow legitimately ran through external scripts — OpenROAD
+  STA results, a synthesized netlist from RTL pinned in another repository —
+  has no `evidence` form for those artifacts (citing a foreign document
+  renders `unreadable_evidence`/`unrecognized_envelope`), so its rows read
+  `unmet`/`no_evidence`: a reason asserting *no evidence exists*, which a
+  fleet reader mistakes for "the work was never done". A disclosure fixes
+  the *record*, not the verdict: the grader's only statement about a
+  disclosed path is that it names a readable local file — the contents are
+  never parsed, classified, executed, or interpreted as a grading envelope —
+  and the row stays `unmet` with `reason: "evidence_not_klt_native"` and the
+  declared path in `detail.disclosed_evidence`. No T1 credit, no
+  `citation`, no exit-code change; a disclosure is identification, never a
+  verdict, so a valid native envelope at a disclosed path still cannot
+  confer credit. Paths resolve against the process working directory, the
+  same convention as a local file-backed `evidence` citation; a path that
+  is missing, a directory, or unreadable renders
+  `unmet`/`unreadable_evidence` instead, still naming the path. Keys use
+  the `evidence` map's grammar (`"<item id>"` or
+  `"<item id>.<analog|digital>"`) and its precedence — the qualifier for
+  the partition being graded first, then the bare key — so a disclosure
+  keyed only to `5.digital` on a mixed-signal block affects only the
+  digital row. A disclosure applies only to a row this build graded whose
+  verdict would otherwise be `unmet`/`no_evidence`; a native pass, a native
+  citation failure, or a spec-row verdict keeps its original status and
+  reason. A malformed declaration (a non-object map, a key that is not an
+  item key, a value that is not a non-empty string path) is a validation
+  error, not a silent no-op.
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
@@ -4956,13 +4998,8 @@ checkout with a Rust toolchain. A bare
 `pip install klayout-tools` and the git-pinned (`@git+…`) form do not
 include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
-callout for the full statement and the build steps). Every *other* T1
-item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
-`functional-verification`, `erc`, `place-and-route` — is reachable from a
-published release, so item 6 is the one row that additionally needs the
-from-source build (the `[yield]` extra once published) to produce evidence for, or to
-re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
-campaign around it.
+callout for the full statement and the build steps). Install the yield extension on the host that will produce or
+re-derive item 6 evidence before scheduling the campaign.
 
 This changes nothing about how the item grades: a `klt yield` report cites,
 hashes, and grades exactly as described here and in "Worked example:
@@ -5673,6 +5710,15 @@ never affected by this: its `samples` path is already resolved relative to
 the entry's own `cwd`, the same directory the subprocess that produced it
 ran in.
 
+In a functioning git checkout, samples candidates must be tracked by that
+checkout's index, just like other input artifacts (issue #6139). Untracked
+samples are excluded before hashing and from `content_hash_unresolved.searched`
+so both disclosures use the same index basis, whether the file is present or
+absent. Each symlink in the lookup must be tracked. For paths such as
+`scratch/../samples.json`, the index must also contain an entry under
+`scratch/` so a fresh checkout creates that directory. Trees without `.git`,
+including copies graded with `--repo-root`, keep filesystem-presence resolution.
+
 When the disk lookup fails, a file-backed entry can still resolve the
 samples digest through its declared store manifest. If lookup fails across
 all available sources, `content_hash` is `null` and
@@ -5799,9 +5845,9 @@ resolved hash renders `unmet`/`unverifiable_provenance`.
 | `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, `"socket-check"`, `"lef-abstract"`, `"synthesize"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
-| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
+| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context — including one inside a functioning git checkout whose index does not track it, the index being the grading basis since issue #5857: an untracked input grades `null` by design, including a local yield samples file since #6139). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `runset_rehash_status` | string | `"unverifiable"` appears on a pinned PDK-runset LVS citation when signoff cannot hash the report's top-level `deck_file` (issue #6452). Look for it in item 4's `citation` or in the LVS entry in item 11's `citation.parts`. Signoff resolves relative deck paths from its own working directory. A missing, non-string, or unreadable path allows an otherwise valid item to remain `met` with this disclosure. |
-| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document — an absent key never means "the input was verified", only that this particular failure mode did not occur; the byte-verification verdict lives in `input_verified`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own when no digest resolves, independent of this field. |
+| `content_hash_unresolved` | object | Present when a `yield` report names a samples document and signoff cannot resolve its hash (issues #2197 and #5963). `samples` is the report's reference and `searched` lists the disk paths tried, in order. Paths excluded by the git index are omitted, so the list can be empty (#6139). If a declared store manifest also fails to supply the digest, `artifact_manifest` names its path and `reason` is one of `manifest_unreadable`, `manifest_invalid`, `member_missing`, `duplicate_member`, or `ambiguous_member`. A passing unpinned entry carries the object on its citation. For a pinned unmet item it appears in `detail.content_hash_unresolved`. The field is absent when a digest resolves or the report names no samples document — an absent key never means "the input was verified", only that this particular failure mode did not occur; the byte-verification verdict lives in `input_verified`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own when no digest resolves, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. `status: "not_assessed"` (issue #6559: a `klt pex --engine klayout-runset` leg, which never runs the check) carries `null` for both `unbiased_device_count` and `unbiased_nets` — not `0` / `[]` — and the text rendering prints no count for it; the same citation then also carries `pex_extraction` (`{"engine", "parasitics_carried", "params_not_carried"}` plus `substrate_return` when present, quoted from the cited envelope's `extraction`; absent for a curated-deck run), rendered as a `pex extraction:` text line beside `body bias:`. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. For a **grouped** citation (issue #5597) these are the *leading group's* parts, and every group's own parts live in the item-level `citations` array (one compound citation per group, in manifest order) beside `citations_graded` and `members_covered`/`members_total` — see "Item 11 is compound" above. **Absent** for every other item. |
@@ -5825,6 +5871,7 @@ actually ran and failed):
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
+| `"evidence_not_klt_native"` | yes | **(issue #6953)** The item has no `evidence` entry, but the manifest's `disclosed_evidence` map named a local artifact for it that this grader cannot read — evidence produced outside `klt` (an OpenROAD STA report, a netlist synthesized from foreign RTL) which no T1 item accepts as a citation. The grader's only claim is that the disclosed path names a readable file (`detail.disclosed_evidence`); its contents are never parsed or interpreted as a grading envelope, and the item still grades `unmet` with no `citation` and no credit — a disclosure is identification, never a verdict. Distinct from `"no_evidence"` (whose meaning, "the manifest has no entry for the item", would otherwise read as "the work was never done"); an unreadable disclosed path renders `"unreadable_evidence"` instead. See the `disclosed_evidence` manifest field above. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). **Item 11 only** (issue #5597): also rendered when a compound cited set names two parts of the same kind (previously resolved last-wins — an order-dependent reduction that could grade a partition `met` on its clean stream alone), or when a grouped citation's nesting is not all-or-nothing (an outer list mixing a group with a bare entry, or carrying an empty inner list). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. A gzip-compressed file is read directly (issue #5452) — only a *truncated* or *damaged* gzip stream lands here on that account. A `not_applicable` object (item 6) also lands here under a grader older than 0.8.0, which predates that form. |
 | `"artifact_unavailable"`  | yes | **(issue #5882)** A cited `artifact:<key>` URI — the evidence file, or the input path of a cited envelope — could not be turned into verified bytes: no `--artifact-manifest`, no entry for the key, no broker configured or reachable, or the fetched bytes failed the manifest's sha256/size. `detail` carries `artifact` and `problem`. See "Citing stored evidence: `--artifact-manifest`" above. |

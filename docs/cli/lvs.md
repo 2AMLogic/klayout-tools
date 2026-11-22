@@ -6,7 +6,7 @@ Epic #153, following the layout-vs-schematic pattern
 [`klt extract`](extract.md) established for extraction.
 
 ```
-klt lvs <request> [-o <report.json[.gz]>] [--format text|json]
+klt lvs <request> [--expect-deck-hash <hash>] [-o <report.json[.gz]>] [--format text|json]
 klt lvs --check <report.json> [--layout <path>] [--reference <path>] [--rerun] [--format text|json]
 ```
 
@@ -54,6 +54,14 @@ cleanly.
   never silently overrides a request document. Never sets
   `reference.deck` (the reference-netlist rewriting deck — a different
   knob). Refused with `--check`.
+- `--expect-deck-hash HASH` — opt-in deck-pin assertion (issue #5806): vouch
+  for the deck bytes this run uses by passing the exact
+  `provenance.deck.content_hash` value to expect (`sha256:<64 hex>`; take it
+  from an earlier report). Compared against the run's own recorded hash after
+  the compare: a mismatch — or a pre-extracted `layout.netlist` run, which
+  records no deck — fails with the error envelope (exit `1`) naming the deck
+  and both hashes. A matching run is unchanged. Rejected with `--check`.
+  See "Deck-pin assertion" below.
 - `--omit-mismatches` — blank the response's `mismatches[]` array so a
   failing compare's report stays small enough to commit verbatim (issue
   #5610, mirroring `klt erc --omit-antenna-tables`; the request-document
@@ -616,6 +624,29 @@ a two-cell fixture: without `flatten_layout`/`flatten_reference` the
 hierarchical compare still does not match (sub-cell circuits are not paired
 with differently-named reference `.SUBCKT`s), so the flattened recipe is the
 supported path.
+
+##### Diagnosing missing layout port names
+
+When `counts.pins.layout` is smaller than expected, inspect `warnings` and
+`ignored_layers`. Inline extraction uses the effective deck, including any
+`layout.label_layers` overrides. If the selected top cell has text but none
+on a pin-label layer, `warnings` lists the layer/datatype pairs where text
+was actually drawn. For example, a SKY130 layout whose li1 labels are on
+67/10 can select that purpose with `"label_layers": {"metal0": [67, 10]}`.
+Text inside an instance does not establish that the top cell has port text.
+
+`ignored_layers` uses the same `{layer, datatype, shapes}` rows and
+stream-wide shape counts as `klt extract`. With a pre-extracted
+`layout.netlist`, both extraction diagnostic arrays are empty.
+
+`pin_set_difference` compares the named ports of the selected top circuits
+in both input forms. It folds case and applies the same gate-level reference
+port aliases used in comparison. `layout_only_pins` and
+`reference_only_pins` each show up to 20 names. Their `_count` fields give
+the full totals and their `_truncated` flags indicate an incomplete sample.
+A layout pin named for the extraction deck’s synthesized substrate appears
+under `deck_synthesized_layout_pins`. These fields describe name coverage
+independently of the topology verdict.
 
 ##### Routed multi-cell blocks (issue #4610)
 
@@ -2612,6 +2643,34 @@ byte-identical to `--format json` stdout (gzip-compressed when `PATH` ends
 exit codes are unchanged. An unwritable `PATH` is the standard error envelope
 (exit `1`). Rejected with `--check`, which emits no run report. Mirrors
 `klt drc -o` (#4393).
+
+## Deck-pin assertion (`--expect-deck-hash`)
+
+`klt lvs` accepts the same opt-in deck-pin assertion as `klt drc`
+(issue #5806; the full rules are in [`drc.md`](drc.md), "Deck-pin assertion"):
+pass the exact `provenance.deck.content_hash` value an earlier report recorded
+and every later run vouches for those deck bytes.
+
+```bash
+klt lvs request.json \
+  --expect-deck-hash sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad \
+  --format json
+```
+
+- The comparison happens after the compare, against the run's own recorded
+  hash, before anything is written or emitted. A **mismatch** is the error
+  envelope (exit `1`) naming the deck, the expected and the observed hash —
+  a deck bump becomes a loud, reviewed event instead of a silent re-score of
+  locked expectations.
+- A pre-extracted `layout.netlist` request involves no deck and records no
+  hash, so an assertion against that shape **fails loudly** rather than
+  passing vacuously.
+- The value must be the `sha256:<64 hex>` form `provenance.deck.content_hash`
+  emits; anything else is a usage error (exit `2`) before the compare runs.
+- A **matching** run is byte-identical to a run without the flag: no
+  exit-code change, no report field, no `schema_version` bump.
+- Rejected with `--check`, which re-verifies the committed report's own
+  recorded deck hash instead.
 
 ## Request
 

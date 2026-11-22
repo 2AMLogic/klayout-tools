@@ -14,6 +14,7 @@ import argparse
 from collections.abc import Callable
 
 from . import lvs_cmd
+from ._deck_hash_parser_args import add_expect_deck_hash_arg
 
 
 def add_lvs_parser(
@@ -161,6 +162,7 @@ def add_lvs_parser(
             "stage) when stderr is not a TTY; --no-progress forces off"
         ),
     )
+    add_expect_deck_hash_arg(lvs_parser)
     lvs_parser.add_argument(
         "--omit-mismatches",
         action="store_true",

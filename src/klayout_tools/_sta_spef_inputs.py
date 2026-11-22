@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from ._digest import content_hash_required
-from ._sta_request_diag import PostRouteStaError
+from .post_route_sta_errors import PostRouteStaError
 
 _INTERCONNECT_CORNERS = ("min", "nom", "max")
 
