@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from test_artifact_store import REPO, _run, _stored, broker, report  # noqa: F401  (broker/report: pytest fixtures)
+from test_artifact_store import REPO, _key, _run, _stored, broker, report  # noqa: F401  (broker/report: pytest fixtures)
 
 
 @pytest.fixture(autouse=True)
@@ -62,3 +62,43 @@ def test_other_delete_refusal_stays_broker_refused(tmp_path, capsys, request):
     assert code == 1
     assert error["code"] == "broker_refused"
     assert error["broker_status"] == 403
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [(404, "unsupported_operation"), (403, "broker_refused")],
+)
+def test_later_refusal_reports_completed_deletes(
+    status, expected_code, capsys, request, monkeypatch
+):
+    fake = request.getfixturevalue("broker")
+    first, second = "a" * 64, "b" * 64
+    fake.objects.update({_key(REPO, first): b"first", _key(REPO, second): b"second"})
+    original_answer = fake.answer
+
+    def answer(op, body):
+        if op == "delete" and body["sha256"] == second:
+            return status, {"error": "refused", "message": "second object refused"}
+        return original_answer(op, body)
+
+    monkeypatch.setattr(fake, "answer", answer)
+    code, _, err = _run(
+        [
+            "artifact",
+            "delete",
+            first,
+            second,
+            "--repo",
+            REPO,
+            "--yes",
+            "--format",
+            "json",
+        ],
+        capsys,
+    )
+    error = json.loads(err)["error"]
+    assert fake.objects == {_key(REPO, second): b"second"}
+    assert code == 1 and error["code"] == expected_code
+    assert error["broker_status"] == status and error["broker_error"] == "refused"
+    assert error["message"].endswith(f"previously deleted: {first}")
+    assert "nothing was deleted" not in error["message"]

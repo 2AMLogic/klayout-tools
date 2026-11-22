@@ -53,10 +53,8 @@ never falls back to a local copy or a direct store path.
   any retention policy; the client has no list op, so it deletes only objects
   it is told to name. A broker without `/v1/delete` answers a route-level
   refusal (404, 405 or 501) — since `stat` had already confirmed the object
-  present, `klt` surfaces that as `unsupported_operation` (exit 1, nothing
-  deleted) rather than `broker_refused`, so a script can tell "this broker
-  has no delete" from "you may not delete". Any other refusal (403, 5xx, ...)
-  stays `broker_refused`, without retrying or falling back.
+  present, `klt` surfaces that as `unsupported_operation` (exit 1).
+  Other refusals, including 403 and 503, keep `broker_refused`.
 - A **refusal** is `{"error", "message"}` with a 4xx or 5xx status. Examples
   are 403 `repo_firewalled`, `repo_unknown`, `not_granted` or `unknown_caller`,
   503 `fleet_unavailable`, 429, and 502 `store_error`.
@@ -327,9 +325,11 @@ refused with 404, 405 or 501 — `stat` had already reported the object
 present, so the route, not the object, is what is missing — `delete` exits
 `1` with `error.code: "unsupported_operation"`, whose `error` still carries
 `broker_status`, `broker_error` and `broker_message`, and whose message says
-the broker does not implement delete and that nothing was deleted. Other
-refusals (403 `not_granted`, 503 `fleet_unavailable`, ...) keep
-`error.code: "broker_refused"`.
+the broker does not implement delete for that object. The command stops at
+the first refusal. If earlier deletes succeeded, the diagnostic lists their
+SHA-256 digests. If none succeeded, an unsupported-operation message says
+nothing was deleted. Other refusals, including 403 `not_granted` and
+503 `fleet_unavailable`, keep `error.code: "broker_refused"`.
 
 `--format json`: `{schema_version: 1, status: "dry_run"|"deleted", objects:
 [{sha256, key, status}], guard: {keep_manifests, checked, forced}}`; in a dry

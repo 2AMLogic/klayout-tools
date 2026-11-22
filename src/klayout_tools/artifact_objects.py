@@ -397,31 +397,26 @@ def referenced_digests(keep_manifests: list[str]) -> dict[str, str]:
     return referenced
 
 
-#: Statuses meaning the broker has no ``/v1/delete`` route at all (vs. an
-#: authorization refusal or fleet trouble): route missing, method not
-#: allowed, not implemented.
 UNIMPLEMENTED_DELETE_STATUSES = (404, 405, 501)
 
 
-def _unsupported_delete(exc: ArtifactError) -> ArtifactError:
-    """Re-raise a route-level ``delete`` refusal as ``unsupported_operation``.
-
-    ``stat`` already answered ``exists: true``, so a 404 here is the route
-    being missing, not the object; ``broker_*`` details pass through.
-    """
-    if (
-        exc.code != "broker_refused"
-        or exc.details.get("broker_status") not in UNIMPLEMENTED_DELETE_STATUSES
-    ):
-        return exc
-    status = exc.details["broker_status"]
-    return ArtifactError(
-        "the artifact broker does not implement the delete op "
-        f"(HTTP {status}: {exc.details.get('broker_error')}: "
-        f"{exc.details.get('broker_message')}); nothing was deleted",
-        "unsupported_operation",
-        dict(exc.details),
-    )
+def _delete_failure(exc: ArtifactError, objects: list[dict[str, Any]]) -> ArtifactError:
+    """Keep the broker details and identify any deletes confirmed before the refusal."""
+    code, message = exc.code, str(exc)
+    status = exc.details.get("broker_status")
+    if code == "broker_refused" and status in UNIMPLEMENTED_DELETE_STATUSES:
+        code = "unsupported_operation"
+        message = (
+            "the artifact broker does not implement the delete op for this object "
+            f"(HTTP {status}: {exc.details.get('broker_error')}: "
+            f"{exc.details.get('broker_message')})"
+        )
+    deleted = [row["sha256"] for row in objects if row["status"] == "deleted"]
+    if deleted:
+        message += "; previously deleted: " + ", ".join(deleted)
+    elif code == "unsupported_operation":
+        message += "; nothing was deleted"
+    return ArtifactError(message, code, dict(exc.details))
 
 
 def delete_objects(
@@ -487,7 +482,7 @@ def delete_objects(
             try:
                 client.call("delete", body)
             except ArtifactError as exc:
-                raise _unsupported_delete(exc) from exc
+                raise _delete_failure(exc, objects) from exc
         objects.append({**item, "status": "deleted" if stat.exists else "absent"})
     return {
         "status": "deleted" if yes else "dry_run",
