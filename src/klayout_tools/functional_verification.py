@@ -1094,6 +1094,7 @@ def _initial_state_echo(
     initial_state: dict[str, Any] | None,
     info: dict[str, Any],
     runs: list[dict[str, Any]],
+    repo_root: RepoRoot,
 ) -> dict[str, Any] | None:
     """``environment.initial_state`` (additive, issue #2998): ``None`` unless
     requested; ``seeds`` the effective seeds (empty for "x"), ``runs`` per seed."""
@@ -1102,7 +1103,7 @@ def _initial_state_echo(
     return {
         "mode": initial_state["mode"],
         "seeds": initial_state["seeds"],
-        "netlist": _hashed_path_envelope(initial_state["netlist"]),
+        "netlist": _hashed_path_envelope(initial_state["netlist"], repo_root=repo_root),
         "clock": info["clock"],
         "state_elements": info["state_elements"],
         "d_nets": info["d_nets"],
@@ -2995,16 +2996,15 @@ def run_functional_verification(
                 "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": _extract_random_seed_property(results_xml),
                 # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
-                "source_defines": _source_defines_envelope(source_defines),
+                "source_defines": _source_defines_envelope(source_defines, repo_root),
                 # Additive (issue #4338): `request.env` as given; `{}` when absent.
                 "env": env,
                 # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
                 "parameters": parameters,
-                # Additive (issue #2998): `null` unless the request set
-                # `options.initial_state`. `seeds` echoes the effective seeds
-                # (empty for mode "x"); `runs` has one entry per seed.
+                # Additive (#2998): `null` unless `options.initial_state` was set;
+                # `seeds` the effective seeds (empty for mode "x"), `runs` one per seed.
                 "initial_state": _initial_state_echo(
-                    initial_state, initial_state_info, run_reports
+                    initial_state, initial_state_info, run_reports, repo_root
                 ),
                 # Additive (issue #1002, spike §4.2 item 5): `null` on an
                 # ordinary run, an object on an SDF-annotated one -- so a caller
@@ -3026,7 +3026,7 @@ def run_functional_verification(
                     if sdf is None
                     else {
                         # Retyped to the hashed envelope (issue #5784).
-                        "file": _hashed_path_envelope(sdf["file"]),
+                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
                         "corner": sdf["corner"],
                         # Additive (issue #2364): echoes the request's entry
                         # population -- "all" (every delay entry) or

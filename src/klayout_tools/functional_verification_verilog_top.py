@@ -360,7 +360,7 @@ def _run_verilog_top(
                 "build_log": _hashed_path_envelope(build_log, repo_root=repo_root),
                 "random_seed": None,
                 # Retyped (issue #5784) to [{source, defines}]; `[]` when absent.
-                "source_defines": _source_defines_envelope(source_defines),
+                "source_defines": _source_defines_envelope(source_defines, repo_root),
                 "parameters": {},  # issue #5697; always `{}` -- rejected upstream
                 "plusargs": plusargs,  # issue #5006; `[]` when absent
                 "initial_state": None,
@@ -369,7 +369,7 @@ def _run_verilog_top(
                     if sdf is None
                     else {
                         # Retyped to the hashed envelope (issue #5784).
-                        "file": _hashed_path_envelope(sdf["file"]),
+                        "file": _hashed_path_envelope(sdf["file"], repo_root=repo_root),
                         "corner": sdf["corner"],
                         "entries": sdf["entries"],
                         **({"scope": sdf["scope"]} if "scope" in sdf else {}),

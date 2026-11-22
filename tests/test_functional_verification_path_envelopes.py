@@ -354,7 +354,12 @@ def test_verilog_top_builder_reports_the_envelopes(tmp_path, monkeypatch):
     }
     request_path = _write(tmp_path / "request.json", json.dumps(request))
 
+    real_run = subprocess.run
+
     def fake_run(cmd, **kwargs):
+        # Stub only the simulator pair; main's provenance `git` probe runs real.
+        if Path(cmd[0]).name not in ("iverilog", "vvp"):
+            return real_run(cmd, **kwargs)
         handle = kwargs.get("stdout")
         if handle is not None:
             handle.write("fake transcript\n")
