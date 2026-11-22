@@ -5955,7 +5955,9 @@ reads:
   v0.9.2). On the `batch` backend it is a mandatory runner feature
   (`crossings_value_from`): a fleet runner older than v0.9.3 is refused
   pre-launch with the standard `batch_runner_request_feature_predated`
-  diagnostic rather than running the grid and returning counts.
+  diagnostic. Before running the user deck, batch and remote workers also
+  dry-run a minimal local request to verify that the installed CLI understands
+  the selector. This distinguishes development builds with the same version prefix.
 - Additive request field reading the existing `value` slot: no
   `schema_version` bump.
 

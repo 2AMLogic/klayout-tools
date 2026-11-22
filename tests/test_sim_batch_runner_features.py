@@ -10,6 +10,9 @@ ratchet itself lives in ``tests/test_sim_runner_feature_registry_coverage.py``.
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pytest
 
 from klayout_tools import sim
@@ -219,3 +222,55 @@ def test_prelaunch_refuses_crossings_value_from_on_an_old_image(tmp_path, monkey
         message = str(raised.value)
         assert "crossings_value_from" in message
         assert "the request was not submitted and no instance was launched" in message
+
+
+@pytest.mark.parametrize("backend", ["batch", "remote"])
+@pytest.mark.parametrize("accepts_selector", [False, True])
+def test_crossings_preflight_checks_the_worker_parser(
+    tmp_path, backend, accepts_selector
+):
+    from klayout_tools.sim_batch_contract_preflight import (
+        _runner_preflight_script,
+        remote_feature_preflight,
+    )
+
+    worker = tmp_path / "klt"
+    worker.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "klt 0.9.3.dev1"; exit 0; fi\n'
+        'test "$1" = sim && grep -Fq "value_from" "$2" || exit 1\n'
+        'test -f "$(dirname "$2")/deck.spice" || exit 1\n'
+        'test "$3 $4 $5" = "--backend local --dry-run" || exit 1\n'
+        'touch "$EDA_OUTPUT_DIR/probed"\n'
+        + ("exit 0\n" if accepts_selector else "exit 1\n")
+    )
+    worker.chmod(0o755)
+    environment = dict(
+        os.environ,
+        PATH=f"{tmp_path}:{os.environ['PATH']}",
+        EDA_OUTPUT_DIR=str(tmp_path),
+        TMPDIR=str(tmp_path),
+    )
+    request = _CROSSINGS_VALUE_FROM_REQUEST
+
+    def preflight(req):
+        if backend == "remote":
+            return remote_feature_preflight(req)
+        return _runner_preflight_script(
+            "0.9.3", enforce=True, required_features=tuple(sb._request_features(req))
+        )
+
+    plain = subprocess.run(["bash", "-c", preflight({}) + " true"], env=environment)
+    assert plain.returncode == 0 and not (tmp_path / "probed").exists()
+    result = subprocess.run(
+        ["bash", "-c", preflight(request) + ' touch "$EDA_OUTPUT_DIR/launched"'],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert (tmp_path / "probed").is_file()
+    assert (tmp_path / "launched").exists() == accepts_selector
+    assert result.returncode == (0 if accepts_selector else 87)
+    if not accepts_selector:
+        assert "crossings_value_from" in result.stderr
+    assert not list(tmp_path.glob("*/probe.json"))
