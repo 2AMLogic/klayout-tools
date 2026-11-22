@@ -140,4 +140,5 @@ def assert_nmos_reference_census(report, *, expected_layout):
         "layout": expected_layout,
         "reference": {"NMOS": 1},
         "reference_source": {"NMOS": 1},
+        "reference_source_subcircuits": {},
     }

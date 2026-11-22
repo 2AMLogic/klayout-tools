@@ -38,21 +38,24 @@ def _class_census(
 
 
 def _reference_source_census(
-    reference_path: str | None, deck_file: str | None
+    reference_path: str | None,
+    deck_file: str | None,
+    *,
+    subcircuit_counts: dict[str, int] | None = None,
 ) -> dict[str, int] | None:
     """Positive reference-side evidence for issue #6902: instance counts
     keyed by upper-cased name over the reference *source* netlist, re-read
     with the plain SPICE reader (hierarchy intact, no deck delegate), one
     count per card per circuit definition -- the same per-definition unit
-    :func:`_class_census` counts, so the two totals are comparable.
+    :func:`_class_census` counts. When requested, ``subcircuit_counts``
+    records the subset of these cards seen as subcircuit calls.
 
     In scope, exactly the cards the runset's reader delegate is responsible
     for keeping:
 
     - a subcircuit call whose callee (upper-cased) is in the deck's
       ``DEVICE_LIST`` -- the subcircuits the delegate converts to devices
-      (including ones it renames, so per-name equality with the converted
-      census does not hold; ``klt signoff`` compares totals instead);
+      (including calls that the pinned reader renames);
     - every device card the plain reader keeps (``M``/``Q``/``D``/``C``/
       ``R``/``L``...), keyed by its device-class name -- for modelled cards
       that is the model string, as written.
@@ -85,6 +88,8 @@ def _reference_source_census(
             name = str(getattr(callee, "name", "") or "")
             name = name.split("(", 1)[0].strip().upper()
             if name in device_list:
+                if subcircuit_counts is not None:
+                    subcircuit_counts[name] = subcircuit_counts.get(name, 0) + 1
                 counts[name] = counts.get(name, 0) + 1
         for device in circuit.each_device():
             name = str(device.device_class().name or "").upper()
@@ -99,9 +104,14 @@ def _attach_reference_source(
     """Attach :func:`_reference_source_census` to a verdict's
     ``device_census`` as ``reference_source`` (issue #6902). A one-call
     helper so ``lvs_runset`` stays at its file-size ceiling."""
-    verdict["device_census"]["reference_source"] = _reference_source_census(
-        reference_path, deck_file
+    subcircuits: dict[str, int] = {}
+    counts = _reference_source_census(
+        reference_path, deck_file, subcircuit_counts=subcircuits
     )
+    census = verdict["device_census"]
+    census["reference_source"] = counts
+    if counts is not None:
+        census["reference_source_subcircuits"] = subcircuits
 
 
 def _build_coverage(

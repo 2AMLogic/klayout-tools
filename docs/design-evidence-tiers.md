@@ -315,8 +315,8 @@ written to every block.
    (compared case-insensitively; issue #6902), a report without the
    reference-source device evidence (`device_census.reference_source`,
    emitted by `klt lvs` since #6902 — a pre-#6902 report fails closed), or a
-   reference source holding device cards the converted reference census does
-   not account for (dropped on both sides), is a failure
+   source class with too few converted devices after accounting for
+   documented runset renames on the affected cards, is a failure
    (`runset_unrecognised_device`), never a warning, even when `status` reads
    `match`. Classes the runset declares with zero instances anywhere are not
    graded — `coverage.declared_not_recognized` is disclosure only (issue

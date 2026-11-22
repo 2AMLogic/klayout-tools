@@ -53,6 +53,9 @@ REASON_RUNSET_UNRECOGNISED_DEVICE = "runset_unrecognised_device"
 
 _IHP_REPO = "IHP-GmbH/IHP-Open-PDK"
 _GF_PV_REPO = "fossi-foundation/globalfoundries-pdk-libs-gf180mcu_fd_pv"
+_SKY130_RUNSET_HASH = (
+    "sha256:5b4ede4bdb4744b60e42c9b29baa93f40bb24430fb8f3a48a276a712a492ac38"
+)
 _SKY130_REPO = "efabless/sky130_klayout_pdk"
 _REVIEW = (
     "klayout-tools#4309: fetched at the commit and hashed; digest reviewed in that PR"
@@ -99,7 +102,7 @@ PINNED_RUNSETS: dict[str, dict[str, str]] = {
     # in its sky130 Makefile) into sky130A/libs.tech/klayout/lvs/sky130.lvs;
     # the digest equals the one the committed 2AMLogic/sky130-usb2-phy
     # reports record, so those reports need no re-run for the pin.
-    "sha256:5b4ede4bdb4744b60e42c9b29baa93f40bb24430fb8f3a48a276a712a492ac38": {
+    _SKY130_RUNSET_HASH: {
         "pdk": "sky130",
         "revision": "main@13d2572",
         "repo": _SKY130_REPO,
@@ -132,6 +135,45 @@ def _folded_class_counts(counts: Any) -> dict[str, int] | None:
     return folded
 
 
+def _source_class_gaps(
+    envelope: dict[str, Any],
+    census: dict[str, Any],
+    source: dict[str, int],
+    reference: dict[str, int],
+) -> list[str]:
+    """Count each source class after the pinned reader's X-card rename."""
+    expected = source.copy()
+    runset = runset_block(envelope)
+    variables = runset.get("deck_vars")
+    if (
+        runset.get("content_hash") == _SKY130_RUNSET_HASH
+        and isinstance(variables, dict)
+        and variables.get("convert_subckts") == "true"
+    ):
+        # SubcircuitModelsReader#element in 13d2572 rewrites only X cards.
+        # A primitive device with the same model keeps its original identity.
+        special = "SKY130_FD_PR__SPECIAL_NFET_01V8"
+        normal = "SKY130_FD_PR__NFET_01V8"
+        calls = _folded_class_counts(census.get("reference_source_subcircuits", {}))
+        if calls is None or any(
+            count > source.get(name, 0) for name, count in calls.items()
+        ):
+            return [
+                "device_census.reference_source_subcircuits carries an invalid count"
+            ]
+        renamed = calls.get(special, 0)
+        if renamed:
+            expected[special] -= renamed
+            expected[normal] = expected.get(normal, 0) + renamed
+    return [
+        f"source class '{name}' requires {count} converted device cards, "
+        f"but the reference accounts for {reference.get(name, 0)}. Devices may have "
+        "been dropped on both sides or converted under an unverified class name"
+        for name, count in sorted(expected.items())
+        if reference.get(name, 0) < count
+    ]
+
+
 def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
     """Why a runset report does not prove every device was recognised -- an
     empty list when it does. Entries are human-readable and stable enough to
@@ -149,13 +191,9 @@ def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
       every reference device and fails closed -- re-run ``klt lvs`` with a
       klt that emits the field;
     - the converted reference must account for every in-scope source card:
-      the runset's reader renames some callees (sky130
-      ``special_nfet_01v8`` -> ``nfet_01v8``), so per-name equality between
-      source and converted census does not hold and the **totals** are
-      compared instead -- rename-proof, and still zero-miss for the
-      both-sides-drop case the old ``declared_not_recognized``-non-empty
-      proxy guarded: a card present in the source but dropped by the reader
-      survives in neither census and shows up as converted < source.
+      compare the case-folded counts for each source class. Account for a
+      renamed class only with the pinned reader's conversion settings and
+      source evidence for the subcircuit cards it actually renames.
 
     ``coverage.declared_not_recognized`` is disclosure, not graded: a class
     the runset declares with zero instances in the layout, the converted
@@ -195,15 +233,7 @@ def unrecognised_device_gaps(envelope: dict[str, Any]) -> list[str]:
     if source_counts is None:
         gaps.append("device_census.reference_source carries an invalid device count")
         return gaps
-    source_total = sum(source_counts.values())
-    converted_total = sum(reference.values())
-    if converted_total < source_total:
-        gaps.append(
-            f"reference source holds {source_total} device cards the runset's "
-            f"reader is responsible for but the converted reference census "
-            f"accounts for {converted_total} -- devices were dropped on both "
-            "sides (issue #6902)"
-        )
+    gaps.extend(_source_class_gaps(envelope, census, source_counts, reference))
     return gaps
 
 

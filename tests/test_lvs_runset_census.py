@@ -104,3 +104,17 @@ def test_reference_source_census_is_none_when_unreadable(tmp_path):
         lvs_runset_census._reference_source_census(str(tmp_path / "ref.spice"), None)
         is None
     )
+
+
+def test_source_subcircuit_count_excludes_primitive_with_same_model(tmp_path):
+    deck = _write_spice(tmp_path / "pdk.lvs", _DECK_TEXT)
+    ref = _write_spice(
+        tmp_path / "ref.spice",
+        "* reference\nXM1 d g s b pdk__fet L=0.5 W=2\nM2 d g s b pdk__fet L=0.5 W=2\n",
+    )
+    verdict = {"device_census": {}}
+    lvs_runset_census._attach_reference_source(verdict, ref, deck)
+    assert verdict["device_census"] == {
+        "reference_source": {"PDK__FET": 2},
+        "reference_source_subcircuits": {"PDK__FET": 1},
+    }

@@ -248,16 +248,18 @@ def test_census_disagreement_fails_even_with_match_status(tmp_path, runset):
     assert item["reason"] == "runset_unrecognised_device"
 
 
-def test_reference_class_counted_only_in_the_source_fails(tmp_path, runset):
+@pytest.mark.parametrize("converted", [2, 3])
+def test_reference_class_counted_only_in_the_source_fails(tmp_path, runset, converted):
     """Issue #6902's both-sides-drop case: the reference source names a
     device the runset's reader dropped, so it survives in neither census and
-    the per-class compare alone would read agreement."""
+    layout and converted reference agree. Three converted NMOS also make the
+    total equal, disguising the missing resistor."""
     envelope = _runset_envelope(
         LVS_MATCH_ENVELOPE,
         runset,
         device_census={
-            "layout": {"NMOS": 2},
-            "reference": {"NMOS": 2},
+            "layout": {"NMOS": converted},
+            "reference": {"NMOS": converted},
             "reference_source": {"NMOS": 2, "RES_XHIGH_PO": 1},
         },
     )
@@ -267,7 +269,8 @@ def test_reference_class_counted_only_in_the_source_fails(tmp_path, runset):
     assert item["status"] == "unmet"
     assert item["reason"] == "runset_unrecognised_device"
     assert any(
-        "dropped on both sides" in gap for gap in item["detail"]["runset_device_gaps"]
+        "RES_XHIGH_PO" in gap and "dropped on both sides" in gap
+        for gap in item["detail"]["runset_device_gaps"]
     ), item["detail"]
 
 

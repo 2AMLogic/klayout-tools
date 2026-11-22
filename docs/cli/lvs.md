@@ -382,6 +382,10 @@ error, as is a crashed runset. Additive; no `schema_version` bump.
   including the ones it renames), plus every device card the plain reader
   keeps (`M`/`Q`/`D`/`C`/`R`/`L`..., keyed by the model name the plain
   reader gives the class). `null` when the reference cannot be re-read.
+  `reference_source_subcircuits` counts the subset read as in-scope
+  subcircuit calls, using the same upper-cased names. This distinguishes a
+  model the pinned SKY130 delegate renames on an X card from a primitive
+  card carrying the same model name.
   This is the positive reference-side evidence `klt signoff` grades item 4
   on (see `docs/cli/signoff.md`, `runset_unrecognised_device`): a report
   without it fails closed, so re-run `klt lvs` rather than hand-editing.
