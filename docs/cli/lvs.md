@@ -6,7 +6,7 @@ Epic #153, following the layout-vs-schematic pattern
 [`klt extract`](extract.md) established for extraction.
 
 ```
-klt lvs <request> [-o <report.json[.gz]>] [--format text|json]
+klt lvs <request> [--expect-deck-hash <hash>] [-o <report.json[.gz]>] [--format text|json]
 klt lvs --check <report.json> [--layout <path>] [--reference <path>] [--rerun] [--format text|json]
 ```
 
@@ -54,6 +54,14 @@ cleanly.
   never silently overrides a request document. Never sets
   `reference.deck` (the reference-netlist rewriting deck — a different
   knob). Refused with `--check`.
+- `--expect-deck-hash HASH` — opt-in deck-pin assertion (issue #5806): vouch
+  for the deck bytes this run uses by passing the exact
+  `provenance.deck.content_hash` value to expect (`sha256:<64 hex>`; take it
+  from an earlier report). Compared against the run's own recorded hash after
+  the compare: a mismatch — or a pre-extracted `layout.netlist` run, which
+  records no deck — fails with the error envelope (exit `1`) naming the deck
+  and both hashes. A matching run is unchanged. Rejected with `--check`.
+  See "Deck-pin assertion" below.
 - `--omit-mismatches` — blank the response's `mismatches[]` array so a
   failing compare's report stays small enough to commit verbatim (issue
   #5610, mirroring `klt erc --omit-antenna-tables`; the request-document
@@ -552,7 +560,7 @@ application error naming the instance and cell, never a silent skip.
   rails float on internal nets under other names proves nothing about
   the top-level grid). The derived block keeps the block's usual key
   set; `klt signoff` item 11 grades it exactly as a stub-form `"match"`.
-- **Tap-less blocks.** ASAP7 cells draw no taps, so the CDL bulk (`VSS` /
+- **Tap-less blocks.** In ASAP7 logic cells without taps, the CDL bulk (`VSS` /
   `VDD`) has no counterpart in the layout and the compare mismatches on the
   bulk nets. Grade such a block with `options.finfet_bulk` (see below); the
   tie is a disclosed `device.finfet_bulk_tied` warning, so a `match` reached
@@ -560,11 +568,12 @@ application error naming the instance and cell, never a silent skip.
 
 #### Bulk policy (`options.finfet_bulk`): opt-in and disclosed
 
-ASAP7 standard cells draw **no substrate or well taps**, while the reference
-CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. The extractor therefore
-gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. By
-default `klt lvs` does **not** bridge that gap: such a cell mismatches and
-nothing is tied silently.
+The reference CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. Extraction
+gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. Where
+an ASAP7 TAPCELL abuts the logic cell's well, N-selected active in that well
+can reach a routed M1 supply through SDT, LISD and V0. The PMOS bulk then
+shares the physical rail in the extracted netlist. A tapless logic cell
+retains separate well and rail nets and mismatches the CDL by default.
 
 `options.finfet_bulk` opts in to a comparison-side assumption:
 
@@ -616,6 +625,29 @@ hierarchical compare still does not match (sub-cell circuits are not paired
 with differently-named reference `.SUBCKT`s), so the flattened recipe is the
 supported path.
 
+##### Diagnosing missing layout port names
+
+When `counts.pins.layout` is smaller than expected, inspect `warnings` and
+`ignored_layers`. Inline extraction uses the effective deck, including any
+`layout.label_layers` overrides. If the selected top cell has text but none
+on a pin-label layer, `warnings` lists the layer/datatype pairs where text
+was actually drawn. For example, a SKY130 layout whose li1 labels are on
+67/10 can select that purpose with `"label_layers": {"metal0": [67, 10]}`.
+Text inside an instance does not establish that the top cell has port text.
+
+`ignored_layers` uses the same `{layer, datatype, shapes}` rows and
+stream-wide shape counts as `klt extract`. With a pre-extracted
+`layout.netlist`, both extraction diagnostic arrays are empty.
+
+`pin_set_difference` compares the named ports of the selected top circuits
+in both input forms. It folds case and applies the same gate-level reference
+port aliases used in comparison. `layout_only_pins` and
+`reference_only_pins` each show up to 20 names. Their `_count` fields give
+the full totals and their `_truncated` flags indicate an incomplete sample.
+A layout pin named for the extraction deck’s synthesized substrate appears
+under `deck_synthesized_layout_pins`. These fields describe name coverage
+independently of the topology verdict.
+
 ##### Routed multi-cell blocks (issue #4610)
 
 Measured on `tests/test_asap7_routed_block.py`: two abutted `INVx1` cells
@@ -641,9 +673,10 @@ suspecting extraction.
   `N declared pin names ... matched no promoted net in the layout: IN, OUT`
   (pinned in `test_declared_pins_do_not_create_pins_but_name_the_missing_labels`).
   Read that warning as "the labels are missing", not as a layout verdict.
-- **A well label and a rail label with one name stay two nets** at extraction
-  (`VDD` and `VDD$1`); `finfet_bulk` is what ties them for the compare, in
-  each cell, before the flatten.
+- **Each well island needs a complete tap path to the rail.** Matching labels
+  alone leave a tapless well and rail as separate nets (`VDD` and `VDD$1`).
+  For such a layout, `finfet_bulk` can tie them per cell before flattening
+  for comparison.
 - **M2 is `20/0`, M3 is `30/0`** in this deck, with V1 at `21/0`; a wire
   drawn on the wrong layer number is invisible to extraction.
 
@@ -1300,6 +1333,55 @@ always assuming SI metres:
   metres assumption — pass `reference.deck`, or write an explicit unit
   suffix or exponent literal (`L=0.5u` / `L=0.15e-6`), either of which is
   unambiguous and unaffected by `reference.deck` either way.
+
+#### SG13G2 poly resistor and MIM capacitor references
+
+For a three-terminal `rppd` resistor, put the actual substrate net after
+the two resistor ends. A `cap_cmim` capacitor takes two plate nets. For
+example, this reference connects the resistor substrate to VSS.
+Declare that net as a top port only if it is a port of the circuit.
+
+```spice
+.SUBCKT FILTER IN OUT VSS
+XR1 IN OUT VSS rppd w=0.5u l=2u
+XC1 OUT VSS cap_cmim w=1u l=1u m=12
+.ENDS FILTER
+```
+
+```json
+{
+  "layout": {"file": "filter.gds", "deck": "sg13g2", "top": "FILTER"},
+  "reference": {"netlist": "filter.cdl", "form": "subckt-call",
+                "deck": "sg13g2", "top": "FILTER"}
+}
+```
+
+With the native runset, set `engine` to `klayout-runset`, supply
+`deck_file` pointing to `sg13g2.lvs`, and omit `layout.deck`. Both
+engines accept the same reference X cards. The converter expands `m=12`
+on the capacitor to twelve parallel capacitors with the specified per-unit
+geometry. For parallel resistors, write one uniquely named three-node X
+card per unit on the same nets. A resistor multiplier greater than one
+raises a conversion error. A native runset can simplify devices after
+conversion. Its reported reference census describes the devices it read.
+A source count and a compared count can differ for several reasons.
+
+The optional `sg13g2_passive_pairing` object describes the two
+engines' comparison of `rppd` and `cap_cmim`. Each finding lists the
+actual model names and ordered device terminals. `compare_event` means
+both devices occurred in the same failed comparison. `unmatched_classes`
+compares observed signatures for the same underlying model across failed
+devices, including a literal CDL token such as `$[RPPD]`. Model and
+terminal spelling are compared case-insensitively. A finding identifies a
+specific discrepancy and can accompany other unresolved mismatches.
+
+The status is `discrepancy_observed` for a model or terminal discrepancy,
+`all_devices_paired` when the device counts and comparison confirm pairing,
+or `insufficient_evidence` otherwise. A census difference alone cannot
+identify a multiplier as the cause. Check `device.placeholder_value` and
+`device.geometry_not_compared` for the extent of parameter checking.
+A topology match with placeholder R/C values and unchecked geometry
+establishes connectivity only.
 
 ## Custom device classes round-tripped through an `X` card (issue #1942)
 
@@ -2562,6 +2644,34 @@ exit codes are unchanged. An unwritable `PATH` is the standard error envelope
 (exit `1`). Rejected with `--check`, which emits no run report. Mirrors
 `klt drc -o` (#4393).
 
+## Deck-pin assertion (`--expect-deck-hash`)
+
+`klt lvs` accepts the same opt-in deck-pin assertion as `klt drc`
+(issue #5806; the full rules are in [`drc.md`](drc.md), "Deck-pin assertion"):
+pass the exact `provenance.deck.content_hash` value an earlier report recorded
+and every later run vouches for those deck bytes.
+
+```bash
+klt lvs request.json \
+  --expect-deck-hash sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad \
+  --format json
+```
+
+- The comparison happens after the compare, against the run's own recorded
+  hash, before anything is written or emitted. A **mismatch** is the error
+  envelope (exit `1`) naming the deck, the expected and the observed hash —
+  a deck bump becomes a loud, reviewed event instead of a silent re-score of
+  locked expectations.
+- A pre-extracted `layout.netlist` request involves no deck and records no
+  hash, so an assertion against that shape **fails loudly** rather than
+  passing vacuously.
+- The value must be the `sha256:<64 hex>` form `provenance.deck.content_hash`
+  emits; anything else is a usage error (exit `2`) before the compare runs.
+- A **matching** run is byte-identical to a run without the flag: no
+  exit-code change, no report field, no `schema_version` bump.
+- Rejected with `--check`, which re-verifies the committed report's own
+  recorded deck hash instead.
+
 ## Request
 
 Accepted as a file path, `-` (stdin), or an inline JSON object string on the
@@ -2586,7 +2696,7 @@ each resolves relative paths inside the document.
 | ----- | ---- | ----------- |
 | `schema` | string | Request contract identifier (not required — `load_request` does not validate it, matching `klt sim`'s convention for user-authored input). |
 | `engine` | string | Engine selector: `"klayout"` (default) or `"netgen"` — see "Engine" above. |
-| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). Default `false`: the response is byte-identical to before this field existed. `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and `environment.klayout_binary` is the binary's basename string in default mode too (issue #5795; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report cannot re-resolve the rewritten input paths and reports `drifted`; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
+| `portable_paths` | boolean \| omitted | Additive field (issue #3798, mirroring `klt place-and-route`'s from #3820). Default `false`: the response is byte-identical to before this field existed. `true` rewrites every absolute host path in the *returned* report (the compare still runs on the real paths) — the `layout`/`reference` echoes, `provenance.pin_order_sources[].path`, `environment.extracted_netlist`, `environment.netgen_binary`, and paths embedded in messages — so it can be committed as evidence and passes `klt env-provenance lint-envelope`: inside the repo → `{"path": "<repo-relative>", "scope": "repo"}`; outside it (or no git root) → `{"path": null, "scope": "external"}`; under the PDK root → a `"$PDK_ROOT/<relative>"` string. For `engine: "klayout-runset"` it also rewrites `deck_file` and `provenance.runset.deck_file`, and `environment.klayout_binary` is the binary's basename string in default mode too (issue #5795; the version stays in `environment.engine_version` and `provenance.runset.klayout_application_version`). Limitation: `klt lvs --check` of a portable report reports `unverifiable` for recorded digests whose rewritten input paths cannot be resolved; keep a default-mode report if you need `--check`/`--rerun`. Not a boolean → `LvsError`. No `schema_version` bump. |
 | `omit_mismatches` | boolean \| omitted | Additive field (issue #5610, the request-document counterpart of `klt lvs --omit-mismatches`, mirroring `klt erc --omit-antenna-tables`). Default `false`: the response is unchanged apart from the always-present `mismatches_omitted: false` echo. `true` emits the response's `mismatches[]` as `[]` (the key stays present; it is schema-required) beside `mismatches_omitted: true`, so a failing flat compare's report stays small enough to commit verbatim — while `status`, `mismatch_count`, `error_count`, `category_counts`, `category_error_counts` and the exit code keep their full-run values: the compare still runs in full and the per-category tally still runs over the full list, only the per-entry echo is dropped. Applied for every engine (`"klayout"`, `"netgen"`, `"klayout-runset"`). The `--omit-mismatches` flag wins over this field when both name it; a non-boolean value is an application error (exit 1). `klt lvs --check` verifies such a report as-is (cheap mode never reads `mismatches[]`), and `--check --rerun` replays the omission from the report's own `mismatches_omitted` echo. No `schema_version` bump. |
 | `layout` | object | The layout side — see "`layout` shapes" below. Exactly one of `file`/`netlist` is required. |
 | `layout.deck_options` | object\<string, string\> | Optional `{"<key>": "<value>"}` pairs, the JSON-request-document counterpart of `klt extract --deck-option <key>=<value>` (issue #600/#595) — selects a caller-visible sheet-rho flavour of a shared-geometry resistor family (e.g. gf180mcu's `poly_res`, one of `1k`/`2k`/`3k`). Honored for both `layout` shapes wherever `layout.deck` is given — inline extraction (`layout.file`) and the pre-extracted `layout.netlist` shape (issue #585). Omitting it (or giving `{}`) resolves every deck exactly as before this field existed. An unrecognised key or value is an application error (exit 1), not a silent no-op or a silently-kept default; giving it without `layout.deck` is likewise an application error (there is no deck to apply it to). The fully resolved mapping — every option key the deck declares, including those it applied by default because `deck_options` did not name them (issue #2394) — is recorded under `provenance.deck.options`, alongside `provenance.deck.options_explicit`/`options_hash`; see "`layout` shapes" below and the `provenance` row further down. |
@@ -5321,9 +5431,8 @@ names no existing file yields `actual: null`, which on its own is
 indistinguishable from "the recorded hash no longer matches". So a
 `checks[]` entry for `layout`/`reference` now carries an **additional,
 optional** `input_not_found` block whenever the echoed path could not be
-found — `expected`, `actual`, `match` and the resulting `status` are
-unchanged, and the key is absent entirely on a genuine content mismatch (the
-input resolved, its bytes moved):
+found. A recorded digest gives the unavailable field its own status, and the
+path hint identifies where the verifier looked.
 
 ```json
 {
@@ -5331,6 +5440,7 @@ input resolved, its bytes moved):
   "expected": "<hex>",
   "actual": null,
   "match": false,
+  "status": "unverifiable",
   "input_not_found": {
     "path": "design.gds",
     "resolved": "/work/design.gds",
@@ -5367,7 +5477,7 @@ Text output (`--format text`, the default) renders the same information in
 place of the bare `actual: None`:
 
 ```
-  [DRIFTED] environment.layout_sha256
+  [UNVERIFIABLE] environment.layout_sha256
       expected: 1ab7…
       actual:   None (input not found: /work/design.gds)
       note:     it exists relative to the report's own directory
@@ -5379,7 +5489,7 @@ A repo-scoped echo additionally renders its anchor (issue #5845), only
 when present:
 
 ```
-  [DRIFTED] environment.reference_sha256
+  [UNVERIFIABLE] environment.reference_sha256
       expected: 9c2d…
       actual:   None (input not found: /work/outer/repo/ref.spice)
       repo root: /work/outer/repo
@@ -5499,10 +5609,13 @@ current `klt`.
 
 ### Exit codes for `--check` / `--rerun`
 
-Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
-`"match"`, `3` when it is `"drifted"` (see "Exit codes" below). A missing or
-unparseable `<report.json>` exits `1` with a clean error message, same as
-any other application-level failure.
+Both modes return 0 for `match` and 3 for `drifted`. In cheap mode, a
+recorded digest whose input is unavailable on this checkout gives its
+`checks[]` entry `status: "unverifiable"`, `actual: null`, and `match: false`.
+Text output marks that field `[UNVERIFIABLE]`. If every other input matches
+or is also unavailable, the overall status is `unverifiable` (exit 4).
+A changed digest takes precedence (exit 3), with both field results visible.
+A missing or unparseable report is a command error (exit 1).
 
 ## Exit codes
 
@@ -5512,7 +5625,7 @@ any other application-level failure.
 | `1` | Failed to run — bad request, unresolvable layout/reference input, unknown `--deck`, unparseable reference netlist, unsupported engine, or an engine error (including a KLayout comparer-internal failure such as a `bt_count != failed_match` assertion — an application error with no verdict, never reported as `mismatch`). Under `--check`: a missing/unparseable committed report. |
 | `2` | Usage error (missing argument, bad `--format` value, or combining `<request>` with `--check`) — from argparse. |
 | `3` | Ran successfully; mismatches found (`status: "mismatch"`); the documented payload is on stdout. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
-| `4` | Ran, but the compare the request asked for could not be performed, so no verdict about the design was reached (`status: "inconclusive"`, issue #1370). The documented payload is still on stdout. Never `0`, and never folded into `3`. |
+| `4` | Ran, but the compare the request asked for could not be performed, so no verdict about the design was reached (`status: "inconclusive"`, issue #1370). Under cheap `--check`, recorded inputs are unavailable and every comparable hash matches (`status: "unverifiable"`). The documented payload is on stdout. |
 
 `0`/`1`/`2`/`3` are `klt lvs`'s direct analogue of `klt drc`'s split — LVS is
 a clean/dirty verdict like DRC, so a normal run has the same two success
