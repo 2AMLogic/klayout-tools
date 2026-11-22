@@ -1,15 +1,7 @@
-"""``klt sim --dry-run`` refuses every malformed ``request.batch`` knob the
-submit path refuses (issue #6437).
-
-Split out of ``test_sim_dry_run_batch_ceiling.py`` for the file-size
-ratchet; same differential-oracle shape -- the dry run versus the submit
-path's own ``preflight_batch_request``, asserting the same ``error.code``
-and message. The rows here are the knobs #5674's differential left
-dry-running clean: each knob's own resolver refuses on the submit path
-while ``dry_run_runner_check``'s swallow-all-but-runner-codes filter hid
-it. ``capacity_retries`` is the same defect at the same site and travels
-with them. A malformed knob refuses even on a host that resolves no batch
-configuration: the knob is the request's own defect, not this host's.
+"""Compare batch dry-run errors with submit preflight for the eight request
+settings in ``KNOB_ROWS`` (issue #6437), including on hosts without fleet
+configuration. The polling fields ``poll_interval_s`` and ``poll_timeout_s``
+are parsed separately, after the provision script and bucket resolve.
 """
 
 from __future__ import annotations
@@ -105,6 +97,17 @@ KNOB_ROWS = [
     ("capacity_retries", -1),
 ]
 KNOB_IDS = [f"{knob}={value!r}" for knob, value in KNOB_ROWS]
+
+
+def test_sim_batch_reexports_knob_contract_constants():
+    from klayout_tools import sim_batch_contract
+    from klayout_tools.sim_batch import (
+        FLEET_MAX_JOB_SECONDS_KEY,
+        RUNNER_VERSION_CHECK_MODES,
+    )
+
+    assert FLEET_MAX_JOB_SECONDS_KEY == sim_batch_contract.FLEET_MAX_JOB_SECONDS_KEY
+    assert RUNNER_VERSION_CHECK_MODES == sim_batch_contract.RUNNER_VERSION_CHECK_MODES
 
 
 @pytest.mark.parametrize(("knob", "value"), KNOB_ROWS, ids=KNOB_IDS)

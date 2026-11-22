@@ -198,26 +198,15 @@ def _resolve_interrupted_grace_s(batch_spec: dict[str, Any]) -> float:
 
 
 def _validate_batch_request_knobs(batch_spec: dict[str, Any]) -> None:
-    """Validate every ``request.batch`` knob that is a property of the
-    request alone (issue #6437): the same resolvers
-    :func:`~klayout_tools.sim_batch._resolve_batch_config` calls, in the
-    same relative order, minus the host-dependent ones (provision script,
-    fleet file, bucket, ``$KLT_BATCH_*`` environment). A malformed knob is
-    the request's own defect -- the submit path refuses it whatever this
-    host's fleet configuration resolves to -- so the batch dry run must
-    refuse it too, with the submit path's own message, even on a host with
-    no bucket and no provision script (the #5449 posture swallows only the
-    host-dependent failures). Resolution here is pure validation: no
-    warning, no S3 write, nothing cached, so calling it here and again
-    inside :func:`~klayout_tools.sim_batch._resolve_batch_config` changes
-    nothing for a valid request. ``max_job_seconds`` is validated only
-    when the request itself sets it: its resolver also reads
-    ``$KLT_BATCH_MAX_JOB_SECONDS`` and the fleet file, which are host
-    config, and the request's own candidate comes first in its resolution
-    order, so that is the only case the request alone pins. Keep this list
-    and its order in step with
-    :func:`~klayout_tools.sim_batch._resolve_batch_config` -- a knob
-    resolver added there belongs here too.
+    """Run the request-only batch resolvers in submit order (issue #6437).
+
+    These checks can report the same errors as submit preflight even on a
+    host without a provision script or bucket. Polling values
+    (``poll_interval_s``, ``poll_timeout_s``) are parsed later by
+    :func:`~klayout_tools.sim_batch._resolve_batch_config` once both resolve.
+    Check ``max_job_seconds`` here only when the request supplies it, since
+    its fallback values come from the environment and the fleet file.
+    Keep the resolver calls in the same order as the submit path.
     """
     resolve_capacity_wait_s(batch_spec)
     _resolve_runner_version_check(batch_spec)
