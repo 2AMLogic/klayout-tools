@@ -13816,30 +13816,21 @@ def test_compose_nests_a_composition_and_bundle_routes_promoted_pins_on_new_laye
 
 
 # --------------------------------------------------------------------------- #
-# Own-block pad self-notch check (issue #1520): a `blocks[].cell` port
-# hand-declared on a pre-existing stream's own internal wire can sit close
-# enough to a *different* part of that same wire (e.g. a perpendicular leg
-# near a corner) that the fixed-size via-drop landing pad `gen-compose` draws
-# there violates the resolved deck's own same-layer minimum-spacing rule --
-# even though the pad and the wire are the same electrical node. Before this
-# check, `gen-compose` drew the pad silently (`routed: true`) and only `klt
-# drc` caught it, several steps downstream of the request that caused it.
+# A via-drop pad can merge with a block's own wire and create a notch near
+# its corner. Compose checks the deck's same-layer spacing before drawing
+# the pad (#1520), using the resolved pad size for each via hop (#6469).
 # --------------------------------------------------------------------------- #
 
 
-def _write_l_wire_gds(path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, w=0.17):
-    """Fabricate a library stream holding one li1 (67/20) "L"-shaped wire --
-    a long horizontal leg from ``x=0`` to ``x=long_len`` at ``y=0.5``, plus a
-    perpendicular leg going north from the corner at ``x=corner_x`` up to
-    ``y=arm_top`` -- the exact shape #1520's reproducer describes: "an
-    L-shaped wire on the base routing layer", with a port later declared on
-    the long leg near the corner.
-    """
+def _write_l_wire_gds(
+    path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, w=0.17, layer=(67, 20)
+):
+    """Draw an L-shaped wire with a horizontal leg centered at y=0.5um."""
     import klayout.db as kdb
 
     layout = kdb.Layout()
     layout.dbu = 0.001
-    li1 = layout.layer(67, 20)
+    wire_layer = layout.layer(*layer)
     cell = layout.create_cell(cell_name)
 
     def d(v):
@@ -13849,22 +13840,18 @@ def _write_l_wire_gds(path, cell_name, long_len=3.0, corner_x=2.9, arm_top=1.5, 
     short_leg = kdb.Box(
         d(corner_x - w / 2), d(0.5 - w / 2), d(corner_x + w / 2), d(arm_top)
     )
-    cell.shapes(li1).insert(long_leg)
-    cell.shapes(li1).insert(short_leg)
+    cell.shapes(wire_layer).insert(long_leg)
+    cell.shapes(wire_layer).insert(short_leg)
     layout.write(str(path))
     return str(path)
 
 
-def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
-    """The shared shape of #1520's reproducer: a small library source block
-    ``u0`` (one li1 port, far from anything) wired via ``metal2`` (met1,
-    which forces an mcon via-drop down to each endpoint's own li1 pad -- the
-    exact mechanism that draws the fixed-size, `width_um`-independent
-    landing pad the issue describes) to a declared port on ``u1``'s own
-    internal L-shaped wire, at ``x=port_x`` along the wire's long leg.
-    """
+def _l_wire_compose_request(
+    tmp_path, pdk_root, port_x, cell_name, output, *, layer=(67, 20), width=0.17
+):
+    """Route on met1 from a source block to a port on the L-wire's long leg."""
     gds = _write_library_gds(tmp_path / "src.gds", {"src": (1.0, 1.0)})
-    wire_gds = _write_l_wire_gds(tmp_path / "wire.gds", cell_name)
+    wire_gds = _write_l_wire_gds(tmp_path / "wire.gds", cell_name, w=width, layer=layer)
     return {
         "pdk": {"variant": "sky130A", "root": str(pdk_root)},
         "blocks": [
@@ -13893,10 +13880,10 @@ def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
                     "ports": [
                         {
                             "name": "o",
-                            "layer": {"layer": 67, "datatype": 20},
+                            "layer": {"layer": layer[0], "datatype": layer[1]},
                             "x_um": port_x,
                             "y_um": 0.5,
-                            "width_um": 0.17,
+                            "width_um": width,
                             "direction_deg": 180,
                         }
                     ],
@@ -13922,15 +13909,8 @@ def _l_wire_compose_request(tmp_path, pdk_root, port_x, cell_name, output):
 def test_compose_rejects_a_via_drop_landing_pad_that_would_self_notch_the_own_wire(
     tmp_path, pdk_root
 ):
-    # #1520's exact reproducer: the declared port ("o", x_um=2.5) sits on the
-    # long leg of the L-wire, close enough to the corner (x=2.9) that the
-    # fixed 0.42um landing pad `gen-compose` draws there -- via an mcon
-    # via-drop, since routing on "metal2" (met1) forces a drop down to each
-    # endpoint's own li1 pad -- comes within 0.105um of the perpendicular
-    # short leg: less than li1.space.1's 0.17um minimum. Before #1520 this
-    # composed `routed: true` with no warning; `klt drc` was the only thing
-    # that caught it (confirmed independently below via `run_drc` against a
-    # hand-drawn equivalent).
+    # A 0.42um pad at x=2.5 leaves 0.105um to the short arm, within
+    # li1.space.1's 0.17um minimum.
     output = tmp_path / "near_corner.gds"
     request = _l_wire_compose_request(tmp_path, pdk_root, 2.5, "l_wire_near", output)
     report = compose(request)
@@ -13949,13 +13929,28 @@ def test_compose_rejects_a_via_drop_landing_pad_that_would_self_notch_the_own_wi
     assert drc_report["violation_count"] == 0
 
 
+def test_compose_rejects_a_resolved_met3_landing_pad_that_would_self_notch(
+    tmp_path, pdk_root
+):
+    # The short arm starts at x=2.75. A 0.42um pad at x=2.225 leaves
+    # 0.315um of clearance, but the met3 area floor grows the pad to
+    # sqrt(0.240)um, leaving 0.280um against met3.space.1's 0.300um minimum.
+    output = tmp_path / "met3_corner.gds"
+    request = _l_wire_compose_request(
+        tmp_path, pdk_root, 2.225, "met3_wire", output, layer=(70, 20), width=0.3
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == ["N1"]
+    reason = report["nets"][0]["legs"][0]["reason"]
+    assert "draws a pad" in reason
+    assert "met3.space.1" in reason
+    assert "met3.space.1" not in run_drc(str(output), "sky130")["rule_counts"]
+
+
 def test_run_drc_confirms_the_rejected_pad_would_have_been_a_real_violation(tmp_path):
-    # Independent confirmation (not reusing gen_compose's own notch_check
-    # machinery) that the pad #1520's reproducer describes really is a `klt
-    # drc` violation: hand-draw the L-wire plus the exact landing pad
-    # gen_compose would have drawn at port_x=2.5 (composed frame: wire placed
-    # at offset (5, 0), so the pad centers on (7.5, 0.5) with the 0.42um
-    # fixed size), with no other gen_compose machinery involved at all.
+    # Use DRC to check the L-wire and a hand-drawn 0.42um pad in the
+    # composed frame, with the wire translated by (5, 0).
     import klayout.db as kdb
 
     from klayout_tools.drc import run_drc
@@ -13998,11 +13993,7 @@ def test_run_drc_confirms_the_rejected_pad_would_have_been_a_real_violation(tmp_
 def test_compose_routes_a_via_drop_landing_pad_placed_clear_of_the_own_wire_corner(
     tmp_path, pdk_root
 ):
-    # Control case: the same L-wire, the same via-drop mechanism, but the
-    # declared port sits far enough from the corner (x_um=0.5, vs. the
-    # corner at x=2.9) that the landing pad never comes close to the
-    # perpendicular leg -- #1520's fix must not reject a legitimate
-    # placement, only the one that actually violates spacing.
+    # At x=0.5, the pad clears the short arm and the route succeeds.
     output = tmp_path / "far_from_corner.gds"
     request = _l_wire_compose_request(tmp_path, pdk_root, 0.5, "l_wire_far", output)
     report = compose(request)

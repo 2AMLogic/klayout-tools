@@ -571,7 +571,14 @@ than only in a PR description:
   against what the netlist digest itself declares for that device name — it
   has no way to also confirm that the `flavor`/`metal_level` this phase
   resolves for the group's generator call actually draws a device of that
-  same class. A metal-layer resistor `device_class` (e.g. `gf180mcu`'s
+  same class. A `res_array` group with neither `params.flavor` nor
+  `params.metal_level` uses the first resistor class mapped by its PDK.
+  For example, sky130 `RES_XHIGH_PO` and `RES_HIGH_PO` select `xhigh`
+  and `high`. The report records the derived flavor in `resolved_params`
+  and `warnings[]`. A generic resistor keeps the default. Mixed mapped
+  classes produce a disagreement warning. An explicit flavor or metal
+  level wins and the post-generation mismatch check still applies.
+  A metal-layer resistor `device_class` (e.g. `gf180mcu`'s
   `rm1`/`rm2`/`rm3`, or sky130's `res_generic_m1`..`m5`) routed through
   `res_array` with no explicit `metal_level` override used to silently draw
   the poly-body default instead, with no diagnostic. This phase now checks

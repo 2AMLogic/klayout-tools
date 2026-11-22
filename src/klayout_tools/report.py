@@ -28,6 +28,15 @@ produced it:
   violations-style reports (a table of structured findings) under a
   different table schema (category/severity/side/description instead of
   rule/cell/layer/bbox/description).
+- an object with a top-level ``measurements`` list whose entries carry a
+  graded ``status`` (or that is empty) is a *measurements-style* report --
+  the rollup shape ``klt sim`` (``schema_version=3``) and ``klt yield``
+  (``schema_version=1``) share; another verb's un-graded ``measurements[]``
+  (``klt yield-sensitivity``) is refused -- rendered as a
+  Measurement/Unit/Limits/Worst/Margin/Corner/Status table (plus per-entry
+  yield columns when present), built by ``report_measurements.py``; the
+  builder lives in its own module only because this file sits against its
+  500-line hard limit (issue #5839).
 - an object carrying ``slug``/``name``/``status`` together (the fields
   ``klt layout-metrics``'s ``layout.json`` documents as *always* present,
   see ``layout_metrics.py``) is a *metrics-style* report -- key/value
@@ -49,6 +58,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from .env_provenance import render_path_field
+from .report_measurements import is_measurements_rollup, section_measurements
+from .report_tables import markdown_table as _markdown_table
+from .report_tables import plain_table as _plain_table
 from .signoff_drc_crosscheck import crosscheck_project
 
 __all__ = ["ReportError", "build_report"]
@@ -95,7 +107,8 @@ def build_report(sources: list[str]) -> dict[str, Any]:
             "envelope_count": <int>,
             "sections": [
                 {
-                    "kind": "drc" | "lvs" | "layout-metrics" | "error",
+                    "kind": "drc" | "lvs" | "layout-metrics" | "measurements"
+                    | "error",
                     "source": <str, the entry from `sources`>,
                     "title": <str>,
                     "status": <str> | None,
@@ -185,13 +198,18 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     if isinstance(envelope.get("mismatches"), list):
         return "lvs"
 
+    measurements = envelope.get("measurements")
+    if isinstance(measurements, list) and is_measurements_rollup(measurements):
+        return "measurements"
+
     if "slug" in envelope and "name" in envelope and "status" in envelope:
         return "layout-metrics"
 
     raise ReportError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): no violations[], mismatches[], "
-        "or layout-metrics-style (slug/name/status) fields found"
+        "a measurements[] rollup (entries carrying a status), or "
+        "layout-metrics-style (slug/name/status) fields found"
     )
 
 
@@ -210,6 +228,7 @@ def _build_section(envelope: dict[str, Any], source: str) -> dict[str, Any]:
     builder = {
         "lvs": _section_lvs,
         "layout-metrics": _section_layout_metrics,
+        "measurements": section_measurements,
         "error": _section_error,
     }[kind]
     return builder(report, source)
@@ -471,29 +490,3 @@ def _render_section(section: dict[str, Any], markup: bool) -> str:
 def _status_badge(status: str) -> str:
     icon = _STATUS_ICONS.get(status)
     return f"{icon} {status}" if icon else str(status)
-
-
-def _markdown_table(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
-    def escape(cell: str) -> str:
-        return cell.replace("|", "\\|").replace("\n", " ")
-
-    lines = [
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join("---" for _ in headers) + " |",
-    ]
-    lines.extend("| " + " | ".join(escape(cell) for cell in row) + " |" for row in rows)
-    return "\n".join(lines)
-
-
-def _plain_table(headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
-    widths = [
-        max(len(headers[col]), max((len(row[col]) for row in rows), default=0))
-        for col in range(len(headers))
-    ]
-
-    def fmt(row: tuple[str, ...]) -> str:
-        return "  ".join(row[col].ljust(widths[col]) for col in range(len(headers)))
-
-    lines = [fmt(headers), "  ".join("-" * width for width in widths)]
-    lines.extend(fmt(row) for row in rows)
-    return "\n".join(lines)

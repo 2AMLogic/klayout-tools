@@ -4043,7 +4043,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # The box collection lives in :func:`_landing_and_widen_pad_boxes`
             # (issue #5803: shared with the pad-vs-pitch message path).
             pad_boxes = _landing_and_widen_pad_boxes(
-                via_drops, stub_widen, layer, side_for_pair
+                via_drops, stub_widen, layer, side_for_pair.drawn_side
             )
 
             for pad_layer, block_id, box, _drop in pad_boxes:
