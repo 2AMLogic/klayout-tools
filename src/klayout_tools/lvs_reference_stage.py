@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 from . import lvs as _lvs
+from .lvs_known_limits import count_unsupported_asap7_instances
 from .netlist_normalize import _sim_model_classes
 
 
@@ -30,6 +31,7 @@ class _ReferenceStage(NamedTuple):
     unresolved_subckt_call_findings: list[dict[str, Any]]
     reference_pin_order_files: list[str]
     reference_netlist: Any
+    reference_known_limit_counts: dict[str, int]
 
 
 def _flatten_reference(
@@ -338,6 +340,15 @@ def _read_reference_stage(
             if reference_parameter_correction is not None:
                 combine_per_circuit_warnings.append(reference_parameter_correction)
 
+    # Issue #6931: census of pinned unsupported ASAP7 masters beneath the
+    # selected reference top, taken while the netlist still carries its
+    # hierarchy (one SubCircuit per X card; `sliced_reference_file` has
+    # already restricted a FinFET reference read to the compared top's own
+    # subtree) -- the optional flatten right below is what discards it.
+    # Consumed by `note_known_limit` only on a mismatching FinFET compare.
+    reference_known_limit_counts = count_unsupported_asap7_instances(
+        reference_netlist, reference_spec.get("top")
+    )
     if opts.flatten_reference:
         reference_flatten_warning = _flatten_reference(
             reference_netlist, reference_spec.get("top"), opts.flatten_reference
@@ -358,6 +369,7 @@ def _read_reference_stage(
         unresolved_subckt_call_findings=unresolved_subckt_call_findings,
         reference_pin_order_files=reference_pin_order_files,
         reference_netlist=reference_netlist,
+        reference_known_limit_counts=reference_known_limit_counts,
     )
 
 

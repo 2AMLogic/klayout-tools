@@ -9,8 +9,8 @@ Exit codes (see ``docs/cli/extract.md`` for the full table):
     1 - failed to run (bad file, unknown deck, unresolvable PDK, missing/
         ambiguous top cell, engine error) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
-    3 - under --check, the committed report drifted from the current deck/
-        input
+    3 - under --check, the committed report drifted from the current deck/input
+    4 - under cheap --check, a recorded input could not be verified
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. A fresh (non-``--check``) extraction still has no "ran but
 found problems" outcome -- it either produces a netlist or it fails -- so
@@ -34,9 +34,8 @@ is also given (issue #2699), which then overrides it unconditionally. Cheap
 mode (default): re-hash the input/deck named in the report and compare against
 its own recorded ``content_hash`` values, no extraction engine re-run. Full
 mode (``--check <report> --rerun``): actually re-run the extraction the report
-describes and diff verdict-bearing fields. Both reuse ``status: "match"`` /
-``"drifted"`` and the same 0/3 exit-code split described above (see
-``klayout_tools._report_verify``).
+describes and diff verdict-bearing fields. Both report match (0) or drifted (3).
+Cheap mode also reports unverifiable (4) when a recorded input is unavailable.
 """
 
 import argparse
@@ -79,9 +78,7 @@ from .output import (
 
 EXIT_OK = 0
 EXIT_DRIFTED = 3
-#: Alias for the --check/--rerun "still consistent" outcome (issue #1149) --
-#: same numeric value as a normal run's success exit, just named for the
-#: "match"/"drifted" vocabulary those modes report under.
+EXIT_UNVERIFIABLE = 4
 EXIT_MATCH = EXIT_OK
 
 
@@ -904,4 +901,6 @@ def _run_check(args: argparse.Namespace) -> int:
     text_renderer = render_rerun_drift if args.rerun else render_check_text
     emit_success(result, args.format, text_renderer)
 
-    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+    return {"match": EXIT_MATCH, "unverifiable": EXIT_UNVERIFIABLE}.get(
+        result["status"], EXIT_DRIFTED
+    )

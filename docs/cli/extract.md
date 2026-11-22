@@ -2296,6 +2296,7 @@ passes LVS silently.
 | `gf180mcu` | `rm1` | `gf180mcu_fd_pr__rm1` (drawn Metal1 resistor, issue #1640) | `Metal1` 34/0 | `metal1_res` 110/11 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm2` | `gf180mcu_fd_pr__rm2` | `Metal2` 36/0 | `metal2_res` 110/12 | — | **0.09 Ω/□** | — |
 | `gf180mcu` | `rm3` | `gf180mcu_fd_pr__rm3` | `Metal3` 42/0 | `metal3_res` 110/13 | — | **0.09 Ω/□** | — |
+| `gf180mcu` | `efuse` | `gf180mcu_fd_pr__efuse` (eFuse, issue #4312; link `Poly2 & plfuse` inside `efuse_mk`, anode = `Poly2 & lvs_source` 100/8, cathode = the rest of that shape; `A` is always the anode net and `B` the cathode net, whatever the orientation; `klt lvs` leaves `R` out of the compare by default, as the PDK does) | `Poly2` 30/0 | `plfuse` 125/5 | `efuse_mk` 80/5 (scope) | **28.5714 Ω/□** | — |
 | `gf180mcu` | `tm6k`/`tm9k`/`tm11k`/`tm30k` | `gf180mcu_fd_pr__tm{6k,9k,11k,30k}` (top-metal thickness flavour, `METAL_TOP` default `9K`, caller-selectable via `--deck-option metal_top=`) | `Metal5` 81/0 (this curated deck's own top-of-stack — see `decks/gf180mcu.py`'s module docstring for the 6LM/`MetalTop` approximation this makes) | `metal5_res` 110/15 | — | **0.06/0.04/0.04/0.0095 Ω/□** | — |
 
 sg13g2's poly resistors `rsil`/`rppd`/`rhigh` are not
@@ -3470,11 +3471,11 @@ source/drain nets and the same `L`, summing `nfin`, `w_um` and `fingers`.
 That is the only combination performed. Series stacks stay as drawn.
 
 **Polarity, body, connectivity.** Polarity comes from `Nselect`/`Pselect`
-(12/0, 13/0), not from the well. The ASAP7 cells draw no substrate or well
-tie (the CDL simply ties bulk to `VSS`/`VDD`). So the NMOS bulk is the
-synthesized `vsubs` global, and the PMOS bulk is the well net, named by
-its `well pin` text (1/251). Neither is joined to a metal supply of the same
-name, and a `warnings[]` entry says so. Diffusion reaches `LISD` (17/0) only
+(12/0, 13/0). NMOS bulk is the synthesized `vsubs` global. PMOS bulk follows
+the drawn well, named by its `well pin` text (1/251). N-selected active inside
+the well forms a tap. A complete contact path connects that well island to
+metal. Without the path, even a rail bearing the same label remains separate.
+Diffusion reaches `LISD` (17/0) only
 through the `SDT` source/drain trench (88/0). `LIG` (16/0) lands on the gate
 (after `GCut` 10/0 is subtracted). `LIG` and `LISD` conduct where they
 overlap. `V0` (18/0) joins both to `M1`, and `V1`..`V8` climb to `M9`. The
@@ -9166,10 +9167,13 @@ legitimately (and unhelpfully) show drift in the corresponding fields under
 
 ### Exit codes for `--check` / `--rerun`
 
-Both modes use the same 0/3 split described below: `0` when `status` is
-`"match"`, `3` when it is `"drifted"`. A missing or unparseable
-`<report.json>` exits `1` with a clean error message, same as any other
-application-level failure.
+Both modes return 0 for `match` and 3 for `drifted`. In cheap mode, a
+recorded digest whose input is unavailable on this checkout gives its
+`checks[]` entry `status: "unverifiable"`, `actual: null`, and `match: false`.
+Text output marks that field `[UNVERIFIABLE]`. If every other input matches
+or is also unavailable, the overall status is `unverifiable` (exit 4).
+A changed digest takes precedence (exit 3), with both field results visible.
+A missing or unparseable report is a command error (exit 1).
 
 Both modes accept plain JSON and gzip-compressed reports, such as
 `report.json.gz`. Compression is detected by the file's contents, so a
@@ -9185,6 +9189,7 @@ error envelope under `--format json`.
 | `1`  | Failed to run — bad file, missing/unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). Under `--check`: a missing/unparseable committed report, or `--rerun` given without `--check`. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Under `--check`: the committed report drifted from the current deck/input (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
+| `4`  | Under cheap `--check`, a recorded input is unavailable and every comparable hash matches (`status: "unverifiable"`). |
 
 Outside `--check`, there is no "ran but found problems" outcome for a fresh
 extraction; it either produces a netlist or it fails (matching `klt gen`'s

@@ -87,15 +87,16 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import IO, Any, NamedTuple
+from typing import Any, NamedTuple
 
 from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_ac_waveform,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -303,6 +304,11 @@ from .sim_param_file import _corner_lib_lines as _corner_lib_lines
 from .sim_param_file import param_file_environment, resolve_param_file
 from .sim_plot import render_waveform_svg
 
+#: Moved to `sim_raw.py` (issue #6752) so measurement modules read a waveform
+#: without importing this runner; re-exported self-aliased for existing callers.
+from .sim_raw import _parse_and_persist_waveform as _parse_and_persist_waveform
+from .sim_raw import parse_ascii_rawfile as parse_ascii_rawfile
+
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
 #: intentional) so ``klayout_tools.sim.<name>`` keeps working (issue #1764).
@@ -482,9 +488,9 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_job_interrupted",
         # Report-level (`environment.job_diagnostic`, issue #2970).
         "all_units_at_timeout",
-        # Report-level (top-level `diagnostics[]`, issue #2901): batch runner
-        # predates request fields, under `runner_version_check: "warn"`.
+        # Report-level batch runner version and request-feature checks.
         "batch_runner_request_feature_predated",
+        "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
@@ -3994,9 +4000,7 @@ def _run_sim_corners(
 
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
-        # off-host "hosts exceeds the units to dispatch" refusal over an
-        # empty fleet. (`attach_job_id is None` keeps #5777's "attach never
-        # fans out" single-job path authoritative for every attach.)
+        # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
@@ -4016,12 +4020,14 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
-            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
-            # map even without --resume (no checkpoint to take it from).
             **(
                 {
                     "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
                     "netlist_sha256": netlist_digests.sha256,
+                    "explicit_points": dispatch_points
+                    if len(dispatch_points) < len(corner_points)
+                    and attach_job_id is None
+                    else None,
                 }
                 if backend == "batch"
                 else {}
@@ -5889,9 +5895,7 @@ def _expand_monte_carlo(
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
 
-    Fan-out only -- reuses the same ``list[CornerPoint]`` shape every
-    execution backend already consumes (see :class:`CornerPoint`'s
-    docstring), so no new backend is needed. Sample order is deterministic
+    All backends consume this same list of sample points. Order is deterministic
     (outer: original corner order from :func:`_expand_corners`; inner:
     ``sample_index`` ``0..n-1``), matching the odometer-style determinism
     :func:`_expand_corners` already guarantees for the PVT axes.
@@ -5966,6 +5970,7 @@ def _expand_monte_carlo(
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    supply_waveforms=base.supply_waveforms,
                     mc_injected=(
                         sim_injected.draw(injected[0], mismatch_seed, injected[1])
                         if injected
@@ -8219,18 +8224,8 @@ def _run_corner(
     if aborted_diagnostic is not None:
         diagnostics.append(aborted_diagnostic)
 
-    # A recovered `singular_matrix`/`nonconvergence` classification (the
-    # engine's own stepping-recovery narration -- routine noise on the way
-    # to a *successful* analysis, not evidence the run failed) does not
-    # count as fatal on its own: downgrade its severity in place before
-    # computing the corner's aggregate status. See
-    # `_recovered_from_stepping` and issue #205;
-    # `timeout`/`netlist`/`measurement`/`no_such_vector`/`unknown` are never
-    # downgraded.
-    # Xyce (issue #2016) gets the same rule against its own abort trailer:
-    # its Amesos "numerically singular matrix, returning zero" warnings can
-    # narrate intermediate solver trouble on a run that ultimately produced
-    # every requested measurement.
+    # Both engines may narrate failed stepping attempts on the path to a
+    # successful solve. Only these two codes are eligible for recovery.
     # Issue #2492: sampled *before* the downgrade immediately below, on the
     # diagnostic's `code` rather than its severity. A caller who listed
     # `singular_matrix` is saying they distrust exactly the case the
@@ -8242,7 +8237,7 @@ def _run_corner(
     )
 
     waveform_complete = _capture_only_waveform_complete(
-        measurements_spec, raw_path, diagnostics, analysis
+        measurements_spec, raw_path, diagnostics, analysis, engine, log_text
     )
 
     if _recovered_from_stepping(
@@ -8252,7 +8247,9 @@ def _run_corner(
         aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
-        _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
+        _downgrade_stepping_diagnostics(
+            diagnostics, bool(measurements_spec), analysis["kind"]
+        )
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
@@ -8508,11 +8505,6 @@ _ABSENT_STATUS = "absent"
 ABSENT_DIAGNOSTIC_CODE = "measurement_absent"
 
 
-#: ngspice's data-row count line, e.g. ``No. of Data Rows : 1`` (verified on
-#: ngspice-46). An ``ac lin 2 ...`` sweep leaves one row, so ``.meas ac ...
-#: AT=`` cannot interpolate and fails without an ``Error: measure`` line
-#: (issue #4084).
-_DATA_ROWS_RE = re.compile(r"No\. of Data Rows\s*:\s*(\d+)", re.IGNORECASE)
 _AC_TOO_FEW_POINTS_HINT = (
     " -- the ac sweep produced fewer than 2 data points, so AT=/interpolation "
     "has nothing to interpolate between: use a denser sweep (e.g. `dec`)"
@@ -8521,7 +8513,7 @@ _AC_TOO_FEW_POINTS_HINT = (
 
 def _ac_sweep_too_few_points(log_text: str) -> bool:
     """Whether the log's (last) ``No. of Data Rows`` is below 2."""
-    rows = _DATA_ROWS_RE.findall(log_text or "")
+    rows = sim_ac_waveform.DATA_ROWS_RE.findall(log_text or "")
     return bool(rows) and int(rows[-1]) < 2
 
 
@@ -8692,67 +8684,10 @@ def _cycle_mean_measurement_result(
     return result, grading_diagnostics
 
 
-def _eye_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_eye.EyeOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``eye`` measurement's response entry (issue #4292).
-
-    ``value`` is the metric the entry selects (eye height by default), graded
-    through :func:`_grade_measurement_value` like any scalar; height, width and
-    best phase ride the additive ``eye`` sibling. A failure is
-    ``status: "error"``, ``value: null`` with a ``code: "measurement"``
-    diagnostic whose message starts with a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_eye.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no eye value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "eye_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "eye_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "eye": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
 def _vector_measurement_result(
     spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Response entry for a ``step_resolution``/``settled`` measurement; the
+    """Response entry for an eye, step-resolution, or settled measurement; the
     detail rides the additive ``key`` sibling. A failure is ``status:
     "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
@@ -8784,7 +8719,8 @@ def _vector_measurement_result(
     return result, grading_diagnostics
 
 
-#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
+#: Per-kind builders; ``settled`` value 1.0/0.0 = (not) settled.
+_eye_measurement_result = functools.partial(_vector_measurement_result, key="eye")
 _step_resolution_measurement_result = functools.partial(
     _vector_measurement_result, key="step_resolution"
 )
@@ -9521,7 +9457,7 @@ def _corner_deck_control_lines(
         # ngspice's `reset` (which re-parses the circuit, reverting every
         # `alter` and dropping the saved set).
         lines.extend(
-            sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
+            sim_steps.control_lines(analysis, measurements_spec, prefix, corner_dir)
         )
         lines.extend(["quit", ".endc"])
         return lines
@@ -9572,6 +9508,8 @@ def _corner_deck_control_lines(
     lines.append(f"{analysis['kind']} {_sao.deck_args(point, analysis)}")
     if raw_path is not None:
         lines.append(f"write {raw_path}")
+        if analysis["kind"] == "ac" and not measurements_spec:
+            lines.append("display frequency")  # Record the original AC point count.
     if analysis.get("linearize") is True:
         # Issue #4014: resample onto a uniform grid, after any rawfile
         # `write` (which keeps the solver's own points) and before the
@@ -10659,11 +10597,8 @@ def _recovered_from_stepping(
     means the analysis never produced a trustworthy result and the
     classification stays fatal.
 
-    A corner with no ``measurements[]`` (a waveform-capture-only request,
-    issue #3246) has no measurement to check; its independent signal is
-    ``waveform_complete`` -- the captured ``tran`` waveform reached the
-    analysis stop time (:func:`_waveform_reached_tran_window`). Without it
-    such a corner is never considered recovered.
+    For a capture-only request, the original waveform can establish that the
+    transient reached its stop time or ngspice completed the AC sweep.
     """
     if not measurements_spec:
         return waveform_complete and not aborted_re.search(log_text)
@@ -10715,14 +10650,10 @@ def _capture_only_waveform_complete(
     raw_path: str | None,
     diagnostics: list[dict[str, Any]],
     analysis: dict[str, Any],
+    engine: str,
+    log_text: str,
 ) -> bool:
-    """Issue #3246: for a waveform-capture-only ``tran`` request (no
-    ``measurements[]``) the captured waveform is the independent completion
-    signal. Parse the rawfile -- only when a ``singular_matrix`` /
-    ``nonconvergence`` diagnostic makes it matter -- and report whether it
-    reached the transient stop time. A truncated/unparseable rawfile stays
-    fatal (``False``).
-    """
+    """Check the original waveform only when it could explain stepping recovery."""
     if (
         measurements_spec
         or raw_path is None
@@ -10732,6 +10663,8 @@ def _capture_only_waveform_complete(
         or not os.path.isfile(raw_path)
     ):
         return False
+    if analysis["kind"] == "ac" and engine == "ngspice":
+        return sim_ac_waveform.complete(raw_path, analysis.get("args", ""), log_text)
     try:
         waveform = parse_ascii_rawfile(raw_path)
     except (SimError, ValueError):
@@ -10740,7 +10673,7 @@ def _capture_only_waveform_complete(
 
 
 def _downgrade_stepping_diagnostics(
-    diagnostics: list[dict[str, Any]], has_measurements: bool
+    diagnostics: list[dict[str, Any]], has_measurements: bool, analysis_kind: str
 ) -> None:
     """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
     to warnings; a capture-only corner also gets the reason appended."""
@@ -10748,9 +10681,13 @@ def _downgrade_stepping_diagnostics(
         if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
             diagnostic["severity"] = "warning"
             if not has_measurements:
+                reached = (
+                    "completed the AC sweep"
+                    if analysis_kind == "ac"
+                    else "reached the transient stop time"
+                )
                 diagnostic["message"] += (
-                    " (treated as recovered: the captured waveform "
-                    "reached the transient stop time)"
+                    f" (treated as recovered: the captured waveform {reached})"
                 )
 
 
@@ -11571,163 +11508,9 @@ def _rollup_measurements(
 
 # --------------------------------------------------------------------------- #
 # Waveform artifact (rawfile -> JSON)
+# The reader/writer moved to `sim_raw.py` (issue #6752); only the noise-mode
+# classifier of a parsed waveform stays here.
 # --------------------------------------------------------------------------- #
-
-
-def parse_ascii_rawfile(raw_path: str) -> dict[str, Any]:
-    """Parse an ngspice ASCII rawfile (``set filetype=ascii`` + ``write``)
-    into the documented waveform JSON shape (see ``docs/cli/sim.md``)::
-
-        {
-            "plotname": str,
-            "variables": [{"index": int, "name": str, "type": str}, ...],
-            "points": [[v0, v1, ...], ...],
-        }
-
-    ``variables[0]`` is always the sweep variable (``time`` for ``.tran``,
-    frequency for ``.ac``, the swept source for ``.dc``). Raises
-    :class:`SimError` if the file is not a recognisable ngspice ASCII
-    rawfile.
-
-    ``ac``/``sp`` analyses declare ``Flags: complex`` in the header, and
-    every value in the ``Values:`` section is then written as a
-    comma-separated ``real,imag`` pair rather than a bare float (verified
-    against ngspice 46). Per the JSON contract's additive-only convention,
-    ``points[]`` always holds plain real-valued floats -- for a ``Flags:
-    complex`` rawfile, each column's magnitude (``hypot(real, imag)``) is
-    emitted instead of the raw pair, applied uniformly across all columns
-    including the sweep variable (whose imaginary part is always ``0``, so
-    its magnitude equals its real part). See ``docs/cli/sim.md``'s waveform
-    JSON shape section for the documented representation.
-    """
-    with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
-        return {"plotname": plotname, "variables": variables, "points": list(points)}
-
-
-def _note_rawfile_header_field(meta: dict[str, Any], line: str) -> None:
-    """Record the first ``Plotname:`` / ``Flags:`` / ``No. Variables:`` header
-    line seen into ``meta`` (later duplicates are ignored)."""
-    if meta["plotname"] is None and line.startswith("Plotname:"):
-        meta["plotname"] = line[len("Plotname:") :].strip()
-    elif meta["is_complex"] is None and line.startswith("Flags:"):
-        meta["is_complex"] = "complex" in line.lower()
-    elif meta["var_count"] is None:
-        count_match = re.match(r"No\. Variables:\s*(\d+)$", line)
-        if count_match is not None:
-            meta["var_count"] = int(count_match.group(1))
-
-
-def _scan_rawfile_header(
-    handle: IO[str],
-) -> tuple[dict[str, Any], bool, bool, list[str]]:
-    """Read ``handle`` up to the ``Values:`` marker.
-
-    Returns ``(meta, in_variables, saw_values, variable_lines)``.
-    """
-    meta: dict[str, Any] = {"plotname": None, "is_complex": None, "var_count": None}
-    in_variables = False
-    saw_values = False
-    variable_lines: list[str] = []
-    try:
-        for raw_line in handle:
-            line = raw_line.rstrip("\r\n")
-            if line == "Values:":
-                saw_values = True
-                break
-            if in_variables:
-                variable_lines.append(line)
-            elif line == "Variables:":
-                in_variables = True
-            else:
-                _note_rawfile_header_field(meta, line)
-    except OSError as exc:
-        raise SimError(f"could not read rawfile: {exc}") from exc
-    return meta, in_variables, saw_values, variable_lines
-
-
-def _parse_rawfile_variables(
-    variable_lines: list[str], var_count: int
-) -> list[dict[str, Any]]:
-    """Parse the ``Variables:`` table lines, checking the declared count."""
-    variables: list[dict[str, Any]] = []
-    for line in variable_lines:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-        variables.append({"index": int(parts[0]), "name": parts[1], "type": parts[2]})
-    if len(variables) != var_count:
-        raise SimError(
-            f"malformed rawfile: declared {var_count} variables, "
-            f"parsed {len(variables)}"
-        )
-    return variables
-
-
-def _parse_rawfile_value(token: str, complex_values: bool) -> float:
-    if not complex_values:
-        return float(token)
-    # "real,imag" -- reduce to a single real-valued magnitude, applied
-    # uniformly to every column (including the sweep variable, whose
-    # imaginary part is always 0 so its magnitude equals its real part).
-    real_str, _, imag_str = token.partition(",")
-    real = float(real_str)
-    imag = float(imag_str) if imag_str else 0.0
-    return math.hypot(real, imag)
-
-
-def _iter_rawfile_points(
-    handle: IO[str], var_count: int, complex_values: bool
-) -> Iterator[list[float]]:
-    """Lazily yield one ``list[float]`` per point from the ``Values:`` body."""
-    current: list[float] = []
-    for raw_line in handle:
-        tokens = raw_line.split()
-        if not tokens:
-            continue
-        if len(tokens) == 2 and current == []:
-            # "<point_index> <value0>" -- start of a new point.
-            current = [_parse_rawfile_value(tokens[1], complex_values)]
-        elif len(tokens) == 1:
-            current.append(_parse_rawfile_value(tokens[0], complex_values))
-        else:
-            continue
-        if len(current) == var_count:
-            yield current
-            current = []
-
-
-@contextlib.contextmanager
-def _open_ascii_rawfile(
-    raw_path: str,
-) -> Iterator[tuple[str, list[dict[str, Any]], Iterator[list[float]]]]:
-    """Open an ngspice ASCII rawfile and yield ``(plotname, variables,
-    points)``, where ``points`` lazily yields one ``list[float]`` per point.
-
-    The header is read line by line up to the ``Values:`` marker, so a
-    non-rawfile or malformed header raises :class:`SimError` before any point
-    is produced, and peak memory does not scale with the size of the
-    ``Values:`` section (issue #3360). See :func:`parse_ascii_rawfile` for the
-    format notes (``Flags: complex`` magnitude reduction in particular).
-    """
-    try:
-        handle = open(raw_path, encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise SimError(f"could not read rawfile: {exc}") from exc
-    with handle:
-        meta, in_variables, saw_values, variable_lines = _scan_rawfile_header(handle)
-        plotname = meta["plotname"]
-        var_count = meta["var_count"]
-        if plotname is None:
-            raise SimError(f"not a recognisable ngspice rawfile: {raw_path}")
-        if var_count is None:
-            raise SimError(f"malformed rawfile (no variable count): {raw_path}")
-        if not (in_variables and saw_values):
-            raise SimError(
-                f"malformed rawfile (no Variables/Values section): {raw_path}"
-            )
-        variables = _parse_rawfile_variables(variable_lines, var_count)
-        points = _iter_rawfile_points(handle, var_count, bool(meta["is_complex"]))
-        yield plotname, variables, points
 
 
 def noise_representation(waveform: dict[str, Any]) -> str:
@@ -11745,35 +11528,6 @@ def noise_representation(waveform: dict[str, Any]) -> str:
         if str(var.get("type", "")).endswith("^2"):
             return "power"
     return "amplitude"
-
-
-def _parse_and_persist_waveform(raw_path: str, decimate: int | None = None) -> str:
-    """Parse the rawfile at ``raw_path`` to the waveform JSON shape and write
-    it alongside as ``<raw_path>.json``, returning that path.
-
-    Kept as its own step (rather than inlining waveform data into the
-    response) so the JSON contract's own response never grows to
-    waveform-shaped size -- per the spike, waveform data is an optional
-    *artifact*, referenced by path, not inlined.
-    """
-    json_path = raw_path + ".json"
-    # Streamed point by point (issue #3360) so peak memory does not scale with
-    # the rawfile; the output is byte-identical to `json.dump` of the dict
-    # `parse_ascii_rawfile` returns.
-    try:
-        with _open_ascii_rawfile(raw_path) as (plotname, variables, points):
-            with open(json_path, "w", encoding="utf-8") as handle:
-                handle.write('{"plotname": ' + json.dumps(plotname))
-                handle.write(', "variables": ' + json.dumps(variables))
-                handle.write(', "points": [')
-                sim_waveform_opts.write_points(handle, points, decimate)
-                handle.write("]}")
-    except (SimError, ValueError):
-        # Do not leave a truncated artifact behind a failed parse.
-        with contextlib.suppress(OSError):
-            os.remove(json_path)
-        raise
-    return json_path
 
 
 # --------------------------------------------------------------------------- #

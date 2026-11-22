@@ -52,6 +52,7 @@ from typing import Any
 
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: Edge polarities that can align a cycle (``either`` would make "one cycle"
 #: ambiguous, so it is refused).
@@ -282,8 +283,6 @@ def extract_corner_cycle_means(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> CycleMeanOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["cycle_mean"]
     name = spec["name"]
     if not os.path.isfile(raw_path):
