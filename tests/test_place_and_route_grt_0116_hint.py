@@ -33,7 +33,6 @@ from klayout_tools.cli import main
 from klayout_tools.place_and_route_route_overflow import route_failure_congestion
 from test_place_and_route import (
     _setup_success_env,
-    _stage_from_script_path,
     _stub_openroad_success,
     _write,
 )
@@ -93,18 +92,22 @@ def _write_20x20_macro_lef(path) -> str:
     )
 
 
-def _stub_openroad_route_failure(monkeypatch, *, route_stdout, report_text=None):
+def _stub_openroad_route_failure(
+    monkeypatch, *, route_stdout, report_text=None, fail_corner=None
+):
     """Floorplan/place/cts succeed (via the shared success stub); the route
     stage exits nonzero with ``route_stdout``, first writing
     ``report_text`` to this run's ``-congestion_report_file`` path when
     given -- the point a real GRT-0116 run has already written its report."""
-    _stub_openroad_success(monkeypatch, stages=("floorplan", "place", "cts"))
+    _stub_openroad_success(monkeypatch)
     succeeding = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] != ["openroad", "-version"]:
             script_path = cmd[5]
-            if _stage_from_script_path(script_path) == "route":
+            if Path(script_path).name.endswith("_route.tcl") and (
+                fail_corner is None or fail_corner in Path(script_path).parts
+            ):
                 if report_text is not None:
                     match = _CONGESTION_REPORT_PATH_RE.search(
                         Path(script_path).read_text(encoding="utf-8")
