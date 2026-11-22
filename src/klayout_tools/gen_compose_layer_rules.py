@@ -446,17 +446,22 @@ def _resolve_landing_pad_sizes(
                 )
                 if override_um < floor_side - 1e-9:
                     rule_id, needed = max(floors, key=lambda f: f[1])
+                    source = (
+                        "native runset"
+                        if rule_id
+                        in (
+                            _top_metal_floors._TOP_METAL_LANDING_WIDTH_FLOOR_RULE_ID,
+                            _top_metal_floors._TOP_METAL_LANDING_AREA_FLOOR_RULE_ID,
+                        )
+                        else "resolved PDK deck"
+                    )
                     raise GenComposeError(
-                        f"request.routing.landing_pad_size_um "
-                        f"({override_um:.4g}um) is below the resolved PDK "
-                        f"deck's own floor for a landing pad on layer "
-                        f"{pad_layer} over via layer {via_layer} -- "
-                        f"'{rule_id}' requires >= {needed:.4g}um. A "
-                        "smaller pad would draw a guaranteed `klt drc` "
-                        "violation; request at least "
-                        f"{floor_side:.4g}um for this deck, or omit "
-                        "routing.landing_pad_size_um to keep the default "
-                        "pads"
+                        f"request.routing.landing_pad_size_um ({override_um:.4g}um) "
+                        f"is below the {source} floor for layer {pad_layer} over "
+                        f"via layer {via_layer}. '{rule_id}' requires "
+                        f">= {needed:.4g}um. "
+                        f"Please request at least {floor_side:.4g}um or omit "
+                        "routing.landing_pad_size_um to keep the default pads"
                     )
                 landing_pad_size_um[pair] = override_um
     return landing_pad_size_um
