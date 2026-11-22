@@ -31,6 +31,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._digest import sha256_file
+from .signoff_joint_rows import JOINT_GRID_ITEM_ID, read_joint_grid
 from .signoff_na import _na_spec_format
 
 #: T1 items whose manifest entry may be a **list** of citations with optional
@@ -103,6 +104,14 @@ def _read_spec_rows(
     :func:`_check_justified_gap_rationales`. An object that does not
     validate degrades the item to ``invalid_evidence`` -- never silently to
     the free-text form.
+
+    Issue #6969: a row may instead carry ``joint_grid`` (item 5 only -- a
+    bare or partition-qualified ``"5"``/``"5.analog"`` key; item 6 shares
+    this reader but not the form). The object is normalized by
+    :func:`signoff_joint_rows.read_joint_grid` and kept under
+    ``joint_grid``; ``joint_grid`` and ``gap`` (either form) are mutually
+    exclusive, and a malformed object degrades the item to
+    ``invalid_evidence`` like every other bad row form.
     """
     raw = manifest.get("spec_rows")
     if raw is None:
@@ -136,6 +145,11 @@ def _read_spec_rows(
                 justified_gap = (
                     _read_justified_gap(gap) if isinstance(gap, dict) else None
                 )
+                # Issue #6969: the joint-grid form, item 5 only.
+                joint_raw = row.get("joint_grid") if isinstance(row, dict) else None
+                joint_grid = (
+                    read_joint_grid(joint_raw) if joint_raw is not None else None
+                )
                 if (
                     not isinstance(row_id, str)
                     or not row_id
@@ -145,6 +159,9 @@ def _read_spec_rows(
                     or (isinstance(gap, dict) and justified_gap is None)
                     or not isinstance(ratified, bool)
                     or not isinstance(margin, bool)
+                    or (joint_raw is not None and gap is not None)
+                    or (joint_raw is not None and joint_grid is None)
+                    or (joint_raw is not None and item_id != JOINT_GRID_ITEM_ID)
                 ):
                     valid = []
                     break
@@ -156,6 +173,7 @@ def _read_spec_rows(
                         "justified_gap": justified_gap,
                         "ratified": ratified,
                         "timing_margin": margin,
+                        "joint_grid": joint_grid,
                     }
                 )
             parsed = valid or None
@@ -220,6 +238,26 @@ def _check_justified_gap_rationales(
                 "expected_content_hash": ref["content_hash"],
                 "actual_content_hash": actual,
             }
+    return None
+
+
+def _justified_gap_rationale_outcome(
+    spec_rows: list[dict[str, Any]] | None,
+    row_info: dict[str, Any],
+    extra: dict[str, Any],
+) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
+    """The ``unmet`` outcome when a justified gap's rationale artifact fails
+    to check (issue #5599); ``None`` when every one checks. A broken
+    declaration is a distinct documented reason -- it is never silently
+    demoted to the free-text form, whose reason would be
+    ``partial_coverage``. Moved from :mod:`.signoff` (issue #6969) for its
+    size ceiling, beside the checker it wraps; ``signoff.<name>`` keeps
+    resolving through the re-import."""
+    failure = _check_justified_gap_rationales(spec_rows)
+    if failure is None:
+        return None
+    reason, detail = failure
+    return "unmet", reason, None, {**row_info, **detail}, extra
     return None
 
 

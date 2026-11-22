@@ -223,9 +223,18 @@ from .signoff_generator_batch import (
     match_approval,
     run_approved_generator,
 )
+
+# The joint-grid spec-row form (issue #6969), hooked into
+# `_grade_multi_citation` below; moved names are for this file's ceiling.
+from .signoff_joint_rows import (
+    _citation_label,
+    _members_rows_declared,
+    _multi_citation_rows,
+    evaluate_joint_rows,
+)
 from .signoff_justified_gap import (
     _ITEMS_ACCEPTING_MULTI_CITATION,
-    _check_justified_gap_rationales,
+    _justified_gap_rationale_outcome,
     _na_document,
     _read_spec_rows,
     _SpecRowsKey,
@@ -234,7 +243,7 @@ from .signoff_justified_gap import (
 
 # Per-cell DRC/LVS member-coverage counts (issue #5031); kept out of this file
 # for its size-ratchet ceiling.
-from .signoff_multi_member import _entry_problem, with_member_coverage
+from .signoff_multi_member import _entry_problem, failed_members, with_member_coverage
 
 # The item-6 `not_applicable` form's pure helpers (statistical scan, markdown
 # spec parser; issue #4793) live in `signoff_na`, keeping this file under its
@@ -273,7 +282,7 @@ from .signoff_runset import (
 from .signoff_runset import (
     REASON_RUNSET_UNRECOGNISED_DEVICE as _REASON_RUNSET_UNRECOGNISED_DEVICE,
 )
-from .signoff_spec_row_table import _members_rows_declared, build_spec_row_records
+from .signoff_spec_row_table import build_spec_row_records
 from .signoff_sta_constraints import (
     constraint_completeness_status,
     sta_annotation_refusal,
@@ -6544,12 +6553,6 @@ def _resolve_spec_rows(
     return {"spec_rows": None, "spec_rows_invalid": bad_suffix}
 
 
-def _citation_label(spec: dict[str, Any]) -> str:
-    if spec["kind"] == "command":
-        return " ".join(spec["command"])
-    return str(spec["file"])
-
-
 def _grade_multi_citation(
     raw_entry: Any,
     grade_spec: Any,
@@ -6602,6 +6605,14 @@ def _grade_multi_citation(
     ``unmet`` with its own reason, and a named row whose tagged measurement
     fails stays in ``failed_rows``.
 
+    Issue #6969: a ``joint_grid`` row is covered only when every named
+    member graded ``met`` and proved the declared grid plus a condition
+    probe (:func:`.signoff_joint_rows.evaluate_joint_rows`); an uncovered
+    one lands in ``uncovered_rows`` with per-member shortfalls under
+    ``detail.joint_rows``, a member no citation names or a Monte Carlo
+    member is ``invalid_evidence`` (decided with the other post-member
+    outcomes).
+
     Returns ``(status, reason, citation, failure_detail, extra_item_keys)``.
     """
 
@@ -6620,11 +6631,17 @@ def _grade_multi_citation(
         return invalid(problem or "malformed evidence entry")
 
     graded = [(spec, rows, grade_spec(spec)) for spec, rows in members]
-    failed = [g for g in graded if g[2][0] != "met"]
+    failed = failed_members(graded)
     # Rows each member is credited with, whether that was machine-derived,
     # and the issue-#5490 `reported` case (needs kind + the unratified set).
     credited = member_credited_rows(graded, met_envelopes, spec_rows)
-    row_info = multi_row_info(graded, failed, spec_rows, credited)
+    # Issue #6969: the joint-grid rows -- a member no citation names, or a
+    # Monte Carlo one, is invalid evidence for the whole item (decided with
+    # the other post-member outcomes, via `_post_member_outcome`).
+    joint = evaluate_joint_rows(graded, spec_rows, met_envelopes)
+    row_info = multi_row_info(
+        graded, failed, spec_rows, credited, joint.covered, joint.rows
+    )
     extra: dict[str, Any] = {
         "citations_graded": [
             {
@@ -6651,7 +6668,7 @@ def _grade_multi_citation(
     # timing-margin rule are the two outcomes decided after every member has
     # graded but before partial coverage.
     post_member = _post_member_outcome(
-        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra
+        spec_rows, required_kind_pair, graded, met_envelopes, row_info, extra, joint
     )
     if post_member is not None:
         return post_member
@@ -6732,23 +6749,6 @@ def _grade_required_kinds(
     )
 
 
-def _justified_gap_rationale_outcome(
-    spec_rows: list[dict[str, Any]] | None,
-    row_info: dict[str, Any],
-    extra: dict[str, Any],
-) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
-    """The ``unmet`` outcome when a justified gap's rationale artifact fails
-    to check (issue #5599); ``None`` when every one checks. A broken
-    declaration is a distinct documented reason -- it is never silently
-    demoted to the free-text form, whose reason would be
-    ``partial_coverage``."""
-    failure = _check_justified_gap_rationales(spec_rows)
-    if failure is None:
-        return None
-    reason, detail = failure
-    return "unmet", reason, None, {**row_info, **detail}, extra
-
-
 def _post_member_outcome(
     spec_rows: list[dict[str, Any]] | None,
     required_kind_pair: tuple[str, ...] | None,
@@ -6756,11 +6756,16 @@ def _post_member_outcome(
     met_envelopes: dict[int, dict[str, Any]] | None,
     row_info: dict[str, Any],
     extra: dict[str, Any],
+    joint: Any = None,
 ) -> tuple[str, str | None, None, dict[str, Any], dict[str, Any]] | None:
     """The ``unmet`` outcomes decided after every member has graded but
-    before partial coverage: the justified-gap declaration check (issue
-    #5599) first, then the timing-margin rule (issue #4314). ``None`` when
-    neither applies."""
+    before partial coverage: the joint-grid declaration check (issue #6969
+    -- a member no citation names, or a Monte Carlo one) first, then the
+    justified-gap declaration check (issue #5599), then the timing-margin
+    rule (issue #4314). ``None`` when none applies."""
+    problem = getattr(joint, "problem", None)
+    if problem is not None:
+        return "unmet", _REASON_INVALID_EVIDENCE, None, {"problem": problem}, extra
     rationale_unmet = _justified_gap_rationale_outcome(spec_rows, row_info, extra)
     if rationale_unmet is not None:
         return rationale_unmet
@@ -6867,16 +6872,6 @@ def _row_margin_lacking_corners(envelope: dict[str, Any] | None, row: str) -> li
         if best is None or len(lacking) < len(best):
             best = lacking
     return best or []
-
-
-def _multi_citation_rows(
-    report_list: bool,
-    spec_rows: list[dict[str, Any]] | None,
-    spec_rows_invalid: bool,
-) -> tuple[list[dict[str, Any]] | None, bool]:
-    """``(spec_rows, spec_rows_invalid)`` as :func:`_grade_multi_citation`
-    sees them: a plain per-cell report list ignores ``spec_rows`` entirely."""
-    return (None, False) if report_list else (spec_rows, spec_rows_invalid)
 
 
 def _report_list_problem(item_id: int, raw: Any) -> dict[str, Any]:

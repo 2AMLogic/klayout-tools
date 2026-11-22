@@ -9,10 +9,9 @@ top-level ``spec_rows[]`` block to its report: one record per declared
 row, in declaration order, carrying each row's limit, worst value,
 binding corner, verdict and yield estimate, and the cited file behind
 each number. A manifest that declares nothing omits the key entirely, so
-``--check`` sees no drift on an upgrade alone (the ``partition_boundary``
-back-compat rule, #2278). Additive: no ``schema_version`` bump. The
-record contract is documented in ``docs/cli/signoff.md`` ("The
-per-spec-row table"); the load-bearing rules:
+``--check`` sees no drift on an upgrade alone (#2278). Additive: no
+``schema_version`` bump. The record contract is documented in
+``docs/cli/signoff.md``; the load-bearing rules:
 
 - **Quote, never re-derive, anything one envelope already states.**
   ``worst`` quotes the binding measurement's own ``worst_case`` verbatim
@@ -27,15 +26,12 @@ per-spec-row table"); the load-bearing rules:
   several citations. The binding one is picked by **minimum relative
   margin** -- ``margin / |active bound|``, recorded as
   ``worst.relative_margin`` -- because absolute margin is wrong when
-  instance limits scale with the supply (a 1 V rail's 1 mV headroom is
-  proportionally tighter than a 1.8 V rail's 20 mV). When the active
-  bound is ``0``, or the measurement declares no ``limits``, relative
-  margin is undefined: the pick falls back to the absolute ``margin``
-  and ``relative_margin`` is ``null``. A non-``pass`` measurement
-  outranks any ``pass`` one regardless of margin, by the house
-  ``error > inconclusive > fail > pass`` precedence extended monotonic
-  for `klt yield`'s two extra tokens (``fail > insufficient_evidence >
-  pass > reported``, docs/cli/yield.md). Ties keep citation order.
+  instance limits scale with the supply. When the active bound is ``0``,
+  or the measurement declares no ``limits``, relative margin is
+  undefined: the pick falls back to the absolute ``margin`` and
+  ``relative_margin`` is ``null``. A non-``pass`` measurement outranks
+  any ``pass`` one regardless of margin, by the house precedence
+  (docs/cli/yield.md); ties keep citation order.
 - **Disagreeing limits stay renderable, unreconciled**: the binding
   measurement's ``limits`` are quoted as ``limits`` and every cited
   measurement declaring a different set is listed under an additive
@@ -43,25 +39,22 @@ per-spec-row table"); the load-bearing rules:
   limit.
 - **States**: ``graded``; ``gap`` (a free-text or justified gap reason in
   an explicit no-evidence record; grading refuses citations for either
-  form); ``no_evidence`` (no citation
-  names the row); ``unattributable`` (a citation names the row but its
-  envelope carries no ``spec_row`` tags at all -- #3778's *asserted*
-  coverage: the measurements cannot be attributed to a row, and guessing
-  is the bug this verb exists to prevent). Every declared row gets a
-  record in every state; the measured fields are ``null`` where the
-  state has nothing to quote.
+  form); ``no_evidence`` (no citation names the row);
+  ``unattributable`` (a citation names the row but its envelope carries
+  no ``spec_row`` tags at all -- #3778's *asserted* coverage: the
+  measurements cannot be attributed to a row, and guessing is the bug
+  this verb exists to prevent). Every declared row gets a record in
+  every state; the measured fields are ``null`` where the state has
+  nothing to quote.
 - **Static projection only**: file-backed citations are re-read;
   command-backed citations would have to be re-executed to render, so
   they contribute nothing here, as does an unreadable, malformed or
   unresolvable citation. Grading reports those on the item axis; this
   block never contradicts it.
 
-The module also hosts ``_members_rows_declared`` (moved here from
-``signoff.py`` as part of the size offset that pays for the hook lines;
-it is the spec-row naming rule the multi-citation grader applies, so
-this is its thematic home). ``klayout_tools.signoff`` re-imports it by
-name so ``signoff._members_rows_declared`` keeps resolving exactly as
-before (the #2313 ``signoff_envelopes.py`` precedent).
+The module also hosted ``_members_rows_declared`` from its start; issue
+#6969 moved it to :mod:`.signoff_joint_rows` with the ``joint_grid``
+reader, as the size offset for that form's hook lines here.
 """
 
 from __future__ import annotations
@@ -71,26 +64,14 @@ from collections.abc import Callable
 from typing import Any
 
 from ._jsonnum import is_number
+from .signoff_joint_rows import (
+    attribute_joint_rows,
+    citation_label,
+    joint_member_lines,
+    joint_table_detail,
+)
 
 __all__ = ["build_spec_row_records", "print_spec_row_table"]
-
-
-def _members_rows_declared(
-    members: list[tuple[dict[str, Any], list[str] | None]],
-    spec_rows: list[dict[str, Any]] | None,
-) -> bool:
-    """True unless a member names an undeclared (or declared-``gap`` --
-    either form, issue #5599) row."""
-    if spec_rows is None:
-        return True
-    declared = {row["id"]: row for row in spec_rows}
-    return all(
-        row_id in declared
-        and declared[row_id]["gap"] is None
-        and declared[row_id]["justified_gap"] is None
-        for _, rows in members
-        for row_id in rows or []
-    )
 
 
 #: The house status precedence ``error > inconclusive > fail > pass`` --
@@ -338,11 +319,10 @@ def _collect_slot_state(
     """Per declared row of one slot: which citations name it, whether the
     envelopes they cite carry ``spec_row`` tags at all, and every tagged
     measurement matching it. A member naming an undeclared row is ignored
-    (#3778); a citation that is not file-backed, or that does not resolve
-    to a readable envelope, contributes nothing (grading reports those on
-    the item axis)."""
+    (#3778); a non-file-backed or unreadable citation contributes nothing
+    (grading reports those on the item axis)."""
     per_row: dict[str, dict[str, Any]] = {
-        row["id"]: {"untagged": False, "candidates": []} for row in rows
+        row["id"]: {"untagged": False, "candidates": [], "joint": None} for row in rows
     }
     raw_entry = lookup_evidence(evidence, item_id, suffix)
     members = []
@@ -350,13 +330,16 @@ def _collect_slot_state(
         members, _problem = parse_members(raw_entry)
         if members is None:
             members = []
+    envelopes: dict[str, dict[str, Any]] = {}
     for spec, member_rows in members or []:
         if spec.get("kind") != "file":
             continue  # command-backed: static projection only
         resolved = _resolved_envelope(spec, resolve_evidence, repo_root, resolved_cache)
         if resolved is None:
             continue  # unreadable/malformed citation: grading reports it
+        envelopes[citation_label(spec)] = resolved["envelope"]
         _attribute_rows(resolved, member_rows, per_row)
+    attribute_joint_rows(rows, per_row, envelopes)  # issue #6969
     return per_row
 
 
@@ -380,6 +363,7 @@ def _resolved_envelope(
                 "file_label": spec["file"],
                 "tagged": _envelope_has_tags(envelope),
                 "measurements": _envelope_measurements(envelope),
+                "envelope": envelope,
             }
         )
     return resolved_cache[key]
@@ -431,6 +415,12 @@ def _emit_slot_records(
         state = per_row[row_id]
         if gap is not None:
             records.append(_base_record(row_id, item_id, "gap", gap))
+        elif row["joint_grid"] is not None:
+            record = _base_record(row_id, item_id, "joint", None)
+            # Issue #6969: no single measurement to quote -- the record
+            # carries the per-member joint projection instead.
+            record["joint"] = state["joint"] or {"covered": False, "members": []}
+            records.append(record)
         elif state["candidates"]:
             records.append(_graded_record(row_id, item_id, state["candidates"]))
         elif state["untagged"]:
@@ -453,6 +443,44 @@ def _verdict_marker(verdict: Any, palette: Any) -> tuple[str, str]:
     return f"{str(verdict or 'grade')[:5].upper():<5}", ""
 
 
+def _record_marker_detail(record: dict[str, Any], palette: Any) -> tuple[str, str, str]:
+    """``(marker, colour, detail)`` for one record's text-table line, by
+    state -- extracted from :func:`print_spec_row_table` (issue #6969)."""
+    state = record["state"]
+    if state == "graded":
+        marker, colour = _verdict_marker(record["verdict"], palette)
+        detail = f"limit {json.dumps(record['limits'], sort_keys=True)}"
+        if record["unit"]:
+            detail += f" {record['unit']}"
+        worst = record["worst"]
+        if isinstance(worst, dict):
+            detail = (
+                f"worst {worst.get('value')} @ {worst.get('corner_id')} "
+                f"(margin {worst.get('margin')}, "
+                f"rel {worst.get('relative_margin')}) -- {detail}"
+            )
+        if isinstance(record["yield"], dict):
+            interval = record["yield"].get("confidence_interval") or {}
+            detail += (
+                f" -- yield {record['yield'].get('estimate')} "
+                f"CI [{interval.get('low')}, {interval.get('high')}] "
+                f"({record['yield'].get('method')})"
+            )
+    elif state == "gap":
+        marker, colour = "GAP  ", ""
+        detail = f"declared gap: {record['gap']}"
+    elif state == "joint":
+        marker, colour = "JOINT", ""
+        detail = joint_table_detail(record)
+    elif state == "unattributable":
+        marker, colour = "UNATT", ""
+        detail = "cited, but its envelope declares no spec_row tags"
+    else:
+        marker, colour = "MISS ", ""
+        detail = "no cited evidence names this row"
+    return marker, colour, detail
+
+
 def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> None:
     """Render the ``spec_rows[]`` block for ``--format text`` -- one line
     per record plus its sources, after the item rows it qualifies. Silent
@@ -463,36 +491,10 @@ def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> 
     print()
     print(f"spec rows ({len(records)}):")
     for record in records:
-        state = record["state"]
-        if state == "graded":
-            marker, colour = _verdict_marker(record["verdict"], palette)
-            detail = f"limit {json.dumps(record['limits'], sort_keys=True)}"
-            if record["unit"]:
-                detail += f" {record['unit']}"
-            worst = record["worst"]
-            if isinstance(worst, dict):
-                detail = (
-                    f"worst {worst.get('value')} @ {worst.get('corner_id')} "
-                    f"(margin {worst.get('margin')}, "
-                    f"rel {worst.get('relative_margin')}) -- {detail}"
-                )
-            if isinstance(record["yield"], dict):
-                interval = record["yield"].get("confidence_interval") or {}
-                detail += (
-                    f" -- yield {record['yield'].get('estimate')} "
-                    f"CI [{interval.get('low')}, {interval.get('high')}] "
-                    f"({record['yield'].get('method')})"
-                )
-        elif state == "gap":
-            marker, colour = "GAP  ", ""
-            detail = f"declared gap: {record['gap']}"
-        elif state == "unattributable":
-            marker, colour = "UNATT", ""
-            detail = "cited, but its envelope declares no spec_row tags"
-        else:
-            marker, colour = "MISS ", ""
-            detail = "no cited evidence names this row"
+        marker, colour, detail = _record_marker_detail(record, palette)
         reset = palette.reset if colour else ""
         print(f"[{colour}{marker}{reset}] {record['id']}: {detail}")
+        for line in joint_member_lines(record):
+            print(f"        {line}")
         for source in record["sources"]:
             print(f"        from: {source['file']} ({source['measurement']})")

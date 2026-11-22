@@ -46,6 +46,13 @@ def with_member_coverage(
     return extra
 
 
+def failed_members(graded: list[Any]) -> list[Any]:
+    """The graded ``(spec, rows, outcome)`` members whose outcome status is
+    not ``met``. Moved out of ``signoff._grade_multi_citation`` (issue
+    #6969) for its complexity ceiling."""
+    return [g for g in graded if g[2][0] != "met"]
+
+
 def _entry_problem(raw: Any) -> str:
     """Human-readable cause for an evidence entry
     :func:`_normalize_evidence_entry` rejects (issue #4562)."""

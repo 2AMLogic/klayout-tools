@@ -413,6 +413,8 @@ def multi_row_info(
     failed: list[Any],
     spec_rows: list[dict[str, Any]] | None,
     credited: dict[int, tuple[list[str] | None, bool]] | None = None,
+    joint_covered: frozenset[str] = frozenset(),
+    joint_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``failed_rows`` / ``uncovered_rows`` / ``declared_gaps`` /
     ``unratified_rows`` for the declared ``spec_rows`` (empty when none were
@@ -433,6 +435,11 @@ def multi_row_info(
     justified row is declared, keeping a free-text-only report
     byte-identical; a justified gap is still a gap (never covered, never
     failed).
+
+    Issue #6969: ``joint_covered`` is the ``joint_grid`` rows every named
+    member proved (:func:`~.signoff_joint_rows.evaluate_joint_rows`); they
+    join ``covered`` as ``derived`` -- never ``asserted`` -- and the
+    per-member ``joint_rows`` shortfalls are reported, omitted when empty.
     """
     if spec_rows is None:
         return {}
@@ -451,6 +458,9 @@ def multi_row_info(
             # A row covered by any derived citation is machine-checked.
             if derived or r not in row_sources:
                 row_sources[r] = "derived" if derived else "asserted"
+    # Issue #6969: a joint row's coverage is the set's, always derived.
+    covered.update(joint_covered)
+    row_sources.update(dict.fromkeys(joint_covered, "derived"))
     failed_rows = sorted({r for _, rows, _ in failed for r in rows or []} - covered)
     justified = [
         {
@@ -486,4 +496,5 @@ def multi_row_info(
             and not row["ratified"]
         ],
         "row_sources": {r: row_sources[r] for r in sorted(row_sources)},
+        **({"joint_rows": joint_rows} if joint_rows else {}),
     }
