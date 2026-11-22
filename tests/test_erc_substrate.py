@@ -7,86 +7,21 @@ Fixtures 1-4 plus the monotonicity pin. gf180mcu's deck declares
 
 from __future__ import annotations
 
-import json
-
 import klayout.db as kdb
 import pytest
 
-from klayout_tools.erc import run_erc
+from helpers.erc_substrate_fixtures import (
+    DBU,
+    _box,
+    _ptie,
+    _rail,
+    _run,
+    _shorts,
+    _spec,
+    _two_rails,
+    _um,
+)
 from klayout_tools.erc_substrate import _FAMILY_MISSING
-
-DBU = 0.001
-
-
-def _um(v: float) -> int:
-    return int(round(v / DBU))
-
-
-def _box(top, layout, layer, x0, y0, x1, y1):
-    top.shapes(layout.layer(*layer)).insert(
-        kdb.Box.new(_um(x0), _um(y0), _um(x1), _um(y1))
-    )
-
-
-def _rail(layout, top, y, name, tap_x=2.0):
-    """A li1 rail labelled ``name`` carrying one implant-marked tap contact."""
-    _box(top, layout, (3, 0), 0, y, 20, y + 1)
-    top.shapes(layout.layer(3, 5)).insert(
-        kdb.Text(name, kdb.Trans(_um(1), _um(y + 0.5)))
-    )
-    _box(top, layout, (21, 0), tap_x, y + 0.2, tap_x + 0.6, y + 0.8)
-    _box(top, layout, (22, 0), tap_x - 0.2, y, tap_x + 0.8, y + 1)
-
-
-def _spec(ties, nets=("VSS", "VSS2")):
-    return {
-        "stackup": [
-            {"name": "poly", "layer": "1/0", "role": "gate"},
-            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
-        ],
-        "vias": [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}],
-        "nets": [{"name": n, "kind": "supply"} for n in nets],
-        "ties": ties,
-    }
-
-
-def _ptie(name, net, **over):
-    entry = {
-        "name": name,
-        "well_layer": None,
-        "well_complement_of": ["10/0"],
-        "tap_layer": "21/0",
-        "tap_requires": ["22/0"],
-        "tap_is_dedicated": True,
-        "connect_to": "li1",
-        "net": net,
-    }
-    entry.update(over)
-    return entry
-
-
-def _run(tmp_path, layout, spec, stem="t", deck="gf180mcu"):
-    gds = tmp_path / f"{stem}.gds"
-    layout.write(str(gds))
-    spec_path = tmp_path / f"{stem}.erc.json"
-    spec_path.write_text(json.dumps(spec))
-    return run_erc(str(gds), str(spec_path), deck=deck)
-
-
-def _two_rails(second_tap_x=2.0):
-    layout = kdb.Layout()
-    layout.dbu = DBU
-    top = layout.create_cell("TOP")
-    _rail(layout, top, 0, "VSS")
-    _rail(layout, top, 5, "VSS2", tap_x=second_tap_x)
-    # An unrelated n-well keeps the complement "substrate" a proper subset of
-    # the die (a whole-die substrate assertion is graded degenerate).
-    _box(top, layout, (10, 0), 0, 20, 20, 30)
-    return layout, top
-
-
-def _shorts(report):
-    return [f for f in report["erc_findings"] if f["rule"] == "erc.supply_short"]
 
 
 def test_fixture1_substrate_only_short_is_reported(tmp_path):
@@ -346,121 +281,111 @@ def test_ihp_unclosed_or_missing_ring_leaves_island_unisolated(tmp_path, deck, r
     assert shorts[0]["body"]["id"] == "vsubs"
 
 
-# --- sky130: dnwell island counts only when an n-well ring closes it (#5344) --
+# --- Issue #5745: an asserted well_boxes tie capturing another net's well tap
 
 
-def _sky130_two_rails():
-    """Like ``_two_rails`` but on sky130 layers: n-well is 64/20, dnwell 64/18."""
+def _foreign_well_repro():
+    """Supply A's asserted ``well_boxes`` overlap supply B's drawn well, and
+    B's own tap marker sits inside that overlap."""
     layout = kdb.Layout()
     layout.dbu = DBU
     top = layout.create_cell("TOP")
     _rail(layout, top, 0, "VSS")
-    _rail(layout, top, 5, "VSS2")
-    _box(top, layout, (64, 20), 0, 20, 20, 30)  # unrelated n-well
+    _box(top, layout, (10, 0), 0, 4, 12, 8)  # B's drawn n-well
+    _rail(layout, top, 5, "VSS2")  # its own tap marker sits inside the well
     return layout, top
 
 
-def _sky130_ties():
-    return [
-        _ptie("p1", "VSS", well_complement_of=["64/20"]),
-        _ptie("p2", "VSS2", well_complement_of=["64/20"]),
+def _foreign_well_spec():
+    return _spec(
+        [
+            _ptie("a1", "VSS", well_complement_of=None, well_boxes=[[0, -1, 12, 9]]),
+            _ptie("b1", "VSS2", well_layer="10/0", well_complement_of=None),
+        ]
+    )
+
+
+def test_foreign_well_tap_not_attributed_to_asserted_substrate_body(tmp_path):
+    """Issue #5745 repro: ``a1`` asserts substrate over a region that overlaps
+    ``b1``'s drawn well, so ``a1``'s (net-agnostic) tap region captures ``b1``'s
+    own well tap. That tap taps the *well*, not the substrate, so it must not
+    be attributed to ``a1``'s asserted substrate body and the two supplies
+    stay unmerged."""
+    layout, _ = _foreign_well_repro()
+    report = _run(tmp_path, layout, _foreign_well_spec(), stem="repro")
+    shorts = _shorts(report)
+    assert shorts == []
+    bodies = {b["id"]: b for b in report["provenance"]["substrate_bodies"]}
+    assert bodies["vsubs"]["ties"] == ["a1"]
+    assert bodies["0,4000,12000,8000"]["ties"] == ["b1"]
+    assert "erc.supply_short.substrate" in report["erc_coverage"]["checked"]
+
+
+def test_finding_body_joins_name_the_joining_tap_evidence(tmp_path):
+    """A substrate short names, per side, the tap site that joined its net to
+    the body: ``body.joins`` carries ``{net, tie, bbox}`` per contributing tap
+    polygon (fixture 1's two complement ties sharing ``vsubs``)."""
+    layout, _ = _two_rails()
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    (short,) = _shorts(report)
+    assert short["body"]["joins"] == [
+        {
+            "net": "VSS",
+            "tie": "p1",
+            "bbox": {"left": 2000, "bottom": 200, "right": 2600, "top": 800},
+        },
+        {
+            "net": "VSS2",
+            "tie": "p2",
+            "bbox": {"left": 2000, "bottom": 5200, "right": 2600, "top": 5800},
+        },
     ]
 
 
-def _ring(top, layout, x0, y0, x1, y1, w=1.0):
-    for box in (
-        (x0, y0, x1, y0 + w),
-        (x0, y1 - w, x1, y1),
-        (x0, y0, x0 + w, y1),
-        (x1 - w, y0, x1, y1),
-    ):
-        _box(top, layout, (64, 20), *box)
-
-
-def _sky130_bodies(tmp_path, layout):
-    report = _run(
-        tmp_path,
-        layout,
-        _spec(_sky130_ties()),
-        deck="sky130",
+def test_join_names_the_contributing_well_box_index(tmp_path):
+    """When the joining site came from an asserted ``well_boxes`` region, the
+    join names the index of the contributing box (0-based, lowest when
+    several overlap); a complemented side carries no index."""
+    layout, _ = _two_rails()
+    spec = _spec(
+        [
+            _ptie(
+                "a1",
+                "VSS",
+                well_complement_of=None,
+                well_boxes=[[0, -1, 3, 3], [0, 3, 20, 7]],
+            ),
+            _ptie("p2", "VSS2"),
+        ]
     )
-    return report, _shorts(report)
+    report = _run(tmp_path, layout, spec)
+    (short,) = _shorts(report)
+    assert short["body"]["ties"] == ["a1", "p2"]
+    assert short["body"]["joins"] == [
+        {
+            "net": "VSS",
+            "tie": "a1",
+            "bbox": {"left": 2000, "bottom": 200, "right": 2600, "top": 800},
+            "well_box": 0,
+        },
+        {
+            "net": "VSS2",
+            "tie": "p2",
+            "bbox": {"left": 2000, "bottom": 5200, "right": 2600, "top": 5800},
+        },
+    ]
 
 
-def test_sky130_closed_nwell_ring_isolates_dnwell_island(tmp_path):
-    layout, top = _sky130_two_rails()
-    _box(top, layout, (64, 18), -1, 4, 21, 7)
-    _ring(top, layout, -2, 3, 22, 8)  # ring enclosing the dnwell
-    report, shorts = _sky130_bodies(tmp_path, layout)
-    assert shorts == []
-    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
-    assert ids == {"vsubs", "vsubs_iso0"}
-
-
-def test_sky130_unclosed_ring_leaves_island_unisolated(tmp_path):
-    layout, top = _sky130_two_rails()
-    _box(top, layout, (64, 18), -1, 4, 21, 7)
-    _ring(top, layout, -2, 3, 22, 8)
-    # Open a gap in the ring's left side.
-    region = kdb.Region(top.shapes(layout.layer(64, 20)))
-    region -= kdb.Region(kdb.Box(_um(-3), _um(4.5), _um(-0.5), _um(6.5)))
-    top.shapes(layout.layer(64, 20)).clear()
-    top.shapes(layout.layer(64, 20)).insert(region)
-    report, shorts = _sky130_bodies(tmp_path, layout)
+def test_metal_and_substrate_pair_stays_suppressed_by_metal_pairs(tmp_path):
+    """A pair already reported through the metal graph is not re-reported
+    through the substrate body graph: one short, ``via: "metal"``."""
+    layout, top = _two_rails()
+    _box(top, layout, (3, 0), 5, 0, 6, 6)  # li1 strap joining both rails
+    report = _run(tmp_path, layout, _spec([_ptie("p1", "VSS"), _ptie("p2", "VSS2")]))
+    shorts = _shorts(report)
     assert len(shorts) == 1
-    assert shorts[0]["body"]["id"] == "vsubs"
-
-
-def test_sky130_dnwell_without_any_nwell_is_not_isolated(tmp_path):
-    layout, top = _sky130_two_rails()
-    layout.clear_layer(layout.layer(64, 20))
-    _box(top, layout, (64, 20), 0, 20, 20, 30)
-    _box(top, layout, (64, 18), -1, 4, 21, 7)
-    _, shorts = _sky130_bodies(tmp_path, layout)
-    assert len(shorts) == 1
-
-
-def test_sky130_no_dnwell_is_one_substrate(tmp_path):
-    layout, _ = _sky130_two_rails()
-    report, shorts = _sky130_bodies(tmp_path, layout)
-    assert len(shorts) == 1
-    assert {b["id"] for b in report["provenance"]["substrate_bodies"]} == {"vsubs"}
-
-
-def test_sky130_nested_islands_are_numbered_independently(tmp_path):
-    layout, top = _sky130_two_rails()
-    _box(top, layout, (64, 18), -1, 4, 21, 7)
-    _ring(top, layout, -2, 3, 22, 8)
-    _box(top, layout, (64, 18), -1, -1, 21, 2)  # closed island around VSS
-    _ring(top, layout, -2, -2, 22, 2.5)
-    report, _ = _sky130_bodies(tmp_path, layout)
-    ids = {b["id"] for b in report["provenance"]["substrate_bodies"]}
-    assert "vsubs_iso0" in ids and "vsubs_iso1" in ids
-
-
-def test_island_closure_helper_empty_and_abutting():
-    from klayout_tools.erc_islands import is_ring_closed, sorted_islands
-
-    island = kdb.Region(kdb.Box(0, 0, 100, 100))
-    assert not is_ring_closed(island, kdb.Region())
-    assert sorted_islands(kdb.Region(), kdb.Region()) == []
-    abutting = kdb.Region(kdb.Box(-20, -20, 120, 120)) - kdb.Region(
-        kdb.Box(0, 0, 100, 100)
-    )
-    assert is_ring_closed(island, abutting)
-    assert len(sorted_islands(island, abutting)) == 1
-    assert sorted_islands(island, None) != []
-
-
-def test_sky130_deck_declares_closure_gated_dnwell_isolation():
-    """#5344: sky130 declares dnwell (64/18) as ``substrate_isolation`` and
-    gates islands on an n-well ring; gf180mcu keeps every island."""
-    from klayout_tools.decks.gf180mcu import EXTRACTION_DECK as GF180
-    from klayout_tools.decks.sky130 import EXTRACTION_DECK as SKY130
-
-    assert SKY130.substrate_isolation == (64, 18)
-    assert SKY130.substrate_isolation_needs_nwell_ring is True
-    assert GF180.substrate_isolation_needs_nwell_ring is False
+    assert shorts[0]["via"] == "metal"
+    assert "body" not in shorts[0]
 
 
 @pytest.mark.parametrize("family", sorted(_FAMILY_MISSING))

@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from ._layout import bbox_um_dict, clip_box, load_layout, select_top_cells
 
 #: Stable rule id carried by every violation this module emits.
@@ -299,11 +300,7 @@ def _allow_region(
 
 
 def _validate_margin(margin_um: Any) -> None:
-    if (
-        isinstance(margin_um, bool)
-        or not isinstance(margin_um, (int, float))
-        or not math.isfinite(margin_um)
-    ):
+    if not is_finite_number(margin_um):
         raise KeepoutCheckError(f"--margin must be a finite number, got {margin_um!r}")
     if margin_um < 0:
         raise KeepoutCheckError(f"--margin must be >= 0 micrometres, got {margin_um}")
