@@ -8696,67 +8696,10 @@ def _cycle_mean_measurement_result(
     return result, grading_diagnostics
 
 
-def _eye_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_eye.EyeOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``eye`` measurement's response entry (issue #4292).
-
-    ``value`` is the metric the entry selects (eye height by default), graded
-    through :func:`_grade_measurement_value` like any scalar; height, width and
-    best phase ride the additive ``eye`` sibling. A failure is
-    ``status: "error"``, ``value: null`` with a ``code: "measurement"``
-    diagnostic whose message starts with a ``[<reason>]`` token from
-    :data:`klayout_tools.sim_eye.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no eye value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "eye_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "eye_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "eye": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
 def _vector_measurement_result(
     spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Response entry for a ``step_resolution``/``settled`` measurement; the
+    """Response entry for an eye, step-resolution, or settled measurement; the
     detail rides the additive ``key`` sibling. A failure is ``status:
     "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
@@ -8788,7 +8731,8 @@ def _vector_measurement_result(
     return result, grading_diagnostics
 
 
-#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
+#: Per-kind builders; ``settled`` value 1.0/0.0 = (not) settled.
+_eye_measurement_result = functools.partial(_vector_measurement_result, key="eye")
 _step_resolution_measurement_result = functools.partial(
     _vector_measurement_result, key="step_resolution"
 )
