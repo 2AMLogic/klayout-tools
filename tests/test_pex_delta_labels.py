@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 
 import klayout_tools.pex as pex_module
+from klayout_tools.cli.pex_text import _errored_rows_summary
 from klayout_tools.pex import _build_delta_rows, _unextracted_delta_rows, run_pex
 from klayout_tools.sim import SimError
 from test_pex import (
@@ -184,3 +185,40 @@ def test_run_pex_measure_command_rows_have_null_testbench(
         assert "testbench" in row
         assert row["testbench"] is None
         assert row["measurement"] == row["spec_row"] == "t_cross"
+
+
+@pytest.mark.parametrize(
+    ("code", "definition"),
+    [
+        ("pin_count_mismatch", ".SUBCKT RES RA RB VSUB\nR1 RA RB 289.2\n.ENDS RES"),
+        ("pin_order_mismatch", ".SUBCKT RES RB RA\nR1 RA RB 289.2\n.ENDS RES"),
+        ("flat_dut_mismatch", "R1 RA RB 289.2"),
+    ],
+)
+def test_static_mismatch_names_every_row_and_the_cli_cause(
+    tmp_path, resistor_layout, monkeypatch, code, definition
+):
+    dut = tmp_path / "dut.spice"
+    dut.write_text(definition + "\n")
+    requests = []
+    for name in ("gain", "bias"):
+        tb = _write_testbench(tmp_path / f"{name}.spice", dut)
+        requests.append(str(_write_request(tmp_path / f"{name}.json", tb)))
+    monkeypatch.setattr(
+        pex_module, "run_sim", lambda *_a, **_kw: _two_corner_schematic_report()
+    )
+    report = run_pex(resistor_layout, requests, "sky130")
+    detail = report[code]["detail"]
+    rows = report["delta"]
+    assert {row["testbench"] for row in rows} == {"gain", "bias"}
+    assert len(rows) == 4
+    for row in rows:
+        assert row["error"] == {
+            "side": "extracted",
+            "stage": "execute",
+            "code": code,
+            "message": detail,
+        }
+    summary = _errored_rows_summary(report)
+    assert f"stage execute, {code}" in summary
+    assert " ".join(detail.split()) in summary
