@@ -20,6 +20,15 @@ PIN_STALE = "stale"
 PIN_UNVERIFIABLE = "unverifiable"
 
 
+def common_input_hash(value: Any) -> str | None:
+    """The input digest shared by every shard, or the original scalar digest."""
+    if isinstance(value, list):
+        if not value or not all(member == value[0] for member in value):
+            return None
+        value = value[0]
+    return value if isinstance(value, str) and value else None
+
+
 def content_hash_pin_state(
     expected_hash: str | None, live_hash: str | None
 ) -> str | None:
@@ -40,6 +49,13 @@ def content_hash_pin_state(
 def unverifiable_pin_note(check_kind: str, resolution: Mapping[str, Any]) -> str:
     """Why a pinned ``content_hash`` cannot be compared (issues #3747, #4893,
     #5550)."""
+    if check_kind == "sim":
+        provenance = (resolution.get("envelope") or {}).get("provenance") or {}
+        if isinstance((provenance.get("input") or {}).get("content_hash"), list):
+            return (
+                "The merged sim report has mixed or missing per-shard input hashes. "
+                "A single netlist digest is required to compare this pin."
+            )
     if check_kind == "functional-verification":
         provenance = (resolution.get("envelope") or {}).get("provenance") or {}
         if provenance.get("input") is not None:
