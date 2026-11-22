@@ -35,15 +35,13 @@ from typing import Any
 from ._jsonnum import is_finite_number, is_int
 from .decks import UnknownDeckError, get_deck, get_extraction_deck, get_nominal_dbu
 from .gen import GenError
+from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 from .gen_compose_routing import (
-    _landing_pad_side_um_for_layer,
-    _min_enclosing_margin_um_for_layer,
-    _min_width_um_for_layer,
     _pdk_family,
     _resolve_route_layer,
     _resolve_via_drop_layer,
 )
-from .gen_compose_via_cuts import landing_pad_half_dbu
+from .gen_compose_via_cuts import landing_pad_half_dbu, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 
 #: Default cap on landing candidates evaluated per port (nearest-first).
@@ -353,27 +351,19 @@ def _min_spacing_um(variant: str, layer: _LayerPair) -> float:
 
 
 def _stack_sizes(
-    variant: str, ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...]
+    variant: str,
+    ladder: tuple[tuple[_LayerPair, _LayerPair, _LayerPair], ...],
+    pad_override_um: float | None = None,
 ) -> tuple[dict[tuple[_LayerPair, _LayerPair], float], dict[_LayerPair, float]]:
     """``(pad side per (metal, via) hop, cut side per via)`` in um, sized exactly
     as ``compose()`` sizes the drawn via-drop ladder (#1501/#2072/#2074/#2585)."""
-    from .gen_compose import _VIA_DROP_SIZE_UM, _fixed_cut_side_um, _via_fixed_size_um
-
-    cuts: dict[_LayerPair, float] = {}
-    for via, _, _ in ladder:
-        floor = _min_width_um_for_layer(variant, via)
-        cuts[via] = _fixed_cut_side_um(
-            max(_VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0),
-            _via_fixed_size_um(variant, via),
-        )
+    cuts = {via: via_drop_cut_side_um(variant, via) for via, _, _ in ladder}
     pads: dict[tuple[_LayerPair, _LayerPair], float] = {}
     for via, lower, upper in ladder:
         for metal in (lower, upper):
-            side = _landing_pad_side_um_for_layer(variant, metal)
-            enclosure = _min_enclosing_margin_um_for_layer(variant, metal, via)
-            if enclosure is not None:
-                side = max(side, cuts[via] + 2 * enclosure[0])
-            pads[metal, via] = side
+            pads[metal, via] = _landing_pad_side_um_for_pair(
+                variant, metal, via, cuts[via], pad_override_um
+            )
     return pads, cuts
 
 
@@ -535,6 +525,7 @@ def _search_landing(
     net_layer: _LayerPair,
     label_xy: tuple[int, int],
     access: dict[str, Any],
+    pad_override_um: float | None = None,
 ) -> dict[str, Any]:
     """Find the nearest legal via-stack landing on ``net``; raises a
     ``GenComposeError`` listing per-category rejections when none exists."""
@@ -544,7 +535,7 @@ def _search_landing(
         raise _err(f"ports_from_labels: port '{name}': {ladder_error}")
     dbu = nets.dbu
     ladder = ladder or ()
-    hop_pads_um, cuts_um = _stack_sizes(variant, ladder)
+    hop_pads_um, cuts_um = _stack_sizes(variant, ladder, pad_override_um)
     array = access["via_array"]
     pitches_um = _array_pitches_um(variant, cuts_um, array, dbu)
     pads_um: dict[_LayerPair, float] = {}
@@ -630,6 +621,7 @@ def derive_label_ports(
     cell_name: str,
     spec: dict[str, Any],
     variant: str,
+    pad_override_um: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     """Resolve ``spec`` (from :func:`parse_ports_from_labels`) against the
     cell in ``gds_path``. Returns ``(ports, reports, warnings)`` in
@@ -656,7 +648,14 @@ def derive_label_ports(
         landing = None
         if entry["access"] is not None:
             landing = _search_landing(
-                nets, variant, name, net, metal, (x, y), entry["access"]
+                nets,
+                variant,
+                name,
+                net,
+                metal,
+                (x, y),
+                entry["access"],
+                pad_override_um,
             )
             if landing["truncated"]:
                 warnings.append(
