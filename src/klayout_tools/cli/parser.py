@@ -14,11 +14,11 @@ from .. import (
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
-from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
     array_check_cmd,
+    cell_hash_cmd,
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
@@ -72,9 +72,11 @@ from . import (
     yield_sensitivity_cmd,
     yield_threshold_cmd,
 )
+from ._arg_types import _parasitic_variant_arg
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._deck_hash_parser_args import add_expect_deck_hash_arg
 from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from ._lvs_parser_args import add_lvs_parser
@@ -106,13 +108,6 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
-
-
-def _parasitic_variant_arg(value: str) -> str:
-    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
-    outside the closed grammar is a usage error (exit 2)."""
-    parse_parasitic_variants([value], argparse.ArgumentTypeError)
-    return value
 
 
 def _drc_deck_names_str() -> str:
@@ -231,14 +226,13 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
-
     _add_stats_parser(subparsers)
     add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
     _add_cells_parser(subparsers)
-
+    cell_hash_cmd.add_parser(subparsers, _add_format_arg)
     _add_clip_parser(subparsers)
     add_components_parser(subparsers, _add_format_arg)
 
@@ -628,9 +622,9 @@ def _add_report_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
             "and render them into a single combined report. Each envelope's "
-            "kind (a klt drc/lvs-style violations/mismatches report, a klt "
-            "layout-metrics-style key-metrics report, or a captured error "
-            "envelope) is detected from its own JSON structure, per "
+            "kind (a klt drc/lvs-style report, a klt sim/yield-style "
+            "measurements rollup, a klt layout-metrics-style report, or a "
+            "captured error envelope) is detected from its own JSON structure, per "
             "docs/json-contract.md -- not hardcoded per verb. "
             "`--format github-summary` emits GitHub Flavored Markdown "
             "suitable for `$GITHUB_STEP_SUMMARY`. See docs/cli/report.md."
@@ -2135,7 +2129,7 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    synthesize_cmd.configure(synthesize_parser)  # --yosys-timeout-s + func=run
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -3491,6 +3485,7 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "with the layout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
+    add_expect_deck_hash_arg(drc_parser)
     drc_parser.add_argument(
         "--allow-missing-host-tools",
         dest="allow_missing_host_tools",
@@ -4199,20 +4194,12 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
-    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
-    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
-    # rather than here.
     erc_input_group = erc_parser.add_mutually_exclusive_group()
     erc_input_group.add_argument(
         "file",
         nargs="?",
         default=None,
-        help=(
-            "path to a routed GDSII or OASIS layout file. Required unless "
-            "--check is given (the input paths are then read from the "
-            "committed report instead)"
-        ),
+        help=("path to the routed GDSII or OASIS layout for an ERC run"),
     )
     erc_parser.add_argument(
         "spec",
@@ -4223,7 +4210,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section. Required unless --check is given"
+            "section. Required for an ERC run"
         ),
     )
     erc_parser.add_argument(
@@ -4335,6 +4322,11 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "consistent, 3 if drifted -- see docs/cli/erc.md, "
             "'--check / --rerun'"
         ),
+    )
+    erc_input_group.add_argument(
+        "--pnr-response",
+        metavar="RUN",
+        help="generate a Sky130 HD supply spec from a routed place-and-route response",
     )
     erc_input_group.add_argument(
         "--validate-spec",

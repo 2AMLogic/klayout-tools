@@ -104,6 +104,12 @@ _STATUS_INSTANCE_FIELDS = (
 #: ``new_job_id``'s alphabet -- what ``batch-fleet-provision.sh launch``
 #: accepts, and therefore the only ids that can name a job.
 _JOB_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MISSING_HEAD_CODES = {"404", "404 Not Found", "Not Found", "NotFound", "NoSuchKey"}
+_MISSING_HEAD_ERROR = re.compile(
+    r"^(?:aws: \[ERROR\]: )?An error occurred \((?:404|NotFound|NoSuchKey)\)"
+    r"(?= when calling the HeadObject operation\b|:|$)",
+    re.MULTILINE,
+)
 
 
 def submit_only(
@@ -340,13 +346,7 @@ def _job_head(
     ``None`` on a 404; any other failure is a transport error."""
     bucket_key = f"{config.jobs_prefix}/{job_id}/job.json"
     argv = _aws_argv(
-        config,
-        "s3api",
-        "head-object",
-        "--bucket",
-        config.bucket,
-        "--key",
-        bucket_key,
+        config, "s3api", "head-object", "--bucket", config.bucket, "--key", bucket_key
     )
     try:
         result = run(argv, 60.0)
@@ -359,7 +359,7 @@ def _job_head(
             return {}
         return head if isinstance(head, dict) else {}
     detail = (result.stderr or "").strip()
-    if "404" in detail or "Not Found" in detail or "NoSuchKey" in detail:
+    if detail in _MISSING_HEAD_CODES or _MISSING_HEAD_ERROR.search(detail):
         return None
     raise BatchError(
         f"aws s3api head-object (job.json) failed (exit {result.returncode}): {detail}"

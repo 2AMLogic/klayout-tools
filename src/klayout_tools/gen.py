@@ -343,11 +343,11 @@ from .gen_pitch import _clamp_pitch_override
 from .gen_ring_layout import (
     _guard_ring_layer_params,
     _ring_layout,
+    _validate_device_ring_implant_gap,
     _validate_guard_ring_implant_gap,
-    _validate_mos_array_implant_gap,
 )
 from .gen_spec import _GeneratorSpec
-from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
+from .pdk import PdkNotFoundError, find_pdk
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -392,10 +392,8 @@ CONTACT_SIZE_UM = 0.22
 #: threshold, so a single dbu of rounding slop is enough to trip it).
 #:
 #: This stays a *fixed* 0.001 even though :func:`_produce` now resolves the
-#: output layout's own dbu from the resolved PDK's tech LEF (issue #1496,
-#: e.g. 0.0005 for gf180mcu's ``DATABASE MICRONS 2000``), and it is exactly
-#: as safe there: a coordinate pre-snapped to a 0.001 grid is *exactly*
-#: representable on any finer dbu that divides 0.001, so ``int(round())``
+#: output dbu from the PDK (#5721/#1496) -- a 0.001-pre-snapped coordinate
+#: is exactly representable on any dbu dividing 0.001, so ``int(round())``
 #: introduces no error at all rather than the sub-dbu slop #685 fixed. It is
 #: deliberately not re-derived per-request from the resolved dbu -- doing so
 #: would move geometry (a finer snap grid moves a contact's centre) on the
@@ -3502,12 +3500,11 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
     ``schema_version`` bump.
 
     ``dbu_um`` (issue #1496) reports the database unit the output stream was
-    actually written at -- resolved from the *resolved PDK's own tech LEF*
-    (``DATABASE MICRONS``) by :func:`~klayout_tools.pdk.resolve_pdk_dbu`, not
-    a fixed ``0.001`` -- so a caller can confirm two blocks agree before
-    handing them to ``klt gen-compose`` (which requires one shared dbu across
-    every block) without a separate ``klt stats`` round-trip. Additive field,
-    no ``schema_version`` bump (see ``docs/json-contract.md``).
+    actually written at -- the PDK's required **stream** dbu
+    (:func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu`, #5721: 0.001
+    for gf180mcu, else its tech LEF ``DATABASE MICRONS``, else ``0.001``) --
+    so a caller can confirm two blocks agree for ``klt gen-compose`` without
+    a ``klt stats`` round-trip. Additive, no ``schema_version`` bump.
 
     ``navigable_regions`` (issue #1531, Phase 1) reports metal-free
     rectangles ``{"x0_um", "y0_um", "x1_um", "y1_um"}`` inside the emitted
@@ -3654,8 +3651,8 @@ def _resolve_params(
         # Before spec.validate: report the family's flavours, not the union (#6630).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     spec.validate(resolved)
-    if spec.name == "mos_array":
-        _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
+    if spec.name in ("mos_array", "diff_pair"):
+        _validate_device_ring_implant_gap(spec, resolved, pdk_info)
     return resolved
 
 
@@ -3716,18 +3713,19 @@ def _produce(
     the *resolved* PDK family rather than a fixed default -- see
     :func:`_device_layer_params` and friends.
 
-    The output dbu comes from ``pdk_info``'s tech LEF via
-    :func:`~klayout_tools.pdk.resolve_pdk_dbu` (issue #1496, e.g. 0.0005 for
-    gf180mcu), agreeing by construction with ``klt place_and_route`` (#1032);
-    it falls back to ``spec.dbu`` when the LEF is missing or unparsable.
+    The output dbu comes from ``pdk_info`` via
+    :func:`~klayout_tools.pdk_output_dbu.resolve_output_dbu` (#5721: the
+    family's required stream dbu, else the LEF dbu per #1496, else spec.dbu).
 
     The third element is the sub-cell naming-scheme id (#5808) -- change it
     with the naming (and CHANGELOG.md); ``None`` once flattened.
     """
     import klayout.db as kdb
 
+    from .pdk_output_dbu import resolve_output_dbu
+
     if spec.name == "bjt_array" and _pdk_family(pdk_info["variant"]) == "sg13g2":
-        dbu = resolve_pdk_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT
+        dbu = resolve_output_dbu(pdk_info) or spec.dbu  # #4850: PDK-authored HBT
         layout, top = produce_hbt_array(cell_name, resolved_params, pdk_info, dbu)
         return layout, top, "pdk-cell-v1"
 
@@ -3737,7 +3735,9 @@ def _produce(
     pcell_values = dict(resolved_params)
     pcell_values.update(spec.layer_params(pdk_info, resolved_params))
 
-    layout = new_canonical_layout(resolve_pdk_dbu(pdk_info) or spec.dbu, pcell_values)
+    layout = new_canonical_layout(
+        resolve_output_dbu(pdk_info) or spec.dbu, pcell_values
+    )
     pcell_var = layout.add_pcell_variant(lib, decl.id(), pcell_values)
     top = layout.create_cell(cell_name)
     top.insert(kdb.CellInstArray(pcell_var, kdb.Trans()))

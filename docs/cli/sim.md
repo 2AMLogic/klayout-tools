@@ -1385,9 +1385,14 @@ terminal (or `batch.poll_timeout_s` elapses), and collects and grades it
 exactly as the original invocation would have. Pass the **same request** the
 job was submitted from — the request supplies the unit list and the
 measurement limits; it is not re-uploaded. A job id with no `job.json` in the
-bucket fails with exit `1` and `error.code: "batch_unknown_job"`. `--attach`
-applies to a single-job `batch` run only: it is refused for other backends,
-for sharded (`hosts > 1`) runs, and with `--batch-set` or `--submit-only`.
+bucket fails with exit `1` and `error.code: "batch_unknown_job"`. That code is
+reserved for a plain "not found" answer: a lookup that fails any other way
+(expired or missing credentials, `AccessDenied`, S3 throttling, a timeout) is
+reported as a `batch backend failed: …` error carrying the AWS CLI's message,
+never as `batch_unknown_job`, so it is not mistaken for a job that was never
+submitted. `--attach` applies to a single-job `batch` run only: it is refused
+for other backends, for sharded (`hosts > 1`) runs, and with `--batch-set` or
+`--submit-only`.
 For a deck-list request, `--attach` returns the same deck report a blocking
 run would (unit trees installed under the outdir, `environment.remote` filled
 in); the request must declare the same decks the job ran, or it fails with
@@ -1547,6 +1552,12 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   aggregate envelope (and each request's `dir` in `set-manifest.json`) is
   the authoritative path to a member's `report.json` -- read it from the
   envelope rather than re-deriving the stem.
+- **Netlist identity.** For each corner batch job, collection compares the
+  runner's `environment.netlist_sha256` with the exact staged `netlist.cir`
+  bytes, including rewritten include paths. A mismatch rejects the result
+  and marks that set member as an error (exit code 4). Older runners that
+  omit the digest remain supported. The outer report records the original
+  request netlist's digest.
 - **Bounded in flight.** At most `--max-in-flight` requests (default **4**)
   run at once -- submit, launch, and poll; the rest queue and start as slots
   free. The bound is a client-side politeness knob, not the fleet's cap.
@@ -2460,6 +2471,13 @@ established. `runner_compatibility` itself stays a major.minor gate.
 - Limit: a `0.7.1.devN` runner built before a feature landed looks the same as
   one built after, so it counts as supporting it.
 
+When the AMI manifest has no candidate images, the client cannot verify
+mandatory features before launch. A configured batch dry-run reports
+`batch_runner_request_feature_unverified` with the affected feature names.
+Submission prints the warning before upload and proceeds under either
+`enforce` or `warn`. The worker can then refuse an unsupported request after
+the instance launches.
+
 **Mandatory features (`transfer`, [#2924](https://github.com/2AMLogic/klayout-tools/issues/2924); `stimulus`, [#2977](https://github.com/2AMLogic/klayout-tools/issues/2977); `dual_injection`, [#3161](https://github.com/2AMLogic/klayout-tools/issues/3161); `complex_vectors`, [#3337](https://github.com/2AMLogic/klayout-tools/issues/3337); `twoport`, [#3338](https://github.com/2AMLogic/klayout-tools/issues/3338); `snm`, [#3895](https://github.com/2AMLogic/klayout-tools/issues/3895); `search`, [#4121](https://github.com/2AMLogic/klayout-tools/issues/4121); `eye`, [#4292](https://github.com/2AMLogic/klayout-tools/issues/4292); `step_resolution`, [#4773](https://github.com/2AMLogic/klayout-tools/issues/4773); `settled`, [#4780](https://github.com/2AMLogic/klayout-tools/issues/4780); `stress`, [#4592](https://github.com/2AMLogic/klayout-tools/issues/4592)/[#4858](https://github.com/2AMLogic/klayout-tools/issues/4858); `slope_band`, [#5518](https://github.com/2AMLogic/klayout-tools/issues/5518)).**
 A runner that predates `measurements[].transfer` would drop the metric (and one
 that predates `stimulus` would simulate with the digital control lines
@@ -2721,19 +2739,59 @@ contents), size-capped, serialised with a JSON encoder, errors recorded as
 | `pdk_stamp_comparison` | `status` of `match`, `mismatch` (with `warning`) or `not_comparable` (with `reason`: `worker_stamp_unavailable`, `client_stamp_unavailable`, `variant_differs` or `scheme_differs`). Under `models_staged` the comparison is `basis: "staged_model_inputs"` instead -- see below. |
 | `engine_build_comparison` | Issue #3095. `status` of `match`, `mismatch` (with `warning`) or `not_comparable`: the worker's `simulator.version_banner` against the submitting client's own `environment.client_engine_build.version_banner` (whitespace-normalised; issue #5566 — on an off-host report `environment.engine_build` is the worker's, so the client's probe is the one kept under `client_engine_build`). `not_comparable` when either side has no banner — never a proven mismatch. A match proves the same banner, not identical build options. |
 
-Two sibling fields sit on `environment.remote` itself (issue #5321), for a
-runner whose image has no readable `SOURCES` stamp:
+Four sibling fields sit on `environment.remote` itself (and on each `fleet[]`
+member), for a runner whose image has no readable `SOURCES` stamp. The first
+pair (issue #5321) attests the `models.lib`; the second (issue #5457) attests
+the per-section corner libraries, which carry the identity when there is no
+`models.lib` to attest:
 
 - `runner_models_lib_sha256`: the `environment.models_lib_sha256` the runner's
   own `klt sim` reported, i.e. the model card the worker actually loaded;
   `null` when absent or malformed (older runner, error envelope), so
   "unknown" is distinguishable from a value.
 - `models_lib_comparison`: `status` of `match`, `mismatch` (with `warning`) or
-  `not_comparable` (with `reason`: `runner_hash_unavailable`,
+  `not_comparable` (with `reason`: `no_models_lib`, `runner_hash_unavailable`,
   `client_hash_unavailable` or `models_staged`) comparing it with the client's
   `environment.models_lib_sha256`. Missing data is never a proven mismatch,
   and klt does not fail the run on `mismatch`. `pdk_stamp_comparison` is
   unchanged. Text output prints a `models_lib:` line next to `pdk_stamp:`.
+- `runner_corner_section_libs` (issue #5457): one `{name, sha256}` per
+  per-section corner library the runner's own `klt sim` reported in its
+  `environment.corner_section_libs`, i.e. the libraries the worker actually
+  resolved. `null` when the runner reported none (a runner predating #2522,
+  an error envelope, a malformed report), and `null` for an ordinary request
+  that named no per-section libraries. The runner's `path`/`scope` are
+  dropped: the path is the worker's and carries no comparable identity, the
+  hash does.
+- `corner_section_libs_comparison` (issue #5457): `status` of `match`,
+  `mismatch` (with `warning` and the unmatched `names`) or `not_comparable`
+  (with `reason`: `runner_libs_unavailable`, `client_libs_unavailable` or
+  `models_staged`), comparing that list with the client's
+  `environment.corner_section_libs`. **Present only when the client or the
+  runner actually reported per-section libraries** — an ordinary request gains
+  nothing but `runner_corner_section_libs: null`. Text output prints a
+  `corner_section_libs:` line next to `models_lib:`.
+
+Entries compare as **`(name, sha256)` pair membership**, not per name and not
+positionally: `name` is a basename, so two libraries in different directories
+can share one, and a `--batch-set` shard need only be handed the libraries its
+own corners name — a subset of the client's. A runner entry is accounted for
+when the client resolved a library of the same basename *and* the same bytes,
+so neither a shared basename nor a shard subset reads as a mismatch. As with
+`models_lib_comparison`, missing data is never a proven mismatch and klt never
+fails the run on the verdict.
+
+**Why `no_models_lib` is its own reason.** A request whose every selected
+section names its own `lib` declares no `models.lib` at all (see "Per-section
+corner libraries"), so `environment.models_lib` is
+`{"path": null, "scope": "absent"}` and `models_lib_sha256` is `null` on
+*both* sides by construction. Before #5457 that reported
+`runner_hash_unavailable` — indistinguishable from an older or broken runner,
+and so read as an image problem no image update could ever fix. It now
+reports `no_models_lib`, and `corner_section_libs_comparison` carries the
+answer instead. This matters because the request shape these docs recommend
+*for* off-host portability (PDK-relative `models.pdk` + a relative `lib`) is
+exactly the shape that has no all-device library to point `models.lib` at.
 
 A third sibling covers the OSDI objects the runner loaded (issue #5562):
 
@@ -2795,6 +2853,10 @@ comparison's status, so a divergence can be attributed from the report alone:
 | Submitter's model library | `environment.models_lib_sha256` -- a content hash of the top model library file actually loaded. |
 | Runner's model library | `environment.remote.runner_models_lib_sha256`, compared in `models_lib_comparison`. |
 | Runner's OSDI objects | `environment.remote.runner_osdi_preload` (`[{name, sha256}]`), joined onto `environment.osdi_preload_runner_resolved[].sha256`. |
+
+On a new run, the submitter hashes the top model library, `osdi_preload`
+files, and `corner_section_libs` before dispatch. A collection-only attach
+or resume hashes the files available to the collecting client.
 
 When `pdk.models_staged` is true the image stamp says nothing about the
 executed models, so `pdk_stamp_comparison` instead compares the client's
@@ -3610,7 +3672,9 @@ not just equivalent.
   whether it failed mid-run or was submitted but never launched (an
   unlaunched shard additionally sets `unlaunched_shards` / `resumable`,
   see "Unlaunched shards are a resumable signal" above). The array is
-  positional: index *i* is shard *i*, in the shard map's order, so a client
+  positional: index *i* is shard *i*, in the shard map's order. On the batch
+  backend, a null slot has only unrun error corners, even if the collector
+  returned measurements without a remote block. A client
   collecting per-job metadata across `fleet[]` must skip the `null` slots
   rather than dereference them, and read job identity and runner skew from
   the null-safe `job_ids` / `runner_compatibility` roll-ups (which omit the
@@ -4881,9 +4945,46 @@ missing vector, or a failed solve still grades `error` even with
 byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
-and for any value other than `"error"`/`"null"`. It is not applied to
-`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+and for any value other than `"error"`/`"null"`. It is not applied to the
+Xyce engine (no ngspice `.meas` evidence to read).
 `"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
+### Step-scoped cards (`analysis_steps[].measurements[].spice`)
+
+A step-scoped `.meas` card gets the same opt-in
+([#7072](https://github.com/2AMLogic/klayout-tools/issues/7072)). `klt sim`
+evaluates the card as a `meas` control command right after that step's own
+analysis, so ngspice prints both evidence lines *after* the step's
+`klt_step_end` marker and before the next step's `klt_step_begin` — and the
+classification is scoped to exactly that log region, matched under the
+card's **local** name. Two steps may therefore reuse a local measurement
+name: a miss confirmed in one step's region never classifies the other
+step's card, and a sibling measurement in the same step is unaffected. The
+graded result carries the qualified name (`edge.missing`) with its `step`
+provenance field, `value: null`, `margin: null`, `status: "not_reached"`,
+and the same `measurement_not_reached` info diagnostic, top-level count,
+skipped-limit coverage and rollup semantics as the scalar form above —
+including `pass_partial` for a run that mixes checked bounds with unreached
+ones, and `not_checked` (exit `4`) when every requested bound was unreached.
+
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
+What stays an error on the step path, even with the opt-in:
+
+- a step that failed or never ran (`step_failed`): its measurements keep
+  `status: "error"`, and a value is never read from a step that produced no
+  plot of its own;
+- a derived measurement (or a later step's `${...}` sweep window) reading
+  the unreached result: `derived_input_unavailable`, and the corner grades
+  `error` while the source keeps `not_reached`;
+- a `.meas` failure whose logged reason is anything other than
+  `out of interval`, an engine echo without the matching `failed!` line (or
+  vice versa), an error-severity engine diagnostic (diverged solve,
+  timeout, …), or a request without the opt-in — each keeps today's
+  `measurement` error and exit `4`.
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
@@ -4989,7 +5090,48 @@ deck is byte-identical to before. `linearize` is refused (exit 1, naming the
 field) on a non-`tran` analysis, inside `analysis_steps[]`, for a non-boolean
 value, and with `engine: "xyce"`. The `batch` backend replays the same deck, so
 it needs no extra support. There is no generic `let`/control-line passthrough:
-express derived quantities as `expr` measurements.
+express derived quantities as `expr` measurements. The one narrow exception is
+`analysis.post_commands`, below.
+
+### Transforms between the analysis and `expr`: `analysis.post_commands`
+
+A waveform transform such as `fft` has to run *between* the transient and the
+`expr` lets, because afterwards the current plot is the spectrum.
+`analysis.post_commands` (a non-empty list of single-line strings) on a scalar
+`tran` analysis emits those lines in order after the analysis line, after the
+rawfile `write` and `linearize`, and before the `expr` lets. A two-tone bench:
+
+```json
+"analysis": {
+  "kind": "tran", "args": "1u 2m",
+  "post_commands": ["linearize v(a) v(b)", "fft v(a) v(b)"]
+},
+"measurements": [
+  { "name": "fund_a", "expr": "mag(a[10])", "unit": "V" }
+]
+```
+
+After `fft` the current plot is the spectrum, so `expr` measurements read
+spectrum bins (`a`, `b` here). Bare `linearize` resamples all vectors. To
+select vectors, give it a space-separated list such as `v(out) i(V1)`. Both
+commands accept bare vector names, numeric nodes, branch currents such as
+`v1#branch`, and device parameters such as `@m1[id]`. Names may contain
+letters, digits, underscores, periods and colons.
+
+`fft` requires at least one waveform expression. It also accepts differential
+voltage (`v(a,b)`), numeric factors, arithmetic (`+ - * / ^ %`), grouping
+parentheses and the functions `mag`, `abs`, `real`, `imag`, `db` and `ph`.
+For example, `fft v(a) mag(v(a) - v(b))` transforms two waveforms. Invalid
+arguments produce an indexed `analysis.post_commands[i]` error before the
+deck is composed.
+
+The following are also refused with exit 1: a non-list or empty value, a non-string entry, an entry
+containing a newline or `;`, a first token outside the allowlist, a non-`tran`
+analysis, use inside `analysis_steps[]`, `engine: "xyce"`, and any measurement
+other than `expr`/`spice` (crossings, energy, eye, ... read the transient plot,
+which `fft` replaces). Without the field the deck is byte-identical to before.
+A request using it needs a batch runner at klt 0.9.3 or later; an older runner
+is refused at submit rather than ignoring the field.
 
 ### `expr` after a `noise` analysis
 
@@ -5559,6 +5701,10 @@ without `top_n` is byte-identical to before.
 - **Order.** Largest `value` first; ties break by `name` ascending, so the
   order never depends on rawfile order. Fewer generators than `top_n` returns
   them all -- not an error.
+- **Same-named columns are separate contributors.** A rawfile may carry two
+  columns under one vector name (PSP103's OSDI model emits them); each is
+  reported under the same `name` with its own value, so the powers still close
+  to the total.
 - **Zero-power generators are omitted.** sky130's `igb`/`igd`/`igs` are
   emitted for every MOSFET and are identically zero at ordinary biases; a
   generator whose reduced value is exactly `0.0` never pads the list.
@@ -6254,7 +6400,7 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
     "limits": {"min": 0.1}}]}
 ```
 
-- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+- **Form.** `eye` is an object `{signal, ui, uis, from?, phase?, level?, metric?}`.
   `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
   works); `ui` is the unit interval (seconds or a SPICE literal such as
   `"100p"`); `uis` is the integer number of unit intervals in the window
@@ -6269,13 +6415,16 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   folded to its phase within a unit interval. `width` is the widest circular
   gap between folded crossing phases (the UI minus the crossing spread -- the
   horizontal opening at the level), `best_phase` is the middle of that gap
-  (seconds from the start of a UI), and `height` is read there: the minimum of
-  the samples above the level minus the maximum of those at or below it, one
-  sample per UI. The data pattern is not known, so decisions are threshold
-  decisions at the sampling phase.
+  (seconds from the start of a UI). Folded width describes the whole pattern.
+  Individual edges can be several UIs apart. For height, omit `phase` to sample
+  at `best_phase`, or supply an offset in seconds or SPICE time with
+  `0 <= phase < ui`. Height is the minimum high sample minus the maximum low
+  sample, interpolating once per UI at `from + k * ui + phase`. Width and
+  best phase use all folded crossings for either choice.
 - **Value.** `value` is the selected metric, graded against `limits` like any
   scalar. An additive `eye` sibling carries
-  `{height, width, best_phase, level, ui, uis}`.
+  `{height, width, best_phase, level, ui, uis}`. Explicit phase also records
+  `sampling_phase` in seconds.
 - **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
   diagnostic whose message starts with a reason token:
 
@@ -6283,12 +6432,15 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   |---|---|
   | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
   | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
-  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the sampling phase |
 - **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
   and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
   and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
   first `klt` release segment `0.8.1`): see "Mandatory features" under
   "Runner/client `klt` version skew".
+  Step eyes and explicit phase require the `eye_step_or_phase` runner capability
+  (release segment `0.9.3`). The worker preflight exercises its installed CLI
+  on a small request to distinguish development builds.
 - **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Edge-window step report (`measurements[].step_resolution`)
@@ -6880,6 +7032,40 @@ top-level `measurements[]` then become **derived** expressions over
 step-qualified results, graded through `limits` like any other measurement.
 `klt` composes the deck itself. There is no raw `.control` escape hatch.
 
+A transient step can measure the eye on its own waveform. Save this circuit
+as `eye.sp` and the request below as `steps.json`, then run
+`klt sim steps.json --backend local --format json`.
+
+```spice
+Vpattern data 0 PULSE(0 1 0 100p 100p 900p 2n)
+Vrail rail 0 1
+Breceive rx 0 V=V(data)*V(rail)
+Rload rx 0 1k
+```
+
+```json
+{
+  "netlist": "eye.sp",
+  "options": {"ngspice_init": []},
+  "analysis_steps": [
+    {"name": "low", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 1},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]},
+    {"name": "high", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 2},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]}
+  ]
+}
+```
+
+`low.opening` measures 1 V and `high.opening` measures 2 V. Both report a
+folded width of 1 ns. Each result records its step. A failed solve returns a
+null measurement for that step. Python reduces these waveforms after
+ngspice finishes, so a deck expression or a later step's analysis arguments
+can reference only measurements computed within ngspice.
+
 Worked example: a two-point load-regulation figure:
 
 ```json
@@ -7006,7 +7192,11 @@ error, exit 1).
     read an **earlier** step's result as `<step>.<name>`.
   - `spice`: a `.meas` card whose type matches the step's `kind` and whose
     card name equals the measurement `name`. It runs as a `meas` control
-    command right after that step's analysis.
+    command right after that step's analysis. It may declare `on_unreached:
+    "null"`: a target the step's completed analysis never reaches then
+    grades `not_reached` under the qualified name, on evidence scoped to
+    that step's own log region — see
+    [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached).
 
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
@@ -9437,7 +9627,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w` as written, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `netlist_title_line` | [#5433](https://github.com/2AMLogic/klayout-tools/issues/5433). The request's `netlist` starts with a SPICE **title line**, which `.include` parses as circuit content (see "Netlist convention" above). Classified from the log after the fact: ngspice echoes the offending source line under its `Error on line N ...` location line, and this code is emitted when that echo is the netlist's own first non-blank line (compared case-insensitively, with internal whitespace folded the way ngspice folds it) and that line is not a `*`/`.`/`+` card. The message names the netlist **file and the line number in it** — not the composed deck's `line N`, which is what ngspice reports — and gives the fix (prefix the line with `*`). Being a deck abort it also carries `analysis_started: false` and collapses the measurement cascade, and it replaces the `ngspice_fatal` and `model_bin_range` readings of the same abort (a title beginning with `m` otherwise surfaces as a BSIM bin-range problem). Never fires when the netlist is unreadable where classification runs, when the echo is some other line, or when line 1 is a comment/dot/continuation card — each falls through to the classification it had before. A title that parses as a *valid* card is undetectable by construction: there is no abort to classify. |
-| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
+| `ngspice_fatal`    | The generic shape of an ngspice deck abort — `Error on line N ...`, `Simulation interrupted due to error!` or `fatal error in ngspice` — when no more specific code above (`missing_include`, `netlist`, `model_bin_range`, `netlist_title_line`) matched. The message carries the first matching log line verbatim. For a bare `fatal error in ngspice` line the message also appends up to two cause lines from the log (`can't find model ...`, `Undefined parameter ...`, or the first `Error`/`warning` line) as `[cause: ...]`. When the log shows no analysis ever began, the cause diagnostic (this code or one of those three) also carries `analysis_started: false` and notes that `runtime_s` is wall-clock before the failure, and the per-measurement `produced no value` diagnostics are collapsed (the measurement results stay `status: error`). Batch runs back-fill it from the retrieved `ngspice.log` ([#3879](https://github.com/2AMLogic/klayout-tools/issues/3879)). The `Error in netlist line no. N` reading is dropped when that alternative is the log's only fatal evidence *and* the run demonstrably completed (an analysis banner plus the `ngspice-N done` exit banner): ngspice-47 prints that line mid-analysis for a `.meas ... param='...'` whose referenced measure produced no value ("Cannot compute substitute"), so the corner fails only through its per-measurement diagnostics ([#6401](https://github.com/2AMLogic/klayout-tools/issues/6401)). On off-host (`batch`/`remote`) runs, when the message shows `Undefined parameter [expr]` or `Expression err: expr(` (a model-library `expr()` parameter the runner's ngspice cannot evaluate), one sentence is appended: the same library may load on a newer local ngspice, so compare `environment.remote.runner_klt_version` / `environment.engine_version` and update the runner image (an infra change); `--backend local` never gets it ([#4891](https://github.com/2AMLogic/klayout-tools/issues/4891)). |
 | `unsupported_model_level` | ngspice's `Only MOS device levels ... are supported in this binary` (e.g. ASAP7 BSIM-CMG `level = 72` without an OSDI module); reported as `prerequisite missing: ...` and suppresses the follow-on `model_bin_range`. See "ASAP7 FinFET (BSIM-CMG) simulation". |
 | `osdi_abi_mismatch` | `NGSPICE only supports OSDI v0.N but ...` — ngspice too old for the compiled module's OSDI ABI. |
 | `osdi_load_failed` | `Error: Library <x>.osdi couldn't be loaded!` — the module is unreadable or not loadable by this ngspice. |
@@ -9463,6 +9653,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `all_units_at_timeout` | Report-level only (`environment.job_diagnostic`, never on a corner): every unit of a ≥2-unit run hit the time budget — see "Timeout-budget hint". |
+| `batch_runner_request_feature_unverified` | Report-level warning. The AMI manifest has no candidate images for verifying the mandatory features listed in `features`. Worker-side enforcement still applies. |
 | `batch_runner_request_feature_predated` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"`: under `batch.runner_version_check: "warn"` the request uses fields the fleet runner `klt` predates — see "Request-feature capability check". |
 | `expr_runner_may_predate` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#4097](https://github.com/2AMLogic/klayout-tools/issues/4097)): an off-host (`remote`/`batch`) run returned no value for a `measurements[].expr` measurement, so the runner image may predate `expr`; `measurements` lists the affected names. |
 | `process_leg_check` | Report-level only (top-level `diagnostics[]`, never on a corner), `severity: "warning"` ([#5385](https://github.com/2AMLogic/klayout-tools/issues/5385)): two or more `corners.process` legs returned bit-identical values for every finite measurement at each supply/temperature, so they may not have been applied; `legs` lists the identical groups. Absent with one leg or when legs differ. The text output also prints a per-corner value table under each measurement (JSON already carries it in `corners[].measurements[]`). |
