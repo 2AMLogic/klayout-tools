@@ -65,7 +65,10 @@ from typing import Any
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
 from .place_and_route_min_area import repair_min_area
-from .place_and_route_pin_conductor import _stage_pin_conductor_layer_map
+from .place_and_route_pin_conductor import (
+    _lef_net_layer_gds_map,
+    _stage_pin_conductor_layer_map,
+)
 from .place_and_route_power_stack import repair_power_stack
 from .place_and_route_via_pad import trim_via_pads
 
@@ -223,50 +226,6 @@ def _cell_library_max_overhang_um(
         )
         max_overhang_um = max(max_overhang_um, overhang_um)
     return max_overhang_um
-
-
-def _lef_net_layer_gds_map(
-    map_path: str | None, purposes: tuple[str, ...] = ("NET",)
-) -> dict[str, tuple[int, int]]:
-    """``{<LEF layer name>: (<GDS layer>, <GDS datatype>)}`` for the given
-    purposes of every entry in the open_pdks KLayout LEF/DEF layer-map file
-    at ``map_path`` -- by default the ``NET`` purpose, i.e. the exact
-    ``(layer, datatype)`` KLayout's own DEF reader draws that LEF layer's
-    *routed net* geometry on, which is also the ``(layer, datatype)`` an
-    extraction deck lists in its own ``metals`` (sky130: ``li1`` ->
-    ``67/20``, ``met1`` -> ``68/20``, ...). A caller that needs via cut
-    layers too (the ``power_stack_repair`` pass, issue #6909) passes
-    ``("NET", "VIA")``: cut layers carry no ``NET`` entry in these maps.
-
-    File shape is the same whitespace-delimited
-    ``<lef_layer_name> <comma-separated purposes> <gds_layer> <gds_datatype>``
-    :func:`~klayout_tools.pdk.load_gds_to_lef_layer_map` parses -- this is
-    the same file read in the opposite direction (LEF name -> GDS pair,
-    restricted to the purposes that name drawn geometry).
-
-    Returns ``{}`` for ``None`` (no map file resolved) or an unreadable/
-    malformed file -- callers treat that as "cannot resolve", never as an
-    error, matching :func:`~klayout_tools.pdk.resolve_klayout_layer_map`'s
-    own degrade-gracefully posture.
-    """
-    if map_path is None:
-        return {}
-    mapping: dict[str, tuple[int, int]] = {}
-    try:
-        with open(map_path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                parts = line.split("#", 1)[0].split()
-                if len(parts) < 4 or parts[0] in ("NAME", "DIEAREA"):
-                    continue
-                if not set(parts[1].split(",")) & set(purposes):
-                    continue
-                try:
-                    mapping.setdefault(parts[0], (int(parts[-2]), int(parts[-1])))
-                except ValueError:
-                    continue
-    except OSError:
-        return {}
-    return mapping
 
 
 def _box_is_inside_drawn_geometry(

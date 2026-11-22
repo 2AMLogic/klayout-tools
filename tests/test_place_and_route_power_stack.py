@@ -259,7 +259,7 @@ def test_counts_match_the_real_deck(tmp_path):
     assert after_counts.get("V4.M4.EN.1", 0) == 0
     assert after_counts.get("V4.M5.EN.2", 0) == 0
     assert after_counts.get("M3.S.2", 0) == 0
-    for rule, count in before_counts.items():
+    for rule, count in after_counts.items():
         if rule in ("V4.M4.EN.1", "V4.M5.EN.2", "M3.S.2"):
             continue
-        assert after_counts.get(rule, 0) <= count, (rule, count, after_counts)
+        assert count <= before_counts.get(rule, 0), (rule, before_counts, after_counts)

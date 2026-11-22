@@ -350,15 +350,9 @@ def repair_power_stack(
             "skipped",
             f"no {'/'.join(missing)} layer in the KLayout layer map",
         )
-    indices = {}
-    for name in _LEF_LAYERS:
-        index = layout.find_layer(*lef_to_gds[name])
-        if index is None:
-            indices[name] = None
-        else:
-            indices[name] = index
-    if all(index is None for index in indices.values()):
-        return _report("clean")
+    indices: dict[str, int | None] = {
+        name: layout.find_layer(*lef_to_gds[name]) for name in _LEF_LAYERS
+    }
 
     def merged(name: str) -> Any:
         index = indices[name]
