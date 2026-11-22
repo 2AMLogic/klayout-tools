@@ -68,8 +68,8 @@ def add_lvs_parser(
             "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
             "REPORT's recorded inputs; combine with --rerun for full mode "
             "(re-run the compare and diff verdict-bearing fields). Exits 0 "
-            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
-            "'--check'"
+            "if consistent, 3 if drifted, or 4 if a recorded input is unavailable "
+            "in cheap mode. See docs/cli/lvs.md, '--check'"
         ),
     )
     lvs_parser.add_argument(

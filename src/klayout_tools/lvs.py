@@ -136,7 +136,7 @@ from ._provenance import (
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -2173,7 +2173,7 @@ def check_lvs_report(
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
-    if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
+    if committed.get("engine") == RUNSET_ENGINE:
         # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
@@ -2186,7 +2186,7 @@ def check_lvs_report(
                 include_repo_root=True,
             )
         )
-    result = build_check_result(report_path=report_path, checks=checks)
+    result = build_input_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
     return result
 
