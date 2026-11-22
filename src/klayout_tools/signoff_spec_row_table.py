@@ -5,56 +5,26 @@ ratchet ceiling (#2766 baseline).
 A manifest may declare a top-level ``spec_rows`` map (``{"<item>":
 [{"id", "gap"?}, ...]}``, issues #2959/#3768). When it does,
 :func:`~klayout_tools.signoff.build_tier_report` adds one additive
-top-level ``spec_rows[]`` block to its report: one record per declared
-row, in declaration order, carrying each row's limit, worst value,
-binding corner, verdict and yield estimate, and the cited file behind
-each number. A manifest that declares nothing omits the key entirely, so
-``--check`` sees no drift on an upgrade alone (the ``partition_boundary``
-back-compat rule, #2278). Additive: no ``schema_version`` bump. The
-record contract is documented in ``docs/cli/signoff.md`` ("The
-per-spec-row table"); the load-bearing rules:
+top-level ``spec_rows[]`` block: one record per declared row, in
+declaration order, carrying each row's limit, worst value, binding
+corner, verdict, yield estimate, and the cited file behind each number.
+A manifest that declares nothing omits the key entirely, so ``--check``
+sees no drift on an upgrade alone (the ``partition_boundary`` back-compat
+rule, #2278). Additive: no ``schema_version`` bump.
 
-- **Quote, never re-derive, anything one envelope already states.**
-  ``worst`` quotes the binding measurement's own ``worst_case`` verbatim
-  (plus the one new quotient below) and ``yield`` quotes
-  ``yield.empirical`` verbatim; the one genuine derivation is the reduce.
-- **Row matching is exact string equality** between a declared row
-  ``id`` and a ``measurements[].spec_row`` tag; no prefix is stripped
-  (the auto-prefixed ``<bench>.<row>`` form is a `klt pex` scheme,
-  #5681). A citation that never names the row, or whose tags name only
-  other rows, contributes nothing (#3778).
-- **The reduce**: several tagged measurements may cover one row across
-  several citations. The binding one is picked by **minimum relative
-  margin** -- ``margin / |active bound|``, recorded as
-  ``worst.relative_margin`` -- because absolute margin is wrong when
-  instance limits scale with the supply (a 1 V rail's 1 mV headroom is
-  proportionally tighter than a 1.8 V rail's 20 mV). When the active
-  bound is ``0``, or the measurement declares no ``limits``, relative
-  margin is undefined: the pick falls back to the absolute ``margin``
-  and ``relative_margin`` is ``null``. A non-``pass`` measurement
-  outranks any ``pass`` one regardless of margin, by the house
-  ``error > inconclusive > fail > pass`` precedence extended monotonic
-  for `klt yield`'s two extra tokens (``fail > insufficient_evidence >
-  pass > reported``, docs/cli/yield.md). Ties keep citation order.
-- **Disagreeing limits stay renderable, unreconciled**: the binding
-  measurement's ``limits`` are quoted as ``limits`` and every cited
-  measurement declaring a different set is listed under an additive
-  ``limit_disagreement`` -- the grader has no basis to pick a "true"
-  limit.
-- **States**: ``graded``; ``gap`` (a free-text or justified gap reason in
-  an explicit no-evidence record; grading refuses citations for either
-  form); ``no_evidence`` (no citation
-  names the row); ``unattributable`` (a citation names the row but its
-  envelope carries no ``spec_row`` tags at all -- #3778's *asserted*
-  coverage: the measurements cannot be attributed to a row, and guessing
-  is the bug this verb exists to prevent). Every declared row gets a
-  record in every state; the measured fields are ``null`` where the
-  state has nothing to quote.
-- **Static projection only**: file-backed citations are re-read;
-  command-backed citations would have to be re-executed to render, so
-  they contribute nothing here, as does an unreadable, malformed or
-  unresolvable citation. Grading reports those on the item axis; this
-  block never contradicts it.
+The record contract and its load-bearing rules -- quote, never
+re-derive; exact-string row matching; the minimum-relative-margin reduce
+with its status precedence; unreconciled ``limit_disagreement``; and the
+record states (``graded``, ``gap``, ``structural`` #6985, carrying its
+``claim`` and hash-pinned ``artifact`` instead of measured values,
+``no_evidence``, ``unattributable``) -- are documented in
+``docs/cli/signoff.md`` ("The per-spec-row table"); that doc is the
+canonical text and this module follows it. One rule worth restating
+here: the projection is **static** -- file-backed citations are re-read;
+command-backed citations would have to be re-executed to render, so they
+contribute nothing here, as does an unreadable, malformed or
+unresolvable citation. Grading reports those on the item axis; this
+block never contradicts it.
 
 The module also hosts ``_members_rows_declared`` (moved here from
 ``signoff.py`` as part of the size offset that pays for the hook lines;
@@ -80,7 +50,7 @@ def _members_rows_declared(
     spec_rows: list[dict[str, Any]] | None,
 ) -> bool:
     """True unless a member names an undeclared (or declared-``gap`` --
-    either form, issue #5599) row."""
+    either form, issue #5599 -- or ``structural``, issue #6985) row."""
     if spec_rows is None:
         return True
     declared = {row["id"]: row for row in spec_rows}
@@ -88,6 +58,7 @@ def _members_rows_declared(
         row_id in declared
         and declared[row_id]["gap"] is None
         and declared[row_id]["justified_gap"] is None
+        and declared[row_id].get("structural") is None
         for _, rows in members
         for row_id in rows or []
     )
@@ -127,14 +98,12 @@ def _envelope_has_tags(envelope: dict[str, Any]) -> bool:
 def _active_bound(limits: Any, value: Any, margin: Any) -> float | int | None:
     """The limit side ``margin`` was measured against, or ``None`` when it
     cannot be proven from the envelope alone: with one declared bound that
-    side is it; with both, ``margin`` is ``min(value - min, max - value)``
-    and the side whose arithmetic reproduces ``margin`` is the binding one
-    (equidistant resolves to ``min`` -- either answer is the same number).
-    Re-deriving the side from the quoted numbers is not re-deriving the
-    margin: the quotient this feeds is the one computation #5691 adds, and
-    every input is read off the envelope. ``None`` when ``limits`` is
-    absent, ``value`` is not a finite number, or neither arithmetic
-    reproduces ``margin``.
+    side is it; with both, the side whose arithmetic reproduces ``margin``
+    is the binding one (equidistant resolves to ``min``). ``None`` when
+    ``limits`` is absent, ``value`` is not a finite number, or neither
+    arithmetic reproduces ``margin``. Re-deriving the side from the quoted
+    numbers is not re-deriving the margin: the quotient this feeds is the
+    one computation #5691 adds, and every input is read off the envelope.
     """
     if not isinstance(limits, dict) or not limits or not is_number(value):
         return None
@@ -290,13 +259,13 @@ def build_spec_row_records(
 
     The four callables are :mod:`klayout_tools.signoff`'s own readers,
     passed in rather than imported back (this module is imported *by* it):
-    ``read_spec_rows`` parses the declaration exactly as grading does,
-    ``parse_members`` normalizes an evidence entry exactly as grading does,
-    ``lookup_evidence`` applies the qualified-then-bare key rule, and
-    ``resolve_evidence`` resolves one citation to its envelope. One record
-    per declared row, in declaration order; a malformed declaration (or one
-    whose per-item rows do not parse) contributes no records -- grading
-    already reports that as ``invalid_evidence`` on the item axis.
+    ``read_spec_rows`` parses the declaration, ``parse_members`` normalizes
+    an evidence entry, ``lookup_evidence`` applies the qualified-then-bare
+    key rule, and ``resolve_evidence`` resolves one citation to its
+    envelope -- each exactly as grading does. One record per declared row,
+    in declaration order; a malformed declaration (or one whose per-item
+    rows do not parse) contributes no records -- grading already reports
+    that as ``invalid_evidence`` on the item axis.
     """
     if manifest.get("spec_rows") is None:
         return None
@@ -419,17 +388,23 @@ def _emit_slot_records(
     per_row: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """One record per declared row, in declaration order, in the row's
-    state: ``gap`` outranks evidence (a gap is never covered), then any
-    attributed candidates grade the record, then the citation-named-but-
-    untagged ``unattributable`` state, then ``no_evidence``. A
-    partition-qualified slot marks its records with ``partition``."""
+    state: a disposition (``gap``, either form, or ``structural`` #6985)
+    outranks evidence (neither is ever covered), then any attributed
+    candidates grade the record, then the citation-named-but-untagged
+    ``unattributable`` state, then ``no_evidence``. A partition-qualified
+    slot marks its records with ``partition``."""
     records: list[dict[str, Any]] = []
     for row in rows:
         justified = row["justified_gap"]
         gap = justified["reason"] if justified is not None else row["gap"]
         row_id = row["id"]
         state = per_row[row_id]
-        if gap is not None:
+        if row.get("structural") is not None:
+            record = _base_record(row_id, item_id, "structural", None)
+            record["claim"] = row["structural"]["claim"]
+            record["artifact"] = dict(row["structural"]["artifact"])
+            records.append(record)
+        elif gap is not None:
             records.append(_base_record(row_id, item_id, "gap", gap))
         elif state["candidates"]:
             records.append(_graded_record(row_id, item_id, state["candidates"]))
@@ -486,6 +461,13 @@ def print_spec_row_table(records: list[dict[str, Any]] | None, palette: Any) -> 
         elif state == "gap":
             marker, colour = "GAP  ", ""
             detail = f"declared gap: {record['gap']}"
+        elif state == "structural":
+            marker, colour = "STRCT", ""
+            artifact = record["artifact"]
+            detail = (
+                f"{record['claim']} (artifact {artifact['file']}, "
+                f"content_hash={artifact['content_hash']})"
+            )
         elif state == "unattributable":
             marker, colour = "UNATT", ""
             detail = "cited, but its envelope declares no spec_row tags"
