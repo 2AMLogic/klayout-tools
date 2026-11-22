@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26060
+      "lines": 26057
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

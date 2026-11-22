@@ -102,10 +102,7 @@ def test_omit_mismatches_runset_rerun_replays_no_drift(tmp_path, fake_klayout):
 
 _LVS_SCHEMA = json.loads(
     (
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "schemas"
-        / "lvs-response.schema.json"
+        Path(__file__).resolve().parents[1] / "docs/schemas/lvs-response.schema.json"
     ).read_text()
 )
 

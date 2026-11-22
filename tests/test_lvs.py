@@ -25377,10 +25377,7 @@ def test_abstract_cells_reconstructed_request_and_rerun(tmp_path):
 
 _LVS_SCHEMA = json.loads(
     (
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "schemas"
-        / "lvs-response.schema.json"
+        Path(__file__).resolve().parents[1] / "docs/schemas/lvs-response.schema.json"
     ).read_text()
 )
 
