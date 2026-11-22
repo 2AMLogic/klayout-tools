@@ -15765,7 +15765,7 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     longer matches".
 
     `reference`'s anchoring is unchanged (still the current working
-    directory): the entry is still `match: False` / `status: "drifted"`, it
+    directory): the entry is `match: False` / `status: "unverifiable"`. It
     just carries an additional `input_not_found` block naming the resolved
     path, plus the report-relative path that *does* exist when one does.
 
@@ -15777,7 +15777,7 @@ def test_check_lvs_report_names_unresolvable_input_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = check_lvs_report(os.path.join("pair", "lvs.json"))
 
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
     by_field = {check["field"]: check for check in result["checks"]}
     check = by_field["environment.reference_sha256"]
     assert check["match"] is False
@@ -16599,21 +16599,21 @@ def test_cli_lvs_check_drifted_exits_three(tmp_path, capsys):
 
 def test_cli_lvs_check_text_names_unresolvable_input(tmp_path, capsys, monkeypatch):
     """Issue #2595's reproduction, end to end through the CLI: `--check`ing
-    a committed pair from its parent directory still exits 3, but the text
+    a committed pair from its parent directory exits 4, but the text
     rendering says the input was not found (and where it really is) instead
     of the bare `actual: None` the report reads as a lost hash."""
     pair, _report_path = _portable_pair(tmp_path, legacy_reference=True)
     monkeypatch.chdir(tmp_path)
     capsys.readouterr()
 
-    assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 3
+    assert main(["lvs", "--check", os.path.join("pair", "lvs.json")]) == 4
     out = capsys.readouterr().out
-    assert "status: drifted" in out
+    assert "status: unverifiable" in out
     # Issue #2659: the *layout* side resolves cleanly now (the `{path, scope}`
     # envelope, anchored on the report's own repo root), so the diagnostic is
     # the reference side's.
     assert "[OK] environment.layout_sha256" in out
-    assert "[DRIFTED] environment.reference_sha256" in out
+    assert "[UNVERIFIABLE] environment.reference_sha256" in out
     assert f"actual:   None (input not found: {tmp_path / 'ref.spice'})" in out
     assert str(pair / "ref.spice") in out
     assert "re-run from there" in out
@@ -23048,7 +23048,7 @@ def test_check_lvs_report_reports_an_external_layout_as_unverifiable(
     # #4984: the reference is outside any repo too: unverifiable.
     assert by_field["environment.reference_sha256"]["actual"] is None
     assert by_field["environment.reference_sha256"]["match"] is False
-    assert result["status"] == "drifted"
+    assert result["status"] == "unverifiable"
 
 
 def test_rerun_lvs_report_refuses_an_external_layout_cleanly(tmp_path_factory):
@@ -25751,8 +25751,8 @@ def test_cli_lvs_check_rerun_with_explicit_layout_on_external_report(
         assert code == 0
         assert json.loads(capsys.readouterr().out)["status"] == "match"
 
-    # Without --layout the honest drift/error is unchanged.
-    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 3
+    # Without --layout the input cannot be verified.
+    assert main(["lvs", "--check", str(report_path), "--format", "json"]) == 4
     capsys.readouterr()
     assert (
         main(["lvs", "--check", str(report_path), "--rerun", "--format", "json"]) == 1

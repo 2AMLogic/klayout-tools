@@ -165,7 +165,7 @@ from ._provenance import (
     sha256_file,
 )
 from ._report_verify import (
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -3698,9 +3698,9 @@ def check_extract_report(
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
     using the same hash functions as the original report. Returns the
     shared ``--check`` payload built by
-    :func:`klayout_tools._report_verify.build_check_result`: ``status:
-    "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
-    otherwise.
+    :func:`klayout_tools._report_verify.build_input_check_result`: ``status:
+    "match"`` when both hashes agree, ``"unverifiable"`` for an unavailable
+    recorded input, or ``"drifted"`` for a changed digest or missing baseline.
 
     This is what surfaces a deck rebuild that silently changed
     device-recognition behavior (e.g. gf180mcu's substrate/well-tap
@@ -3753,7 +3753,7 @@ def check_extract_report(
             committed, deck_content_hash=deck_content_hash
         ),
     ]
-    return build_check_result(report_path=report_path, checks=checks)
+    return build_input_check_result(report_path=report_path, checks=checks)
 
 
 # `\$<n>` -- the escaped spelling `spice_safe_net_name` gives every anonymous

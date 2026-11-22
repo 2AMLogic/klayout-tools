@@ -1249,8 +1249,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   result also prints a one-line warning to stderr, so the drift is visible
   even without inspecting the JSON — for `--engine klayout` runs the warning
   names the standalone application and its remedy, not `--with klayout==`
-  (issue #5660: pinning the wheel does not pin that engine). See "Pinning
-  the KLayout engine version" below.
+  (issue #5660: pinning the wheel does not pin that engine). Under
+  `--format json` that warning follows the "Error shape" delivery rule
+  above (issue #6935): still on stderr ahead of a report — any report,
+  including a violations report's exit `3` — but dropped when the
+  invocation ends in the error envelope, which keeps that stderr one
+  parseable JSON document. See "Pinning the KLayout engine version" below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it
@@ -2562,6 +2566,15 @@ Under `--format json`, errors are also JSON — not a plain-text line — writte
 to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
+
+**Warning delivery (issue #6935).** The CLI defers engine-version mismatch
+warnings (see [shared `provenance`](#shared-provenance-block)) and the
+`klt sim` advisories for ambiguous PDK installs and an ambient ngspice
+init file. When a command emits a JSON error, the CLI discards these
+warnings so the caller can parse the whole error stream as one JSON value.
+When a command produces a report, the CLI sends the warnings to stderr,
+including for a violations report with exit code `3`. Under `--format text`,
+the warnings print as they happen, ahead of the plain-text error line.
 
 ```json
 {
