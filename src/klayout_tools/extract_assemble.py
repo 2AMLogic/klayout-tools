@@ -44,7 +44,7 @@ def assemble_extract_report(
     merged_net_labels: Any,
     missing_flavour_markers: Any,
     netlist_sha256: Any,
-    nets: Any,
+    nets: list[dict[str, Any]],
     parasitics_report: Any,
     path: Any,
     pdk_info: Any,
@@ -104,11 +104,7 @@ def assemble_extract_report(
     # different array built by a different stage and is untouched.
     nets_name_map = _anonymous_net_name_map({"devices": devices, "nets": nets})
     for net_entry in nets:
-        if isinstance(net_entry, dict):
-            name = net_entry.get("name")
-            net_entry["structural_id"] = (
-                nets_name_map.get(name) if isinstance(name, str) else None
-            )
+        net_entry["structural_id"] = nets_name_map.get(net_entry["name"])
 
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,

@@ -40,24 +40,8 @@ def tmp_path(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _annotate_structural_ids(devices: list[Any], nets: list[Any]) -> None:
-    """Annotate ``nets`` entries with ``structural_id`` exactly the way
-    ``assemble_extract_report`` does (issue #5735) -- the synthetic-test
-    twin of the production loop; the real-run tests and
-    :func:`_assemble_report` below exercise the assembler itself."""
-    from klayout_tools.extract import _anonymous_net_name_map
-
-    name_map = _anonymous_net_name_map({"devices": devices, "nets": nets})
-    for entry in nets:
-        if isinstance(entry, dict):
-            name = entry.get("name")
-            entry["structural_id"] = (
-                name_map.get(name) if isinstance(name, str) else None
-            )
-
-
 def _assemble_report(
-    devices: list[Any], nets: list[Any], tmp_path: Any
+    devices: list[Any], nets: list[dict[str, Any]], tmp_path: Path
 ) -> dict[str, Any]:
     """Run the real ``assemble_extract_report`` over a synthetic
     ``devices``/``nets`` pair (issue #5735): every stage input the assembler
@@ -91,10 +75,7 @@ def _assemble_report(
         merged_net_labels=[],
         missing_flavour_markers=[],
         netlist_sha256=None,
-        nets=[
-            {**entry, "pin": False} if isinstance(entry, dict) else entry
-            for entry in nets
-        ],
+        nets=[{"pin": False, **entry} for entry in nets],
         parasitics_report=None,
         report_parasitics_shape=None,
         path=str(input_path),
@@ -129,8 +110,8 @@ def test_extract_report_nets_carry_structural_id(tmp_path):
     assert report["nets"], "fixture must extract nets"
     for entry in report["nets"]:
         assert "structural_id" in entry, entry
-    named = {entry["name"]: entry for entry in report["nets"] if entry["pin"] or True}
-    for name, entry in named.items():
+    for entry in report["nets"]:
+        name = entry["name"]
         if not name.startswith("\\$"):
             assert entry["structural_id"] is None, name
     anonymous = [
@@ -175,8 +156,8 @@ def test_structural_id_ignores_anonymous_net_numbering(tmp_path):
     second: list[Any] = []
     for numbers, sink in (((3, 7), first), ((81, 12), second)):
         devices, nets = _anon_connectivity(*numbers)
-        _annotate_structural_ids(devices, nets)
-        sink.extend(entry["structural_id"] for entry in nets)
+        report = _assemble_report(devices, nets, tmp_path)
+        sink.extend(entry["structural_id"] for entry in report["nets"])
     assert sorted(sid for sid in first if sid is not None) == sorted(
         sid for sid in second if sid is not None
     )
@@ -197,7 +178,7 @@ def test_structural_id_ignores_anonymous_net_numbering(tmp_path):
     assert rewired_ids != base_ids
 
 
-def test_structural_id_null_when_no_identity():
+def test_structural_id_null_when_no_identity(tmp_path):
     """`structural_id` is `null` exactly when the net has no structural
     identity (issue #5735 acceptance criterion 3): a named net, or an
     anonymous net with zero device terminals -- the case
@@ -205,8 +186,8 @@ def test_structural_id_null_when_no_identity():
     `_anonymous_net_name_map` skips."""
     devices, nets = _anon_connectivity(3, 7)
     nets.append({"name": "\\$999", "net_id": 999, "device_count": 0})
-    _annotate_structural_ids(devices, nets)
-    by_name = {entry["name"]: entry for entry in nets if isinstance(entry, dict)}
+    report = _assemble_report(devices, nets, tmp_path)
+    by_name = {entry["name"]: entry for entry in report["nets"]}
     assert by_name["IN"]["structural_id"] is None
     assert by_name["VSS"]["structural_id"] is None
     assert by_name["\\$999"]["structural_id"] is None
@@ -232,7 +213,7 @@ def test_structural_id_present_on_every_net_with_no_netlist(tmp_path):
     assert anonymous, "the anonymous internal net must still carry its identity"
 
 
-def test_normalized_netlist_hash_ignores_structural_id_field():
+def test_normalized_netlist_hash_ignores_structural_id_field(tmp_path):
     """Issue #5735 acceptance criterion 4: annotating the hash payload's own
     `nets[]` entries with `structural_id` leaves
     `netlist_normalized_sha256` byte-identical -- the field is stripped
@@ -240,23 +221,26 @@ def test_normalized_netlist_hash_ignores_structural_id_field():
     from klayout_tools.extract import _normalized_netlist_sha256
 
     devices, nets = _anon_connectivity(3, 7)
+    nets = [{"pin": False, **entry} for entry in nets]
     base = _normalized_netlist_sha256(devices, nets)
-    _annotate_structural_ids(devices, nets)
-    assert _normalized_netlist_sha256(devices, nets) == base
+    report = _assemble_report(devices, nets, tmp_path)
+    assert _normalized_netlist_sha256(devices, report["nets"]) == base
 
     # Golden-digest pin across the field's introduction: the annotated
     # `_digest_fixture` (which carries floating nets, non-dict entries and
     # one-device-two-terminals shapes) must still hash to the pre-change
     # constant computed with the pre-#3568 implementation.
     fixture_devices, fixture_nets = _digest_fixture()
-    _annotate_structural_ids(fixture_devices, fixture_nets)
+    for entry in fixture_nets:
+        if isinstance(entry, dict):
+            entry["structural_id"] = "$anon<ignored.by.digest>"
     assert (
         _normalized_netlist_sha256(fixture_devices, fixture_nets)
         == _DIGEST_FIXTURE_SHA256
     )
 
 
-def test_canonicalization_strips_structural_id():
+def test_canonicalization_strips_structural_id(tmp_path):
     """The mechanism behind criteria 4-5: `_canonicalize_extract_report_for_rerun_diff`
     drops every `structural_id` key (the identity is redundant with the
     anonymous-name rewrite it performs anyway, and dropping it keeps
@@ -265,10 +249,8 @@ def test_canonicalization_strips_structural_id():
     from klayout_tools.extract import _canonicalize_extract_report_for_rerun_diff
 
     devices, nets = _anon_connectivity(3, 7)
-    _annotate_structural_ids(devices, nets)
-    canonical = _canonicalize_extract_report_for_rerun_diff(
-        {"devices": devices, "nets": nets}
-    )
+    report = _assemble_report(devices, nets, tmp_path)
+    canonical = _canonicalize_extract_report_for_rerun_diff(report)
     for entry in canonical["nets"]:
         assert "structural_id" not in entry, entry
     # ...and the anonymous names still rewrite to the same `$anon<...>`
@@ -296,15 +278,15 @@ def test_rerun_matches_report_committed_without_structural_id(tmp_path):
     assert result["status"] == "match", result["drift"]
 
 
-def test_structural_id_keeps_duplicate_attachments():
+def test_structural_id_keeps_duplicate_attachments(tmp_path):
     """A net both of whose terminals belong to one device keeps the
     duplicate in its identity: `_net_attachment_index` deliberately stores
     one `<device>.<terminal>` entry per terminal, so the emitted token
     carries both (issue #5735 edge case)."""
     devices = [{"name": "M1", "nets": {"D": "\\$5", "S": "\\$5"}}]
     nets = [{"name": "\\$5", "net_id": 5}]
-    _annotate_structural_ids(devices, nets)
-    assert nets[0]["structural_id"] == "$anon<M1.D,M1.S>"
+    report = _assemble_report(devices, nets, tmp_path)
+    assert report["nets"][0]["structural_id"] == "$anon<M1.D,M1.S>"
 
 
 def test_parasitics_nets_gain_no_structural_id(tmp_path):
