@@ -294,6 +294,7 @@ def _write_netlist(
     import klayout.db as kdb
 
     from .extract import _finish_netlist_write, _resolve_netlist_target
+    from .extract_netlist_write import write_spice_netlist
     from .extract_progress import stage
 
     netlist_path, scratch_dir = _resolve_netlist_target(path, output, no_netlist)
@@ -304,7 +305,7 @@ def _write_netlist(
     description = _netlist_description(deck_basename, uncarried, bool(device_params))
     try:
         with stage("netlist_write"):
-            netlist.write(netlist_path, writer, description)
+            write_spice_netlist(netlist, netlist_path, writer, description)
     except Exception as exc:  # one error envelope
         if scratch_dir is not None:
             shutil.rmtree(scratch_dir, ignore_errors=True)
