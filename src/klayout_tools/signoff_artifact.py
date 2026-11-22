@@ -7,9 +7,11 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from functools import wraps
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, ParamSpec
 
+from ._git_tracked import is_untracked_working_tree_file, repo_scoped_candidates
 from .artifact_objects import fetch_to
 from .artifact_verify import (
     URI_SCHEME,
@@ -19,6 +21,7 @@ from .artifact_verify import (
     target_for_entry,
     uri_key,
 )
+from .signoff_store_pin import _resolve_relative_to_spec
 
 #: Per kind, the top-level envelope field(s) naming the **input artifact**
 #: whose bytes ``provenance.input.content_hash`` covers -- the file
@@ -224,3 +227,89 @@ def materialize_citation(value: Any) -> str | None:
             uri, "no_manifest: no artifact manifest given (pass --artifact-manifest)"
         )
     return resolver.resolve(uri)
+
+
+def resolve_input_artifact_value(
+    value: Any,
+    spec: Mapping[str, Any],
+    evidence_dir: str | None,
+    repo_root: str | Path | None = None,
+) -> list[str]:
+    """Every filesystem path one input-artifact field's raw envelope
+    ``value`` could mean **from this grading context** -- ``[]`` when the
+    value's shape cannot be resolved here. Shared by every per-field branch
+    in :func:`_input_artifact_candidates`, native and ``generic`` alike, so
+    the two agree on exactly one resolution convention.
+
+    A path an envelope names is not portable: it was written relative to
+    whatever directory the producing run used, which is not necessarily the
+    one grading happens in. Rather than guess a single interpretation, this
+    returns each plausible one and lets :func:`_verify_input_artifact`
+    prefer a *match* over a mismatch, so a coincidentally same-named file
+    beside the envelope can never turn a genuinely fresh citation into a
+    reported mismatch:
+
+    - as the producing run itself named it -- :func:`_resolve_relative_to_spec`
+      (``spec["cwd"]`` for a command-backed entry, this process's cwd
+      otherwise), the same convention `klt drc --check`/`klt lvs --check`
+      re-hash a committed report under;
+    - relative to the **evidence file's own directory**, for a file-backed
+      entry. This is the case the two ``--check`` modes document as a known
+      limitation (``lvs.py``): ``klt lvs`` echoes ``layout``/``reference``
+      exactly as the *request document* gave them, so evidence committed
+      beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
+      ``layout.spice``) is only resolvable this way.
+    - for an **absolute** string, the evidence directory joined with the
+      path's *basename* (issue #2340). A legacy `klt drc`/`klt extract`/
+      `klt erc` envelope records its layout exactly as invoked -- often an
+      absolute ``$PWD/...`` host path from the producing run's checkout,
+      which never exists in a different one (a CI runner, another
+      worktree). When the artifact is committed beside its evidence under
+      the same name, this candidate finds it. It is appended *after* the
+      as-named candidate, and like every candidate here it only ever
+      verifies on a **hash match**: a same-named file with different bytes
+      reports a mismatch (``False``) unless another candidate matches, and
+      it never verifies on its name alone.
+
+    The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
+    `klt pex`'s ``layout``; issue #2879 -- `klt sta` schema 2's
+    ``def_path``/``verilog_path``; issue #2403 -- a ``generic`` envelope's
+    opt-in ``provenance.input.path``) is resolved against the repo root discovered
+    from the evidence file's own location, which is what ``scope: "repo"``
+    means by construction. ``scope: "external"`` carries no path at all (it
+    is ``null`` on purpose, so a host-specific absolute path never lands in
+    committed evidence) and is therefore unresolvable here -- correctly
+    reported as "not verified" rather than guessed at.
+
+    ``repo_root`` (``klt signoff --repo-root``, issue #2878) names that root
+    explicitly and replaces the discovery: evidence graded outside any git
+    checkout (a source archive, a vendored copy, an unpacked CI artifact)
+    has no ``.git`` ancestor to find, so every repo-scoped path would be
+    unresolvable without it. The caller validates the directory exists --
+    an explicit root is never second-guessed by a ``.git`` walk here.
+
+    **The grading basis is the git index, not the working tree** (issue
+    #5857): a candidate inside a functioning checkout whose index does
+    not track it is dropped here -- :mod:`klayout_tools._git_tracked`
+    holds the contract and the fallbacks.
+    """
+    candidates: list[str] = []
+    local = materialize_citation(value)
+    if local is not None:
+        return [local]
+    if isinstance(value, str) and value:
+        candidates.append(_resolve_relative_to_spec(value, spec))
+        if evidence_dir is not None:
+            if not os.path.isabs(value):
+                candidates.append(os.path.join(evidence_dir, value))
+            else:
+                # Issue #2340: a legacy absolute host path from the producing
+                # run's checkout -- also try its basename beside the evidence.
+                basename = os.path.basename(value)
+                if basename:
+                    candidates.append(os.path.join(evidence_dir, basename))
+    elif isinstance(value, Mapping) and value.get("scope") == "repo":
+        candidates.extend(repo_scoped_candidates(value, spec, evidence_dir, repo_root))
+    return [
+        c for c in dict.fromkeys(candidates) if not is_untracked_working_tree_file(c)
+    ]
