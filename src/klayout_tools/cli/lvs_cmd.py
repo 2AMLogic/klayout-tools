@@ -42,6 +42,7 @@ import sys
 from ..deck_hash_assertion import assert_deck_hash
 from ..env_provenance import render_path_field
 from ..lvs import LvsError, check_lvs_report, rerun_lvs_report, run_lvs
+from ._parsing import parse_deck_options
 from .output import (
     emit_error,
     emit_success,
@@ -109,6 +110,15 @@ def run(args: argparse.Namespace) -> int:
                 "verifies the committed report's own recorded deck hash",
                 args.format,
             )
+        if getattr(args, "omit_mismatches", False):
+            return emit_error(
+                "lvs",
+                "--omit-mismatches applies to a fresh run; --check reads "
+                "the committed report as-is (a report produced with the "
+                "flag already carries mismatches: [] and mismatches_omitted: "
+                "true, and --rerun replays the omission from that echo)",
+                args.format,
+            )
         return _run_check(args)
 
     if args.rerun:
@@ -125,7 +135,12 @@ def run(args: argparse.Namespace) -> int:
             args.request,
             deck=args.deck,
             deck_file=args.deck_file,
-            deck_vars=_parse_deck_vars(args.deck_var),
+            # Repeatable `--deck-var NAME=VALUE` (issue #3206), parsed by the
+            # helper `klt drc`/`klt extract` share (issue #6738) so the three
+            # verbs accept one spelling.
+            deck_vars=(
+                parse_deck_options(args.deck_var, LvsError, flag="--deck-var") or {}
+            ),
             # `--progress` (issue #4347), same default as `klt extract`:
             # heartbeat only, and only when stderr is not a TTY.
             progress=(
@@ -133,6 +148,9 @@ def run(args: argparse.Namespace) -> int:
                 if args.progress is not None
                 else ("heartbeat" if not sys.stderr.isatty() else False)
             ),
+            # `--omit-mismatches` (issue #5610), mirroring `klt erc
+            # --omit-antenna-tables`.
+            omit_mismatches=getattr(args, "omit_mismatches", False),
         )
         # Issue #5806: the caller's deck-pin assertion, before anything is
         # written or emitted -- a mismatch produces only the error envelope.
@@ -171,21 +189,6 @@ def _write_output(report: dict, args: argparse.Namespace) -> int | None:
     return None
 
 
-def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
-    """Parse repeatable ``--deck-var NAME=VALUE`` (issue #3206), same
-    spelling and last-one-wins rule as ``klt drc --deck-var``."""
-    deck_vars: dict[str, str] = {}
-    for item in raw or ():
-        name, sep, value = item.partition("=")
-        if not sep or not name:
-            raise LvsError(
-                f"invalid --deck-var {item!r}: expected 'name=value' "
-                "(e.g. --deck-var feol=true)"
-            )
-        deck_vars[name] = value
-    return deck_vars
-
-
 def _run_check(args: argparse.Namespace) -> int:
     if args.output is not None:
         return emit_error(
@@ -214,6 +217,13 @@ def _run_check(args: argparse.Namespace) -> int:
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_mismatches_omitted(report: dict) -> None:
+    """The ``--omit-mismatches`` note (issue #5610), printed only when the
+    flag was used."""
+    if report.get("mismatches_omitted"):
+        print("mismatches_omitted: True (--omit-mismatches)")
 
 
 def _print_excluded_pins(power: dict) -> None:
@@ -250,6 +260,11 @@ def _print_text(report: dict) -> None:
         print(f"parameter_tolerance: {report['parameter_tolerance']}")
     print(f"status: {report['status']}")
     print(f"mismatches: {report['mismatch_count']}")
+    # Issue #5610: the `--omit-mismatches` note, printed only when the flag
+    # was used -- without it, a compacted report's per-entry section is
+    # empty and would be indistinguishable from a clean report's tail (the
+    # renderer returns early on an empty list, after the counts above).
+    _print_mismatches_omitted(report)
     # Issue #1132: printed unconditionally (like `mismatches` above), even
     # when 0, so a caller skimming text output can tell "0 mismatches" and
     # "N mismatches, 0 of them errors" apart from "no report at all".

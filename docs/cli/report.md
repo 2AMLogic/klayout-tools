@@ -52,6 +52,7 @@ detected from its own JSON structure:
 | `drc`            | a top-level `violations` array (`klt drc`'s shape)             | status + a Rule/Cell/Layer/BBox/Description table         |
 | `lvs`            | a top-level `mismatches` array (`klt lvs`'s shape)              | status + a Category/Severity/Side/Description table       |
 | `layout-metrics` | top-level `slug` + `name` + `status` together (`klt layout-metrics`'s `layout.json` shape) | a Metric/Value key-metrics table, plus DRC/Renders/Signals summary lines when present |
+| `measurements`   | a top-level `measurements` array whose entries carry a graded `status` string, or that is empty (the rollup shape `klt sim` and `klt yield` share) | status + a Measurement/Unit/Limits/Worst/Margin/Corner/Status table, plus per-entry yield columns when any entry carries them — see "Measurements sections" below |
 | `error`          | a top-level `error` object with a `message` (any verb's own `--format json` error output, per `docs/json-contract.md`) | the failed command name and message               |
 
 A `klt drc --engine both` cross-check renders as one DRC section. Its
@@ -86,7 +87,62 @@ gallery site's own "omit-absent" convention
 
 With zero finding rows, single-engine DRC renders “No violations found.” and
 LVS renders “No mismatches found.” A DRC cross-check with zero curated rows
-renders “No curated violation rows to display.”
+renders “No curated violation rows to display.” An empty measurements rollup renders
+“No measurements found.”
+
+### Measurements sections
+
+One structural kind covers both of `klt`'s own measurement producers — a
+`klt sim` report (`schema_version=3`) and a `klt yield` report
+(`schema_version=1`) — because a top-level `measurements` list of graded
+entries is the structural marker they share and the rendered table is the
+same shape; keying on `corner_count` vs `campaign` would be a per-verb
+field by another name.
+
+The marker is the per-entry **graded verdict**: at least one entry must
+carry a string `status` (the field the table's final column quotes), or the
+list must be empty. Both producers always emit it. It is deliberately not
+`worst_case` — that is a `klt sim` field only (`klt yield` entries carry
+`yield.empirical` instead, and a sim entry's `worst_case` is `null` for an
+all-absent measurement). Another verb's `measurements[]` that is *not* a
+graded rollup — `klt yield-sensitivity`'s per-measurement parameter
+ranking carries no `status` — is refused as an unrecognized shape (exit 1)
+rather than rendered as a table whose every evidence cell reads `-`, which
+would look like "measured, found nothing".
+
+Every cell quotes the producer envelope's own rollup fields verbatim —
+`worst_case.{value, corner_id, margin}` and, when present,
+`yield.empirical.{estimate, confidence_interval, confidence}` — and never
+re-derives an extreme or a yield (the same rule `klt signoff` applies to
+`klt yield`'s rollups). Formatting follows the producers' own text
+conventions (`repr` for worst-case values/margins as `klt sim`'s text
+summary prints them; `.6g` for limits bounds and `.6f` for yield figures
+as `klt yield` prints them):
+
+- **Limits** renders each declared bound with its direction, so a floor
+  and a ceiling never read the same: `>=30` (a `min` only), `<=10` (a
+  `max` only), `>=1e+06, <=2e+09` (both). A bound flagged `exclusive_min`
+  / `exclusive_max` renders strict — `>-3, <3` — the same `>=`/`<=` vs
+  `>`/`<` labelling `klt yield`'s own `limits:` line prints. The cell is
+  `-` when the entry has `limits: null` — a measurement with no declared
+  bounds has no worst-case extreme (every margin is `null`, see the
+  `measurements` rollup row in [`sim.md`](sim.md)), so its **Margin** cell
+  reads `-` (absent) too, never `0`.
+- **Worst**/**Corner** quote `worst_case.value`/`worst_case.corner_id`; a
+  `null` `worst_case.value` (an errored or `absent` measurement) renders
+  `-`, not zero. **Status** is the entry's own aggregate status
+  (`pass`/`fail`/`error`, plus `absent` and `inconclusive`).
+- **Yield**/**Yield CI** columns exist only when at least one entry
+  carries an empirical yield figure; entries without one render `-` there
+  (a `klt sim` rollup entry never has a `yield` block; a `klt yield`
+  rollup entry can lack one when the measurement errored).
+
+Absent cells always render `-` — the marker both producers' own text
+output uses — never a literal `null`, matching this doc's omit-absent
+convention above. A present value that is not a number (a producer-contract
+violation, e.g. a string `limits.min`) is quoted verbatim in its cell
+(`>='abc'`) rather than failing the render or reading as absent — the
+no-traceback guarantee under "Exit codes and errors" holds for it too.
 
 ## Why a third format
 
@@ -152,11 +208,11 @@ rather not parse markdown.
 
 | Field         | Type              | Description                                                                          |
 | ------------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| `kind`        | string              | `"drc"`, `"lvs"`, `"layout-metrics"`, or `"error"` — see "Envelope-kind detection" above. |
+| `kind`        | string              | `"drc"`, `"lvs"`, `"layout-metrics"`, `"measurements"`, or `"error"` — see "Envelope-kind detection" above. |
 | `source`      | string              | The input file path (or `"-"`) this section was rendered from, exactly as given.         |
 | `title`       | string              | The section's rendered heading text (without markdown's `## ` prefix).                    |
-| `status`      | string \| null      | The source envelope's own `status` field (`drc`/`lvs`/`layout-metrics` kinds), `"error"` for an `error`-kind section, or `null` if the source envelope had none. |
-| `item_count`  | integer \| null     | Number of displayed finding rows for DRC or LVS (curated rows for a DRC cross-check). Other kinds return `null`. |
+| `status`      | string \| null      | The source envelope's own `status` field (`drc`/`lvs`/`layout-metrics`/`measurements` kinds), `"error"` for an `error`-kind section, or `null` if the source envelope had none. |
+| `item_count`  | integer \| null     | Number of displayed finding rows for DRC or LVS (curated rows for a DRC cross-check), or the number of measurement rows for a measurements rollup. Other kinds return `null`. |
 
 `sections[]` never embeds the underlying `violations[]`/`mismatches[]`
 arrays themselves — a consumer that wants that raw structured detail should
@@ -197,7 +253,7 @@ to stdout. No Python traceback is printed.
     "schema_version": 1,
     "error": {
       "command": "report",
-      "message": "envelope file 'bad.json' has an unrecognized shape (schema_version=1): no violations[], mismatches[], or layout-metrics-style (slug/name/status) fields found"
+      "message": "envelope file 'bad.json' has an unrecognized shape (schema_version=1): no violations[], mismatches[], a measurements[] rollup (entries carrying a status), or layout-metrics-style (slug/name/status) fields found"
     }
   }
   ```

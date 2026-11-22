@@ -172,8 +172,11 @@ def parse_deck_options(
 
     Shared by ``klt extract`` and ``klt pex`` (issue #1558) -- both forward
     the result to ``run_extract``'s own ``deck_options`` parameter, so the
-    accepted spelling must stay identical between them. ``flag`` and
-    ``error_cls`` behave as in :func:`load_json_path_or_inline`.
+    accepted spelling must stay identical between them. It is also the one
+    parser behind the repeatable ``--deck-var NAME=VALUE`` flag of ``klt
+    drc``, ``klt lvs`` and ``klt extract`` (``flag="--deck-var"``, issue
+    #6738); do not fork it per verb. ``flag`` and ``error_cls`` behave as in
+    :func:`load_json_path_or_inline`.
 
     Raises ``error_cls`` for a malformed entry (no ``=``, or a blank key) --
     a likely typo, not a meaningful "no options" request. A later ``KEY``

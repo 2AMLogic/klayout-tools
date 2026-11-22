@@ -53,6 +53,31 @@ def _ring_well_mark_box(
     )
 
 
+def _diff_pair_pcell_layout(pcell: Any) -> dict[str, Any]:
+    """Build the same resolved pair and ring geometry for validation and drawing."""
+    from klayout_tools.gen import _diff_pair_layout, _pcell_tap_reach_um
+
+    return _diff_pair_layout(
+        pcell.w_um,
+        pcell.l_um,
+        pcell.splits,
+        pcell.add_guard_ring,
+        pcell.ring_gap_side,
+        pcell.ring_gap_um,
+        pcell.ring_gap_offset_um,
+        pcell.ring_padding_um,
+        pcell.row_spacing_um,
+        pcell.gate_contact,
+        pcell.gate_pad_clearance_um,
+        pcell.contact_gate_offset_um,
+        pcell.bottom_endcap_um,
+        pcell.sd_implant_margin_um if pcell.sd_implant_present else 0.0,
+        pitch_x_um=pcell.pitch_x_um,
+        top_endcap_um=pcell.top_endcap_um,
+        tap_reach_um=_pcell_tap_reach_um(pcell),
+    )
+
+
 def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     """Build the ``diff_pair`` reference generator's PCell -- a differential
     pair / current mirror cell.
@@ -73,11 +98,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         WELL_ENCLOSURE_MARGIN_UM,
         _clamp_cut_boxes,
         _close_implant_gaps,
-        _diff_pair_layout,
         _draw_pcell_npc,
         _draw_pcell_tap_pads,
         _insert_boxes,
-        _pcell_tap_reach_um,
     )
     from klayout_tools.gen_voltage_flavor import _draw_voltage_flavor_marks
 
@@ -263,25 +286,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             li_poly = self.layout.layer(self.poly_layer)
             li_contact = self.layout.layer(self.contact_layer)
             li_metal = self.layout.layer(self.metal_layer)
-            info = _diff_pair_layout(
-                self.w_um,
-                self.l_um,
-                self.splits,
-                self.add_guard_ring,
-                self.ring_gap_side,
-                self.ring_gap_um,
-                self.ring_gap_offset_um,
-                self.ring_padding_um,
-                self.row_spacing_um,
-                self.gate_contact,
-                self.gate_pad_clearance_um,
-                self.contact_gate_offset_um,
-                self.bottom_endcap_um,
-                self.sd_implant_margin_um if self.sd_implant_present else 0.0,
-                pitch_x_um=self.pitch_x_um,
-                top_endcap_um=self.top_endcap_um,
-                tap_reach_um=_pcell_tap_reach_um(self),
-            )
+            info = _diff_pair_pcell_layout(self)
             unit_boxes = info["unit"]["boxes_um"]
             for c in info["cells"]:
                 for role, li in (

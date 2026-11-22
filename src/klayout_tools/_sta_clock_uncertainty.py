@@ -28,8 +28,9 @@ def validate_clock_uncertainty(
 
     The value is either a finite number ``>= 0`` (applied to setup and hold)
     or an object with the optional keys ``setup_ns`` / ``hold_ns`` (each a
-    finite number ``>= 0``, at least one required). Booleans, non-finite or
-    negative numbers, unknown keys and any other type are request errors.
+    finite number ``>= 0`` or ``null``, at least one key required). Booleans,
+    non-finite or negative numbers, unknown keys and any other type are
+    request errors.
     """
     value = constraints.get("clock_uncertainty_ns")
     if value is None:
@@ -89,7 +90,9 @@ def clock_uncertainty_block(
     """The ``clock_uncertainty`` response block (issue #4240): whether any
     uncertainty was applied. A side not given is ``null`` (unconstrained),
     never copied from the other."""
-    if not clock_uncertainty:
+    if not clock_uncertainty or all(
+        value is None for value in clock_uncertainty.values()
+    ):
         return {"applied": False}
     return {
         "applied": True,
