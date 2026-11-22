@@ -118,13 +118,11 @@ def test_gf180_bare_guard_ring_opening_is_drc_clean(
             "options": {"output": str(output)},
         }
     )
-    # GF180 streams use 1 nm DBU even when the tech LEF resolves to 0.5 nm.
-    assert report["dbu_um"] == 0.001
     assert run_drc(str(output), "gf180mcu")["violations"] == []
 
     layout = kdb.Layout()
     layout.read(str(output))
-    assert layout.dbu == report["dbu_um"]
+    assert layout.dbu == report["dbu_um"] == 0.001
     top = layout.top_cell()
     for layer, expected_gap in (
         (22, comp_opening_um),  # Comp
@@ -386,21 +384,50 @@ def test_sg13g2_standalone_guard_ring_gap_still_accepted(tmp_path, sg13g2_pdk_ro
     assert run_drc(str(output), "sg13g2")["violations"] == []
 
 
-def test_gf180mcu_mos_array_ring_gap_not_newly_rejected(tmp_path, both_pdk_root):
-    """GF180 still accepts this gap. Issue #6827 tracks its pplus.space.1 violation."""
+def _gf180_mos_request(root, output, gap, flavor, *, ring=True, offset=0.0):
+    return {
+        "generator": "mos_array",
+        "pdk": {"variant": "gf180mcuD", "root": str(root)},
+        "params": {
+            "flavor": flavor,
+            "add_guard_ring": ring,
+            "ring_gap_side": "W",
+            "ring_gap_um": gap,
+            "ring_gap_offset_um": offset,
+        },
+        "options": {"output": str(output)},
+    }
+
+
+@pytest.mark.parametrize(
+    ("flavor", "rule"), [("nfet", "pplus.space.1"), ("pfet", "nplus.space.1")]
+)
+@pytest.mark.parametrize(
+    ("gap", "offset", "drawn"),
+    [(0.50, 0, 0.18), (0.60, 0, 0.28), (0.71, 0, 0.39), (0.715, 0.0025, 0.395)],
+)
+def test_gf180_mos_rejects_subrule_implant_gap(
+    tmp_path, both_pdk_root, gap, offset, drawn, flavor, rule
+):
     output = tmp_path / "gf180_mos.gds"
-    generate(
-        {
-            "generator": "mos_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                "add_guard_ring": True,
-                "ring_gap_side": "W",
-                "ring_gap_um": 0.5,
-            },
-            "options": {"output": str(output)},
-        }
-    )
+    with pytest.raises(GenError) as exc:
+        generate(_gf180_mos_request(both_pdk_root, output, gap, flavor, offset=offset))
+    assert f"{drawn:.3f} µm" in str(exc.value)
+    assert rule in str(exc.value)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+@pytest.mark.parametrize("gap", [0.715, 0.72, 1.00])
+def test_gf180_mos_accepts_clean_implant_gap(tmp_path, both_pdk_root, gap, flavor):
+    output = tmp_path / "gf180_mos.gds"
+    generate(_gf180_mos_request(both_pdk_root, output, gap, flavor))
+    assert run_drc(str(output), "gf180mcu")["violations"] == []
+
+
+def test_gf180_ringless_mos_accepts_small_gap(tmp_path, both_pdk_root):
+    output = tmp_path / "ringless.gds"
+    generate(_gf180_mos_request(both_pdk_root, output, 0.5, "nfet", ring=False))
     assert output.exists()
 
 
