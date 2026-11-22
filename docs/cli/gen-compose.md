@@ -2623,8 +2623,9 @@ replaced) on either rule, both implemented by
 1. **Pairwise declared-footprint intersection** — any two distinct blocks
    whose declared placed footprints intersect with positive width *and*
    height. The error names both ids and the intersection rectangle in the
-   composed coordinate frame, in µm; a participant whose measured footprint
-   outgrew its declaration gets its growth deltas folded in. Edge and corner
+   composed coordinate frame, in µm. When measured footprints differ, the
+   error lists each changed edge. Positive deltas extend outward and negative
+   deltas move inward. Edge and corner
    contact passes (zero width or height is not a positive-area overlap), so
    flows that abut by design are not penalized. A `blocks[].abuts`
    declaration can suppress the clearance *advisory* above — it can never

@@ -155,12 +155,8 @@ Scope (phase 2, this module's current state):
 to a nonexistent block ``id``/port name is an application error, exit code
 1); geometry is *advisory* -- ``klt drc`` remains the rule-compliance
 authority on the composed output, so a routed net (``routed: true``) is not a
-DRC-clean guarantee. The one opt-in exception is the hard placement gate
-(issue #6942): ``options.check_placement: true`` refuses the request on a
-positive-area pairwise footprint intersection or a footprint that outgrew
-its own declaration (:func:`check_placement_overlap` -- also a preflight
-library entry point for hand-rolled merges), before anything is drawn or
-written; omitted or ``false``, geometry stays advisory exactly as before.
+DRC-clean guarantee. Set ``options.check_placement`` to fail before writing
+on declared overlap or measured footprint growth (:func:`check_placement_overlap`).
 
 PDK resolution goes through the one resolver every other verb uses
 (:func:`klayout_tools.pdk.find_pdk`) -- this module never implements its own
@@ -219,6 +215,10 @@ from .gen_compose_draw import (
 )
 from .gen_compose_draw import (
     _insert_via_cuts as _insert_via_cuts,
+)
+from .gen_compose_footprints import _bbox_contains
+from .gen_compose_footprints import (
+    check_placement_overlap as check_placement_overlap,
 )
 from .gen_compose_ladder_floors import (
     _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
@@ -777,197 +777,6 @@ def _explicit_placement_clearance_warnings(
     return clearance_warnings, abutment_notes
 
 
-# Tolerance (um) for comparing a block's declared ``bbox_um`` against its own
-# real, stream-read ``kdb.Cell.dbbox()`` in
-# :func:`_declared_bbox_overlap_warnings` below -- large enough to absorb dbu
-# quantization noise between an analytically-computed declared bbox and the
-# same geometry's dbu-rounded drawn extent (dbu is typically 0.001um, so
-# quantization alone can differ by up to half a dbu step), far too small to
-# ever mask a real "declared bbox undershoots the block's own guard ring/seal
-# ring" discrepancy (#1679), which is always at least tens of nm.
-_BBOX_REALITY_TOLERANCE_UM = 1e-4
-
-
-def _bbox_contains(outer: dict[str, float], inner: dict[str, float]) -> bool:
-    """Whether ``outer`` fully contains ``inner`` (within
-    :data:`_BBOX_REALITY_TOLERANCE_UM`)."""
-    tol = _BBOX_REALITY_TOLERANCE_UM
-    return (
-        inner["x0"] >= outer["x0"] - tol
-        and inner["y0"] >= outer["y0"] - tol
-        and inner["x1"] <= outer["x1"] + tol
-        and inner["y1"] <= outer["y1"] + tol
-    )
-
-
-def _fmt_bbox_um(bbox_um: dict[str, float]) -> str:
-    """Format one ``{x0, y0, x1, y1}`` box as ``(x0, y0)-(x1, y1)`` um --
-    the spelling every placement-gate diagnostic below uses."""
-    return (
-        f"({bbox_um['x0']:.3f}, {bbox_um['y0']:.3f})-"
-        f"({bbox_um['x1']:.3f}, {bbox_um['y1']:.3f})"
-    )
-
-
-def _require_gate_bbox(value: Any, where: str) -> dict[str, float]:
-    """Validate one caller-supplied ``{x0, y0, x1, y1}`` box (um) for
-    :func:`check_placement_overlap`, raising :class:`ValueError` on a
-    malformed shape.
-
-    The gate is a library entry point for merge scripts with no request
-    document at all, so its input errors are plain ``ValueError`` s rather
-    than :class:`GenComposeError` (compose itself validates its own request
-    boxes through :func:`_require_bbox` before any box ever gets here)."""
-    if not isinstance(value, dict):
-        raise ValueError(f"{where} must be a JSON object with x0/y0/x1/y1 (um)")
-    missing = [key for key in ("x0", "y0", "x1", "y1") if key not in value]
-    if missing:
-        raise ValueError(f"{where} is missing field(s): {', '.join(missing)}")
-    box: dict[str, float] = {}
-    for key in ("x0", "y0", "x1", "y1"):
-        raw = value[key]
-        if (
-            isinstance(raw, bool)
-            or not isinstance(raw, (int, float))
-            or not math.isfinite(raw)
-        ):
-            raise ValueError(f"{where}.{key} must be a finite number (um)")
-        box[key] = float(raw)
-    if box["x1"] < box["x0"] or box["y1"] < box["y0"]:
-        raise ValueError(f"{where} must have x1 >= x0 and y1 >= y0")
-    return box
-
-
-def _footprint_growth_sides(
-    declared_um: dict[str, float], measured_um: dict[str, float]
-) -> list[tuple[str, float]]:
-    """Per-side growth (um) of ``measured_um`` past ``declared_um`` beyond
-    :data:`_BBOX_REALITY_TOLERANCE_UM`, as ``(side, delta_um)`` pairs in
-    left/right/bottom/top order -- empty when the declaration encloses the
-    geometry (the passing case: only *outgrowing* a declaration, never
-    undershooting it, is a growth failure)."""
-    tol = _BBOX_REALITY_TOLERANCE_UM
-    sides = (
-        ("left", declared_um["x0"] - measured_um["x0"]),
-        ("right", measured_um["x1"] - declared_um["x1"]),
-        ("bottom", declared_um["y0"] - measured_um["y0"]),
-        ("top", measured_um["y1"] - declared_um["y1"]),
-    )
-    return [(side, delta) for side, delta in sides if delta > tol]
-
-
-def check_placement_overlap(
-    declared_um: dict[str, dict[str, float]],
-    measured_um: dict[str, dict[str, float]] | None = None,
-) -> list[str]:
-    """Fail-fast placement gate over already-placed block footprints (um).
-
-    The opt-in **hard** counterpart to this module's advisory geometry
-    checks (issue #6942): ``options.check_placement`` routes a compose
-    request's own placed boxes through this function, and a hand-rolled
-    merge (``Layout.read`` / ``Cell.copy_tree`` / ``CellInstArray`` -- the
-    only option today for sources outside this command's ``klt gen``
-    provenance contract) can call it directly as a preflight, with no PDK,
-    generator report, or second CLI required.
-
-    ``declared_um`` maps each block id to its placed footprint
-    ``{x0, y0, x1, y1}`` in the composed (merged) coordinate frame.
-    ``measured_um`` optionally maps ids to real, stream-measured placed
-    footprints in the same frame -- omit an id (or the whole argument)
-    where no measurement exists; a declaration that encloses its geometry
-    passes the growth rule.
-
-    Returns a list of failure strings (empty when the placement passes):
-
-    - **pairwise** -- any two distinct entries whose declared footprints
-      intersect with positive width *and* height fail, naming both ids and
-      the intersection rectangle. Edge and corner contact passes (a
-      zero-width or zero-height intersection is not a positive-area
-      overlap; differences below :data:`_BBOX_REALITY_TOLERANCE_UM` count
-      as contact). No ``abuts`` declaration is consulted here: a declared
-      abutment suppresses the *clearance* advisory
-      (:func:`_explicit_placement_clearance_warnings`) but never exempts a
-      positive-area intersection. A pair participant whose measured
-      footprint outgrew its own declaration gets its growth deltas folded
-      into the pair failure.
-    - **growth** -- a measured footprint that extends past its own
-      declaration beyond :data:`_BBOX_REALITY_TOLERANCE_UM` fails even
-      with no other block anywhere near (#1679 hardened from warning to
-      opt-in failure): a generator that outgrew its manifest fails in
-      seconds, not after the next chip-level DRC run. Each failure names
-      the block, both rectangles, and which sides grew by how much.
-
-    Raises :class:`ValueError` on a malformed box
-    (:func:`_require_gate_bbox`) or a ``measured_um`` id with no
-    ``declared_um`` entry.
-    """
-    declared: dict[str, dict[str, float]] = {}
-    for block_id, raw_box in declared_um.items():
-        if not isinstance(block_id, str) or not block_id:
-            raise ValueError("block ids must be non-empty strings")
-        declared[block_id] = _require_gate_bbox(
-            raw_box, f"declared footprint of block '{block_id}'"
-        )
-    measured: dict[str, dict[str, float]] = {}
-    for block_id, raw_box in (measured_um or {}).items():
-        if block_id not in declared:
-            raise ValueError(f"measured footprint given for unknown block '{block_id}'")
-        measured[block_id] = _require_gate_bbox(
-            raw_box, f"measured footprint of block '{block_id}'"
-        )
-
-    failures: list[str] = []
-    tol = _BBOX_REALITY_TOLERANCE_UM
-    ids = list(declared)
-    for index, a_id in enumerate(ids):
-        for b_id in ids[index + 1 :]:
-            a_bbox, b_bbox = declared[a_id], declared[b_id]
-            intersection = {
-                "x0": max(a_bbox["x0"], b_bbox["x0"]),
-                "y0": max(a_bbox["y0"], b_bbox["y0"]),
-                "x1": min(a_bbox["x1"], b_bbox["x1"]),
-                "y1": min(a_bbox["y1"], b_bbox["y1"]),
-            }
-            if (
-                intersection["x1"] - intersection["x0"] <= tol
-                or intersection["y1"] - intersection["y0"] <= tol
-            ):
-                continue  # edge/corner contact or clear -- not positive-area
-            message = (
-                f"blocks '{a_id}' and '{b_id}' overlap: declared footprints "
-                f"intersect over {_fmt_bbox_um(intersection)} um"
-            )
-            for participant_id in (a_id, b_id):
-                if participant_id not in measured:
-                    continue
-                growth = _footprint_growth_sides(
-                    declared[participant_id], measured[participant_id]
-                )
-                if not growth:
-                    continue
-                message += (
-                    f"; '{participant_id}' measured footprint "
-                    f"{_fmt_bbox_um(measured[participant_id])} um exceeds "
-                    f"its declared {_fmt_bbox_um(declared[participant_id])} um"
-                    " by "
-                    + ", ".join(f"{side} {delta:.3f}um" for side, delta in growth)
-                )
-            failures.append(message)
-    for block_id in ids:
-        if block_id not in measured:
-            continue
-        growth = _footprint_growth_sides(declared[block_id], measured[block_id])
-        if not growth:
-            continue
-        failures.append(
-            f"block '{block_id}' measured footprint "
-            f"{_fmt_bbox_um(measured[block_id])} um exceeds its declared "
-            f"bbox_um {_fmt_bbox_um(declared[block_id])} um -- grew past it "
-            "by " + ", ".join(f"{side} {delta:.3f}um" for side, delta in growth)
-        )
-    return failures
-
-
 def _block_real_placed_bbox_um(
     block_id: str, block: dict[str, Any], offset_um: dict[str, float]
 ) -> dict[str, float] | None:
@@ -976,11 +785,8 @@ def _block_real_placed_bbox_um(
     declared ``bbox_um`` already is -- or ``None`` when it cannot be read
     (bad ``gds_path``/``cell_name``, or an empty cell).
 
-    Never raises: this is an advisory cross-check (#1679), and a block whose
-    stream genuinely cannot be read fails identically -- loudly, as a
-    :class:`GenComposeError` -- later in :func:`compose` regardless (when its
-    geometry is actually copied into the composed output), so silently
-    skipping the advisory here for that block costs nothing.
+    An unreadable stream has no measurement. Compose reports the underlying
+    read error when copying the source geometry.
     """
     try:
         real_bbox_um = read_cell_bbox_um(
@@ -1066,6 +872,21 @@ def _read_all_block_layers_geometry(
     return geometry
 
 
+def _measure_placed_bboxes(
+    order: list[str],
+    blocks: dict[str, dict[str, Any]],
+    offsets_um: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    measured = {}
+    for block_id in order:
+        box = _block_real_placed_bbox_um(
+            block_id, blocks[block_id], offsets_um[block_id]
+        )
+        if box is not None:
+            measured[block_id] = box
+    return measured
+
+
 def _declared_bbox_overlap_warnings(
     order: list[str],
     blocks: dict[str, dict[str, Any]],
@@ -1107,20 +928,11 @@ def _declared_bbox_overlap_warnings(
     Never raises and never blocks composition, matching every other check in
     this module's "geometry is advisory" philosophy.
 
-    ``real_placed_bbox_um`` may carry a caller's already-computed
-    ``_block_real_placed_bbox_um`` results (compose measures each source
-    cell once and shares the measurement with the ``options.check_placement``
-    gate, #6942); ``None`` measures here exactly as before.
+    Compose shares its measured boxes with the optional strict check.
     """
     warnings: list[str] = []
     if real_placed_bbox_um is None:
-        real_placed_bbox_um = {}
-        for block_id in order:
-            real_bbox = _block_real_placed_bbox_um(
-                block_id, blocks[block_id], offsets_um[block_id]
-            )
-            if real_bbox is not None:
-                real_placed_bbox_um[block_id] = real_bbox
+        real_placed_bbox_um = _measure_placed_bboxes(order, blocks, offsets_um)
 
     leaky_ids = [
         block_id
@@ -3339,9 +3151,6 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     cell_name = options.get("cell_name") or "gen_compose_0"
     output_path = options.get("output") or f"{cell_name}.gds"
     boundary_bbox_um = parse_boundary(options.get("boundary"), GenComposeError)
-    # #6942: the opt-in hard placement gate. Parsed here (fail fast on a
-    # non-boolean) but enforced below, after placement is resolved and
-    # before any routing is drawn or the output stream is written.
     check_placement = options.get("check_placement", False)
     if not isinstance(check_placement, bool):
         raise GenComposeError("request.options.check_placement must be a boolean")
@@ -3401,48 +3210,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         warnings.extend(clearance_warnings)
         notes.extend(abutment_notes)
 
-    # #1679: every check above (and every placement strategy's own math)
-    # trusts a block's *declared* bbox_um -- accurate for a `klt gen` block,
-    # but a `generator_report` block's bbox_um is taken verbatim
-    # (_parse_blocks) and never cross-checked against its own stream. A
-    # block whose real drawn geometry (e.g. a guard/seal ring) extends past
-    # its declared bbox can silently overlap a neighbour placed just outside
-    # the *declared* box -- a `klt drc`-clean same-layer merge that only
-    # surfaces later via `klt extract`'s merged_net_labels diagnostic.
-    # Real-geometry-based, so (unlike the declared-bbox check above) it
-    # applies to every strategy -- "row"/"array" place from the same
-    # unreliable declared bbox_um and are no less exposed; "array" is a
-    # no-op here in practice (exactly one blocks[] entry, so no pairwise
-    # comparison is possible).
-    #
-    # #6942: measure each source cell once, shared between this advisory and
-    # the opt-in hard gate below it.
-    real_placed_bboxes_um: dict[str, dict[str, float]] = {}
-    for block_id in order:
-        real_placed_bbox = _block_real_placed_bbox_um(
-            block_id, blocks[block_id], offsets_um[block_id]
-        )
-        if real_placed_bbox is not None:
-            real_placed_bboxes_um[block_id] = real_placed_bbox
-
-    # #6942: the opt-in hard placement gate -- the fail-fast counterpart to
-    # every advisory above. A positive-area pairwise footprint intersection
-    # (which `abuts` cannot exempt) or a measured footprint that outgrew its
-    # own declaration refuses the whole request here, before any routing is
-    # drawn and before the output stream is created or replaced -- a block
-    # that outgrew its manifest fails in seconds, not after the next
-    # chip-level DRC run.
+    # The placement gate and the advisory share one measurement for each source.
+    real_placed_bboxes_um = _measure_placed_bboxes(order, blocks, offsets_um)
     if check_placement:
+        gate_declared_um = placed_bboxes_um
         if strategy == "array":
-            # The array union describes the whole placement and can hide the
-            # growth of one tile -- the growth rule compares the base tile's
-            # own measured footprint against that tile's own declaration
-            # (translated by its origin), never the union.
+            # Compare the base tile to its own declaration.
+            tile = order[0]
             gate_declared_um = {
-                order[0]: _translate_bbox(bboxes_um[order[0]], offsets_um[order[0]])
+                tile: _translate_bbox(bboxes_um[tile], offsets_um[tile])
             }
-        else:
-            gate_declared_um = dict(placed_bboxes_um)
         gate_failures = check_placement_overlap(gate_declared_um, real_placed_bboxes_um)
         if gate_failures:
             raise GenComposeError(
