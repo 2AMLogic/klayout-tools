@@ -227,6 +227,28 @@ def test_climb_clears_placed_metal_around_each_landing(tmp_path, case):
     assert nets[0]["routed"] is (case == "exact")
 
 
+@pytest.mark.parametrize("rail_bottom,routed", [(5.640, False), (5.645, True)])
+def test_mixed_grid_climb_checks_the_written_pad(tmp_path, rail_bottom, routed):
+    # The 1.001 um pad rounds to 1.002 on the output grid. Quantizing it
+    # on the first block's 0.010 um grid would check a 1.020 um pad.
+    layout, request = _row_request(tmp_path, "sky130A", pad_size=1.001)
+    layout.transform(kdb.ICplxTrans(0.1))
+    layout.dbu = 0.010
+    rail = kdb.Layout()
+    rail.dbu = 0.001
+    _add_port_block(rail, request, "rail", (68, 20), 0.3, (0.15, 0), 270)
+    rail_path = str(tmp_path / "rail.gds")
+    rail.write(rail_path)
+    request["blocks"][-1]["cell"]["gds_path"] = rail_path
+    _place(request, left=(0, 0), right=(13, 0), rail=(10.15, rail_bottom))
+    nets, output = _run_row(layout, request)
+    assert nets[0]["routed"] is routed
+    assert (
+        run_drc(output, "sky130", top="test_top", rules=["met1.space.1"])["rule_counts"]
+        == {}
+    )
+
+
 def _gf180_parallel_layout(tmp_path, suffix, parallel_first, *, straight=False):
     variant = "gf180mcu" + suffix
     layout, request = _row_request(

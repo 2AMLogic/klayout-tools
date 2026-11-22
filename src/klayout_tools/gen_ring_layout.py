@@ -128,7 +128,7 @@ def _mos_array_ring_layout(
 def _validate_device_ring_implant_gap(
     spec: _GeneratorSpec, params: dict[str, Any], pdk_info: dict[str, Any]
 ) -> None:
-    """Check the drawn SG13G2 implant opening on a MOS array or differential pair.
+    """Check drawn ring openings on SG13G2 devices and GF180MCU MOS arrays.
 
     Each cut face snaps independently on the library grid before the implant
     margin is applied. Those two edges then rescale onto the output grid. At
@@ -147,7 +147,12 @@ def _validate_device_ring_implant_gap(
 
     family = _pdk_family(pdk_info["variant"])
     side = params["ring_gap_side"]
-    if family != "sg13g2" or not side or not params["add_guard_ring"]:
+    supported = (family, spec.name) in {
+        ("sg13g2", "mos_array"),
+        ("sg13g2", "diff_pair"),
+        ("gf180mcu", "mos_array"),
+    }
+    if not supported or not side or not params["add_guard_ring"]:
         return
     layer = spec.layer_params(pdk_info, params)
     if not layer["ring_implant_present"]:

@@ -183,7 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
-from functools import partial
+from functools import cache, partial
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -3440,19 +3440,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # from route_layer). So this cache is keyed by (block_id, layer) instead,
     # read lazily the same way, and reused by every leg that drops onto the
     # same block/layer pair.
-    own_block_layer_geometry_cache: dict[
-        tuple[str, tuple[int, int]], dict[str, Any] | None
-    ] = {}
-
+    @cache
     def _own_block_layer_geometry(
-        block_id: str, layer: tuple[int, int]
+        block_id: str, layer: tuple[int, int], dbu: float | None = None
     ) -> dict[str, Any] | None:
-        key = (block_id, layer)
-        if key not in own_block_layer_geometry_cache:
-            own_block_layer_geometry_cache[key] = read_block_layer_geometry(
-                block_id, blocks[block_id], offsets_um[block_id], layer
-            )
-        return own_block_layer_geometry_cache[key]
+        return read_block_layer_geometry(
+            block_id, blocks[block_id], offsets_um[block_id], layer, dbu
+        )
 
     # --- Per-net/per-leg routing-plane override (#1655) ----------------------
     # `routing.layer_role` resolves ONE plane for the whole composition, so a
@@ -3549,7 +3543,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 block_id: str, _cache=cache, _layer=layer
             ) -> dict[str, dict[str, Any] | None]:
                 if block_id not in _cache:
-                    _cache[block_id] = _own_block_layer_geometry(block_id, _layer)
+                    _cache[block_id] = _own_block_layer_geometry(
+                        block_id, _layer, _drawing_dbu()
+                    )
                 return _cache
 
             _override_geometry_fetchers[layer] = _fetch
@@ -3595,34 +3591,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return width
 
-    # dbu for the route-vs-route collision check below (#1057), read lazily
-    # (only once connectivity[] actually has a net to check) from any one
-    # block's own GDS -- this pre-flight check only ever compares continuous
-    # micron-space geometry quantized at *some* fine resolution, so any
-    # single block's own dbu is precise enough to reuse here even though (as
-    # of #1514) it need not be identical to every other block's dbu, nor to
-    # the composed layout's own dbu `_write_composed_gds` resolves below
-    # (the finest dbu across all blocks, reconciling any coarser block onto
-    # it) -- a difference of, at most, one block's own dbu step is far below
-    # any DRC-relevant tolerance.
-    _route_dbu_cache: list[float] = []
+    @cache
+    def _block_dbu(block_id: str) -> float:
+        layout, _ = _load_block_cell(block_id, blocks[block_id])
+        return float(layout.dbu)
 
-    def _route_dbu() -> float:
-        if not _route_dbu_cache:
-            import klayout.db as kdb
-
-            probe_block_id = order[0]
-            probe_gds_path = blocks[probe_block_id]["gds_path"]
-            probe_layout = kdb.Layout()
-            try:
-                probe_layout.read(probe_gds_path)
-            except Exception as exc:  # klayout raises RuntimeError for bad paths
-                raise GenComposeError(
-                    f"block '{probe_block_id}': could not read gds_path "
-                    f"'{probe_gds_path}': {exc}"
-                ) from exc
-            _route_dbu_cache.append(probe_layout.dbu)
-        return _route_dbu_cache[0]
+    @cache
+    def _drawing_dbu() -> float:
+        # The writer reconciles every block onto the finest input grid.
+        return min(_block_dbu(block_id) for block_id in order)
 
     def _leg_regions(
         points: list[tuple[float, float]],
@@ -3632,15 +3609,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         layer: tuple[int, int] | None,
     ) -> dict[tuple[int, int] | None, Any]:
         """Use the same drawn footprint to check a candidate and to register it."""
-        dbu = _route_dbu()
-        side, cut = side_for_pair.drawn_side, side_for_pair.cut_side_um
+        dbu = _drawing_dbu()
+        side, cut = side_for_pair.drawn_side, side_for_pair.via_side_um
         regions = {
             layer: _drawn_leg_footprint_region(
                 points, width, drops, stub_widen, dbu, layer, side, cut
             )
         }
         regions.update(
-            _drawn_leg_intermediate_pad_regions(drops, dbu, layer, side, cut)
+            _drawn_leg_intermediate_pad_regions(drops, dbu, layer, side, cut).items()
         )
         return regions
 
@@ -3949,7 +3926,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         other_net,
                         cand_region,
                         other_region,
-                        _route_dbu(),
+                        _drawing_dbu(),
                         side_for_pair,
                         _min_spacing_um_for_layer,
                         check_spacing=automatic
@@ -3986,15 +3963,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # The box collection lives in :func:`_landing_and_widen_pad_boxes`
             # (issue #5803: shared with the pad-vs-pitch message path).
             pad_boxes = _landing_and_widen_pad_boxes(
-                via_drops, stub_widen, layer, side_for_pair.drawn_side
+                via_drops,
+                stub_widen,
+                layer,
+                side_for_pair,
+                _drawing_dbu(),
             )
 
-            for pad_layer, block_id, box, _drop in pad_boxes:
+            for pad_layer, block_id, box, drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
-                pad_geometry = _own_block_layer_geometry(block_id, pad_layer)
+                pad_geometry = _own_block_layer_geometry(
+                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                )
                 if pad_geometry is None:
                     continue
                 violation_um = _pad_self_notch_violation_um(
@@ -4038,10 +4021,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # half of this very function (overlap-only -> spacing-rule aware),
             # applied to the route-vs-own-block case, and it reuses the same
             # `_min_spacing_um_for_layer` deck lookup rather than a second,
-            # private threshold. Scoped to the blocks *this net's own pins sit
-            # on* -- the blocks a leg is guaranteed to draw an approach stub
-            # inside, and the ones check 5 deliberately funds an allowance for;
-            # every other block stays check 5's business. Deliberately *not*
+            # private threshold. Ordinary legs check their endpoint blocks.
+            # Climbs check every block on the candidate plane. Deliberately *not*
             # restricted to `blocks[].cell` blocks the way #1527's own-block
             # escape check is: that scoping exists because an *overlap* with a
             # `generator_report` block's unreported-but-legitimate geometry
@@ -4063,7 +4044,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     else {block for block, _port in _net_pin_set}
                 )
                 for block_id in sorted(checked_blocks):
-                    own_geometry = _own_block_layer_geometry(block_id, layer)
+                    own_geometry = _own_block_layer_geometry(
+                        block_id, layer, _drawing_dbu()
+                    )
                     if own_geometry is None:
                         continue
                     violation_um = _leg_block_spacing_violation_um(
@@ -4132,7 +4115,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 auto_plane_climb=net_auto_climb,
                 width_aware_conflict=_leg_conflict,
                 landing_pad_side=side_for_pair.drawn_side,
-                route_dbu=_route_dbu,
+                route_dbu=_drawing_dbu,
             )
             notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
@@ -4295,9 +4278,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             min_spacing_for_layer=lambda layer: (
                 _min_spacing_um_for_layer(layer) or (None,)
             )[0],
-            block_geometry=_own_block_layer_geometry,
+            block_geometry=partial(_own_block_layer_geometry, dbu=_drawing_dbu()),
             routed_regions=accepted_route_regions,
-            dbu=_route_dbu(),
+            dbu=_drawing_dbu(),
         )
     pin_placements, response_pins = _label_promoted_pins(
         promoted_pins,
@@ -4583,6 +4566,32 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     return int(nearest)
 
 
+def _rescale_block_layout(
+    src_layout: Any, dbu: float, block_id: str, gds_path: str
+) -> str | None:
+    """Scale shapes and instances onto the output grid before polygonization."""
+    import klayout.db as kdb
+
+    original_dbu = src_layout.dbu
+    if abs(original_dbu - dbu) <= 1e-12:
+        return None
+    ratio = _integer_dbu_ratio(original_dbu, dbu)
+    if ratio is None:
+        raise GenComposeError(
+            f"block '{block_id}': gds '{gds_path}' has dbu={original_dbu}, "
+            f"which does not evenly divide the composed cell's dbu={dbu} "
+            "-- every block's dbu must be an exact integer multiple of "
+            "the finest block's own dbu to be losslessly reconciled"
+        )
+    src_layout.transform(kdb.ICplxTrans(float(ratio)))
+    src_layout.dbu = dbu
+    return (
+        f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
+        f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
+        f"(exact integer ratio {ratio})"
+    )
+
+
 def _create_placed_sub_cell(
     layout: Any,
     block: dict[str, Any],
@@ -4770,34 +4779,9 @@ def _write_composed_gds(
         gds_path = block["gds_path"]
         src_layout = src_layouts[block_id]
 
-        if abs(src_layout.dbu - dbu) > 1e-12:
-            # #1514: klt draw (always 0.001) and pre-#1512 `klt gen` output
-            # composed against a #1512-and-later `klt gen` block resolved
-            # against a finer-grid PDK (e.g. gf180mcu's 0.0005) used to hit
-            # a hard refusal here. Reconcile it instead, whenever the ratio
-            # is an exact integer, by rescaling this block's geometry onto
-            # `dbu` -- the same scale/transform pattern `_merge_gds_view`
-            # (place_and_route.py) already uses for the analogous DEF/LEF
-            # merge problem (#1090). `kdb.Layout.transform()` rescales every
-            # shape *and* every instance array vector in the layout, so a
-            # block's own internal hierarchy (and any array pitch inside it)
-            # survives the rescale intact.
-            ratio = _integer_dbu_ratio(src_layout.dbu, dbu)
-            if ratio is None:
-                raise GenComposeError(
-                    f"block '{block_id}': gds '{gds_path}' has dbu={src_layout.dbu}, "
-                    f"which does not evenly divide the composed cell's dbu={dbu} "
-                    "-- every block's dbu must be an exact integer multiple of "
-                    "the finest block's own dbu to be losslessly reconciled"
-                )
-            original_dbu = src_layout.dbu
-            src_layout.transform(kdb.ICplxTrans(float(ratio)))
-            src_layout.dbu = dbu
-            dbu_rescale_warnings.append(
-                f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
-                f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
-                f"(exact integer ratio {ratio})"
-            )
+        warning = _rescale_block_layout(src_layout, dbu, block_id, gds_path)
+        if warning:
+            dbu_rescale_warnings.append(warning)
 
         src_cell_name = block["cell_name"]
         src_cell = src_layout.cell(src_cell_name)

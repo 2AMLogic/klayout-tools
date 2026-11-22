@@ -293,11 +293,8 @@ class PlaneClimbContext(NamedTuple):
         self, drops: list[dict[str, Any]], plane: tuple[int, int]
     ) -> bool:
         """Check the pads as drawn, on every hop including intermediate metals."""
-        import klayout.db as kdb
-
         from .gen_compose_landing_pads import _make_landing_pad_side_um
-        from .gen_compose_routing import _drop_array_extra_um
-        from .gen_compose_via_cuts import landing_pad_half_dbu, via_drop_cut_side_um
+        from .gen_compose_via_cuts import drawn_landing_box, via_drop_cut_side_um
 
         if not drops:
             return True
@@ -311,23 +308,21 @@ class PlaneClimbContext(NamedTuple):
         for drop in drops:
             via = drop["via_layer"]
             cut = via_drop_cut_side_um(self.pdk_variant, via)
-            cx, cy = (round(drop[key] / dbu) for key in ("x_um", "y_um"))
             for layer in drop["landing_layers"]:
                 # A top-metal port can also be the source of a downward via.
                 if self.pdk_variant == "gf180mcuA" and layer == (42, 0):
                     return False
-                size = side(layer, via, drop) + _drop_array_extra_um(drop)
-                if self.pdk_variant == "gf180mcuB" and layer == (46, 0) and size < 0.75:
+                box = drawn_landing_box(
+                    drop, side(layer, via, drop), cut, dbu
+                ).to_dtype(dbu)
+                if (
+                    self.pdk_variant == "gf180mcuB"
+                    and layer == (46, 0)
+                    and box.width() < 0.75 - 1e-9
+                ):
                     # Native MT.1/MT.4 on the 11K top need 0.44 um width and
                     # 0.5625 um² area; accept a pad that meets both on its own.
                     return False
-                half = landing_pad_half_dbu(size, cut, dbu)
-                box = kdb.DBox(
-                    (cx - half) * dbu,
-                    (cy - half) * dbu,
-                    (cx + half) * dbu,
-                    (cy + half) * dbu,
-                )
                 rule = _route_spacing_rule(self.pdk_variant, layer)
                 if not self._pad_is_clear(
                     box, drop, layer, plane, rule[0] if rule else 0.0

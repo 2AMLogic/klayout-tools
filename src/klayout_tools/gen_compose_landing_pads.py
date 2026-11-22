@@ -136,7 +136,7 @@ class _LandingPadSideResolver:
         self._via_cache: dict[tuple[int, int], float] = {}
         self._via_side_lookup = via_drop_cut_side_um
 
-    def cut_side_um(self, via_layer: tuple[int, int]) -> float:
+    def via_side_um(self, via_layer: tuple[int, int]) -> float:
         if via_layer not in self._via_cache:
             self._via_cache[via_layer] = self._via_side_lookup(self._variant, via_layer)
         return self._via_cache[via_layer]
@@ -171,20 +171,20 @@ class _LandingPadSideResolver:
                 )
 
                 floor_side, _floors = _intermediate_landing_pad_floor_um(
-                    self._variant, pad_layer, via_layer, self.cut_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
                 self._pair_cache[key] = floor_side
             elif self._override_um is None:
                 from .gen_compose_layer_rules import _landing_pad_side_um_for_pair
 
                 self._pair_cache[key] = _landing_pad_side_um_for_pair(
-                    self._variant, pad_layer, via_layer, self.cut_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
             else:
                 from .gen_compose_layer_rules import _landing_pad_floor_um
 
                 floor_side, _floors = _landing_pad_floor_um(
-                    self._variant, pad_layer, via_layer, self.cut_side_um(via_layer)
+                    self._variant, pad_layer, via_layer, self.via_side_um(via_layer)
                 )
                 self._pair_cache[key] = max(self._override_um, floor_side)
         return self._pair_cache[key]
@@ -251,57 +251,28 @@ def _landing_and_widen_pad_boxes(
     via_drops: list[dict[str, Any]],
     stub_widen: list[dict[str, Any]],
     layer: tuple[int, int] | None,
-    side_for_pair: Any,
+    sizes: _LandingPadSideResolver,
+    dbu: float,
 ) -> list[_LegPadBox]:
-    """Every pad box one routed leg draws, sized for its own pair (#1520).
+    """Own-block landing and stub-widen boxes in the composed frame (µm).
 
-    Extracted verbatim from ``compose()``'s ``_leg_conflict`` (issue #1520's
-    own-block pad self-notch loop grew there; issue #5803's message path
-    needs the same boxes, so the loop moved here beside it instead of being
-    duplicated). ``side_for_pair`` (issue #5803) is
-    :func:`_make_landing_pad_side_um`'s resolver -- a landing pad is sized
-    for its own ``(landing, via)`` pair rather than the fixed baseline, so
-    a request-level override is checked at the size drawing will insert.
-    Stub-widen boxes draw on the leg's own ``layer`` at their own width,
-    exactly as before (they are not pair-sized; ``drop`` is ``None``).
-
-    Returns ``[(pad_layer, block_id, (x0, y0, x1, y1)_um, drop)]``. A
-    pre-#1520 caller-built entry (``block_id`` absent) is skipped, not an
-    error -- unchanged behaviour.
+    Landings use the writer's integer box on the composed grid. Stub-widen
+    boxes retain their own width and length. Drops without an owning block
+    predate this check and are skipped.
     """
-    from .gen_compose import _VIA_LANDING_SIZE_UM
-    from .gen_compose_routing import _drop_array_extra_um
+    from .gen_compose_via_cuts import drawn_landing_box
 
     boxes: list[_LegPadBox] = []
     for drop in via_drops:
         block_id = drop.get("block_id")
         if block_id is None:
-            continue  # pre-#1520 caller-built via_drops -- skip, not an error
+            continue
         via_layer = drop["via_layer"]
-        cx, cy = drop["x_um"], drop["y_um"]
-        # Each hop's landing pad is drawn on *both* of its own
-        # ``landing_layers`` (see _write_composed_gds) -- issue #1567
-        # generalized this from a single hop's fixed (port_layer, this leg's
-        # own route layer) pair to whatever pair *that hop* actually lands
-        # on, so a multi-level ladder's intermediate pads are checked here
-        # too, not just the one nearest the backbone or the one nearest the
-        # pin. dict.fromkeys dedupes the common case where both layers of a
-        # hop happen to be identical.
         for pad_layer in dict.fromkeys(drop.get("landing_layers", ())):
-            side_um = (
-                side_for_pair(pad_layer, via_layer, drop)
-                if side_for_pair is not None
-                else _VIA_LANDING_SIZE_UM
-            )
-            half_um = (side_um + _drop_array_extra_um(drop)) / 2.0
-            boxes.append(
-                (
-                    pad_layer,
-                    block_id,
-                    (cx - half_um, cy - half_um, cx + half_um, cy + half_um),
-                    drop,
-                )
-            )
+            side = sizes.drawn_side(pad_layer, via_layer, drop)
+            box = drawn_landing_box(drop, side, sizes.via_side_um(via_layer), dbu)
+            bounds = (box.left * dbu, box.bottom * dbu, box.right * dbu, box.top * dbu)
+            boxes.append((pad_layer, block_id, bounds, drop))
     for widen in stub_widen:
         block_id = widen.get("block_id")
         if block_id is None or layer is None:
@@ -329,19 +300,17 @@ def _landing_pad_box(
 
     from .gen_compose import _VIA_LANDING_SIZE_UM
     from .gen_compose_routing import _drop_array_extra_um
-    from .gen_compose_via_cuts import landing_pad_half_dbu
+    from .gen_compose_via_cuts import drawn_landing_box
 
     side = (
         side_for_pair(layer, drop["via_layer"], drop)
         if side_for_pair is not None and layer is not None
         else _VIA_LANDING_SIZE_UM
     )
-    side += _drop_array_extra_um(drop)
-    half = (
-        landing_pad_half_dbu(side, cut_side_um(drop["via_layer"]), dbu)
-        if cut_side_um is not None
-        else round(side / (2 * dbu))
-    )
+    if cut_side_um is not None:
+        return drawn_landing_box(drop, side, cut_side_um(drop["via_layer"]), dbu)
+    # A caller without a PDK uses the original nominal footprint.
+    half = round((side + _drop_array_extra_um(drop)) / (2 * dbu))
     cx, cy = (round(drop[key] / dbu) for key in ("x_um", "y_um"))
     return kdb.Box(cx - half, cy - half, cx + half, cy + half)
 
