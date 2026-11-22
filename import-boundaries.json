@@ -240,6 +240,7 @@
         "klayout_tools.erc",
         "klayout_tools.erc_antenna_gf180mcu",
         "klayout_tools.erc_disclosure",
+        "klayout_tools.erc_keepouts",
         "klayout_tools.erc_spec",
         "klayout_tools.erc_spec_boxes",
         "klayout_tools.erc_substrate",
@@ -2373,6 +2374,12 @@
       "exporter": "klayout_tools._provenance",
       "symbol": "_combined_content_hash",
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
+      "consumer": "klayout_tools.erc_keepouts",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Keepout declarations use the same indexed key validation and _comment convention as the other ERC spec objects."
     },
     {
       "consumer": "klayout_tools.erc_disclosure",
