@@ -307,6 +307,7 @@ from .sim_plot import render_waveform_svg
 #: without importing this runner; re-exported self-aliased for existing callers.
 from .sim_raw import _parse_and_persist_waveform as _parse_and_persist_waveform
 from .sim_raw import parse_ascii_rawfile as parse_ascii_rawfile
+from .sim_raw import persist_waveform_with_header
 
 #: The remaining names below are not called directly from this module -- they
 #: are re-exported (self-aliased so linters recognise the re-export as
@@ -7769,10 +7770,8 @@ def _persist_waveform_artifact(
 ) -> str | None:
     """Convert ``raw_path`` to its ``waveform.raw.json`` artifact and return
     that path, or ``None`` when ``raw_size`` is over ``waveform_max_bytes``
-    (issue #3211): converting parses the whole ASCII rawfile into memory, so
-    past the cap a ``waveform_too_large`` warning is appended instead. For a
-    ``noise`` analysis the converted waveform also sets
-    ``noise_fields["noise_representation"]`` (issue #3006).
+    (issue #3211). Past the cap, append a ``waveform_too_large`` warning.
+    Otherwise stream the points and use the header to classify noise units.
     """
     if waveform_max_bytes is not None and raw_size > waveform_max_bytes:
         # Keep the raw file and every measurement; only the JSON conversion
@@ -7794,10 +7793,9 @@ def _persist_waveform_artifact(
             }
         )
         return None
-    waveform_path = _parse_and_persist_waveform(raw_path, waveform_decimate)
+    waveform_path, header = persist_waveform_with_header(raw_path, waveform_decimate)
     if analysis.get("kind") == "noise":
-        with open(waveform_path, encoding="utf-8") as fh:
-            noise_fields["noise_representation"] = noise_representation(json.load(fh))
+        noise_fields["noise_representation"] = noise_representation(header)
     return waveform_path
 
 
