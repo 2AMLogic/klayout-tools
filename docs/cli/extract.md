@@ -5705,9 +5705,21 @@ per-net lumped model would produce.
     in a straight line. Terminals are this net's contact/via landings on the
     fragment, plus any edge where the fragment abuts a device body cut out of
     the conductor region (a transistor gate, a drawn resistor's marked body).
-    The path length `L` is then the fragment's extent along the axis joining
-    its two farthest-apart terminals and `A / L` its effective width, so
-    squares = `L² / A`. The smaller of the two measurements is used, so this
+    Terminals stay grouped by interface: each landing layer (contacts, the
+    via below, the via above) is one interface, and the fragment's cut faces
+    are another. When there are exactly two interfaces, each a straight row
+    (a cut face, or two or more landings), parallel, separated across their
+    common direction by more than either row's own scatter, and facing each
+    other along at least half the longer row, the current axis is the normal
+    between the two rows (#7028). A straight row can have up to one grid
+    diagonal of transverse scatter from rounding its landing centres.
+    Examples are a wide poly head contacted by
+    a row of licons opposite the resistor body, or a li1 pad joining a licon
+    row to a parallel mcon row. A 20 × 0.8 µm head reads 0.04 squares
+    whether it carries one centred contact or twenty along its width.
+    Otherwise the axis joins the fragment's two farthest-apart terminals. In
+    both cases the path length `L` is the fragment's extent along the axis
+    and `A / L` its effective width, so squares = `L² / A`. The smaller of the two measurements is used, so this
     can only ever remove a long-axis artefact, never add resistance the
     whole-fragment fit did not already charge.
 

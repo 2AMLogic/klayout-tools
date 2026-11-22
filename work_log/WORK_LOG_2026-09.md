@@ -2,6 +2,46 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-18
+
+- **PR #2081**: docs: document envelope-vs-plain-string split for artifact path fields
+- **PR #2077**: fix: re-snapshot complexity-baseline.json to unblock the C901 ratchet (#2055)
+- **PR #2075**: fix(gen-compose): floor via-drop landing pads against each layer's own min-area rule
+- **PR #2050**: fix(gen): emit the JSON error envelope for self-detected usage errors (#2029)
+- **PR #2049**: feat(erc): pin the spec file's contents in klt erc's provenance block
+- **PR #2047**: feat(lvs,pex,signoff): make device-body tie/bias a gradeable field (#1983)
+- **PR #2046**: test(oracle): cross-validate klt drc and klt extract against magic
+- **PR #2043**: doc: add module-ownership map for multi-file klt verbs
+- **PR #2042**: fix(loom): give every worktree its own uv-synced editable install
+- **PR #2041**: feat(ci): add a cyclomatic-complexity ratchet (C901), not a ceiling
+- **PR #2040**: test(signoff): bind an LVS check to the DRC'd layout, correct stale prose
+- **PR #2038**: fix(lvs): join assign-aliased reference ports onto their canonical net
+- **PR #2023**: fix(decks): transcribe sky130's met1-met5 holes-area rules (m1.7-m5.7)
+- **PR #2022**: fix(erc,power): report pass_partial when coverage is incomplete
+- **PR #2019**: fix(equiv): stop dropping escaped top-level ports in cut-point refinement
+- **PR #1993**: ci: add a wall-clock budget check to ci.yml
+- **Issue #2083** (closed): Epic: fasterhenry — a clean-room, MIT-licensed Rust PEEC inductance/resistance extractor (FastHenry's problem class, none of its code)
+- **Issue #2073** (closed): Stage-response artifact path fields use two shapes ({path, scope} vs. plain string) with no version signal to tell them apart
+- **Issue #2072** (closed): place-and-route emits via cells and router stubs whose metal is below the PDK's own minimum-area rules
+- **Issue #2055** (closed): complexity-baseline.json landed stale: main fails the C901 ratchet on four pre-existing functions
+- **Issue #2051** (closed): Document run-json fallback and mandatory re-measurement in ci-wall-clock-budget check
+- **Issue #2037** (closed): klt lvs mismatch_count counts warning-severity entries, so 'mismatch_count == 0' can no longer be used as the clean-LVS assertion
+- **Issue #2036** (closed): klt erc writes no provenance block (no input hash, no tool version, no PDK revision) unlike drc/lvs/sta/place-and-route
+- **Issue #2034** (closed): Establish a measured cyclomatic-complexity baseline and CI ratchet (not a ceiling)
+- **Issue #2032** (closed): Document a module-ownership map for klt verb implementation boundaries (findability, not refactor)
+- **Issue #2029** (closed): klt gen --format json emits a plain-text error, not the documented JSON error envelope — and routing it through emit_error would silently change exit 2 to 1
+- **Issue #2021** (closed): klt lvs reports assign-aliased reference ports (two names, one node) as mismatches — the other half of #1994's 77 false errors
+- **Issue #2020** (closed): Worktree setup never re-runs 'pip install -e .', so pytest silently tests the wrong checkout's code
+- **Issue #2014** (closed): cross-validation oracle: magic-backed DRC and extraction agreement (sky130/gf180)
+- **Issue #1999** (closed): klt equiv: escaped top-level port (\q.x, \q[0]) is dropped by cut-point refinement, producing a false equivalent verdict
+- **Issue #1997** (closed): klt erc and klt power should report pass_partial (not pass) when their own coverage data shows only some levels/nets were checked
+- **Issue #1991** (closed): klt drc: boundary-scoped whole-region density check (the shape the open PDKs' density decks actually use)
+- **Issue #1987** (closed): klt signoff: T1 items 3 and 4 are satisfied by a klt extract envelope (which always passes), and provenance_consistency never binds LVS to the DRC'd layout
+- **Issue #1983** (closed): device.body_unverified never changes LVS status, and an untied body makes klt pex resimulation 'physically wrong' — silently invalidating item 7 evidence
+- **Issue #1976** (closed): DerivedLayer cannot express a polygon's holes, so the sky130 deck's m1.7-m5.7 holes-area rules stay untranscribable
+- **Issue #1971** (closed): CI wall-clock is dominated by self-hosted runner queue time, not compute: sky130-pll does 24s of work in 6.5 hours
+- **Issue #1686** (closed): corner runner: fail fast when the per-point timeout cannot cover the analysis window, and report progress-at-timeout as a diagnostic
+
 ### 2026-09-17
 
 - **PR #2031**: feat(lvs): disclose applied hints.equivalent_pins groupings in the envelope
