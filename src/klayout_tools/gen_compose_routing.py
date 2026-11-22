@@ -1711,7 +1711,11 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _ORIENTATION_KDB_ARGS, _load_block_cell
+    from .gen_compose import (
+        _ORIENTATION_KDB_ARGS,
+        _load_block_cell,
+        _rescale_block_layout,
+    )
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
@@ -1720,20 +1724,15 @@ def read_block_layer_geometry(
     if layer_index is None:
         return None
 
+    _rescale_block_layout(src_layout, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
         return None
     rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
-    region.transform(
-        kdb.ICplxTrans(
-            src_layout.dbu / dbu,
-            rot * 90,
-            mirrx,
-            int(round(offset_um["x"] / dbu)),
-            int(round(offset_um["y"] / dbu)),
-        )
-    )
+    ox = round(offset_um["x"] / dbu)
+    oy = round(offset_um["y"] / dbu)
+    region.transform(kdb.Trans(rot, mirrx, ox, oy))
     return {"region": region, "dbu": dbu}
 
 

@@ -4643,6 +4643,32 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     return int(nearest)
 
 
+def _rescale_block_layout(
+    src_layout: Any, dbu: float, block_id: str, gds_path: str
+) -> str | None:
+    """Scale shapes and instances onto the output grid before polygonization."""
+    import klayout.db as kdb
+
+    original_dbu = src_layout.dbu
+    if abs(original_dbu - dbu) <= 1e-12:
+        return None
+    ratio = _integer_dbu_ratio(original_dbu, dbu)
+    if ratio is None:
+        raise GenComposeError(
+            f"block '{block_id}': gds '{gds_path}' has dbu={original_dbu}, "
+            f"which does not evenly divide the composed cell's dbu={dbu} "
+            "-- every block's dbu must be an exact integer multiple of "
+            "the finest block's own dbu to be losslessly reconciled"
+        )
+    src_layout.transform(kdb.ICplxTrans(float(ratio)))
+    src_layout.dbu = dbu
+    return (
+        f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
+        f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
+        f"(exact integer ratio {ratio})"
+    )
+
+
 def _create_placed_sub_cell(
     layout: Any,
     block: dict[str, Any],
@@ -4830,34 +4856,9 @@ def _write_composed_gds(
         gds_path = block["gds_path"]
         src_layout = src_layouts[block_id]
 
-        if abs(src_layout.dbu - dbu) > 1e-12:
-            # #1514: klt draw (always 0.001) and pre-#1512 `klt gen` output
-            # composed against a #1512-and-later `klt gen` block resolved
-            # against a finer-grid PDK (e.g. gf180mcu's 0.0005) used to hit
-            # a hard refusal here. Reconcile it instead, whenever the ratio
-            # is an exact integer, by rescaling this block's geometry onto
-            # `dbu` -- the same scale/transform pattern `_merge_gds_view`
-            # (place_and_route.py) already uses for the analogous DEF/LEF
-            # merge problem (#1090). `kdb.Layout.transform()` rescales every
-            # shape *and* every instance array vector in the layout, so a
-            # block's own internal hierarchy (and any array pitch inside it)
-            # survives the rescale intact.
-            ratio = _integer_dbu_ratio(src_layout.dbu, dbu)
-            if ratio is None:
-                raise GenComposeError(
-                    f"block '{block_id}': gds '{gds_path}' has dbu={src_layout.dbu}, "
-                    f"which does not evenly divide the composed cell's dbu={dbu} "
-                    "-- every block's dbu must be an exact integer multiple of "
-                    "the finest block's own dbu to be losslessly reconciled"
-                )
-            original_dbu = src_layout.dbu
-            src_layout.transform(kdb.ICplxTrans(float(ratio)))
-            src_layout.dbu = dbu
-            dbu_rescale_warnings.append(
-                f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
-                f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
-                f"(exact integer ratio {ratio})"
-            )
+        warning = _rescale_block_layout(src_layout, dbu, block_id, gds_path)
+        if warning:
+            dbu_rescale_warnings.append(warning)
 
         src_cell_name = block["cell_name"]
         src_cell = src_layout.cell(src_cell_name)
