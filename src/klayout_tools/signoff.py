@@ -54,6 +54,7 @@ from . import _json_pointer
 from . import _report_verify_hints as hints
 from . import signoff_foundry_cell as foundry_cell
 from . import signoff_nothing_checked as vacuous
+from ._git_tracked import is_untracked_yield_sample
 from ._jsongz import READ_ERRORS, open_text
 from ._jsonnum import is_finite_number
 from ._provenance import INPUT_ROLE_LAYOUT, layout_geometry_digest, sha256_file
@@ -130,7 +131,16 @@ from .signoff_derived_rows import (
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
-from .signoff_details import _DETAIL_BUILDERS, _drc_rule_selection_detail
+from .signoff_details import (
+    _DETAIL_BUILDERS,
+    _drc_rule_selection_detail,
+    synthesis_disclosure,
+)
+from .signoff_disclosed_evidence import _lookup_evidence as _lookup_evidence
+from .signoff_disclosed_evidence import (
+    apply_disclosed_evidence,
+    read_disclosed_evidence,
+)
 
 # The `drc --engine both` (cross-check) envelope projection (issue #5815):
 # rewriting the cross-check shape into the single-engine `drc` envelope the
@@ -298,6 +308,7 @@ from .signoff_yield_disclosure import (
 from .signoff_yield_disclosure import (
     _yield_sample_size_rollup as _yield_sample_size_rollup,
 )
+from .synthesize_abc import unmapped_comb_cells
 
 __all__ = [
     "SignoffError",
@@ -1060,6 +1071,13 @@ _DEFAULT_INPUT_ROLE = INPUT_ROLE_LAYOUT
 #: checked this" apart from "somebody checked this and it failed" without
 #: cross-referencing anything outside the item itself.
 _REASON_NO_EVIDENCE = "no_evidence"
+#: Issue #6953: no ``evidence`` entry, but the manifest's ``disclosed_evidence``
+#: map named a readable local artifact produced outside ``klt`` -- still
+#: ``unmet`` with no citation and no credit, distinct from ``no_evidence``
+#: ("no entry") so a fleet reader can tell "external record disclosed" from
+#: "no record". Unreadable path -> :data:`_REASON_UNREADABLE_EVIDENCE`. See
+#: :mod:`.signoff_disclosed_evidence`.
+_REASON_EVIDENCE_NOT_KLT_NATIVE = "evidence_not_klt_native"
 _REASON_INVALID_EVIDENCE = "invalid_evidence"
 _REASON_UNREADABLE_EVIDENCE = "unreadable_evidence"
 _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
@@ -2807,12 +2825,15 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
 
 
 def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
-    """Whether a `klt synthesize` response's ``structural`` block reports no
-    unexpected latch, combinational loop or multiply-driven net (issue
-    #4015). A missing or non-integer count fails closed."""
+    """Grade structural defects and residual logic in custom ABC mappings."""
     structural = envelope.get("structural")
     if not isinstance(structural, dict):
         return False
+    mapping = envelope.get("synthesis")
+    if isinstance(mapping, dict) and mapping.get("abc_script") is not None:
+        counts = envelope.get("instance_counts_by_type")
+        if not isinstance(counts, dict) or unmapped_comb_cells(counts):
+            return False
     return all(
         type(structural.get(key)) is int and structural[key] == 0
         for key in ("unexpected_latches", "comb_loops", "multi_driven")
@@ -3018,9 +3039,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind == "erc":
         passed = _erc_passed(envelope)
     elif kind == "synthesize":
-        # Issue #4015: `status` is only ever "ok" (a failed run raises
-        # `SynthesizeError`), so the structural netlist counts are the
-        # real verdict.
+        # Grade the saved netlist counts even when synthesis reported success.
         passed = envelope.get("status") == "ok" and _synthesize_structural_clean(
             envelope
         )
@@ -3743,7 +3762,10 @@ def build_tier_report(
                 # per-kind item and is looked up by both partitions of a
                 # mixed-signal block -- see the doc's "Block kind"
                 # subsection for which items split which way.
-            }
+            },
+            # issue #6953: optional "disclosed_evidence" map (item keys ->
+            # local file paths, never graded; see
+            # :mod:`.signoff_disclosed_evidence`).
         }
 
     An evidence entry is either **file-backed** (a bare string, or
@@ -3997,6 +4019,11 @@ def build_tier_report(
 
     - ``"no_evidence"`` -- the manifest gave no ``evidence`` entry for this
       item at all.
+    - ``"evidence_not_klt_native"`` (issue #6953) -- no ``evidence`` entry,
+      but ``disclosed_evidence`` named a readable local artifact for it
+      produced outside ``klt``: still ``"unmet"``, no citation, no credit,
+      the path in ``detail.disclosed_evidence`` -- see
+      :mod:`.signoff_disclosed_evidence`.
     - ``"invalid_evidence"`` -- the manifest's entry for this item is
       present but malformed (neither a string, nor an object with a string
       ``"file"``, nor an object with a non-empty list-of-strings
@@ -4219,7 +4246,8 @@ def build_tier_report(
     its ``evidence`` field (when given) is not a JSON object, or its
     ``partition_boundary`` field (when given) is not a well-formed
     declaration for a ``mixed-signal`` block
-    (:func:`_read_partition_boundary`). Raises
+    (:func:`_read_partition_boundary`), or its ``disclosed_evidence`` field
+    (when given) is malformed (issue #6953). Raises
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     (re-exported here for convenient ``except`` handling alongside
     :class:`SignoffError`) if ``docs/design-evidence-tiers.md`` itself
@@ -4243,6 +4271,10 @@ def build_tier_report(
             "block manifest 'evidence' must be a JSON object, got "
             f"{type(evidence).__name__}"
         )
+
+    # Issue #6953: opt-in disclosure of externally-produced evidence,
+    # validated whole and applied to the finished rows in the T1 loop.
+    disclosed_evidence = read_disclosed_evidence(manifest)
 
     partition_boundary = _read_partition_boundary(manifest, kind)
     spec_rows_by_item = _read_spec_rows(manifest)
@@ -4315,6 +4347,14 @@ def build_tier_report(
                     require_coverage_disclosure_invalid=require_coverage_invalid,
                     generator_exec=generator_exec,
                 )
+            # Issue #6953: replaces only the bare "nothing was cited"
+            # reason on a graded row -- never a native verdict, no credit.
+            entry = apply_disclosed_evidence(
+                entry,
+                disclosed_evidence,
+                item_id=t1_item["id"],
+                partition_kind=partition,
+            )
             total += 1
             met_count += entry["status"] == "met"
             not_applicable_count += entry["status"] == STATUS_NOT_APPLICABLE
@@ -4528,39 +4568,6 @@ def _t1_item_text(t1_item: dict[str, Any], partition: str) -> str | None:
     if columns:
         return columns.get(partition) or t1_item["text"]
     return t1_item["text"]
-
-
-def _lookup_evidence(
-    evidence: dict[str, Any], item_id: int, partition_kind: str | None
-) -> Any:
-    """Look up a manifest ``evidence`` entry for ``item_id``, preferring the
-    partition-qualified key (``"<id>.<partition_kind>"``) over the bare
-    ``"<id>"`` key -- so a mixed-signal manifest can give per-partition
-    evidence for a per-kind item while still sharing one evidence entry
-    across both partitions for a kind-independent item.
-
-    ``partition_kind`` is the partition **being graded** -- ``"analog"`` or
-    ``"digital"`` for a ``"mixed-signal"`` manifest (which grades one
-    partition at a time), and the block's own ``kind`` for a pure
-    ``"analog"``/``"digital"`` manifest. It is deliberately *not* the report
-    row's ``"partition"`` field, which stays ``None`` outside a mixed-signal
-    manifest: issue #2362 -- ``docs/cli/signoff.md`` documents
-    ``"<item id>.<analog|digital>"`` as *the* spelling for a per-kind item
-    without restricting it to mixed-signal blocks, so a ``"7.digital"`` key
-    on a ``kind: "digital"`` manifest has to resolve. Keying the lookup off
-    the row's ``partition`` instead silently ignored exactly the citation the
-    docs asked for and rendered the item ``unmet``/``no_evidence``.
-
-    Only the partition actually being graded is ever tried, so a mismatched
-    qualifier (``"7.analog"`` on a ``"digital"`` manifest) still finds
-    nothing and falls through to the bare key -- it is never graded against
-    the other kind's evidence.
-    """
-    if partition_kind:
-        keyed = evidence.get(f"{item_id}.{partition_kind}")
-        if keyed is not None:
-            return keyed
-    return evidence.get(str(item_id))
 
 
 def _normalize_evidence_pointer(raw: Any) -> tuple[str | None, bool]:
@@ -4815,10 +4822,9 @@ def _yield_samples_content_hash(
     null``. A declared store pin that fails to resolve extends that
     disclosure with the manifest path and a named ``reason`` (issue #5963).
 
-    Follow-up reconciliation: if a later #710 phase adds its own
-    ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
-    generic ``input_block`` lookup in :func:`_grade_evidence` finds it first
-    and this fallback simply never fires again -- no change needed here.
+    Drop untracked candidates before hashing and from ``searched`` so both
+    disclosures use the same git-index basis (issue #6139). A future
+    ``provenance.input.content_hash`` takes precedence in :func:`_grade_evidence`.
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
@@ -4831,7 +4837,7 @@ def _yield_samples_content_hash(
     cwd_relative = _resolve_relative_to_spec(samples, spec)
     if cwd_relative not in candidates:
         candidates.append(cwd_relative)
-
+    candidates = [c for c in candidates if not is_untracked_yield_sample(c)]
     for candidate in candidates:
         digest = sha256_file(candidate)
         if digest is not None:
@@ -6130,25 +6136,19 @@ def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
 def _citation(
     resolution: dict[str, Any], *, runset_rehash_unverifiable: bool = False
 ) -> dict[str, Any]:
-    """Build a ``"met"`` item's ``citation`` block from a
-    :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
-    docstring for what each field means."""
+    """Build a met item's citation from its resolved evidence."""
     citation: dict[str, Any] = {
         "file": resolution["file"],
         "command": resolution["command"],
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
-        # Issue #2196: was that `content_hash` checked against the input artifact
-        # itself, or only against the envelope's own claim? Always present --
-        # including the `None` ("nothing was re-hashed") case, the one this
-        # field exists to stop being silent. See the "Input-artifact
-        # verification" docstring section; never consulted by any grading rule.
+        # Whether the input artifact was checked against its envelope (#2196).
+        # None records that no artifact was re-hashed.
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
-    # Issue #6403: a declared pathless `content_hash` binds nothing -- disclose
-    # that beside the unchanged `null` ({} -- no key -- otherwise).
+    citation.update(synthesis_disclosure(resolution["kind"], resolution["envelope"]))
     citation.update(declared_hash_unbound_disclosure(resolution))
     # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
     citation.update(_citation_pointer(resolution["spec"]))
