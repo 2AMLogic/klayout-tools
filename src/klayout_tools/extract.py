@@ -262,7 +262,7 @@ from .extract_netlist_target import _resolve_netlist_target as _resolve_netlist_
 from .extract_netlist_target import (
     _validate_no_netlist_flags as _validate_no_netlist_flags,
 )
-from .extract_netlist_write import write_flat_netlist
+from .extract_netlist_write import write_flat_netlist, write_spice_netlist
 from .extract_netselect import NetSelectors
 from .extract_orient import orient_asymmetric_mos
 
@@ -3669,7 +3669,7 @@ def _write_subcircuit_deck(
     if parasitics:
         description += "\n" + _parasitic_model_header_comment(substrate_tie_ohms)
     try:
-        netlist.write(subcircuit_path, writer, description)
+        write_spice_netlist(netlist, subcircuit_path, writer, description)
     except Exception as exc:
         raise ExtractError(
             f"could not write sub-circuit netlist '{subcircuit_path}': {exc}"
