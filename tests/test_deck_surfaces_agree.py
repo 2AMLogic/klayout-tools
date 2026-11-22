@@ -17,7 +17,7 @@ from klayout_tools.decks import (
     get_deck,
 )
 from klayout_tools.decks import sg13g2_cont_grid as sg13g2_cont_grid_module
-from klayout_tools.decks.history import deck_info
+from klayout_tools.decks.history import deck_info, deck_rules
 
 
 def _deck_doc_example(command: str) -> dict:
@@ -74,6 +74,20 @@ def test_deck_info_provides() -> None:
             assert get_deck(name)
 
 
+def test_deck_info_enforced_rule_count_agrees_with_deck_rules() -> None:
+    """`deck info`'s ``enforced_rule_count`` is the same count ``klt deck
+    rules`` reports, for every curated deck (#5843) -- and present-but-null
+    (never 0, never omitted) for a deck without a curated table. Loops every
+    registered deck so the two surfaces cannot drift apart on a PDK bump."""
+    by_name = {d["deck"]: d for d in deck_info()["decks"]}
+    for name, entry in by_name.items():
+        if "curated_drc" in entry["provides"]:
+            assert entry["enforced_rule_count"] == len(deck_rules(name)["rules"])
+        else:
+            assert "enforced_rule_count" in entry
+            assert entry["enforced_rule_count"] is None
+
+
 def test_deck_info_documented_example_matches_gf180mcu() -> None:
     doc = Path(__file__).resolve().parents[1] / "docs/cli/deck.md"
     context = "docs/cli/deck.md: klt deck info example"
@@ -124,6 +138,10 @@ def test_deck_info_documented_example_matches_gf180mcu() -> None:
     assert "release" in example and example["release"] == actual["release"], (
         f"{context}: release differs from deck_info()"
     )
+    assert (
+        "enforced_rule_count" in example
+        and example["enforced_rule_count"] == actual["enforced_rule_count"]
+    ), f"{context}: enforced_rule_count differs from deck_info()"
 
 
 def test_asap7_rejected_with_route_hint() -> None:

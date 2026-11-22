@@ -14,6 +14,7 @@ import argparse
 from collections.abc import Callable
 
 from . import lvs_cmd
+from ._deck_hash_parser_args import add_expect_deck_hash_arg
 
 
 def add_lvs_parser(
@@ -68,8 +69,8 @@ def add_lvs_parser(
             "REPORT itself (issue #1106). Cheap mode (default) re-hashes "
             "REPORT's recorded inputs; combine with --rerun for full mode "
             "(re-run the compare and diff verdict-bearing fields). Exits 0 "
-            "if still consistent, 3 if drifted -- see docs/cli/lvs.md, "
-            "'--check'"
+            "if consistent, 3 if drifted, or 4 if a recorded input is unavailable "
+            "in cheap mode. See docs/cli/lvs.md, '--check'"
         ),
     )
     lvs_parser.add_argument(
@@ -159,6 +160,24 @@ def add_lvs_parser(
             "inline layout extraction to stderr (stdout stays the pure "
             "response). Default: heartbeat lines only (every 30s of a long "
             "stage) when stderr is not a TTY; --no-progress forces off"
+        ),
+    )
+    add_expect_deck_hash_arg(lvs_parser)
+    lvs_parser.add_argument(
+        "--omit-mismatches",
+        action="store_true",
+        help=(
+            "blank the response's mismatches[] array so a failing compare's "
+            "report stays small enough to commit verbatim (issue #5610): "
+            "mismatches is [] (the key stays present) beside "
+            "mismatches_omitted: true, while status, mismatch_count, "
+            "error_count, category_counts and category_error_counts keep "
+            "their full-run values -- the compare still runs in full, only "
+            "the per-entry echo is dropped. Mirrors klt erc "
+            "--omit-antenna-tables. The request-document equivalent is "
+            "omit_mismatches: true (the flag wins when both are given). "
+            "klt lvs --check verifies such a report as-is, and --check "
+            "--rerun replays the omission from the report's own echo"
         ),
     )
     add_format_arg(lvs_parser)

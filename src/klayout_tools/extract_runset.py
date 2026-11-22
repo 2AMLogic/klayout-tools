@@ -132,6 +132,7 @@ from .extract_runset_spice import (
     _device_params_echo,
     _dropped_parameter_warnings,
     _instantiated_device_counts,
+    _prepare_merged_node_names,
     _uncarried_parameters,
     _write_netlist,
 )
@@ -286,6 +287,7 @@ def run_extract_klayout_runset(
     runset_timeout_s: float | None = None,
     klayout_binary: str | None = None,
     request_dir: str | None = None,
+    lvsdb_out: str | None = None,
 ) -> dict[str, Any]:
     """Extract ``path`` by running the PDK runset ``deck_file`` and return the
     ``klt extract`` report. See this module's docstring for the mechanism and
@@ -295,6 +297,11 @@ def run_extract_klayout_runset(
     binary, a runset that wrote no database, a timeout, an unreadable
     database -- reusing ``klt lvs``'s own message text wherever the shared
     launcher produces it.
+
+    ``lvsdb_out`` (issue #6606, internal -- no CLI flag) copies the runset's
+    ``.lvsdb`` to that path before the scratch work directory is removed, so
+    a caller (:mod:`klayout_tools.pex_net_correspondence`) can read the
+    database's per-net geometry back after this function returns.
     """
     from . import lvs_runset
     from .extract import _build_metrics, _normalized_netlist_sha256, _staged
@@ -333,6 +340,8 @@ def run_extract_klayout_runset(
             timeout_s=timeout_s,
             work_dir=work_dir,
         )
+        if lvsdb_out is not None:
+            shutil.copy2(lvsdb_path, lvsdb_out)
 
         with stage("lvsdb_read"):
             # `lvsdb` is the owner of `netlist`; it must stay referenced for
@@ -356,6 +365,7 @@ def run_extract_klayout_runset(
 
         # Checked before anything is written: an unknown `--device-param`
         # parameter is an error, never a device silently left at its default.
+        aliases = _prepare_merged_node_names(circuit) if lvsdb_out else []
         declared_warnings = _check_device_params(netlist, declared)
         uncarried = _uncarried_parameters(netlist, declared)
         reported_netlist_path, netlist_sha256 = _write_netlist(
@@ -446,6 +456,7 @@ def run_extract_klayout_runset(
         "device_classes": sorted(device_counts),
         "devices": devices,
         "nets": nets,
+        **({"runset_node_renames": aliases} if aliases else {}),
         "device_models": dict(sorted(models.items())) if models else None,
         # Additive (issue #5513): present only when `--device-param` was given.
         **_device_params_echo(declared),

@@ -128,6 +128,7 @@ from .sim_batch_features import (
     refusal_diagnostic,
 )
 from .sim_batch_hints import attribute_modelname, hint_existing_fatal, with_runner_hints
+from .sim_batch_log import read_collected_log
 from .sim_batch_reattach import (
     _RESUME_INTERRUPTED_GRACE_S,
     _resume_attach_config,
@@ -136,6 +137,7 @@ from .sim_batch_reattach import (
 )
 from .sim_batch_warn import warn_over_serial_bound_once
 from .sim_exit_reason import status_exit_code as _status_exit_code
+from .sim_pin_settle import _enforce_published_engine_version_pin
 from .sim_remote import (
     _build_remote_request,
     _points_to_push,
@@ -611,27 +613,23 @@ def _resolve_batch_config(
     check_runner: bool = True,
 ) -> BatchConfig:
     """Resolve every ``batch.*`` knob, raising
-    :class:`~klayout_tools.sim.SimError` before any S3 write.
-
-    Resolution order per field: ``request.batch.<field>``, then a
-    ``KLT_BATCH_*`` environment variable, then 2am's own
-    ``batch-fleet.env`` beside the provision script, then (for the profile
-    and jobs prefix only) a documented literal default. The **bucket has no
-    literal default** -- an unresolvable bucket is an error naming all three
-    sources, never a guess (see this module's docstring).
+    :class:`~klayout_tools.sim.SimError` before any S3 write. Per-field
+    resolution order: ``request.batch.<field>``, then a ``KLT_BATCH_*``
+    environment variable, then 2am's own ``batch-fleet.env`` beside the
+    provision script, then (profile and jobs prefix only) a documented
+    literal default. The **bucket has no literal default** -- an
+    unresolvable bucket errors naming all three sources, never a guess.
 
     ``models.pdk`` is validated here too (:func:`_validate_batch_pdk`),
     first: a PDK the fleet publishes no image for has no compliant execution
-    path on this backend at all, so it is a property of the *request* rather
-    than of this host's fleet configuration and should be reported even when
-    the provision script or bucket is also unresolvable.
+    path on this backend at all -- a property of the *request*, reported
+    even when the provision script or bucket is also unresolvable.
 
     Last, the runner ``klt`` the AMI manifest publishes is compared with
     this client (:func:`_assess_published_runner`, issue #2851): under
-    ``enforce`` a known mismatch raises ``batch_runner_version_mismatch``
-    here, so neither ``klt sim`` (one job or every shard) nor ``klt
-    netlist`` uploads or launches anything. ``check_runner=False`` skips
-    that comparison for a read-only caller (``--job-status``, #3073).
+    ``enforce`` a known mismatch raises ``batch_runner_version_mismatch``.
+    A pin excluded by every published engine version also fails before any
+    upload or launch (#5851). Read-only callers skip both with ``check_runner=False``.
     """
     from .sim import SimError
 
@@ -713,6 +711,7 @@ def _resolve_batch_config(
         diagnostic = _enforce_published_runner_features(request, assessment)
         if diagnostic is not None:
             config = replace(config, feature_diagnostic=diagnostic)
+        _enforce_published_engine_version_pin(request, assessment)
         # Issue #3251: refuse a PDK variant the published image does not ship.
         _validate_batch_pdk_variant(request, config.region)
     return config
@@ -734,11 +733,8 @@ def dry_run_runner_check(
     Returns the feature diagnostic a ``warn`` run reports, else ``None``. A
     host with no resolvable batch configuration (no bucket, no provision
     script) cannot run the check and is left to dry-run clean, as before;
-    only the runner version/feature refusals propagate -- plus
-    ``batch_max_units_per_job_invalid`` (issue #5674): a malformed
-    ``max_units_per_job``, or one combined with ``job_ceiling_check:
-    "enforce"``, is raised during config resolution and the ceiling/split
-    plan built on that config must refuse the dry run like the submit does.
+    runner version, feature and engine-pin refusals propagate, as do
+    invalid ceiling/split combinations (``batch_max_units_per_job_invalid``).
     When ``runner_out`` is given it is filled with the published runner
     identity (``status``, ``client_klt_version``, ``images``) for ``match``,
     ``unknown`` and, under ``runner_version_check: "warn"``, ``mismatch``, so
@@ -751,7 +747,7 @@ def dry_run_runner_check(
     (:func:`sim_batch_plan.plan_batch_job`) on the config already in hand --
     re-resolving it would resolve and warn twice (issue #5674).
     """
-    from .sim import SimError
+    from .sim import ENGINE_VERSION_UNMET_CODE, SimError
 
     try:
         config = _resolve_batch_config(
@@ -762,6 +758,7 @@ def dry_run_runner_check(
             BATCH_RUNNER_FEATURE_CODE,
             BATCH_RUNNER_MISMATCH_CODE,
             BATCH_MAX_UNITS_CODE,
+            ENGINE_VERSION_UNMET_CODE,
         ):
             raise
         return None
@@ -1584,14 +1581,13 @@ def job_exists(
     runner: remote_transport.CommandRunner | None = None,
 ) -> bool:
     """Whether ``<prefix>/job.json`` exists, i.e. the job was really
-    submitted (issue #2978)."""
+    submitted (issue #2978). One ``head-object`` probe shared with
+    ``--job-status`` (issue #5613): a 404 is "absent"; any other failure
+    (credentials, throttling, timeout) raises :class:`BatchError`."""
+    from .sim_batch_async import _job_head  # imports this module at load time
+
     run = runner if runner is not None else _run_subprocess
-    argv = _aws_argv(config, "s3", "cp", f"{job_uri(config, job_id)}/job.json", "-")
-    try:
-        result = run(argv, _BATCH_AWS_TIMEOUT_S)
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise BatchError(f"job.json lookup could not complete: {exc}") from exc
-    return result.returncode == 0
+    return _job_head(config, job_id, run) is not None
 
 
 def _advance_interrupted_clock(
@@ -1900,7 +1896,7 @@ def _install_batch_artifacts(
     remote_root: str | None = None
     for corner in corners:
         for value in (corner.get("artifacts") or {}).values():
-            if value and marker in value:
+            if isinstance(value, str) and marker in value:
                 remote_root = value[: value.rindex(marker) + len(marker) - 1]
                 break
         if remote_root is not None:
@@ -2375,16 +2371,6 @@ def _find_engine_logs(collected: str) -> list[str]:
     return sorted(found)
 
 
-def _read_log_head(path: str) -> str:
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(_BATCH_ENGINE_LOG_HEAD_BYTES).decode(
-                "utf-8", errors="replace"
-            )
-    except OSError:
-        return ""
-
-
 def _fatal_log_diagnostic(log_text: str) -> dict[str, Any] | None:
     """The ngspice deck-abort diagnostic (``missing_include``, ``netlist``,
     ``model_bin_range`` or ``ngspice_fatal``) the local classifier would emit
@@ -2437,7 +2423,8 @@ def _surface_log_fatal(corners: list[dict[str, Any]], collected: str) -> None:
             log_path = logs[0]
         if log_path is None:
             continue
-        found = _fatal_log_diagnostic(_read_log_head(log_path))
+        _, evidence = read_collected_log(log_path, _BATCH_ENGINE_LOG_HEAD_BYTES)
+        found = _fatal_log_diagnostic(evidence)
         if found is not None:
             diagnostics.append(found)
 
@@ -2454,11 +2441,11 @@ def _engine_log_note(collected: str) -> tuple[str, dict[str, Any] | None]:
             "outputs (engine logs are retrieved only when artifacts are kept)",
             None,
         )
-    text = _read_log_head(logs[0])
+    text, evidence = read_collected_log(logs[0], _BATCH_ENGINE_LOG_HEAD_BYTES)
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     tail = "\n".join(lines[-_BATCH_ENGINE_LOG_TAIL_LINES:])
     tail = tail[-_BATCH_ENGINE_LOG_TAIL_CHARS:]
-    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(text)
+    return f"{os.path.basename(logs[0])} tail: {tail}", _fatal_log_diagnostic(evidence)
 
 
 def _job_failure_corners(
@@ -2813,22 +2800,17 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
-def _manifest_difference(
-    stored_fingerprint: Any, fingerprint: str, stored_hosts: Any, hosts: int
-) -> str:
-    """Issue #4721: what a shard map refusal compared. ``hosts`` is named
-    outright; the fingerprint is one opaque hash of the units, seed, netlist
-    and settings, so it can only be reported as differing (with prefixes)."""
-    parts = []
-    if stored_hosts != hosts:
-        parts.append(f"hosts: map has {stored_hosts}, request has {hosts}")
-    if stored_fingerprint != fingerprint:
-        parts.append(
-            f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
-            f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
-            "settings, so which of those changed is not recoverable"
-        )
-    return "; ".join(parts)
+def _manifest_difference(stored_fingerprint: Any, fingerprint: str) -> str:
+    """What a shard map refusal compared: the fingerprint only (issue #6197;
+    the ``hosts`` arm was dead by construction -- #4821 made ``hosts`` not
+    identity, resume re-splits under the new count -- and it is one opaque
+    hash of the units, seed, netlist and settings, so it can only be reported
+    as differing, with prefixes)."""
+    return (
+        f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
+        f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
+        "settings, so which of those changed is not recoverable"
+    )
 
 
 class _ShardManifest:
@@ -2881,9 +2863,10 @@ class _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
         a missing file means nothing to re-attach to; an unreadable one, or
-        one written for a different request or shard count, raises
-        :class:`SimError` -- never a silent restart that would re-bill every
-        shard."""
+        one written for a different request, raises :class:`SimError` --
+        never a silent restart that would re-bill every shard (the shard
+        count is not compared, issue #4821: resume re-splits under the new
+        count)."""
         from .sim import SimError
 
         path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
@@ -3157,26 +3140,17 @@ def _run_batch_job(
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
     receipt_name: str | None = None,
+    netlist_sha256: str | None = None,
     on_phase: Callable[[str], None] | None = None,
     launch_if_unlaunched: bool = False,
     launch_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """Submit, wait for, and collect **one** batch job's worth of corners --
-    the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
-    and one shard of a sharded run (:func:`_run_batch_fleet`).
+    """Submit and collect one corner job, either standalone or part of a fleet run.
 
-    ``explicit_points`` is threaded to
-    :func:`sim_remote._build_remote_request` so a shard's job runs exactly
-    its own slice (with already-derived Monte Carlo seeds) instead of
-    re-expanding the whole matrix on the job instance -- ``None`` (the
-    single-job case) forwards ``corners``/``monte_carlo`` unchanged, exactly
-    as ``_run_remote`` does.
-
-    Returns the same ``(corners, engine_version, remote_environment)``
-    triple every backend returns. A terminal job failure or a poll-budget
-    overrun returns *unrun corner reports* rather than raising; only a
-    transport failure (a failed upload/launch/collect, an unreadable report,
-    an undocumented status state) raises :class:`BatchError`.
+    Each shard supplies ``explicit_points`` (including derived Monte Carlo
+    seeds). A single job forwards the original corner matrix. Fleet failures
+    and poll timeouts yield unrun corner reports; transport errors raise
+    :class:`BatchError`.
 
     ``attach=True`` (issue #2978) resumes an *existing* ``job_id``: nothing
     is staged, submitted or launched -- the job must already have a
@@ -3260,8 +3234,7 @@ def _run_batch_job(
     _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     timestamps["client_launched_at"] = now()
     notify("launched")
-    # Issue #2978: name the job on stderr the moment it exists, so a caller
-    # killed by an outer wall-clock limit knows what it orphaned.
+    # Emit the job id before polling so an interrupted client can attach.
     sys.stderr.write(
         f"klt sim: batch job {job_id} launched; "
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
@@ -3271,7 +3244,9 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
-    receipt = sim_batch_receipt.new_receipt(config, job_id, request, corner_points)
+    receipt = sim_batch_receipt.new_receipt(
+        config, job_id, request, corner_points, netlist_sha256
+    )
     _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
@@ -3452,15 +3427,13 @@ def _run_batch(
     attach_job_id: str | None = None,
     collect_partial: bool = False,
     shard_fingerprint: str | None = None,
+    netlist_sha256: str | None = None,
+    explicit_points: list[CornerPoint] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
 
-    Like ``remote``, this is **the same code path as ``local-parallel``, run
-    on a different box** -- the job command is a plain
-    ``klt sim ... --backend local-parallel --format json`` invocation on the
-    fleet's own pinned image, so corner expansion, ordering, measurement
-    extraction, and pass/fail classification are never reimplemented here.
+    The pinned worker runs ``klt sim ... --backend local-parallel --format json``.
     Unlike ``remote``, this process provisions nothing, holds no SSH key,
     and needs no ``RunInstances`` authority: it writes an S3 job contract
     and asks 2am's launch script to acquire diversified Spot capacity for
@@ -3526,7 +3499,9 @@ def _run_batch(
             collect_partial=collect_partial,
         )
     if attach_job_id is not None:
-        sim_batch_receipt.check_attach_receipt(artifacts_dir, attach_job_id, request)
+        sim_batch_receipt.check_attach_receipt(
+            artifacts_dir, attach_job_id, request, netlist_sha256
+        )
         try:
             return _run_batch_job(
                 config=config,
@@ -3582,10 +3557,18 @@ def _run_batch(
         corners, engine_version, environment = _resume_or_submit_one_job(
             config=config,
             resume_grace_s=_RESUME_INTERRUPTED_GRACE_S,
+            netlist_sha256=netlist_sha256,
             resume_job_id=sim_batch_receipt.resumable_job_id(
-                artifacts_dir, request, len(corner_points), checkpoint is not None
+                artifacts_dir,
+                request,
+                len(corner_points),
+                checkpoint is not None,
+                netlist_sha256,
+                units_sha256=sim_batch_receipt.units_digest(corner_points),
+                require_units_digest=explicit_points is not None,
             ),
             corner_points=corner_points,
+            explicit_points=explicit_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
             keep_artifacts=keep_artifacts,
@@ -3715,6 +3698,12 @@ def _raise_client_interrupted(signum: int, _frame: Any) -> None:
     )
 
 
+def _require_shard_environment(result: _ShardResult) -> _ShardResult:
+    if result[2] is None:
+        raise BatchError("batch shard returned no remote environment")
+    return result
+
+
 class _BatchFleetRun:
     """The per-shard half of :func:`_run_batch_fleet`: runs one shard's job
     (submit, or re-attach under ``--resume``) and carries the run-wide state
@@ -3818,9 +3807,7 @@ class _BatchFleetRun:
         launch_if_unlaunched: bool = False,
         resumed: bool = False,
     ) -> _ShardResult:
-        # The job id doubles as the shard's artifacts subdirectory, so
-        # per-shard artifact trees never collide and each one is traceable
-        # back to the S3 prefix it was collected from.
+        # Each retained artifact directory maps back to its job's S3 prefix.
         shard_artifacts_dir = (
             os.path.join(self.artifacts_dir, job_id)
             if self.keep_artifacts
@@ -3828,14 +3815,12 @@ class _BatchFleetRun:
         )
         shard_config = self.shard_config()
         if resumed:
-            # A recorded job still ``interrupted`` on resume already waited out
-            # the full grace in the prior run: surface it after ~one poll so
-            # ``_try_reattach_shard`` can submit that shard afresh (issue #5371).
+            # An interrupted shard already spent its grace on the prior run.
             shard_config = _resume_attach_config(
                 shard_config, _RESUME_INTERRUPTED_GRACE_S
             )
         try:
-            return _run_batch_job(
+            result = _run_batch_job(
                 config=shard_config,
                 job_id=job_id,
                 corner_points=shard_points,
@@ -3855,20 +3840,18 @@ class _BatchFleetRun:
                 sleep=self.abortable_sleep,
                 launch_kwargs=self._launch_kwargs(shard_config, index),
             )
+            return _require_shard_environment(result)
         except BatchError as exc:
             if type(exc) is not BatchError:
                 # Poll timeout / interruption already say where the job is.
                 raise
             raise BatchError(
-                f"{exc}{_remote_state_note(shard_config, job_id)}", code=exc.code
+                f"shard {index}: {exc}{_remote_state_note(shard_config, job_id)}",
+                code=exc.code,
             ) from exc
 
     def start_retry_pass(self) -> list[int]:
-        """Begin a ``--capacity-retries`` pass (issue #5567): hand back the
-        shards the last pass lost to a capacity refusal, in shard order, and
-        give the pass a fresh ``--wait-for-capacity`` budget (the run-wide
-        one is long spent, which would make every retry a single no-wait
-        attempt)."""
+        """Retry capacity-refused shards in order with a fresh wait budget."""
         refused = sorted(self.capacity_refused)
         self.started = time.monotonic()
         self.budget_spent.clear()
