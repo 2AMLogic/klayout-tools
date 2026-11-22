@@ -1204,10 +1204,12 @@ all (only `hold_violation_count`, a count).
 
 Once the `"route"` stage's own script (single-corner, unchanged) has
 written its checkpoint, a **second** OpenROAD invocation reads that
-checkpoint back, `define_corners`s every `.lib` timing corner the resolved
-`cell_library` ships (`klayout_tools.pdk_cells.list_lib_corners`, an additive
-enumeration alongside the existing single-corner `_nominal_supply` pick),
-`read_liberty -corner`s each, and re-estimates parasitics
+checkpoint back. For a library mapped in `klt-pdk.json`, the descriptor's
+corner names define the sweep. A list of Liberty members forms one merged
+deck for that corner, including when the members live outside the library's
+`lib/` directory. Other libraries use the conventional filename discovery.
+The session declares the selected corners with `define_corners`, loads each
+deck with `read_liberty -corner`, and re-estimates parasitics
 (`estimate_parasitics -global_routing`, the same estimate the single-corner
 `worst_slack_ns` is already based on) before calling
 `report_worst_slack_metric -setup`/`-hold`. OpenSTA reports the worst value
@@ -1764,6 +1766,12 @@ merged polygon:
    `modexp_canary`) sit on the same knife edge — both clean, both with a
    smallest met1 polygon of exactly `0.0832 um²`;
    `tests/test_place_and_route_min_area.py` pins that measured baseline.
+
+   > **Historical measurement (open_pdks `c6d73a35`).** Measured at
+   > `c6d73a3`; **not** re-run under `f6eeac7` — the margin above needs
+   > that specific OpenROAD build and the 48-stage reproducer; see the
+   > superseded-revision note in the `gf180mcu_fd_sc_mcu9t5v0`
+   > live-verification record above.
 2. **PDN via patches on a strap layer with a large area floor.** sky130's
    `m5.4` is `4.0 um²`, ~17x met3's; a `1.42 x 1.60 um` (`2.272 um²`) met5
    via landing violates it by construction.
@@ -2292,7 +2300,7 @@ live re-measurement above.
 | `pdk.corner` | string \| omitted | Liberty (device) corner selector; defaults to the nominal corner when omitted. This single deck is the **only** liberty the `place`/`cts`/`route` stages' `repair_design`/`repair_timing`/`repair_timing -hold`/`repair_antennas` passes see; the other corners in the post-route sweep (`pdk.sweep_corners`) are analysed afterwards and never feed back into repair. To aim repair at a low-voltage deck, name it here. A tight `constraints.max_transition_ns`/`.max_capacitance_pf` is one absolute value for every corner and, at a slow corner, can grow the design sharply without meeting it (see `docs/design/place-and-route-improvements-survey.md` section 3.7); check `corners[]` and the `..._vs_library` counts afterwards. |
 | `pdk.interconnect_corner` | string \| omitted | `"min"` \| `"nom"` \| `"max"` — tech-LEF *parasitic-extraction* corner selector, independent of `pdk.corner` (issue #1100). Default `"nom"`, byte-identical to this command's behavior before this field existed. An install that doesn't stage the requested corner's tech LEF is a clear application error (exit 1), never a silent fallback. Echoed back as the response's own `interconnect_corner` field — see "PDK / LEF / liberty resolution" above. |
 | `pdk.rebuild_corners` | array\<string\> \| omitted | Additive field (issue #3507). Re-runs the **whole** flow (`floorplan` through `target_stage`) once per named corner, serially, into one aggregated report — see "Physical rebuild per corner" below. Non-empty, no duplicates, mutually exclusive with `pdk.corner`; every name must be one of `cell_library`'s shipped liberty corners (an unknown name is a `PlaceAndRouteError` raised before any unit starts). Not the same as `pdk.sweep_corners`, which only re-times an already-routed design. |
-| `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitted (the default) sweeps every shipped corner, reproducing today's behaviour exactly. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
+| `pdk.sweep_corners` | array\<string\> \| omitted | Additive field (issue #1092). Scopes the "Multi-corner setup/hold sweep" below to the named subset of `cell_library`'s shipped `.lib` corners. Omitting the field sweeps every descriptor corner for a mapped library, or every conventionally discovered corner otherwise. An explicit `[]` sweeps zero corners (`worst_setup_slack_ns`/`worst_hold_slack_ns`/`corners` all degrade to `null`/`[]`). Every named corner must actually be one of `cell_library`'s own shipped corners (`corners[].name` in the unfiltered sweep) — an unresolvable name raises a `PlaceAndRouteError` naming the corner(s) it could not find and every corner that *is* valid. |
 | `floorplan.method` | string | `"utilization"` \| `"explicit"` \| `"def"` — see "Floorplan methods" above. Required. |
 | `floorplan.tracks` | array\<object\> \| omitted | Additive field (issue #4088). Explicit `make_tracks` definitions (`layer`, `x_offset_um`, `x_pitch_um`, `y_offset_um`, `y_pitch_um`) replacing the bare `make_tracks`; needed for a tech LEF with a negative routing-layer `OFFSET`, which is otherwise rejected at request time. Repeated layers are allowed (issue #5671) and accumulate in list order — one `make_tracks` call per entry, exactly as listed; only a byte-identical repeated entry (same `layer` and all four numbers) is a request error. See "Explicit tracks" above. |
 | `io.layer_h` / `.layer_v` | string | Horizontal/vertical I/O routing layers for `place_pins`. Required once `target_stage` reaches `"place"` or later. |
@@ -3699,7 +3707,10 @@ is host- and scrub-shape-specific and never verdict-bearing. The file name
 keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
 directory under names derived from the top module, so a renamed artifact, or
 one going `null` ↔ path (missing or newly appearing), still reports
-`"drifted"`.
+`"drifted"`. Message prose is not reduced, so it carries no host path: the
+`power.placed.unavailable_reason` strings that name a DEF (and the
+`warnings[]` that quote them) use its file name only (issue #6146), so a
+lint-clean report is not made to drift by prose.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is

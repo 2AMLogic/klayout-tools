@@ -35,6 +35,7 @@ def _build_and_test_variant(
     test_dir: str,
     results_xml: str,
     test_log: str,
+    plusargs: list[str] | None = None,
 ) -> None:
     """``_run_build`` then ``_run_test`` against whatever source bytes are on
     disk right now -- the isolated per-mutant build+test this module runs
@@ -81,6 +82,7 @@ def _build_and_test_variant(
         parameters=parameters,
         extra_env=env,
         log_path=test_log,
+        plusargs=plusargs,
     )
 
 

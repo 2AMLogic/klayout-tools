@@ -1609,8 +1609,8 @@
       "branch": 100.0
     },
     "src/klayout_tools/sim_crossings.py": {
-      "line": 96.7,
-      "branch": 95.1
+      "line": 97.2,
+      "branch": 97.2
     },
     "src/klayout_tools/sim_crossings_reduce.py": {
       "line": 100.0,
@@ -1656,6 +1656,10 @@
       "line": 97.0,
       "branch": 93.7
     },
+    "src/klayout_tools/sim_measurement_kind.py": {
+      "line": 100.0,
+      "branch": 100.0
+    },
     "src/klayout_tools/sim_measurement_results.py": {
       "line": 99.0,
       "branch": 94.7
@@ -1673,8 +1677,8 @@
       "branch": 97.2
     },
     "src/klayout_tools/sim_noise.py": {
-      "line": 96.2,
-      "branch": 92.8
+      "line": 96.6,
+      "branch": 93.0
     },
     "src/klayout_tools/sim_op_args.py": {
       "line": 100.0,
@@ -1729,8 +1733,8 @@
       "branch": 76.7
     },
     "src/klayout_tools/sim_settled.py": {
-      "line": 95.8,
-      "branch": 87.5
+      "line": 96.1,
+      "branch": 89.5
     },
     "src/klayout_tools/sim_slug.py": {
       "line": 100.0,
@@ -1741,8 +1745,8 @@
       "branch": 95.8
     },
     "src/klayout_tools/sim_snm_meas.py": {
-      "line": 98.8,
-      "branch": 91.6
+      "line": 100.0,
+      "branch": 96.4
     },
     "src/klayout_tools/sim_staging.py": {
       "line": 95.5,
