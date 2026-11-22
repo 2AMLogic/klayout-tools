@@ -125,31 +125,48 @@ def _tracked_files_under(root: str) -> frozenset[str] | None:
     return _TRACKED_FILES_CACHE[key]
 
 
-def _untracked_entry(path: str) -> bool:
-    """Check a physical directory entry against the index of its parent."""
-    root = find_repo_root(os.path.dirname(path))
+def _untracked_entry(path: str, *, directory: bool = False) -> bool:
+    """Check an entry, or the indexed children that create a directory."""
+    root = find_repo_root(path if directory else os.path.dirname(path))
     if root is None:
         return False
     tracked = _tracked_files_under(root)
     if tracked is None:
         return False
-    relative = os.path.relpath(path, root)
-    return relative.replace(os.sep, "/") not in tracked
+    relative = os.path.relpath(path, root).replace(os.sep, "/")
+    if directory:
+        prefix = relative + "/"
+        return relative != "." and not any(p.startswith(prefix) for p in tracked)
+    return relative not in tracked
 
 
 def is_untracked_yield_sample(path: str) -> bool:
     """Check the sample and the links a clone needs to reach it (#6139)."""
-    resolved = os.path.realpath(path)
+    try:
+        resolved = os.path.realpath(path)
+    except ValueError:
+        # An unrepresentable name remains an attempted, unhashable candidate.
+        return False
     if _untracked_entry(resolved):
         return True
     absolute = Path(path).absolute()
     if str(absolute) == resolved:
         return False
+    return _untracked_yield_components(absolute)
+
+
+def _untracked_yield_components(absolute: Path) -> bool:
+    """Check every link and directory a lookup traverses before resolving its target."""
     pending = [absolute]
     visited: set[Path] = set()
     while pending:
         target = pending.pop()
         for part in (target, *target.parents):
+            # Opening dir/../file requires dir even though realpath discards it.
+            if part.name == ".." and _untracked_entry(
+                os.path.realpath(part.parent), directory=True
+            ):
+                return True
             if not os.path.islink(part):
                 continue
             link = Path(os.path.realpath(part.parent)) / part.name

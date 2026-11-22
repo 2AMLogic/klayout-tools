@@ -5603,8 +5603,10 @@ In a functioning git checkout, samples candidates must be tracked by that
 checkout's index, just like other input artifacts (issue #6139). Untracked
 samples are excluded before hashing and from `content_hash_unresolved.searched`
 so both disclosures use the same index basis, whether the file is present or
-absent. Trees without `.git`, including copies graded with `--repo-root`, keep
-filesystem-presence resolution.
+absent. Each symlink in the lookup must be tracked. For paths such as
+`scratch/../samples.json`, the index must also contain an entry under
+`scratch/` so a fresh checkout creates that directory. Trees without `.git`,
+including copies graded with `--repo-root`, keep filesystem-presence resolution.
 
 When the disk lookup fails, a file-backed entry can still resolve the
 samples digest through its declared store manifest. If lookup fails across

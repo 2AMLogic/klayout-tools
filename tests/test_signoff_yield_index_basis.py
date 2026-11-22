@@ -6,6 +6,7 @@ Separate from test_signoff_input_index_basis.py to respect its size ratchet.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 
 import pytest
@@ -177,3 +178,85 @@ def test_tracked_yield_samples_resolve_from_command_cwd(tmp_path, monkeypatch):
     citation = _item(result, 6)["citation"]
     assert citation["content_hash"] == _hash_of(samples)
     assert citation["input_verified"] is True
+
+
+def _yield_cli_manifest(root, samples, command_backed):
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": samples}
+    report = _write(root, "yield.json", envelope)
+    evidence = (
+        {
+            "command": [sys.executable, "-c", f"print({json.dumps(envelope)!r})"],
+            "cwd": str(root),
+        }
+        if command_backed
+        else report
+    )
+    _write(root, "manifest.json", _manifest(evidence={"6": evidence}))
+
+
+def _render_yield(root):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "klayout_tools.cli",
+            "signoff",
+            "--manifest",
+            "manifest.json",
+            "--format",
+            "json",
+        ],
+        cwd=root,
+        capture_output=True,
+    )
+    # The partial manifest leaves other tier items unmet.
+    assert result.returncode == 3, result.stderr.decode()
+    return result.stdout
+
+
+@pytest.mark.parametrize("link", [False, True])
+@pytest.mark.parametrize("command_backed", [False, True])
+def test_yield_samples_require_indexed_directory_before_parent_step(
+    tmp_path, link, command_backed
+):
+    repo = _git_checkout(tmp_path)
+    directory = repo / "scratch"
+    directory.mkdir()
+    samples = repo / "data.json"
+    samples.write_text('{"measurements": []}\n')
+    reference = "scratch/../data.json"
+    if link:
+        (repo / "samples.json").symlink_to(reference)
+        reference = "samples.json"
+    _yield_cli_manifest(repo, reference, command_backed)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "commit the evidence and target")
+
+    present = _render_yield(repo)
+    directory.rmdir()
+    assert _render_yield(repo) == present
+    citation = _item(json.loads(present), 6)["citation"]
+    assert citation["input_verified"] is None
+    assert citation["content_hash_unresolved"] == {"samples": reference, "searched": []}
+
+    # A clone creates scratch/ once a child of that directory is tracked.
+    directory.mkdir()
+    (directory / "tracked").touch()
+    _git(repo, "add", "-f", "scratch/tracked")
+    citation = _item(json.loads(_render_yield(repo)), 6)["citation"]
+    assert citation["input_verified"] is True
+    assert citation["content_hash"] == _hash_of(samples)
+
+
+@pytest.mark.parametrize("command_backed", [False, True])
+def test_unrepresentable_yield_sample_name_keeps_gitless_report(
+    tmp_path, command_backed
+):
+    name = "invalid\0name"
+    _yield_cli_manifest(tmp_path, name, command_backed)
+    citation = _item(json.loads(_render_yield(tmp_path)), 6)["citation"]
+    assert citation["content_hash"] is None
+    assert citation["input_verified"] is None
+    unresolved = citation["content_hash_unresolved"]
+    assert unresolved["samples"] == name
+    assert str(tmp_path / name) in unresolved["searched"]
