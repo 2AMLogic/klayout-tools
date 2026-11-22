@@ -4404,7 +4404,7 @@ def test_clock_capture_fixture_matches_module_tcl():
     at = stored.index("    incr klt_design_total")
     assert (
         current
-        == stored[:at] + list(post_route_sta._SPEF_SKIP_DRIVER_ONLY) + stored[at:]
+        == stored[:at] + list(post_route_sta.SPEF_SKIP_DRIVER_ONLY) + stored[at:]
     )
 
 

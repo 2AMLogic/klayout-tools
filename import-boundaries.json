@@ -1984,6 +1984,11 @@
       "reason": "Issue #3518: `klt place-and-route --backend batch` reuses the sim/netlist batch backends' S3 job transport and job-contract helpers as they are (one transport, one config resolver, one preflight)."
     },
     {
+      "consumer": "place_and_route",
+      "exporter": "sta",
+      "reason": "Issue #7267: the in-flow P&R timing report splices the same public SPEF_SKIP_DRIVER_ONLY Tcl fragment (_sta_request_diag) into its design-side SPEF correlation loop as standalone `klt sta`, rather than a second hand-maintained copy the two verbs' annotation_complete verdicts could drift apart on."
+    },
+    {
       "consumer": "sim",
       "exporter": "netlist",
       "reason": "Issue #4443: `klt sim` command-list requests ship their unit trees through the Spot batch backend and enforce the same batch tree size cap and error code as netlist_batch rather than duplicating them."
