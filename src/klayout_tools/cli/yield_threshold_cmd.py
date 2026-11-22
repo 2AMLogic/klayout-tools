@@ -11,6 +11,8 @@ shared envelope helpers in :mod:`.output` -- see ``docs/json-contract.md``.
 Exit codes:
     0 - the records were read and every corner reported (a corner whose data
         cannot be fitted is reported with a ``fit.status``, not an error)
+    3 - a declared limit failed
+    4 - the fit cannot establish a declared limit
     1 - the records document is missing/unreadable/malformed or an option is
         invalid -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
 (2 is reserved for argparse usage errors.)
@@ -38,7 +40,7 @@ def run(args: argparse.Namespace) -> int:
     except ThresholdError as exc:
         return emit_error(COMMAND, str(exc), args.format)
     emit_success(payload, args.format, _print_text)
-    return 0
+    return {"fail": 3, "insufficient_evidence": 4}.get(payload.get("status", "pass"), 0)
 
 
 def _fmt(value: float | None) -> str:
@@ -95,3 +97,17 @@ def _print_text(payload: dict) -> None:
                 f"({flag}); "
                 f"N resolves {target['resolvable_error_rate']:.3g}"
             )
+        for name, check in corner.get("checks", {}).items():
+            upper = _fmt(check["sigma_ci_upper"])
+            operands = (
+                f"sigma upper {upper} <= {check['maximum']:g}"
+                if name == "sigma_max"
+                else f"separation {check['separation']:g} ({check['source']}) >= "
+                f"{check['multiple']:g} * sigma upper {upper}"
+            )
+            reason = f" ({check['reason']})" if "reason" in check else ""
+            print(f"  {name}: {check['verdict']} | {operands}{reason}")
+        if "verdict" in corner:
+            print(f"  corner verdict: {corner['verdict']}")
+    if "status" in payload:
+        print(f"campaign verdict: {payload['status']}")

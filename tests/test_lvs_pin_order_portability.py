@@ -68,3 +68,16 @@ def test_run_lvs_default_keeps_non_pdk_pin_order_files_absolute(tmp_path):
     assert sources[-1]["library"] is None
     assert os.path.isabs(sources[-1]["path"])
     assert os.path.basename(sources[-1]["path"]) == "macro.spice"
+
+
+def test_pin_order_tokenisation_preserves_existing_tokens_and_relative_paths(
+    tmp_path, monkeypatch
+):
+    from klayout_tools.lvs_report import _tokenise_pdk_pin_order_sources
+
+    monkeypatch.chdir(tmp_path)
+    sources = [
+        {"path": "$PDK_ROOT/lib.spice", "cells": 2},
+        {"path": "relative/lib.spice", "cells": 1},
+    ]
+    assert _tokenise_pdk_pin_order_sources(sources, str(tmp_path)) == sources

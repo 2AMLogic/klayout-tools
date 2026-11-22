@@ -31,6 +31,8 @@ import json
 import os
 from typing import Any
 
+from .liberty_merge import LibertyMergeError, merge_liberty
+
 #: Descriptor filename at a variant's root.
 DESCRIPTOR_FILENAME = "klt-pdk.json"
 
@@ -150,6 +152,26 @@ def _resolve_liberty(
             for corner, rel in corners.items()
         }
     return liberty
+
+
+def mapped_liberty_path(
+    mapped: str | list[str],
+    cell_library: str,
+    corner: str,
+    error_cls: type[Exception],
+    *,
+    merge_hint: str = "",
+) -> str:
+    """Return the same explicit deck for single-corner and sweep sessions."""
+    if isinstance(mapped, str):
+        return mapped
+    try:
+        return merge_liberty(mapped)
+    except LibertyMergeError as exc:
+        raise error_cls(
+            f"liberty not found for deck: cannot merge '{cell_library}' "
+            f"corner '{corner}': {exc}{merge_hint}"
+        ) from exc
 
 
 def _resolve_liberty_entry(directory: str, rel: Any, where: str) -> str | list[str]:
