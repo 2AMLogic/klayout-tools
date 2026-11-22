@@ -8184,7 +8184,6 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
     import klayout.db as kdb
 
     from klayout_tools.cli import equiv_cmd, lvs_cmd
-    from klayout_tools.cli.parser import create_parser
 
     # The two verbs agree on the numeric value, by construction.
     assert lvs_cmd.EXIT_INCONCLUSIVE == equiv_cmd.EXIT_INCONCLUSIVE == 4
@@ -8205,8 +8204,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    args = create_parser().parse_args(["lvs", path, "--format", "json"])
-    assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
+    assert main(["lvs", path, "--format", "json"]) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"
 

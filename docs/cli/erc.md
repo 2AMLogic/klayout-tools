@@ -14,6 +14,8 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
                       [--findings-only] [--omit-antenna-tables]
                       [--format text|json]
 klt erc --check <report> [--rerun] [--format text|json]
+klt erc --validate-spec <spec> [--format text|json]
+klt erc --pnr-response <run.json> [--format json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -72,6 +74,38 @@ klt erc --check <report> [--rerun] [--format text|json]
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
 run in CI.
+
+## Generate a supply spec from a routed block
+
+Save the JSON response from a successful Sky130A or Sky130B HD standard-cell
+route with an explicit PDN. Generate and validate an editable spec offline,
+then run ERC on the GDS from that route.
+
+```sh
+klt erc --pnr-response run.json --format json > supply.json
+klt erc --validate-spec supply.json --format json
+klt erc routed.gds supply.json --findings-only --format json > erc.json
+```
+
+Generation writes the spec itself. It uses the Sky130 extraction deck's
+gate, active, li1–met5, label and cut layers. The n-well check requires
+a dedicated tap connected through a drawn licon1 cut to li1 and the power
+net. The response must identify the HD library, its tap master, a resolved
+Sky130 layer map and supported strap layers. Macro grids are outside this
+profile.
+
+For renamed supplies, `power.library_rail_labels` records which configured
+nets the applied global-connect rules tie to VPWR and VGND. The generator
+declares each renamed pair with `same_net_as`. Older responses work when
+both supplies already have their native names. If the mapping is missing
+for renamed supplies, rerun P&R or write and verify the aliases in your
+spec. A custom pin regex with ambiguous matches requires an explicit spec.
+
+Add any design-specific substrate regions, fill exclusions and exclusive
+layer ownership assertions after inspecting the block. Signal routing can
+share a strap layer. The generated n-well declaration does not cover the
+substrate. Read the layout run's `erc_findings` and `erc_coverage` to see
+which physical checks ran.
 
 ## Phase scope: what `klt erc` is, and what has shipped so far
 
@@ -223,7 +257,7 @@ filename and the complete field path (for example
 `spec 'spec.json': unknown field 'ties[0].well_boxess'`), exits `1`, prints
 no success report on stdout, and does so before the layout is read or any
 analysis/solver runs. This applies to the top level and to every nested object
-(`stackup[]`, `vias[]`, `nets[]`, `ties[]`, `ties_disclosure`, `devices[]`,
+(`stackup[]`, `vias[]`, `nets[]`, `keepouts[]`, `ties[]`, `ties_disclosure`, `devices[]`,
 `antenna_limits[]`).
 A key that is valid in a *different* section is still unknown in the section it
 appears in.
@@ -253,6 +287,30 @@ field this build predates would otherwise run green and report the older
 semantics, indistinguishable from a spec that never asked for the field. Upgrade
 `klt` to use such a field; do not rely on it being ignored. Optional supported
 fields, their defaults, and the shape of the JSON report are unchanged.
+
+### Conductor keepouts
+
+Use top-level `keepouts` to reserve a rectangular corridor across selected
+stackup roles. Given the fabrication order `poly, met1, met2, met3`, this
+example checks `met1` and `met2` inside a 10 by 20 µm box. The exclusive
+upper bound lets `met3` cross it.
+
+```json
+{"keepouts": [{"box": [0, 0, 10, 20], "roles": ["met1", "met2", "met3"], "below": "met3"}]}
+```
+
+The box takes four finite micrometre coordinates in left, bottom, right, top
+order and must have positive width and height. Both `below` and the distinct
+names in `roles` refer to declared stackup conductors. ERC inspects labelled
+and unlabelled shapes throughout the selected top-cell hierarchy. Positive-area
+overlap produces an `erc.role_keepout` finding with the zero-based
+`keepout_index`, `role`, physical `layer`, and the bounding box of the
+clipped conductor in database units. Edge contact is clear.
+
+In `erc_coverage`, each checked identity names the declaration index and role.
+Geometry drawn solely outside the corridor counts as checked. An undrawn role,
+an empty list, a declaration with no roles below its cutoff, or a corridor
+that rounds to zero width or height in database units records skipped work.
 
 ### Gate area: `poly ∩ diff` vs. raw poly area
 
@@ -3072,6 +3130,11 @@ forward regardless (a `diode_insertion` remedy):
 The [common v1 coverage contract](../coverage-contract.md) is additive to
 this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
+
+With `--pdk`, ERC matches non-gate stackup names to the antenna rule table
+case-insensitively. Reports keep the spelling from the spec, and a spec's
+layer-specific limit takes precedence. If none of the names match, ERC prints
+one warning to stderr listing the stackup names and the PDK table's keys.
 
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
 actually compared against a limit. Levels with no limit (no `--pdk` and no spec `antenna_limits` entry, or a

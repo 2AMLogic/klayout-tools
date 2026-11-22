@@ -245,7 +245,10 @@ request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
 member, `"not_reached"` (with `value: null`), an `info` diagnostic
 `measurement_not_reached`, and a top-level `not_reached` count present only
-for a request that declared the field. Consumers that switch on measurement
+for a request that declared the field. The same opt-in on a step-scoped
+`analysis_steps[].measurements[].spice` card (issue #7072) reports the
+identical members under the qualified `<step>.<name>` result, which also
+carries its `step` provenance field. Consumers that switch on measurement
 `status` already must tolerate unknown members per the rule above. No
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
 `.meas` targets (`measurements[].on_unreached`)".
@@ -1800,6 +1803,41 @@ convention).
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
 
+### GF180 native DRC deck selection
+
+The native GF180 verdict exposes `native_deck.deck_selection`. Fatal deck
+errors expose `error.deck_selection`. A tolerated abort carries the same
+object in `engine_deck_errors.deck_selection`. A symlink to the installed
+GF180 main script carries the same selection as its target.
+
+When the parallel runner names failed workers, `error.abort.decks` lists their
+distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
+A single identified failure also supplies `abort.deck`. For the recognized GF180
+3LM abort (`deck: "mslot1"`, `symbol: "metal4_drawn"`), the optional
+`error.abort.hint` points to the [deck selectors and their coverage](cli/drc.md#gf180-3lm-deck-selection).
+A tolerated report carries that hint at `engine_deck_errors.abort.hint`.
+
+The parallel runner
+can start several decks before reporting a failure.
+
+| Field | Meaning |
+|---|---|
+| `requested` | The supplied `decks` string, or `null` for the PDK default. |
+| `selected` | Registry IDs resolved by the installed PDK for this selector, in runner order. |
+| `omitted` | Sorted default registry IDs excluded by selection. Explicit `all` has an empty omission array. |
+| `narrowed` | Whether the resolved selector omits any default IDs. |
+| `started` | Registry IDs observed starting in the full run log, in observation order. |
+| `not_reached` | Selected IDs outside the observed starts when the start log accounts for the full selection or a sequential abort prefix. |
+
+If the registry cannot be resolved, `selected`, `omitted` and `narrowed` are
+`null`. Missing or incomplete start evidence leaves `not_reached` null.
+The report records unknown scope in `coverage.unknown`. Known exclusions
+appear in `coverage.skipped` as namespaced `native_deck` work IDs with
+reason `not_selected`. Unreached selected IDs use reason `not_reached`.
+Narrowed reports also expose a top-level `rule_selection` for signoff.
+These arrays name native registry IDs. `coverage.rule_categories` names
+RDB categories, which can differ from the deck that emits them.
+
 ## Path fields: envelope vs. plain string (issue #2073)
 
 `klt` reports a path — an output artifact it just wrote (a netlist, a DEF, a
@@ -1870,7 +1908,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 3 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762). Version 4 adds `coverage.info_path` in the same hashed envelope, anchored to the request repo | 4 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1888,7 +1926,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `options.trace.path` | 3 (`log_path` moved to the envelope table; the echoed inputs joined them in #5784) |
+| `functional-verification` | `trace.path` (absolute waveform filename, which can trigger a provenance lint finding) | 4 (`coverage.info_path` moved to the envelope table in #6005) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 

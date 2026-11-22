@@ -21,6 +21,7 @@ from typing import Any
 
 from . import sim_batch
 from .sim_batch_shards import mismatch_error, shard_map_mismatch
+from .sim_errors import SimError
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
@@ -99,8 +100,6 @@ def _load_resume_shard_map(
     different fingerprint/request, refuses with
     :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
     stale results."""
-    from .sim import SimError
-
     if not os.path.isfile(path):
         return None
     try:
