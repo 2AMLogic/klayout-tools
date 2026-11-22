@@ -14,6 +14,14 @@ pytestmark = pytest.mark.usefixtures(
 _DYNAMIC = (
     "Note: Starting dynamic gmin stepping\nNote: Dynamic gmin stepping completed\n"
 )
+# The same deck with gminsteps=2 (ngspice-47 prints this method in lowercase).
+_SPICE3 = "Note: Starting spice3 gmin stepping\nNote: spice3 gmin stepping completed\n"
+# The failure line is not a captured run: no simple deck made spice3 gmin fail, so it
+# joins ngspice-47's own "spice3 gmin stepping failed" string to the "Warning: "
+# prefix the engine uses for the dynamic and true gmin failures in _PRIOR.
+_SPICE3_FAILED = (
+    "Note: Starting spice3 gmin stepping\nWarning: spice3 gmin stepping failed\n"
+)
 # The same deck with gminsteps=0.
 _SOURCE = "Note: Starting source stepping\nNote: Source stepping completed\n"
 _PRIOR = (
@@ -29,6 +37,8 @@ _CODE = "dc_homotopy_recovery"
     [
         (_DYNAMIC, "dynamic gmin", ""),
         (_SOURCE, "source", ""),
+        (_SPICE3, "spice3 gmin", ""),
+        (_SPICE3_FAILED + _SOURCE, "source", " after spice3 gmin stepping failed"),
         (
             _PRIOR + _SOURCE,
             "source",

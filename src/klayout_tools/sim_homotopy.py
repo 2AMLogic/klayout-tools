@@ -7,7 +7,7 @@ from collections.abc import Iterator
 
 DC_HOMOTOPY_RECOVERY_CODE = "dc_homotopy_recovery"
 
-_METHOD = r"(dynamic gmin|true gmin|source) stepping"
+_METHOD = r"(dynamic gmin|true gmin|spice3 gmin|source) stepping"
 _EVENTS = re.compile(
     rf"^[ \t]*(?:Note: Starting {_METHOD}|Warning: {_METHOD} failed|"
     rf"Note: {_METHOD} completed)[ \t]*\r?$",
