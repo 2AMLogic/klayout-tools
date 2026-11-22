@@ -267,6 +267,7 @@ from .lvs_gate_level_convert import (
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
+from .lvs_label_coverage import REFERENCE_PORT_ALIAS_CATEGORY  # noqa: F401
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -1235,8 +1236,9 @@ def run_lvs(
     from .lvs_layout_stage import _resolve_layout_stage
     from .lvs_passive_pairing import curated_pairing
 
+    layout_coverage: dict[str, Any] = {}
     layout_stage = _resolve_layout_stage(
-        layout_spec, reference_spec, request_dir, opts, progress
+        layout_spec, reference_spec, request_dir, opts, progress, layout_coverage
     )
     (
         layout_netlist,
@@ -1705,6 +1707,7 @@ def run_lvs(
     )
 
     return assemble_lvs_report(
+        layout_coverage=layout_coverage,
         passive_pairing=passive_pairing,
         mismatches=mismatches,
         omit_mismatches=omit_mismatches,
@@ -2303,10 +2306,9 @@ def rerun_lvs_report(
             # Issue #1983: same rule -- a report committed before the
             # `body_verification` block existed cannot have drifted in it.
             "body_verification",
-            # Issue #5610: same rule -- a report committed before the
-            # `mismatches_omitted` echo existed cannot have drifted on it
-            # (the replay above leaves such a report uncompacted, so the
-            # only difference would be the fresh run's new `false` echo).
+            "ignored_layers",
+            "warnings",
+            "pin_set_difference",
             "mismatches_omitted",
             "sg13g2_passive_pairing",
         )
@@ -2703,6 +2705,7 @@ def _resolve_layout(
     def_net_names: bool = False,
     def_pins: frozenset[str] | None = None,
     progress: bool | str = False,
+    coverage: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -2882,12 +2885,7 @@ def _resolve_layout(
         progress_scope.enter_context(active_timer(StageTimer(progress=progress)))
         progress_scope.enter_context(stage("extract_layout"))
         try:
-            # LVS is topological -- no parasitics_deck, so the 5th return
-            # (parasitic_nets) is always None here and is ignored. The 6th
-            # return (black_box_regions, issue #293) still takes effect --
-            # any reserved-annotation-layer region in the layout is excluded
-            # from connectivity the same as `klt extract` -- but is not
-            # surfaced in `klt lvs`'s own response, out of scope here. The 7th
+            # Black-box regions affect connectivity as in klt extract. The 7th
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
@@ -2943,6 +2941,7 @@ def _resolve_layout(
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
+                layout_coverage=coverage,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,
