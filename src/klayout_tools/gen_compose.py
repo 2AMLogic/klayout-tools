@@ -3907,8 +3907,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             separately, keyed by each pad's own layer, and ``layer_checks``
             below folds each one in as a further ``(layer, region,
             check_spacing=False)`` entry -- compared against
-            ``accepted_route_regions`` for a literal overlap the same way as
-            the primary entry, just keyed to a different layer. This is the
+            ``accepted_route_regions`` for an area overlap or a shared conductive
+            edge (#7024) on the same physical layer. This is the
             only place that *can* catch a short living entirely on a plane
             neither net's own primary layer names: two shapes that overlap
             on one physical layer merge into a single polygon in the
@@ -3971,7 +3971,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
             # layer_checks (#1913): the primary (layer, region) entry (with
             # its own spacing check, exactly as before), plus one further
-            # overlap-only entry per additional layer this leg's via-drop
+            # electrical-contact check per additional layer this leg's via-drop
             # ladder lands an intermediate/far pad on -- see this closure's
             # own docstring above. Empty from
             # `_drawn_leg_intermediate_pad_regions` when `layer` is `None`:

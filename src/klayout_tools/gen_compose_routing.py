@@ -4384,9 +4384,11 @@ def route_bundle(
         j: int,
         cross_geometry: Any,
         leg_waypoints_um: list[tuple[float, float]] | None,
-    ) -> dict[str, Any] | None:
+        primary: dict[str, Any],
+        primary_reason: str,
+    ) -> tuple[dict[str, Any], str | None]:
         if cross_block_route_layer is None or leg_conflict is None:
-            return None
+            return primary, primary_reason
         retry_width_um = (
             cross_block_width_um if cross_block_width_um is not None else width_um
         )
@@ -4406,7 +4408,7 @@ def route_bundle(
             grid_um=grid_um,
         )
         if not retry["routed"]:
-            return None
+            return primary, primary_reason
         retry_reason = leg_conflict(
             retry["points_um"],
             retry.get("via_drops", []),
@@ -4414,8 +4416,8 @@ def route_bundle(
             retry.get("route_layer"),
         )
         if retry_reason is not None:
-            return None
-        return retry
+            return primary, f"{primary_reason}; cross-block fallback {retry_reason}"
+        return retry, None
 
     legs: list[dict[str, Any]] = []
     total_length_um = 0.0
@@ -4568,12 +4570,9 @@ def route_bundle(
                 and reason is not None
                 and result.get("route_layer") != cross_block_route_layer
             ):
-                retry = _retry_leg_on_cross_layer(
-                    i, j, cross_geometry, leg_spec.get("waypoints_um")
+                result, reason = _retry_leg_on_cross_layer(
+                    i, j, cross_geometry, leg_spec.get("waypoints_um"), result, reason
                 )
-                if retry is not None:
-                    result = retry
-                    reason = None
         if reason is None and result["routed"]:
             if uf.union(i, j):
                 components -= 1
@@ -4664,10 +4663,9 @@ def route_bundle(
                 reason is not None
                 and result.get("route_layer") != cross_block_route_layer
             ):
-                retry = _retry_leg_on_cross_layer(i, j, cross_geometry, waypoints_um)
-                if retry is not None:
-                    result = retry
-                    reason = None
+                result, reason = _retry_leg_on_cross_layer(
+                    i, j, cross_geometry, waypoints_um, result, reason
+                )
 
         if reason is None and result["routed"]:
             uf.union(i, j)
