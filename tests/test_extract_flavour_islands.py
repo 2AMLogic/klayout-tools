@@ -8,6 +8,8 @@ its own marker."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import klayout.db as kdb
 import pytest
 
@@ -34,6 +36,20 @@ def test_wholly_inside_marker_island_is_claimed_whole(dualgate):
     )
     assert claimed == island
     assert remaining.is_empty()
+
+
+def test_whole_marker_does_not_override_excluded_gate(dualgate):
+    island = kdb.Region(kdb.Box(0, 0, 5000, 2000))
+    left = kdb.Region(kdb.Box(500, 0, 1500, 2000))
+    right = kdb.Region(kdb.Box(3500, 0, 4500, 2000))
+    flavour = replace(dualgate, not_markers=((13, 0),))
+
+    claimed, remaining = _flavour_split_island(
+        island, left + right, flavour, island, [], [left], kdb.Region()
+    )
+
+    assert (claimed ^ (island - left)).is_empty()
+    assert (remaining ^ (island - right)).is_empty()
 
 
 def test_gateless_island_inside_marker_is_claimed_whole(dualgate):
