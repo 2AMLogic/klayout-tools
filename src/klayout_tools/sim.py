@@ -5889,9 +5889,7 @@ def _expand_monte_carlo(
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
 
-    Fan-out only -- reuses the same ``list[CornerPoint]`` shape every
-    execution backend already consumes (see :class:`CornerPoint`'s
-    docstring), so no new backend is needed. Sample order is deterministic
+    All backends consume this same list of sample points. Order is deterministic
     (outer: original corner order from :func:`_expand_corners`; inner:
     ``sample_index`` ``0..n-1``), matching the odometer-style determinism
     :func:`_expand_corners` already guarantees for the PVT axes.
@@ -5966,6 +5964,7 @@ def _expand_monte_carlo(
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    supply_waveforms=base.supply_waveforms,
                     mc_injected=(
                         sim_injected.draw(injected[0], mismatch_seed, injected[1])
                         if injected
