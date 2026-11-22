@@ -552,7 +552,7 @@ application error naming the instance and cell, never a silent skip.
   rails float on internal nets under other names proves nothing about
   the top-level grid). The derived block keeps the block's usual key
   set; `klt signoff` item 11 grades it exactly as a stub-form `"match"`.
-- **Tap-less blocks.** ASAP7 cells draw no taps, so the CDL bulk (`VSS` /
+- **Tap-less blocks.** In ASAP7 logic cells without taps, the CDL bulk (`VSS` /
   `VDD`) has no counterpart in the layout and the compare mismatches on the
   bulk nets. Grade such a block with `options.finfet_bulk` (see below); the
   tie is a disclosed `device.finfet_bulk_tied` warning, so a `match` reached
@@ -560,11 +560,12 @@ application error naming the instance and cell, never a silent skip.
 
 #### Bulk policy (`options.finfet_bulk`): opt-in and disclosed
 
-ASAP7 standard cells draw **no substrate or well taps**, while the reference
-CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. The extractor therefore
-gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. By
-default `klt lvs` does **not** bridge that gap: such a cell mismatches and
-nothing is tied silently.
+The reference CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. Extraction
+gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. Where
+an ASAP7 TAPCELL abuts the logic cell's well, N-selected active in that well
+can reach a routed M1 supply through SDT, LISD and V0. The PMOS bulk then
+shares the physical rail in the extracted netlist. A tapless logic cell
+retains separate well and rail nets and mismatches the CDL by default.
 
 `options.finfet_bulk` opts in to a comparison-side assumption:
 
@@ -641,9 +642,10 @@ suspecting extraction.
   `N declared pin names ... matched no promoted net in the layout: IN, OUT`
   (pinned in `test_declared_pins_do_not_create_pins_but_name_the_missing_labels`).
   Read that warning as "the labels are missing", not as a layout verdict.
-- **A well label and a rail label with one name stay two nets** at extraction
-  (`VDD` and `VDD$1`); `finfet_bulk` is what ties them for the compare, in
-  each cell, before the flatten.
+- **Each well island needs a complete tap path to the rail.** Matching labels
+  alone leave a tapless well and rail as separate nets (`VDD` and `VDD$1`).
+  For such a layout, `finfet_bulk` can tie them per cell before flattening
+  for comparison.
 - **M2 is `20/0`, M3 is `30/0`** in this deck, with V1 at `21/0`; a wire
   drawn on the wrong layer number is invisible to extraction.
 
