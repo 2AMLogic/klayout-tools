@@ -192,6 +192,11 @@ class CycleMeanOutcome:
     error: str | None = None
     code: str | None = None
 
+    @property
+    def value(self) -> float | None:
+        """Scalar used to grade this measurement."""
+        return self.mean
+
     def report(self) -> dict[str, Any]:
         """The response's ``cycle_mean`` object for this measurement."""
         return {
