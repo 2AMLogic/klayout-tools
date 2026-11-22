@@ -176,39 +176,50 @@ def extract_device(
     )
 
 
-def _anode_net(
+def _contact_net(
     l2n: kdb.LayoutToNetlist,
-    device: kdb.Device,
-    entries: list[tuple[kdb.Region, kdb.Region]],
+    terminal: kdb.Region,
+    link: kdb.Region,
     contact: kdb.Region,
 ) -> kdb.Net | None:
-    """The net of the anode polygon abutting ``device``'s link, or ``None``.
+    """Probe contacts on the marker-derived terminal touching this link."""
+    import klayout.db as kdb
 
-    KLayout places a resistor device at the centre of its ``R`` polygon, which
-    selects the link component, and from it the anode polygon that touches it.
-    ``probe_net`` only resolves where a shape meets a connected layer, so the
-    probe point is a contact inside that polygon; an uncontacted anode is
-    ``None``.
+    dbu = l2n.internal_layout().dbu
+    for polygon in terminal.each():
+        # extract_devices also writes geometrically assigned pins into this
+        # layer. Only the original marker-derived polygons have no properties.
+        shape = kdb.Region(polygon)
+        if polygon.properties() or shape.interacting(link).is_empty():
+            continue
+        for piece in (shape & contact).each():
+            centre = piece.bbox().center()
+            net = l2n.probe_net(terminal, kdb.DPoint(centre.x * dbu, centre.y * dbu))
+            if net is not None:
+                return net
+    return None
 
-    ``extract_devices`` writes each device's terminal shapes back into the
-    ``tA``/``tB`` regions, tagged with a ``TERMINAL_ID`` property, so the anode
-    region also holds whichever block was handed ``A``. Only the polygons that
-    carry no property come from the marker, and only those are considered.
-    """
+
+def _contacted_terminal(
+    l2n: kdb.LayoutToNetlist,
+    device: kdb.Device,
+    entries: list[tuple[kdb.Region, kdb.Region, kdb.Region]],
+    contact: kdb.Region,
+) -> tuple[str, kdb.Net] | None:
+    """Use the device centre to select its link, then probe either terminal."""
     import klayout.db as kdb
 
     dbu = l2n.internal_layout().dbu
     x, y = round(device.trans.disp.x / dbu), round(device.trans.disp.y / dbu)
     probe = kdb.Region(kdb.Box(x - 1, y - 1, x + 1, y + 1))
-    for link, anode in entries:
+    for link, anode, cathode in entries:
         here = link.interacting(probe)
-        for polygon in anode.each():
-            shape = kdb.Region(polygon)
-            if polygon.properties() or shape.interacting(here).is_empty():
-                continue
-            for piece in (shape & contact).each():
-                centre = piece.bbox().center()
-                return l2n.probe_net(anode, kdb.DPoint(centre.x * dbu, centre.y * dbu))
+        if here.is_empty():
+            continue
+        for name, region in (("A", anode), ("B", cathode)):
+            net = _contact_net(l2n, region, here, contact)
+            if net is not None:
+                return name, net
     return None
 
 
@@ -237,27 +248,29 @@ def orient_terminals(
     """
     if circuit is None:
         return
-    by_class: dict[str, list[tuple[kdb.Region, kdb.Region]]] = {}
+    by_class: dict[str, list[tuple[kdb.Region, kdb.Region, kdb.Region]]] = {}
     for spec, body, _terminal, split in resistors:
         if split is not None:
-            by_class.setdefault(spec.name, []).append((body, split[0]))
+            by_class.setdefault(spec.name, []).append((body, *split))
     for device in circuit.each_device():
         entries = by_class.get(device.device_class().name)
-        anode_net = _anode_net(l2n, device, entries, contact) if entries else None
-        if anode_net is None:
+        if not entries:
             continue
-        ids = {td.name: td.id() for td in device.device_class().terminal_definitions()}
-        a_net = device.net_for_terminal(ids["A"])
-        b_net = device.net_for_terminal(ids["B"])
-        if b_net is None or b_net.cluster_id != anode_net.cluster_id:
-            continue  # the anode is not on B: A already holds it
-        if a_net is not None and a_net.cluster_id == anode_net.cluster_id:
-            continue  # both terminals on one net: nothing to swap
-        device.disconnect_terminal(ids["A"])
-        device.disconnect_terminal(ids["B"])
-        device.connect_terminal(ids["A"], anode_net)
-        if a_net is not None:
-            device.connect_terminal(ids["B"], a_net)
+        contacted = _contacted_terminal(l2n, device, entries, contact)
+        if contacted is None:
+            continue
+        target, marked_net = contacted
+        other = "B" if target == "A" else "A"
+        target_net = device.net_for_terminal(target)
+        other_net = device.net_for_terminal(other)
+        if target_net is not None and target_net.cluster_id == marked_net.cluster_id:
+            continue
+        if other_net is None or other_net.cluster_id != marked_net.cluster_id:
+            continue
+        device.disconnect_terminal(other)
+        device.connect_terminal(target, marked_net)
+        if target_net is not None:
+            device.connect_terminal(other, target_net)
 
 
 def connect_terminals(

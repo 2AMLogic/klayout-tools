@@ -30,6 +30,7 @@ from klayout_tools.pdk_models import (
     known_device_subckt_names,
     resolve_device_bindings,
 )
+from test_lvs import _assert_lvs_report_conforms
 from test_lvs_native_extraction_cross_check_gf180mcu import (
     _SKIP_NO_GF180MCU_LVS_CROSS_CHECK,
     _one_native_device,
@@ -59,6 +60,7 @@ def _draw_fuse(
     names: tuple[str, str],
     *,
     anode_marker: bool = True,
+    open_terminal: str | None = None,
 ) -> None:
     """One fuse at x offset ``x`` (um), same proportions as the PDK cell."""
 
@@ -84,8 +86,10 @@ def _draw_fuse(
     if anode_marker:
         draw(_LVS_SOURCE, 0, 0.6, 2.43, 1.66)
     draw(_PLFUSE, 2.43, 1.04, 3.69, 1.22)
-    draw(_CONTACT, 1.585, 0.785, 1.805, 1.005)  # anode
-    draw(_CONTACT, 3.845, 0.785, 4.065, 1.005)  # cathode
+    if open_terminal != "anode":
+        draw(_CONTACT, 1.585, 0.785, 1.805, 1.005)
+    if open_terminal != "cathode":
+        draw(_CONTACT, 3.845, 0.785, 4.065, 1.005)
     draw(_METAL1, 0.0, 0.725, 2.335, 1.535)
     draw(_METAL1, 3.785, 0.255, 5.4, 2.005)
     for name, px in zip(names, (1.0, 4.5), strict=True):
@@ -215,6 +219,23 @@ def test_deck_ignores_r_by_default_and_says_so(tmp_path: Path) -> None:
     assert entry["details"]["parameter"] == "R"
     assert entry["details"]["source"] == "deck"
     assert entry["device"]["class"] == "efuse"
+    (coverage,) = report["device_parameter_coverage"]
+    assert {"parameter": "R", "reason": "deck"} in coverage["not_compared"]
+    _assert_lvs_report_conforms(report)
+
+
+def test_caller_scoping_out_r_owns_the_exclusion(tmp_path: Path) -> None:
+    gds = _write(tmp_path, "named", [{"x": 0.0, "names": ("in", "out")}])
+    options = {"compare_parameters": {"efuse": ["L", "W"]}}
+    report = _lvs(tmp_path, gds, "TOP", _REFERENCE.format(top="TOP"), options)
+    assert report["status"] == "match"
+    (entry,) = _excluded(report)
+    assert entry["details"]["parameter"] == "R"
+    assert "source" not in entry["details"]
+    (coverage,) = report["device_parameter_coverage"]
+    assert {"parameter": "R", "reason": "compare_parameters"} in coverage[
+        "not_compared"
+    ]
 
 
 @pytest.mark.parametrize("params", ["", " pblow=0"], ids=["bare", "pblow"])
@@ -246,6 +267,8 @@ def test_compare_parameters_naming_the_class_compares_r(tmp_path: Path) -> None:
     report = _lvs(tmp_path, gds, "TOP", _REFERENCE.format(top="TOP"), options)
     assert report["status"] == "mismatch"  # 50 vs ~200 ohm
     assert not [m for m in _excluded(report) if m["details"].get("source") == "deck"]
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == ["R"]
 
 
 def _pdk_file(relative: str) -> str | None:
@@ -358,8 +381,9 @@ def test_efuse_is_recognised_by_native_deck(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("mirror", [False, True], ids=["plain", "mirrored"])
 @pytest.mark.parametrize("rotation", [0, 1, 2, 3], ids=lambda r: f"r{90 * r}")
+@pytest.mark.parametrize("open_terminal", [None, "anode", "cathode"])
 def test_terminal_identity_follows_the_markers_in_every_orientation(
-    tmp_path: Path, rotation: int, mirror: bool
+    tmp_path: Path, rotation: int, mirror: bool, open_terminal: str | None
 ) -> None:
     """KLayout hands ``A``/``B`` to the two contacts in geometric order, which
     turns with the layout; the anode marker, not the orientation, must decide
@@ -368,7 +392,7 @@ def test_terminal_identity_follows_the_markers_in_every_orientation(
     layout.dbu = _DBU_UM
     top = layout.create_cell("TOP")
     fuse = layout.create_cell("FUSE")
-    _draw_fuse(layout, fuse, 0.0, ("anode", "cathode"))
+    _draw_fuse(layout, fuse, 0.0, ("anode", "cathode"), open_terminal=open_terminal)
     top.insert(
         kdb.CellInstArray(fuse.cell_index(), kdb.Trans(rotation, mirror, 10000, 10000))
     )
@@ -379,9 +403,14 @@ def test_terminal_identity_follows_the_markers_in_every_orientation(
     report = run_extract(gds, "gf180mcu", output=str(tmp_path / "oriented.spice"))
 
     (device,) = report["devices"]
-    assert device["nets"] == {"a": "anode", "b": "cathode"}
+    anode = None if open_terminal == "anode" else "anode"
+    cathode = None if open_terminal == "cathode" else "cathode"
+    assert device["nets"] == {"a": anode, "b": cathode}
     spice = (tmp_path / "oriented.spice").read_text()
-    assert re.search(r"^R\S+ anode cathode ", spice, re.MULTILINE)
+    open_node = r"nc_\d+"
+    assert re.search(
+        rf"^R\S+ {anode or open_node} {cathode or open_node} ", spice, re.MULTILINE
+    )
 
 
 def _extract_dummy_fuse(tmp_path: Path, name: str, *, live_neighbour: bool) -> dict:

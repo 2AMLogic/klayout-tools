@@ -1628,22 +1628,14 @@ def run_lvs(
     # `device_classes` follow, never a spuriously empty `[]` that would read
     # as "no resistor/capacitor class participated".
     device_parameter_coverage: list[dict[str, Any]] | None = None
-    # Issue #2461: every `(class, parameter)` pair a request-side hook took
-    # out of *this* run's compare, so the classification pass downstream never
-    # reports one of them as a `device.property` error in the same report that
-    # discloses it as excluded. Kept as two sets so the coverage block can name
-    # which hook excluded each one.
+    # Suppress property mismatches for every disabled (class, parameter) pair.
+    # For coverage, track the source of each exclusion separately. A deck
+    # default or caller option only narrows coverage for parameters that were
+    # primary before the hook ran. Previously secondary parameters retain
+    # their built-in reason (#2461, #2654).
+    excluded_parameters: set[tuple[str, str]] = set()
     placeholder_excluded: set[tuple[str, str]] = set()
-    compare_scoped_excluded: set[tuple[str, str]] = set()
-    # Issue #2654: the subset of `compare_scoped_excluded` that
-    # `options.compare_parameters` actually took *out of* the compare -- the
-    # parameters that were primary before `enable_parameter` ran. The option
-    # can only narrow, so scoping a class to one subset also disables every
-    # sibling the caller did not name; a sibling the class itself declares
-    # secondary was never compared, so the coverage block must not attribute
-    # its exclusion to the caller's option (see
-    # `_record_excluded_parameters`). The full set above still drives the
-    # classification pass's suppression, unchanged.
+    deck_narrowed: set[tuple[str, str]] = set()
     compare_scoped_narrowed: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
@@ -1713,13 +1705,13 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             placeholder_excluded,
-            compare_scoped_excluded,
-            compare_scoped_narrowed,
+            excluded_parameters,
+            deck_narrowed,
         ) + _apply_compare_parameters(
             opts.compare_parameters,
             layout_netlist,
             reference_netlist,
-            compare_scoped_excluded,
+            excluded_parameters,
             compare_scoped_narrowed,
         )
 
@@ -1737,9 +1729,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             placeholder_excluded,
+            deck_narrowed,
             compare_scoped_narrowed,
         )
-        excluded_parameters = placeholder_excluded | compare_scoped_excluded
+        excluded_parameters.update(placeholder_excluded)
 
         logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
@@ -6118,6 +6111,7 @@ def _apply_compare_parameters(
 #: * ``"placeholder_value"`` -- excluded by
 #:   :func:`_apply_reference_placeholder_values` (issue #1907); already
 #:   disclosed as :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE`.
+#: * ``"deck"`` -- excluded by the layout deck's ignored parameters (#4312).
 #: * ``"compare_parameters"`` -- *narrowed away* by
 #:   :func:`_apply_compare_parameters` (issue #1928): it was being compared
 #:   (``is_primary == True``) until that option scoped the class to a subset
@@ -6127,6 +6121,7 @@ def _apply_compare_parameters(
 #:   secondary.
 PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
 PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
+PARAMETER_NOT_COMPARED_DECK = "deck"
 PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
 
 
@@ -6156,6 +6151,7 @@ def _device_parameter_coverage(
     layout_netlist: Any,
     reference_netlist: Any,
     placeholder_excluded: AbstractSet[tuple[str, str]],
+    deck_narrowed: AbstractSet[tuple[str, str]],
     compare_scoped_narrowed: AbstractSet[tuple[str, str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Which parameters of each participating resistor/capacitor class this
@@ -6193,10 +6189,8 @@ def _device_parameter_coverage(
     comparing it.
 
     **Never duplicates another disclosure.** A parameter in
-    ``placeholder_excluded``/``compare_scoped_narrowed`` is already reported
-    as ``device.placeholder_value``/``device.parameter_excluded``; it appears
-    in the coverage block (with that ``reason``) but never in the warning,
-    which is reserved for the case that had no disclosure at all.
+    any of the three exclusion sets already has a ``device.placeholder_value``
+    or ``device.parameter_excluded`` disclosure. Coverage records its source.
 
     ``compare_scoped_narrowed`` is :func:`_apply_compare_parameters`'
     *narrowed* set, not its full excluded set (issue #2654): a parameter that
@@ -6237,6 +6231,8 @@ def _device_parameter_coverage(
             pair = (key, param.name.lower())
             if pair in placeholder_excluded:
                 reason = PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE
+            elif pair in deck_narrowed:
+                reason = PARAMETER_NOT_COMPARED_DECK
             elif pair in compare_scoped_narrowed:
                 reason = PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS
             elif param.is_primary:
