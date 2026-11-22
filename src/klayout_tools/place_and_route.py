@@ -897,9 +897,8 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
 #: ``klayout_tools.decks`` extraction deck matches this run's PDK family.
-#: Like :data:`_CTS_BUFFER_CELLS`/:data:`_ROUTING_LAYER_RANGE` above, this
-#: bridges LEF/liberty cell-library names to ``klayout_tools.decks`` family
-#: keys, matching ``get_parasitics_deck``'s own accepted names exactly.
+#: The keys are LEF/Liberty library names; their values are curated
+#: extraction deck names accepted by ``get_parasitics_deck``.
 #:
 #: ``sg13g2_stdcell`` (issue #1784) -> ``"sg13g2"`` -- the IHP SG13G2 deck
 #: family already registered in ``klayout_tools.decks.__init__`` (used
@@ -914,6 +913,7 @@ _EXTRACT_DECK_FOR_CELL_LIBRARY: dict[str, str] = {
     "gf180mcu_fd_sc_mcu7t5v0": "gf180mcu",
     "sg13g2_stdcell": "sg13g2",
     "asap7sc7p5t_rvt": "asap7",
+    "asap7sc7p5t_28_R": "asap7",
 }
 
 
