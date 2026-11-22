@@ -9,6 +9,8 @@ import json
 import klayout.db as kdb
 import pytest
 
+from klayout_tools import erc_antenna_gf180mcu as gf180
+from klayout_tools._layout import ActiveIndex
 from klayout_tools.cli import main
 from klayout_tools.erc import run_erc
 
@@ -228,3 +230,24 @@ def test_wrong_contact_layer_on_an_otherwise_measurable_gate(tmp_path):
     (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
     assert gate["levels"][1]["antenna_ratio"] == 453
     assert gate["has_contacted_diffusion"] is None
+
+
+def test_contacted_diffusion_goes_through_the_bbox_index(tmp_path, monkeypatch):
+    # A bare `net_geometry & outside_channel` visits every active polygon in
+    # the chip once per violating gate -- quadratic in design size (measured:
+    # 7.5 s at 2000 gates vs 0.1 s indexed). Wall-clock is flaky in CI, so pin
+    # the property structurally: every net goes through `ActiveIndex`.
+    windows = []
+
+    class Spy(ActiveIndex):
+        def intersect(self, poly_region):
+            windows.append(poly_region.bbox())
+            return super().intersect(poly_region)
+
+    monkeypatch.setattr(gf180, "ActiveIndex", Spy)
+    gds, spec = tmp_path / "gate.gds", tmp_path / "erc.json"
+    _diffusion_fixture(gds, "contacted")
+    _diffusion_spec(spec)
+    (gate,) = run_erc(str(gds), str(spec), pdk="gf180mcu")["gates"]
+    assert gate["has_contacted_diffusion"] is True
+    assert len(windows) == 1 and not windows[0].empty()

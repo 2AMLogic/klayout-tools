@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._layout import region
+from ._layout import ActiveIndex, region
 
 #: gf180mcu antenna-ratio limit (maximum ratio *without* a protection diode),
 #: from google/gf180mcu-pdk at commit f6eeac7dad085ffcc829ccfd721f7b4ce39edcf7
@@ -79,13 +79,17 @@ def annotate_contacted_diffusion(
     ]
     if not pairs:
         return
-    outside_channel = active - region(layout, top, poly["layer"])
+    # Bbox-indexed (issue #2751's `ActiveIndex`): a bare `net_geometry &
+    # outside_channel` visits every active polygon in the chip once per
+    # violating gate -- quadratic in design size, and on a routed block nearly
+    # every gate net violates.
+    outside_channel = ActiveIndex(active - region(layout, top, poly["layer"]))
     for gate, net in violations:
         gate["has_contacted_diffusion"] = any(
-            not (
-                l2n.polygons_of_net(net, metal)
-                & l2n.polygons_of_net(net, cut)
-                & outside_channel
+            not outside_channel.intersect(
+                (
+                    l2n.polygons_of_net(net, metal) & l2n.polygons_of_net(net, cut)
+                ).merged()
             ).is_empty()
             for metal, cut in pairs
         )
