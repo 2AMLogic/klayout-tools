@@ -290,6 +290,8 @@ def test_rename_counts_all_condition_declarations(tmp_path, extra_in_first, afte
     [
         "/* characterized at typ25 */\n    // related_condition : typ25;\n",
         "pin (typ25) { direction : input; }",
+        "pin (scaled_cell) { direction : input; }",
+        "pin (related_condition) { direction : input; }",
         'comment : "related_condition : typ25;";',
     ],
 )
