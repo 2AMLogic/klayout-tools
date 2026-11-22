@@ -47,7 +47,7 @@ from ._provenance import (
     sha256_file,
     wasi_sandbox_hint_if_applicable,
 )
-from .request_paths import RequestPaths
+from .request_paths import RequestPaths, resolve_readable_files
 
 
 class FormalError(Exception):
@@ -356,13 +356,9 @@ def _resolve_sources(value: Any, request_dir: str) -> list[str]:
         return []
     if not isinstance(value, list) or not all(isinstance(e, str) and e for e in value):
         raise FormalError("request.sources must be an array of non-empty strings")
-    resolved = []
-    for entry in value:
-        path = _rpath(entry, request_dir, "request.sources entry")
-        if not os.path.isfile(path):
-            raise FormalError(f"source not found: {entry}")
-        resolved.append(os.path.abspath(path))
-    return resolved
+    return resolve_readable_files(
+        value, request_dir, FormalError, field="request.sources entry", noun="source"
+    )
 
 
 def _staged_name(index: int, path: str) -> str:

@@ -16,6 +16,7 @@ from typing import Any
 from ._artifact_envelope import RepoRoot
 from ._artifact_envelope import hashed_path_envelope as _hashed_path_envelope
 from ._verilog_top import plusargs, require_module_declared
+from .functional_verification_initial_state import resolve_module_plusargs
 
 VERILOG_TOP_FIELDS = (
     "verilog_top",
@@ -117,13 +118,18 @@ def _resolve_verilog_top(
 
 def _resolve_testbench_target(
     verilog_tb: dict[str, Any] | None, testbench: Any, request_dir: str
-) -> tuple[str, str, str | list[str] | None]:
-    """``(module, module_dir, testcase)`` for either testbench form."""
+) -> tuple[str, str, str | list[str] | None, list[str]]:
+    """``(module, module_dir, testcase, plusargs)`` for either testbench
+    form. On the cocotb path the plusargs are the user's validated
+    ``testbench.plusargs`` (issue #6906); on a Verilog bench they are the
+    form's own already-validated entries."""
     if verilog_tb is None:
-        return _fv._resolve_testbench(testbench, request_dir)
+        module, module_dir, testcase = _fv._resolve_testbench(testbench, request_dir)
+        plusargs = resolve_module_plusargs(testbench, _fv.FunctionalVerificationError)
+        return module, module_dir, testcase, plusargs
     top = verilog_tb["verilog_top"]
     assert top is not None
-    return top, request_dir, None
+    return top, request_dir, None, verilog_tb["plusargs"]
 
 
 def _sdf_annotate_scope(
