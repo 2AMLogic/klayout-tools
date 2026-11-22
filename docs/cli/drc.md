@@ -4,10 +4,10 @@ Run a headless DRC rule deck against a GDSII or OASIS layout stream and
 report violations as structured data.
 
 ```
-klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
+klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--rules '<id|glob>,...'] [--expect-deck-hash <hash>] [--pdk <variant> [--pdk-root <path>]] [--negative-control <layout> [--negative-control-categories <A,B>]] [--format text|json]
 klt drc --deck sky130|gf180mcu|sg13g2|sg13cmos5l --list-rules [--format text|json]
 klt drc <file> --engine both --deck <name> [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--klayout-binary <path>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--min-klayout-version <X.Y.Z>] [--klayout-binary <path>] [--negative-control <layout> [--negative-control-categories <A,B>]] [--expect-rule-categories <N> | --expect-rule-categories-file <path>] [--expect-deck-hash <hash>] [--format text|json]
 klt drc <file> --deck <name> --waivers <waivers.json> [--format text|json]
 klt drc <file> --deck <name> -o <report.json[.gz]> [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
@@ -116,6 +116,17 @@ klt drc --check <report.json> [<file>] [--rerun] [--format text|json]
   must declare. An unreadable file, invalid UTF-8, or a manifest with no
   names is rejected before `klayout` is launched. See "Engine" → `"klayout"`
   → "Opt-in rule-category set assertion".
+- `--expect-deck-hash HASH` — opt-in deck-pin assertion (issue #5806): vouch
+  for the deck bytes this run uses by passing the exact
+  `provenance.deck.content_hash` value to expect (`sha256:<64 hex>`; take it
+  from an earlier report). Compared against the run's own recorded hash after
+  the run: a mismatch — or a run that recorded no deck hash at all — fails
+  with the error envelope (exit `1`) naming the deck, the expected and the
+  observed hash, so a deck bump becomes a loud, reviewed event instead of a
+  silent re-score of locked expectations. A matching run is unchanged (exit
+  code and report bytes; the assertion is not recorded in the report).
+  Rejected with `--check`, `--engine both` and the listing modes. Request
+  field: `expect_deck_hash`. See "Deck-pin assertion" below.
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). The input path is read from the
   report itself unless `<file>` is also given, which overrides it
@@ -191,6 +202,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `negative_control_categories` | string | `--negative-control-categories` (comma-separated) |
 | `expect_rule_categories` | positive integer | `--expect-rule-categories` (booleans, floats, strings, `0` and negatives are rejected) |
 | `expect_rule_categories_file` | string | `--expect-rule-categories-file` (a path, resolved relative to the request document's own directory like `deck_file`; mutually exclusive with `expect_rule_categories`. The *names* are not inlined in the request — point at the reviewed manifest.) |
+| `expect_deck_hash` | string | `--expect-deck-hash` (`sha256:<64 hex>` — the exact form `provenance.deck.content_hash` emits; anything else is rejected as a clean error before the run). See "Deck-pin assertion". |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 | `rules` | string \| array\<string\> | `--rules` — one comma-separated string (the argv spelling) or a list of selector strings, each comma-split the same way. Any other type (a number, an object, a list holding a non-string) is rejected; empty and unmatched tokens are rejected exactly as for the flag. Curated engine only. |
@@ -545,6 +557,52 @@ alters what a glob matches surfaces as drift; a report with no
 `rule_selection` (every report written before this flag) keeps its full-deck
 interpretation. A present but malformed `rule_selection` is a clean error
 rather than a silent full-deck rerun.
+
+## Deck-pin assertion (`--expect-deck-hash`)
+
+Every `klt drc`/`klt lvs` report records which deck bytes it ran under
+(`provenance.deck.content_hash`), but nothing forced a runner to *assert* it —
+so a toolchain pin bump that changed deck bytes re-scored every locked
+expectation silently, with no field anywhere failing. `--expect-deck-hash`
+(issue #5806) closes that gap: the caller vouches for the hash, and the run
+fails loudly when it drifts.
+
+```bash
+# 1. take the hash from the accepted run's report
+klt drc layout.gds --deck sky130 --format json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["provenance"]["deck"]["content_hash"])'
+#    sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+
+# 2. assert it on every later run of the same locked expectation
+klt drc layout.gds --deck sky130 \
+  --expect-deck-hash sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad \
+  --format json
+```
+
+Rules:
+
+- The value must be exactly what `provenance.deck.content_hash` emits —
+  `sha256:` plus 64 lowercase hex digits. Anything else (a bare digest, another
+  algorithm's hash) is a usage error (exit `2`) before any deck runs, naming
+  the form.
+- The comparison happens **after** the run, against the run's own recorded
+  hash, before anything is written or emitted. A **mismatch** is the error
+  envelope (exit `1`), naming the deck, both hashes, and
+  `klt deck resolve --content-hash <observed>` to identify the revision that
+  moved — a deck change becomes a one-reviewed-change event.
+- An assertion against a run that recorded **no deck hash** never passes
+  silently: it is the same error envelope, because an expectation that cannot
+  be checked must fail loudly, not vacuously.
+- A **matching** run is byte-identical to a run without the flag: no exit-code
+  change, no report field, no `schema_version` bump. The assertion is an
+  input, not a recorded result.
+- Not combinable with `--check` (which re-verifies the committed report's own
+  recorded hash — a different use), `--engine both` (the cross-check compares
+  each engine's whole-deck report unchanged) or the listing modes. Request
+  field: `expect_deck_hash`.
+
+Pin the hash, not a deck version: the hash is the identity (see
+`docs/json-contract.md`).
 
 ## Engine
 
