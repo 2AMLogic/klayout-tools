@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 
+import pytest
+
 from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.cli._drc_native import resolve_native_deck
+from klayout_tools.drc import DrcError
 from klayout_tools.pdk_native_drc import native_drc_main_script
 from test_drc_klayout_engine import _stub_klayout_drc_subprocess, _write_gds
 
@@ -73,6 +76,29 @@ def test_user_deck_var_and_floor_override_defaults(tmp_path):
     assert floor == "0.30.1"
     assert native["deck_vars_defaulted"] == {}
     assert native["min_klayout_version_defaulted"] is False
+
+
+def test_deck_var_parsing_is_the_shared_helper(tmp_path):
+    """`--deck-var` is parsed by `cli._parsing.parse_deck_options` (issue
+    #6738), the same helper `klt lvs`/`klt extract` use: last-one-wins, only
+    the first `=` splits, and whitespace around key and value is stripped."""
+    root = _install(tmp_path, "sky130A", ("sky130A.lydrc",))
+    _, vars_, _, _ = resolve_native_deck(
+        _args(root, "sky130A", deck_var=["a=1", "b=x=y", "a=2", " c = z "])
+    )
+    assert vars_ == {"a": "2", "b": "x=y", "c": "z"}
+
+
+@pytest.mark.parametrize("entry", ["novalue", "=v", "  =v"])
+def test_malformed_deck_var_raises_drc_error(tmp_path, entry):
+    """A `--deck-var` with no `=` or a blank key is a clean `DrcError` (exit
+    1) before any engine runs. `klt drc` used to accept `=v` and forward a
+    nameless `-rd =v` global to klayout; it now matches `klt lvs`/`extract`
+    (issue #6738)."""
+    root = _install(tmp_path, "sky130A", ("sky130A.lydrc",))
+    with pytest.raises(DrcError) as excinfo:
+        resolve_native_deck(_args(root, "sky130A", deck_var=[entry]))
+    assert f"--deck-var entry {entry!r} is not KEY=VALUE" in str(excinfo.value)
 
 
 def test_cli_klayout_engine_uses_main_script_and_reports_it(

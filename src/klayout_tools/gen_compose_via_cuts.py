@@ -32,6 +32,19 @@ def landing_pad_half_dbu(landing_size_um: float, via_size_um: float, dbu: float)
     )
 
 
+def drawn_landing_box(
+    drop: dict[str, Any], side_um: float, via_size_um: float, dbu: float
+) -> Any:
+    """Landing box on the output grid, including the full cut-array span."""
+    import klayout.db as kdb
+
+    from .gen_compose_routing import _drop_array_extra_um
+
+    cx, cy = round(drop["x_um"] / dbu), round(drop["y_um"] / dbu)
+    half = landing_pad_half_dbu(side_um + _drop_array_extra_um(drop), via_size_um, dbu)
+    return kdb.Box(cx - half, cy - half, cx + half, cy + half)
+
+
 def via_cut_block_spacing_violation_um(
     drop: dict[str, Any],
     cut_side_um: float,

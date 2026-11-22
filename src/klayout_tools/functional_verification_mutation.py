@@ -215,8 +215,8 @@ def run_functional_verification_with_mutations(
         raise _fv.FunctionalVerificationError(
             "request.hdl_toplevel must be a non-empty string"
         )
-    module, module_dir, testcase = _fv._resolve_testbench(
-        request_doc["testbench"], request_dir
+    module, module_dir, testcase, plusargs = _fv._resolve_testbench_target(
+        None, request_doc["testbench"], request_dir
     )
     parameters = _fv._resolve_parameters(request_doc.get("parameters"))
     env = _fv._resolve_env(request_doc.get("env"))
@@ -337,6 +337,10 @@ def run_functional_verification_with_mutations(
                 test_dir=mutant_dir,
                 results_xml=mutant_results_xml,
                 test_log=test_log,
+                # Issue #6906: `testbench.plusargs` apply to the baseline and
+                # every variant alike -- a DUT that needs `+lut=` to run at
+                # all cannot pass the baseline gate otherwise.
+                plusargs=plusargs,
             )
         _write_mutant_combined_log(combined_log, build_log, test_log)
 
