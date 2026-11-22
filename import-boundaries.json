@@ -377,6 +377,7 @@
         "klayout_tools.gen",
         "klayout_tools.gen_asap7",
         "klayout_tools.gen_asap7_tap",
+        "klayout_tools.gen_base",
         "klayout_tools.gen_cap_vpp",
         "klayout_tools.gen_pdk_cell",
         "klayout_tools.gen_cap_stack",

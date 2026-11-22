@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .gen_base import GenError
+
 DIODE_KINDS = ("n_psub", "p_nwell")
 
 #: Voltage classes each supported PDK family accepts; the first entry is the
@@ -252,7 +254,6 @@ def resolve_diode_voltage_class(
     union of every family's; ``spec.validate``'s generic union check stays as
     the backstop for families with no diode support (#6630).
     """
-    from .gen import GenError
     from .gen_layer_params import _pdk_family
 
     family = _pdk_family(variant)
