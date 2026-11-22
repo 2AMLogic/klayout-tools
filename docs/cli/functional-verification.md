@@ -1271,6 +1271,14 @@ annotation-class-dependent: correct under `INTERCONNECT`-only annotation,
 dead under any `IOPATH`-bearing SDF, still dead at a 10× relaxed clock. See
 §3.8's 2026-09-23 addendum for that isolation table.
 
+On the routed GF180 design in issue #6991, full SDF at both min and typ
+passed 3/21 tests with the bench's 10 ns clock. Interconnect-only passed
+21/21. The first missed bit-counter capture had negative setup slack at
+10 ns and positive hold slack. With the same full SDF at 100 ns, all 21
+tests passed. For a specify-enabled control without SDF, list the PDK's
+timing-model sources explicitly. A plain `request.pdk` run without SDF
+selects the `FUNCTIONAL` branch. [Pin traces, controls and reproduction](../design/sdf-annotate-feasibility-spike.md#gf180-bit-counter-capture-at-10-ns)
+
 **Net-delay back-annotation only: `options.sdf.entries: "interconnect"`
 (issue #2364).** For a design whose post-route STA closes, the supported way
 to back-annotate the post-layout-specific net delays without the
