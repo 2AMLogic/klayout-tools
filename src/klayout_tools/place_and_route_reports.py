@@ -237,12 +237,13 @@ def _attribute_region(
     return None
 
 
-def parse_congestion_report(
+def parse_congestion_report_records(
     report_path: str,
     macro_boxes: list[dict[str, Any]],
-    top_n: int = OVERFLOW_REGIONS_TOP_N,
 ) -> list[dict[str, Any]] | None:
-    """Worst-``top_n`` overflow regions from a ``-congestion_report_file``;
+    """Every violation record of a ``-congestion_report_file``, with its
+    region attribution, in report order (issue #6949: the full population
+    both the worst-N ranking and the per-region aggregates derive from);
     ``None`` when the file is absent/unreadable or holds no violation.
 
     ``macro_boxes`` is ``[{instance, footprint=(x1,y1,x2,y2), margin}]``; a
@@ -273,9 +274,27 @@ def parse_congestion_report(
         )
     if not regions:
         return None
-    # Stable: worst overflow first, ties keep report order.
-    regions.sort(key=lambda r: -r["overflow"])
-    return regions[:top_n]
+    return regions
+
+
+def rank_overflow_regions(
+    records: list[dict[str, Any]], top_n: int = OVERFLOW_REGIONS_TOP_N
+) -> list[dict[str, Any]]:
+    """Worst overflow first, ties keep report order (stable sort)."""
+    return sorted(records, key=lambda r: -r["overflow"])[:top_n]
+
+
+def parse_congestion_report(
+    report_path: str,
+    macro_boxes: list[dict[str, Any]],
+    top_n: int = OVERFLOW_REGIONS_TOP_N,
+) -> list[dict[str, Any]] | None:
+    """Worst-``top_n`` overflow regions from a ``-congestion_report_file``;
+    ``None`` when the file is absent/unreadable or holds no violation."""
+    records = parse_congestion_report_records(report_path, macro_boxes)
+    if records is None:
+        return None
+    return rank_overflow_regions(records, top_n)
 
 
 def parse_global_route_congestion(stdout: str) -> dict[str, Any] | None:
@@ -376,11 +395,16 @@ def build_congestion(
     completeness: dict[str, int] | None,
     placement: dict[str, Any],
     detailed: dict[str, Any],
-    overflow_regions: list[dict[str, Any]] | None = None,
+    overflow: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the route-stage ``congestion`` block. Every field the engine
     could not produce is ``null`` and named, with its reason, in
-    ``null_reasons`` -- a missing value is never silently ``0``."""
+    ``null_reasons`` -- a missing value is never silently ``0``. ``overflow``
+    is the route stage's congestion-report digest
+    (:func:`place_and_route_route_overflow.grt_overflow`): the capped
+    worst-N ``overflow_regions`` list and the full-population
+    ``overflow_by_region`` aggregates, both ``null`` (same reason) when no
+    report was produced."""
     reasons: dict[str, str] = {}
     gr_keys = (
         "total_overflow",
@@ -396,9 +420,11 @@ def build_congestion(
         gr[key] = None if global_route is None else global_route[key]
         if gr[key] is None:
             reasons[f"global_route.{key}"] = _NOT_REPORTED
-    gr["overflow_regions"] = overflow_regions
-    if overflow_regions is None:
+    gr["overflow_regions"] = overflow["overflow_regions"] if overflow else None
+    gr["overflow_by_region"] = overflow["overflow_by_region"] if overflow else None
+    if overflow is None:
         reasons["global_route.overflow_regions"] = _NO_CONGESTION_REPORT
+        reasons["global_route.overflow_by_region"] = _NO_CONGESTION_REPORT
     gr["max_gcell_usage_pct"] = None
     reasons["global_route.max_gcell_usage_pct"] = _NO_GCELL_USAGE
 
