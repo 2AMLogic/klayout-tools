@@ -151,3 +151,94 @@ def test_run_sta_attaches_block_only_when_requested(tmp_path, monkeypatch):
     )
     out = run_sta(_request(tmp_path, sdc_check={"path": "c.sdc"}))
     assert out["sdc_drift"]["status"] == "match"
+
+
+_UNCHECKED_SDC = (
+    "create_clock -name clk -period 20.0000 [get_ports {clk}]\n"
+    "set_input_delay 4.0000 -clock [get_clocks {clk}] -add_delay [get_ports {ena}]\n"
+    "set_output_delay 4.0000 -clock [get_clocks {clk}] "
+    "-add_delay [get_ports {uo_out[0]}]\n"
+)
+
+
+@pytest.mark.parametrize("parsed_period", [None, 21.0])
+def test_unchecked_forms_only_suppress_inferred_absence(tmp_path, parsed_period):
+    sdc = _UNCHECKED_SDC
+    if parsed_period is not None:
+        sdc += f"create_clock -period {parsed_period} [get_ports clk]\n"
+    result = _block(
+        tmp_path,
+        sdc,
+        clocks=[{"port": "clk", "period_ns": 20.0}],
+        input_delay_ns=4.0,
+        output_delay_ns=4.0,
+    )
+    assert result["unchecked"] == [
+        {"command": cmd, "line": line, "reason": "unsupported option or argument form"}
+        for line, cmd in enumerate(
+            ("create_clock", "set_input_delay", "set_output_delay"), 1
+        )
+    ]
+    if parsed_period is None:
+        assert result["mismatches"] == []
+        assert result["status"] == "match"
+    else:
+        assert result["mismatches"] == [
+            {
+                "command": "create_clock",
+                "subject": "clk",
+                "sdc_value": 21.0,
+                "request_value": 20.0,
+                "line": 4,
+            }
+        ]
+        assert result["status"] == "drift"
+
+
+@pytest.mark.parametrize("unchecked_input", [False, True])
+def test_missing_clock_and_delays_are_command_specific(tmp_path, unchecked_input):
+    sdc = "set_input_delay $value -clock clk [all_inputs]\n" if unchecked_input else ""
+    result = _block(tmp_path, sdc, input_delay_ns=4.0, output_delay_ns=4.0)
+    missing = [("create_clock", None)]
+    if not unchecked_input:
+        missing.extend([("set_input_delay", "min"), ("set_input_delay", "max")])
+    missing.extend([("set_output_delay", "min"), ("set_output_delay", "max")])
+    assert [(m["command"], m.get("bound")) for m in result["mismatches"]] == missing
+    assert all(m["sdc_value"] is None for m in result["mismatches"])
+    assert result["status"] == "drift"
+
+
+def test_unchecked_uncertainty_keeps_parsed_sdc_only_value(tmp_path):
+    sdc = (
+        "create_clock -period 2 [get_ports clk]\n"
+        "set_clock_uncertainty -setup $jitter [get_clocks clk]\n"
+        "set_clock_uncertainty -hold 0.3 [get_clocks clk]\n"
+    )
+    result = _block(tmp_path, sdc, clock_uncertainty={"setup_ns": 0.1})
+    assert [u["line"] for u in result["unchecked"]] == [2]
+    assert result["mismatches"] == [
+        {
+            "command": "set_clock_uncertainty",
+            "subject": "clk",
+            "sdc_value": 0.3,
+            "request_value": None,
+            "line": 3,
+            "bound": "hold",
+        }
+    ]
+    assert result["status"] == "drift"
+
+
+def test_unchecked_input_keeps_wildcard_comparison_with_port_override(tmp_path):
+    sdc = (
+        "create_clock -period 2 [get_ports clk]\n"
+        "set_input_delay 0.5 -clock clk [all_inputs]\n"
+        "set_input_delay $unresolved -clock clk [get_ports b]\n"
+    )
+    result = _block(
+        tmp_path, sdc, input_delay_ns=0.5, input_delays={"a": {"min_ns": 0.4}}
+    )
+    assert [
+        (m["subject"], m["bound"], m["sdc_value"], m["request_value"])
+        for m in result["mismatches"]
+    ] == [("a", "min", 0.5, 0.4)]

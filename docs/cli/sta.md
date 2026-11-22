@@ -1749,6 +1749,10 @@ Comments, blank lines and `\` continuations are handled; anything else --
 other commands, or a checked command using an option/form the reader does not
 understand (`-add_delay`, `-waveform`, braces, `$variables`) -- goes to
 `unchecked`.
+An unchecked form may supply a requested constraint. For that command,
+`mismatches` lists differences involving parsed SDC values. For other
+commands, a requested constraint missing from the SDC still produces a
+mismatch with `sdc_value: null`.
 
 ```json
 "sdc_drift": {
