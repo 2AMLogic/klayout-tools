@@ -27,7 +27,10 @@ and 10"):
   exists; every cited evidence envelope exists and its declared ``--check``
   command exits ``0``; every declared spec row cites at least one envelope;
   and, for a digital partition, Fmax, area and power are each bound to a
-  numeric field of a cited envelope for every declared corner. Item 8 stays
+  numeric field of a cited envelope for every declared corner. A committed
+  record produced outside klt is citable through ``external_records``
+  (issue #6939), and a metric binding may declare a ``reciprocal``
+  transform (a period binds its frequency). Item 8 stays
   open to a bare generic envelope in the grader -- this producer is the
   tool-produced alternative, disclosed as such on the citation.
 - **Item 9 (Testbenches shipped)** -- every listed testbench exists; each
@@ -64,7 +67,7 @@ from typing import Any
 
 from . import signoff_attest_item8 as item8
 from . import signoff_attest_item9 as item9
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_int
 from ._provenance import sha256_file
 from ._report_verify import load_committed_report
 from .build_identity import build_version, klayout_version
@@ -84,7 +87,7 @@ from .signoff_attest_drift import drift_result
 from .signoff_attest_env import klt_shim_scope
 from .signoff_attest_glob import expand_entry
 from .signoff_attest_input import attestation_block, input_binding
-from .signoff_attest_pins import item9_pin_checks, json_node
+from .signoff_attest_pins import item9_pin_checks
 from .signoff_attest_presence import file_check as _file_check
 from .signoff_attest_presence import path_checks, split_entries
 
@@ -150,7 +153,15 @@ _ITEM_KEYS: dict[int, frozenset[str]] = {
     # generator's input files (``inputs``, #5724); the stream is the ``--input``.
     2: frozenset({"checks", "inputs"}),
     8: frozenset(
-        {"report", "spec_rows", "citations", "envelope_checks", "corners", "metrics"}
+        {
+            "report",
+            "spec_rows",
+            "citations",
+            "envelope_checks",
+            "external_records",
+            "corners",
+            "metrics",
+        }
     ),
     9: item9.ITEM9_KEYS,
     10: frozenset({"hygiene", "checks"}),
@@ -451,12 +462,18 @@ def _validated_characterization(
             "summarises the evidence, it is not itself evidence"
         )
     envelope_checks = _validated_envelope_checks(inventory, cited, root)
-    corners, metrics = _validated_metrics(inventory, root)
+    corners, metrics = item8.validated_metrics(
+        inventory, root, AttestationError, _normalize_repo_path, _REQUIRED_METRICS
+    )
+    external_records = item8.validated_external_records(
+        inventory, cited, root, AttestationError, _normalize_repo_path
+    )
     return {
         "report": report,
         "spec_rows": list(rows),
         "citations": citations,
         "envelope_checks": envelope_checks,
+        "external_records": external_records,
         "corners": corners,
         "metrics": metrics,
     }
@@ -529,73 +546,6 @@ def _validated_envelope_checks(
             f"when it is stale; missing: {', '.join(missing)}"
         )
     return envelope_checks
-
-
-def _validated_metrics(
-    inventory: Mapping[str, Any], root: str
-) -> tuple[list[str], dict[str, dict[str, dict[str, str]]]]:
-    """``(corners, metrics)`` for a digital partition; ``([], {})`` for an
-    analog one (neither key declared). ``metrics[corner][name]`` binds a
-    required metric to ``{"envelope": path, "field": dotted.path}``."""
-    has_corners, has_metrics = "corners" in inventory, "metrics" in inventory
-    if has_corners != has_metrics:
-        raise AttestationError(
-            "'corners' and 'metrics' go together (a digital partition's corner "
-            "set and the metric bindings for it)"
-        )
-    if not has_corners:
-        return [], {}
-    corners = inventory["corners"]
-    if (
-        not isinstance(corners, list)
-        or not corners
-        or not all(isinstance(c, str) and c for c in corners)
-        or len(set(corners)) != len(corners)
-    ):
-        raise AttestationError("'corners' must be a non-empty list of unique names")
-    raw = inventory["metrics"]
-    if not isinstance(raw, Mapping):
-        raise AttestationError("'metrics' must map corner -> metric bindings")
-    unknown = sorted(set(raw) - set(corners))
-    if unknown:
-        raise AttestationError(
-            f"'metrics' names corner(s) not in 'corners': {', '.join(unknown)}"
-        )
-    metrics = {
-        corner: _validated_corner_metrics(corner, raw.get(corner, {}), root)
-        for corner in corners
-    }
-    return list(corners), metrics
-
-
-def _validated_corner_metrics(
-    corner: str, bound: Any, root: str
-) -> dict[str, dict[str, str]]:
-    if not isinstance(bound, Mapping):
-        raise AttestationError(f"'metrics.{corner}' must be an object")
-    unknown = sorted(set(bound) - set(_REQUIRED_METRICS))
-    if unknown:
-        raise AttestationError(
-            f"'metrics.{corner}' has unknown metric(s): {', '.join(unknown)} "
-            f"(accepted: {', '.join(_REQUIRED_METRICS)})"
-        )
-    result: dict[str, dict[str, str]] = {}
-    for name, binding in bound.items():
-        field = f"metrics.{corner}.{name}"
-        if (
-            not isinstance(binding, Mapping)
-            or set(binding) != {"envelope", "field"}
-            or not isinstance(binding["field"], str)
-            or not binding["field"]
-        ):
-            raise AttestationError(
-                f'\'{field}\' must be {{"envelope": path, "field": "dotted.path"}}'
-            )
-        result[name] = {
-            "envelope": _normalize_repo_path(binding["envelope"], field, root),
-            "field": binding["field"],
-        }
-    return result
 
 
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -779,15 +729,6 @@ def _skipped_check(
     }
 
 
-def _metric_value(root: str, path: str, field: str) -> float | int | None:
-    """The finite number at dotted ``field`` of the JSON envelope at ``path``
-    (digit segments index lists), or ``None`` if unreadable/absent/non-numeric.
-    The walk itself is shared with item 9's reference-form pins
-    (:func:`~.signoff_attest_pins.json_node`, issue #5563)."""
-    node = json_node(root, path, field)
-    return node if is_number(node) else None
-
-
 def _characterization_checks(
     root: str, normalized: Mapping[str, Any], command: Any
 ) -> list[dict[str, Any]]:
@@ -795,7 +736,9 @@ def _characterization_checks(
     a citation per spec row, each freshness command, then (digital) metrics."""
     checks: list[dict[str, Any]] = [_file_check(root, normalized["report"], "report")]
     cites = normalized["citations"]
-    cited, present, envelopes = item8.evidence_checks(root, cites, _file_check)
+    cited, present, envelopes = item8.evidence_checks(
+        root, cites, _file_check, set(normalized.get("external_records", ()))
+    )
     checks.extend((*present.values(), *envelopes.values()))
     for row in sorted(normalized["spec_rows"]):
         paths = cites[row]
@@ -816,24 +759,7 @@ def _characterization_checks(
                 target=path,
             )
         )
-    for corner in sorted(normalized["corners"]):
-        for name in _REQUIRED_METRICS:
-            binding = normalized["metrics"].get(corner, {}).get(name)
-            value = None
-            if binding is not None and binding["envelope"] in present:
-                value = _metric_value(root, binding["envelope"], binding["field"])
-            checks.append(
-                {
-                    "check": "metric",
-                    "role": "digital",
-                    "corner": corner,
-                    "metric": name,
-                    "envelope": binding["envelope"] if binding else None,
-                    "field": binding["field"] if binding else None,
-                    "value": value,
-                    "passed": value is not None,
-                }
-            )
+    checks.extend(item8.metric_checks(root, normalized, present, _REQUIRED_METRICS))
     return checks
 
 
