@@ -557,10 +557,8 @@ class PostRouteStaError(Exception):
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sta`` request JSON file.
 
-    Raises :class:`PostRouteStaError` if the file is missing/unreadable,
-    not valid JSON, or missing a required top-level field (``pdk``,
-    ``constraints``). Does not require a ``schema`` field, matching every
-    other request-taking verb's ``load_request``.
+    Reject unreadable files, malformed JSON, unknown top-level fields, and
+    requests missing ``pdk`` or ``constraints``. The schema field is optional.
 
     Unlike ``pdk``/``constraints``, neither ``def`` nor ``verilog`` is a
     required top-level field here -- exactly one of them is required, a
@@ -571,12 +569,16 @@ def load_request(request_path: str) -> dict[str, Any]:
     #1825).
     """
     request = _load_request_json(request_path, PostRouteStaError)
-    return validate_request_shape(
+    request = validate_request_shape(
         request,
         "request file",
         error_cls=PostRouteStaError,
         required_fields=("pdk", "constraints"),
     )
+    check_known_fields(
+        request, KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
+    )
+    return request
 
 
 def run_sta(
@@ -608,9 +610,6 @@ def run_sta(
     as debuggable artifacts, never deleted.
     """
     request = load_request(request_path)
-    check_known_fields(
-        request, KNOWN_REQUEST_FIELDS, verb="sta", error_cls=PostRouteStaError
-    )
     request_dir = os.path.dirname(os.path.abspath(request_path))
 
     # Issue #1825: `def`/`verilog` are mutually exclusive alternate geometry
