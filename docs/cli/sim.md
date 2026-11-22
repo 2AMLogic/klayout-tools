@@ -4653,8 +4653,12 @@ its drain current at the operating point.
 To derive the inner name for a different wrapper, open its `.subckt` in the
 PDK model library and find the device line beginning with `N`. In ngspice,
 `show n.xdut.xm1.nsg13_lv_nmos` lists this instance's operating-point
-parameters. PSP103 exposes `ids` and `ide`. A request for `id` produces a
-missing-vector diagnostic.
+parameters. PSP103 exposes `ids` and `ide`, and has no `id`. A request that
+names `[id]` anyway errors the corner (exit 4) with the generic
+`measurement '<name>' produced no value: its 'expr' (...) printed no
+'<name> = <value>' line` diagnostic, not a message naming the missing vector —
+so confirm an unfamiliar parameter name with `show` rather than reading that
+diagnostic as a plumbing fault.
 
 With a 1 µm × 0.13 µm NMOS at 27 °C, a 0.7 V gate and a 0.6 V drain,
 ngspice 46 reported 44.56219 µA for both parameters and for the independent
