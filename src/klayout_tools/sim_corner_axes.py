@@ -20,6 +20,29 @@ from .sim_corner_point import (
 from .sim_echo_messages import zipped_length_message
 from .sim_errors import SimError
 
+#: ``options.ngspice_options`` (issue #3111): the solver/convergence
+#: ``.options`` names a request may set (``chgtol``/``trtol``, issue #7007,
+#: complete the transient tolerance set). Moved out of ``sim.py`` (issue
+#: #7007) for its size ratchet; re-exported there. ngspice silently ignores
+#: an unknown ``.options`` name, so a free-form map would hide a typo as "no
+#: effect"; the allowlist turns it into a named error instead.
+NGSPICE_SOLVER_OPTIONS = (
+    "abstol",
+    "chgtol",
+    "gmin",
+    "gminsteps",
+    "itl1",
+    "itl2",
+    "itl4",
+    "method",
+    "noopiter",
+    "pivtol",
+    "reltol",
+    "srcsteps",
+    "trtol",
+    "vntol",
+)
+
 #: ``corners.options`` (issue #3125): the numeric solver ``.options`` a
 #: corner axis may sweep. A subset of :data:`NGSPICE_SOLVER_OPTIONS` -- the
 #: flag/token options (``method``, ``noopiter``) are not numbers -- plus

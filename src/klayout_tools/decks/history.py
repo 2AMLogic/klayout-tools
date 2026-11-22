@@ -335,13 +335,13 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       ``provenance.deck.content_hash``), or ``None`` if the deck's source
       file can't be hashed.
     - ``device_classes`` -- the device-class roles this deck is structurally
-      capable of recognising (``ExtractionDeck.device_classes``), e.g.
-      whether ``diode_nd2ps_06v0``/``diode_pd2nw_06v0`` are wired up at all --
+      capable of recognising (``ExtractionDeck.device_classes``) --
       independent of whether any given layout actually contains one.
-    - ``provides`` -- which capabilities this deck supplies (issue #3783),
-      any of ``curated_drc`` (``klt drc --deck`` / ``klt deck rules``),
-      ``klayout_drc`` (a shipped KLayout DRC script run via ``--engine
-      klayout --deck-file``) and ``extraction``.
+    - ``provides`` -- which capabilities this deck supplies (issue #3783):
+      ``curated_drc`` (``klt drc --deck``/``klt deck rules``),
+      ``klayout_drc`` (a shipped KLayout DRC script) and ``extraction``.
+    - ``enforced_rule_count`` -- rules the deck's curated DRC rule table
+      enforces (issue #5843); ``None`` for a deck with no table (``asap7``).
     - ``released`` -- the same tri-state signal as
       ``provenance.deck.released`` (:func:`is_deck_hash_released`): ``True``
       when this exact content hash shipped in a tagged release, ``False``
@@ -363,10 +363,8 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
       release}`` with the same semantics as the fields of the same name;
       ``path_kind`` is ``"packaged"`` (the file inside this install).
     """
-    # Imported lazily, not at module scope: `_provenance` itself imports
-    # `is_deck_hash_released` from this module, so a module-level import here
-    # would be a circular import (this module would be mid-initialization the
-    # first time anything imports `_provenance` first).
+    # Lazy imports: `_provenance` imports `is_deck_hash_released` from this
+    # module, so a module-level import here would be circular.
     from .._provenance import sha256_file
     from . import (
         UnknownExtractionDeckError,
@@ -376,6 +374,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
         get_unmodeled_rules,
         known_extraction_deck_names,
     )
+    from .enforced_rules import enforced_rule_count
 
     names = [name] if name is not None else list(known_extraction_deck_names())
 
@@ -394,6 +393,7 @@ def deck_info(name: str | None = None) -> dict[str, Any]:
             "content_hash": content_hash,
             "device_classes": list(deck.device_classes),
             "provides": deck_provides(deck_name),
+            "enforced_rule_count": enforced_rule_count(deck_name),
             "released": released,
             "release": release,
             "unmodeled_rules": get_unmodeled_rules(deck_name),
