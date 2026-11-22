@@ -175,9 +175,10 @@ def run(args: argparse.Namespace) -> int:
         ):
             _rehydrate_bare_attach(args)
         # Issue #6559: `--engine klayout-runset` -- usage errors (exit 2) use
-        # `klt extract`'s own validation and text. `--deck` belongs to the
-        # curated engine, so it is not required here (and, if given, is
-        # refused by name by `run_extract` as on `klt extract`).
+        # `klt extract`'s own validation and text. `--deck` is not required
+        # here; given, it selects the curated deck whose parasitics are
+        # joined onto the runset devices by geometric net correspondence
+        # (issue #6606) -- never forwarded to the runset extraction itself.
         try:
             runset = pex_runset.runset_from_args(
                 args.engine,

@@ -71,7 +71,7 @@ def _report(
     }
 
 
-def _run(monkeypatch, curated, native, mapping=MAPPING):
+def _run(monkeypatch, curated, native, mapping=MAPPING, deck="sky130"):
     monkeypatch.setattr(cc, "run_drc", lambda *a, **k: curated)
     if isinstance(native, Exception):
 
@@ -81,7 +81,7 @@ def _run(monkeypatch, curated, native, mapping=MAPPING):
         monkeypatch.setattr(cc, "run_drc_klayout_engine", boom)
     else:
         monkeypatch.setattr(cc, "run_drc_klayout_engine", lambda *a, **k: native)
-    return cc.run_drc_crosscheck("x.gds", "sky130", "native.drc", rule_mapping=mapping)
+    return cc.run_drc_crosscheck("x.gds", deck, "native.drc", rule_mapping=mapping)
 
 
 def _covered(**kw):
@@ -395,8 +395,11 @@ def test_crosscheck_envelope_validates_with_real_reports(tmp_path, monkeypatch):
         native_kwargs={"allow_missing_host_tools": True},
     )
     assert out["reports"]["native"]["engine"] == "klayout"
-    # Real decks and no mapping group: never an agreement.
+    # Real decks and no sky130 mapping group: never an agreement, and the
+    # reason names the empty mapping (schema-validated below with `reason`
+    # present, issue #5720).
     assert out["comparison"]["state"] == "not_comparable"
+    assert out["comparison"]["reason"] == cc.REASON_MAPPING_EMPTY
     _schema_validator().validate(out)
 
 

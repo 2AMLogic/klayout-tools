@@ -76,6 +76,8 @@ def _resistance_graph_echo(
                 "selected_resistance_ohm": graph.get("selected_resistance_ohm"),
                 "legacy_resistance_ohm": graph.get("legacy_resistance_ohm"),
                 "fallback_reason": _resistance_graph_fallback_reason(graph),
+                "terminals": graph.get("terminals"),
+                "pair_resistance_ohm": graph.get("pair_resistance_ohm"),
             }
         )
     echo: dict[str, Any] = {"r_cut_ohm": r_cut_ohm}

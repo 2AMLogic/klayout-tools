@@ -1227,6 +1227,8 @@ _ERROR_STAGE_BY_CODE = {
     "timeout_budget_unreachable": "execute",
     "budget_exceeded": "execute",
     "pin_count_mismatch": "execute",
+    "pin_order_mismatch": "execute",
+    "flat_dut_mismatch": "execute",
     "lost_shard": "collect",
     "orphaned": "collect",
 }
@@ -1255,16 +1257,11 @@ def _side_error(
     code: str | None = None,
     measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``error`` object of an errored ``delta[]`` row (issue
-    #3062): ``side``, ``stage``, ``message`` and, when the source has one,
-    ``code`` -- taken from that side's corner ``diagnostics[]`` (first
-    error-severity entry), else from the caller-supplied ``message``/``code``
-    (a ``SimError``), never invented. ``remote`` carries the side's
-    ``environment.remote`` (the batch job id) when present.
-
-    When neither exists, the blamed side's ``measurement`` may carry the
-    ``message`` a ``--measure-command`` harness recorded (issue #4555); the
-    stage is then ``"execute"``."""
+    """Describe why a delta row errored (#3062). Read the corner's first
+    error diagnostic, falling back to its first diagnostic. A caller-supplied
+    failure can supply the message and code directly. Include the side's
+    remote job metadata when available. A measurement-harness message alone
+    is an execute-stage error (#4555)."""
     remote = None
     if sim_report is not None:
         remote = (sim_report.get("environment") or {}).get("remote")
@@ -1407,14 +1404,13 @@ def _build_delta_rows(
 
 
 def _static_extracted_failure(
-    pin_count_mismatch: dict[str, Any] | None,
-    flat_dut_mismatch: dict[str, Any] | None,
-) -> tuple[str, str | None] | None:
-    """``(message, code)`` for a statically detected extracted-side mismatch."""
-    static = pin_count_mismatch or flat_dut_mismatch
-    if static is None or not static.get("detail"):
-        return None
-    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
+    **mismatches: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Use the top-level mismatch name and detail for the skipped leg."""
+    for code, mismatch in mismatches.items():
+        if mismatch and mismatch.get("detail"):
+            return str(mismatch["detail"]), code
+    return None
 
 
 def _unextracted_delta_rows(
@@ -2594,7 +2590,7 @@ def run_pex(
     echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
     values -- only when a cap was given) and one ``{net, net_id,
     resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
-    fallback_reason}`` entry per net, only when the flag was given --
+    fallback_reason, terminals, pair_resistance_ohm}`` entry per net, only when the flag was given --
     otherwise the report and netlist are byte-identical. Combining it with
     ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
     legacy scalar, so a critical net would mix resistance sources).
@@ -2788,10 +2784,10 @@ def run_pex(
     ``device_cards_match``. Without it the report is byte-identical.
     Incompatible with ``measure_command`` (:class:`PexError`).
 
-    **``runset`` (issue #6559)** swaps the curated-deck extraction for ``klt
-    extract --engine klayout-runset`` (``deck_name`` is then ``None``): a
-    device-level leg with **no parasitics**, reported in ``extraction.engine``/
-    ``parasitics_carried``/``params_not_carried`` (see :mod:`.pex_runset`).
+    **``runset`` (issues #6559/#6606)** swaps the curated-deck extraction for
+    ``klt extract --engine klayout-runset``: no parasitics when ``deck_name`` is
+    ``None``, else that curated deck's parasitics attached by net correspondence;
+    ``extraction.engine``/``parasitics_carried`` say which (see :mod:`.pex_runset`).
     ``None`` -- the curated route -- leaves the envelope byte-identical.
 
     **Output-directory ownership (issue #2770).** The run owns its artifact
@@ -2847,48 +2843,37 @@ def run_pex(
     )
 
     try:
-        extract_report = run_extract(
+        # Issue #6559/#6606: the engine dispatch (curated / runset / the
+        # `--deck`-under-runset merged route) and the option mapping live in
+        # `pex_runset.run_extract_leg` -- the module that owns them.
+        extract_report = pex_runset.run_extract_leg(
             layout_path,
             deck_name,
+            runset=runset,
             output=output,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
-            # Issue #6559: the runset engine has no parasitics; every other
-            # option passes through and is refused by name by `run_extract`.
-            parasitics=runset is None,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            # Issue #2854: `--rename-declared-pins` passthrough. `False`
-            # whenever the flag was never given, which is the exact
-            # `run_extract` call this module made before it existed.
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            # Issue #2686: `--label-layer` passthrough. `None` when the flag
-            # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
             device_models=device_models,
+            deck_options=deck_options,
+            declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             critical_nets=critical_nets,
             critical_net_patterns=critical_net_patterns,
             critical_net_all=critical_net_all,
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
-            # Issue #4037: `False`/`None` whenever the flags were never given,
-            # which is the exact `run_extract` call made before they existed.
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
             resistance_graph_caps=resistance_graph_caps,
-            emit_selected_resistance=resistance_graph,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=mom_rlc_inductance_nh,
-            **pex_runset.extract_options(runset),
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
@@ -3345,7 +3330,9 @@ def run_pex(
         if extracted_report is None:
             if extracted_failure is None:
                 extracted_failure = _static_extracted_failure(
-                    pin_count_mismatch, flat_dut_mismatch
+                    pin_count_mismatch=pin_count_mismatch,
+                    flat_dut_mismatch=flat_dut_mismatch,
+                    pin_order_mismatch=pin_order_mismatch,
                 )
             delta.extend(
                 _unextracted_delta_rows(
