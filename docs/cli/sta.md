@@ -2110,8 +2110,10 @@ klt sta flows/gcd/sta.json --check flows/gcd/sta.report.json --rerun   # full
   map-form `spef`) report hoists `provenance.input` and carries one
   `corners[].deck.content_hash` per corner, so each corner is checked on its
   own and the moved one is named, e.g. `corners[ss_100C_1v60].deck.content_hash`.
-  A recorded hash of `null` counts as drift. A corner added to or removed
-  from the request is reported under that corner’s deck hash.
+  A map-form `spef` names the Liberty and interconnect corner together, e.g.
+  `corners[ss_100C_1v60,min].deck.content_hash`. Each entry is checked against
+  its resolved Liberty digest. A missing entry, a recorded hash of `null`, or
+  a corner added to or removed from the request counts as drift.
 - **`--rerun` (full mode, requires `--check`).** Re-runs the analysis and diffs
   the fresh report against the committed one, reporting every changed field
   under `drift`. Excluded from the diff: `provenance.klt_version` /
