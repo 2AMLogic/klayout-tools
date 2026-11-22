@@ -6913,6 +6913,32 @@ error, exit 1).
   response, a step measurement is reported as `<step>.<name>` (e.g.
   `light.vout`).
 
+  On a transient `TRIG`/`TARG` card, each clause starts its own crossing
+  count. A trailing `td=4n` delays only the target count. For example, with
+  `Vx x 0 PULSE(0 1 1n 100p 100p 2n 5n)`, `Rx x 0 1k`, and a transient
+  step with `"args": "20p 20n"`, the first rising crossing of 0.2 V after
+  4 ns occurs at 6.02 ns. The corresponding 0.8 V crossing is at 6.08 ns.
+
+  | Placement of `td=4n` | Trigger at 0.2 V | Target at 0.8 V | Target minus trigger |
+  | --- | ---: | ---: | ---: |
+  | Target clause only | 1.02 ns | 6.08 ns | 5.06 ns |
+  | Trigger clause only | 6.02 ns | 1.08 ns | −4.94 ns |
+  | Both clauses | 6.02 ns | 6.08 ns | 60 ps |
+
+  The first two intervals pair crossings from different pulses. To measure
+  a single edge, put the delay on both clauses. This step's `measurements`
+  array also checks the result with two independent `WHEN` cards. The last
+  entry reads their earlier results by bare name within the same step.
+
+  ```json
+  [
+    {"name":"both", "spice":".meas tran both trig v(x) val=0.2 rise=1 td=4n targ v(x) val=0.8 rise=1 td=4n"},
+    {"name":"t20", "spice":".meas tran t20 when v(x)=0.2 rise=1 td=4n"},
+    {"name":"t80", "spice":".meas tran t80 when v(x)=0.8 rise=1 td=4n"},
+    {"name":"dt", "expr":"t80 - t20"}
+  ]
+  ```
+
   **Do not name a step measurement after a node a later measurement in the
   same step reads.** ngspice stores a measurement's result in the step's plot
   as a vector named after the measurement, so such a name replaces that
