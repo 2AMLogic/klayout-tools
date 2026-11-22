@@ -27,6 +27,7 @@ identification, never a verdict.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -34,7 +35,7 @@ from typing import Any
 #: ``"<item id>.<analog|digital>"`` -- exactly the ``evidence`` map's key
 #: grammar, resolved with the same partition-qualified precedence by
 #: :func:`._lookup_evidence` (this module, re-exported by ``signoff``).
-_DISCLOSED_KEY = re.compile(r"^(\d+)(?:\.(analog|digital))?$")
+_DISCLOSED_KEY = re.compile(r"\d+(?:\.(?:analog|digital))?")
 
 
 def _lookup_evidence(
@@ -104,7 +105,7 @@ def read_disclosed_evidence(manifest: dict[str, Any]) -> dict[str, str]:
             f"item keys to file paths, got {type(raw).__name__}"
         )
     for key, value in raw.items():
-        if not isinstance(key, str) or not _DISCLOSED_KEY.match(key):
+        if not isinstance(key, str) or not _DISCLOSED_KEY.fullmatch(key):
             raise SignoffError(
                 "block manifest 'disclosed_evidence' keys must be "
                 '"<item id>" or "<item id>.<analog|digital>", '
@@ -171,12 +172,5 @@ def apply_disclosed_evidence(
 
 
 def _readable_file(path: str) -> bool:
-    """Whether ``path`` (cwd-relative, the same convention as a local
-    file-backed evidence citation) names a readable file -- and nothing
-    more: opened and closed, never read, parsed, or executed (issue #6953:
-    the grader confirms the artifact is there, not what it says)."""
-    try:
-        with open(path, "rb"):
-            return True
-    except OSError:
-        return False
+    """Check that the disclosure resolves to a readable regular file (#6953)."""
+    return os.path.isfile(path) and os.access(path, os.R_OK)

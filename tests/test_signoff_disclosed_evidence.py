@@ -8,6 +8,7 @@ ceiling), reusing its fixtures, exactly like ``test_signoff_unmet_reasons``.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -249,6 +250,27 @@ def test_directory_renders_unreadable_evidence(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "target,expected",
+    [(None, "unreadable_evidence"), ("file", "evidence_not_klt_native")],
+)
+def test_regular_file_links_and_device_disclosures(tmp_path, target, expected):
+    link = tmp_path / "artifact"
+    if target is None:
+        path = os.devnull
+    else:
+        regular = tmp_path / target
+        regular.write_text("external measurement")
+        link.symlink_to(regular)
+        path = str(link)
+    report = build_tier_report(
+        {"kind": "digital", "disclosed_evidence": {"5.digital": path}}
+    )
+    row = _t1_row(report, 5)
+    assert row["reason"] == expected
+    assert row["detail"]["disclosed_evidence"] == path
+
+
+@pytest.mark.parametrize(
     "bad",
     [
         "netlist/demo.v",  # not a JSON object
@@ -257,6 +279,7 @@ def test_directory_renders_unreadable_evidence(tmp_path, monkeypatch):
         {"1": {"file": "demo.v"}},  # an evidence-entry shape, not a path
         {"five": "demo.v"},  # key is not an item id
         {"5.quantum": "sta.json"},  # unknown partition qualifier
+        {"5.digital\n": "sta.json"},
         {"5.": "sta.json"},  # dangling qualifier
         {".digital": "sta.json"},  # no item id
     ],
