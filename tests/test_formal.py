@@ -23,6 +23,7 @@ import textwrap
 
 import pytest
 
+from klayout_tools import _provenance
 from klayout_tools.cli.parser import create_parser
 from klayout_tools.formal import FormalError, run_formal
 
@@ -215,6 +216,23 @@ def test_same_basename_inputs_do_not_collide(tmp_path, fake_solver):
     assert files[0] != files[2]
 
 
+def test_multi_source_content_hash_matches_shared_hash_in_either_order(
+    tmp_path, fake_solver
+):
+    (tmp_path / "helper.v").write_text("module helper; endmodule\n")
+    sources = ["d.v", "helper.v"]
+    sby = _fake_sby(tmp_path, _PASS_BODY)
+    report = run_formal(_request(tmp_path, sby, sources=sources))
+    reversed_report = run_formal(_request(tmp_path, sby, sources=sources[::-1]))
+
+    expected = _provenance._combined_content_hash(
+        [str(tmp_path / name) for name in sources]
+    )
+    assert expected is not None
+    assert report["provenance"]["input"]["content_hash"] == expected
+    assert reversed_report["provenance"]["input"] == report["provenance"]["input"]
+
+
 def test_missing_sby_is_structured_error(tmp_path, fake_solver, monkeypatch):
     monkeypatch.setenv("PATH", os.path.dirname(shutil.which("bitwuzla")))
     req = _request(tmp_path, "")
@@ -247,6 +265,27 @@ def test_request_validation(tmp_path, fake_solver, override, message):
     req = _request(tmp_path, _fake_sby(tmp_path, _PASS_BODY), **override)
     with pytest.raises(FormalError, match=message):
         run_formal(req)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root reads chmod-000 files",
+)
+def test_unreadable_source_rejected_at_request_validation(tmp_path, fake_solver):
+    """A present-but-unreadable RTL source is a named request error (#5718).
+
+    ``klt synthesize`` / ``equiv`` / ``functional-verification`` already probe
+    each source with ``open(path, "rb")``; ``klt formal`` used to accept it and
+    hand it to sby, where it surfaced as an opaque engine failure.
+    """
+    req = _request(tmp_path, _fake_sby(tmp_path, _PASS_BODY))
+    source = tmp_path / "d.v"
+    os.chmod(source, 0o000)
+    try:
+        with pytest.raises(FormalError, match="could not read source 'd.v'"):
+            run_formal(req)
+    finally:
+        os.chmod(source, 0o644)
 
 
 def test_absolute_tmp_source_is_staged_not_referenced(tmp_path, fake_solver):

@@ -1,0 +1,1 @@
+- **`klt sim` captures model library, OSDI preload, and corner section library hashes before dispatch.** Reports retain those hashes if a file changes or is deleted during the run (#6508, 2026-11-18).
