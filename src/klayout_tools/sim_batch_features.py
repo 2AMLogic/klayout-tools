@@ -367,11 +367,6 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
     ``models.pdk_root`` both keep it), so a name that disagrees means the two
     arrays do not line up and the digest describes some *other* object. Report
     nothing rather than the wrong bytes.
-
-    The declared entry is compared after the same ``os.path.normpath`` the
-    resolver applies, so every spelling that resolves to one file
-    (``device.osdi/.``, ``dir/../device.osdi``) names the file the runner
-    reported; the entry itself is never rewritten.
     """
     index = entry.get("index")
     if lifted is None or not isinstance(index, int) or isinstance(index, bool):
@@ -387,12 +382,10 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
         declared = declared.get("pdk_relative")
         if not isinstance(declared, str) or not isinstance(name, str):
             return None
-    if (
-        isinstance(name, str)
-        and isinstance(declared, str)
-        and os.path.basename(os.path.normpath(declared)) != name
-    ):
-        return None
+    # Normalize as the resolver does: ``device.osdi/.`` names ``device.osdi``.
+    if isinstance(name, str) and isinstance(declared, str):
+        if os.path.basename(os.path.normpath(declared)) != name:
+            return None
     return _sha256_or_none(reported.get("sha256"))
 
 
