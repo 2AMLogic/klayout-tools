@@ -59,6 +59,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from ._text import read_text
 from .functional_verification_sdf_rename import _sdf_unresolvable_pin_tokens
 from .request_paths import resolve_request_path
 
@@ -1042,11 +1043,7 @@ def _read_sdf_text(sdf_path: str) -> str | None:
     unreadable file is *not* an error on this path: every caller is a
     normalization pass, and failing to normalize must never be worse than
     never having tried."""
-    try:
-        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
-            return handle.read()
-    except OSError:
-        return None
+    return read_text(sdf_path)
 
 
 #: The three SDF header fields whose value may be a ``min:typ:max`` triple

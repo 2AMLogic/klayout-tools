@@ -10,8 +10,8 @@ Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
-(units, operating conditions, ``default_*``, ...) is an error naming the
-conflicting field and both values. Top-level ``lu_table_template`` and
+(units, operating conditions, ``default_*``, ...) is an error naming every
+conflicting field and both values (issue #7011). Top-level ``lu_table_template`` and
 ``power_lut_template`` groups are the exception: they are unioned by name
 (same name with different content is an error) and the ones the first file
 lacks are appended after its header. Each file's cell groups are appended in
@@ -26,6 +26,8 @@ import hashlib
 import os
 import re
 import tempfile
+
+from .liberty_header_diff import header_mismatch
 
 #: Environment override for the cache root (otherwise ``$XDG_CACHE_HOME`` or
 #: ``~/.cache``, plus ``klt/liberty-merged``).
@@ -120,7 +122,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
         if path is first_path:
             header, header_fields = file_header, fields
         else:
-            _compare_headers(first_path, header_fields, path, fields)
+            mismatch = header_mismatch(first_path, header_fields, path, fields)
+            if mismatch:
+                raise LibertyMergeError(mismatch)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -232,34 +236,6 @@ def _add_residue(text: str, fields: dict[str, str]) -> None:
         return
     prior = fields.get(_RESIDUE_KEY)
     fields[_RESIDUE_KEY] = f"{prior} {norm}" if prior else norm
-
-
-def _compare_headers(
-    first_path: str, first: dict[str, str], path: str, other: dict[str, str]
-) -> None:
-    """Raise :class:`LibertyMergeError` on the first header field that
-    differs; a field present in one header and absent from the other is
-    reported as missing rather than as a value difference."""
-    for key, value in first.items():
-        if key not in other:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' present in '{first_path}', missing in '{path}'"
-            )
-        if other[key] != value:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' differs: {_clip(value)} in "
-                f"'{first_path}', {_clip(other[key])} in '{path}'"
-            )
-    for key in other:
-        if key not in first:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' missing in '{first_path}', present in '{path}'"
-            )
-
-
-def _clip(value: str, limit: int = 80) -> str:
-    """Value truncated so an error message stays readable."""
-    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:
