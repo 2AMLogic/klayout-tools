@@ -1018,7 +1018,7 @@ def _mos_unit_strapped_layout(
     drawn bottom to top on the single role pair the phase-2 generators have.
     There is no second routing metal to cross on, so the two S/D rails go on
     *opposite* sides of the diffusion and the gate stripes cross **under**
-    the drain rail on ``poly`` to reach their comb -- legal on both curated
+    the drain rail on ``poly`` to reach their comb -- legal on all curated
     decks, and no contact there means no connection::
 
         y = 0                    source rail  (metal, full width)
@@ -1418,8 +1418,8 @@ def _mos_array_layout(
     that function's own docstring.
 
     ``mos_cap`` (issue #3283) is forwarded to :func:`_mos_unit_layout`; the
-    capacitor marker (:data:`_PDK_MOS_CAP_MARK_LAYERS`) is drawn over the
-    same ``voltage_flavor_mark_box_um`` box that encloses every unit device.
+    capacitor marker (:data:`_PDK_MOS_CAP_MARK_LAYERS`) covers all units with no margin,
+    excluding the guard ring (``_mos_array_shapes._mos_cap_mark_box_um``, #6170).
 
     ``interior_channel_um`` (issue #1531, Phase 1) reserves a navigable
     routing channel *inside* the array's own grid: when greater than zero it

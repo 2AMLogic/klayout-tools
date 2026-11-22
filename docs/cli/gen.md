@@ -59,6 +59,10 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   naming is part of `klt gen`'s documented output: a change to it is a
   CHANGELOG-recorded event, since structure names are written into the
   stream.
+  Under `--pdk-pcell` the child is **not** renamed: it keeps the vendor
+  PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
+  generated under different `--cell-name`s share that child name (issue
+  #5933; pinned by `tests/test_gen_pdk_pcell_vendor_name.py`).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -1173,10 +1177,16 @@ head-geometry attribution was measured, not assumed (2026-11-15: Magic
 forcing the marker to a uniform 0.2 µm on all four sides (`spacing_um` <=
 0.4) left the `rpm.1` verdict unchanged, while sweeping only the head
 length cleared it — `rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean
-from 2.08 µm. (The duplicated `poly.2` reports — "Distance between
-precision resistors < 0.21um" and "poly spacing < 0.21um" — seen on a
-standalone unit at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they
-are not tracked.) `klt drc --deck sky130` does not check the head rules (see
+from 2.08 µm. (The duplicated `poly.2` reports, “Distance between precision
+resistors < 0.21um” and “poly spacing < 0.21um”, were length-specific in
+the 2026-11-18 measurements for #6706. With Magic 8.3.683, open_pdks
+sky130A `c6d73a35f524`, and klt `0.9.3.dev1789` and `0.9.3.dev1792`,
+a `length_um: 9.765` body fired both rules for both `high` and `xhigh`.
+The 9.77 and 10.0 µm bodies drew no `poly.2` report. A half-grid regrid
+at the odd multiple of 5 nm is an **unverified** explanation. Magic also
+printed “Input off lambda grid by 1/2” for the two clear lengths. Only
+these three lengths were measured. The finding stays with the odd-5 nm
+case below unless another length class reproduces it.) `klt drc --deck sky130` does not check the head rules (see
 `docs/cli/drc.md`, "Precision-poly-resistor head rules are not checked"),
 so use `klt drc --engine klayout` for the independent check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm

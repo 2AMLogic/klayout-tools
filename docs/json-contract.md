@@ -1028,6 +1028,15 @@ the right member even when two members under one path declare identical
 check order does not depend on inventory listing order. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
 
+Issue #5563 adds the optional `resolved_from` field to an item-9 `pin` entry
+in `attestation.checks[]` when at least one pin in that check uses a reference.
+It maps each referenced leaf name (`name` or `revision` for the `pdk` role,
+the tool name for the `tools` role) to its declared `{"from", "key"}` object.
+On a passing check, the corresponding leaf in `value` holds the resolved
+string. A literal-only check omits `resolved_from`. This field is additive
+and requires no `schema_version` bump. See
+[A pin declared by the file that owns it (issue #5563)](cli/signoff.md#examples).
+
 Issue #5963 adds two additive, optional keys to a **file-backed**
 `evidence[]` entry of the `klt signoff --manifest` request (no
 `schema_version` bump; absent they change nothing): `artifact_manifest`
@@ -2230,11 +2239,13 @@ All eight share one contract:
   `spef_sta.spef_path`/`sdf_path`) to its file name on **both** sides
   before diffing. The identity check stays: a different file *name* drifts,
   and so does an artifact going `null` ↔ path (missing or newly appearing).
-  Message prose that embeds a path (`warnings[]`,
-  `power.placed.unavailable_reason`) is not reduced — scrub-shape drift
-  there remains visible, by design. The other flow verbs (`synthesize`) and
-  the analysis verbs (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed
-  this and are unchanged; a follow-up issue covers them if reproduced.
+  Message prose is not reduced, so it must not carry a path in the first
+  place: the DEF-derived `power.placed.unavailable_reason` strings (and the
+  `warnings[]` that quote them) name the DEF by file name only (issue
+  #6146), so a lint-clean envelope reproduces exactly. The other flow
+  verbs (`synthesize`) and the analysis verbs
+  (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed this and are
+  unchanged; a follow-up issue covers them if reproduced.
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
@@ -2875,6 +2886,25 @@ report, so a reader can tell the two apart without looking at the argv.
 additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
+### `klt pex --resistance-graph` echo fields (issue #5894)
+
+`extraction.resistance_graph.nets[]` entries — present only with
+`--resistance-graph` — additively gain `terminals` and `pair_resistance_ohm`,
+copied verbatim from `klt extract`'s own per-net `resistance_graph` (the
+sorted geometry-derived terminal names and the full symmetric
+effective-resistance matrix, `null` for a disconnected pair, `[]` on an
+`unsupported`/`skipped` net). This closes an honesty gap in the
+extraction-to-simulation loop: the lumped `resistance_ohm` a `legacy` net
+keeps is a series sum of *all* the net's fragments, so a tree-routed net's
+total overstates the terminal-to-terminal path (stub arms to terminals
+carrying no DC current are summed in), and nets with three or more terminals
+always keep `legacy` — the pair matrix is what a caller reads for the path
+resistance between two named terminals there. No existing field changes
+name, type or meaning, output without the flag stays byte-identical, so
+**no `schema_version` bump**. See [`cli/pex.md`](cli/pex.md) and
+[`cli/extract.md`](cli/extract.md)'s "Terminal-aware resistance graph"
+section.
 
 ### `klt corner-matrix check` coverage verdict (issue #5865)
 
