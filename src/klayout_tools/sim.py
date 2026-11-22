@@ -1274,20 +1274,12 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: already matched" rule below cannot drop it.
 _BIN_RANGE_SUPERSEDERS = frozenset({"unsupported_model_level", "netlist_title_line"})
 
-#: Codes that mean ngspice aborted while reading the deck (issue #3879). When
-#: one of them is classified and the log shows no analysis banner, the run
-#: never started: its per-measurement "produced no value" errors are
-#: consequences and are collapsed (`_demote_abort_cascade`).
-_NGSPICE_FATAL_CODES: frozenset[str] = frozenset(
-    {"missing_include", "netlist", "model_bin_range", "ngspice_fatal"}
-) | {sim_cause.NETLIST_TITLE_LINE_CODE}
+#: Moved to :mod:`sim_cause` (issue #6401); aliased for the callers here and
+#: in :mod:`sim_batch`.
+_NGSPICE_FATAL_CODES = sim_cause._NGSPICE_FATAL_CODES
 
-#: What ngspice prints once an analysis actually begins (or has produced
-#: data); absent from a run that died in the deck parser.
-_ANALYSIS_STARTED_RE = re.compile(
-    r"Doing analysis at TEMP|No\. of Data Rows|Initial Transient Solution",
-    re.IGNORECASE,
-)
+#: Moved to :mod:`sim_cause` (issue #6401's helper shares it); aliased below.
+_ANALYSIS_STARTED_RE = sim_cause._ANALYSIS_STARTED_RE
 
 #: Appended to the cause diagnostic of a run that never started analysis.
 _NO_ANALYSIS_NOTE = (
@@ -4002,9 +3994,7 @@ def _run_sim_corners(
 
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
-        # off-host "hosts exceeds the units to dispatch" refusal over an
-        # empty fleet. (`attach_job_id is None` keeps #5777's "attach never
-        # fans out" single-job path authoritative for every attach.)
+        # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
@@ -4024,12 +4014,14 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
-            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
-            # map even without --resume (no checkpoint to take it from).
             **(
                 {
                     "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
                     "netlist_sha256": netlist_digests.sha256,
+                    "explicit_points": dispatch_points
+                    if len(dispatch_points) < len(corner_points)
+                    and attach_job_id is None
+                    else None,
                 }
                 if backend == "batch"
                 else {}
@@ -5897,9 +5889,7 @@ def _expand_monte_carlo(
     """Expand each point in ``corner_points`` into ``mc_spec["n"]`` sample
     points, returning ``(sampled_points, monte_carlo_info)``.
 
-    Fan-out only -- reuses the same ``list[CornerPoint]`` shape every
-    execution backend already consumes (see :class:`CornerPoint`'s
-    docstring), so no new backend is needed. Sample order is deterministic
+    All backends consume this same list of sample points. Order is deterministic
     (outer: original corner order from :func:`_expand_corners`; inner:
     ``sample_index`` ``0..n-1``), matching the odometer-style determinism
     :func:`_expand_corners` already guarantees for the PVT axes.
@@ -5974,6 +5964,7 @@ def _expand_monte_carlo(
                     options=base.options,
                     sample_index=sample_index,
                     mc_seed=mc_seed,
+                    supply_waveforms=base.supply_waveforms,
                     mc_injected=(
                         sim_injected.draw(injected[0], mismatch_seed, injected[1])
                         if injected
@@ -9529,7 +9520,7 @@ def _corner_deck_control_lines(
         # ngspice's `reset` (which re-parses the circuit, reverting every
         # `alter` and dropping the saved set).
         lines.extend(
-            sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
+            sim_steps.control_lines(analysis, measurements_spec, prefix, corner_dir)
         )
         lines.extend(["quit", ".endc"])
         return lines
@@ -10485,11 +10476,14 @@ def _classify_diagnostics(
         elif code in _PREREQUISITE_MESSAGES:
             message = _PREREQUISITE_MESSAGES[code].format(raw=message.strip())
         if code == "ngspice_fatal":
-            if any(d["code"] in _NGSPICE_FATAL_CODES for d in diagnostics):
-                continue
-            message = sim_cause._with_netlist_error_cause(
-                message, log_text, match.start()
+            fatal = sim_cause._netlist_fatal_message(
+                message, log_text, match.start(), diagnostics
             )
+            if fatal is None:
+                # Superseded by a specific fatal code, or the benign
+                # measure-substitute block of a completed run (#6401).
+                continue
+            message = fatal
         diagnostics.append({"severity": "error", "code": code, "message": message})
     return diagnostics
 

@@ -1,0 +1,1 @@
+- **ASAP7 provisioning can produce a self-contained descriptor root with Liberty, cell views, the KLayout routing layer map, and per-file source hashes** (#6901, 2026-11-21).

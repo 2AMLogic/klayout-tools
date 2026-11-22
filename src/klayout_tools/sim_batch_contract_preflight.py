@@ -257,6 +257,20 @@ KLT_CROSSINGS_PROBE
     klt sim "$probe/probe.json" --backend local --dry-run --format json
 )"""
 
+# The first supported release segment also identifies development images built
+# before phase selection and stepped eyes. Exercise the installed worker CLI.
+_EYE_STEP_PROBE = """(
+    probe=$(mktemp -d) || exit 1
+    trap 'rm -f "$probe/eye.sp" "$probe/request.json"; rmdir "$probe"' EXIT
+    echo 'V1 rx 0 1' > "$probe/eye.sp" || exit 1
+    cat > "$probe/request.json" <<'KLT_EYE_PROBE' || exit 1
+{"netlist":"eye.sp","analysis_steps":[{"name":"one","analysis":{"kind":"tran",
+"args":"10p 4n"},"measurements":[{"name":"e","eye":{"signal":"v(rx)","ui":"1n",
+"uis":2,"phase":"500p"}}]}]}
+KLT_EYE_PROBE
+    klt sim "$probe/request.json" --backend local --dry-run --format json
+)"""
+
 
 def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
     """Shell setting ``$mmiss`` to the ``features`` the runner is not known
@@ -274,6 +288,12 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
             f' if [ "$mk" -ge {floor} ] && ! {_CROSSINGS_VALUE_FROM_PROBE} '
             ">/dev/null 2>&1; then "
             'mmiss="${mmiss}${mmiss:+, }crossings_value_from"; fi;'
+        )
+    if "eye_step_or_phase" in features:
+        floor = _feature_release_key("eye_step_or_phase")
+        checks += (
+            f' if [ "$mk" -ge {floor} ] && ! {_EYE_STEP_PROBE} >/dev/null 2>&1; then '
+            'mmiss="${mmiss}${mmiss:+, }eye_step_or_phase"; fi;'
         )
     names = ", ".join(features)
     return (

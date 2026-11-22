@@ -83,8 +83,7 @@ _TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
 
 
 #: The keys each part of the ``klt erc`` spec file recognises (issue #2243).
-#: Any other key is rejected with its full path rather than ignored -- see
-#: ``docs/cli/erc.md``'s "Unrecognised spec keys". Keep these in step with
+#: Unknown keys are rejected with their full path. Keep these in step with
 #: the ``_validate_*``/``_parse_*`` readers below when a spec field is added.
 _SPEC_KEYS = (
     "stackup",
@@ -95,6 +94,7 @@ _SPEC_KEYS = (
     "common_native_substrate",
     "devices",
     "antenna_limits",
+    "keepouts",
 )
 _STACKUP_KEYS = ("name", "layer", "label_layer", "active_layer", "role")
 _NET_KEYS = (
@@ -112,6 +112,7 @@ _TIE_KEYS = (
     "well_layer",
     "tap_layer",
     "connect_to",
+    "through",
     "net",
     "tap_requires",
     "tap_excludes",
@@ -958,50 +959,43 @@ def _parse_well_declaration(
     }
 
 
+def _tie_through(
+    entry: dict[str, Any],
+    connect_to: str,
+    via_roles: dict[str, tuple[str, str]],
+    spec_path: str,
+    index: int,
+) -> str | None:
+    """Resolve an optional contact by name against the validated via endpoints."""
+    if "through" not in entry:
+        return None
+    name = entry["through"]
+    field = f"spec '{spec_path}': ties[{index}].through"
+    if not isinstance(name, str) or not name.strip() or name not in via_roles:
+        raise ErcError(f"{field} must name a declared via (got {name!r})")
+    if connect_to not in via_roles[name]:
+        raise ErcError(
+            f"{field} via {name!r} must include connect_to {connect_to!r} "
+            "in its between roles"
+        )
+    return name
+
+
 def _validate_ties(
-    spec: dict[str, Any], spec_path: str, stackup_names: list[str]
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    vias: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Validate the optional ``ties`` array (issue #861): substrate/well
-    tie declarations for the ``erc.missing_tie`` check. Each entry names a
-    well/tub layer and the tap (contact) layer expected inside it, the
-    ``stackup`` role the tap must be wired up to, and the supply net that
-    tap must ultimately reach. Omitted or empty -> no missing-tie findings
-    are computed.
+    """Validate well and tap declarations used to check supply connectivity.
 
-    ``tap_requires`` intersects the drawn tap with each required layer
-    (e.g. ``Comp ∩ Nplus`` in an n-well). Omit it to use ``tap_layer`` alone.
+    The derived tap conductor can be narrowed by markers or asserted boxes
+    or declared dedicated. A named ``through`` via qualifies its physical
+    connection to the ``connect_to`` role. Omission uses polygon overlap.
 
-    ``tap_is_dedicated`` (optional boolean, issue #2199) is the other way
-    to say the same thing for a PDK that draws taps on their own layer:
-    nothing needs narrowing because the layer is already tap-only. A tie
-    that declares neither is *degenerate* -- see
-    :func:`_degenerate_tie_reasons` -- and is graded as skipped rather than
-    checked work.
-
-    ``tap_boxes`` (optional array of ``[left, bottom, right, top]``
-    micrometre boxes, issue #2234) is a third, caller-*asserted* way: rather
-    than narrowing ``tap_layer`` by a PDK marker layer's boolean, the spec
-    names the tap geometry directly. For a stream that draws taps with no
-    distinguishing marker at all -- neither ``tap_requires`` nor
-    ``tap_is_dedicated`` has anything true to narrow or affirm -- this is
-    the only way to declare a tie that is not degenerate. Graded under its
-    own coverage classification (:func:`_connectivity_coverage`'s
-    ``checked_by_assertion``) rather than folded into an ordinary
-    geometrically-derived pass, and held to the same falsifiability test as
-    every other narrowing form (:func:`_degenerate_tie_reasons`): an
-    assertion that removes nothing from the drawn ``tap_layer`` is still
-    degenerate.
-
-    ``well_boxes`` (optional array of the same micrometre boxes, issue
-    #2255) is the *well*-side counterpart, and the one thing on this entry
-    that substitutes for a required field rather than narrowing one: with
-    ``"well_layer": null``, it asserts the substrate region of a block that
-    draws no well/tub layer at all (a native-substrate, NMOS-in-bulk
-    block), which before this could not declare a substrate tie in any
-    form. Exactly one of the two well forms may be given -- see
-    :func:`_parse_well_declaration` -- and an assertion covering the whole
-    top-cell extent is graded as skipped work, not as evidence (see
-    :func:`_degenerate_tie_reasons`).
+    A tie names its drawn well layer or asserts substrate geometry with
+    ``well_boxes`` when ``well_layer`` is null (#2255). An assertion covering
+    the whole cell is graded as skipped (see :func:`_degenerate_tie_reasons`).
 
     ``well_requires``/``well_excludes`` (optional arrays of
     ``"<layer>/<datatype>"``, issue #2339) narrow the *drawn* well the way
@@ -1031,7 +1025,9 @@ def _validate_ties(
     half of such a tie rests on the caller's word, a tie graded through one is
     additionally named in ``erc_coverage.checked_by_well_assertion`` (see
     :func:`_connectivity_coverage`), which a purely marker-driven selection
-    stays out of."""
+    stays out of.
+    """
+    via_roles = {via["name"]: via["between"] for via in vias}
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -1086,6 +1082,7 @@ def _validate_ties(
                 "tap_boxes": tap_boxes,
                 "isolation_boxes": isolation_boxes,
                 "connect_to": connect_to,
+                "through": _tie_through(entry, connect_to, via_roles, spec_path, i),
                 "net": net,
             }
         )
