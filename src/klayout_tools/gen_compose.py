@@ -3936,6 +3936,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             already-accepted net whose own primary-layer geometry merely
             passes nearby, not through, that fixed point.
 
+            An automatic plane climb checks spacing on its new ladder's
+            intermediate and far pads as well, using their drawn sizes.
+
             A literal positive-area overlap is still always rejected first
             (mirrors check 4's "positive area only, not a mere edge touch"
             rule: a ``kdb.Region`` boolean AND between two backbones already
@@ -3952,7 +3955,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             this check could not see. A layer with no known ``"space"`` rule
             keeps the overlap-only test.
             """
-            # An automatic retry supplies the width it will draw on this plane.
+            # A new automatic via ladder must clear other nets on every plane.
+            automatic = candidate_width_um is not None
+            pad_side = side_for_pair.drawn_side if automatic else side_for_pair
             if candidate_width_um is None:
                 candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
             region = _drawn_leg_footprint_region(
@@ -3962,25 +3967,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 stub_widen,
                 _route_dbu(),
                 layer,
-                side_for_pair,
+                pad_side,
             )
-            # layer_checks (#1913): the primary (layer, region) entry (with
-            # its own spacing check, exactly as before), plus one further
-            # overlap-only entry per additional layer this leg's via-drop
-            # ladder lands an intermediate/far pad on -- see this closure's
-            # own docstring above. Empty from
-            # `_drawn_leg_intermediate_pad_regions` when `layer` is `None`:
-            # every pad is already folded into `region` itself in that case
-            # (the pre-#1567 conservative fallback), so there is nothing
-            # left to separate out.
+            # The primary footprint always checks spacing. Only the automatic
+            # climb requires spacing on intermediate and far landing pads.
             layer_checks: list[tuple[tuple[int, int] | None, Any, bool]] = [
                 (layer, region, True)
             ]
             if layer is not None:
                 layer_checks.extend(
-                    (pad_layer, pad_region, False)
+                    (pad_layer, pad_region, automatic)
                     for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                        via_drops, _route_dbu(), layer, side_for_pair
+                        via_drops, _route_dbu(), layer, pad_side
                     ).items()
                 )
             for (
