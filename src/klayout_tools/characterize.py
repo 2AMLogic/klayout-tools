@@ -62,8 +62,9 @@ from functools import partial
 from typing import Any
 
 from . import liberty_writer, sim
-from ._paths import _load_request_json, _resolve_relative, fold_spice_continuations
+from ._paths import _load_request_json, _resolve_relative
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._spice_text import fold_spice_continuations, strip_spice_inline_comment
 from .characterize_arcs import DerivedArc, FunctionError, derive_arcs
 from .characterize_capacity import capacity_shard, with_batch_passthrough
 from .characterize_cards import (
@@ -323,11 +324,9 @@ def run_characterize(
             ) from exc
 
     return _build_response(
-        request_path=request_path,
         grid=grid,
         corner=corner,
         thresholds=thresholds,
-        options=options,
         results=results,
         library=library,
         emitted_path=emitted_path,
@@ -396,7 +395,7 @@ def _characterize_cell(
         batch_shard=batch_shard,
     )
     tables = _build_tables(plan, grid, legs.values, thresholds)
-    _check_settle_margin(plan, grid, tables, options)
+    _check_settle_margin(grid, tables, options)
     power_tables = _build_power_tables(plan, grid, legs.values, corner)
     leakage = _build_leakage(plan, legs.values, corner)
     pin_capacitance = _build_pin_capacitance(plan, legs.values, corner)
@@ -739,9 +738,8 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
     """Return ``subckt``'s terminal names, in declaration order.
 
     The order is load-bearing: a SPICE ``X`` instance line is positional, so
-    the generated testbench binds nodes by the position each terminal
-    appears in here, never by the order the request happens to list pins in.
-    """
+    the generated testbench binds nodes by the position each terminal appears
+    in here, never by the order the request happens to list pins in."""
     try:
         with open(netlist_path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
@@ -749,7 +747,7 @@ def _read_subckt_terminals(netlist_path: str, subckt: str) -> tuple[str, ...]:
         raise CharacterizeError(f"could not read '{netlist_path}': {exc}") from exc
 
     for line in fold_spice_continuations(lines):
-        match = _SUBCKT_RE.match(line.split("$")[0])
+        match = _SUBCKT_RE.match(strip_spice_inline_comment(line))
         if match is None:
             continue
         if match.group(1) != subckt:
@@ -1722,7 +1720,6 @@ def _build_pin_capacitance(
 
 
 def _check_settle_margin(
-    plan: dict[str, Any],
     grid: dict[str, tuple[float, ...]],
     tables: dict[int, dict[str, liberty_writer.Table2D]],
     options: dict[str, Any],
@@ -2141,11 +2138,9 @@ def _cell_entry(result: dict[str, Any]) -> dict[str, Any]:
 
 def _build_response(
     *,
-    request_path: str,
     grid: dict[str, tuple[float, ...]],
     corner: dict[str, Any],
     thresholds: liberty_writer.Thresholds,
-    options: dict[str, Any],
     results: list[dict[str, Any]],
     library: liberty_writer.Library,
     emitted_path: str,

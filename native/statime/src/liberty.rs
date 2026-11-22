@@ -15,338 +15,11 @@
 //! structurally even where semantic extraction below only reads a subset of
 //! it -- the tokenizer/parser is not hand-tuned to sky130's file.
 
+mod liberty_parse;
+
+use liberty_parse::{parse_top, Group, Member, Value};
 use std::collections::HashMap;
 use std::fmt;
-
-// ---------------------------------------------------------------------
-// Tokenizer
-// ---------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Ident(String),
-    Str(String),
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    Comma,
-    Colon,
-    Semi,
-}
-
-fn tokenize(src: &str) -> Vec<Token> {
-    // Liberty allows a line-continuation backslash immediately before a
-    // newline inside `values(...)` lists that span many lines -- join those
-    // first so the tokenizer never has to special-case it.
-    let joined = src.replace("\\\r\n", "").replace("\\\n", "");
-
-    let mut tokens = Vec::new();
-    let bytes = joined.as_bytes();
-    let mut i = 0;
-    let n = bytes.len();
-    while i < n {
-        let c = bytes[i] as char;
-        if c.is_whitespace() {
-            i += 1;
-            continue;
-        }
-        // Comments
-        if c == '/' && i + 1 < n && bytes[i + 1] as char == '*' {
-            i += 2;
-            while i + 1 < n && !(bytes[i] as char == '*' && bytes[i + 1] as char == '/') {
-                i += 1;
-            }
-            i += 2;
-            continue;
-        }
-        if c == '/' && i + 1 < n && bytes[i + 1] as char == '/' {
-            while i < n && bytes[i] as char != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        match c {
-            '(' => {
-                tokens.push(Token::LParen);
-                i += 1;
-            }
-            ')' => {
-                tokens.push(Token::RParen);
-                i += 1;
-            }
-            '{' => {
-                tokens.push(Token::LBrace);
-                i += 1;
-            }
-            '}' => {
-                tokens.push(Token::RBrace);
-                i += 1;
-            }
-            ',' => {
-                tokens.push(Token::Comma);
-                i += 1;
-            }
-            ':' => {
-                tokens.push(Token::Colon);
-                i += 1;
-            }
-            ';' => {
-                tokens.push(Token::Semi);
-                i += 1;
-            }
-            '"' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < n && bytes[j] as char != '"' {
-                    j += 1;
-                }
-                let s = joined[start..j].to_string();
-                tokens.push(Token::Str(s));
-                i = j + 1;
-            }
-            _ => {
-                let start = i;
-                while i < n {
-                    let ch = bytes[i] as char;
-                    if ch.is_whitespace()
-                        || matches!(ch, '(' | ')' | '{' | '}' | ',' | ':' | ';' | '"')
-                    {
-                        break;
-                    }
-                    i += 1;
-                }
-                tokens.push(Token::Ident(joined[start..i].to_string()));
-            }
-        }
-    }
-    tokens
-}
-
-// ---------------------------------------------------------------------
-// Parse tree
-// ---------------------------------------------------------------------
-
-/// A single liberty "value" -- either a bare identifier/number or a quoted
-/// string. Liberty does not distinguish these at the grammar level; the
-/// distinction only matters when the caller pulls a specific attribute out.
-#[derive(Debug, Clone)]
-enum Value {
-    Ident(String),
-    Str(String),
-}
-
-impl Value {
-    fn as_str(&self) -> &str {
-        match self {
-            Value::Ident(s) | Value::Str(s) => s,
-        }
-    }
-}
-
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-/// A parsed group: `name (args) { members }`.
-#[derive(Debug, Clone)]
-struct Group {
-    name: String,
-    args: Vec<Value>,
-    members: Vec<Member>,
-}
-
-#[derive(Debug, Clone)]
-enum Member {
-    Group(Group),
-    /// `name : value ;`
-    SimpleAttr(String, Value),
-    /// `name (v1, v2, ...) ;` -- used for e.g. `index_1(...)`/`values(...)`.
-    ComplexAttr(String, Vec<Value>),
-}
-
-struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
-}
-
-impl Parser {
-    fn peek(&self) -> Option<&Token> {
-        self.tokens.get(self.pos)
-    }
-
-    fn next(&mut self) -> Option<Token> {
-        let t = self.tokens.get(self.pos).cloned();
-        self.pos += 1;
-        t
-    }
-
-    /// Parse one top-level group (liberty files are a single top-level
-    /// `library (...) { ... }` group).
-    fn parse_group(&mut self) -> Option<Group> {
-        let name = match self.next()? {
-            Token::Ident(s) => s,
-            other => panic!("expected group/attr name, got {:?}", other),
-        };
-        // Args in parens (may be empty).
-        let mut args = Vec::new();
-        if self.peek() == Some(&Token::LParen) {
-            self.next();
-            loop {
-                match self.peek() {
-                    Some(Token::RParen) => {
-                        self.next();
-                        break;
-                    }
-                    Some(Token::Comma) => {
-                        self.next();
-                    }
-                    Some(Token::Ident(_)) | Some(Token::Str(_)) => {
-                        let v = match self.next().unwrap() {
-                            Token::Ident(s) => Value::Ident(s),
-                            Token::Str(s) => Value::Str(s),
-                            _ => unreachable!(),
-                        };
-                        args.push(v);
-                    }
-                    other => panic!("unexpected token in arg list: {:?}", other),
-                }
-            }
-        }
-        // Is this a group (has `{`) or an attribute (ends at `;`)?
-        match self.peek() {
-            Some(Token::LBrace) => {
-                self.next();
-                let mut members = Vec::new();
-                loop {
-                    match self.peek() {
-                        Some(Token::RBrace) => {
-                            self.next();
-                            break;
-                        }
-                        Some(Token::Semi) => {
-                            // stray semicolons between members
-                            self.next();
-                        }
-                        Some(Token::Ident(_)) => {
-                            members.push(self.parse_member());
-                        }
-                        other => panic!("unexpected token in group body: {:?}", other),
-                    }
-                }
-                Some(Group {
-                    name,
-                    args,
-                    members,
-                })
-            }
-            Some(Token::Semi) => {
-                self.next();
-                // A complex attribute at top level -- shouldn't normally
-                // happen for the outermost call, but handle gracefully by
-                // wrapping it as a group with no members.
-                Some(Group {
-                    name,
-                    args,
-                    members: Vec::new(),
-                })
-            }
-            other => panic!("expected '{{' or ';' after group header, got {:?}", other),
-        }
-    }
-
-    fn parse_member(&mut self) -> Member {
-        let name = match self.next().unwrap() {
-            Token::Ident(s) => s,
-            other => panic!("expected member name, got {:?}", other),
-        };
-        match self.peek() {
-            Some(Token::Colon) => {
-                self.next();
-                let v = match self.next().unwrap() {
-                    Token::Ident(s) => Value::Ident(s),
-                    Token::Str(s) => Value::Str(s),
-                    other => panic!("expected value after ':', got {:?}", other),
-                };
-                // consume trailing ';'
-                if self.peek() == Some(&Token::Semi) {
-                    self.next();
-                }
-                Member::SimpleAttr(name, v)
-            }
-            Some(Token::LParen) => {
-                self.next();
-                let mut args = Vec::new();
-                loop {
-                    match self.peek() {
-                        Some(Token::RParen) => {
-                            self.next();
-                            break;
-                        }
-                        Some(Token::Comma) => {
-                            self.next();
-                        }
-                        Some(Token::Ident(_)) | Some(Token::Str(_)) => {
-                            let v = match self.next().unwrap() {
-                                Token::Ident(s) => Value::Ident(s),
-                                Token::Str(s) => Value::Str(s),
-                                _ => unreachable!(),
-                            };
-                            args.push(v);
-                        }
-                        other => panic!("unexpected token in complex-attr args: {:?}", other),
-                    }
-                }
-                match self.peek() {
-                    Some(Token::LBrace) => {
-                        // It's actually a nested group.
-                        self.next();
-                        let mut members = Vec::new();
-                        loop {
-                            match self.peek() {
-                                Some(Token::RBrace) => {
-                                    self.next();
-                                    break;
-                                }
-                                Some(Token::Semi) => {
-                                    self.next();
-                                }
-                                Some(Token::Ident(_)) => {
-                                    members.push(self.parse_member());
-                                }
-                                other => {
-                                    panic!("unexpected token in group body: {:?}", other)
-                                }
-                            }
-                        }
-                        Member::Group(Group {
-                            name,
-                            args,
-                            members,
-                        })
-                    }
-                    Some(Token::Semi) => {
-                        self.next();
-                        Member::ComplexAttr(name, args)
-                    }
-                    other => panic!("expected '{{' or ';' after complex attr, got {:?}", other),
-                }
-            }
-            other => panic!(
-                "expected ':' or '(' after member name '{}', got {:?}",
-                name, other
-            ),
-        }
-    }
-}
-
-fn parse_top(src: &str) -> Group {
-    let tokens = tokenize(src);
-    let mut p = Parser { tokens, pos: 0 };
-    p.parse_group().expect("empty liberty file")
-}
 
 // ---------------------------------------------------------------------
 // Semantic model
@@ -635,7 +308,7 @@ fn parse_cell(group: &Group) -> Cell {
 /// netlist references) -- selective parsing is a valid future optimisation
 /// but this spike measures the full, general parse path.
 pub fn parse(src: &str) -> Result<Library, LibertyError> {
-    let top = parse_top(src);
+    let top = parse_top(src)?;
     if top.name != "library" {
         return Err(LibertyError(format!(
             "expected top-level 'library' group, got '{}'",
@@ -821,5 +494,46 @@ library ("test_lib") {
             .unwrap();
         assert_eq!(table.values.len(), 2);
         assert_eq!(table.values[1], vec![0.30, 0.40]);
+    }
+
+    #[test]
+    fn truncated_group_returns_err_not_panic() {
+        // Issue #5629: the file ends right after the opening brace -- EOF
+        // inside an open group body must surface as a group-body
+        // diagnostic through the `Result<_, LibertyError>` the public
+        // signature already promises, never as a panic. This pins the
+        // direct Rust caller of `parse` (the standalone `klt-statime` CLI,
+        // `lib.rs`'s `run_critical_path`); the pyo3 entry point
+        // `critical_path_json` already wraps its call in `catch_unwind`
+        // and re-raises a panic as `ValueError`, so the Python boundary
+        // was never the failure site.
+        let err = parse("library (demo) {").unwrap_err();
+        assert!(
+            err.0.contains("unexpected token in group body"),
+            "unexpected diagnostic: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_err_not_panic() {
+        // Initial EOF is distinct from EOF inside an open group: the whole
+        // file is empty, reported as such rather than as a group-body
+        // diagnostic.
+        let err = parse("").unwrap_err();
+        assert_eq!(err.0, "empty liberty file");
+    }
+
+    #[test]
+    fn malformed_nested_member_returns_err_not_panic() {
+        // `area` with neither ':' nor '(' after it -- reached through the
+        // nested-group recursion, same error path as the truncation above.
+        let err = parse(r#"library (demo) { cell (A) { area } }"#).unwrap_err();
+        assert!(
+            err.0
+                .contains("expected ':' or '(' after member name 'area'"),
+            "unexpected diagnostic: {}",
+            err.0
+        );
     }
 }

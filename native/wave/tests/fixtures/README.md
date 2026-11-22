@@ -8,6 +8,15 @@ Small, committed trace fixtures for `native/wave/`'s own `cargo test`:
   `tests/build_vcd_test.rs`, `tests/build_fst_test.rs`, and
   `tests/modexp_canary_test.rs` (issue #1600, `klt wave build`).
 
+## Real-signal compatibility fixtures
+
+`leading_nan.vcd` records the first change of `tb.leading` at 10 ns (NaN)
+and its next change at 30 ns (3.5). It also covers a NaN at tick zero, an
+unwritten real, and a NaN after a finite value. `leading_nan_0_3_1.fst`
+was built from this VCD with `klt-wave build` at `b5d7a3911` using its
+locked fst-writer 0.3.1. Keep the FST pinned to that writer. The tests in
+`tests/real_nan.rs` also build the VCD with the current writer.
+
 ## Query fixtures (issue #1599)
 
 Two small, committed FST fixtures exercised by `tests/query_ops.rs` (issue
