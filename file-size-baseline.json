@@ -309,7 +309,7 @@
     },
     {
       "path": "src/klayout_tools/extract_parasitics.py",
-      "lines": 3438
+      "lines": 3147
     },
     {
       "path": "src/klayout_tools/extract_passive_regions.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12101
+      "lines": 12056
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -1041,7 +1041,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15832
+      "lines": 15827
     },
     {
       "path": "tests/test_sim_batch.py",
