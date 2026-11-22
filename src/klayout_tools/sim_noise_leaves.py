@@ -105,6 +105,10 @@ class Leaf:
     suffix: str | None
     #: ``"thermal"``, ``"flicker"`` or None (unclassified).
     mechanism: str | None
+    #: The leaf's rawfile **column index**. Distinct columns may share a
+    #: vector name (ngspice OSDI models emit them, #6978), so only the
+    #: index identifies a column; classification stays name-based.
+    index: int
 
     @property
     def label(self) -> str:
@@ -112,17 +116,19 @@ class Leaf:
         return self.suffix if self.suffix is not None else self.name
 
 
-def contributor_names(names: list[str]) -> list[str]:
-    """The output-referred per-contributor vectors among ``names`` -- device
-    totals and leaves both, with the plot's own aggregates excluded."""
-    return [
-        name
-        for name in names
-        if name not in _AGGREGATE_VECTORS
+def _is_contributor(name: str) -> bool:
+    return (
+        name not in _AGGREGATE_VECTORS
         and name.startswith(PREFIX)
         and len(name) > len(PREFIX) + 1
         and name[len(PREFIX)] in SEPARATORS
-    ]
+    )
+
+
+def contributor_names(names: list[str]) -> list[str]:
+    """The output-referred per-contributor vectors among ``names`` -- device
+    totals and leaves both, with the plot's own aggregates excluded."""
+    return [name for name in names if _is_contributor(name)]
 
 
 def _extends(name: str, prefix: str) -> bool:
@@ -164,7 +170,9 @@ def classify_mechanism(device_class: str, suffix: str | None) -> str | None:
 
 
 def classify_leaves(names: list[str]) -> list[Leaf]:
-    """Every leaf contributor among ``names``, classified.
+    """Every leaf contributor among ``names``, classified, each pinned to the
+    rawfile column index it was read from (#6978: two columns may share a
+    vector name; classification below stays name-based and untouched).
 
     A contributor is a *device total* when another contributor extends its
     name across a separator, and a *leaf* otherwise -- so the double-counting
@@ -172,12 +180,15 @@ def classify_leaves(names: list[str]) -> list[Leaf]:
     ``onoise_m1_id``) cannot happen. Device totals are dropped here; only
     leaves carry a mechanism.
     """
-    contributors = contributor_names(names)
+    contributors = [
+        (index, name) for index, name in enumerate(names) if _is_contributor(name)
+    ]
+    labels = [name for _, name in contributors]
     leaves: list[Leaf] = []
-    for name in contributors:
-        if any(_extends(other, name) for other in contributors):
+    for index, name in contributors:
+        if any(_extends(other, name) for other in labels):
             continue  # a device total, not a leaf
-        parent = _device_total_of(name, contributors)
+        parent = _device_total_of(name, labels)
         suffix = name[len(parent) + 1 :] if parent is not None else None
         device_class = name[len(PREFIX) + 1].lower()
         leaves.append(
@@ -186,6 +197,7 @@ def classify_leaves(names: list[str]) -> list[Leaf]:
                 device_class=device_class,
                 suffix=suffix,
                 mechanism=classify_mechanism(device_class, suffix),
+                index=index,
             )
         )
     return leaves
