@@ -136,6 +136,67 @@ def test_registry_literal_not_in_doc_and_unresolved(root):
     assert ec.F_UNRESOLVED in _codes(payload)
 
 
+# --------------------------------------------------------------------------- #
+# Issue #6860: registry pointers resolve through the shared RFC 6901 walk
+# (`klayout_tools._json_pointer`), so array indexes are strict (no `-1`,
+# no `01`, ASCII digits only) and `~`-escapes are checked, not rewritten.
+# --------------------------------------------------------------------------- #
+
+READINGS = "evidence/sim/blk/full/20260301-000000-eeeeeee.json"
+
+
+def _row(pointer, literal="34", record=READINGS):
+    return {
+        "mapping": [],
+        "claims": [{"literal": literal, "record": record, "pointer": pointer}],
+    }
+
+
+def test_registry_negative_and_leading_zero_indexes_unresolved(root):
+    """`/readings/-1` used to select the last Python list element, so an
+    invalid citation passed validation clean; `01` resolved too."""
+    _w(root, READINGS, json.dumps({"supersedes": [], "readings": [12, 34]}))
+    for pointer in ("/readings/-1", "/readings/01"):
+        payload = _run(root, "r 34\n", _row(pointer))
+        assert _codes(payload) == [ec.F_UNRESOLVED]
+
+
+def test_registry_plain_index_still_resolves(root):
+    _w(root, READINGS, json.dumps({"supersedes": [], "readings": [12, 34]}))
+    assert _run(root, "r 34\n", _row("/readings/1"))["status"] == "clean"
+
+
+def test_registry_pointer_escapes_strict(root):
+    esc = "evidence/sim/blk/full/20260302-000000-fffffff.json"
+    _w(root, esc, json.dumps({"supersedes": [], "a/b": 5, "a~b": 6}))
+    assert _run(root, "x 5\n", _row("/a~1b", literal="5", record=esc))["status"] == (
+        "clean"
+    )
+    assert _run(root, "x 6\n", _row("/a~0b", literal="6", record=esc))["status"] == (
+        "clean"
+    )
+    payload = _run(root, "x 5\n", _row("/a~2b", literal="5", record=esc))
+    assert _codes(payload) == [ec.F_UNRESOLVED]
+
+
+def test_registry_empty_pointer_is_whole_record_slash_is_empty_key(root):
+    scalar = "evidence/sim/blk/full/20260303-000000-fffffff.json"
+    _w(root, scalar, "42")  # a bare JSON scalar record
+    assert _run(root, "x 42\n", _row("", literal="42", record=scalar))["status"] == (
+        "clean"
+    )
+    ekey = "evidence/sim/blk/full/20260304-000000-fffffff.json"
+    _w(root, ekey, json.dumps({"supersedes": [], "": 7, "n": 1}))
+    assert _run(root, "x 7\n", _row("/", literal="7", record=ekey))["status"] == (
+        "clean"
+    )
+    # "/" names the empty-string key, not the whole record: against a record
+    # with no "" key it is claim_unresolved, never a fallback to the root.
+    _w(root, READINGS, json.dumps({"supersedes": [], "readings": [12, 34]}))
+    payload = _run(root, "x 7\n", _row("/", literal="7", record=READINGS))
+    assert _codes(payload) == [ec.F_UNRESOLVED]
+
+
 def test_legacy_mapping_superseded_and_twin(root):
     _w(root, "records/a.md", "old")
     _w(root, "records/a.json", "{}")

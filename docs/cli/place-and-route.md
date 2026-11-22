@@ -664,20 +664,72 @@ aligns the router's *track* positions, not its *wire ends*. The detailed router
 chooses where a short M4 stub ends (e.g. a stub running from a via landing to a
 coordinate 61 nm from the via centre), and that choice is not checked against
 the deck's track-alignment rules. The request has no control for it, and
-`klt place-and-route` does not snap routed geometry after the fact.
+`klt place-and-route` does not snap routed geometry after the fact. There is
+also no router option for a request field to drive: the flow runs
+`detailed_route -output_drc ... -output_maze ... -or_seed ...`, and OpenROAD
+`26Q3-1510-g6cb3f2b704`'s `help detailed_route` (read 2026-11-18) lists no
+option that places or snaps line ends. Its options include report paths, the
+routing-layer window, via and pin access (`-via_access_layer`,
+`-min_access_points`, `-no_pin_access`), the seed, distribution, and
+`-clean_patches` / `-repair_pdn_vias`.
 
-Expect a small residual of `M4.AUX.2` (minimum-width M4 off a routing track) and
+A residual of `M4.AUX.1` / `M4.AUX.2` (M4 off the deck's across-track grid) and
 `M4.W.3` (vertical M4 width an even multiple of 24 nm) point markers from
-`klt drc` on the merged GDS. As observed by the issue author on the 2026-10
-ASAP7 reproducer, with the `floorplan.tracks` offsets above and the PDN straps
-disabled (#4494), this was about 7 markers per block (4 `M4.AUX.2`, 3
-`M4.W.3`) against several thousand router shapes. This is a dated observation,
-not a guarantee or a pass/fail threshold.
+`klt drc` on the merged GDS has been **reported, not established**. Two dated
+reports exist, and this repo has reproduced neither (see below):
 
-These markers carry no `source_cell` / `source_path` (both `null`), so they
-cannot be traced to a net or router shape: they sit on top-level router
-geometry, which has no containing instance to attribute (`drc.md`). Rule
-definitions are in [`drc.md`](drc.md).
+- 2026-10, issue #4501's author, ASAP7 reproducer, `floorplan.tracks` offsets
+  above, PDN straps disabled (#4494): about 7 markers per block (4
+  `M4.AUX.2`, 3 `M4.W.3`) against several thousand router shapes.
+- 2026-11-18, issue #6596's reporter, klayout-tools 0.9.2, packaged deck,
+  KLayout 0.30.12: `M4.AUX.1` and `M4.AUX.2`, 4 + 4 markers per routed slice
+  and 64 + 64 on a 16-instance column of the same stream, all at two x
+  positions off the 48 nm grid. The count scales with instance count, so it is
+  not a fixed per-block number, and it is route-dependent: a re-route that
+  changed only the cell mapping brought the family back.
+
+Neither report is a guarantee or a pass/fail threshold.
+
+**Not reproduced on a fresh run (2026-11-18).** With klayout-tools
+0.9.3.dev1789+g94950eeee19e, the OpenROAD build above, the packaged
+`asap7.drc`, `output_dbu_um` 0.00025 and the `floorplan.tracks` offsets above,
+six runs of `klt place-and-route` then `klt drc --engine klayout` on the merged
+GDS gave **zero** `M4.AUX.1`, `M4.AUX.2` and `M4.W.3` markers: a 97-inverter
+chain at 20 % utilization (4-5 routed M4 segments in the DEF `NETS` section)
+and a 32-output fan-out block (one `BUFx4` driving 32 three-inverter chains;
+74-89 routed M4 segments) at 20 % and 40 % utilization, each with the
+`asap7sc7p5t` power preset and with `power` omitted. The only M4-related
+markers were `V4.M4.EN.1` (12-17), present only with the power preset and
+documented under the preset below. This does not show the report is wrong: the
+reporter's cell mapping, floorplan and routed stream are not available here. It
+does mean this section cannot attribute the family to router metal, and **does
+not support recording it as recipe-inherent**.
+
+One reading of the report does not fit the packaged deck. M4 is a
+horizontally routed layer there, `M4.AUX.1` checks only the across-track (y)
+coordinate of M4 vertices against the 24 nm grid, and `M4.AUX.2` the y position
+of rectangles exactly 24 nm high against the 48 nm track grid. A router *line
+end* is an x position, which neither rule examines, and markers repeating at
+the same two x positions on every instance of a column look more like geometry
+repeated per instance than independent per-route line-end choices. Neither
+explanation is traced.
+
+To narrow the search, re-run the same request with `power` omitted. A marker
+that persists shows the violation can occur without the generated PDN. A marker
+can disappear because removing the PDN changes the routing obstructions and a
+signal wire takes a different path.
+
+To identify the source, overlay each marker on the M4 geometry in the **same
+failing run's routed DEF**. Check signal wires in `NETS` and PDN straps in
+`SPECIALNETS`, including the M4 shapes of vias in both sections. If the
+geometry at the marker leaves the source ambiguous, leave it unattributed.
+Include the request and that routed DEF in an issue referencing #6596.
+
+For these top-cell markers, `null` values for `source_cell` and `source_path`
+mean that no single placed instance fully contains the marker's bounding box.
+This can happen on top-level geometry or where the box crosses an instance
+boundary. Either signal or PDN geometry can yield those values. See the
+[DRC guide](drc.md) for rule definitions and instance attribution.
 
 ## PDK / LEF / liberty resolution
 
@@ -1712,6 +1764,12 @@ merged polygon:
    `modexp_canary`) sit on the same knife edge — both clean, both with a
    smallest met1 polygon of exactly `0.0832 um²`;
    `tests/test_place_and_route_min_area.py` pins that measured baseline.
+
+   > **Historical measurement (open_pdks `c6d73a35`).** Measured at
+   > `c6d73a3`; **not** re-run under `f6eeac7` — the margin above needs
+   > that specific OpenROAD build and the 48-stage reproducer; see the
+   > superseded-revision note in the `gf180mcu_fd_sc_mcu9t5v0`
+   > live-verification record above.
 2. **PDN via patches on a strap layer with a large area floor.** sky130's
    `m5.4` is `4.0 um²`, ~17x met3's; a `1.42 x 1.60 um` (`2.272 um²`) met5
    via landing violates it by construction.
@@ -2252,7 +2310,7 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library` (the `asap7sc7p5t` recipe also accepts `asap7sc7p5t_rvt`, issue #6029 — the open_pdks name of the same 7.5-track stack, and the one `post_route_spef`/`post_route_sdf` resolve their extract deck under, so the preset and the post-route pass compose). An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sg13g2"` (issue #2447), `"sky130hd"`, `"asap7sc7p5t"` (issue #4494) — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`** (supplying both is a validation error, not a per-field override). An explicit `power.connects` (issue #4348) is allowed and *replaces* the preset's connect entries wholesale (`[]` = no via tuning); the response then sets `power.connects_overridden: true`. The preset's own standard-cell library must match `pdk.cell_library` (the `asap7sc7p5t` recipe also accepts `asap7sc7p5t_rvt`, issue #6029 — the lambdapdk name of the same 7.5-track stack, and the one `post_route_spef`/`post_route_sdf` resolve their extract deck under, so the preset and the post-route pass compose). An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's upstream provenance and exact geometry. |
 | `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.tapcell` | object \| omitted | Additive field (issue #3051). Only key: `distance_um` — positive, finite number (µm) → `tapcell -distance`. Omitted, the per-library default applies and the Tcl is byte-identical to before. Zero, negative, boolean, string, a non-object `tapcell` or an unknown key is rejected; so is any override on a library that places no tapcells (`sg13g2_stdcell`), rather than being silently ignored. The pitch is a **placement input, not evidence of any diffusion-to-tap boundary distance** — measure the resulting stream. The effective value is echoed as `power.tapcell_distance_um`. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
@@ -3124,15 +3182,14 @@ tiny routed block, `output_dbu_um` 0.00025, M4/M5 track offsets 0.012 and
 M6/M7 0.016 per #4493): the ORFS-width `M5` strap lands a 24 nm `V4` cut in
 a 120 nm strap, so `V4.M5.AUX.2` fired 1,332 times, with `M4.AUX.1`/`M4.AUX.2`
 from the off-grid `M3`/`M4` stub and `M5.AUX.1`/`M6.AUX.1` from strap edges.
-The shipped recipe clears those families: `M5` is 0.216 um wide, the only
+The shipped recipe uses a 0.216 µm `M5` strap, the only
 width for which the tech LEF has a wide `V4` bar (`VIARULE
-M5_M4widePWR0p864`); `ongrid {M3 M4}` snaps the stub onto the tracks;
-`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits; widths plus
-spacings, pitches and offsets sit on the deck's 24 nm (`M5`) / 32 nm (`M6`)
-edge grids. Measured result: zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`,
-`M4.W.3`, `M5.AUX.1`, `M6.AUX.1`. **Not deck-clean:** the tech LEF's wide
-`V4` bar has zero `M4` enclosure, so `V4.M4.EN.1` (~370) and `V4.M5.EN.2`
-(~13) remain, plus 1-2 `M5.W.3`; no existing request field changes that.
+M5_M4widePWR0p864`). `ongrid {M3 M4}` snaps the stub onto the tracks and
+`max_columns 1` clears the `V5.M5.EN.1`/`V5.M6.EN.2` hits. Both strap-edge
+checks were clean on the original seven-inverter block (24 µm core, reported
+origin 0.96 µm, PR #4499). The wide `V4` bar's zero `M4` enclosure left
+369 `V4.M4.EN.1` and 13 `V4.M5.EN.2` markers. The request exposes no control
+for that enclosure. That run also had two `M5.W.3` markers.
 At block scale `M3.S.2` is a further known residual (issue #6030): ~15
 markers per ~10^3 `M2`->`M5` crossings, measured at klayout-tools 0.9.2 (a
 count that scales with block size, not a fixed number). They sit on
@@ -3145,9 +3202,34 @@ re-introduces the families above), `split_cuts` is measured DRC-dirty on
 gf180mcu (issue #4301), and the stub patch shape comes from the tech LEF.
 This is an upstream
 OpenROAD `pdngen` limitation; the preset is unchanged here.
-`pdngen` offsets are core-origin relative: the edge-grid result was measured
-with core origin 0.96 um, and other origins can leave `M5.AUX.1`/`M6.AUX.1`
-hits (adjust `power.straps` explicitly in that case).
+
+**Strap edges depend on the snapped core origin.** At `core_margin_um: 0.96`,
+the 97-inverter chain using the `place_and_route_drcfill` request (20% utilization)
+had zero `V4.M5.AUX.2`, `M4.AUX.1`, `M4.AUX.2`, `M4.W.3`, `M5.AUX.1` and
+`M6.AUX.1`. The first routed DEF `ROW` started at (972, 1080) nm. The
+following runs varied only the requested margin (2026-11-18, klayout-tools
+`94950eeee`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12, packaged
+`asap7.drc`, lambdapdk v0.2.17).
+
+| `core_margin_um` | First row x, y (nm) | `M5.AUX.1` | `M6.AUX.1` |
+| ---: | ---: | ---: | ---: |
+| 0.864 | 864, 1080 | 8 | 0 |
+| 0.918 | 918, 1080 | 8 | 0 |
+| 0.96 | 972, 1080 | 0 | 0 |
+| 1.0 | 1026, 1080 | 8 | 0 |
+| 1.188 | 1188, 1350 | 0 | 8 |
+
+Among these origins, M5 was clean at x = 972 and 1188 nm, both 12 nm modulo
+the deck's 24 nm grid. At x = 1026 nm the first strap's edges were at 1230
+and 1446 nm, both 6 nm off grid. M6 checks the horizontal edges against a
+32 nm grid. At the 1.0 µm margin, a 32-output fan-out also had eight
+`M5.AUX.1` markers at both 20% and 40% utilization. Rerun the same request
+with `power` omitted to isolate the PDN contribution. All three 1.0 µm runs
+then had zero `M5.AUX.1` markers. To confirm attribution, compare the marker
+coordinates with the strap edges in the routed DEF's `SPECIALNETS`. To move
+a strap, expand the preset into explicit `power.straps` and `power.connects`
+and adjust the affected layer's `power.straps[].offset_um` relative to the
+snapped origin.
 
 **`preset` and explicit `straps` are mutually exclusive.**
 Supplying both is a validation error — deliberately, rather than a
@@ -3623,7 +3705,10 @@ is host- and scrub-shape-specific and never verdict-bearing. The file name
 keeps the identity check — this verb writes to a fixed `.klt/place-and-route/`
 directory under names derived from the top module, so a renamed artifact, or
 one going `null` ↔ path (missing or newly appearing), still reports
-`"drifted"`.
+`"drifted"`. Message prose is not reduced, so it carries no host path: the
+`power.placed.unavailable_reason` strings that name a DEF (and the
+`warnings[]` that quote them) use its file name only (issue #6146), so a
+lint-clean report is not made to drift by prose.
 
 **`--rerun` overwrites this request's own artifacts.** Unlike `klt
 synthesize`'s retained per-`run_id` directories, the output directory is

@@ -246,6 +246,7 @@ from .sim_batch_contract_worker import (  # noqa: F401
     assess_par_backend_support,
     par_backend_preflight_lines,
     runner_ngspice_init,
+    runner_threads_per_worker,
 )
 from .sim_batch_job_timeout import (
     _resolve_job_ceiling_check,
@@ -2083,9 +2084,9 @@ def attach_staged_model_comparison(
 def _compare_engine_builds(
     worker_simulator: dict[str, Any] | None, client_build: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """Compare the worker's ``--version`` banner with the client's local
-    ``environment.engine_build`` banner (issue #3095). ``not_comparable``
-    unless both sides captured one -- never a proven mismatch. Whitespace is
+    """Compare the worker's ``--version`` banner with the client's
+    ``environment.client_engine_build`` banner (#3095; the off-host probe key, #5566).
+    ``not_comparable`` unless both sides have one; never a proven mismatch. Whitespace
     normalised; a match proves the same banner, not the same build options."""
     worker = (worker_simulator or {}).get("version_banner")
     client = (client_build or {}).get("version_banner")
@@ -2340,6 +2341,7 @@ def _read_job_identity(
     into ``environment.remote``. Neither reader can raise."""
     worker_environment = _read_worker_environment(local_dir, request)
     worker_environment["ngspice_init"] = runner_ngspice_init(report)
+    worker_environment["threads_per_worker"] = runner_threads_per_worker(report)
     return {
         **_read_runner_identity(local_dir, request),
         "worker_environment": worker_environment,
@@ -2612,13 +2614,10 @@ def _recover_failed_job_corners(
     try:
         with tempfile.TemporaryDirectory(prefix="klt-batch-outputs-") as collected:
             collect_outputs(config, job_id, collected, runner=runner)
-            identity = _read_job_identity(collected, request)
             log_note, log_diagnostic = _engine_log_note(collected)
+            report = None
             try:
                 report = read_collected_report(collected)
-                identity["worker_environment"]["ngspice_init"] = runner_ngspice_init(
-                    report
-                )
                 kind, runner_error = _classify_collected_report(report)
                 if kind == "report":
                     note = "collected report is not a klt error envelope"
@@ -2626,6 +2625,7 @@ def _recover_failed_job_corners(
                     note = "collected report has an unrecognized shape"
             except BatchError as exc:
                 note = str(exc)
+            identity = _read_job_identity(collected, request, report=report)
             if runner_error is None:
                 runner_error, stderr_note = _read_stderr_envelope(collected)
                 if runner_error is None:
@@ -2780,7 +2780,6 @@ def _prepare_batch_job_spec(
         corner_count=corner_count,
         timeout_s=timeout_s,
         job_timeout_s=config.job_timeout_s,
-        keep_artifacts=keep_artifacts,
         request_dir=request_dir,
         version_check=config.runner_version_check,
     )
@@ -2814,22 +2813,17 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
-def _manifest_difference(
-    stored_fingerprint: Any, fingerprint: str, stored_hosts: Any, hosts: int
-) -> str:
-    """Issue #4721: what a shard map refusal compared. ``hosts`` is named
-    outright; the fingerprint is one opaque hash of the units, seed, netlist
-    and settings, so it can only be reported as differing (with prefixes)."""
-    parts = []
-    if stored_hosts != hosts:
-        parts.append(f"hosts: map has {stored_hosts}, request has {hosts}")
-    if stored_fingerprint != fingerprint:
-        parts.append(
-            f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
-            f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
-            "settings, so which of those changed is not recoverable"
-        )
-    return "; ".join(parts)
+def _manifest_difference(stored_fingerprint: Any, fingerprint: str) -> str:
+    """What a shard map refusal compared: the fingerprint only (issue #6197;
+    the ``hosts`` arm was dead by construction -- #4821 made ``hosts`` not
+    identity, resume re-splits under the new count -- and it is one opaque
+    hash of the units, seed, netlist and settings, so it can only be reported
+    as differing, with prefixes)."""
+    return (
+        f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
+        f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
+        "settings, so which of those changed is not recoverable"
+    )
 
 
 class _ShardManifest:
@@ -2882,9 +2876,10 @@ class _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
         a missing file means nothing to re-attach to; an unreadable one, or
-        one written for a different request or shard count, raises
-        :class:`SimError` -- never a silent restart that would re-bill every
-        shard."""
+        one written for a different request, raises :class:`SimError` --
+        never a silent restart that would re-bill every shard (the shard
+        count is not compared, issue #4821: resume re-splits under the new
+        count)."""
         from .sim import SimError
 
         path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)

@@ -697,14 +697,21 @@ host. `-o/--output`, `--no-netlist`, `--top`, `--device-model`,
 holds too: `--device-param` is refused under the default `--engine klayout`
 rather than silently ignored.
 
-**No parasitics, so `klt pex` cannot use this engine.** The result is a
-device-level netlist with `parasitics: null`. Combining runset devices with
-curated-deck parasitics would need a geometric net correspondence between two
-independent extractions that number their unlabelled nets independently
-(`\$1` above; see "Anonymous net numbering" below) — nothing in this repo
-provides that today. Consequently this engine does **not** by itself make
-`docs/design-evidence-tiers.md` T1 item 7 citable for such a block: item 7
-accepts only a `klt pex` report.
+**No parasitics.** The result is a device-level netlist with
+`parasitics: null`. Combining runset devices with curated-deck parasitics
+needs a geometric net correspondence between two independent extractions
+that number their unlabelled nets independently (`\$1` above; see "Anonymous
+net numbering" below) — this engine stays device-only, and `klt extract
+--engine klayout-runset --deck` is refused as ever.
+[`klt pex --engine klayout-runset --deck <curated>`](pex.md) (issues #6559,
+#6606) is where that correspondence lives: it runs this engine for devices,
+a curated deck for parasitics, joins the two by measured geometric rules
+([`../design/runset-pex-net-correspondence.md`](../design/runset-pex-net-correspondence.md)),
+and merges the parasitic network into the leg it re-simulates. A `klt pex`
+report from that route can satisfy `docs/design-evidence-tiers.md` T1 item
+7's intent when its envelope says `extraction.parasitics_carried: true`;
+a parasitic-free leg (either runset shape) is refused by `klt signoff`
+(`no_parasitics`, issue #6606).
 
 **Report.** Additive fields only, so `SCHEMA_VERSION` is unchanged (4): the
 report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
@@ -714,8 +721,21 @@ report carries a top-level `engine`, `deck_file`, `deck_vars`, `deck: null`,
 `--device-param` was given it also carries `device_params`
 (`{class: {PARAM: {"name", "suffix"}}}`, sorted); the key is **absent**, not
 `null`, otherwise, so a report without the flag is byte-identical to one from
-before it existed. `device_count`,
-`device_counts`, `devices[]`, `nets[]`, `netlist_path`, `netlist_sha256`,
+before it existed. It always carries `params_not_carried` (issue #6559: `{class: [PARAM, …]}`,
+sorted — the measured parameters the `X` cards do not carry, the structured form
+of the per-class `warnings[]` prose; `{}` once every parameter is declared), which
+`klt pex` copies into its own `extraction` block. It also always carries two
+additive fields for a runset that does not flatten (issue #6559):
+`instantiated_device_counts` (`{class: count}` — the devices instantiated from
+the selected circuit through every circuit it calls, once per call; equal to
+`device_counts` for a flat runset) and `extra_circuits` (`[circuit, …]` — the
+circuits written besides the selected one, `[]` when flat). `device_count`,
+`device_counts`, `devices[]`, `nets[]` describe the **selected circuit alone**
+— `{}`/`0`/empty for a top whose devices all sit in called cells, which the
+`warnings[]` entry for a multi-circuit netlist states — and the "recognised no
+devices" warning keys on `instantiated_device_counts`, never on that top-only
+count. `klt pex` reports `instantiated_device_counts` as its own
+`extraction.device_counts`. `netlist_path`, `netlist_sha256`,
 `netlist_normalized_sha256`, `status` and `metrics` mean exactly what they
 mean for the curated engine. **The exit status proves nothing** about the
 extraction: a runset may exit non-zero purely because its (discarded) compare
@@ -1076,12 +1096,20 @@ two things let a caller tell a slow run from a hang and budget the step:
   `unattributed_seconds` (the remainder no stage covers, so
   `sum(stages) + unattributed_seconds ≈ total_seconds`). Stage seconds are
   **exclusive**: a stage opened inside another is credited to the inner stage
-  only, so the parent's value excludes it (issue #5716). Stages, in order:
+  only, so the parent's value excludes it (issue #5716). The `--progress`
+  `finished in Ns` line is **not** this quantity: it is wall time *inside* the
+  stage, inclusive of any stage nested in it, so for a parent stage it exceeds
+  that stage's `timing.stages` value by its children's time (e.g.
+  `device_extraction` with `--parasitics`, whose `parasitics_compute` runs
+  inside it). Use the stderr line to see how long a stage has been open, and
+  `timing.stages` to see where the time went. Stages, in order:
   `read_layout`, `device_extraction` (the `LayoutToNetlist` run plus dead-metal
   and passive-region work; **excludes** the `--parasitics` compute),
   `parasitics_compute` (the per-net R/C accumulation and coupling-pair search,
   run while the `LayoutToNetlist` is still live; issue #5716; present only with
   `--parasitics`), `diagnostics` (voltage-domain and flavour-marker checks),
+  `unsupported_devices` (the #2919 diagnostic re-runs the recogniser walks
+  to find device markers the deck could not classify),
   `parasitics_inject` (building the parasitics report and injecting the R/C
   elements into the netlist, issue #5716; present only with `--parasitics`),
   `netlist_write`, `netlist_hash` (the raw-file SHA-256), and
@@ -1116,20 +1144,22 @@ agreed within ~10 % on `device_extraction`).
 | 2× `gcd` | 9,714 | 4,107 | 3.96 s | 0.14 s | 20.4 s | 24.9 s |
 | 4× `gcd` | 19,428 | 8,213 | 10.4 s | 0.26 s | 79.7 s | 90.9 s |
 
-**Scaling.** `device_extraction` is mildly super-linear (≈0.36 → 0.41 → 0.54
-ms/device across 4.9k → 9.7k → 19.4k devices, roughly n^1.2) but is not the
-problem. `netlist_normalized_hash` is: it grows ~4× per doubling (quadratic) and
-is 70–88 % of the whole run once a netlist is written, which is the default.
+**Scaling.** On these sky130 routed digital blocks, `device_extraction` is
+mildly super-linear (≈0.36 → 0.41 → 0.54 ms/device across 4.9k → 9.7k → 19.4k
+devices, roughly n^1.2). The dominant stage is `netlist_normalized_hash`,
+which grows ~4× per doubling (quadratic) and accounts for 70–88 % of the
+whole run once a netlist is written, which is the default.
 A ~8.5k-instance block (≈9–10k devices, the 2× row) spends ~20 s of a ~25 s run
 there. Before issue #3408 that time was reported as `unattributed_seconds`
 (5.1 s of 7.0 s on `gcd`), so the `timing` object understated the cost; it now
 has its own stage. Passing `--no-netlist` skips it (the `mult8` row and the
 earlier `device_extraction`-dominated numbers).
 
-`device_extraction` was not split further: it is under 50 % of a default run
-and its growth is close to linear, so the data does not warrant it. Making the
-normalized hash itself sub-quadratic is a separate change and is out of scope
-here; this section only records and attributes the cost.
+On this sky130 corpus, `device_extraction` took under 50 % of a default run
+and grew close to linearly, so those measurements did not warrant splitting
+the stage further. On a 1,600-cell gf180mcu flat array, the unsupported-device
+diagnostic alone accounted for 123 s of `unattributed_seconds` before #5807
+rewrote the recogniser walks and timed the diagnostic as `unsupported_devices`.
 
 ### Reserved annotation layer
 
@@ -3703,16 +3733,16 @@ reported (not asserted)." This section is the gf180mcu counterpart of the
 sky130 section immediately above, reusing the exact same infrastructure
 (`run_extract_klayout_engine`) and reporting discipline.
 
-**Unlike gf180mcu's own DRC deck** (which ships only as unassembled
-per-feature fragments under `libs.tech/klayout/drc/rule_decks/*.drc` with no
-single runnable file, per `docs/cli/drc.md`'s "Engine" → "klayout"
-limitation — the reason gf180mcu's *DRC*-side native cross-check remains
-deferred), **gf180mcu's native LVS deck ships as a single, directly-runnable
-`libs.tech/klayout/lvs/gf180mcu.lvs`** — verified against a real
-`volare`-fetched `gf180mcuD` install for this issue, resolved the same way
-`sky130.lvs` is via `klayout_tools.pdk.lvs_deck_file` (whose own docstring
-already flagged this exact possibility as of issue #869: "a future caller
-is free to attempt it").
+**gf180mcu's native LVS deck is a single, directly runnable file.** For #904,
+`klayout_tools.pdk.lvs_deck_file` resolved `libs.tech/klayout/lvs/gf180mcu.lvs`
+in a `volare`-fetched `gf180mcuD` install, just as it resolves `sky130.lvs`.
+
+The gf180mcu golden-pair DRC cross-check remains deferred because the manifest
+tests do not yet run those fixtures through the native engine. Since #4002,
+`klt drc --engine klayout|both --pdk <variant>`
+resolves the family main script `tech/drc/gf180mcu.drc` as
+`native_deck.kind: pdk_main_script`. Both engines completed a live
+`--engine both` run on `gf180mcuA` (premise corrected 2026-11-18, issue #5720).
 
 **A generalization `run_extract_klayout_engine` needed for a second PDK.**
 sky130.lvs's own custom SPICE-writer delegate emits length/area parameters
@@ -4931,6 +4961,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   case-insensitively and would report a false `net.merged`. Pair it with
   `options.flatten_layout` in `klt lvs` — see
   [`klt lvs`](lvs.md) (`options.flatten_layout`).
+  A flat `--parasitics` run that would *write* such a netlist fails instead
+  (exit 1, issue #7091), naming each colliding group: ngspice folds case,
+  so the two nets would become one node and their net-derived parasitic
+  cards (`RN1_t0` / `Rn1_t0`) would be rejected as duplicate devices —
+  regardless of which nets `--parasitics-net` / `--critical-net` select.
+  Nothing is written and an existing output file (including the default
+  `<input>.spice`) is left untouched; `klt pex` reports it as
+  `extraction failed` before any simulation. `--parasitics --no-netlist`
+  still returns the report with the warning, and a device-only extraction
+  still writes its netlist with the warning. Several labels on *one* net
+  (`A|a`) are not a collision.
 
 ### Flat vs hierarchical
 
@@ -5705,14 +5746,22 @@ per-net lumped model would produce.
   > with tap count even though the real resistance between two fixed points
   > does not. Across levels, two strapped layers joined at both ends are
   > charged as the sum of both, not their parallel combination, while two
-  > levels joined at a single landing correctly add. The true value depends
+  > levels joined at a single landing correctly add. A net routed as a tree
+  > is over-charged the same way: the total sums every branch in series,
+  > including stub arms that end on terminals carrying no DC current (e.g.
+  > MOS gates), so it overstates the trunk-plus-two-arms path between the
+  > current-carrying terminals. The true value depends
   > on which terminals carry current and on the boundary conditions, and a
   > net with three or more terminals has no single scalar. `--distributed-rc`
   > does **not** repair this: the ladder redistributes the *same*
   > `resistance_ohm` along the terminal order and conserves its total, so it
-  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
-  > graph, specified (design only, not implemented) in Stage 3 of
-  > `docs/design/extract-fidelity-roadmap.md`.
+  > inherits the bias. The opt-in terminal-aware resistance graph
+  > ("Terminal-aware resistance graph" above, from Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`) is the cross-check: it
+  > reports the per-terminal-pair path resistance.
+  > Only a two-terminal net gets a graph-sourced scalar; a net with three or
+  > more terminals keeps the legacy total and must be read pairwise through
+  > its `pair_resistance_ohm` matrix.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -8020,7 +8069,13 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 
 `resistance_ohm` is a series sum over a net's fragments (see "Squares are
 counted per connected fragment"); it cannot express parallel structure or
-the resistance *between two named terminals*. `--resistance-graph` (requires
+the resistance *between two named terminals*. Because the sum runs over
+**every** fragment of the net, a tree-routed net (one trunk, several stub
+arms to different terminals) is charged the sum of all arms — including
+arms that end on terminals carrying no DC current (e.g. MOS gates) — so the
+lumped total can overstate the two-terminal path by multiples; the
+`pair_resistance_ohm` matrix below is the cross-check for exactly that
+case. `--resistance-graph` (requires
 `--parasitics`) additionally builds the geometry-derived resistor graph of
 `docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
 `extract_resistance_graph.build_resistance_graph`, DC solve
@@ -8824,7 +8879,7 @@ Every field in this report falls into exactly one of four classes:
 | **content** | Reproduces from the same input on any build; safe to compare strictly. This is what "did this extraction reproduce?" actually means. | `device_count`, `net_count`, `device_counts`, `metrics` (issue #1848 — a deterministic re-keying of already-content fields, so it reproduces exactly whenever they do), `devices[].class`/`.params`/`.instance_path` (cell names and array element keys come from the input layout's own instance tree, not from any extractor-assigned counter), `nets[].pin`/`.device_count`, `parasitics.nets[].resistance_ohm`/`.capacitance_ff`/`.by_layer[]` (issue #1701), `parasitics.nets[].resistance_ohm_top_cell`/`.capacitance_ff_top_cell` (issue #1704, `null` unless `--parasitics-top-cell-only` was given), `parasitics.r_count`/`.c_count`/`.total_*`, `parasitics.integrity` and `parasitics.nets[].integrity` (issue #2764 — derived deterministically from the same emitted model the rest of the block reports; detail strings naming anonymous nets inherit those spellings' bookkeeping class), `warnings[]`, `netlist_normalized_sha256` (a hash *of* content, numbering normalized), `netlist_sha256` (a hash of the written bytes, which embed the bookkeeping `$N` spellings — stable only within one `klayout` build; prefer `netlist_normalized_sha256` for cross-build pins). |
 | **bookkeeping** | Extractor-internal identifiers with no meaning outside the one run that produced them — assigned inside the opaque native `l2n.extract_netlist()` call this repo does not control (see "Anonymous net numbering (`$N`) is NOT a stable cross-platform contract" above). **Explicitly not a contract**: must be normalized (not compared by raw value) before a committed/fresh pair is judged to have reproduced. | `nets[].net_id`, `parasitics.nets[].net_id` (KLayout's `cluster_id` counter — issue #765/#1540); an anonymous net's `$N`/`\$N` name spelling wherever it appears (`nets[].name`, `devices[].nets[...]`, `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`/`.segments[].net_a`/`.net_b`/`.coupled[].net` — issue #1063/#1162); `parasitics.nets[]`'s own list *order* (its extraction-time sort key is `(net, net_id)`, itself derived from the unstable spelling above, so two builds can legitimately produce the identical net set in a different order). |
 | **tool metadata** | Legitimately varies with the build/toolchain, independent of the input's content. | `provenance.klt_version`, `provenance.klayout_version`, `provenance.pdk.version` (`_report_verify.VOLATILE_PROVENANCE_PATHS`, issue #1106). |
-| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift; a hand-rolled comparer should drop it. The full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
+| **run-specific** | Describes the run or the machine, not the layout (issue #5182). Excluded from `--check --rerun` drift. Rather than hand-rolling a comparer that drops it, pipe the report through `klt evidence canonicalize --kind extract` (issue #5541), which emits exactly the `--rerun` view; the full list is in `docs/json-contract.md` "Run-specific fields". | `timing`, `provenance.pdk.ambiguous_sources`, `provenance.pdk.linked_trees`, `provenance.pdk.commit`. |
 
 `klt extract --check <report> --rerun` (below) normalizes every
 **bookkeeping** field before diffing (an anonymous net's committed and

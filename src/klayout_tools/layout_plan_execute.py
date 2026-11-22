@@ -186,6 +186,7 @@ from .gen_compose import GenComposeError, _translate_bbox, compose
 from .layout_plan_fields import ingest_netlist
 from .layout_plan_ports import (
     apply_gate_contact,
+    apply_resistor_flavor,
     device_owned_port_names,
     extract_raw_params_by_id,
     port_pins,
@@ -1058,6 +1059,7 @@ def execute_layout_plan(
 
         generated: dict[str, dict[str, Any]] = {}
         resolved_params_by_id: dict[str, dict[str, Any]] = {}
+        family = None
         for group in device_groups:
             params, param_warnings = _resolve_group_params(
                 group,
@@ -1077,6 +1079,7 @@ def execute_layout_plan(
                 },
             }
             try:
+                warnings.extend(apply_resistor_flavor(group, params, pdk_spec, family))
                 generated[group["id"]] = generate(gen_request)
             except GenError as exc:
                 raise LayoutPlanExecuteError(
@@ -1085,11 +1088,7 @@ def execute_layout_plan(
             except PdkNotFoundError as exc:
                 raise LayoutPlanExecuteError(str(exc)) from exc
 
-            # Scope decision 8 (issue #1731): the PDK variant `generate()`
-            # actually resolved (never `None`, unlike `pdk_spec["variant"]`,
-            # which Phase B leaves optional) -- resolving `family` from it
-            # here, once per group, avoids a second, possibly-divergent PDK
-            # lookup.
+            # Reuse the actual PDK family when resolving subsequent groups.
             family = _pdk_family(generated[group["id"]]["pdk"]["variant"])
             warnings.extend(_device_class_mismatch_warnings(group, params, family))
 
