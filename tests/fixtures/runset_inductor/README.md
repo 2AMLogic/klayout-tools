@@ -6,7 +6,13 @@ top cell, plus the issue-#6903 variants built from it. Derived from
 `testing/testcases/unit/ind_devices/layout/inductor.gds` in
 [IHP-GmbH/IHP-Open-PDK](https://github.com/IHP-GmbH/IHP-Open-PDK)
 (Apache-2.0), at the pinned runset's commit `5cccb161` (v0.3.0); the
-geometry is cut verbatim from that stream around the origin device.
+fixtures use the geometry around the origin device. All variants share one
+reflection about the horizontal centre line of the device marker
+(`y = 44.68 um`). This preserves every dimension and each port's x coordinate.
+On macOS arm64, KLayout 0.30.12 and the pinned deck extracted a spacing of
+13.471 um in the original orientation and 2.1 um after this reflection. The
+latter agrees with the PDK reference CDL and lets the tests isolate the
+runset's left-to-right terminal ordering.
 
 | file | what it is |
 | ---- | ---------- |
@@ -23,7 +29,8 @@ geometry is cut verbatim from that stream around the origin device.
 Regenerate the GDS variants by re-cutting the IHP testcase stream (layers
 27/0, 27/2, 27/25, 63/0, 134/0, 134/2, 134/23, 46/21 around the origin
 device, texts on 63/0 that are not valid UTF-8 dropped) and applying the
-per-file transform above; re-capture `mirrored.lvsdb` with
+common horizontal reflection and the per-file transform above. Re-capture
+`mirrored.lvsdb` with
 
 ```
 klayout -b -r <pdk>/libs.tech/klayout/tech/lvs/sg13g2.lvs \
