@@ -65,6 +65,7 @@ from .pdk_diode_models import (
     diode_write_bindings,
 )
 from .pdk_families import pdk_variant_family
+from .pdk_model_aliases import capacitor_lookup_bindings
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -271,6 +272,10 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
         "lvt": {p: f"sky130_fd_pr__{p}_01v8_lvt" for p in ("nfet", "pfet")},
     },
 }
+
+# Input spellings only: gf180mcu's 5 V wrappers instantiate the 6 V model
+# on the same D/G/S/B pins with the caller's W/L. The writer emits 6 V.
+_MOS_SUBCKT_ALIASES = {"nfet_05v0": "nfet_06v0", "pfet_05v0": "pfet_06v0"}
 
 #: Geometry-literal style: write an explicit SPICE unit suffix (``L=0.5U``,
 #: ``AS=0.84P``), i.e. an absolute SI value that does not depend on the
@@ -560,26 +565,13 @@ def resolve_mos_model_table_for_deck(deck_name: str) -> dict[str, str]:
 
 
 def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
-    """Reverse of :func:`resolve_mos_model_table_for_deck`: a
-    ``<subckt-name> -> <device-class>`` map (e.g.
-    ``"sky130_fd_pr__nfet_01v8" -> "nfet"``) for turning a PDK schematic
-    flow's subcircuit-call device cards *back* into the curated deck's
-    plain-element device form (the ``klt lvs`` reference-netlist direction,
-    issue #280) -- the mirror of the writer delegate's plain-element ->
-    subckt-call direction (:func:`create_model_binding_delegate`).
+    """Map reference subcircuit names to the deck's base MOS device classes.
 
-    Every ``_MOS_MODEL_FLAVOURS`` subcircuit name (issue #1111, e.g.
-    gf180mcu's ``nfet_06v0``/``pfet_06v0``) resolves to the *same* base
-    ``"nfet"``/``"pfet"`` device class its default-flavour sibling does, not
-    a separate class of its own: a reference netlist that instantiates a
-    flavour subcircuit directly is still structurally an ordinary MOS device
-    for ``klt lvs`` comparison purposes (the extracted layout side reports
-    every MOS device -- flavoured or not -- under the same base class too,
-    see ``MOSFlavour``'s own docstring in ``decks/__init__.py`` for why), so
-    this reverse direction deliberately does not distinguish them.
+    For example, ``nfet_05v0`` and ``nfet_06v0`` both map to ``nfet`` in
+    gf180mcu. This matches the layout classes used for structural comparison.
+    Flavour-sensitive comparisons use :func:`mos_flavour_for_subckt` as well.
 
-    Raises :class:`ModelBindingError` (via
-    :func:`resolve_mos_model_table_for_deck`) for an unknown deck.
+    Raises :class:`ModelBindingError` for an unknown deck.
     """
     result = {
         subckt: device_class
@@ -588,6 +580,9 @@ def build_subckt_to_class_map(deck_name: str) -> dict[str, str]:
     for flavour_table in _MOS_MODEL_FLAVOURS.get((deck_name, deck_name), {}).values():
         for device_class, subckt in flavour_table.items():
             result.setdefault(subckt, device_class)
+    for alias, canonical in _MOS_SUBCKT_ALIASES.items():
+        if canonical in result:
+            result[alias] = result[canonical]
     return result
 
 
@@ -602,6 +597,7 @@ def mos_flavour_for_subckt(subckt_name: str) -> str | None:
     A name shared by several decks (``sg13_hv_nmos`` in sg13g2 and
     sg13cmos5l) resolves to the same key in each.
     """
+    subckt_name = _MOS_SUBCKT_ALIASES.get(subckt_name, subckt_name)
     for flavours in _MOS_MODEL_FLAVOURS.values():
         for flavour, table in flavours.items():
             if subckt_name in table.values():
@@ -642,6 +638,8 @@ def known_mos_subckt_names() -> dict[str, tuple[str, str]]:
         for flavour_table in flavours.values():
             for device_class, subckt in flavour_table.items():
                 result.setdefault(subckt, (deck_name, device_class))
+    for alias, canonical in _MOS_SUBCKT_ALIASES.items():
+        result[alias] = result[canonical]
     return result
 
 
@@ -830,15 +828,12 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
             ),
         )
     for (deck_name, family), table in _CAPACITOR_MODEL_TABLE.items():
-        length_param, width_param = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
-        for device_class, subckt in table.items():
-            result.setdefault(
-                subckt,
-                (
-                    deck_name,
-                    DeviceLookup("capacitor", device_class, length_param, width_param),
-                ),
-            )
+        _setdefault_bindings(
+            result,
+            _tagged_bindings(
+                deck_name, capacitor_lookup_bindings(table, deck_name, family)
+            ),
+        )
     for deck_name, family in _BIPOLAR_MODEL_TABLE:
         _setdefault_bindings(
             result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
@@ -951,12 +946,10 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
         )
     _setdefault_bindings(result, _fixed_width_resistor_bindings(deck_name, family))
     _setdefault_bindings(result, _read_only_resistor_bindings(deck_name, family))
-    cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family))
-    for device_class, subckt in (cap_table or {}).items():
-        result.setdefault(
-            subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
-        )
+    _setdefault_bindings(
+        result, capacitor_lookup_bindings(cap_table, deck_name, family)
+    )
     _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
     _setdefault_bindings(result, diode_lookup_bindings(deck_name, family))
     if res_table is None or cap_table is None:
@@ -968,6 +961,7 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
                     DeviceLookup("resistor", device_class, res_len, res_wid),
                 )
         if cap_table is None:
+            cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
             for device_class in declared_capacitors:
                 result.setdefault(
                     device_class,
