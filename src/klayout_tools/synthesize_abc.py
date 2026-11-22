@@ -12,6 +12,37 @@ from ._paths import _reject_unknown_keys
 
 FastMode = Literal["native", "inline"] | None
 
+# Yosys combinational primitives after techmap, including the LUT/SOP
+# representations ABC can return. Sequential cells have separate grading.
+_GENERIC_COMB_CELLS = frozenset(
+    """$lut $sop $_BUF_ $_TBUF_ $_NOT_ $_AND_ $_NAND_ $_OR_ $_NOR_ $_XOR_ $_XNOR_
+    $_ANDNOT_ $_ORNOT_ $_MUX_ $_NMUX_ $_MUX4_ $_MUX8_ $_MUX16_
+    $_AOI3_ $_OAI3_ $_AOI4_ $_OAI4_""".split()
+)
+
+
+def unmapped_comb_cells(counts: dict[str, int]) -> list[str]:
+    """Residual generic combinational cell types in the final leaf counts."""
+    return sorted(cell for cell in _GENERIC_COMB_CELLS if counts.get(cell))
+
+
+def check_custom_mapping(
+    script_path: str | None, stats: dict[str, Any], error_cls: type[Exception]
+) -> None:
+    if script_path is None:
+        return
+    counts = stats.get("num_cells_by_type")
+    if not isinstance(counts, dict):
+        raise error_cls(
+            "could not verify request.synthesis.abc_script: missing cell counts"
+        )
+    unmapped = unmapped_comb_cells(counts)
+    if unmapped:
+        raise error_cls(
+            "request.synthesis.abc_script left unmapped combinational cells: "
+            + ", ".join(unmapped)
+        )
+
 
 @dataclass(frozen=True)
 class AbcMapping:
@@ -121,38 +152,44 @@ def liberty_command(
         if constrained:
             commands += f";buffer;upsize{target};dnsize{target};stime,-p"
         script_text = "+" + commands
+    elif script_text and script_text.startswith("+"):
+        # ABC reserves a leading '+' for inline commands, even in a file path.
+        script_text = "./" + script_text
     command = f"abc -liberty {liberty}"
     if script_text is not None:
         command += f" -script {script_text}"
     return command
 
 
-def _identity(report: Any) -> Any:
-    if report is None:
-        return {"abc_fast": False, "abc_script_sha256": None}
-    if not isinstance(report, dict):
-        return report
-    script = report.get("abc_script")
-    if not isinstance(report.get("abc_fast"), bool) or "abc_script" not in report:
-        return report
-    if script is not None and not (
-        isinstance(script, dict) and isinstance(script.get("sha256"), str)
-    ):
-        return report
+def _identity(report: Any) -> dict[str, Any] | None:
+    match report:
+        case {"abc_fast": bool() as fast, "abc_script": None, "reduced_passes": passes}:
+            digest = None
+        case {
+            "abc_fast": False,
+            "abc_script": {"path": str() as path, "sha256": str() as digest},
+            "reduced_passes": passes,
+        } if path and not os.path.isabs(path):
+            fast = False
+        case _:
+            return None
     return {
-        "abc_fast": report.get("abc_fast"),
-        "abc_script_sha256": script.get("sha256")
-        if isinstance(script, dict)
-        else script,
+        "abc_fast": fast,
+        "abc_script_sha256": digest,
+        "reduced_passes": passes,
     }
 
 
-def mapping_check(committed: Any, mapping: AbcMapping | None) -> dict[str, Any]:
-    expected = _identity(committed)
-    actual = _identity(mapping.report() if mapping is not None else None)
+def mapping_check(
+    committed: dict[str, Any], mapping: AbcMapping | None
+) -> dict[str, Any]:
+    default = AbcMapping(False, None, None)
+    recorded = committed.get("synthesis", default.report())
+    expected = _identity(recorded)
+    actual = _identity((mapping or default).report())
     return {
         "field": "synthesis",
-        "expected": expected,
+        "expected": recorded if expected is None else expected,
         "actual": actual,
-        "match": expected == actual,
+        "match": expected is not None and expected == actual,
     }

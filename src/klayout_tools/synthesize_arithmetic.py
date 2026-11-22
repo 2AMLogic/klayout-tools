@@ -768,7 +768,9 @@ def _measure_candidate(
     try:
         _run_yosys(script_path)
         _read_produced_netlist(netlist_path)
-        module_stats = _read_stats(stats_path, hdl_toplevel)
+        module_stats = _read_stats(
+            stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
+        )
         abc_timing = _read_produced_abc_timing(
             abc_log_path, engine_options.delay_target_ps
         )

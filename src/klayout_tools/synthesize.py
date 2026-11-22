@@ -1396,7 +1396,9 @@ def run_synthesize(
         netlist_path, netlist_text, stripped, elab_sources, repo_root=repo_root
     )
 
-    module_stats = _read_stats(stats_path, hdl_toplevel)
+    module_stats = _read_stats(
+        stats_path, hdl_toplevel, abc_script_path=engine_options.abc_script_path
+    )
     timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
@@ -3211,7 +3213,9 @@ def _aggregate_cell_counts(
     return total, aggregated
 
 
-def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
+def _read_stats(
+    stats_path: str, hdl_toplevel: str, *, abc_script_path: str | None = None
+) -> dict[str, Any]:
     """Parse ``stat -liberty ... -json``'s captured output (Yosys survey
     section 2) and return the top module's stats block, with ``num_cells``/
     ``num_cells_by_type`` replaced by a recursive rollup over the design's
@@ -3318,6 +3322,7 @@ def _read_stats(stats_path: str, hdl_toplevel: str) -> dict[str, Any]:
                 for cell_type, count in raw_by_type.items()
                 if _submodule_key(modules, cell_type, frozenset()) is None
             }
+    synthesize_abc.check_custom_mapping(abc_script_path, result, SynthesizeError)
     return result
 
 
@@ -4221,13 +4226,12 @@ RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
 def _canonicalize_synthesize_report_for_rerun_diff(
     report: dict[str, Any],
 ) -> dict[str, Any]:
-    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
-    -- the comparison view :func:`rerun_synthesize_report` diffs, never what
-    it embeds as ``fresh``. See :func:`klayout_tools._report_verify.strip_keys`
-    for why the exclusion is keyed by name rather than by path."""
+    """Drop run bookkeeping and proof durations from the replay comparison."""
     view = strip_keys(report, RERUN_BOOKKEEPING_KEYS)
-    if isinstance(view.get("equivalence"), dict):
-        view["equivalence"].pop("elapsed_s", None)
+    for path in (("equivalence",), ("restructuring", "equivalence")):
+        proof = get_path(view, path)
+        if isinstance(proof, dict):
+            proof.pop("elapsed_s", None)
     return view
 
 
@@ -4430,7 +4434,7 @@ def check_synthesize_report(
             _synthesize_request_defines(request_path),
         ),
         synthesize_abc.mapping_check(
-            committed.get("synthesis"),
+            committed,
             synthesize_abc.resolve_mapping(
                 load_request(request_path), request_path, SynthesizeError
             ),

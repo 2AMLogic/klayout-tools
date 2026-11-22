@@ -1759,6 +1759,11 @@
       "reason": "Issue #2839: T1 item 11 re-grades a cited klt socket-check envelope's power_ports facts with the verb's own public grading function (grade_power_ports/assess_power_port), so the verb and signoff can never disagree about edge accessibility."
     },
     {
+      "consumer": "signoff",
+      "exporter": "synthesize",
+      "reason": "Signoff checks a custom ABC mapping's recorded cell types with the same predicate used by synthesis (#6915)."
+    },
+    {
       "consumer": "sim",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."

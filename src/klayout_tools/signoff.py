@@ -298,6 +298,7 @@ from .signoff_yield_disclosure import (
 from .signoff_yield_disclosure import (
     _yield_sample_size_rollup as _yield_sample_size_rollup,
 )
+from .synthesize_abc import unmapped_comb_cells
 
 __all__ = [
     "SignoffError",
@@ -2832,12 +2833,15 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
 
 
 def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
-    """Whether a `klt synthesize` response's ``structural`` block reports no
-    unexpected latch, combinational loop or multiply-driven net (issue
-    #4015). A missing or non-integer count fails closed."""
+    """Grade structural defects and residual logic in custom ABC mappings."""
     structural = envelope.get("structural")
     if not isinstance(structural, dict):
         return False
+    mapping = envelope.get("synthesis")
+    if isinstance(mapping, dict) and mapping.get("abc_script") is not None:
+        counts = envelope.get("instance_counts_by_type")
+        if not isinstance(counts, dict) or unmapped_comb_cells(counts):
+            return False
     return all(
         type(structural.get(key)) is int and structural[key] == 0
         for key in ("unexpected_latches", "comb_loops", "multi_driven")
@@ -3043,9 +3047,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind == "erc":
         passed = _erc_passed(envelope)
     elif kind == "synthesize":
-        # Issue #4015: `status` is only ever "ok" (a failed run raises
-        # `SynthesizeError`), so the structural netlist counts are the
-        # real verdict.
+        # Grade the saved netlist counts even when synthesis reported success.
         passed = envelope.get("status") == "ok" and _synthesize_structural_clean(
             envelope
         )

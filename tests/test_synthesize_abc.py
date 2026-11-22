@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from test_synthesize import (
     _REAL_SKY130_VARIANT,
     HAVE_YOSYS,
     _base_request,
+    _macro_success_env,
     _setup_success_env,
     _stub_yosys_success,
 )
@@ -115,6 +117,33 @@ def test_original_script_golden(tmp_path):
     )
 
 
+def test_cheap_check_validates_custom_disclosure(tmp_path, monkeypatch):
+    path = _setup(tmp_path, monkeypatch, {"abc_script": "map.abc"})
+    (tmp_path / "map.abc").write_text("strash\nmap\n")
+    report = synthesize.run_synthesize(str(path))
+    disclosure = report["synthesis"]
+    digest = disclosure["abc_script"]["sha256"]
+    committed = tmp_path / "report.json"
+    for malformed in (
+        {"abc_fast": False, "abc_script_sha256": digest},
+        {**disclosure, "abc_script": {"sha256": digest}},
+        {**disclosure, "abc_script": {"path": "", "sha256": digest}},
+        {**disclosure, "abc_script": {"path": "/map.abc", "sha256": digest}},
+        {**disclosure, "reduced_passes": []},
+        {k: v for k, v in disclosure.items() if k != "reduced_passes"},
+    ):
+        committed.write_text(json.dumps({**report, "synthesis": malformed}))
+        check = synthesize.check_synthesize_report(str(committed), str(path))
+        assert [c["field"] for c in check["checks"] if not c["match"]] == ["synthesis"]
+    # The path is disclosure. Identity follows script content when a file moves.
+    disclosure["abc_script"]["path"] = "elsewhere.abc"
+    committed.write_text(json.dumps(report))
+    assert (
+        synthesize.check_synthesize_report(str(committed), str(path))["status"]
+        == "match"
+    )
+
+
 def test_mapping_changed_from_legacy_is_drift(tmp_path, monkeypatch):
     path = _setup(tmp_path, monkeypatch, {"abc_fast": True})
     request = json.loads(path.read_text())
@@ -158,6 +187,65 @@ def test_signoff_synthesis_citation_discloses_effort(tmp_path):
     item = _synth_item_1(tmp_path, envelope)
     assert item["status"] == "met"
     assert item["citation"]["synthesis"] == envelope["synthesis"]
+
+
+@pytest.mark.skipif(
+    not HAVE_YOSYS or _REAL_SKY130_VARIANT is None,
+    reason="requires real Yosys and Sky130 HD liberty",
+)
+def test_real_custom_script_must_map_adder_in_both_output_dirs(tmp_path):
+    root, variant = _REAL_SKY130_VARIANT
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "adder.v").write_text(
+        "module adder(input [3:0] a,b, output [4:0] y); assign y=a+b; endmodule\n"
+    )
+    script = tmp_path / "+custom map.abc"
+    script.write_text("strash\nmap\n")
+    path = tmp_path / "request.json"
+    request = _base_request(
+        sources=["adder.v"], hdl_toplevel="adder", synthesis={"abc_script": script.name}
+    )
+
+    def run(out):
+        path.write_text(json.dumps({**request, "outputs": {"dir": out}}))
+        return synthesize.run_synthesize(
+            str(path), pdk_root=root, pdk_variant=variant, verify_equivalence=True
+        )
+
+    control = run("control")
+    assert _synth_item_1(tmp_path, control)["status"] == "met"
+    # Earlier builds could prove functional equivalence on a LUT-only netlist.
+    saved = {**control, "instance_counts_by_type": {"$lut": 17}}
+    assert _synth_item_1(tmp_path, saved)["status"] == "unmet"
+    counts = control["instance_counts_by_type"]
+    assert counts and all(cell.startswith("sky130_fd_sc_hd__") for cell in counts)
+    assert run("+artifacts")["instance_counts_by_type"] == counts
+    script.write_text("strash\n")
+    with pytest.raises(synthesize.SynthesizeError, match=r"abc_script.*\$lut"):
+        run("unmapped")
+
+
+def test_custom_mapping_keeps_macro_and_latch_grading(tmp_path, monkeypatch):
+    path = Path(
+        _macro_success_env(tmp_path, monkeypatch, macros=[{"lef": "sram_8x8.lef"}])
+    )
+    (tmp_path / "map.abc").write_text("strash\nmap\n")
+    counts = {"sram_8x8": 1, "$_DLATCH_P_": 1, "sky130_fd_sc_hd__and2_1": 2}
+    _stub_yosys_success(
+        monkeypatch, module_stats={"num_cells": 4, "num_cells_by_type": counts}
+    )
+    request = json.loads(path.read_text())
+    request["synthesis"] = {"abc_script": "map.abc"}
+    for expected, status in [(0, "unmet"), (1, "met")]:
+        request["structural"] = {"expected_latches": expected}
+        path.write_text(json.dumps(request))
+        report = synthesize.run_synthesize(str(path))
+        assert report["structural"]["latches"] == 1
+        assert report["macro_instance_counts_by_type"] == {"sram_8x8": 1}
+        assert _synth_item_1(tmp_path, report)["status"] == status
+    counts["$_AND_"] = 1
+    with pytest.raises(synthesize.SynthesizeError, match=r"abc_script.*\$_AND_"):
+        synthesize.run_synthesize(str(path))
 
 
 @pytest.mark.skipif(
@@ -215,16 +303,20 @@ def test_inline_fast_mapping_with_delay_target():
     )
 
 
-def test_equivalence_rerun_compares_verdict_and_ignores_duration():
+@pytest.mark.parametrize("restructured", [False, True], ids=["original", "resized"])
+def test_equivalence_rerun_compares_verdict_and_ignores_duration(restructured):
     from klayout_tools.evidence_canonicalize import rerun_result_for
 
-    old = {"equivalence": {"status": "equivalent", "elapsed_s": 0.1}}
-    fresh = {"equivalence": {"status": "equivalent", "elapsed_s": 0.5}}
+    proof = {"status": "equivalent", "elapsed_s": 0.1}
+    old = {"equivalence": dict(proof), "restructuring": {"equivalence": dict(proof)}}
+    fresh = deepcopy(old)
+    changed = (fresh["restructuring"] if restructured else fresh)["equivalence"]
+    changed["elapsed_s"] = 0.5
     assert (
         rerun_result_for("synthesize", "report", committed=old, fresh=fresh)["status"]
         == "match"
     )
-    fresh["equivalence"]["status"] = "counterexample"
+    changed["status"] = "counterexample"
     assert (
         rerun_result_for("synthesize", "report", committed=old, fresh=fresh)["status"]
         == "drifted"
@@ -234,6 +326,7 @@ def test_equivalence_rerun_compares_verdict_and_ignores_duration():
 @pytest.mark.parametrize(
     "recorded",
     [
+        None,
         [],
         {"abc_fast": 1},
         {"abc_fast": False, "abc_script": {}},
@@ -241,7 +334,16 @@ def test_equivalence_rerun_compares_verdict_and_ignores_duration():
     ],
 )
 def test_malformed_or_fast_committed_effort_never_matches_default(recorded):
-    assert synthesize_abc.mapping_check(recorded, None)["match"] is False
+    assert synthesize_abc.mapping_check({"synthesis": recorded}, None)["match"] is False
+
+
+def test_custom_mapping_requires_final_cell_counts(tmp_path):
+    stats = tmp_path / "stats.json"
+    stats.write_text(json.dumps({"design": {"num_cells": 1, "area": 0.0}}))
+    with pytest.raises(
+        synthesize.SynthesizeError, match="abc_script: missing cell counts"
+    ):
+        synthesize._read_stats(str(stats), "adder", abc_script_path="map.abc")
 
 
 def test_custom_script_read_and_stage_errors(tmp_path, monkeypatch):

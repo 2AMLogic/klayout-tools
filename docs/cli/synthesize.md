@@ -372,6 +372,11 @@ The report echoes `abc_fast`, `abc_script` (null without a script), and
 an empty object or `abc_fast: false` records `[]`. A signoff item 1 citation
 carries the same disclosure and uses the usual structural grading.
 
+If a custom script leaves generic combinational cells such as `$lut` in the
+netlist, synthesis fails and names the unmapped cell types. Signoff also checks
+these counts when grading a saved custom-mapping report. Declared hard macros
+and expected latches retain their usual grading.
+
 ### ABC constraints, delay target, and cell exclusions
 
 `abc -liberty <lib>` **without** `-constr` skips ABC's own
@@ -2046,9 +2051,11 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
-The `synthesis` check compares the effective fast flag and custom script SHA-256.
-A legacy report with no block uses default mapping. Changed script bytes or
-effort report `drifted`. Full `--rerun` reapplies the request and compares its report.
+The `synthesis` check compares the fast flag, reduced passes and custom script
+SHA-256. A legacy report with no block uses default mapping. A malformed block
+or a change in mapping effort or script content reports `drifted`. Full
+`--rerun` compares both the original and restructured netlist proof verdicts
+and ignores the elapsed time of each proof.
 
 The `netlist_sha256` check (issue #4313), re-hashes the committed
 gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
