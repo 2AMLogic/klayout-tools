@@ -131,7 +131,7 @@ def preserve_pin_limits(text: str) -> tuple[str, int]:
 
 
 def template_args(text: str) -> Iterator[slice]:
-    """The definitions in the header and lookup tables inside cell arcs, in file order."""
+    """Yield template arguments from header definitions and cell arcs in file order."""
     definitions = ("lu_table_template", "power_lut_template")
     for group in group_headers(text, {*definitions, "timing", "internal_power"}):
         if text.startswith(definitions, group.start):
