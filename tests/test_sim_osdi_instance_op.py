@@ -3,21 +3,46 @@
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from klayout_tools.cli import main
 
+VARIANT = Path("pdks/ihp-open-pdk/ihp-sg13g2")
+CARD = Path("libs.tech/ngspice/models/cornerMOSlv.lib")
+MODEL = Path("libs.tech/ngspice/osdi/psp103.osdi")
+
+
+def _shared_checkout(repo: Path) -> Path | None:
+    """Root of the main checkout when ``repo`` is a linked git worktree.
+
+    Git's own metadata names the main checkout, so this holds wherever the
+    worktree lives (``.loom/worktrees/<name>``, ``.loom/worktrees/repo/pr-<N>``).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = (repo / out).resolve()
+    return common.parent if out and common.name == ".git" else None
+
 
 def _psp103_files(repo: Path, override: str | None) -> tuple[Path, Path] | None:
     if override is not None:
         roots = [Path(override).resolve()]
     else:
-        variant = Path("pdks/ihp-open-pdk/ihp-sg13g2")
-        roots = [repo / variant]
-        if repo.parent.name == "worktrees" and repo.parent.parent.name == ".loom":
-            roots.append(repo.parents[2] / variant)
+        roots = [repo / VARIANT]
+        shared = _shared_checkout(repo)
+        if shared is not None and shared != repo.resolve():
+            roots.append(shared / VARIANT)
     for root in roots:
         assets = root / "libs.tech/ngspice"
         card = assets / "models/cornerMOSlv.lib"
@@ -27,21 +52,52 @@ def _psp103_files(repo: Path, override: str | None) -> tuple[Path, Path] | None:
     return None
 
 
-def test_psp103_discovery_in_a_loom_worktree(tmp_path, monkeypatch):
-    repo = tmp_path / ".loom/worktrees/worker"
-    variant = Path("pdks/ihp-open-pdk/ihp-sg13g2")
-    card = Path("libs.tech/ngspice/models/cornerMOSlv.lib")
-    model = Path("libs.tech/ngspice/osdi/psp103.osdi")
-    local, shared = repo / variant, tmp_path / variant
-    for file in (local / card, shared / card, shared / model):
-        file.parent.mkdir(parents=True)
-        file.touch()
-    assert _psp103_files(repo, None) == (shared / card, shared / model)
-    (local / model).parent.mkdir(parents=True)
-    (local / model).touch()
-    assert _psp103_files(repo, None) == (local / card, local / model)
-    monkeypatch.chdir(tmp_path)
-    assert _psp103_files(repo, str(variant)) == (shared / card, shared / model)
+def _git(cwd: Path, *args: str) -> None:
+    identity = ["-c", "user.name=klt", "-c", "user.email=klt@example.invalid"]
+    subprocess.run(["git", *identity, *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _touch(root: Path, *files: Path) -> None:
+    for file in files:
+        (root / file).parent.mkdir(parents=True, exist_ok=True)
+        (root / file).touch()
+
+
+@pytest.fixture
+def main_checkout(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("requires git")
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git(main_repo, "init", "-q")
+    _git(main_repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "init")
+    return main_repo
+
+
+@pytest.mark.parametrize(
+    "layout", [".loom/worktrees/worker", ".loom/worktrees/repo/pr-7250"]
+)
+def test_psp103_discovery_in_a_loom_worktree(main_checkout, monkeypatch, layout):
+    repo = main_checkout / layout
+    _git(main_checkout, "worktree", "add", "-q", "--detach", str(repo))
+    local, shared = repo / VARIANT, main_checkout / VARIANT
+    assert _psp103_files(repo, None) is None
+    _touch(shared, CARD, MODEL)
+    assert _psp103_files(repo, None) == (shared / CARD, shared / MODEL)
+    _touch(local, CARD)  # an incomplete local install still falls back
+    assert _psp103_files(repo, None) == (shared / CARD, shared / MODEL)
+    _touch(local, MODEL)
+    assert _psp103_files(repo, None) == (local / CARD, local / MODEL)
+    monkeypatch.chdir(main_checkout)
+    assert _psp103_files(repo, str(VARIANT)) == (shared / CARD, shared / MODEL)
+
+
+def test_psp103_discovery_without_git_uses_the_active_checkout(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    _touch(repo / VARIANT, CARD, MODEL)
+    monkeypatch.setenv("PATH", "")  # no git: nothing names a shared checkout
+    assert _psp103_files(repo, None) == (repo / VARIANT / CARD, repo / VARIANT / MODEL)
+    assert _psp103_files(tmp_path / "elsewhere", None) is None
 
 
 @pytest.fixture
