@@ -20,17 +20,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .sim_osdi_pin import osdi_pdk_root_pin, resolve_osdi_preload
+from .sim_osdi_pin import resolve_osdi_preload, resolve_request_osdi
 
 
 def _settle_on_host(
-    options: dict[str, Any], request_dir: str, pdk_root: str | None
+    options: dict[str, Any],
+    request_dir: str,
+    pdk_root: str | None,
+    pdk_variant: str | None,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     """Settle for a run that executes here: every entry is expanded and
     existence-checked now (see :func:`sim_osdi_pin.resolve_osdi_preload`) and
     nothing is deferred to a runner, so no entry can reach a deck
     unresolved."""
-    return resolve_osdi_preload(options, request_dir, pdk_root=pdk_root), []
+    return resolve_osdi_preload(
+        options, request_dir, pdk_root=pdk_root, pdk_variant=pdk_variant
+    ), []
 
 
 def finalize_osdi_preload(
@@ -40,6 +45,7 @@ def finalize_osdi_preload(
     osdi_preload: tuple[str, ...],
     osdi_runner_resolved: dict[int, str],
     pdk_root: str | None = None,
+    pdk_variant: str | None = None,
 ) -> tuple[tuple[str, ...], list[dict[str, Any]]]:
     """Settle ``osdi_preload`` once the backend is known (issue #3819).
 
@@ -58,7 +64,7 @@ def finalize_osdi_preload(
     ``options.osdi_preload[index]`` for itself.
     """
     if not offhost:
-        return _settle_on_host(options, request_dir, pdk_root)
+        return _settle_on_host(options, request_dir, pdk_root, pdk_variant)
     return osdi_preload, [
         {
             "entry": options["osdi_preload"][index],
@@ -100,9 +106,7 @@ def resettle_osdi_preload_for_local(
     re-applied over the re-settled entries for the same reason: it was a
     no-op while the backend still looked off-host.
     """
-    osdi_preload, osdi_runner_environment = _settle_on_host(
-        request.get("options") or {}, request_dir, osdi_pdk_root_pin(request)
-    )
+    osdi_preload = resolve_request_osdi(request, request_dir)
     # Deferred import: ``sim`` imports this module at import time, and the
     # ABI pre-check lives there because it needs ``sim``'s engine-version
     # probe. Reaching it through the module object also keeps it patchable
@@ -110,7 +114,7 @@ def resettle_osdi_preload_for_local(
     from . import sim
 
     sim._check_local_osdi_abi(osdi_preload, backend, engine, engine_binary)
-    return osdi_preload, osdi_runner_environment
+    return osdi_preload, []
 
 
 def osdi_runner_environment_fields(

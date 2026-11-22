@@ -260,8 +260,7 @@ from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
 from .sim_netlist_includes import expand_netlist_includes as _expand_netlist_includes
-from .sim_osdi_pin import osdi_pdk_root_pin
-from .sim_osdi_pin import resolve_osdi_preload as _resolve_osdi_preload
+from .sim_osdi_pin import osdi_pdk_root_pin, resolve_request_osdi
 from .sim_osdi_settle import (
     finalize_osdi_preload,
     osdi_runner_environment_fields,
@@ -3046,18 +3045,13 @@ def _prepare_sim_request(
     )
     # Issue #2513: OSDI (Verilog-A) model preload. Resolved and
     # existence-checked here, before any corner is dispatched, like
-    # `models.lib` -- see `_resolve_osdi_preload`. Validated for every engine
+    # `models.lib` -- see `resolve_request_osdi`. Validated for every engine
     # so a typo'd path is always named; `engine: "xyce"` then refuses the
     # option outright in `_enforce_xyce_support_boundary` below rather than
     # silently dropping it.
-    # Issue #3819: entries the executing host resolves for itself (a literal
-    # `$PDK_ROOT/<rel>`, or a path under `models.pdk_root`) name an
-    # image-baked `.osdi`; they are existence-checked here only when the run
-    # stays on this host (see below).
     osdi_runner_resolved = sim_staging.runner_resolved_osdi(request, request_dir)
-    osdi_pdk_root = osdi_pdk_root_pin(request)
-    osdi_preload = _resolve_osdi_preload(
-        options, request_dir, frozenset(osdi_runner_resolved), osdi_pdk_root
+    osdi_preload = resolve_request_osdi(
+        request, request_dir, frozenset(osdi_runner_resolved)
     )
     # Issue #2668 staging and issue #5325's `options.pdk_revision`: both are
     # validated for every backend (a typo'd value is always named, never
@@ -3098,7 +3092,8 @@ def _prepare_sim_request(
         backend in _OFFHOST_BACKENDS,
         osdi_preload,
         osdi_runner_resolved,
-        pdk_root=osdi_pdk_root,
+        pdk_root=osdi_pdk_root_pin(request),
+        pdk_variant=models.get("pdk"),
     )
     # Issue #3041: an `engine_version` pin is checked before any corner runs
     # where this process can see the engine (local backends); off-host
@@ -4917,7 +4912,7 @@ def _resolve_corner_section_libs(
     (:func:`_resolve_lib_ref`), and every ref is existence-checked **here**,
     before any corner is dispatched -- the same posture as
     :func:`_resolve_models_lib`'s ``model library not found`` and
-    :func:`_resolve_osdi_preload`, rather than left to surface as a
+    :func:`resolve_request_osdi`, rather than left to surface as a
     per-corner ngspice parse error deep inside the run.
 
     Fills each point's ``process_section_libs_resolved`` in place rather than

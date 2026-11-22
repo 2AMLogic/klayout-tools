@@ -353,6 +353,10 @@ def _joined_osdi_sha256(entry: dict[str, Any], lifted: list[Any] | None) -> str 
         return None
     name = reported.get("name")
     declared = entry.get("entry")
+    if isinstance(declared, dict):
+        declared = declared.get("pdk_relative")
+        if not isinstance(declared, str) or not isinstance(name, str):
+            return None
     if (
         isinstance(name, str)
         and isinstance(declared, str)

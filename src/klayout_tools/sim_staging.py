@@ -314,10 +314,10 @@ _PDK_ROOT_LITERAL_PREFIXES = ("$PDK_ROOT/", "${PDK_ROOT}/")
 def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int, str]:
     """``{index: reason}`` for every ``options.osdi_preload`` entry the
     *executing* host resolves for itself (issue #3819), by the same two
-    reasons the include rule reports: ``"env_var"`` for a literal
+    include reasons: ``"env_var"`` for a literal
     ``$PDK_ROOT/<rel>`` and ``"pdk_root"`` for a path under
-    ``models.pdk_root``. Such an entry names an image-baked ``.osdi``: it is
-    not existence-checked, staged or hashed on this host. Malformed entries
+    ``models.pdk_root``. Variant objects use ``"pdk_relative"`` with staging off.
+    The executing host checks and hashes these entries. Malformed entries
     are left to the callers' own validation.
     """
     from ._paths import _resolve_relative
@@ -328,6 +328,9 @@ def runner_resolved_osdi(request: dict[str, Any], request_dir: str) -> dict[int,
     roots = host_resolved_roots(request)
     found: dict[int, str] = {}
     for index, entry in enumerate(raw):
+        if isinstance(entry, dict) and not stage_model_inputs_requested(request):
+            found[index] = "pdk_relative"
+            continue
         if not isinstance(entry, str) or not entry.strip():
             continue
         if entry.startswith(_PDK_ROOT_LITERAL_PREFIXES):
@@ -708,30 +711,22 @@ def _resolve_declared_lib(
 def _osdi_roots(request: dict[str, Any], request_dir: str) -> list[_ModelRoot]:
     """``options.osdi_preload`` entries, resolved like ``sim`` resolves them
     (request-relative), in preload order."""
-    from ._paths import _resolve_relative
+    from .sim_errors import SimError
+    from .sim_osdi_pin import resolve_request_osdi
 
-    raw = (request.get("options") or {}).get("osdi_preload")
-    if raw is None:
-        return []
-    runner_resolved = runner_resolved_osdi(request, request_dir)
-    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
-        raise ModelStagingError(
-            "options.osdi_preload must be an array of paths to compiled "
-            "`.osdi` shared libraries"
-        )
-    roots: list[_ModelRoot] = []
-    for index, entry in enumerate(raw):
-        field_name = f"options.osdi_preload[{index}]"
-        if not isinstance(entry, str) or not entry.strip():
-            raise ModelStagingError(f"{field_name} must be a non-empty path")
-        if index in runner_resolved:
-            continue
-        path = os.path.abspath(_resolve_relative(entry, request_dir))
-        if not os.path.isfile(path):
-            raise ModelStagingError(
-                f"{field_name}: osdi_preload file not found: {path}"
+    options = request.get("options") or {}
+    skip = runner_resolved_osdi(request, request_dir)
+    try:
+        resolved = iter(resolve_request_osdi(request, request_dir, frozenset(skip)))
+    except SimError as exc:
+        raise ModelStagingError(str(exc)) from exc
+    roots = []
+    for index in range(len(options.get("osdi_preload") or [])):
+        if index not in skip:
+            path = os.path.abspath(next(resolved))
+            roots.append(
+                _ModelRoot(f"options.osdi_preload[{index}]", "osdi", path, path)
             )
-        roots.append(_ModelRoot(field_name, "osdi", entry, path))
     return roots
 
 

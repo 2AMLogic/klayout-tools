@@ -1524,9 +1524,7 @@ def run_op_sanity(
     timeout_s = op_lint.get("timeout_s", options.get("timeout_s", DEFAULT_TIMEOUT_S))
     # Issue #2513: the sweep's OSDI preload must reach this deck too.
     try:
-        osdi_preload = sim_osdi_pin.resolve_osdi_preload(
-            options, request_dir, pdk_root=sim_osdi_pin.osdi_pdk_root_pin(request)
-        )
+        osdi_preload = sim_osdi_pin.resolve_request_osdi(request, request_dir)
     except SimError as exc:
         raise OpSanityError(str(exc)) from exc
 
