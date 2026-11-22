@@ -283,7 +283,7 @@ not `klt --version`, if you need to detect this kind of drift. See
   forms no device. Other decks are untouched (the field defaults to `0.0`).
   The gf180mcu deck hash changes (the two poly entries gain the new field),
   so a consumer pinning `provenance.deck.content_hash` for gf180mcu re-pins
-  to the value `klt deck resolve --deck gf180mcu` reports for this release.
+  to the value reported by `klt deck resolve --deck gf180mcu --version 0.10.0`.
   No JSON field added or removed; `schema_version` unchanged.
 
 - **Changed** (#5640, grading rule — new `signoff --manifest` reason): an
