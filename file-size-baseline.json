@@ -177,7 +177,7 @@
     },
     {
       "path": "src/klayout_tools/cli/drc_cmd.py",
-      "lines": 563
+      "lines": 551
     },
     {
       "path": "src/klayout_tools/cli/extract_cmd.py",
@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4402
+      "lines": 4397
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -349,7 +349,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose.py",
-      "lines": 4961
+      "lines": 4915
     },
     {
       "path": "src/klayout_tools/gen_compose_port_access.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 11791
+      "lines": 11785
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -853,11 +853,11 @@
     },
     {
       "path": "tests/test_gen.py",
-      "lines": 12372
+      "lines": 12212
     },
     {
       "path": "tests/test_gen_compose.py",
-      "lines": 17460
+      "lines": 17135
     },
     {
       "path": "tests/test_gen_pdk_pcell.py",
@@ -901,7 +901,7 @@
     },
     {
       "path": "tests/test_lvs.py",
-      "lines": 26057
+      "lines": 26043
     },
     {
       "path": "tests/test_lvs_device_provenance.py",

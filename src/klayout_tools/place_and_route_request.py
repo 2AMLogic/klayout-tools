@@ -280,7 +280,7 @@ _PDN_PRESETS: dict[str, dict[str, Any]] = {
     },
     "asap7sc7p5t": {
         "cell_library": "asap7sc7p5t_28",
-        "also_cell_libraries": ("asap7sc7p5t_rvt",),
+        "also_cell_libraries": ("asap7sc7p5t_rvt", "asap7sc7p5t_28_R"),
         "source": (
             "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
             "flow/platforms/asap7/openRoad/pdn/grid_strategy-M1-M2-M5-M6.tcl "

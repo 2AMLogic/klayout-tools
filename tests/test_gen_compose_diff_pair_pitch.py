@@ -113,9 +113,10 @@ def test_compose_gf180mcu_diff_pair_two_net_row_default_pitch_cannot_route(
     output = tmp_path / "diff_pair_two_net_row_default.gds"
     request = _diff_pair_two_net_row_request(both_pdk_root, tmp_path, output)
     report = compose(request)
-    assert report["unrouted_nets"], (
-        "the default-pitch composition is expected to leave a net unrouted"
-    )
+    assert report["unrouted_nets"] == ["TAIL"]
+    # Moving the second backbone up would leave its intermediate Metal2
+    # landing too close to OUTN. The GDS must keep this spacing clean.
+    assert run_drc(str(output), "gf180mcu")["status"] == "clean"
 
 
 def test_compose_gf180mcu_diff_pair_two_net_row_widened_pitch_routes_drc_clean(

@@ -634,7 +634,10 @@ field by field, which two separate passes on a real design had to do
   entry that declares the optional four-terminal `substrate` layer (issue
   #2862) reports a fourth `substrate` terminal after `collector`; entries
   that leave it `None` — every deck shipped today — report the
-  three-terminal shape only. `relation` (issue #2863) is `null` for a
+  three-terminal shape only. A split-terminal resistor (`anode_marker`, issue
+  #4312: gf180mcu's `efuse`) likewise reports a third `anode` terminal, on
+  that marker layer, after `body` and `terminal`, so the marker appears in
+  `required_layers`. `relation` (issue #2863) is `null` for a
   terminal defined by those static layer sets alone — every terminal of
   every shipped class today — and otherwise
   `{"source": <terminal>, "op": "interacting", "extents": <bool>}`: the

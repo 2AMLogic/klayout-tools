@@ -1249,8 +1249,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
   result also prints a one-line warning to stderr, so the drift is visible
   even without inspecting the JSON — for `--engine klayout` runs the warning
   names the standalone application and its remedy, not `--with klayout==`
-  (issue #5660: pinning the wheel does not pin that engine). See "Pinning
-  the KLayout engine version" below.
+  (issue #5660: pinning the wheel does not pin that engine). Under
+  `--format json` that warning follows the "Error shape" delivery rule
+  above (issue #6935): still on stderr ahead of a report — any report,
+  including a violations report's exit `3` — but dropped when the
+  invocation ends in the error envelope, which keeps that stderr one
+  parseable JSON document. See "Pinning the KLayout engine version" below.
 - `pdk` — the resolved PDK, as `{name, source, version}` (`name` is the
   variant, `source` is how it was found, `version` is the `SOURCES` stamp), or
   `null` when the run resolved no PDK. `klt drc` (issue #1901) populates it
@@ -1795,6 +1799,36 @@ convention).
   which a request spec defines, not `klt` itself) is out of scope for this
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
+
+### GF180 native DRC deck selection
+
+The native GF180 verdict exposes `native_deck.deck_selection`. Fatal deck
+errors expose `error.deck_selection`. A tolerated abort carries the same
+object in `engine_deck_errors.deck_selection`. A symlink to the installed
+GF180 main script carries the same selection as its target.
+
+When the parallel runner names failed workers, `error.abort.decks` lists their
+distinct deck IDs. A tolerated partial report uses `engine_deck_errors.abort.decks`.
+A single identified failure also supplies `abort.deck`. The parallel runner
+can start several decks before reporting a failure.
+
+| Field | Meaning |
+|---|---|
+| `requested` | The supplied `decks` string, or `null` for the PDK default. |
+| `selected` | Registry IDs resolved by the installed PDK for this selector, in runner order. |
+| `omitted` | Sorted default registry IDs excluded by selection. Explicit `all` has an empty omission array. |
+| `narrowed` | Whether the resolved selector omits any default IDs. |
+| `started` | Registry IDs observed starting in the full run log, in observation order. |
+| `not_reached` | Selected IDs outside the observed starts when the start log accounts for the full selection or a sequential abort prefix. |
+
+If the registry cannot be resolved, `selected`, `omitted` and `narrowed` are
+`null`. Missing or incomplete start evidence leaves `not_reached` null.
+The report records unknown scope in `coverage.unknown`. Known exclusions
+appear in `coverage.skipped` as namespaced `native_deck` work IDs with
+reason `not_selected`. Unreached selected IDs use reason `not_reached`.
+Narrowed reports also expose a top-level `rule_selection` for signoff.
+These arrays name native registry IDs. `coverage.rule_categories` names
+RDB categories, which can differ from the deck that emits them.
 
 ## Path fields: envelope vs. plain string (issue #2073)
 
@@ -2563,6 +2597,15 @@ to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
 
+**Warning delivery (issue #6935).** The CLI defers engine-version mismatch
+warnings (see [shared `provenance`](#shared-provenance-block)) and the
+`klt sim` advisories for ambiguous PDK installs and an ambient ngspice
+init file. When a command emits a JSON error, the CLI discards these
+warnings so the caller can parse the whole error stream as one JSON value.
+When a command produces a report, the CLI sends the warnings to stderr,
+including for a violations report with exit code `3`. Under `--format text`,
+the warnings print as they happen, ahead of the plain-text error line.
+
 ```json
 {
   "schema_version": 1,
@@ -2928,3 +2971,9 @@ The envelope modules (`klayout_tools.cli.output`,
 `klayout_tools.signoff_envelopes`) are held to `disallow_untyped_defs` under
 mypy and the package ships `py.typed`. The rest of the code is covered by a
 baseline ratchet; see [`type-checking.md`](type-checking.md).
+
+In report mode, `errored[]` contains the expected corner IDs whose error row
+records an engine attempt, in matrix order. It is a subset of
+`not_simulated[]`. A report without attempted errors emits an empty array.
+Request mode omits this field. Both verdicts and the exit status retain
+their existing meanings (#7008).

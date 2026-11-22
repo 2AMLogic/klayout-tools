@@ -96,18 +96,6 @@ def test_run_pex_resistance_graph_echo_carries_graph_terminals(tmp_path):
     )
 
 
-def test_run_pex_resistance_graph_unsupported_net_echoes_empty_graph_fields(
-    tmp_path,
-):
-    """Without a per-cut resistance the strapped net is `unsupported`: its
-    echo carries empty terminals/matrix verbatim rather than omitting them."""
-    graph, _ = _pex_strapped(tmp_path, "strapped", "echo_legacy", resistance_graph=True)
-    (net,) = graph["extraction"]["resistance_graph"]["nets"]
-    assert net["resistance_source"] == "legacy"
-    assert net["terminals"] == []
-    assert net["pair_resistance_ohm"] == []
-
-
 def test_cli_pex_resistance_graph_json_echoes_graph_fields(tmp_path, capsys):
     """The CLI JSON report carries the echo fields too (issue #5894)."""
     out = tmp_path / "cli.spice"

@@ -34,7 +34,8 @@ flag line carries cleanly — not positional RTL file args.
 
 - `<request>` — a path to a request JSON file, e.g. `klt synthesize request.json`.
   Relative paths inside the request (`sources`) resolve against the
-  **request file's own directory**.
+  **request file's own directory**. Pass `-` to read JSON from stdin and resolve
+  relative input paths against the current working directory.
 - `--pdk` — PDK variant to resolve (e.g. `sky130A`); overrides `$PDK`.
   Optional — omit to use `find_pdk()`'s own default search order.
 - `--pdk-root` — explicit PDK install root; overrides `$PDK_ROOT` and the
@@ -98,19 +99,6 @@ unchanged); an inherited `COLUMNS=80` from an interactive shell is
 overridden for the child, everything else (`PATH`, `TMPDIR`, PDK vars) is
 inherited unchanged.
 
-### Watchdog timeouts ("did not complete within")
-
-Each `yosys -s` invocation uses the resolved [Yosys budget](#yosys-budget-overrides-issue-5773) (default 300 s).
-When the watchdog kills the process group, the error names the budget,
-the script, and the sibling `.log` file containing both output streams.
-
-When the last non-empty stdout line is the ABC gate-netlist extraction
-banner, the error reports that ABC produced no output after extraction.
-Check the ABC build bundled with the `yosys` on `$PATH` and the selected
-liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
-Other timeouts suggest raising `--yosys-timeout-s`, `KLT_YOSYS_TIMEOUT_S`, or
-`request.yosys_timeout_s` to allow more time.
-
 **Which `yosys` matters.** If the `yosys` resolved from `$PATH` is a YoWASP
 (WASI-sandboxed) build — e.g. `yowasp-yosys`, commonly pulled in by `pip
 install --user` and installed to `~/.local/bin/yosys`, shadowing a native
@@ -145,6 +133,19 @@ optional and additive: a missing extension reports `"sta": null` and changes
 nothing else about the run. The extension is not shipped with the published
 `klayout-tools` package, so an installed package always reports `"sta": null`
 (see "`sta` is `null`" below).
+
+### Watchdog timeouts ("did not complete within")
+
+Each `yosys -s` invocation uses the resolved [Yosys budget](#yosys-budget-overrides-issue-5773) (default 300 s).
+When the watchdog kills the process group, the error names the budget,
+the script, and the sibling `.log` file containing both output streams.
+
+When the last non-empty stdout line is the ABC gate-netlist extraction
+banner, the error reports that ABC produced no output after extraction.
+Check the ABC build bundled with the `yosys` on `$PATH` and the selected
+liberty. Raising `yosys_timeout_s` is unlikely to help in this case.
+Other timeouts suggest raising `--yosys-timeout-s`, `KLT_YOSYS_TIMEOUT_S`, or
+`request.yosys_timeout_s` to allow more time.
 
 ## Generated `.ys` script
 
@@ -347,6 +348,41 @@ retained directory next to that request.
 | `<top>_memory_evidence.ys` / `.log` | The side memory-evidence script (`memory_mapping.script_path`) and its captured log (issue #2745). Never the production script; see "`memory_mapping`" below. **Commit-safe** when its sources and `outputs.dir` sit inside the repo: those paths are written repo-relative (anything outside the repo stays absolute). |
 | `<top>_blackboxes.txt` | The evidence script's `select -list =A:blackbox =A:whitebox` output, read for `blackbox_modules`. |
 | `<top>_memory_elaborated.json` / `<top>_memory_pre_lowering.json` | The evidence script's two `stat -json` captures — the `elaborated` and `pre_lowering` stages `memory_mapping` is derived from. |
+
+### ABC mapping effort
+
+Use the optional top-level `synthesis` object to select one mapping change.
+
+| Request | Generic mapping | Standard-cell mapping |
+| --- | --- | --- |
+| Omit `synthesis` | Yosys `synth -top` internal ABC pass | Yosys default Liberty script |
+| `{"synthesis":{"abc_fast":true}}` | `synth -noabc -top`, then generic `abc -fast` and `opt -fast` | `abc -fast -liberty` |
+| `{"synthesis":{"abc_script":"scripts/map.abc"}}` | Yosys `synth -top` internal ABC pass | `abc -liberty … -script` with the specified file |
+
+Fast mapping reduces effort on both passes. On builds without the native
+`-fast` option, klt emits the corresponding Yosys 0.67 commands explicitly.
+With Liberty timing constraints it retains the buffer, sizing and `stime -p`
+steps. A custom script applies only to standard-cell mapping so it can refer
+to the target library. Use `--verify-equivalence` to check the resulting
+gate-level netlist against the source RTL. To populate ABC timing with a
+custom script, include `stime -p` and enable the appropriate ABC constraints.
+
+`abc_fast` accepts a boolean. `abc_script` names a file relative to the
+request directory (the working directory for stdin). A leading `+` is a
+literal filename character. klt snapshots the file beside the generated
+script and records its request-relative path and SHA-256 in both
+`synthesis.abc_script` and `provenance.abc_script`. Supply only one key.
+
+The report echoes `abc_fast`, `abc_script` (null without a script), and
+`reduced_passes` when the request includes `synthesis`. Fast mapping records
+`["synth_internal", "liberty"]`, a custom script records `["liberty"]`, and
+an empty object or `abc_fast: false` records `[]`. A signoff item 1 citation
+carries the same disclosure and uses the usual structural grading.
+
+If a custom script leaves generic combinational cells such as `$lut` in the
+netlist, synthesis fails and names the unmapped cell types. Signoff also checks
+these counts when grading a saved custom-mapping report. Declared hard macros
+and expected latches retain their usual grading.
 
 ### ABC constraints, delay target, and cell exclusions
 
@@ -2070,7 +2106,13 @@ as `{}`), so the same sources elaborated with different overrides report
 request's `defines` (issue #4196): a changed, added or removed define reports
 `drifted`.
 
-A fifth check, `netlist_sha256` (issue #4313), re-hashes the committed
+The `synthesis` check compares the fast flag, reduced passes and custom script
+SHA-256. A legacy report with no block uses default mapping. A malformed block
+or a change in mapping effort or script content reports `drifted`. Full
+`--rerun` compares both the original and restructured netlist proof verdicts
+and ignores the elapsed time of each proof.
+
+The `netlist_sha256` check (issue #4313), re-hashes the committed
 gate-level netlist (SHA-256 of its bytes, bare lowercase hex) and compares it
 with the report's recorded top-level `netlist_sha256`, so a hand-edited or
 stale-after-resynthesis netlist reports `drifted` with no Yosys and no extra
