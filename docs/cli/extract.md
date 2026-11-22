@@ -1174,9 +1174,11 @@ total, `device_extraction` 80.4 s (of which `l2n.extract_netlist()` — the
 KLayout C++ engine — is the bulk; the remaining Python leg is
 `apportion_shared_sd`'s per-device pass over mixed S/D polygons), ~1.3 s
 unattributed, netlist byte-identical (same SHA-256), warnings identical.
-The 2x2 `tt_um_2048_vga_game` (66,459 devices) runs in 112.0 s; both were
-250–300 s timeouts before. The netlist is a 5.2 MB 33k-device file, so
-`netlist_normalized_hash` stays sub-second at this size on gf180mcu.
+The 2x2 `tt_um_2048_vga_game` (66,459 devices) took 112.0 s on that host.
+Both layouts had previously timed out at 250–300 s. The PAL netlist is
+5.2 MB, and its `netlist_normalized_hash` took less than a second.
+The current extractor combines the flavour-island shortcuts with the bulk
+MOS-capacitor classification from #5807 and its per-layer cache from #6527.
 
 ### Reserved annotation layer
 

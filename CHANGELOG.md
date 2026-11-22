@@ -28,8 +28,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   Measured on the 166 KB ttgf0p2 `tt_um_MATTHIAS_M_PAL_TOP_WRAPPER` block
   (33,582 devices): 2,262.7 s → 83.6 s total, netlist byte-identical; the
   2x2 `tt_um_2048_vga_game` (66,459 devices) went from a 300 s timeout to
-  112.0 s. No JSON field is added, renamed or removed; no `schema_version`
-  bump.
+  112.0 s on the same host. The extra timing stage is additive and keeps the
+  current `schema_version`.
 
 - **`klt sim` `options.ngspice_options` accepts `chgtol` and `trtol`** (#7007,
   2026-11-21): the solver-option allowlist gains ngspice's two remaining
