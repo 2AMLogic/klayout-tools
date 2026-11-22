@@ -259,7 +259,9 @@ directory itself, or a named subdirectory of it). When present it wins over
   `power_lut_template` groups are unioned by name (same name with different
   content is an error). A duplicate cell name is an error; the merged header
   is the first file's plus any templates it lacks; a one-element list equals
-  the string form.
+  the string form. The place-and-route timing sweep uses these corner keys in
+  descriptor order. Each list contributes one merged deck and a single report
+  entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
