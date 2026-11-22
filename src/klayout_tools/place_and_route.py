@@ -2575,7 +2575,7 @@ def _run_rebuild_corners(
                 output_subdir=name,
             )
         except PlaceAndRouteError as exc:
-            entry.update({"status": "failed", "error": str(exc)})
+            _route_overflow.record_corner_failure(entry, exc)
         else:
             entry.update(report)
         corner_runs.append(entry)

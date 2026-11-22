@@ -19,6 +19,7 @@ from .place_and_route_reports import (
     parse_global_route_congestion,
     rank_overflow_regions,
 )
+from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_script import _macro_footprint
 
 #: Issue #6949: the region frame `overflow_by_region` always carries -- a
@@ -174,3 +175,16 @@ def route_failure_congestion(
         global_route["congestion_report_path"] = None
         reasons["global_route.congestion_report_path"] = _NO_REPORT_REASON
     return {"congestion": {"global_route": global_route, "null_reasons": reasons}}
+
+
+def record_corner_failure(entry: dict[str, Any], exc: PlaceAndRouteError) -> None:
+    """Attach failure evidence while preserving the corner's metadata."""
+    entry.update(status="failed", error=str(exc))
+    if exc.code is not None:
+        entry["error_code"] = exc.code
+    if exc.job_id is not None:
+        entry["job_id"] = exc.job_id
+    for key, value in (exc.details or {}).items():
+        # Only the exception attributes can supply these optional fields.
+        if key not in ("error_code", "job_id"):
+            entry.setdefault(key, value)
