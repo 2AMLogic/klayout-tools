@@ -185,7 +185,7 @@
     },
     {
       "path": "src/klayout_tools/cli/parser.py",
-      "lines": 4403
+      "lines": 4402
     },
     {
       "path": "src/klayout_tools/cli/pdk_cmd.py",
@@ -577,7 +577,7 @@
     },
     {
       "path": "src/klayout_tools/sim.py",
-      "lines": 12251
+      "lines": 12100
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
@@ -645,7 +645,7 @@
     },
     {
       "path": "src/klayout_tools/synthesize.py",
-      "lines": 4560
+      "lines": 4525
     },
     {
       "path": "src/klayout_tools/synthesize_arithmetic.py",
@@ -1041,7 +1041,7 @@
     },
     {
       "path": "tests/test_sim.py",
-      "lines": 15832
+      "lines": 15827
     },
     {
       "path": "tests/test_sim_batch.py",
