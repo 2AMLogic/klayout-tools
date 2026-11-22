@@ -364,6 +364,7 @@
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_params_checks",
         "klayout_tools.gen_layer_mv_ring",
+        "klayout_tools.gen_pitch",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_res_head",
         "klayout_tools.gen_pcells",
