@@ -33,7 +33,6 @@ Three tiers:
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
 import os
@@ -8205,21 +8204,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    args = argparse.Namespace(
-        request=path,
-        format="json",
-        check=None,
-        rerun=False,
-        deck=None,
-        deck_file=None,
-        deck_var=None,
-        expect_deck_hash=None,
-        layout=None,
-        reference=None,
-        progress=None,
-        output=None,
-    )
-    assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
+    assert main(["lvs", path, "--format", "json"]) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"
 
