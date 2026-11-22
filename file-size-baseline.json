@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4567
+      "lines": 4544
     },
     {
       "path": "src/klayout_tools/power.py",
