@@ -264,7 +264,7 @@ from .equiv_verdict import require_equivalence
 from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
-from .request_paths import RequestPaths
+from .request_paths import RequestPaths, resolve_readable_files
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -2020,20 +2020,13 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
     if not all(isinstance(entry, str) and entry for entry in sources):
         raise SynthesizeError("request.sources entries must be non-empty strings")
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _rpath(entry, request_dir, "request.sources entry")
-        if not os.path.isfile(path):
-            raise SynthesizeError(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise SynthesizeError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        SynthesizeError,
+        field="request.sources entry",
+        noun="RTL source",
+    )
 
 
 def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
