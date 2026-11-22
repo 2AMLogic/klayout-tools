@@ -185,6 +185,23 @@ def test_check_names_corner_removed_from_request(tmp_path, monkeypatch, capsys, 
     assert moved[field]["actual"] is None
 
 
+def test_check_rejects_unknown_request_field_like_fresh_run(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    report = _commit_report(tmp_path, capsys, request_path)
+    request = json.loads(Path(request_path).read_text())
+    request["netlsit"] = "other.v"
+    Path(request_path).write_text(json.dumps(request))
+
+    assert main(["sta", request_path, "--format", "json"]) == 1
+    fresh_error = capsys.readouterr().err
+    assert "unknown field" in fresh_error and "netlsit" in fresh_error
+    assert main(["sta", request_path, "--check", report, "--format", "json"]) == 1
+    assert capsys.readouterr().err == fresh_error
+
+
 def test_check_refuses_conflicting_corner_selectors(tmp_path, monkeypatch, capsys):
     request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
     _stub_openroad_multi_corner(monkeypatch)
