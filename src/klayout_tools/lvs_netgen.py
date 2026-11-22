@@ -452,6 +452,7 @@ def _run_netgen_lvs(
     """
     import klayout.db as kdb
 
+    from .extract_netlist_write import write_spice_netlist
     from .lvs import LvsError
 
     work_dir = tempfile.mkdtemp(prefix="klt-lvs-netgen-")
@@ -463,21 +464,20 @@ def _run_netgen_lvs(
         layout_path = os.path.join(work_dir, "layout.spice")
         reference_path = os.path.join(work_dir, "reference.spice")
         log_path = os.path.join(work_dir, "comp.out")
-
         writer = kdb.NetlistSpiceWriter()
         writer.use_net_names = True
         try:
-            layout_netlist.write(
-                layout_path, writer, "klt lvs -- netgen engine layout netlist"
-            )
-            reference_netlist.write(
-                reference_path, writer, "klt lvs -- netgen engine reference netlist"
-            )
+            for netlist, path, side in (
+                (layout_netlist, layout_path, "layout"),
+                (reference_netlist, reference_path, "reference"),
+            ):
+                write_spice_netlist(
+                    netlist, path, writer, f"klt lvs -- netgen engine {side} netlist"
+                )
         except Exception as exc:
             raise LvsError(
                 f"could not write a netlist for the netgen engine: {exc}"
             ) from exc
-
         cmd = [
             binary,
             "-batch",
