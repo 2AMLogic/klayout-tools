@@ -20,6 +20,7 @@ from .erc_spec_boxes import (  # -- _parse_um_boxes is re-exported
     _parse_tap_boxes,
     _parse_um_boxes,
     _parse_well_boxes,
+    validate_common_native_substrate,
 )
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
@@ -91,6 +92,7 @@ _SPEC_KEYS = (
     "nets",
     "ties",
     "ties_disclosure",
+    "common_native_substrate",
     "devices",
     "antenna_limits",
 )
@@ -991,16 +993,9 @@ def _validate_ties(
     or declared dedicated. A named ``through`` via qualifies its physical
     connection to the ``connect_to`` role. Omission uses polygon overlap.
 
-    ``well_boxes`` (optional array of the same micrometre boxes, issue
-    #2255) is the *well*-side counterpart, and the one thing on this entry
-    that substitutes for a required field rather than narrowing one: with
-    ``"well_layer": null``, it asserts the substrate region of a block that
-    draws no well/tub layer at all (a native-substrate, NMOS-in-bulk
-    block), which before this could not declare a substrate tie in any
-    form. Exactly one of the two well forms may be given -- see
-    :func:`_parse_well_declaration` -- and an assertion covering the whole
-    top-cell extent is graded as skipped work, not as evidence (see
-    :func:`_degenerate_tie_reasons`).
+    A tie names its drawn well layer or asserts substrate geometry with
+    ``well_boxes`` when ``well_layer`` is null (#2255). An assertion covering
+    the whole cell is graded as skipped (see :func:`_degenerate_tie_reasons`).
 
     ``well_requires``/``well_excludes`` (optional arrays of
     ``"<layer>/<datatype>"``, issue #2339) narrow the *drawn* well the way
@@ -1091,6 +1086,7 @@ def _validate_ties(
                 "net": net,
             }
         )
+    validate_common_native_substrate(spec, spec_path, entries)
     return entries
 
 

@@ -3054,10 +3054,8 @@ def run_erc(
     )
     erc_findings.extend(connectivity_findings)
 
-    # The tie graph (issue #2169): a second extraction (only when `ties[]` is
-    # declared) adding each tie's tap conductor to the same stackup/vias. Kept
-    # separate so no `ties[]` declaration can reach `gates[]`, the antenna
-    # ratios, or the `nets[]` findings already computed.
+    # Extract the tap conductors in a separate graph (#2169) so ties cannot
+    # affect gates, antenna ratios or the net findings already computed.
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3071,6 +3069,7 @@ def run_erc(
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
         substrate_outcome = run_substrate_pass(
             layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            common_native_substrate=spec.get("common_native_substrate", False),
             tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,
