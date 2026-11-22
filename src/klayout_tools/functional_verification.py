@@ -201,7 +201,6 @@ import importlib.metadata
 import json  # noqa: F401 -- tests reach it as fv.json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from typing import Any
@@ -213,7 +212,6 @@ from ._jsonnum import is_int
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import sha256_file
 from .env_provenance import find_repo_root, repo_relative_path
 from .functional_verification_from_synthesize import (  # noqa: F401
     _resolve_sources,
@@ -280,12 +278,16 @@ from .functional_verification_sdf_steps import (
     _sdf_refusal_attribution,
     _sdf_refusal_error,
 )
+from .functional_verification_tools import (
+    _ENGINE_VERSION_COMMANDS,
+    _check_required_tool,
+)
 from .request_paths import RequestPaths
 from .reset_coverage import ResetCoverageError, sequential_elements
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: ``"icarus"`` first: it is the documented default, per the spike's own
 #: CI-cost finding (~0.7 s vs. Verilator's ~8 s for the worked example).
@@ -630,11 +632,6 @@ DEFAULT_MUTATION_TIMEOUT_S = 600.0
 #: group, for the OS to actually reap it before giving up and moving on --
 #: never itself a source of an unbounded wait.
 _MUTATION_KILL_GRACE_S = 5.0
-
-_ENGINE_VERSION_COMMANDS = {
-    "icarus": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
-    "verilator": (["verilator", "--version"], re.compile(r"Verilator (\S+)")),
-}
 
 _COVERAGE_SUMMARY_RE = re.compile(
     r"^\s*(line|toggle|branch|expr)\s*:\s*([0-9.]+)%", re.MULTILINE
@@ -1462,9 +1459,11 @@ def _resolve_requires_tools(
     Each entry is ``{"name": str, "version": str|null, "sha256": str|null}``.
     ``name`` is looked up with ``shutil.which`` on ``request.env["PATH"]`` when
     that is set (else the ambient ``PATH``); ``version`` is a substring match on
-    the tool's ``--version`` output; ``sha256`` is compared with the resolved
-    binary's digest. Every unmet tool is listed in one ``missing_tool`` error.
-    Returns the ``environment.tools`` echo (``[]`` when omitted).
+    the first non-empty line from the probe (``-V`` for Icarus, otherwise
+    ``--version``; issue #7094); ``sha256`` is
+    compared with the resolved binary's digest. Every unmet tool is listed in
+    one ``missing_tool`` error. Returns the ``environment.tools`` echo (``[]``
+    when omitted).
     """
     entries = _requires_tool_entries(requires_tools)
     search_path = env.get("PATH")
@@ -1527,73 +1526,6 @@ def _parse_requires_tool_entry(
                 f"{where}.{field} must be a non-empty string or null"
             )
     return name, entry.get("version"), entry.get("sha256")
-
-
-def _check_required_tool(
-    name: str,
-    want_version: str | None,
-    want_sha256: str | None,
-    search_path: str | None,
-    run_env: dict[str, str],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Resolve one tool; return ``(tool_echo, unmet)``. ``tool_echo`` is
-    ``None`` when the binary was not found; ``unmet`` is ``None`` when every
-    requested constraint holds."""
-    resolved = shutil.which(name, path=search_path)
-    if resolved is None:
-        missing: dict[str, Any] = {
-            "name": name,
-            "wanted": "on PATH",
-            "found": None,
-            "reason": "not found",
-        }
-        return None, missing
-    observed = _tool_version_output(resolved, run_env)
-    try:
-        digest = sha256_file(resolved)
-    except OSError:
-        digest = None
-    tool: dict[str, Any] = {
-        "name": name,
-        "path": resolved,
-        "version": observed,
-        "sha256": digest,
-    }
-    problems = []
-    if want_version is not None and (observed is None or want_version not in observed):
-        problems.append(f"version {want_version!r} not in --version output")
-    if want_sha256 is not None and digest != want_sha256.lower():
-        problems.append(f"sha256 {want_sha256} != {digest}")
-    if not problems:
-        return tool, None
-    unmet: dict[str, Any] = {
-        "name": name,
-        "wanted": {"version": want_version, "sha256": want_sha256},
-        "found": {"path": resolved, "version": observed, "sha256": digest},
-        "reason": "; ".join(problems),
-    }
-    return tool, unmet
-
-
-def _tool_version_output(path: str, env: dict[str, str]) -> str | None:
-    """First non-empty line of ``<path> --version`` (stdout, else stderr);
-    ``None`` if it cannot run. A non-zero exit still counts when it printed."""
-    try:
-        proc = subprocess.run(
-            [path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    for stream in (proc.stdout, proc.stderr):
-        for line in (stream or "").splitlines():
-            if line.strip():
-                return line.strip()
-    return None
 
 
 class _MissingToolError(FunctionalVerificationError):
@@ -1927,7 +1859,7 @@ def _find_coverage_dat(test_dir: str, build_dir: str) -> str | None:
 
 
 def collect_coverage(
-    *, test_dir: str, build_dir: str, info_path: str
+    *, test_dir: str, build_dir: str, info_path: str, repo_root: str | None = None
 ) -> dict[str, Any]:
     """Post-process Verilator's ``coverage.dat`` into the contract's
     ``coverage`` block (spike section 5).
@@ -1984,7 +1916,7 @@ def collect_coverage(
         "toggle_pct": percentages.get("toggle"),
         "branch_pct": percentages.get("branch"),
         "expr_pct": percentages.get("expr"),
-        "info_path": info_path,
+        "info_path": _hashed_path_envelope(info_path, repo_root=repo_root),
     }
 
 
@@ -2040,17 +1972,8 @@ def _find_trace_artifact(
 def _resolve_trace(
     *, hdl_toplevel: str, build_dir: str, test_dir: str
 ) -> dict[str, Any]:
-    """Build the response's ``trace`` block -- ``{"path", "format",
-    "size_bytes"}``, the identical shape ``klt wave build``'s own ``trace``
-    field already uses (``docs/schemas/wave-build-response.schema.json``),
-    so the object this verb hands back can be dropped straight into a
-    ``klt wave build`` request's own ``trace`` field unchanged.
-
-    Raises :class:`FunctionalVerificationError` when ``options.trace`` was
-    requested but the run produced no waveform file -- a requested-and-
-    missing trace would otherwise be indistinguishable from "not requested"
-    (``null``), the same posture :func:`collect_coverage` already takes for
-    a requested-and-missing ``coverage.dat``.
+    """Report waveform path, format and byte count. A wave-build request
+    takes the path and format. A requested but missing waveform is an error.
     """
     found = _find_trace_artifact(
         hdl_toplevel=hdl_toplevel, build_dir=build_dir, test_dir=test_dir
@@ -2745,19 +2668,17 @@ def run_functional_verification(
     run_inputs.normalize_failure_messages(tests, request_dir)
 
     coverage = None
+    coverage_info_path = None
     if coverage_requested:
+        coverage_info_path = os.path.join(output_dir, "coverage.info")
         coverage = collect_coverage(
             test_dir=output_dir,
             build_dir=build_dir,
-            info_path=os.path.join(output_dir, "coverage.info"),
+            info_path=coverage_info_path,
+            repo_root=repo_root,
         )
 
-    # Additive (Epic #1585 Phase 3, issue #1845): `null` on a run that did
-    # not ask for a trace, an object -- `{"path", "format", "size_bytes"}`,
-    # the identical shape `klt wave build`'s own `trace` field already uses
-    # -- on one that did. Resolved *after* the verdict/coverage above so a
-    # missing waveform (options.trace requested but unproducible) is never
-    # mistaken for the run's own pass/fail outcome.
+    # Resolve a requested waveform after the run verdict and coverage are known.
     trace = None
     if trace_requested:
         trace = _resolve_trace(
@@ -2847,6 +2768,7 @@ def run_functional_verification(
     )
     with_run_inputs(report, run_inputs)
     report.local_paths = {
+        "coverage_info_path": coverage_info_path,
         "results_xml": results_xml,
         "test_log": test_log,
         "build_log": build_log,

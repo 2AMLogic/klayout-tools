@@ -155,7 +155,7 @@ def test_check_lvs_report_explicit_reference_rescues_unresolvable_scopes(
     report_path.write_text(json.dumps(report))
 
     without = check_lvs_report(str(report_path))
-    assert without["status"] == "drifted"
+    assert without["status"] == "unverifiable"
     fields = {check["field"]: check for check in without["checks"]}
     assert fields["environment.reference_sha256"]["actual"] is None
 
@@ -339,10 +339,10 @@ def test_cli_lvs_reference_without_check_is_rejected(tmp_path, capsys):
     )
 
 
-def test_cli_lvs_reference_naming_a_missing_file_drifts_cleanly(
+def test_cli_lvs_reference_naming_a_missing_file_is_unverifiable(
     tmp_path_factory, capsys
 ):
-    """A nonexistent override is a clean `drifted` (with the
+    """A nonexistent override is a clean `unverifiable` (with the
     `input_not_found` diagnostic), never a traceback."""
     _, reference_path, report_path = _external_reference_report(tmp_path_factory)
     capsys.readouterr()
@@ -358,7 +358,7 @@ def test_cli_lvs_reference_naming_a_missing_file_drifts_cleanly(
             "json",
         ]
     )
-    assert code == 3
+    assert code == 4
     result = json.loads(capsys.readouterr().out)
     checks = {check["field"]: check for check in result["checks"]}
     assert "input_not_found" in checks["environment.reference_sha256"]

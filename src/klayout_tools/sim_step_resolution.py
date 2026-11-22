@@ -57,6 +57,7 @@ from typing import Any
 from . import sim_crossings, sim_measurement_kind, sim_window
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_raw import parse_ascii_rawfile
 
 #: Reason tokens a failed ``step_resolution`` entry's diagnostic leads with.
 ERROR_CODES = (
@@ -309,8 +310,6 @@ def extract_corner_step_resolutions(
 
 
 def _extract_one(spec: dict[str, Any], raw_path: str) -> StepResolutionOutcome:
-    from .sim import parse_ascii_rawfile
-
     body = spec["step_resolution"]
     name = spec["name"]
     if not os.path.isfile(raw_path):

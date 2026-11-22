@@ -60,6 +60,7 @@ from .pex import (
     _resolve_reference_netlist_path,
     _validate_measure_mode,
 )
+from .pex_sim_evidence import schematic_probes
 from .sim import SimError, run_sim
 
 #: Codes a dry run always reports in ``not_checked[]`` -- what no amount of
@@ -228,6 +229,7 @@ def _resolve_testbenches(
     dut_paths: list[str] = []
     for testbench_path in testbench_paths:
         request = _load_testbench_request(testbench_path)
+        schematic_probes(request)
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):

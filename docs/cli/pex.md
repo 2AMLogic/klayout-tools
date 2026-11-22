@@ -331,21 +331,22 @@ klt pex <layout> <testbench>... --engine klayout-runset --deck-file <runset.lvs>
   finite and `>= 0`, `0` = ideal via), surfaced as `PexError`. Unlike `klt
   extract`, which keeps the legacy per-level series sum in its netlist, `klt
   pex` writes each net's terminal-aware `selected_resistance_ohm` as that net's
-  lumped R wherever `resistance_source` is `graph`; `legacy` nets (no per-cut
-  resistance given, three or more terminals, ...) keep the legacy value, as do
-  nets overridden with `--mom-rlc-resistance-ohm`. This removes the
-  double-counting of strapped / via-stitched conductors from the re-simulated
-  extracted side (#2458). The legacy value a `legacy` net keeps is a series
-  sum of *all* the net's fragments, so a tree-routed net's lumped total can
-  overstate the resistance between its two current-carrying terminals (stub
-  arms to terminals that carry no DC current, e.g. MOS gates, are summed in);
-  the echoed `terminals` and `pair_resistance_ohm` (issue #5894, verbatim
-  from the graph) give the path resistance between two named terminals —
-  exactly what a net with three or more terminals (always `legacy`: no
-  unique scalar to select) needs. Cannot be combined with `--distributed-rc`
-  (the ladder stays on the legacy scalar, so a critical net would mix
-  sources):
-  `PexError`. Off by default -- the netlist and JSON report are byte-identical
+  lumped R wherever `resistance_source` is `graph`. A landing without a
+  curated resistance, or a net with three or more terminals, keeps the legacy
+  value. An explicit `--mom-rlc-resistance-ohm` override also takes precedence.
+  When `--resistance-graph-r-cut` is omitted, each landing uses its nominal
+  deck resistance where available. See the `--resistance-graph` section in
+  [extract.md](extract.md) for the resolution order (#6917).
+  Graph resistance accounts for strapped and via-stitched parallel paths in
+  the extracted simulation (#2458). The legacy value sums all fragments in
+  series, including branches carrying no DC current such as MOS gate stubs.
+  On a tree-routed net this can overstate the resistance between two
+  current-carrying terminals. The echoed `terminals` and
+  `pair_resistance_ohm` give the graph resistance between named terminals
+  (#5894), including individual pairs on nets with three or more terminals.
+  Combining the graph with `--distributed-rc` raises `PexError` because the
+  ladder uses the legacy scalar. Off by default -- the netlist and JSON
+  report are byte-identical
   to a run without the flags. Echoed under `extraction.resistance_graph`.
 - `--distributed-rc` — passed through to `klt extract --distributed-rc`
   (issue #977, Epic #709 Phase 2b); requires `--critical-net`. Replaces the
@@ -2018,7 +2019,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `schematic_value` | number \| null  | The measurement's value on the schematic-side run, or `null` if that corner/measurement was missing or itself errored. |
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
 | `delta_pct`       | number \| null  | `100 * (extracted_value - schematic_value) / abs(schematic_value)`, rounded to 3 decimals; `null` when either value is missing or `schematic_value` is exactly `0`. |
-| `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
+| `status`          | string          | `"pass"`, `"fail"`, `"error"`, or `"skipped"` for a schematic-only observation — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Issue #3620: an optional measurement that is `"absent"` on exactly one side (a figure lost — or newly appearing — after parasitics) is also `"error"` (`delta_pct: null`, `error` blames the absent side); `"absent"` on both sides is `"pass"`. Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 | `schematic_status` | string         | Issue #2989 (additive). The schematic-side measurement's own `klt sim` limit status: `"pass"`, `"fail"`, `"error"` (also when the schematic measurement is missing), or `"absent"` (issue #3620: an optional measurement with no value). Does not affect `status`. |
 | `extracted_status` | string         | Issue #2989 (additive). The extracted-side measurement's own `klt sim` limit status (may be `"absent"`, see `schematic_status`); `"error"` for rows whose extracted side never produced a response. |
 | `error`           | object          | Issue #3062 (additive). Present **only** on `status: "error"` rows (absent on `pass`/`fail`), naming why the row has no trustworthy value: `side` (`"schematic"` or `"extracted"`), `stage` (`"submit"`, `"execute"`, `"collect"`, `"parse"` or `"unknown"` — `"unknown"` when the source code maps to no stage, never guessed), `message`, and `code` when the source has one (e.g. `batch_job_failed`, `batch_no_capacity`). When a static diagnostic skips the extracted leg, `stage` is `"execute"`, `code` is `pin_count_mismatch`, `flat_dut_mismatch`, or `pin_order_mismatch`, and `message` carries that diagnostic's `detail`. Taken from that side's corner `diagnostics[]` (first error-severity entry) or, when that side never returned a report, from the recorded failure; `remote` carries the side's `environment.remote` (the batch job id) when present. In `--measure-command` mode, when the blamed side has no diagnostics, `message` is that side's measurement-document `message` and `stage` is `"execute"` (issue #4555). The side's full evidence stays under `testbenches[].sides.<side>.corners[]` for the same `corner_id`. |
@@ -2033,6 +2034,18 @@ When the exit code is `4` because rows errored and at least one row carries an
 cause's side, stage, code and message. A `SimError` that aborts the run
 (exit `1`) now keeps its `code` (e.g. `batch_no_capacity`) as the error
 envelope's `error.code`.
+
+### Schematic-only measurements
+
+An internal schematic node can disappear during extraction. Add `"sides": "schematic"` to its testbench measurement to retain the observation at each corner.
+
+```json
+{"name": "vref", "spice": ".meas tran vref FIND v(xdut.vref) AT=1u", "sides": "schematic"}
+```
+
+Step-scoped probes retain their usual `<step>.<name>` identity. PEX runs this probe on the schematic. It omits the probe from the extracted and optional device-only requests. Each delta row preserves the schematic value and limit status. The extracted value and percentage delta are null. A successful observation has row and extracted status `"skipped"`. An actual schematic error names its side and returns an error for the row. A schematic limit failure still contributes to `schematic_failed`.
+
+The intentionally unrequested comparison appears in `coverage.inapplicable` with reason `schematic_only_measurement`. A passing portable comparison alongside these probes yields `pass` and exit 0. A run containing only successful schematic probes yields `not_checked` and exit 4. Omitting `sides` compares the measurement on both legs. A standalone `klt sim` run still measures the probe.
 
 ### `coverage`: an empty `delta[]` is not a pass
 

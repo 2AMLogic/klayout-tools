@@ -51,10 +51,10 @@ from .signoff_store_pin import _resolve_relative_to_spec
 #:   and only the first *present* field is consulted, so the two can never
 #:   be crossed.
 #:
-#: A kind absent here is never re-hashed and reports ``input_verified:
-#: null``: ``yield`` re-hashes its samples document already
-#: (:func:`~.signoff._yield_samples_content_hash` -- that path reports ``True`` on its
-#: own); ``functional-verification``/``power``/``place-and-route``
+#: Yield verifies samples separately in :func:`~.signoff._yield_samples_content_hash`.
+#: A successful re-hash sets ``input_verified`` to true. A digest supplied by
+#: the committed store manifest leaves it null (#5963).
+#: ``functional-verification``/``power``/``place-and-route``
 #: populate no ``provenance.input`` at all today, or echo no path for
 #: the artifact they hashed (`klt place-and-route` pins the gate-level
 #: netlist it placed but echoes only its *outputs*); ``error`` envelopes

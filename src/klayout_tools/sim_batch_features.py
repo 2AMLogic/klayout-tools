@@ -180,7 +180,7 @@ def runner_osdi_preload(report: dict[str, Any] | None) -> list[dict[str, Any]] |
     The runner is not a reduced klt -- it runs a full
     ``--backend local-parallel`` sweep, whose on-host settling expands and
     existence-checks every entry and hashes the bytes it opened
-    (``sim._model_file_entries``). So the digest a runner-resolved,
+    (``sim_environment_report.ModelInputDigests``). So the digest a runner-resolved,
     image-baked ``.osdi`` otherwise has nowhere to come from already exists
     one level down; this only lifts it.
 
