@@ -281,6 +281,7 @@ from .signoff_store_pin import (
 )
 from .signoff_store_pin import store_pin_samples_entry
 from .signoff_unmet_reasons import unmet_reason_counts
+from .signoff_upstream_source import read_upstream_source
 
 # The `klt yield` campaign-disclosure rollups (issue #2467), split out of
 # this file for its size-ratchet ceiling (issue #5815) and re-imported by
@@ -3739,16 +3740,8 @@ def build_tier_report(
                 "analog": "bandgap + LDO: nets vref/vbg, cells bg_core, ota",
                 "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl",
             },
-            # optional, any kind (issue #6972): where a block *consumed from
-            # another repository at a pinned commit* came from -- the
-            # repository locator and the full hexadecimal Git commit ID of
-            # the upstream revision the consumer pinned. Echoed back
-            # verbatim onto the report (and onto the fleet roll-up row);
-            # never graded. See :func:`_read_upstream_source`.
-            "upstream_source": {
-                "repository": "https://github.com/2AMLogic/example-blocks",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-            },
+            # Optional upstream design source pin, reported for all block kinds.
+            "upstream_source": {"repository": "...", "commit": "<full Git object ID>"},
             "evidence": {                      # optional, default {}
                 "3": "drc.json",
                 "4": {"file": "lvs.json", "content_hash": "sha256:..."},
@@ -3807,14 +3800,6 @@ def build_tier_report(
             # a "mixed-signal" manifest's own statement of its partition
             # boundary, echoed verbatim and never graded.
             "partition_boundary": {"analog": "...", "digital": "..."},
-            # Present only when the manifest declared one (issue #6972) --
-            # the upstream repository and full commit a block consumed from
-            # another repository was pinned at, echoed verbatim and never
-            # graded.
-            "upstream_source": {
-                "repository": "https://github.com/2AMLogic/example-blocks",
-                "commit": "0123456789abcdef0123456789abcdef01234567",
-            },
             "tier": "T1" | None,
             "t1_item_count": 11,
             # How many T1 rows this build's *own* shipped doc would have
@@ -4254,12 +4239,10 @@ def build_tier_report(
 
     Raises :class:`SignoffError` if ``manifest`` is not a JSON object, its
     ``kind`` is missing or not one of ``analog``/``digital``/``mixed-signal``,
-    its ``evidence`` field (when given) is not a JSON object, its
+    its ``evidence`` field (when given) is not a JSON object, or its
     ``partition_boundary`` field (when given) is not a well-formed
     declaration for a ``mixed-signal`` block
-    (:func:`_read_partition_boundary`), or its ``upstream_source`` field
-    (when given) is not a well-formed declaration
-    (:func:`_read_upstream_source`). Raises
+    (:func:`_read_partition_boundary`). Raises
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     (re-exported here for convenient ``except`` handling alongside
     :class:`SignoffError`) if ``docs/design-evidence-tiers.md`` itself
@@ -4285,10 +4268,7 @@ def build_tier_report(
         )
 
     partition_boundary = _read_partition_boundary(manifest, kind)
-    # Issue #6972: the optional declaration naming where a block consumed
-    # from another repository at a pinned commit came from -- reported,
-    # never graded.
-    upstream_source = _read_upstream_source(manifest)
+    upstream_source = read_upstream_source(manifest, SignoffError)
     spec_rows_by_item = _read_spec_rows(manifest)
     # Issue #5462: the opt-in ratchet that fails item 5 on manifest-asserted
     # (rather than envelope-derived) row coverage.
@@ -4403,21 +4383,8 @@ def build_tier_report(
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
         "block": manifest.get("block"),
         "kind": kind,
-        # Issue #2278: the manifest's own statement of what its two
-        # partitions denote, echoed verbatim -- present only when the
-        # manifest declared one, so a report from a manifest that declares
-        # nothing is byte-identical to the one this build rendered before the
-        # field existed (and therefore does not read as `--check` drift on an
-        # upgrade alone). Never graded: see `_read_partition_boundary`.
+        # Include only declared metadata so older reports still reproduce.
         **({"partition_boundary": partition_boundary} if partition_boundary else {}),
-        # Issue #6972: the manifest's declaration of where this block's
-        # design sources live when they were consumed from another
-        # repository at a pinned commit -- echoed verbatim (with the commit
-        # lowercased) and present only when the manifest declared one, so a
-        # report from a manifest that declares nothing is byte-identical to
-        # the one this build rendered before the field existed (and therefore
-        # does not read as `--check` drift on an upgrade alone). Never
-        # graded: see `_read_upstream_source`.
         **({"upstream_source": upstream_source} if upstream_source else {}),
         # Additive (#5691), gated the same way as the echo above: present
         # only when the manifest declared a top-level `spec_rows` map.
@@ -4542,108 +4509,6 @@ def _join_partitions() -> str:
     offers, derived from :data:`_MIXED_SIGNAL_PARTITIONS` so the message can
     never name a set the grading does not render."""
     return "/".join(repr(name) for name in _MIXED_SIGNAL_PARTITIONS)
-
-
-#: A full hexadecimal Git commit ID: exactly 40 hex digits (a SHA-1 object
-#: name, what ``git rev-parse HEAD`` prints in Git's default configuration)
-#: or 64 (a SHA-256 repository's). Matched case-insensitively -- Git itself
-#: accepts either case on input -- and normalized to lowercase by
-#: :func:`_read_upstream_source`, so two manifests naming the same commit in
-#: different case render the same report bytes. Everything else a consumer
-#: might paste here (a branch or tag name, a shortened object name) is a
-#: *moving* reference, not a pin, and is refused there.
-_UPSTREAM_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$", re.IGNORECASE)
-
-
-def _read_upstream_source(manifest: dict[str, Any]) -> dict[str, str] | None:
-    """Validate a manifest's optional ``upstream_source`` declaration (issue
-    #6972), returning ``None`` when none was made.
-
-    A repo can assemble a design from blocks **consumed from other
-    repositories at pinned commits**: the consumer commits the block's
-    evidence reports and a small pin record, but not the block's design
-    sources. Before this field, nothing ``klt signoff`` read recorded that
-    binding -- the report said ``block:``/``kind:`` and nothing distinguished
-    "every cited artifact was produced in this repo" from "the block's
-    sources live in another repository at a commit only a non-graded local
-    file records"::
-
-        {
-            "kind": "analog",
-            "upstream_source": {
-                "repository": "https://github.com/2AMLogic/example-blocks",
-                "commit": "0123456789abcdef0123456789abcdef01234567"
-            }
-        }
-
-    The object describes the design sources for the whole block, so it
-    applies to every block kind (unlike ``partition_boundary``, which is
-    meaningful only for ``mixed-signal``). It is a **declaration, not a
-    verdict** -- reported, never graded, exactly like ``partition_boundary``
-    (issue #2278): declaring a pin moves no item's ``status`` and no block's
-    ``tier``. The staleness story is the report itself: the declaration is
-    part of the claim a committed report records, so after the consumer
-    bumps its pin and updates the manifest, ``--check`` re-grading against
-    the new declaration reports the old report ``drifted`` (naming
-    ``upstream_source.commit`` / ``upstream_source.repository``) even with
-    identical evidence -- which is exactly how a report graded against one
-    upstream revision is told apart from one graded against another. The
-    consumer updates the declaration when it bumps the pin; a change solely
-    in a separate pin file stays invisible until then (no remote Git access,
-    by design).
-
-    What *is* refused, as an authoring mistake rather than a missing
-    disclosure (:class:`SignoffError`, naming ``upstream_source`` and the
-    offending member):
-
-    - a non-object declaration;
-    - a member other than ``repository``/``commit`` (a typo'd member name
-      would otherwise vanish from the report with no signal);
-    - an incomplete pair -- either member alone;
-    - a blank or non-string ``repository``;
-    - a ``commit`` that is not a full hexadecimal Git commit ID (see
-      :data:`_UPSTREAM_COMMIT_RE`) -- a branch or tag in particular is a
-      moving reference, not a pin.
-
-    The returned mapping is ``{"repository", "commit"}`` in that fixed
-    order, with ``commit`` lowercased, so two manifests declaring the same
-    pin render the same report bytes.
-    """
-    raw = manifest.get("upstream_source")
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise SignoffError(
-            "block manifest 'upstream_source' must be a JSON object with "
-            f"'repository' and 'commit' (got {type(raw).__name__})"
-        )
-    for member in sorted(set(raw) - {"repository", "commit"}):
-        raise SignoffError(
-            f"block manifest 'upstream_source.{member}' is not a member of "
-            "the declaration ('repository' and 'commit' only)"
-        )
-    for member in ("repository", "commit"):
-        if member not in raw:
-            raise SignoffError(
-                f"block manifest 'upstream_source.{member}' is required -- "
-                "an upstream source pin needs both 'repository' and 'commit' "
-                f"(declaration carries {sorted(raw) or 'no members'})"
-            )
-    repository = raw["repository"]
-    if not isinstance(repository, str) or not repository.strip():
-        raise SignoffError(
-            "block manifest 'upstream_source.repository' must be a non-empty "
-            f"string naming the upstream repository, got {repository!r}"
-        )
-    commit = raw["commit"]
-    if not isinstance(commit, str) or not _UPSTREAM_COMMIT_RE.fullmatch(commit):
-        raise SignoffError(
-            "block manifest 'upstream_source.commit' must be a full "
-            "hexadecimal Git commit ID (40 hex digits, or 64 in a SHA-256 "
-            f"repository), got {commit!r} -- a branch or tag name is a "
-            "moving reference, not a pin"
-        )
-    return {"repository": repository, "commit": commit.lower()}
 
 
 def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
