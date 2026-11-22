@@ -9114,10 +9114,13 @@ legitimately (and unhelpfully) show drift in the corresponding fields under
 
 ### Exit codes for `--check` / `--rerun`
 
-Both modes use the same 0/3 split described below: `0` when `status` is
-`"match"`, `3` when it is `"drifted"`. A missing or unparseable
-`<report.json>` exits `1` with a clean error message, same as any other
-application-level failure.
+Both modes return 0 for `match` and 3 for `drifted`. In cheap mode, a
+recorded digest whose input is unavailable on this checkout gives its
+`checks[]` entry `status: "unverifiable"`, `actual: null`, and `match: false`.
+Text output marks that field `[UNVERIFIABLE]`. If every other input matches
+or is also unavailable, the overall status is `unverifiable` (exit 4).
+A changed digest takes precedence (exit 3), with both field results visible.
+A missing or unparseable report is a command error (exit 1).
 
 Both modes accept plain JSON and gzip-compressed reports, such as
 `report.json.gz`. Compression is detected by the file's contents, so a
@@ -9133,6 +9136,7 @@ error envelope under `--format json`.
 | `1`  | Failed to run — bad file, missing/unknown `--deck`, unresolvable PDK (when `--pdk`/`--pdk-root` given), a resolved PDK with no curated model-binding table entry for `--deck` (see "SPICE model binding" above), missing/ambiguous top cell, or an engine error (e.g. device recognition producing a device with an unconnected terminal — most commonly a bipolar device-mark drawn exactly coincident with, rather than strictly enclosing, the terminal geometry it scopes; confirmed clean by this module's own test suite, issue #432). Under `--check`: a missing/unparseable committed report, or `--rerun` given without `--check`. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Under `--check`: the committed report drifted from the current deck/input (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
+| `4`  | Under cheap `--check`, a recorded input is unavailable and every comparable hash matches (`status: "unverifiable"`). |
 
 Outside `--check`, there is no "ran but found problems" outcome for a fresh
 extraction; it either produces a netlist or it fails (matching `klt gen`'s

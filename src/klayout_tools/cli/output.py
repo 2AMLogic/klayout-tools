@@ -271,6 +271,12 @@ def _print_build_skew(skew: dict | None) -> None:
         print(f"build_skew: {what} -- excluded from the verdict")
 
 
+def _hash_check_label(check: dict) -> str:
+    if check.get("status") == "unverifiable":
+        return "UNVERIFIABLE"
+    return "OK" if check["match"] else "DRIFTED"
+
+
 def render_check_text(result: dict) -> None:
     """Print the ``--format text`` rendering of a cheap-mode ``--check`` result.
 
@@ -281,7 +287,7 @@ def render_check_text(result: dict) -> None:
     print(f"report: {result['report']}")
     print(f"status: {result['status']}")
     for check in result["checks"]:
-        mark = "OK" if check["match"] else "DRIFTED"
+        mark = _hash_check_label(check)
         print(f"  [{mark}] {check['field']}")
         if not check["match"]:
             print(f"      expected: {check['expected']}")
