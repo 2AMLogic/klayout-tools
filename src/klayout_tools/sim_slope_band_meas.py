@@ -75,7 +75,7 @@ _FORMS = other_forms("slope_band")
 
 def is_slope_band(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``slope_band``."""
-    return spec.get("slope_band") is not None
+    return sim_measurement_kind.declares(spec, "slope_band")
 
 
 def slope_band_measurements(
@@ -230,7 +230,7 @@ def validate_slope_band_context(
 
 
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"slope_band_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, "slope_band", index)
 
 
 def control_lines(
