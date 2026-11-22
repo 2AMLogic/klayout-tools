@@ -1059,7 +1059,8 @@
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
-        "klayout_tools.post_route_sta_stages"
+        "klayout_tools.post_route_sta_stages",
+        "klayout_tools.post_route_sta_verify"
       ]
     },
     "stats": {
