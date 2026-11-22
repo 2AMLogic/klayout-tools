@@ -90,7 +90,9 @@ def hint_existing_fatal(diagnostics: list[dict[str, Any]]) -> bool:
 #: ngspice prints the offending expanded-deck card on the line it reports:
 #: ``Error on line 570 : m.x1.m0 d g s b nfet_03v3 w=1.28e-4 l=2.8e-7``.
 _CARD_ERR_RE = re.compile(
-    r"^[ \t]*Error on line (\d+)[ \t]*:[ \t]*(\S[^\n]*)$", re.IGNORECASE | re.MULTILINE
+    r"^[ \t]*Error on line (\d+)(?: or its substitute)?[ \t]*:[ \t]*"
+    r"(?:\n[ \t]+)?(\S[^\n]*)$",
+    re.IGNORECASE | re.MULTILINE,
 )
 _MODELNAME_RE = re.compile(r"could not find a valid modelname", re.IGNORECASE)
 _ATTRIBUTED_MARK = "ngspice card at expanded-deck line"

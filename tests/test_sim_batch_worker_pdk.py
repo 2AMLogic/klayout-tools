@@ -49,6 +49,21 @@ def _attributed_message(worker_environment):
     return diag["message"]
 
 
+def test_batch_recognizes_ngspice_47_substitute_card_and_unprefixed_model_error():
+    log = (
+        "Error on line 4 or its substitute:\n"
+        "  mtrial d g 0 0 type_n w=200u l=10u\n"
+        "could not find a valid modelname\n"
+        "    Simulation interrupted due to error!\n"
+        "Error: incomplete or empty netlist\n"
+    )
+    diagnostic = sb._fatal_log_diagnostic(log, _worker_block())
+    assert diagnostic["code"] == "model_bin_range"
+    assert "instance 'mtrial' model 'type_n' (w=200u l=10u)" in diagnostic["message"]
+    assert "expanded-deck line 4" in diagnostic["message"]
+    assert "the fleet resolved PDK gf180mcuD" in diagnostic["message"]
+
+
 def test_worker_block_names_fleet_stamp_comparison_and_remedy():
     msg = _attributed_message(_worker_block())
     assert "the fleet resolved PDK gf180mcuD" in msg

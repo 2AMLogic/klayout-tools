@@ -1244,7 +1244,10 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         # back to ngspice's raw line.
         "model_bin_range",
         re.compile(
-            r"^Error:\s*could not find a valid modelname", re.IGNORECASE | re.MULTILINE
+            r"(?:^Error:[ \t]*|^[ \t]*Error on line \d+ or its substitute:[ \t]*\n"
+            r"[ \t]*m\S*(?:[ \t]+[^\s=]+){5}[ \t]+[^\n]*\b[wl]=[^\n]+\n)"
+            r"could not find a valid modelname",
+            re.IGNORECASE | re.MULTILINE,
         ),
     ),
     (
@@ -10478,7 +10481,9 @@ def _classify_diagnostics(
                 # The follow-on "could not find a valid modelname" is a
                 # consequence of the superseding cause, not a bin range.
                 continue
-            message = _diagnose_modelname_error(netlist_path) or message
+            message = _diagnose_modelname_error(netlist_path) or _line_containing(
+                log_text, match.end() - 1
+            )
         elif code == "par_call_cap":
             message = _PAR_CALL_CAP_MESSAGE.format(raw=message.strip())
         elif code in _PREREQUISITE_MESSAGES:
