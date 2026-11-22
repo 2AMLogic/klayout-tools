@@ -47,7 +47,7 @@ from ._paths import resolve_tool_binary
 from ._provenance import build_provenance, sha256_file
 from .env_provenance import repo_relative_path, repo_root_for
 from .lvs_mismatch import _mismatch
-from .lvs_runset_census import _build_coverage, _class_census
+from .lvs_runset_census import _attach_reference_source, _build_coverage, _class_census
 from .lvs_runset_findings import _circuit_findings, _device_label, _paired_ok
 
 if TYPE_CHECKING:
@@ -578,9 +578,8 @@ _DEVICE_LIST_ITEM_RE = re.compile(r"""["']([^"']+)["']""")
 def _deck_device_list(deck_file: str) -> set[str]:
     """Upper-cased names in the runset's ``DEVICE_LIST = [...]`` -- the
     subcircuits its SPICE reader delegate converts to devices, including ones
-    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``) so that no
-    declared device class carries the called name. ``set()`` when the deck
-    has no such list or cannot be read."""
+    it renames (sky130 ``special_nfet_01v8`` -> ``nfet_01v8``). ``set()`` when
+    the deck has no such list or cannot be read."""
     try:
         with open(deck_file, encoding="utf-8", errors="replace") as handle:
             text = handle.read()
@@ -667,6 +666,7 @@ def run_lvs_klayout_runset(request: dict[str, Any], request_dir: str) -> dict[st
             # keep the exit-status diagnosis, not just the db-read message.
             raise LvsError(_nonzero_exit_message(binary, completed)) from exc
         # Checked on the file the runset saw, before work_dir goes away.
+        _attach_reference_source(verdict, runset_reference, deck_file)
         declared = verdict["coverage"]["declared_device_classes"]
         unresolved = _unresolved_reference_calls(
             runset_reference,
