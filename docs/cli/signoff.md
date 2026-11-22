@@ -4956,13 +4956,8 @@ checkout with a Rust toolchain. A bare
 `pip install klayout-tools` and the git-pinned (`@git+…`) form do not
 include it either (see
 [`yield.md`](yield.md)'s "What the extra does and does not reach"
-callout for the full statement and the build steps). Every *other* T1
-item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
-`functional-verification`, `erc`, `place-and-route` — is reachable from a
-published release, so item 6 is the one row that additionally needs the
-from-source build (the `[yield]` extra once published) to produce evidence for, or to
-re-derive an already-committed report for, from a pinned release. Worth knowing *before* planning a T1
-campaign around it.
+callout for the full statement and the build steps). Install the yield extension on the host that will produce or
+re-derive item 6 evidence before scheduling the campaign.
 
 This changes nothing about how the item grades: a `klt yield` report cites,
 hashes, and grades exactly as described here and in "Worked example:
