@@ -9521,7 +9521,7 @@ def _corner_deck_control_lines(
         # ngspice's `reset` (which re-parses the circuit, reverting every
         # `alter` and dropping the saved set).
         lines.extend(
-            sim_steps.control_lines(analysis, measurements_spec, reset_prefix=prefix)
+            sim_steps.control_lines(analysis, measurements_spec, prefix, corner_dir)
         )
         lines.extend(["quit", ".endc"])
         return lines

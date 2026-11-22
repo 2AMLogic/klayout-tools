@@ -6335,7 +6335,7 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
     "limits": {"min": 0.1}}]}
 ```
 
-- **Form.** `eye` is an object `{signal, ui, uis, from?, level?, metric?}`.
+- **Form.** `eye` is an object `{signal, ui, uis, from?, phase?, level?, metric?}`.
   `signal` is a single-line ngspice vector expression (`"v(outp) - v(outn)"`
   works); `ui` is the unit interval (seconds or a SPICE literal such as
   `"100p"`); `uis` is the integer number of unit intervals in the window
@@ -6350,13 +6350,16 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   folded to its phase within a unit interval. `width` is the widest circular
   gap between folded crossing phases (the UI minus the crossing spread -- the
   horizontal opening at the level), `best_phase` is the middle of that gap
-  (seconds from the start of a UI), and `height` is read there: the minimum of
-  the samples above the level minus the maximum of those at or below it, one
-  sample per UI. The data pattern is not known, so decisions are threshold
-  decisions at the sampling phase.
+  (seconds from the start of a UI). Folded width describes the whole pattern.
+  Individual edges can be several UIs apart. For height, omit `phase` to sample
+  at `best_phase`, or supply an offset in seconds or SPICE time with
+  `0 <= phase < ui`. Height is the minimum high sample minus the maximum low
+  sample, interpolating once per UI at `from + k * ui + phase`. Width and
+  best phase use all folded crossings for either choice.
 - **Value.** `value` is the selected metric, graded against `limits` like any
   scalar. An additive `eye` sibling carries
-  `{height, width, best_phase, level, ui, uis}`.
+  `{height, width, best_phase, level, ui, uis}`. Explicit phase also records
+  `sampling_phase` in seconds.
 - **Errors.** `status: "error"`, `value: null`, and a `code: "measurement"`
   diagnostic whose message starts with a reason token:
 
@@ -6364,12 +6367,15 @@ measurement, replacing a hand-built chain of ~40 `expr` entries (a windowed
   |---|---|
   | `[eye_vector_missing]` | `signal` did not resolve, or its rawfile was unreadable |
   | `[eye_window_outside_transient]` | the window is not inside the sampled transient |
-  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the best phase |
+  | `[eye_no_levels]` | the signal never crosses the level inside the window, or sits on one side of it at the sampling phase |
 - **Backends.** The signal is dumped to a corner-local rawfile (`eye_<k>.raw`)
   and reduced in Python on the worker, so `local`, `local-parallel`, `remote`
   and `batch` return the same scalars. It is a mandatory runner feature (`eye`,
   first `klt` release segment `0.8.1`): see "Mandatory features" under
   "Runner/client `klt` version skew".
+  Step eyes and explicit phase require the `eye_step_or_phase` runner capability
+  (release segment `0.9.3`). The worker preflight exercises its installed CLI
+  on a small request to distinguish development builds.
 - **Out of scope.** RJ/DJ jitter decomposition and bathtub curves.
 
 ## Edge-window step report (`measurements[].step_resolution`)
@@ -6960,6 +6966,40 @@ source overrides applied before its solve, and its own measurements. The
 top-level `measurements[]` then become **derived** expressions over
 step-qualified results, graded through `limits` like any other measurement.
 `klt` composes the deck itself. There is no raw `.control` escape hatch.
+
+A transient step can measure the eye on its own waveform. Save this circuit
+as `eye.sp` and the request below as `steps.json`, then run
+`klt sim steps.json --backend local --format json`.
+
+```spice
+Vpattern data 0 PULSE(0 1 0 100p 100p 900p 2n)
+Vrail rail 0 1
+Breceive rx 0 V=V(data)*V(rail)
+Rload rx 0 1k
+```
+
+```json
+{
+  "netlist": "eye.sp",
+  "options": {"ngspice_init": []},
+  "analysis_steps": [
+    {"name": "low", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 1},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]},
+    {"name": "high", "analysis": {"kind": "tran", "args": "10p 8n"},
+     "alter": {"Vrail": 2},
+     "measurements": [{"name": "opening", "unit": "V", "eye": {
+       "signal": "v(rx)", "ui": "1n", "uis": 6, "from": "1n", "phase": "500p"}}]}
+  ]
+}
+```
+
+`low.opening` measures 1 V and `high.opening` measures 2 V. Both report a
+folded width of 1 ns. Each result records its step. A failed solve returns a
+null measurement for that step. Python reduces these waveforms after
+ngspice finishes, so a deck expression or a later step's analysis arguments
+can reference only measurements computed within ngspice.
 
 Worked example: a two-point load-regulation figure:
 
