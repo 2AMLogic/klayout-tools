@@ -1014,6 +1014,7 @@ def _path_envelope(
 
 def _initial_state_run_specs(
     initial_state: dict[str, Any] | None,
+    plusargs: list[str],
     *,
     engine: str,
     output_dir: str,
@@ -1021,17 +1022,12 @@ def _initial_state_run_specs(
     test_log: str,
 ) -> list[dict[str, Any]]:
     """One regression normally; one per seed for ``initial_state.mode:
-    "random"`` -- same build, a different ``+klt_init_seed`` plusarg and its
-    own results/transcript files."""
+    "random"``. Per-spec ``plusargs``: user entries, then ``+klt_init_seed``."""
     if initial_state is None or initial_state["mode"] != "random":
-        return [
-            {
-                "seed": None,
-                "results_xml": results_xml,
-                "test_log": test_log,
-                "plusargs": [],
-            }
-        ]
+        single = dict(
+            seed=None, results_xml=results_xml, test_log=test_log, plusargs=plusargs
+        )
+        return [single]
     return [
         {
             "seed": seed,
@@ -1039,7 +1035,7 @@ def _initial_state_run_specs(
                 output_dir, f"results_{engine}_init_seed{seed}.xml"
             ),
             "test_log": os.path.join(output_dir, f"test_{engine}_init_seed{seed}.log"),
-            "plusargs": [f"+{SEED_PLUSARG}={seed}"],
+            "plusargs": [*plusargs, f"+{SEED_PLUSARG}={seed}"],
         }
         for seed in initial_state["seeds"]
     ]
@@ -2516,7 +2512,7 @@ def run_functional_verification(
     verilog_tb = _resolve_verilog_top(
         request_doc["testbench"], sources, engine, request_doc.get("options")
     )
-    module, module_dir, testcase = _resolve_testbench_target(
+    module, module_dir, testcase, plusargs = _resolve_testbench_target(
         verilog_tb, request_doc["testbench"], request_dir
     )
     (
@@ -2890,6 +2886,7 @@ def run_functional_verification(
     )
     run_specs = _initial_state_run_specs(
         initial_state,
+        plusargs,
         engine=engine,
         output_dir=output_dir,
         results_xml=results_xml,
@@ -3001,6 +2998,7 @@ def run_functional_verification(
                 "env": env,
                 # Additive (issue #5697): `request.parameters` echo; `{}` when absent.
                 "parameters": parameters,
+                "plusargs": plusargs,  # additive, issue #6906; `[]` when absent
                 # Additive (issue #2998): `null` unless the request set
                 # `options.initial_state`. `seeds` echoes the effective seeds
                 # (empty for mode "x"); `runs` has one entry per seed.
