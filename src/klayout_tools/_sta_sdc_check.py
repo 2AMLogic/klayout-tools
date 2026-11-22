@@ -12,7 +12,7 @@ listed by name in ``unchecked``; it is never silently passed.
 
 Drift is data, not a gate: the response block is informational and the exit
 code is unaffected. Split out of ``post_route_sta.py`` (per-file size ratchet,
-issue #2766); errors are ``PostRouteStaError``, imported lazily.
+issue #2766); validation raises the shared ``PostRouteStaError``.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from . import env_provenance
+from .post_route_sta_errors import PostRouteStaError
 
 _TOLERANCE = 1e-9
 _TOKEN = re.compile(r"\[[^\]]*\]|\S+")
@@ -35,25 +36,21 @@ _SUPPORTED = (
 )
 
 
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
-
-
 def resolve_sdc_check(field: Any, request_dir: str) -> str | None:
     """Validate ``request.sdc_check`` and return the absolute SDC path
     (``None`` when the field is omitted/null)."""
     if field is None:
         return None
     if not isinstance(field, dict) or set(field) != {"path"}:
-        raise _error('request.sdc_check must be an object {"path": "<file>.sdc"}')
+        raise PostRouteStaError(
+            'request.sdc_check must be an object {"path": "<file>.sdc"}'
+        )
     given = field["path"]
     if not isinstance(given, str) or not given:
-        raise _error("request.sdc_check.path must be a non-empty string")
+        raise PostRouteStaError("request.sdc_check.path must be a non-empty string")
     path = given if os.path.isabs(given) else os.path.join(request_dir, given)
     if not os.path.isfile(path):
-        raise _error(f"sdc_check file not found: {given}")
+        raise PostRouteStaError(f"sdc_check file not found: {given}")
     return os.path.abspath(path)
 
 
@@ -365,7 +362,7 @@ def sdc_drift_block(
             raw = handle.read()
         text = raw.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
-        raise _error(
+        raise PostRouteStaError(
             f"could not read sdc_check file '{os.path.basename(sdc_path)}': {exc}"
         ) from exc
     commands, unchecked = parse_sdc(text)
