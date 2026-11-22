@@ -774,6 +774,8 @@ def run_sta(
             input_path=input_path,
             basename=basename,
         )
+        if boundary and "clock_driving_cell" in boundary:
+            response["clock_driving_cell"] = boundary["clock_driving_cell"]
         attach_sdc_drift(  # issue #5236: opt-in, informational only
             response,
             sdc_path,
@@ -2183,20 +2185,11 @@ def _validate_boundary(
     input_transition_ns: float | None,
     input_transitions: dict[str, float] | None,
 ) -> dict[str, Any] | None:
-    """``constraints.driving_cell`` / ``.driving_cells`` and
-    ``.output_load_pf`` / ``.output_loads`` (issue #3742): the boundary
-    conditions an SDC flow expresses with ``set_driving_cell`` / ``set_load``.
-    Returns a dict holding only the supplied keys (``driving_cell``,
-    ``driving_cells``, ``output_load_pf``, ``output_loads``), or ``None`` when
-    none was given -- which leaves the generated Tcl byte-identical.
+    """Validate the optional driving cells and output loads for a timing boundary.
 
-    ``driving_cell`` is the default for non-clock inputs absent from
-    ``driving_cells`` and from ``input_transitions``; a port may not carry both
-    a driving cell and an input transition (the two would silently override
-    each other), so any such overlap -- or ``input_transition_ns`` together
-    with a driving-cell field -- is a request error. Load values are finite
-    non-boolean numbers ``>= 0`` (pF). Port existence and direction are
-    verified in the engine session (:func:`_port_check_lines`).
+    The data driver and input transitions must target disjoint ports. The
+    primary clock driver is independent of those data-port constraints.
+    Port existence and direction are checked in the engine session.
     """
     prefix = "request.constraints."
     boundary = _validate_driving_cells(constraints, clock_port, prefix)
@@ -2214,11 +2207,9 @@ def _validate_driving_cells(
     """The ``driving_cell`` / ``driving_cells`` half of
     :func:`_validate_boundary` (only the supplied, non-empty keys)."""
     boundary: dict[str, Any] = {}
-    default_cell = constraints.get("driving_cell")
-    if default_cell is not None:
-        boundary["driving_cell"] = _validate_driving_cell(
-            default_cell, f"{prefix}driving_cell"
-        )
+    for key in ("driving_cell", "clock_driving_cell"):
+        if constraints.get(key) is not None:
+            boundary[key] = _validate_driving_cell(constraints[key], f"{prefix}{key}")
     field = f"{prefix}driving_cells"
     cells = constraints.get("driving_cells")
     if cells is not None:
@@ -3286,6 +3277,12 @@ def _boundary_lines(
             args += f" -from_pin {_tcl_literal(cell['input_pin'])}"
         return args
 
+    clock_cell = boundary.get("clock_driving_cell")
+    if clock_cell is not None:
+        lines.append(
+            f"set_driving_cell {drive_args(clock_cell)} "
+            f"[get_ports {_tcl_literal(clock_port)}]"
+        )
     default_cell = boundary.get("driving_cell")
     if default_cell is not None:
         mapped = " ".join(

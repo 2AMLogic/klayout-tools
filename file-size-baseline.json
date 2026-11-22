@@ -365,7 +365,7 @@
     },
     {
       "path": "src/klayout_tools/gen_layer_params.py",
-      "lines": 2873
+      "lines": 2831
     },
     {
       "path": "src/klayout_tools/gen_layer_tables.py",
@@ -385,7 +385,7 @@
     },
     {
       "path": "src/klayout_tools/layout_plan_execute.py",
-      "lines": 1223
+      "lines": 1222
     },
     {
       "path": "src/klayout_tools/lef_abstract.py",
@@ -521,7 +521,7 @@
     },
     {
       "path": "src/klayout_tools/post_route_sta.py",
-      "lines": 4600
+      "lines": 4580
     },
     {
       "path": "src/klayout_tools/power.py",
@@ -665,7 +665,7 @@
     },
     {
       "path": "src/klayout_tools/yield_analysis.py",
-      "lines": 1235
+      "lines": 1232
     },
     {
       "path": "src/klayout_tools/yield_campaign.py",
@@ -841,7 +841,7 @@
     },
     {
       "path": "tests/test_functional_verification.py",
-      "lines": 6564
+      "lines": 6516
     },
     {
       "path": "tests/test_functional_verification_identity_contract.py",
@@ -849,7 +849,7 @@
     },
     {
       "path": "tests/test_functional_verification_sdf_ifnone_edge.py",
-      "lines": 586
+      "lines": 574
     },
     {
       "path": "tests/test_gen.py",

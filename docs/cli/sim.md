@@ -271,7 +271,10 @@ block.
 `models.pdk_root = DIR`: the flag wins over the request field, a relative `DIR`
 resolves against the CWD (not the request directory), and the resolution takes
 that root without the first-match-wins search, so the PDK ambiguity warning does
-not fire. The pinned root shows in `provenance.pdk`. Corner requests only:
+not fire. The pinned root shows in `provenance.pdk`. For a local ngspice
+corner, klt expands `$PDK_ROOT` in the body’s include paths with the selected
+install root and passes the same `PDK_ROOT` to the child process. This also
+applies to a store selected by discovery. Corner requests only:
 `decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
 refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
 
@@ -1332,9 +1335,10 @@ id survives the caller. Collecting a finished `--submit-only` job's report is
 
 Unsharded `--attach <job_id>` checks the supplied request against the
 `request_sha256` in `<artifacts_dir>/batch-receipt.json` when that receipt is
-for the same job id, and refuses a different request with
-`error.code: "resume_fingerprint_mismatch"` (the message names the receipt's
-hash). No receipt, or a receipt for another job id, proceeds unchanged
+for the same job id. New corner receipts also record `netlist_sha256`, the
+SHA-256 of the top-level input deck before dispatch. Changing the request or
+the deck at the same path raises `resume_fingerprint_mismatch` before
+collection. Older receipts verify the request JSON only. No receipt, or a receipt for another job id, proceeds unchanged
 ([#4971](https://github.com/2AMLogic/klayout-tools/issues/4971)).
 
 The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
@@ -1479,7 +1483,8 @@ failed sweep. `--format json` stdout is unchanged.
 
 **`--resume` re-attaches through the receipt, and resubmits a spent job.** On
 an unsharded request, `--resume` re-attaches to the `job_id` the receipt
-records when its `request_sha256` and `unit_count` match the run about to be
+records when its `request_sha256`, `unit_count`, and (when recorded)
+`netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
 any mismatch, or no receipt, submits afresh. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
