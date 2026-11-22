@@ -5776,15 +5776,15 @@ def test_cli_json_contract(tmp_path, capsys):
     spec = tmp_path / "basic.erc.json"
     _basic_fixture(gds)
     _basic_spec(spec)
-
     assert main(["erc", str(gds), str(spec), "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert set(data.keys()) == {
+    assert set(data) == {
         "coverage",
         "erc_coverage",
         "schema_version",
         "file",
+        "top",
         "spec",
         "pdk",
         "findings_only",
