@@ -1307,10 +1307,11 @@ never operates at. Issue #1092 closes both gaps additively:
   mechanics rather than new, unverified Tcl surface.
 - **`pdk.sweep_corners`** — scopes both the combined sweep and the
   per-corner breakdown to a caller-named subset of the shipped corners
-  (see the request field table above). For a library mapped by the PDK descriptor, use
-  the descriptor's corner keys. For an unmapped library, use the unfiltered
-  `list_lib_corners` enumeration. An unknown name raises `PlaceAndRouteError` before any OpenROAD invocation runs,
-  naming both the unresolvable name(s) and the full list of valid corners.
+  (see the request field table). For a library mapped by the PDK descriptor,
+  use the descriptor's corner keys. For an unmapped library, use the unfiltered
+  `list_lib_corners` enumeration. After routing, the tool validates the names
+  before starting the timing sweep. An unknown name raises `PlaceAndRouteError`
+  listing the unknown names and all available corners.
 
 **Wall-clock cost, updated.** A `sweep_corners`-scoped or naturally
 single-corner run pays exactly the original #949 cost above (one combined
