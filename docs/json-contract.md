@@ -1889,7 +1889,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 
 | Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
 |---|---|---|---|
-| `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
+| `synthesize` | `partial.netlist_path`, `partial.stats_path`, `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,netlist,schematic_netlist}` | 2 | #1261 (`testbenches[].netlist` additionally #2875); additive `measurement.mode: "extract-only"` (`--extract-only`, #3739) carries `reference_netlist: {path: null, scope: "absent"}` and empty `testbenches[]`/`delta[]` |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
@@ -2776,6 +2776,10 @@ tool failure, documented in its own `docs/cli/<verb>.md` — e.g. `klt drc`
 exits `3` when the deck ran successfully but found violations (a successful
 run, so the documented success payload is still on stdout). Extensions never
 redefine `0`/`1`/`2`.
+
+`klt synthesize` exits `4` with `status: "inconclusive"` and
+`reason: "abc_timeout"` when its optional generic ABC budget expires.
+The `partial` block identifies the retained generic netlist and statistics.
 
 **The exit-code contract is additive, and a consumer must treat it that way.**
 A command may ship a new code above `2` in a later release for an outcome

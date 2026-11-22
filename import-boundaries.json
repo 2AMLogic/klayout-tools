@@ -1133,6 +1133,7 @@
         "klayout_tools.sta",
         "klayout_tools.synthesize",
         "klayout_tools.synthesize_abc",
+        "klayout_tools.synthesize_abc_stages",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_driving_cell",
