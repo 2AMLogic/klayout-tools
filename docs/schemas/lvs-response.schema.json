@@ -75,6 +75,24 @@
     "mismatch_count": {"type": "integer", "minimum": 0},
     "mismatches_omitted": {"type": "boolean"},
     "error_count": {"type": "integer", "minimum": 0},
+    "sg13g2_passive_pairing": {
+      "type": "object",
+      "required": ["status", "findings"],
+      "properties": {
+        "status": {"enum": ["discrepancy_observed", "insufficient_evidence", "all_devices_paired"]},
+        "findings": {"type": "array", "items": {
+          "type": "object",
+          "required": ["differences", "evidence", "layout_model", "reference_model", "layout_terminals", "reference_terminals"],
+          "properties": {
+            "differences": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["class_model", "terminal_list"]}},
+            "evidence": {"enum": ["compare_event", "unmatched_classes"]},
+            "layout_model": {"type": "string"}, "reference_model": {"type": "string"},
+            "layout_terminals": {"type": "array", "items": {"type": "string"}},
+            "reference_terminals": {"type": "array", "items": {"type": "string"}}
+          }
+        }}
+      }
+    },
     "category_counts": {"$ref": "#/$defs/count_map"},
     "category_error_counts": {"$ref": "#/$defs/count_map"},
     "counts": {
@@ -86,6 +104,33 @@
         "pins": {"$ref": "#/$defs/count_triple"}
       },
       "additionalProperties": true
+    },
+    "ignored_layers": {
+      "type": "array",
+      "description": "Inline extraction coverage, using the same full-stream counts as klt extract. Empty for pre-extracted netlists.",
+      "items": {
+        "type": "object",
+        "properties": {"layer": {"type": "integer"}, "datatype": {"type": "integer"}, "shapes": {"type": "integer", "minimum": 1}},
+        "required": ["layer", "datatype", "shapes"]
+      }
+    },
+    "warnings": {
+      "type": "array", "items": {"type": "string"},
+      "description": "Advisory extraction coverage messages. A top cell with text exclusively outside its effective label layers names those layer/datatype pairs."
+    },
+    "pin_set_difference": {
+      "type": "object",
+      "description": "Top-level pin-name differences after case and applied reference-port alias normalization. Each list of one-sided ports is sampled to 20 entries.",
+      "required": ["layout_only_pins", "layout_only_pins_count", "layout_only_pins_truncated", "reference_only_pins", "reference_only_pins_count", "reference_only_pins_truncated", "deck_synthesized_layout_pins"],
+      "properties": {
+        "layout_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "layout_only_pins_count": {"type": "integer", "minimum": 0},
+        "layout_only_pins_truncated": {"type": "boolean"},
+        "reference_only_pins": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+        "reference_only_pins_count": {"type": "integer", "minimum": 0},
+        "reference_only_pins_truncated": {"type": "boolean"},
+        "deck_synthesized_layout_pins": {"type": "array", "items": {"type": "string"}}
+      }
     },
     "device_classes": {
       "type": ["array", "null"],

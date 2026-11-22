@@ -136,7 +136,7 @@ from ._provenance import (
 )
 from ._report_verify import (
     VOLATILE_PROVENANCE_PATHS,
-    build_check_result,
+    build_input_check_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -209,6 +209,7 @@ from .lvs_gate_level_convert import (
 )
 from .lvs_hierarchy import _hierarchy_mismatch_warnings
 from .lvs_known_limits import note_known_limit
+from .lvs_label_coverage import REFERENCE_PORT_ALIAS_CATEGORY
 from .lvs_mismatch import (
     _annotate_case_collision_merges,
     _apply_tolerance_snaps,
@@ -477,7 +478,7 @@ CATEGORY_TOPOLOGY_DANGLING_OUTPUT_AMBIGUOUS = "topology.dangling_output_ambiguou
 #: The alias pin's net was joined onto its canonical target's net (`Circuit
 #: .connect_pin`) before comparing, so it is not reported as
 #: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
-CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
+CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = REFERENCE_PORT_ALIAS_CATEGORY
 #: Issue #2692: `options.anchor_top_level_pins` tied each top-level pin name
 #: declared on *both* sides to its own net on the other side
 #: (`NetlistComparer.same_nets(..., must_match=True)`, the same mechanism
@@ -1550,9 +1551,11 @@ def run_lvs(
     import klayout.db as kdb
 
     from .lvs_layout_stage import _resolve_layout_stage
+    from .lvs_passive_pairing import curated_pairing
 
+    layout_coverage: dict[str, Any] = {}
     layout_stage = _resolve_layout_stage(
-        layout_spec, reference_spec, request_dir, opts, progress
+        layout_spec, reference_spec, request_dir, opts, progress, layout_coverage
     )
     (
         layout_netlist,
@@ -1645,11 +1648,10 @@ def run_lvs(
     # the other request-side disclosures further down.
     anchored_pins: list[_TopLevelPinAnchor] = []
     anchor_warnings: list[dict[str, Any]] = []
-    # Issue #3014: the caller's explicit `hints.constant_nets` bindings; same
-    # roles as `anchored_pins`/`anchor_warnings` above.
     constant_bindings: list[_ConstantNetBinding] = []
     constant_warnings: list[dict[str, Any]] = []
 
+    passive_pairing = None
     if engine == "klayout":
         # Issue #2653: resolve a mask-option (metal-option/probe-pad/e-fuse
         # trim) reference's behavioural option construct to one concrete drawn
@@ -1820,8 +1822,6 @@ def run_lvs(
                 # state, so the second pass would otherwise compare on
                 # topology alone and could reach a `"match"` the first,
                 # anchored pass had already refused.
-                # Issue #3014: bindings are comparer state too, so they are
-                # re-applied on the fresh comparer exactly like the hints.
                 constant_bindings, constant_warnings = _apply_constant_nets(
                     comparer,
                     request.get("hints") or {},
@@ -1888,15 +1888,10 @@ def run_lvs(
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
-            # Issue #2692: an anchored pin pairing the comparer refused is a
-            # real finding, reported through the same reconciliation a
-            # hand-written `hints.same_nets` refusal goes through.
             anchored_pins=[
                 (anchor.layout_net, anchor.reference_net, anchor.pin)
                 for anchor in anchored_pins
             ],
-            # Issue #3014: a refused constant binding is a `hints.rejected`
-            # finding attributed through `details.declared_constant_net`.
             constant_bindings=constant_bindings,
             excluded_parameters=excluded_parameters,
         )
@@ -1953,9 +1948,14 @@ def run_lvs(
                 "matched": logger.matched_pins,
             },
         }
+        passive_pairing = curated_pairing(
+            (layout_deck_name, reference_spec.get("deck")),
+            logger,
+            counts["devices"],
+            status,
+            (layout_netlist, reference_netlist),
+        )
     else:
-        # `engine == "netgen"` -- the only other `SUPPORTED_ENGINES` member;
-        # see `_run_netgen_engine_branch`.
         (
             status,
             mismatches,
@@ -2024,6 +2024,8 @@ def run_lvs(
     )
 
     return assemble_lvs_report(
+        layout_coverage=layout_coverage,
+        passive_pairing=passive_pairing,
         mismatches=mismatches,
         omit_mismatches=omit_mismatches,
         status=status,
@@ -2173,7 +2175,7 @@ def check_lvs_report(
             )
         )
     runset_hash = get_path(committed, ("provenance", "runset", "content_hash"))
-    if committed.get("engine") == RUNSET_ENGINE and runset_hash is not None:
+    if committed.get("engine") == RUNSET_ENGINE:
         # Issues #2849/#6840: the runset is an input with no --check override.
         checks.append(
             input_hash_check(
@@ -2186,7 +2188,7 @@ def check_lvs_report(
                 include_repo_root=True,
             )
         )
-    result = build_check_result(report_path=report_path, checks=checks)
+    result = build_input_check_result(report_path=report_path, checks=checks)
     result["advisories"] = version_drift_advisories(committed)
     return result
 
@@ -2621,11 +2623,11 @@ def rerun_lvs_report(
             # Issue #1983: same rule -- a report committed before the
             # `body_verification` block existed cannot have drifted in it.
             "body_verification",
-            # Issue #5610: same rule -- a report committed before the
-            # `mismatches_omitted` echo existed cannot have drifted on it
-            # (the replay above leaves such a report uncompacted, so the
-            # only difference would be the fresh run's new `false` echo).
+            "ignored_layers",
+            "warnings",
+            "pin_set_difference",
             "mismatches_omitted",
+            "sg13g2_passive_pairing",
         )
         if field not in committed
     )
@@ -3020,6 +3022,7 @@ def _resolve_layout(
     def_net_names: bool = False,
     def_pins: frozenset[str] | None = None,
     progress: bool | str = False,
+    coverage: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3199,12 +3202,7 @@ def _resolve_layout(
         progress_scope.enter_context(active_timer(StageTimer(progress=progress)))
         progress_scope.enter_context(stage("extract_layout"))
         try:
-            # LVS is topological -- no parasitics_deck, so the 5th return
-            # (parasitic_nets) is always None here and is ignored. The 6th
-            # return (black_box_regions, issue #293) still takes effect --
-            # any reserved-annotation-layer region in the layout is excluded
-            # from connectivity the same as `klt extract` -- but is not
-            # surfaced in `klt lvs`'s own response, out of scope here. The 7th
+            # Black-box regions affect connectivity as in klt extract. The 7th
             # return (dummy_devices_dropped, #295) is a report-only count
             # surfaced by `klt extract`; the compare only cares that dummy
             # gates never became devices, which the suppression already
@@ -3260,6 +3258,7 @@ def _resolve_layout(
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,
+                layout_coverage=coverage,
                 top=layout_spec.get("top"),
                 top_cell_pins_only=top_cell_pins_only,
                 declared_pins=declared_pins,

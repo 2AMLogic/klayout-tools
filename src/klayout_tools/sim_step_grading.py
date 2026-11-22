@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from . import sim_step_evidence
 from .sim_eye import EyeOutcome, is_eye
-
-#: ``echo`` marker emitted around each step's analysis: ``klt_step_begin 0
-#: unknown1`` / ``klt_step_end 0 op1``.
-_STEP_MARKER_RE = re.compile(
-    r"^\s*klt_step_(begin|end)\s+(\d+)\s+(\S+)\s*$", re.MULTILINE
-)
+from .sim_step_evidence import step_outcomes
 
 
 def measurement_provenance(spec: dict[str, Any]) -> dict[str, Any]:
@@ -31,22 +26,6 @@ def measurement_provenance(spec: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-def step_outcomes(analysis: dict[str, Any], log_text: str) -> dict[str, bool]:
-    """``{step name: completed}`` from the ``echo`` markers in the log. A
-    step completed iff both markers are present and the analysis made a new
-    plot current; a missing end marker (killed, aborted script) or an
-    unchanged plot (the analysis produced none) is a failed step."""
-    begin: dict[int, str] = {}
-    end: dict[int, str] = {}
-    for match in _STEP_MARKER_RE.finditer(log_text):
-        target = begin if match.group(1) == "begin" else end
-        target[int(match.group(2))] = match.group(3)
-    return {
-        step["name"]: index in begin and index in end and begin[index] != end[index]
-        for index, step in enumerate(analysis["steps"])
-    }
-
-
 def grade_step_measurements(
     measurement_values: dict[str, float],
     measurements_spec: list[dict[str, Any]],
@@ -55,14 +34,22 @@ def grade_step_measurements(
     log_text: str,
     save_mode: str,
     eyes: dict[int, EyeOutcome] | None = None,
+    engine_diagnostics: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, Any]]:
     """One corner's step-sequence results: ``(measurement_results,
     diagnostics, extra_corner_fields)``.
 
     ``extra_corner_fields`` is the additive ``{"steps": [...]}`` per-step
     outcome list. Results are graded in flattened order (steps, then derived
-    measurements), so every input a result depends on is decided first."""
+    measurements), so every input a result depends on is decided first.
+    ``engine_diagnostics`` (issue #7072) is the corner's diagnostics so far;
+    an opted-in step ``.meas`` card grades ``not_reached`` only when none of
+    them is error-severity, exactly like the scalar path (#3108)."""
     outcomes = step_outcomes(analysis, log_text)
+    opted_in = any(spec.get("on_unreached") for spec in measurements_spec)
+    unreached = (
+        sim_step_evidence.step_unreached_locals(analysis, log_text) if opted_in else {}
+    )
     unmet = _apply_arg_dependencies(
         analysis, measurements_spec, measurement_values, outcomes
     )
@@ -82,6 +69,8 @@ def grade_step_measurements(
             by_name,
             save_mode=save_mode,
             eye=(eyes or {}).get(position),
+            unreached_locals=unreached.get(spec.get("step") or "", set()),
+            engine_diagnostics=engine_diagnostics,
         )
         by_name[spec["name"]] = result
         results.append(result)
@@ -164,6 +153,8 @@ def _grade_one(
     *,
     save_mode: str,
     eye: EyeOutcome | None,
+    unreached_locals: set[str],
+    engine_diagnostics: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     from .sim import _eye_measurement_result, _grade_measurement_value
 
@@ -206,11 +197,18 @@ def _grade_one(
         ]
     value = measurement_values.get(spec["log_key"])
     if value is None:
+        unreached = sim_step_evidence.not_reached_result(
+            spec,
+            unreached_locals=unreached_locals,
+            engine_diagnostics=engine_diagnostics,
+        )
+        if unreached is not None:
+            return unreached
         return errored, [
             {
                 "severity": "error",
                 "code": "measurement",
-                "message": _no_value_message(spec, save_mode),
+                "message": sim_step_evidence.no_value_message(spec, save_mode),
             }
         ]
     status, margin, grading_diagnostics = _grade_measurement_value(spec, value)
@@ -222,31 +220,3 @@ def _grade_one(
         **measurement_provenance(spec),
     }
     return result, grading_diagnostics
-
-
-def _no_value_message(spec: dict[str, Any], save_mode: str) -> str:
-    from .sim import SAVE_MODE_NETLIST_NO_VALUE_HINT
-
-    if "step" in spec:
-        form = (
-            f"its .meas card ({spec['meas_card']!r})"
-            if "meas_card" in spec
-            else f"its 'expr' ({spec['expr']!r})"
-        )
-        message = (
-            f"measurement {spec['name']!r} produced no value: step "
-            f"{spec['step']!r} completed, but {form} printed no "
-            f"'{spec['log_key']} = <value>' line -- check that it resolves "
-            "against that step's saved vectors and reduces to a single real "
-            "scalar"
-        )
-    else:
-        message = (
-            f"derived measurement {spec['name']!r} produced no value: every "
-            f"input ({', '.join(spec['derived_from'])}) was available, but its "
-            f"expression ({spec['expr']!r}) did not evaluate to a single real "
-            "scalar -- check the expression itself"
-        )
-    if save_mode == "netlist" and "step" in spec:
-        message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-    return message

@@ -1,0 +1,1 @@
+- AC passes now reject a source that is absent from a fully resolved netlist before starting simulation. Steps and passes use the same include-aware check (#7033).
