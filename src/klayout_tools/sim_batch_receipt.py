@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
+from .sim_errors import SimError
+
 
 def request_sha256(request: dict[str, Any]) -> str:
     """Digest of the whole request (what receipts written before #5194 recorded)."""
@@ -56,7 +58,6 @@ def check_attach_receipt(
     submitted from, when the local submit receipt says so. No receipt, an
     unreadable one, or one for a different job id -> proceed unchanged."""
     from . import sim_batch
-    from .sim import SimError
 
     path = os.path.join(artifacts_dir, sim_batch.BATCH_RECEIPT_FILENAME)
     try:

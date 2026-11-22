@@ -581,19 +581,19 @@
     },
     {
       "path": "src/klayout_tools/sim_batch.py",
-      "lines": 4314
+      "lines": 4265
     },
     {
       "path": "src/klayout_tools/sim_commands.py",
-      "lines": 912
+      "lines": 909
     },
     {
       "path": "src/klayout_tools/sim_decks.py",
-      "lines": 2264
+      "lines": 2247
     },
     {
       "path": "src/klayout_tools/sim_remote.py",
-      "lines": 1146
+      "lines": 1145
     },
     {
       "path": "src/klayout_tools/sim_search.py",
@@ -601,7 +601,7 @@
     },
     {
       "path": "src/klayout_tools/sim_staging.py",
-      "lines": 1230
+      "lines": 1227
     },
     {
       "path": "src/klayout_tools/sim_steps.py",

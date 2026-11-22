@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._provenance import sha256_file, sha256_file_required
+from .sim_errors import SimError
 from .sim_param_file import declared_model_refs, rewrite_model_refs
 from .sim_provenance import staged_asset_json
 
@@ -484,8 +485,6 @@ def stage_model_inputs_requested(request: dict[str, Any]) -> bool:
     #2668): absent means ``False``; anything but a JSON boolean is a
     ``SimError`` (``"yes"``/``1`` reading as "stage everything" is never what
     a request author meant)."""
-    from .sim import SimError
-
     options = request.get("options") or {}
     if not isinstance(options, dict):
         return False
@@ -524,8 +523,6 @@ def stage_sim_job(
     the offending field/path; callers invoke this before any upload, push
     or launch.
     """
-    from .sim import SimError
-
     opted_in = stage_model_inputs_requested(request)
     stager = _Stager(
         reserved_names=(*reserved_names, netlist_staged_name),
@@ -685,7 +682,7 @@ def _resolve_declared_lib(
 ) -> str:
     """Resolve one declared library ref exactly as ``sim`` resolves it for a
     local run (memoized per ref), refusing a missing file by field name."""
-    from .sim import SimError, _resolve_lib_ref
+    from .sim import _resolve_lib_ref
 
     if not isinstance(ref, str) or not ref:
         raise ModelStagingError(f"{field_name} must be a non-empty path")
