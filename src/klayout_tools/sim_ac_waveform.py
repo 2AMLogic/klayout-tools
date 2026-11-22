@@ -21,7 +21,9 @@ def _log_ratios(mode: str, count: int, start: float, stop: float) -> tuple[float
         return (1.0,)
     span = stop / start
     intervals = math.floor(math.log10(span) * count)
-    ratios = (math.exp(math.log(span) / intervals),) if intervals else ()
+    ratios: tuple[float, ...] = (
+        (math.exp(math.log(span) / intervals),) if intervals else ()
+    )
     if stop / 10 < start:
         # ngspice 42 fits whole intervals to the span even below a decade.
         # ngspice 47 uses a fixed number of intervals per decade there.
