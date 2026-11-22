@@ -287,7 +287,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. Versioned independently of `klt place-and-route`'s own `schema_version` (each command owns its own). |
 | `engine` / `engine_version` | string | Always `"openroad"`, plus the resolved OpenROAD build string (`openroad -version`'s own token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string \| null | Echo of the request; `null` when omitted. |
-| `status` | string | Always `"ok"` — like `klt place-and-route`, this command has no pass/fail concept of its own; a failed run never emits this envelope. |
+| `status` | string | Always `"ok"` — this command has no pass/fail concept of its own; a failed run never emits this envelope. |
 | `def_path` | object \| null | `{path, scope}` identity of the analysed DEF (issue #2879; a plain absolute string in schema 1) — see "Path field shape" above; `null` in `verilog` mode (issue #1825). |
 | `verilog_path` | object \| null | Additive field (issue #1825). `{path, scope}` identity of the analysed netlist (issue #2879; a plain absolute string in schema 1); `null` unless `request.verilog` was given — the mutually-exclusive counterpart to `def_path`. |
 | `geometry_source` | string | Additive field (issue #1826), extended by issue #1825. Echo of `request.geometry_source` in `def` mode — always present (never `null`); `"routed"` when the request omitted it, matching this command's pre-#1826 behaviour byte-for-byte. Forced to `"netlist_estimate"` whenever `request.verilog` was given, regardless of what (if anything) the request supplied. See "Pre-route DEFs" and "From-scratch netlist input" below. |
