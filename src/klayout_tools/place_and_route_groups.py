@@ -11,7 +11,9 @@ from typing import Any
 
 from ._jsonnum import is_finite_number
 
-_GROUP_KEYS = frozenset({"name", "instances", "max_extent_um", "region_um", "order"})
+_GROUP_KEYS = frozenset(
+    {"name", "instances", "max_extent_um", "region_um", "enforce_region", "order"}
+)
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -63,6 +65,17 @@ def validate_group_geometry(
     if region is not None:
         _check_region_um(region, where, error)
         item["region_um"] = list(region)
+    if "enforce_region" in entry:
+        enforce = entry["enforce_region"]
+        if not isinstance(enforce, bool):
+            raise error(f"{where}.enforce_region must be a boolean")
+        if enforce and region is None:
+            raise error(f"group {entry['name']!r}: enforce_region requires region_um")
+        if enforce and any(ch in name for name in instances for ch in "*?"):
+            raise error(
+                f"group {entry['name']!r}: a placement fence requires exact names"
+            )
+        item["enforce_region"] = enforce
     order = entry.get("order")
     if order is not None:
         item["order"] = _check_group_order(order, instances, where, error)

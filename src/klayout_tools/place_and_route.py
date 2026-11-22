@@ -75,6 +75,7 @@ from .env_provenance import find_repo_root, repo_relative_path
 from .evidence_canonicalize import rerun_result_for
 from .lef_header import read_lef_header as read_lef_header
 from .pdk_sweep_corners import list_sweep_corners
+from .place_and_route_fences import checked_fence_reports, fence_failure_context
 
 # The DEF->GDS merge subsystem (issue #1090/#438/#1032/#1029/#1488) lives in
 # `place_and_route_gds_merge.py` (issue #1820 split). `_merge_def_to_gds` is
@@ -100,12 +101,7 @@ from .place_and_route_layers import _ROUTING_LAYER_STACK as _ROUTING_LAYER_STACK
 from .place_and_route_layers import _signal_layer_range
 from .place_and_route_layers import _signal_routing_layers as _signal_routing_layers
 
-# The PDN/floorplan joint pre-flight (issue #2170): derives `pdngen`'s own
-# minimum core dimension from `request.power.straps[]` and compares it with
-# the core `request.floorplan` will produce, so a jointly-impossible pair is
-# rejected here instead of failing deep inside the "floorplan" stage with
-# PDN-0185. Same "self-contained subsystem in its own module" split as the
-# power audit below.
+# The joint preflight compares the PDN strap minimum with the requested core.
 from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
 from .place_and_route_pins import (
     check_io_pin_constraints,
@@ -1868,6 +1864,7 @@ def _run_single_corner(
             floorplan=floorplan,
             io_spec=io_spec,
             macros=macros,
+            instance_groups=instance_groups,
             power=power,
             clock_port=clock_port,
             clock_period_ns=clock_period_ns,
@@ -1940,7 +1937,8 @@ def _run_single_corner(
                         pdk_info=pdk_info,
                         pin_constraints=(io_spec or {}).get("pin_constraints"),
                         top_ports=netlist_top_ports(netlist_path, hdl_toplevel),
-                    ),
+                    )
+                    + fence_failure_context(stage, instance_groups),
                     details=_route_overflow.route_failure_congestion(
                         stage,
                         completed,
@@ -2446,11 +2444,12 @@ def _run_single_corner(
             if audited_def_path
             else None
         ),
-        # Additive field (issue #4344): placed-origin bbox of each requested
-        # `instance_groups` entry, read from the same DEF (`null` at
-        # "floorplan"; `[]` when none were requested).
         "instance_groups": (
-            read_def_instance_groups(audited_def_path, instance_groups)
+            checked_fence_reports(
+                read_def_instance_groups(audited_def_path, instance_groups),
+                instance_groups,
+                PlaceAndRouteError,
+            )
             if audited_def_path
             else None
         ),

@@ -694,6 +694,7 @@
         "klayout_tools.place_and_route_batch_single",
         "klayout_tools.place_and_route_def_drcfill",
         "klayout_tools.place_and_route_gds_merge",
+        "klayout_tools.place_and_route_fences",
         "klayout_tools.place_and_route_groups",
         "klayout_tools.place_and_route_hints",
         "klayout_tools.place_and_route_layers",
