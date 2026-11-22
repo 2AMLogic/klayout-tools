@@ -153,6 +153,7 @@ from . import sim_netlist_identity as sim_netlist_identity
 from . import sim_op_check as sim_op_check
 from . import sim_peak_rss as sim_peak_rss
 from . import sim_provenance as sim_provenance
+from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
 from ._jsonnum import is_finite_number, is_int, is_number
 from ._paths import (
@@ -173,7 +174,7 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
-from .pdk import PdkNotFoundError, find_pdk, list_corners, variant_dir_of
+from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
@@ -245,6 +246,15 @@ from .sim_echo_checks import (  # noqa: F401 -- codes stay public on ``sim``
     _require_supply_echo,
 )
 from .sim_echo_messages import echo_unsupported_message
+
+#: Moved to ``sim_environment_report`` (issue #5663) so this module stays
+#: under its per-file size ratchet; the coverage helper is self-aliased so
+#: ``klayout_tools.sim``'s historical attribute (and existing tests) keeps
+#: working unchanged.
+from .sim_environment_report import _corner_process_sections
+from .sim_environment_report import (
+    corner_coverage_environment as _corner_coverage_environment,
+)
 from .sim_netlist_includes import (
     absolutize_relative_include as _absolutize_relative_include,
 )
@@ -419,6 +429,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "netlist",
         "model_bin_range",
         "model_bin_range_preflight",
+        "save_all_supersedes",
         "ngspice_fatal",
         "netlist_title_line",
         "no_such_vector",
@@ -3953,12 +3964,8 @@ def _run_sim_corners(
     )
     _check_capacity_wait_applies(capacity_wait_s, backend, attach_job_id)
 
-    # Issue #2668: stage the complete job closure once, here, before any
-    # backend runs -- so a missing model input, unresolvable dependency or
-    # exceeded cap is a named SimError before any S3 write, SSH push or
-    # instance launch on every off-host path (single job, remote fleet,
-    # batch shards alike). The result's asset list is also this report's
-    # provenance for what the worker actually received.
+    # Issue #2668: stage the complete job closure once, before any backend
+    # runs; see `_preflight_staged_model_inputs` for the rationale.
     staged_model_environment = _preflight_staged_model_inputs(
         request,
         netlist_path,
@@ -3970,6 +3977,9 @@ def _run_sim_corners(
 
     bin_diagnostic = sim_bin_range.preflight_with_bins(
         netlist_path, models_lib, _find_width_ceiling_culprit, _MODEL_WIDTH_CEILING_UM
+    )
+    save_diagnostic = sim_save_diagnostic.preflight(
+        netlist_path, engine, save_mode, save_vectors, want_waveforms
     )
     if dry_run:
         published_runner: dict[str, Any] = {}
@@ -3988,6 +3998,7 @@ def _run_sim_corners(
             feature_diagnostic=feature_diagnostic,
             job_ceiling=job_ceiling,
             bin_range_diagnostic=bin_diagnostic,
+            save_diagnostic=save_diagnostic,
             published_runner=published_runner or None,
             engine=engine,
             backend=backend,
@@ -4483,14 +4494,8 @@ def _run_sim_corners(
     }
     netlist_digests.pin_provenance_input(report["provenance"])
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
-    if top_diags := [
-        d
-        for d in (
-            *remote_diagnostics,
-            bin_diagnostic,
-        )
-        if d
-    ]:
+    diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
+    if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
     _attach_runner_hints(report, measurements_spec, corners, backend=backend)
     attach_process_leg_check(report, corners)
@@ -4763,6 +4768,7 @@ def _build_dry_run_report(
     feature_diagnostic: dict[str, Any] | None = None,
     job_ceiling: dict[str, Any] | None = None,
     bin_range_diagnostic: dict[str, Any] | None = None,
+    save_diagnostic: dict[str, Any] | None = None,
     published_runner: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``klt sim --dry-run`` response (issue #3064): the request as
@@ -4815,7 +4821,9 @@ def _build_dry_run_report(
         report["job_ceiling"] = job_ceiling
     if published_runner is not None:
         report["published_runner"] = published_runner
-    if dry_diags := [d for d in (feature_diagnostic, bin_range_diagnostic) if d]:
+    if dry_diags := [
+        d for d in (feature_diagnostic, bin_range_diagnostic, save_diagnostic) if d
+    ]:
         report["diagnostics"] = dry_diags
     return report
 
@@ -5809,59 +5817,6 @@ def _derive_mc_seed(base_seed: int, *parts: object) -> int:
     payload = ":".join(str(part) for part in (base_seed, *parts)).encode("utf-8")
     digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:4], "big") % _MC_SEED_MODULUS
-
-
-def _corner_process_sections(corner_points: list[Any]) -> list[str]:
-    """Every process section the run's corner points exercise, in order."""
-    return [
-        name
-        for point in corner_points
-        for name in (
-            point.process_sections
-            if point.process_sections is not None
-            else ([point.process] if point.process else [])
-        )
-    ]
-
-
-def _corner_coverage_environment(
-    request: dict[str, Any], corner_points: list[Any]
-) -> dict[str, Any]:
-    """Additive ``environment.corner_coverage`` (issue #3794): per requested
-    non-typical process section, the device flavours the PDK deck leaves at
-    their typical model (e.g. gf180mcu's 5/6V devices), so a multi-corner
-    sweep never reads as skewing devices it does not. Empty (key absent) when
-    there is no resolvable PDK, no per-flavour corner data, or nothing
-    unmoved."""
-    models = request.get("models") or {}
-    if not (models.get("pdk") or models.get("pdk_root")):
-        return {}
-    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
-    if not process_sections:
-        return {}
-    try:
-        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
-    except PdkNotFoundError:
-        return {}
-    by_corner = {entry["corner"]: entry for entry in report["corners"]}
-    entries: list[dict[str, Any]] = []
-    for name in process_sections:
-        corner = by_corner.get(name)
-        if corner is None:
-            continue
-        devices = [
-            device
-            for section in corner["sections"]
-            for device in section.get("devices", [])
-        ]
-        if not devices:
-            continue
-        unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
-        if name != "typical" and unmoved:
-            entries.append({"process": name, "unmoved_devices": unmoved})
-    if not entries:
-        return {}
-    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
 
 
 def _with_family_mismatch(
@@ -8397,7 +8352,7 @@ def _run_corner(
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
-    artifacts: dict[str, str | None] = {
+    artifacts: dict[str, str | int | None] = {
         "log": None,
         "raw": None,
         "waveform": None,
@@ -8415,6 +8370,7 @@ def _run_corner(
         if raw_path is not None and os.path.isfile(raw_path):
             artifacts["raw"] = raw_path
             raw_size = os.path.getsize(raw_path)
+            artifacts["raw_bytes"] = raw_size  # issue #5622
             try:
                 waveform_path = _persist_waveform_artifact(
                     raw_path,
