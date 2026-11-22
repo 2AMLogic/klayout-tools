@@ -116,6 +116,7 @@
         "klayout_tools.cli.deck_cmd",
         "klayout_tools.cli.parsers.deck",
         "klayout_tools.deck_diff",
+        "klayout_tools.decks.enforced_rules",
         "klayout_tools.decks.history"
       ]
     },
