@@ -87,6 +87,32 @@ def test_validate_accepts_scalars():
     assert sim._validate_ngspice_options(value) == value
 
 
+def test_validate_accepts_transient_charge_tolerances():
+    # Issue #7007: the reltol/abstol/vntol/chgtol quartet plus trtol.
+    value = {
+        "reltol": 1e-3,
+        "abstol": 1e-10,
+        "vntol": 1e-5,
+        "chgtol": 1e-13,
+        "trtol": 5,
+    }
+    assert sim._validate_ngspice_options(value) == value
+
+
+def test_allowlist_is_reexported_from_sim():
+    from klayout_tools import sim_corner_axes
+
+    assert sim.NGSPICE_SOLVER_OPTIONS is sim_corner_axes.NGSPICE_SOLVER_OPTIONS
+    assert {"chgtol", "trtol"} <= set(sim.NGSPICE_SOLVER_OPTIONS)
+
+
+def test_typo_rejection_lists_new_names():
+    with pytest.raises(sim.SimError, match='"chgtl" is not a supported') as excinfo:
+        sim._validate_ngspice_options({"chgtl": 1e-13})
+    assert "chgtol" in str(excinfo.value)
+    assert "trtol" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("value", "match"),
     [
@@ -142,6 +168,15 @@ def test_deck_value_types(tmp_path):
         {"reltol": 0.0001, "method": "gear", "noopiter": True, "srcsteps": False},
     )
     assert ".options reltol=0.0001 method=gear noopiter" in lines
+
+
+def test_deck_renders_charge_tolerance_quartet(tmp_path):
+    lines = _deck_lines(
+        tmp_path, {"reltol": 1e-3, "abstol": 1e-10, "vntol": 1e-5, "chgtol": 1e-13}
+    )
+    card = ".options reltol=0.001 abstol=1e-10 vntol=1e-05 chgtol=1e-13"
+    assert card in lines
+    assert lines.index(card) == lines.index(".temp 27") + 1
 
 
 def test_deck_unset_is_byte_identical(tmp_path):

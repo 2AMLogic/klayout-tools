@@ -364,6 +364,7 @@
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_params_checks",
         "klayout_tools.gen_layer_mv_ring",
+        "klayout_tools.gen_pitch",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_res_head",
         "klayout_tools.gen_pcells",
@@ -614,10 +615,12 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cell_models",
         "klayout_tools.pdk_cells",
+        "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
+        "klayout_tools.pdk_model_aliases",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
@@ -951,6 +954,7 @@
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_netlist_identity",
+        "klayout_tools.sim_netlist_includes",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",
@@ -1159,7 +1163,8 @@
       "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.yield_threshold_cmd",
-        "klayout_tools.probit"
+        "klayout_tools.probit",
+        "klayout_tools.probit_document"
       ]
     }
   },

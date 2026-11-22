@@ -1218,6 +1218,40 @@ M1 and LISD/LIG. (A hand-drawn `V1` with no `M1`/`M2` nearby reports
 `V1.AUX.1` under `--engine klayout`.) The per-side `*.EN.*` rules there only
 measure a margin on vias that already land, so they need no flag.
 
+#### Verifying "zero new findings" for a `require_containment` opt-in (issue #6174)
+
+Every `require_containment` opt-in (#5883 family: #5737 sky130, #5915 gf180mcu,
+#5916 sg13g2) is gated on "zero new findings on the existing corpus". (asap7 sits
+under the same #5883 umbrella but needs no opt-in -- see above -- so the recipe
+reaches it only when a new asap7 rule is added.)
+That corpus is **two** trees, and `tests/corpus/<pdk>/` alone is the smaller
+one for most PDKs (`tests/corpus/` has no sg13g2 tree at all, yet the repo
+tracks ten real sg13g2 layouts). Enumerate both:
+
+```bash
+ls tests/corpus/<pdk>/                                  # fixture corpus
+git ls-files 'blocks/<prefix>*/output/*.gds*'           # mirrored block layouts
+```
+
+`<prefix>` is the PDK's block-directory prefix, which is not always the PDK
+name: `sg13g2-` (and `sg13cmos5l-` for the sg13cmos5l deck), `gf180-` plus the
+`gf180mcu_fd_sc_mcu*` cells, `sky130-` plus the `sky130_fd_sc_hd__*` cells,
+`asap7-`. Run `git ls-files 'blocks/*/output/*.gds*'` unfiltered and read the
+directory names if in doubt. Then run `run_drc(path, "<pdk>")` on every layout
+at the merge base and at the PR head, and report **any layout whose
+`rule_counts` changed**, naming the rule and the before/after count.
+
+Pre-existing violations are baseline, not new findings: the `blocks/` layouts
+are snapshots mirrored from the downstream canary repos by
+`.github/workflows/refresh-canaries.yml` and several are known-violating, so
+nothing gates on their DRC status. Only the delta attributable to the new rule
+counts, and a delta there is evidence to triage (a true positive belongs
+upstream in the canary repo, not in a waiver here), not an automatic blocker.
+Worked example: opting sg13g2 in (PR #6065) added `metal2.enclosing.via1.1: 0
+-> 12` on `blocks/sg13g2-bandgap/output/bandgap_amp.gds` only; all 12 are true
+positives (250 x 250 dbu Via1 centred on a Metal2 boundary, half outside) and
+the other nine sg13g2 layouts were unchanged.
+
 ### Sized/derived-layer rules (`DerivedLayer`)
 
 Some DRM rules are defined against a derived geometry rather than a single
@@ -3431,6 +3465,29 @@ Follow-up acceptance criteria if the missing definitions are established
    added to `SHIPPED_CELL_DEVIATIONS` with explicit cell/rule/DRM evidence;
    single standard cells carry no tap, so the check needs the placed-row
    context (`TAPCELL_WITH_FILLER`) rather than a per-cell run.
+
+### Markers on preset PDN geometry (`V4.M4.EN.1`, `V4.M5.EN.2`, `M5.AUX.1`)
+
+On a block routed by `klt place-and-route` with `power.preset: "asap7sc7p5t"`,
+some markers of these three rules can come from the PDN, not the router or
+the cells. Attribute a marker to the PDN only after it lands on matching
+`SPECIALNETS` geometry in the routed DEF; the rule id alone does not say where
+a marker came from. The preset's M2–M5 via stack uses the tech LEF's wide
+`V4` bar, which has zero `M4` enclosure, so `V4` cuts on the M5 straps can
+miss the 11 nm opposite-side enclosure (`V4.M4.EN.1`, `V4.M5.EN.2`). The
+request has no control for this; [#6909](https://github.com/2AMLogic/klayout-tools/issues/6909)
+tracks the repair. For `M5.AUX.1`, check whether the marker sits on an M5
+strap edge in the routed DEF's `SPECIALNETS`. Strap edges move with the
+snapped core origin. In the committed
+`tests/fixtures/place_and_route_drcfill/routed.def` (1000 units per µm, first
+`ROW` at x = 1026 nm), both 216 nm M5 stripes have edges 6 nm off the 24 nm
+grid: 1230/1446 nm (centre 1338) and 1758/1974 nm (centre 1866). To move the
+straps, replace `power.preset` with its explicit `power.straps` and
+`power.connects` (the two forms are mutually exclusive) and adjust the M5
+entry's `power.straps[].offset_um`. The deck still reports every such marker;
+nothing here is a waiver. Measurements and the recipe are under
+[Platform PDN presets](place-and-route.md#platform-pdn-presets-powerpreset-issue-2123)
+in the `klt place-and-route` guide.
 
 ### Shipped standard cells
 
