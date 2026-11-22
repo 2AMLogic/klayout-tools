@@ -599,6 +599,11 @@ the script is byte-identical to before.
 
 #### ASAP7 RVT example (M4-M7 on the DRC deck's grid)
 
+Prepare the descriptor, cell views and GDS routing layer map with
+`uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"`.
+Use `--pdk asap7 --pdk-root "$ROOT"` and request library `asap7sc7p5t_rvt`,
+corner `TT`. [ASAP7 root assembly](pdk.md#assembling-an-asap7-root)
+
 The packaged ASAP7 deck's `M4.AUX.*` rules assume wire centres sit at a 0 nm
 origin plus a fixed offset per pitch class. For `asap7sc7p5t_rvt`, give M4/M5
 (0.048 um pitch) a 0.012 um offset and M6/M7 (0.064 um pitch) a 0.016 um
