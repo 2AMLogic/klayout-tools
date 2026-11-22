@@ -16,6 +16,7 @@ from . import (
     remote_transport,
     sim_eye,
     sim_op_check,
+    sim_post_commands,
     sim_search,
     sim_settled,
     sim_slope_band_meas,
@@ -236,6 +237,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
             for spec in request.get("measurements") or []
         ),
     ),
+    "post_commands": (
+        (0, 9, 3),
+        lambda request: sim_post_commands.is_declared(request.get("analysis")),
+    ),
     "stimulus": (
         (0, 7, 1),
         lambda request: request.get("stimulus") is not None,
@@ -281,7 +286,10 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: ``twoport_noise`` is mandatory because an older runner would reject
 #: ``analysis.noise`` or omit ``nf_db`` (#3339). ``corners.params`` is
 #: mandatory because an older runner ignores the axis, running one corner per
-#: process x temperature with ``status: pass`` (#4235). The #5645 five
+#: process x temperature with ``status: pass`` (#4235). ``post_commands`` is
+#: mandatory because an older runner ignores the field, composing the deck
+#: without ``linearize``/``fft`` and evaluating ``expr`` measurements against
+#: the transient plot with ``status: pass`` (#6080). The #5645 five
 #: (``corners.options``, ``options.nodeset``,
 #: ``options.initial_conditions``, ``analysis_overrides``,
 #: ``analysis.op_check``) are mandatory because each one's post-run
@@ -317,6 +325,7 @@ _MANDATORY_RUNNER_FEATURES = frozenset(
         "analysis_overrides",
         "analysis.op_check",
         "lossless supply_v corner_id spelling",
+        "post_commands",
     }
 )
 

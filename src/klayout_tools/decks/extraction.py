@@ -115,12 +115,11 @@ class ResistorDevice:
     device parameter back and rewrites it in place to ``L / W *
     sheet_rho_ohm_sq + fixed_offset_ohm`` after extraction, before the
     netlist reaches the SPICE writer or ``klt lvs``'s comparer (issue
-    #521). Defaults to ``0.0``, which
-    reproduces ``R = L / W * sheet_rho_ohm_sq`` only -- today's behaviour,
-    bit-for-bit -- for every deck entry that does not set it. A deck that
+    #521). Defaults to ``0.0``, which reproduces ``R = L / W *
+    sheet_rho_ohm_sq`` only -- today's behaviour, bit-for-bit. A deck that
     transcribes (or, as for sky130's ``res_high_po``, measures via ngspice
-    against) its PDK's own composite head-plus-body resistor model should
-    set this rather than leave the fixed head/end term silently dropped.
+    against) its PDK's composite head-plus-body resistor model should set
+    this rather than leave the fixed head/end term silently dropped.
 
     ``end_term_ohm_um``/``width_offset_um`` (issue #2652) are two more
     optional coefficients covering a composite PDK resistor model
@@ -135,14 +134,11 @@ class ResistorDevice:
     separate coefficients rather than folding into ``fixed_offset_ohm``:
 
     - ``end_term_ohm_um`` is an ohm-micrometre coefficient: ``R`` gains
-      ``end_term_ohm_um / W`` (``W`` the already-computed device parameter,
-      in micrometres like every other KLayout device geometry parameter --
-      see ``CapacitorDevice.area_cap_f_um2``/``perim_cap_f_um``'s own units).
-      A PDK model's own coefficient is typically quoted in ohm-*metres*
-      against ``w`` in metres (e.g. sg13g2 rppd's ``70.0e-6 / w``); converting
-      to ohm-micrometres against ``W`` in micrometres is a clean factor of
-      1e6 (``70.0e-6`` ohm*m == ``70.0`` ohm*um), so deck entries transcribe
-      the PDK coefficient directly without an awkward residual scale factor.
+      ``end_term_ohm_um / W`` (``W`` in micrometres like every KLayout
+      device geometry parameter). PDK coefficients are typically quoted in
+      ohm-*metres* against ``w`` in metres (sg13g2 rppd's ``70.0e-6 / w``);
+      the conversion is a clean factor of 1e6 (``70.0e-6`` ohm*m == ``70.0``
+      ohm*um), so entries transcribe the PDK coefficient directly.
     - ``width_offset_um`` shifts the body term's denominator from ``W`` to
       ``W + width_offset_um`` (micrometres, so a PDK ``lwd`` quoted in metres
       is converted the same way): since the already-computed ``R = L / W *
@@ -153,18 +149,15 @@ class ResistorDevice:
       width the same way a positive one (rppd's/rsil's ``w + lwd``) widens
       it.
 
-    Both are applied in the same post-extraction correction (``extract.py``'s
-    ``apply_resistor_fixed_offset_corrections``) and in the same order
-    relative to series ``combine_devices()`` folding as ``fixed_offset_ohm``
-    (applied once per surviving, possibly-combined device, using that
-    device's own already-combined ``R``/``W`` -- correct because a uniform-
-    width series string's combined ``R`` stays linear in the summed ``L``,
-    and only the two true end contacts of the folded string get an end
-    term, not one per drawn primitive). Both default to ``0.0``, the
-    identity: ``end_term_ohm_um=0.0`` adds nothing, and
-    ``width_offset_um=0.0`` leaves ``W / (W + 0.0) == 1.0``, so every deck
-    entry that does not set them extracts ``R`` bit-for-bit as before this
-    field existed.
+    Both are applied in the same post-extraction correction
+    (``extract.py``'s ``apply_resistor_fixed_offset_corrections``), in the
+    same order relative to series ``combine_devices()`` folding as
+    ``fixed_offset_ohm`` -- once per surviving, possibly-combined device,
+    using its own already-combined ``R``/``W`` (correct: a uniform-width
+    string's combined ``R`` stays linear in the summed ``L``, and only the
+    folded string's two true end contacts get an end term). Both default to
+    ``0.0``, the identity: every entry that does not set them extracts ``R``
+    bit-for-bit as before.
 
     ``topology`` (issue #2679) selects how ``body``/``marker`` relate:
 
@@ -188,22 +181,23 @@ class ResistorDevice:
       layout that *does* overlap (a continuous bar marked by ``polyres``)
       keeps extracting as before.
 
-    ``name`` is the extracted device-class name (``devices[].class`` in the
-    JSON response, and the model token on the written ``R`` card -- a
-    consumer simulating the netlist supplies a matching ``.model``, exactly
-    as it already must for the ``nfet``/``pfet`` ``M`` cards).
+    ``anode_marker`` (issue #4312) declares a **split-terminal** resistor: two
+    terminals carved from one conductor shape by marker layers (the gf180mcu
+    eFuse). ``requires`` is then the scope; a shape missing its segment, anode
+    or cathode stays ordinary conductor. See ``extract_split_terminal``.
+
+    ``name`` is the extracted device-class name (``devices[].class`` and the
+    model token on the written ``R`` card; a consumer supplies a matching
+    ``.model``, as it already must for the ``nfet``/``pfet`` ``M`` cards).
 
     ``bulk_to_substrate`` selects ``DeviceExtractorResistorWithBulk`` (a
     third ``W`` terminal tied to the deck's ``substrate_net`` global)
     instead of the plain two-terminal ``DeviceExtractorResistor``, for a
     device whose PDK LVS deck models a bulk terminal (e.g. gf180mcu's
-    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the
-    same ``W`` terminal region as the NMOS body (``extract.py``'s
-    ``nfet_body``), so it inherits that terminal's behaviour: on a deck that
-    draws a distinct ``tap`` layer (issue #490), a substrate-tie ring drawn
-    outside every ``nwell`` and contacted up to a named net resolves the
-    bulk terminal to that real net; only a layout with no such ring falls
-    back to the deck's synthesized ``substrate_net`` global.
+    ``ppolyf_u``, extracted upstream with ``'W' => sub``). It shares the NMOS
+    body's ``W`` terminal region: with a distinct ``tap`` layer (issue #490) a
+    contacted substrate-tie ring names the bulk net, else the synthesized
+    ``substrate_net`` global is used.
 
     ``flavour_option``/``flavours`` (issue #595) declare an optional,
     caller-selectable **sheet-rho flavour set** for a resistor family whose
@@ -224,30 +218,27 @@ class ResistorDevice:
     ``deck_options`` (``klt extract --deck-option <flavour_option>=<value>``).
 
     ``flavour_option`` is the deck-option key this entry's flavour is chosen
-    by (``None``, the default, means this entry has no caller-selectable
-    flavour -- today's behaviour, unaffected either way). ``flavours`` is the
-    tuple of every :class:`ResistorFlavour` selectable through that key,
-    typically including one entry that matches this ``ResistorDevice``'s own
-    default ``name``/``sheet_rho_ohm_sq`` (the value used when no
-    ``deck_options`` override is given) plus the previously-unmodelled
-    siblings. :func:`get_extraction_deck` validates a given ``deck_options``
-    value against this list and raises :class:`InvalidDeckOptionError` for an
-    unrecognised key or value rather than silently keeping the default or
-    guessing -- the same "known-unmodelled short beats a silently wrong
-    value" discipline ``excludes`` already applies. A deck entry that leaves
-    ``flavours`` at its empty default has no selectable flavour: passing
-    ``deck_options`` naming a key no entry declares is itself an
+    by (``None``, the default: no caller-selectable flavour). ``flavours`` is
+    the tuple of every :class:`ResistorFlavour` selectable through that key,
+    typically one matching this entry's own default
+    ``name``/``sheet_rho_ohm_sq`` (used when no ``deck_options`` override is
+    given) plus the previously-unmodelled siblings.
+    :func:`get_extraction_deck` validates a ``deck_options`` value against
+    this list and raises :class:`InvalidDeckOptionError` for an unrecognised
+    key or value rather than guessing -- the same "known-unmodelled short
+    beats a silently wrong value" discipline ``excludes`` applies. A
+    ``deck_options`` key no entry declares is itself an
     :class:`InvalidDeckOptionError`, not a silent no-op.
 
-    ``provenance`` (issue #868) is a machine-readable citation of the exact
-    upstream PDK-LVS-deck source this entry's ``sheet_rho_ohm_sq`` (and, when
-    set, ``fixed_offset_ohm``) was transcribed/measured from -- the
-    device-recognition analogue of :class:`DrcRule.provenance` (see
-    :class:`RuleProvenance`'s own docstring for the shared type and how it
-    generalises beyond DRC). ``None`` (the default) means no structured
-    provenance has been backfilled for this entry yet -- the prose citation
-    in the deck module's own inline comment remains the only record, exactly
-    as for every entry before this field existed.
+    ``ignored_parameters`` (issue #4312): parameters the PDK's own LVS deck
+    leaves out of its compare (``ignore_parameter``), the eFuse's ``R``. ``klt
+    lvs`` excludes them by default and discloses it; naming the class in
+    ``options.compare_parameters`` compares it as asked.
+
+    ``provenance`` (issue #868) cites the upstream PDK-LVS-deck source this
+    entry's ``sheet_rho_ohm_sq`` (and ``fixed_offset_ohm``) came from, as
+    :class:`DrcRule.provenance` does (see :class:`RuleProvenance`); ``None``
+    leaves only the deck module's inline prose citation.
     """
 
     name: str
@@ -266,12 +257,21 @@ class ResistorDevice:
     provenance: RuleProvenance | None = None
     topology: str = "overlap"
     terminal_enclosure_um: float = 0.0
+    anode_marker: tuple[int, int] | None = None
+    ignored_parameters: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.topology not in RESISTOR_TOPOLOGIES:
             raise ValueError(
                 f"ResistorDevice '{self.name}': unknown topology "
                 f"{self.topology!r} (expected one of {RESISTOR_TOPOLOGIES})"
+            )
+        if self.anode_marker is not None and (
+            self.topology != "overlap" or not self.requires
+        ):
+            raise ValueError(
+                f"ResistorDevice '{self.name}': anode_marker needs "
+                "topology='overlap' and a non-empty requires (the scope)"
             )
 
 
@@ -993,8 +993,8 @@ class ExtractionDeck:
             layers.add(resistor.marker)
             layers.update(resistor.requires)
             layers.update(resistor.excludes)
-            if resistor.terminal is not None:
-                layers.add(resistor.terminal)
+            # filter(None, ...) keeps this ratcheted function's complexity put.
+            layers.update(filter(None, (resistor.terminal, resistor.anode_marker)))
         for diode in self.diodes:
             layers.add(diode.marker)
             layers.update(diode.anode_requires)

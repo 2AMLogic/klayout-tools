@@ -312,7 +312,7 @@ def test_yosys_timeout_abc_stall_names_the_diagnostic(tmp_path, monkeypatch):
         "yosys did not complete within 0.5s (script "
         f"'{script_path_holder[0]}') -- process killed"
     )
-    assert "(raise request.yosys_timeout_s to allow more time)" not in message
+    assert "(raise " not in message
     log_path = os.path.splitext(script_path_holder[0])[0] + ".log"
     assert f"log '{log_path}'" in message
     assert os.path.isfile(log_path)
@@ -345,5 +345,6 @@ def test_yosys_timeout_non_abc_stall_keeps_generic_message(tmp_path, monkeypatch
         f"yosys did not complete within 0.5s (script '{script_path_holder[0]}')"
         " -- process killed (a run hung on yosys-abc's stdout has its abc"
         f" child killed with the whole process group) -- log '{log_path}'"
-        " (raise request.yosys_timeout_s to allow more time)"
+        " (raise --yosys-timeout-s, $KLT_YOSYS_TIMEOUT_S or "
+        "request.yosys_timeout_s to allow more time)"
     )
