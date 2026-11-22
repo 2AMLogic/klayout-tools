@@ -357,7 +357,7 @@
     },
     {
       "path": "src/klayout_tools/gen_compose_routing.py",
-      "lines": 4882
+      "lines": 4835
     },
     {
       "path": "src/klayout_tools/gen_describe.py",
