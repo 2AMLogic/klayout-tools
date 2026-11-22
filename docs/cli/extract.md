@@ -4961,6 +4961,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   case-insensitively and would report a false `net.merged`. Pair it with
   `options.flatten_layout` in `klt lvs` — see
   [`klt lvs`](lvs.md) (`options.flatten_layout`).
+  A flat `--parasitics` run that would *write* such a netlist fails instead
+  (exit 1, issue #7091), naming each colliding group: ngspice folds case,
+  so the two nets would become one node and their net-derived parasitic
+  cards (`RN1_t0` / `Rn1_t0`) would be rejected as duplicate devices —
+  regardless of which nets `--parasitics-net` / `--critical-net` select.
+  Nothing is written and an existing output file (including the default
+  `<input>.spice`) is left untouched; `klt pex` reports it as
+  `extraction failed` before any simulation. `--parasitics --no-netlist`
+  still returns the report with the warning, and a device-only extraction
+  still writes its netlist with the warning. Several labels on *one* net
+  (`A|a`) are not a collision.
 
 ### Flat vs hierarchical
 
@@ -5735,14 +5746,22 @@ per-net lumped model would produce.
   > with tap count even though the real resistance between two fixed points
   > does not. Across levels, two strapped layers joined at both ends are
   > charged as the sum of both, not their parallel combination, while two
-  > levels joined at a single landing correctly add. The true value depends
+  > levels joined at a single landing correctly add. A net routed as a tree
+  > is over-charged the same way: the total sums every branch in series,
+  > including stub arms that end on terminals carrying no DC current (e.g.
+  > MOS gates), so it overstates the trunk-plus-two-arms path between the
+  > current-carrying terminals. The true value depends
   > on which terminals carry current and on the boundary conditions, and a
   > net with three or more terminals has no single scalar. `--distributed-rc`
   > does **not** repair this: the ladder redistributes the *same*
   > `resistance_ohm` along the terminal order and conserves its total, so it
-  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
-  > graph, specified (design only, not implemented) in Stage 3 of
-  > `docs/design/extract-fidelity-roadmap.md`.
+  > inherits the bias. The opt-in terminal-aware resistance graph
+  > ("Terminal-aware resistance graph" above, from Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`) is the cross-check: it
+  > reports the per-terminal-pair path resistance.
+  > Only a two-terminal net gets a graph-sourced scalar; a net with three or
+  > more terminals keeps the legacy total and must be read pairwise through
+  > its `pair_resistance_ohm` matrix.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -8050,7 +8069,13 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 
 `resistance_ohm` is a series sum over a net's fragments (see "Squares are
 counted per connected fragment"); it cannot express parallel structure or
-the resistance *between two named terminals*. `--resistance-graph` (requires
+the resistance *between two named terminals*. Because the sum runs over
+**every** fragment of the net, a tree-routed net (one trunk, several stub
+arms to different terminals) is charged the sum of all arms — including
+arms that end on terminals carrying no DC current (e.g. MOS gates) — so the
+lumped total can overstate the two-terminal path by multiples; the
+`pair_resistance_ohm` matrix below is the cross-check for exactly that
+case. `--resistance-graph` (requires
 `--parasitics`) additionally builds the geometry-derived resistor graph of
 `docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
 `extract_resistance_graph.build_resistance_graph`, DC solve

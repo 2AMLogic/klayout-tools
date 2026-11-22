@@ -1,0 +1,1 @@
+- **`klt pex` names the cause when a flat DUT or reordered pins prevent an extracted-side simulation** (#6963, 2026-11-21). `delta[].error` reports the `flat_dut_mismatch` or `pin_order_mismatch` code, its detail, and the `execute` stage. The stderr summary includes the same cause.

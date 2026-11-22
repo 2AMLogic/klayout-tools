@@ -157,6 +157,7 @@
         "klayout_tools.cli.drc_cmd",
         "klayout_tools.cli.drc_text",
         "klayout_tools._drc_edge_pair_hull",
+        "klayout_tools.deck_global_defaults",
         "klayout_tools.drc",
         "klayout_tools.drc_attribution",
         "klayout_tools.drc_check_kinds",
@@ -364,6 +365,7 @@
         "klayout_tools.gen_layer_params",
         "klayout_tools.gen_layer_params_checks",
         "klayout_tools.gen_layer_mv_ring",
+        "klayout_tools.gen_pitch",
         "klayout_tools.gen_layer_tables",
         "klayout_tools.gen_res_head",
         "klayout_tools.gen_pcells",
@@ -614,10 +616,13 @@
         "klayout_tools.pdk_capabilities",
         "klayout_tools.pdk_cell_models",
         "klayout_tools.pdk_cells",
+        "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
         "klayout_tools.pdk_families",
+        "klayout_tools.pdk_model_aliases",
         "klayout_tools.pdk_models",
         "klayout_tools.pdk_native_drc",
         "klayout_tools.pdk_pcell",
@@ -951,6 +956,7 @@
         "klayout_tools.sim_measurement_results",
         "klayout_tools.sim_measurement_template",
         "klayout_tools.sim_netlist_identity",
+        "klayout_tools.sim_netlist_includes",
         "klayout_tools.sim_noise",
         "klayout_tools.sim_noise_contributors",
         "klayout_tools.sim_noise_leaves",
@@ -1046,6 +1052,7 @@
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
+        "klayout_tools._sta_timing_derate",
         "klayout_tools.post_route_sta",
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
@@ -1158,7 +1165,8 @@
       "description": "`klt yield-threshold` implementation: probit threshold fit plus CLI adapter.",
       "modules": [
         "klayout_tools.cli.yield_threshold_cmd",
-        "klayout_tools.probit"
+        "klayout_tools.probit",
+        "klayout_tools.probit_document"
       ]
     }
   },
@@ -1597,6 +1605,11 @@
       "consumer": "pdk",
       "exporter": "gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "pdk",
+      "exporter": "lvs",
+      "reason": "Issue #5827: `klt pdk decks` reports LVS runset globals with the runset harness's own reserved names (lvs_runset.RESERVED_RUNSET_VARS) folded in, so a deck listing cannot disagree with what `klt lvs` requires; imported lazily."
     },
     {
       "consumer": "pex",
