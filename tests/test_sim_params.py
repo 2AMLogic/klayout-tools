@@ -431,11 +431,6 @@ def test_xyce_refuses_a_parameter_axis():
             corners_spec={"params": {"r": [1]}},
             monte_carlo_declared=False,
             fail_fast_probe=False,
-            osdi_preload_declared=False,
-            expr_measurements_declared=False,
-            save_mode_declared=False,
-            analysis_steps_declared=False,
-            crossings_declared=False,
         )
 
 

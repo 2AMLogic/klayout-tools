@@ -120,8 +120,8 @@ def test_unsupported_and_unmodeled_diagnostics_have_their_own_stages(tmp_path):
     path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
     result = run_extract(path, "sky130")
     assert {
-        "unsupported_device_diagnostic",
+        "unsupported_devices",
         "unmodeled_marker_diagnostic",
     } <= set(result["timing"]["stages"])
-    assert result["timing"]["stages"]["unsupported_device_diagnostic"] >= 0
+    assert result["timing"]["stages"]["unsupported_devices"] >= 0
     assert result["timing"]["stages"]["unmodeled_marker_diagnostic"] >= 0

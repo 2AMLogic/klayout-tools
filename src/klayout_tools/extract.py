@@ -165,7 +165,6 @@ from ._provenance import (
 )
 from ._report_verify import (
     build_check_result,
-    build_rerun_result,
     get_path,
     hash_check,
     resolve_committed_path,
@@ -180,11 +179,12 @@ from .decks import (
     ParasiticsDeck,
     SizeFilter,
     UnknownExtractionDeckError,
-    deck_source_path,
+    deck_content_hash,
     get_extraction_deck,
     get_parasitics_deck,
 )
 from .erc_islands import partition_region_by_islands, sorted_islands
+from .evidence_canonicalize import rerun_result_for
 
 # The cell-level (black-box + pins) abstraction subsystem lives in its own
 # module (issue #1303, split out of this one at ~8800 lines). `_sanitize_
@@ -219,7 +219,7 @@ from .extract_assemble import assemble_extract_report
 
 # The pre-report detection/warning run also moved out of `run_extract`
 # (issue #5196, stage 7) -- see `extract_detect_block.py`'s module docstring.
-from .extract_detect_block import build_detection_findings
+from .extract_detect_block import build_detection_findings, refuse_case_fold_nets
 
 # The layout-geometry device-recognition diagnostics (diode near-miss,
 # unmodelled poly / flavour-marker / unsupported-device / voltage-domain
@@ -3125,8 +3125,7 @@ def run_extract(
 
     # `_purge_preserving_named_nets()` (in `_extract_netlist`) still drops a
     # circuit entirely when it has no devices, no named/labelled nets, and no
-    # subcircuits -- e.g. a layout with no extractable devices and no named
-    # nets. That is a legitimate "nothing extracted" result, not an error:
+    # subcircuits -- a legitimate "nothing extracted" result, not an error:
     # report zero devices/nets rather than dereferencing a `None` circuit. A
     # circuit with named/labelled nets but zero devices survives with those
     # nets/pins intact instead (issue #539) -- `circuit` below is only ever
@@ -3162,6 +3161,7 @@ def run_extract(
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
+    refuse_case_fold_nets(nets, parasitics and not no_netlist)
 
     # Snapshotted *here* -- before `_inject_parasitics` below can add a single
     # R/C/L -- so `--subcircuit` (issue #2245) can tell a real device from an
@@ -3691,13 +3691,12 @@ def check_extract_report(
     ``klt extract`` up to the same shared ``_report_verify.py`` machinery
     issue #1106 built for those two verbs: re-hashes the input layout stream
     (``committed["file"]``) and the deck
-    (:func:`~klayout_tools.decks.deck_source_path`, resolved from
+    (:func:`~klayout_tools.decks.deck_content_hash`, resolved from
     ``committed["provenance"]["deck"]["name"]``) and compares each against
     the ``sha256:``-prefixed digest already recorded in
     ``provenance.input.content_hash``/``provenance.deck.content_hash``
-    (:func:`klayout_tools._provenance.content_hash`) -- reusing
-    :func:`klayout_tools._provenance.sha256_file`, never reimplementing
-    hashing. Returns the shared ``--check`` payload built by
+    using the same hash functions as the original report. Returns the
+    shared ``--check`` payload built by
     :func:`klayout_tools._report_verify.build_check_result`: ``status:
     "match"`` when both hashes agree, ``"drifted"`` (naming which one moved)
     otherwise.
@@ -3717,7 +3716,7 @@ def check_extract_report(
     extract --deck`` is required for every run, so ``provenance.deck`` is
     always populated for a genuine committed report; an unresolvable deck
     name (e.g. the deck module was since renamed/removed) hashes to ``None``
-    via :func:`~klayout_tools.decks.deck_source_path`, which likewise never
+    via :func:`~klayout_tools.decks.deck_content_hash`, which likewise never
     counts as a match.
 
     Under ``--engine klayout-runset`` the deck entry is replaced by a runset
@@ -3750,7 +3749,7 @@ def check_extract_report(
             ),
         ),
         extract_runset.provenance_hash_check(
-            committed, deck_source_path=deck_source_path
+            committed, deck_content_hash=deck_content_hash
         ),
     ]
     return build_check_result(report_path=report_path, checks=checks)
@@ -4204,13 +4203,7 @@ def rerun_extract_report(
             shutil.rmtree(scratch_dir, ignore_errors=True)
     if scratch_dir is not None and fresh.get("netlist_path") is not None:
         fresh["netlist_path"] = committed_netlist_path
-    return build_rerun_result(
-        report_path=report_path,
-        committed=committed,
-        fresh=fresh,
-        committed_for_diff=_canonicalize_extract_report_for_rerun_diff(committed),
-        fresh_for_diff=_canonicalize_extract_report_for_rerun_diff(fresh),
-    )
+    return rerun_result_for("extract", report_path, committed=committed, fresh=fresh)
 
 
 def _replay_pin_renames_echo(
@@ -4792,13 +4785,10 @@ def extract_netlist_from_layout(
 
     # Unsupported devices (issue #2919): additive diagnostic through the
     # optional `unsupported_devices` out-parameter, same idiom as above.
-    # Staged (issue #5893) so its wall time lands in `timing.stages` -- this
-    # was the dominant, unattributed cost of real runs (it re-reads marker
-    # layers and re-runs `_resolve_mos_capacitors` on the whole cell), the
-    # same "the timing object understated the cost" gap #3408 closed for the
-    # normalized hash.
+    # Timed as its own stage (#5807): it re-runs the recogniser walks, a
+    # superlinear share previously hidden in `unattributed_seconds`.
     warnings = warnings + _staged(
-        "unsupported_device_diagnostic",
+        "unsupported_devices",
         _detect_unsupported_devices,
         layout,
         top_cell,
@@ -7513,13 +7503,11 @@ def _extract_netlist(
         ]
         claimed = kdb.Region()
         if not marker_region.is_empty() and not active.is_empty():
-            merged_active = active.merged()
-            # One whole-chip boolean per flavour, then per-island gates come
-            # out of `gates_region.interacting(island)` inside the split
-            # (issue #5893).
-            gates_region = merged_active & split_poly
-            remaining = kdb.Region()
-            for component in merged_active.each():
+            # Non-marker-touching islands claim nothing and pass through whole (#5807).
+            candidates = active.merged().interacting(marker_region)
+            gates_region = candidates & split_poly
+            remaining = active - candidates
+            for component in candidates.each():
                 component_region = kdb.Region(component)
                 claimed_part, remaining_part = _flavour_split_island(
                     component_region,
