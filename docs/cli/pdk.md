@@ -246,7 +246,12 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Matching files are merged into one
+  and both files' values. Every differing field between the first file and
+  the offending one is reported in the same error (up to 10, then a count of
+  the rest), long group values are shown around their first difference, and
+  a group renamed between files (`operating_conditions (typ)` vs
+  `operating_conditions (slow)`) is reported once as the same group under a
+  different name. Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized
