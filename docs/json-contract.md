@@ -245,7 +245,10 @@ request field (`"error"` default, `"null"` opt-in) whose default reproduces
 today's response byte-for-byte. Opting in adds a new measurement `status`
 member, `"not_reached"` (with `value: null`), an `info` diagnostic
 `measurement_not_reached`, and a top-level `not_reached` count present only
-for a request that declared the field. Consumers that switch on measurement
+for a request that declared the field. The same opt-in on a step-scoped
+`analysis_steps[].measurements[].spice` card (issue #7072) reports the
+identical members under the qualified `<step>.<name>` result, which also
+carries its `step` provenance field. Consumers that switch on measurement
 `status` already must tolerate unknown members per the rule above. No
 `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "Unreached
 `.meas` targets (`measurements[].on_unreached`)".
