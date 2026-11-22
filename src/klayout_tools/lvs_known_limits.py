@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from .lvs_mismatch import _mismatch, _sort_key
@@ -69,70 +70,23 @@ def count_unsupported_asap7_instances(netlist: Any, top: str | None) -> dict[str
             root = top_circuits[0]
     if root is None:
         return {}
-    reachable: list[Any] = []
-    seen: set[int] = set()
-    stack = [root]
-    while stack:
-        circuit = stack.pop()
-        if id(circuit) in seen:
+    # KLayout visits all callers before their children. Seed only the selected
+    # root so additional top circuits and unused definitions contribute nothing.
+    placements: Counter[Any] = Counter({root: 1})
+    unsupported: Counter[str] = Counter()
+    for circuit in netlist.each_circuit_top_down():
+        count = placements[circuit]
+        if not count:
             continue
-        seen.add(id(circuit))
-        reachable.append(circuit)
-        for sub in circuit.each_subcircuit():
-            child = sub.circuit_ref()
-            if child is not None:
-                stack.append(child)
-    if len(reachable) == 1:
-        return {}
-    # Per-circuit reference counts (child id -> how many subcircuit entries in
-    # this circuit call it) and the reverse edge map they induce, so the
-    # per-circuit instance count below is one memoized DAG walk rather than a
-    # path-sensitive traversal that would re-count shared parents.
-    refs: dict[int, dict[int, int]] = {}
-    callers: dict[int, list[int]] = {}
-    for circuit in reachable:
-        counts: dict[int, int] = {}
-        for sub in circuit.each_subcircuit():
-            child = sub.circuit_ref()
-            if child is not None:
-                counts[id(child)] = counts.get(id(child), 0) + 1
-        refs[id(circuit)] = counts
-        for child_id in counts:
-            callers.setdefault(child_id, []).append(id(circuit))
-    root_id = id(root)
-    instance_memo: dict[int, int] = {}
-
-    def instances(circuit_id: int, visiting: set[int]) -> int:
-        if circuit_id == root_id:
-            return 1
-        cached = instance_memo.get(circuit_id)
-        if cached is not None:
-            return cached
-        if circuit_id in visiting:
-            return 0  # cycle guard: only a malformed netlist ever reaches this
-        visiting.add(circuit_id)
-        total = sum(
-            instances(parent_id, visiting) * refs[parent_id][circuit_id]
-            for parent_id in callers.get(circuit_id, ())
-        )
-        visiting.discard(circuit_id)
-        instance_memo[circuit_id] = total
-        return total
-
-    unsupported: dict[str, int] = {}
-    for circuit in reachable:
-        multiplicity = instances(id(circuit), set())
-        if multiplicity <= 0:
-            continue
-        for sub in circuit.each_subcircuit():
-            child = sub.circuit_ref()
+        for instance in circuit.each_subcircuit():
+            child = instance.circuit_ref()
             if child is None:
                 continue
-            hit = _KNOWN_BY_UPPER.get(child.name.upper())
-            if hit is not None:
-                cell, _kind = hit
-                unsupported[cell] = unsupported.get(cell, 0) + multiplicity
-    return unsupported
+            placements[child] += count
+            pinned = _KNOWN_BY_UPPER.get(child.name.upper())
+            if pinned is not None:
+                unsupported[pinned[0]] += count
+    return dict(unsupported)
 
 
 def note_known_limit(

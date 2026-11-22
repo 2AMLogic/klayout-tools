@@ -194,13 +194,29 @@ def test_block_warnings_gated_on_mismatching_finfet_and_instantiation():
     counts = {"AOI21x1_ASAP7_75t_R": 2}
     for finfet, status in ((True, "match"), (False, "mismatch")):
         out: list = []
-        note_known_limit(out, finfet, status, {"top": "TOPBLOCK"}, {}, counts, counts)
+        note_known_limit(
+            out,
+            finfet,
+            status,
+            {"top": "TOPBLOCK"},
+            {},
+            layout_counts=counts,
+            reference_counts=counts,
+        )
         assert out == []
     # A zero-count master (an entry the censuses did not instantiate) emits
     # nothing, and the single-cell warning is preserved unchanged beside the
     # block entries when both conditions hold at once.
     out = []
-    note_known_limit(out, True, "mismatch", {"top": "TOPBLOCK"}, {}, {}, {})
+    note_known_limit(
+        out,
+        True,
+        "mismatch",
+        {"top": "TOPBLOCK"},
+        {},
+        layout_counts={},
+        reference_counts={},
+    )
     assert out == []
     out = []
     note_known_limit(
