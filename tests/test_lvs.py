@@ -33,7 +33,6 @@ Three tiers:
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
 import os
@@ -8185,6 +8184,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
     import klayout.db as kdb
 
     from klayout_tools.cli import equiv_cmd, lvs_cmd
+    from klayout_tools.cli.parser import create_parser
 
     # The two verbs agree on the numeric value, by construction.
     assert lvs_cmd.EXIT_INCONCLUSIVE == equiv_cmd.EXIT_INCONCLUSIVE == 4
@@ -8205,19 +8205,7 @@ def test_lvs_cli_exits_4_on_inconclusive(tmp_path, monkeypatch, capsys):
         },
     )
 
-    args = argparse.Namespace(
-        request=path,
-        format="json",
-        check=None,
-        rerun=False,
-        deck=None,
-        deck_file=None,
-        deck_var=None,
-        layout=None,
-        reference=None,
-        progress=None,
-        output=None,
-    )
+    args = create_parser().parse_args(["lvs", path, "--format", "json"])
     assert lvs_cmd.run(args) == lvs_cmd.EXIT_INCONCLUSIVE
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "inconclusive"
@@ -12672,8 +12660,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "rppd",
         "rhigh",
     }
-    # sg13g2's own arm lives in tests/test_extract_sg13g2_antenna_diodes.py
-    # (issue #5491, antenna-diode keys); both curated decks: no derived entry.
+    # For sg13g2's keys see test_extract_sg13g2_antenna_diodes.py (#5491).
     assert set(build_device_binding_map("gf180mcu")) == {
         "nfet_03v3",
         "pfet_03v3",
@@ -12697,6 +12684,7 @@ def test_build_device_binding_map_derived_fallback_shape():
         "tm9k",
         "tm11k",
         "tm30k",
+        "efuse",  # read-only: `_RESISTOR_READ_ONLY_TABLE` (issue #4312)
         # MiM densities (issue #3090) -- curated in `_CAPACITOR_MODEL_TABLE`.
         "cap_mim_1f0_m4m5_noshield",
         "cap_mim_1f5_m4m5_noshield",
