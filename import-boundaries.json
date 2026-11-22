@@ -274,6 +274,7 @@
         "klayout_tools.extract_batch",
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
+        "klayout_tools.extract_fragment_resistance",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
@@ -527,6 +528,7 @@
         "klayout_tools.lvs_power",
         "klayout_tools.lvs_reference_stage",
         "klayout_tools.lvs_report",
+        "klayout_tools.lvs_replay",
         "klayout_tools.lvs_run_options",
         "klayout_tools.lvs_runset",
         "klayout_tools.lvs_runset_reference",
@@ -618,6 +620,7 @@
         "klayout_tools.pdk_cells",
         "klayout_tools.pdk_sweep_corners",
         "klayout_tools.pdk_compat",
+        "klayout_tools.pdk_corner_skew",
         "klayout_tools.pdk_decks",
         "klayout_tools.pdk_descriptor",
         "klayout_tools.pdk_diode_models",
@@ -919,6 +922,7 @@
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
         "klayout_tools.sim_batch_warn",
+        "klayout_tools.sim_batch_worker_engine_build",
         "klayout_tools.sim_commands",
         "klayout_tools.sim_cause",
         "klayout_tools.sim_case_names",
@@ -939,6 +943,7 @@
         "klayout_tools.sim_decks_resume",
         "klayout_tools.sim_decks_split",
         "klayout_tools.sim_decks_staging",
+        "klayout_tools.sim_echo_checks",
         "klayout_tools.sim_echo_messages",
         "klayout_tools.sim_energy",
         "klayout_tools.sim_environment_report",
@@ -980,6 +985,7 @@
         "klayout_tools.sim_raw",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
+        "klayout_tools.sim_save_diagnostic",
         "klayout_tools.sim_search",
         "klayout_tools.sim_search_analysis",
         "klayout_tools.sim_search_param",
@@ -1058,7 +1064,8 @@
         "klayout_tools.post_route_sta_electrical",
         "klayout_tools.post_route_sta_instance_paths",
         "klayout_tools.post_route_sta_path_groups",
-        "klayout_tools.post_route_sta_stages"
+        "klayout_tools.post_route_sta_stages",
+        "klayout_tools.post_route_sta_verify"
       ]
     },
     "stats": {

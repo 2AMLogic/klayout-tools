@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
+  `environment.corner_coverage` no longer claim a device flavour sits at its
+  typical model when only its include tokens are unchanged. gf180mcuD's
+  `06v0`/`06v0_nvt` MOSFETs are now reported `"param"` at `ff`/`ss`/`fs`/`sf`
+  (their typical-named sub-libraries consume `.param` values the corner
+  sections override; attribution is by consumption, with a name-prefix
+  fallback for unresolvable sub-libraries), a differing `.param`
+  attributable by neither rule reports the new `"unknown"` value (surfaced
+  as `environment.corner_coverage`'s `unknown_devices` key, never folded
+  into `unmoved_devices`), and non-device flavours (`fets_mm`,
+  `noise_corner`) are no longer listed in `devices[]` at all.
+  **Additive-compatible — `schema_version` unchanged:** the
+  `devices[].skew` value set grows and `"typical"` narrows per
+  docs/json-contract.md's pre-1.0 caveat (the old answer was factually
+  wrong about the deck), but consumers pinning on `"typical"` will see
+  different output for the same PDK.
+
 - **`klt sim` `options.ngspice_options` accepts `chgtol` and `trtol`** (#7007,
   2026-11-21): the solver-option allowlist gains ngspice's two remaining
   transient tolerance knobs, so a request can carry the common
@@ -23,6 +40,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klayout_tools.sim_corner_axes` and is re-exported from `klayout_tools.sim`.
   Off-host runners that predate this release reject the new keys with the same
   named error (a loud failure, not a silent drop).
+
+- **Changed** (#5784, breaking — `klt functional-verification` `schema_version`
+  2 → 3): the three request-resolved *input* paths the response echoes no
+  longer leak the producing checkout's absolute layout. `environment.sdf.file`
+  and `environment.initial_state.netlist` are now the hashed
+  `{path, scope, sha256}` envelope (`path` relative to the request's repo —
+  the #6762 anchor every other envelope of this verb uses — `{"path": null,
+  "scope": "external"}` outside it), and `environment.source_defines`
+  is retyped from an absolute-path-keyed object to a list of
+  `{"source": <envelope>, "defines": {...}}` (`[]` when absent) — an envelope
+  cannot be a JSON object key, and a source outside the repo has no path to
+  key on. Both response builders (cocotb and Verilog-bench) emit the new
+  shape, and a committed report now passes `klt env-provenance
+  lint-envelope` clean. Path *resolution* is unchanged — the engine still
+  receives the absolute path (the `$sdf_annotate` shim, the define wrappers)
+  — and `--format text` still prints the real absolute paths, via the
+  `local_paths` side-channel. Consumers reading these three fields as
+  strings (schema-2 evidence) must adapt; completing #4279.
 
 - **`klt extract --deck gf180mcu` resolves marker-scoped MOS capacitors ~2x
   faster on marker-rich layouts** (#6527, 2026-11-20): the bulk-algebra
@@ -758,6 +793,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   When no pin applies (a single local corner with no explicit
   `options.threads_per_worker`) nothing is written, as before. No new request
   option or response field.
+
+- **`klt lvs --omit-mismatches`: a compact-response mode for failing
+  compares** (#5610, 2026-11-15): the verb had no way to bound, summarise or
+  omit the top-level `mismatches[]` array, so on a failing compare of a
+  flattened gate-level block the array *is* the report — the only workflow
+  for committing it verbatim was post-processing with `jq`, which leaves the
+  committed document something other than what the tool emitted. The new
+  `--omit-mismatches` flag (and the request document's top-level boolean
+  `omit_mismatches`; the flag wins when both name it, mirroring `klt erc
+  --omit-antenna-tables` / `antenna_tables_omitted`) emits `mismatches` as
+  `[]` — the key stays present, it is schema-required — beside an
+  always-present `mismatches_omitted` echo (`false` without the flag),
+  while `status`, `mismatch_count`, `error_count`, `category_counts`,
+  `category_error_counts` and every exit code keep their full-run values:
+  the compare still runs in full and the per-category tally still runs over
+  the complete list, so a reader reaches the same verdict from kilobytes
+  instead of tens of megabytes. Applied for all three engines. Text mode
+  prints a `mismatches_omitted: True (--omit-mismatches)` line rather than
+  degrading into a clean report's tail. Cheap `klt lvs --check` verifies a
+  compacted report as-is (it never reads `mismatches[]`), and
+  `--check --rerun` replays the omission from the report's own echo, both
+  in `_reconstruct_lvs_request` and — explicitly, so a runset report does
+  not rerun uncompacted — in `_reconstruct_runset_request`; a report
+  committed before the echo existed has the field excluded from its drift
+  diff. `docs/schemas/lvs-response.schema.json` gains the required
+  `mismatches_omitted` boolean; `schema_version` stays `3` (additive,
+  opt-in). The committed `examples/signoff/` evidence was regenerated for
+  the new echo field.
+
 - **`klt functional-verification` reports name what they simulated** (#5771,
   2026-11-17): the report recorded the engine, results and environment but not
   the simulated files, so an RTL run and a gate-level run of the same testbench
@@ -957,7 +1021,11 @@ not `klt --version`, if you need to detect this kind of drift. See
   **Re-baseline note**: this moves the header once more for joined-label
   layouts, so a committed extracted netlist produced with `--pins` on such a
   layout needs regenerating once; after that the header depends only on
-  `--pins`. `docs/cli/extract.md` also now records that *without* `--pins` the
+  `--pins`, subject to the #2000 disconnected-label exception. A single
+  drawn `Y|ybar` label orders its escaped token `Y\x7cybar` (#6021).
+  With two distinct labels `Y` and `ybar`, declare a component to promote
+  the net and order its `Y|ybar` token.
+  `docs/cli/extract.md` also now records that *without* `--pins` the
   top-level port order is the extractor's own and is not a cross-build
   contract, alongside the existing `$N` caveat (#1063). Additive; no
   `schema_version` bump.
