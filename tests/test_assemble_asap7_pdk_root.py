@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -11,12 +12,15 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import pdk
+from klayout_tools.liberty_compare import parse_liberty_text
 from klayout_tools.pdk_cells import resolve_liberty_for_cell_library
+from klayout_tools.place_and_route_gds_merge import _lef_net_layer_gds_map
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "assemble-asap7-pdk-root.py"
 CELL_DIR = "asap7sc7p5t_28"
 PDK_DIR = "asap7_pdk_r1p7"
 LAYER_MAP = "cdslib/asap7_TechLib_10/asap7_fromAPR.layermap"
+MAP_CONTENT = "M2 NET 20 0\nM3 NET 30 0\n"
 GROUP_DATES = {
     "AO": "211120",
     "INVBUF": "220122",
@@ -83,7 +87,7 @@ def source(tmp_path):
 """,
                 )
     _put(cells / "techlef_misc/asap7_tech_1x_201209.lef", "tech lef")
-    _put(root / PDK_DIR / LAYER_MAP, "M2 NET 20 0\n")
+    _put(root / PDK_DIR / LAYER_MAP, MAP_CONTENT)
     _repo(cells)
     _repo(root / PDK_DIR)
     return root
@@ -104,7 +108,7 @@ def test_assembled_root_records_real_inputs_and_matches_named_views(source, tmp_
     info = pdk.find_pdk(variant="asap7", root=str(root))
     layer_map, resolution = pdk.resolve_klayout_layer_map(info)
     assert resolution == "exact"
-    assert Path(layer_map).read_text() == "M2 NET 20 0\n"
+    assert Path(layer_map).read_text() == MAP_CONTENT
     provenance = json.loads((root / "klt-pdk-sources.json").read_text())
     assert provenance["commits"] == {
         name: _git(source / name, "rev-parse", "HEAD")
@@ -157,7 +161,7 @@ def test_changed_input_is_recorded_and_output_is_publish_once(source, tmp_path):
     manifest = "klt-pdk-sources.json"
     recorded = json.loads((first / manifest).read_text())
     path = source / PDK_DIR / LAYER_MAP
-    path.write_text("M3 NET 30 0\n")
+    path.write_text(MAP_CONTENT + "M4 NET 40 0\n")
     repeat = _run(source, first)
     assert repeat.returncode == 1 and "already exists" in repeat.stderr
     assert _run(source, second).returncode == 0
@@ -171,6 +175,70 @@ def test_changed_input_is_recorded_and_output_is_publish_once(source, tmp_path):
         changed["outputs"]["klayout/tech/asap7.map"]
         != recorded["outputs"]["klayout/tech/asap7.map"]
     )
+
+
+def test_layer_map_with_git_symlinks_disabled(source, tmp_path):
+    process = source / PDK_DIR
+    link = process / LAYER_MAP
+    target = link.with_name("asap7_fromAPR_08b.layermap")
+    link.rename(target)
+    link.symlink_to(target.name)
+    _git(process, "add", ".")
+    link.unlink()
+    _git(process, "-c", "core.symlinks=false", "checkout-index", "--", LAYER_MAP)
+    assert not link.is_symlink() and link.read_text() == target.name
+
+    output = tmp_path / "root"
+    result = _run(source, output)
+    assert result.returncode == 0, result.stderr
+    info = pdk.find_pdk(variant="asap7", root=str(output))
+    staged, resolution = pdk.resolve_klayout_layer_map(info)
+    assert resolution == "exact"
+    assert _lef_net_layer_gds_map(staged) == {"M2": (20, 0), "M3": (30, 0)}
+    inputs = json.loads((output / "klt-pdk-sources.json").read_text())["inputs"]
+    for path in (link, target):
+        assert (
+            inputs[path.relative_to(source).as_posix()]
+            == hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+
+    target.write_text("M2 NET 20 0\nM3 PIN 30 0\n")
+    invalid = tmp_path / "invalid"
+    result = _run(source, invalid)
+    assert result.returncode == 1 and link.name in result.stderr
+    assert not invalid.exists()
+
+
+def test_same_line_pin_limits(source, tmp_path):
+    path = next(source.glob("*/LIB/NLDM/*_SIMPLE_RVT_TT_*"))
+    path.write_text(
+        """library (example) { default_max_transition : 4000;
+  cell (SIMPLEx1_RVT) { pin /* output */ (Y) { direction : output;
+      /* max_transition : 88; */ timing () { comment : "max_transition : 44;";
+        max_transition : 77; }
+    } pin (A) { direction : input; max_transition : 320; }
+  }
+}
+"""
+    )
+    output = tmp_path / "root"
+    result = _run(source, output)
+    assert result.returncode == 0, result.stderr
+    merged = next(output.glob("libs/*/lib/*.lib")).read_text()
+    cell = next(
+        cell
+        for cell in parse_liberty_text(merged).children("cell")
+        if cell.args == ["SIMPLEx1_RVT"]
+    )
+    assert {
+        pin.args[0]: pin.attributes["max_transition"] for pin in cell.children("pin")
+    } == {"Y": "4000", "A": "320"}
+    # Parsing collapses duplicate attributes. Check the two actual declarations too.
+    simple = merged.split("cell (SIMPLEx1_RVT)", 1)[1]
+    assert re.findall(r"\bmax_transition\s*:\s*(4000|320)\s*;", simple) == [
+        "4000",
+        "320",
+    ]
 
 
 def test_inconsistent_corner_is_rejected(source, tmp_path):
@@ -227,16 +295,45 @@ def test_corrected_ff_keeps_its_voltage_and_condition_values(source, tmp_path):
             if "_SIMPLE_" in tt.name
             else "total_output_net_capacitance"
         )
+        delay = "delay_template_7x7"
+        power = "power_template_7x7"
+        # Exercise quoted definitions, quoted references and mixed spellings.
+        delay_definition = f'"{delay}"' if "_SIMPLE_" in tt.name else delay
         attrs += (
-            f"  lu_table_template (delay_template_7x7) {{ variable_1 : {table}; }}\n"
+            f"  lu_table_template ({delay_definition}) {{ variable_1 : {table}; }}\n"
+            f"  power_lut_template ({power}) {{ variable_1 : {table}; }}\n"
         )
-        ff.write_text(tt.read_text().replace("  cell (", attrs + groups + "  cell ("))
+        arcs = (
+            f' timing () {{ cell_rise ("{delay}") {{ values ("1"); }}'
+            f' cell_fall ({delay}) {{ values ("1"); }} }}'
+            f' internal_power () {{ rise_power ("{power}") {{ values ("2"); }}'
+            f' fall_power ({power}) {{ values ("2"); }} }}'
+        )
+        ff.write_text(
+            tt.read_text()
+            .replace("  cell (", attrs + groups + "  cell (")
+            .replace("direction : output;", "direction : output;" + arcs)
+        )
     output = tmp_path / "good"
     result = _run(source, output, "--corner", "FF")
     assert result.returncode == 0, result.stderr
-    merged = next(output.glob("libs/*/lib/*.lib")).read_text()
-    assert "lu_table_template (simple_ff_250407_delay_template_7x7)" in merged
-    assert "lu_table_template (delay_template_7x7)" in merged
+    merged = parse_liberty_text(next(output.glob("libs/*/lib/*.lib")).read_text())
+    for kind, group, arc in (
+        ("lu_table_template", "timing", "cell_rise"),
+        ("lu_table_template", "timing", "cell_fall"),
+        ("power_lut_template", "internal_power", "rise_power"),
+        ("power_lut_template", "internal_power", "fall_power"),
+    ):
+        axes = {t.args[0]: t.attributes["variable_1"] for t in merged.children(kind)}
+        for cell in merged.children("cell"):
+            pin = cell.children("pin")[0]
+            (name,) = pin.children(group)[0].children(arc)[0].args
+            expected = (
+                "input_net_transition"
+                if cell.args == ["SIMPLEx1_RVT"]
+                else "total_output_net_capacitance"
+            )
+            assert axes[name] == expected
     simple = next(folder.glob("*250407.lib"))
     simple.write_text(simple.read_text().replace("voltage : 0.77;", "voltage : 0.70;"))
     result = _run(source, tmp_path / "invalid", "--corner", "FF")

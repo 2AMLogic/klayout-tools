@@ -11,9 +11,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import NamedTuple
 
-from klayout_tools.liberty_merge import LibertyMergeError, _find_matching, merge_liberty
+from klayout_tools.liberty_merge import (
+    LibertyMergeError,
+    _find_matching,
+    _next_significant,
+    _tokens,
+    merge_liberty,
+)
+from klayout_tools.place_and_route_gds_merge import _lef_net_layer_gds_map
 
 CELLS = "asap7sc7p5t_28"
 PROCESS = "asap7_pdk_r1p7"
@@ -56,30 +65,99 @@ def write_json(path: Path, value: dict) -> None:
     )
 
 
+def members(
+    text: str, names: set[str] | None, depth: int | None = None
+) -> Iterator[tuple[int, int, str]]:
+    """Locate named members and their delimiters outside strings and comments."""
+    nesting = 0
+    for kind, start, end in _tokens(text):
+        if kind == "{":
+            nesting += 1
+        elif kind == "}":
+            nesting -= 1
+        elif (depth is None or nesting == depth) and (
+            names is None or text[start:end] in names
+        ):
+            pos, delimiter = _next_significant(text, end)
+            yield start, pos, delimiter
+
+
+class GroupHeader(NamedTuple):
+    start: int
+    args: slice
+    brace: int
+
+
+def group_headers(
+    text: str, names: set[str] | None, depth: int | None = None
+) -> Iterator[GroupHeader]:
+    for start, opening, delimiter in members(text, names, depth):
+        if delimiter == "(":
+            close = _find_matching(text, opening, "(", ")")
+            brace, delimiter = _next_significant(text, close + 1)
+            if delimiter == "{":
+                yield GroupHeader(start, slice(opening + 1, close), brace)
+
+
+def attribute_start(text: str, name: str, depth: int) -> int | None:
+    for _, colon, delimiter in members(text, {name}, depth):
+        if delimiter == ":":
+            return _next_significant(text, colon + 1)[0]
+    return None
+
+
 def preserve_pin_limits(text: str) -> tuple[str, int]:
     """Move the SIMPLE library's inherited 4000 ps limit onto its signal pins."""
-    default = re.compile(r"(?m)^(\s*default_max_transition\s*:\s*)4000(\s*;)")
-    if not default.search(text):
+    default = attribute_start(text, "default_max_transition", depth=1)
+    if default is None or not text.startswith("4000", default):
         return text, 0
-    text = default.sub(r"\g<1>320\2", text, count=1)
-    pin = re.compile(r"(?m)^([ \t]*)pin\s*\([^()\n]+\)\s*\{")
+    end = default + len("4000")
+    if _next_significant(text, end)[1] != ";":
+        return text, 0
+    text = text[:default] + "320" + text[end:]
     pieces = []
     start = 0
     count = 0
-    for match in pin.finditer(text):
-        end = _find_matching(text, match.end() - 1, "{", "}")
+    for pin in group_headers(text, {"pin"}):
+        end = _find_matching(text, pin.brace, "{", "}")
         if end == len(text):
             raise ValueError("unclosed Liberty pin group")
-        if not re.search(r"(?m)^\s*max_transition\s*:", text[match.end() : end]):
-            pieces.extend(
-                [
-                    text[start : match.end()],
-                    "\n" + match[1] + "  max_transition : 4000;",
-                ]
-            )
-            start = match.end()
+        body_start = pin.brace + 1
+        if attribute_start(text[body_start:end], "max_transition", depth=0) is None:
+            pieces.extend([text[start:body_start], " max_transition : 4000;"])
+            start = body_start
             count += 1
     return "".join([*pieces, text[start:]]), count
+
+
+def template_args(text: str) -> Iterator[slice]:
+    """The definitions in the header and lookup tables inside cell arcs, in file order."""
+    definitions = ("lu_table_template", "power_lut_template")
+    for group in group_headers(text, {*definitions, "timing", "internal_power"}):
+        if text.startswith(definitions, group.start):
+            yield group.args
+            continue
+        start = group.brace + 1
+        end = _find_matching(text, group.brace, "{", "}")
+        for table in group_headers(text[start:end], names=None, depth=0):
+            yield slice(start + table.args.start, start + table.args.stop)
+
+
+def rename_ff_templates(text: str) -> tuple[str, dict[str, str]]:
+    """Keep each corrected SIMPLE timing or power table bound to its own axes."""
+    identifier = re.compile(r'("?)(?P<name>(?:delay|power)_template_7x7)\1')
+    pieces = []
+    start = 0
+    renamed = {}
+    for args in template_args(text):
+        arg, _ = _next_significant(text, args.start)
+        match = identifier.match(text, arg)
+        if match and _next_significant(text, match.end())[0] == args.stop:
+            name = match["name"]
+            renamed[name] = f"simple_ff_250407_{name}"
+            pieces.extend([text[start : match.start("name")], renamed[name]])
+            start = match.end("name")
+    return "".join([*pieces, text[start:]]), renamed
 
 
 def align_corrected_ff(text: str, reference: str) -> tuple[str, dict]:
@@ -88,30 +166,21 @@ def align_corrected_ff(text: str, reference: str) -> tuple[str, dict]:
     # voltage, temperature and every other operating-condition attribute.
     old, new = "FF_0.77_0", "PVT_0P77V_0C"
     text = re.sub(r"(?<![\w.])FF_0\.77_0(?![\w.])", new, text)
-    # The separately characterized SIMPLE file reuses template names from
-    # SEQ for different tables. Keep both definitions and each cell's lookup.
-    templates = ("delay_template_7x7", "power_template_7x7")
-    renamed = {
-        name: f"simple_ff_250407_{name}"
-        for name in templates
-        if re.search(rf"\(\s*{name}\s*\)", text)
-    }
-    for name, replacement in renamed.items():
-        text = re.sub(rf"(?<=\()\s*{re.escape(name)}\s*(?=\))", replacement, text)
+    text, renamed = rename_ff_templates(text)
     additions = []
     for kind in ("input_voltage", "output_voltage"):
         # Do not supply electrical definitions to a pin which references them.
         # The corrected SIMPLE file uses neither of these named groups.
-        if re.search(rf"\b{kind}\b", text):
+        if next(members(text, {kind}), None) is not None:
             continue
-        item = re.search(rf"(?m)^[ \t]*{kind}\s*\([^()]+\)\s*\{{", reference)
+        item = next(group_headers(reference, {kind}, depth=1), None)
         if item:
-            end = _find_matching(reference, item.end() - 1, "{", "}")
-            additions.append(reference[item.start() : end + 1])
-    first_cell = re.search(r"(?m)^[ \t]*cell\s*\(", text)
+            end = _find_matching(reference, item.brace, "{", "}")
+            additions.append(reference[item.start : end + 1])
+    first_cell = next(group_headers(text, {"cell"}, depth=1), None)
     if first_cell is None:
         raise ValueError("corrected RVT FF SIMPLE Liberty contains no cells")
-    pos = first_cell.start()
+    pos = first_cell.start
     text = text[:pos] + "\n".join(additions) + "\n" + text[pos:]
     return text, {
         "operating_condition_alias": {old: new},
@@ -155,6 +224,19 @@ def unpack(source: Path, data: bytes, scratch: Path) -> bytes:
     return proc.stdout
 
 
+def stage_layer_map(source: Path, dest: Path, read: Callable[[Path], bytes]) -> None:
+    data = read(source)
+    # Git with core.symlinks=false checks out the upstream link as its basename.
+    if re.fullmatch(rb"[\w.-]+\.layermap", data.strip()):
+        data = read(source.with_name(data.strip().decode("ascii")))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    routing = _lef_net_layer_gds_map(str(dest))
+    for layer, gds in (("M2", 20), ("M3", 30)):
+        if routing.get(layer) != (gds, 0):
+            raise ValueError(f"{source}: expected {layer} NET mapping to GDS {gds}/0")
+
+
 def assemble(
     source: Path, output: Path, flavours: list[str], corners: list[str]
 ) -> None:
@@ -183,7 +265,9 @@ def assemble(
             path.write_bytes(read(origin))
             return dest
 
-        copy(source / PROCESS / LAYER_MAP, "klayout/tech/asap7.map")
+        stage_layer_map(
+            source / PROCESS / LAYER_MAP, root / "klayout/tech/asap7.map", read
+        )
         for vt in flavours:
             lib = f"asap7sc7p5t_{vt.lower()}"
             prefix = f"{CELLS}_{FLAVOURS[vt]}"
