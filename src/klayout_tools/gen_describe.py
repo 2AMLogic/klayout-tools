@@ -86,6 +86,7 @@ from .gen_layer_params import (
     _tap_pads_wanted,
     mfg_grid_um,
 )
+from .gen_pitch import _pitch_hints_and_warnings
 from .gen_res_head import _res_end_contact_um, _res_head_len_um, _res_head_note
 from .gen_ring_layout import _guard_ring_gap_contact_enclosure_um
 from .gen_ring_ports import _ring_ports
@@ -306,36 +307,6 @@ def _share_sd_hints(
             "series chain"
         )
     return {"share_sd": True, "shared_sd_nodes": shared_nodes}
-
-
-def _pitch_hints_and_warnings(
-    params: dict[str, Any], info: dict[str, Any]
-) -> tuple[dict[str, Any], list[str]]:
-    """Issue #3299 (Phase 1): only when a pitch override was requested, report
-    the effective pitch and whether it was clamped up to the legal minimum
-    (empty otherwise, so default reports are unchanged)."""
-    if params["pitch_x_um"] <= 0 and params["pitch_y_um"] <= 0:
-        return {}, []
-    hints = {
-        "pitch": {
-            "col_pitch_um": info["col_pitch_um"],
-            "row_pitch_um": info["row_pitch_um"],
-            "min_col_pitch_um": info["min_col_pitch_um"],
-            "min_row_pitch_um": info["min_row_pitch_um"],
-            "pitch_x_clamped": info["pitch_x_clamped"],
-            "pitch_y_clamped": info["pitch_y_clamped"],
-        }
-    }
-    warnings = [
-        f"params.{name}={params[name]} is below the legal minimum "
-        f"pitch {minimum}um; clamped up to {minimum}um"
-        for axis, name, minimum in (
-            ("x", "pitch_x_um", info["min_col_pitch_um"]),
-            ("y", "pitch_y_um", info["min_row_pitch_um"]),
-        )
-        if info[f"pitch_{axis}_clamped"]
-    ]
-    return hints, warnings
 
 
 from .gen_layer_params_checks import (  # noqa: E402 -- re-exported name
@@ -2374,6 +2345,8 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
         raise GenError("generator 'diff_pair': params.ring_padding_um must be >= 0")
     if params["row_spacing_um"] < 0:
         raise GenError("generator 'diff_pair': params.row_spacing_um must be >= 0")
+    if params["pitch_x_um"] < 0:
+        raise GenError("generator 'diff_pair': params.pitch_x_um must be >= 0")
 
     # `gate_pad_clearance_um` is deliberately left at its default here: this
     # validator runs before the PDK family is resolved (the same PDK-agnostic
@@ -2390,6 +2363,7 @@ def _diff_pair_validate(params: dict[str, Any]) -> None:
             ring_padding_um=params["ring_padding_um"],
             row_spacing_um=params["row_spacing_um"],
             gate_contact=params["gate_contact"],
+            pitch_x_um=params["pitch_x_um"],
         )
     )
     _validate_ring_gap(
@@ -2430,6 +2404,7 @@ def _diff_pair_describe(
         _gate_bottom_endcap_um(family),
         top_endcap_um=_gate_top_endcap_um(family),
         tap_reach_um=_tap_reach_um(family),
+        pitch_x_um=params["pitch_x_um"],
     )
     unit = info["unit"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
@@ -2514,6 +2489,7 @@ def _diff_pair_describe(
 
     voltage_flavor_hints = _voltage_flavor_hints(family, params, notes)
     sd_implant_hints = _sd_implant_hints(family, params, notes)
+    pitch_hints, pitch_warnings = _pitch_hints_and_warnings(params, info, axes=("x",))
 
     snapped = _grid_snapped(dbu, params["w_um"], params["l_um"])
     kind = "mirror" if params["mirror"] else "pair"
@@ -2531,6 +2507,7 @@ def _diff_pair_describe(
             "notes": notes,
             **voltage_flavor_hints,
             **sd_implant_hints,
+            **pitch_hints,
         },
         "warnings": (
             (
@@ -2538,6 +2515,7 @@ def _diff_pair_describe(
                 if snapped
                 else []
             )
+            + pitch_warnings
             + _mfg_grid_warnings(
                 "diff_pair",
                 family,
