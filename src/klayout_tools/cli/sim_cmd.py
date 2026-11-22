@@ -49,7 +49,7 @@ from ..sim_batch_plan import print_dry_run_plan_line
 from ..sim_set import DEFAULT_MAX_IN_FLIGHT, print_set_text, run_sim_set
 from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 from .sim_job_status import _run_job_status as _run_job_status
-from .sim_measurement_text import print_measurement_head
+from .sim_measurement_text import print_measurement_head, print_monte_carlo
 from .sim_pdk_text import _print_pdk as _print_pdk
 from .sim_pdk_text import _print_worker_pdk as _print_worker_pdk
 from .sim_report_out import _write_report_out as _write_report_out
@@ -415,21 +415,6 @@ def _print_deck_text(report: dict) -> None:
             print(f"    missing outputs: {', '.join(unit['missing_outputs'])}")
 
 
-def _print_population_limits(mc: dict[str, Any]) -> None:
-    """The dispersion-bound verdict, one line next to the sigma-window line
-    (issue #6967) -- a courtesy; the JSON contract is the API. A no-op when
-    the measurement declared no ``population_limits``."""
-    population = mc.get("population_limits")
-    if population is None:
-        return
-    print(
-        f"    mc: population {population['k']:g}*sigma <= "
-        f"{population['max']!r} [{population['status']}] "
-        f"(margin={population['margin']!r}, "
-        f"worst_corner={population['worst_corner']!r})"
-    )
-
-
 def _print_text(report: dict) -> None:
     # Issue #1261: `netlist` is the `{path, scope}` shape
     # `env_provenance.repo_relative_path` defines -- `render_path_field` is
@@ -500,21 +485,7 @@ def _print_text(report: dict) -> None:
                 # Issue #1723: name the SVG next to the failing measurement
                 # so an agent (or a human) knows exactly what to open.
                 print(f"    plot: {plot}")
-            mc = m.get("monte_carlo")
-            if mc is not None:
-                stats = f"n={mc['n']} mean={mc['mean']!r} sigma={mc['stddev']!r}"
-                quantiles = "  ".join(
-                    f"{key}={value!r}" for key, value in mc["quantiles"].items()
-                )
-                print(f"    mc: {stats}  {quantiles}".rstrip())
-                window = mc["sigma_window"]
-                if window is not None:
-                    print(
-                        f"    mc: mean+/-{window['k']:g}sigma = "
-                        f"[{window['low']!r}, {window['high']!r}] "
-                        f"[{window['status']}] (margin={window['margin']!r})"
-                    )
-                _print_population_limits(mc)
+            print_monte_carlo(m.get("monte_carlo"))
 
     corners = report["corners"]
     if not corners:
