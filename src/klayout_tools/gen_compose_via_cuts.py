@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from .gen_compose_plane_change import RouteConflict
+
 
 def landing_pad_half_dbu(landing_size_um: float, via_size_um: float, dbu: float) -> int:
     """Half-side (DBU) of the landing-pad square drawn for one via hop (#6572).
@@ -93,7 +95,7 @@ def own_via_cut_clearance_reason(
     pdk_variant: str,
     min_spacing_for_layer: Any,
     own_block_layer_geometry: Any,
-) -> str | None:
+) -> RouteConflict | None:
     """Own-block via-cut clearance check (#5398): every other route-time
     check compares *metal*. A via-drop's cut lands on its own pin, and when
     that pin sits inside a PDK-authored cell with its own cut array (sg13g2's
@@ -101,7 +103,9 @@ def own_via_cut_clearance_reason(
     without overlapping -- the cell's own cuts: a `via1.space.1` finding per
     neighbouring cut, plus the metal pads that enclose it. Cuts the new cut
     overlaps merge with it and are exempt (same convention as #1904), so only
-    a genuine near miss rejects. Returns the rejection reason, or ``None``.
+    a genuine near miss rejects. Returns the rejection reason -- a
+    blocker-less :class:`RouteConflict` since #6961 (this check names a
+    block's own geometry, never an already-routed net) -- or ``None``.
     """
     from .gen_compose import _insert_via_cuts
 
@@ -125,7 +129,7 @@ def own_via_cut_clearance_reason(
             _insert_via_cuts,
         )
         if cut_violation_um is not None:
-            return (
+            return RouteConflict(
                 f"draws a via cut on layer {cut_layer} at "
                 f"({drop['x_um']:.4g}, {drop['y_um']:.4g}) that comes "
                 f"within {cut_violation_um:.4g}um of block "
