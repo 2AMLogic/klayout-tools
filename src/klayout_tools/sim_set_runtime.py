@@ -144,12 +144,22 @@ class _ShardTracker:
             if state == "interrupted":
                 job["interrupted_observations"] += 1
 
-    def stalled_job(self, budget_s: float) -> str | None:
-        """A job id that has sat in ``pending`` for more than ``budget_s``."""
+    def stalled_job(
+        self, budget_s: float, since_floor: float | None = None
+    ) -> str | None:
+        """A job id that has sat in ``pending`` for more than ``budget_s`` --
+        since its last state change, floored at ``since_floor`` when that is
+        later (issue #6324: the admission gate floors the window at the
+        member's abandonment, so a job already held then keeps a full window
+        measured from the abandonment while a shard accepted later gets its
+        own)."""
         now = self._clock()
         with self._lock:
             for job_id, job in self._jobs.items():
-                if job["last_state"] == "pending" and now - job["since"] > budget_s:
+                since = job["since"]
+                if since_floor is not None and since_floor > since:
+                    since = since_floor
+                if job["last_state"] == "pending" and now - since > budget_s:
                     return job_id
         return None
 
@@ -291,7 +301,10 @@ class _MemberScheduler:
         footprint matches its thread footprint instead of growing once per
         abandonment under congestion. A job that never launches cannot starve
         the rest: once one stays ``pending`` a further ``budget`` (the launch
-        budget, narrowed by the caller) past its member's abandonment, the
+        budget, narrowed by the caller) past its grace window -- measured from
+        the later of its acceptance and its member's abandonment, so a shard
+        accepted after the abandonment gets a full window of its own instead
+        of inheriting whatever was left of its member's (issue #6324) -- the
         unstarted members become ``not_launched`` entries naming the held job
         rather than being submitted (caller holds ``cond``).
 
@@ -306,17 +319,18 @@ class _MemberScheduler:
                 self.replacement_debt -= 1
                 self._spawn()
             return
-        now = time.monotonic()
         for index in sorted(self.abandoned):
             abandoned_at = self.abandoned_at.get(index)
-            job_id = self.trackers[index].pending_job()
-            if abandoned_at is None or job_id is None or now - abandoned_at <= budget:
-                continue  # inside the grace window, or not scan-abandoned
+            if abandoned_at is None:
+                continue  # interrupt-abandoned, not scan-abandoned
+            job_id = self.trackers[index].stalled_job(budget, since_floor=abandoned_at)
+            if job_id is None:
+                continue  # every held job is still inside its grace window
             if any(self.results[i] is None for i in self.started):
                 return  # a live worker is still draining self.pending (#6278)
             message = (
                 f"batch job {job_id} of abandoned member {index} is still "
-                f"pending {budget:g}s after its abandonment; "
+                f"pending past its {budget:g}s grace window; "
                 "not submitting the remaining members while it holds fleet "
                 "capacity -- cancel or attach it by job id"
             )

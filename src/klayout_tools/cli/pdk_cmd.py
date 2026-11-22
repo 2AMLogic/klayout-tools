@@ -12,8 +12,8 @@ Eleven subcommands, all emitting through the shared envelope helpers in
   opened" failure mode ``find``/``env`` also report but do not gate on.
 - ``cells`` — per standard-cell library device flavor(s) and nominal supply.
 - ``macros`` — per hard-macro IP library (`*_fd_ip_*` or lef+lib), which views it ships.
-- ``decks`` — the KLayout DRC deck files the variant ships and the ``-rd``
-  globals each consumes (issue #3816).
+- ``decks`` — the KLayout DRC decks and LVS runsets the variant ships and the
+  ``-rd`` globals each consumes (issues #3816, #5827).
 - ``corners`` — per SPICE process corner, which device families skew vs.
   resolve to typical.
 - ``em-limits`` — per-layer electromigration current-density limits declared
@@ -400,7 +400,7 @@ def _print_decks_text(report: dict) -> None:
 
     print(f"pdk: {report['pdk']}")
     if not decks:
-        print("no DRC decks found (no `.lydrc`/`.drc` under libs.tech/klayout/drc)")
+        print("no DRC decks or LVS runsets found under libs.tech/klayout/{drc,lvs}")
         return
 
     headers = ("deck", "kind", "default", "globals")
@@ -421,7 +421,7 @@ def _print_decks_text(report: dict) -> None:
 
     render_table(headers, rows, left_aligned={0, 1, 2, 3})
     print()
-    print("* = no default detected; supply with `klt drc --deck-var name=value`")
+    print("* = no default detected; supply with `klt drc|lvs --deck-var name=value`")
 
 
 def _format_em_field(field: dict) -> str:

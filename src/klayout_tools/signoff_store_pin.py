@@ -162,7 +162,7 @@ def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
     return os.path.join(os.path.dirname(file), path)
 
 
-def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
+def _resolve_relative_to_spec(path: str, spec: Mapping[str, Any]) -> str:
     """Resolve a path an envelope *names* (not one the manifest names)
     against the directory the producing run itself used: ``spec["cwd"]`` for
     a command-backed entry, this process's own cwd otherwise.
