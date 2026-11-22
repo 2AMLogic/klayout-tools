@@ -203,6 +203,31 @@ def test_two_sub_libraries_contribute_evidence(
     assert _devices(report, "typical") == {"06v0": "typical"}
 
 
+@pytest.mark.parametrize("external_file", ["sibling.lib", "parts/sm141064.ngspice"])
+@pytest.mark.parametrize("unused_body", ["", "vto=-0.5", "vto={hidden_vto}"])
+def test_external_section_does_not_use_a_local_namesake(
+    tmp_path, unused_body, external_file
+):
+    tokens = (
+        f".lib './sm141064.ngspice' nfet_06v0_t\n.lib '{external_file}' pfet_06v0_t\n"
+    )
+    deck = (
+        f".lib typical\n{tokens}.param hidden_vto=-0.5\n.endl\n"
+        f".lib ss\n{tokens}.param hidden_vto=-0.9\n.endl\n"
+        ".lib nfet_06v0_t\n.model visible nmos(vto=0.5)\n.endl\n"
+    )
+    if unused_body:
+        deck += f".lib pfet_06v0_t\n.model unused pmos({unused_body})\n.endl\n"
+    root = _install(tmp_path, deck)
+    sibling = next(root.rglob(_FILENAME)).parent / external_file
+    sibling.parent.mkdir(exist_ok=True)
+    sibling.write_text(
+        ".lib pfet_06v0_t\n.model actual pmos(vto={hidden_vto})\n.endl\n"
+    )
+    report = pdk.list_corners(root=str(root), variant="gf180mcuD")
+    assert _devices(report, "ss") == {"06v0": "unknown"}
+
+
 # The undecidable case (AC3): identical tokens, `.param` values differ, but
 # the flavour's sub-library is unresolvable and no differing param's prefix
 # maps to it -- a distinct "unknown", never folded into "typical" nor
