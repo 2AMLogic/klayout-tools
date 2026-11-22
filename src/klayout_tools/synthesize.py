@@ -3085,11 +3085,9 @@ def _run_yosys(
         _write_yosys_log(script_path, "", str(exc))
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        _write_yosys_log(script_path, exc.stdout, exc.stderr)
+        log_path = _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
-            f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed (a run hung on yosys-abc's "
-            "stdout has its abc child killed with the whole process group)"
+            ytimeout.timeout_message(timeout_s, script_path, log_path, exc.stdout)
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
@@ -3101,7 +3099,7 @@ def _run_yosys(
 
 def _write_yosys_log(
     script_path: str, stdout: str | bytes | None, stderr: str | bytes | None
-) -> None:
+) -> str:
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
@@ -3109,10 +3107,12 @@ def _write_yosys_log(
             return stream.decode("utf-8", errors="replace")
         return stream or ""
 
+    log_path = os.path.splitext(script_path)[0] + ".log"
     _write_text_file(
-        os.path.splitext(script_path)[0] + ".log",
+        log_path,
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
+    return log_path
 
 
 def _submodule_key(

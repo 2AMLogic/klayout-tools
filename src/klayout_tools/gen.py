@@ -343,8 +343,8 @@ from .gen_pitch import _clamp_pitch_override
 from .gen_ring_layout import (
     _guard_ring_layer_params,
     _ring_layout,
+    _validate_device_ring_implant_gap,
     _validate_guard_ring_implant_gap,
-    _validate_mos_array_implant_gap,
 )
 from .gen_spec import _GeneratorSpec
 from .pdk import PdkNotFoundError, find_pdk, resolve_pdk_dbu
@@ -3654,8 +3654,8 @@ def _resolve_params(
         # Before spec.validate: report the family's flavours, not the union (#6630).
         resolve_diode_voltage_class(raw_params, resolved, pdk_info["variant"])
     spec.validate(resolved)
-    if spec.name == "mos_array":
-        _validate_mos_array_implant_gap(resolved, pdk_info, spec.dbu)
+    if spec.name in ("mos_array", "diff_pair"):
+        _validate_device_ring_implant_gap(spec, resolved, pdk_info)
     return resolved
 
 
