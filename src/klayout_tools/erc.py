@@ -3339,6 +3339,7 @@ def run_erc(
         "file": env_provenance.repo_relative_path(
             file, repo_root=env_provenance.repo_root_for(file)
         ),
+        "top": top_cell.name,
         "spec": spec_path,
         "pdk": pdk,
         # (issue #2219) Whether the per-gate antenna accumulation was
@@ -3460,23 +3461,11 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
 
 def rerun_erc_report(report_path: str) -> dict[str, Any]:
-    """``klt erc --check <report> --rerun`` (full mode, issue #3060): verify a
-    previously committed ``klt erc --format json`` report by re-running ERC
-    from the ``file``/``spec``/``pdk``/``findings_only``/``antenna_tables_omitted``
-    it echoes (and the
-    ``--deck`` named by ``provenance.deck``, when there is one) and diffing
-    the fresh report against the committed one.
+    """Rerun the saved file, spec, PDK, top, deck and report options (#3060).
 
-    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
-    excluding :data:`klayout_tools._report_verify.VOLATILE_PROVENANCE_PATHS`.
-
-    **Known limitation**: ``--top`` is not echoed in the report, so ``--rerun``
-    always runs with ``top=None``; a report from a multi-top-cell stream then
-    fails with the ordinary ambiguous-top-cell :class:`ErcError`. Use
-    ``--check`` (cheap mode) in that case.
-
-    Raises :class:`ErcError` for a missing/unparseable committed report, one
-    missing ``file``/``spec`` to rerun, or any error the rerun itself raises.
+    Reports written before #7022 use automatic top selection. They can
+    replay a single-top stream and omit the new top field from their diff.
+    Missing inputs and cell lookup failures raise :class:`ErcError`.
     """
     committed = _load_committed_report(report_path, ErcError)
     file_path = resolve_committed_path(committed.get("file"), report_path=report_path)
@@ -3484,15 +3473,23 @@ def rerun_erc_report(report_path: str) -> dict[str, Any]:
         raise ErcError(f"committed report has no 'file' field to rerun: {report_path}")
     if not committed.get("spec"):
         raise ErcError(f"committed report has no 'spec' field to rerun: {report_path}")
+    if "top" in committed and not isinstance(committed["top"], str):
+        raise ErcError("committed report field 'top' must name a cell")
     deck = get_path(committed, ("provenance", "deck"))
     fresh = run_erc(
         file_path,
         committed["spec"],
-        top=None,
+        top=committed.get("top"),
         pdk=committed.get("pdk"),
         deck=deck.get("name") if isinstance(deck, dict) else None,
         findings_only=bool(committed.get("findings_only")),
         omit_antenna_tables=bool(committed.get("antenna_tables_omitted")),
         compact="compact" in committed,
     )
-    return rerun_result_for("erc", report_path, committed=committed, fresh=fresh)
+    return rerun_result_for(
+        "erc",
+        report_path,
+        committed=committed,
+        fresh=fresh,
+        extra_exclude=() if "top" in committed else (("top",),),
+    )

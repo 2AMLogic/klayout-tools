@@ -1,0 +1,1 @@
+- ERC reports now record the cell analysed in `top`, changing new report bytes once. `--check --rerun` replays the saved selection, including on multi-top streams. Earlier single-top reports still replay with automatic selection (#7022).
