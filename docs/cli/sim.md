@@ -271,7 +271,10 @@ block.
 `models.pdk_root = DIR`: the flag wins over the request field, a relative `DIR`
 resolves against the CWD (not the request directory), and the resolution takes
 that root without the first-match-wins search, so the PDK ambiguity warning does
-not fire. The pinned root shows in `provenance.pdk`. Corner requests only:
+not fire. The pinned root shows in `provenance.pdk`. For a local ngspice
+corner, klt expands `$PDK_ROOT` in the body’s include paths with the selected
+install root and passes the same `PDK_ROOT` to the child process. This also
+applies to a store selected by discovery. Corner requests only:
 `decks`/`commands` requests, `--batch-set`, `--op-lint` and `--job-status`
 refuse it. A nonexistent `DIR` fails with the usual PDK-not-found error.
 
@@ -1332,9 +1335,10 @@ id survives the caller. Collecting a finished `--submit-only` job's report is
 
 Unsharded `--attach <job_id>` checks the supplied request against the
 `request_sha256` in `<artifacts_dir>/batch-receipt.json` when that receipt is
-for the same job id, and refuses a different request with
-`error.code: "resume_fingerprint_mismatch"` (the message names the receipt's
-hash). No receipt, or a receipt for another job id, proceeds unchanged
+for the same job id. New corner receipts also record `netlist_sha256`, the
+SHA-256 of the top-level input deck before dispatch. Changing the request or
+the deck at the same path raises `resume_fingerprint_mismatch` before
+collection. Older receipts verify the request JSON only. No receipt, or a receipt for another job id, proceeds unchanged
 ([#4971](https://github.com/2AMLogic/klayout-tools/issues/4971)).
 
 The wait for a batch job is bounded by **`batch.poll_timeout_s`** (table
@@ -1479,7 +1483,8 @@ failed sweep. `--format json` stdout is unchanged.
 
 **`--resume` re-attaches through the receipt, and resubmits a spent job.** On
 an unsharded request, `--resume` re-attaches to the `job_id` the receipt
-records when its `request_sha256` and `unit_count` match the run about to be
+records when its `request_sha256`, `unit_count`, and (when recorded)
+`netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
 any mismatch, or no receipt, submits afresh. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
@@ -2138,15 +2143,18 @@ describing dispatch-time re-attachment. Harvested shards are absent from
 A map written before these fields existed carries no `state` and is only ever polled.
 
 The fingerprint is the resume checkpoint's own, so a changed request (units,
-seed, `hosts`, netlist) or an unreadable `batch-shards.json` is refused with
+seed, netlist) or an unreadable `batch-shards.json` is refused with
 exit 1 and error code `resume_fingerprint_mismatch` before any S3 write; delete
 the file or drop `--resume`. Without `--resume` an existing map is ignored and
 overwritten. The map is removed when the sweep finishes with no unrun corner;
 a sharded `--attach` keeps it (a multi-leg caller such as `klt pex --attach`
 removes it once every leg has collected, so an interrupted attach can be re-run).
-A refusal names what differed: `hosts` (map vs. request) and/or the fingerprint
-(shown as hash prefixes; it is one hash of units, seed, netlist and settings, so
-which of those changed is not recoverable). A shard lost at the collect stage
+A refusal names the fingerprint (shown as hash prefixes; it is one hash of
+units, seed, netlist and settings, so which of those changed is not
+recoverable). `hosts` is not compared on resume
+([#4821](https://github.com/2AMLogic/klayout-tools/issues/4821)): a changed
+shard count re-splits the remaining units under the new count. A shard lost
+at the collect stage
 ends its `lost_shard` message with `[remote job <id>: finished|failed|timeout|
 running|unknown]`, the job's `status.json` state at that moment: `finished`
 means re-attaching can collect it, `unknown` means no status was readable.
@@ -2242,6 +2250,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `analysis.op_check` | 0.9.2 |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
+| `lossless supply_v corner_id spelling` | unreleased |
 
 Safe on an old runner: a plain `measurements[]` `{name, spice}` `.meas` card
 and the plain-string `sections[]` form. Prefer them over `expr` when the
@@ -4150,6 +4159,11 @@ renders the bare flag; `false` renders nothing (the ngspice default) but is
 still echoed. The map is request-wide: split requests to use different
 settings per device family. Only the solver options listed in the table below
 are accepted, because ngspice silently ignores an unknown `.options` name.
+The transient tolerance set is accepted whole (issue #7007): a deck's
+`reltol`/`abstol`/`vntol`/`chgtol` quartet (plus `trtol`) can live in the
+request, so `environment.ngspice_options` echoes the run's complete tolerance
+configuration instead of splitting it with `.options` cards in the netlist
+body.
 
 This is distinct from `options.ngspice_init`: `.spiceinit` lines are not
 reliably honoured for `.options` names (a `.spiceinit` `option itl1=1` had no
@@ -6946,6 +6960,32 @@ error, exit 1).
   response, a step measurement is reported as `<step>.<name>` (e.g.
   `light.vout`).
 
+  On a transient `TRIG`/`TARG` card, each clause starts its own crossing
+  count. A trailing `td=4n` delays only the target count. For example, with
+  `Vx x 0 PULSE(0 1 1n 100p 100p 2n 5n)`, `Rx x 0 1k`, and a transient
+  step with `"args": "20p 20n"`, the first rising crossing of 0.2 V after
+  4 ns occurs at 6.02 ns. The corresponding 0.8 V crossing is at 6.08 ns.
+
+  | Placement of `td=4n` | Trigger at 0.2 V | Target at 0.8 V | Target minus trigger |
+  | --- | ---: | ---: | ---: |
+  | Target clause only | 1.02 ns | 6.08 ns | 5.06 ns |
+  | Trigger clause only | 6.02 ns | 1.08 ns | −4.94 ns |
+  | Both clauses | 6.02 ns | 6.08 ns | 60 ps |
+
+  The first two intervals pair crossings from different pulses. To measure
+  a single edge, put the delay on both clauses. This step's `measurements`
+  array also checks the result with two independent `WHEN` cards. The last
+  entry reads their earlier results by bare name within the same step.
+
+  ```json
+  [
+    {"name":"both", "spice":".meas tran both trig v(x) val=0.2 rise=1 td=4n targ v(x) val=0.8 rise=1 td=4n"},
+    {"name":"t20", "spice":".meas tran t20 when v(x)=0.2 rise=1 td=4n"},
+    {"name":"t80", "spice":".meas tran t80 when v(x)=0.8 rise=1 td=4n"},
+    {"name":"dt", "expr":"t80 - t20"}
+  ]
+  ```
+
   **Do not name a step measurement after a node a later measurement in the
   same step reads.** ngspice stores a measurement's result in the step's plot
   as a vector named after the measurement, so such a name replaces that
@@ -8051,6 +8091,25 @@ a corner grid. A stock ngspice without the module still produces the
   is never assumed to be DC. The rejection message names
   `corners.supply_waveforms` for a PWL/PULSE source; to sweep a ramped supply
   see the next entry.
+  **Corner identity ([#5870](https://github.com/2AMLogic/klayout-tools/issues/5870)).**
+  Each swept value is spelled into the `corner_id` (and hence the
+  artifact-directory slug) as `X.XXX` when that three-decimal spelling
+  round-trips, and at full precision otherwise — `0`, `1.5e-9` and `5e-7`
+  produce three distinct IDs where the legacy three-decimal formatting
+  collapsed all sub-milli rungs into one. Two declared points that still
+  resolve to one `corner_id` are refused with a `SimError` naming both
+  (mirroring `corners.units`), so one simulation can never be mis-attributed
+  to several corners through a shared artifact directory. On
+  `remote`/`batch`, a grid containing such a value must be answered by a
+  runner image that spells it the same way: every returned corner must echo
+  the dispatched `corner_id`, otherwise the request fails with error code
+  `supply_precision_unsupported_worker` and reports no result. A grid whose
+  values are all exactly representable at three decimals keeps its legacy
+  IDs byte-for-byte and is not gated. The spelling is also a **mandatory**
+  registry feature (`lossless supply_v corner_id spelling`, unreleased): a
+  release that contains it pins the minimum runner version and adds the
+  pre-launch detector, so `--dry-run` refuses an older runner image before
+  anything is submitted.
 - **`corners.supply_waveforms`** (`array<string>`, optional; issue #2902) —
   names of `corners.supply_v` keys whose top-level **`PWL(...)`/`PULSE(...)`**
   source is *rescaled* per corner instead of `alter`ed. Every entry must also
@@ -10120,7 +10179,7 @@ the *response* echoes back.
 | `options.pdk_revision`   | string            | Issue #5325. Caller-asserted PDK revision/stamp for a run with `options.stage_model_inputs` on an off-host backend; echoed as `environment.pdk_revision_asserted` (`{value, scope: "caller-asserted"}`), separate from the worker-observed `worker_environment.pdk`. The value is **validated on every run** — a non-string, empty or whitespace-only value is an application error (exit 1) whatever the backend and whether or not staging is on — but it is only *echoed* by a run that actually stages model inputs off-host; on any other run (staging off, or a `local`/`local-parallel` backend) a valid value is **accepted and ignored**, exactly as `options.stage_model_inputs` itself is a no-op on-host, and the report carries no `pdk_revision_asserted` field. Unset: no field. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | `options.save_mode`      | string            | Issue #2732. `"all"` (default; omitted means the same) keeps the generated `save all`; `"netlist"` suppresses it so the netlist's own `.save` cards decide the resident vector set, and the caller owns measurement/waveform coverage. Any other value (including `null`) is an application error (exit 1); an explicit value is refused for `engine: "xyce"`. Off-host workers must include this implementation. See "Opting out: `options.save_mode`" above. |
-| `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
+| `options.ngspice_options` | object | Issue #3111. Solver/convergence `.options` (`gmin`, `gminsteps`, `srcsteps`, `itl1`, `itl2`, `itl4`, `noopiter`, `method`, `reltol`, `abstol`, `vntol`, `pivtol`, and the transient tolerances `chgtol`, `trtol` — issue #7007) rendered as one `.options` card after `.temp` in every corner deck and echoed verbatim as `environment.ngspice_options`. Values are numbers, booleans or bare-token strings; an unknown key or other value is an application error (exit 1) naming it; refused for `engine: "xyce"`. Unset: no card, no echo. See "Solver options: `options.ngspice_options`" above. |
 | `options.nodeset`        | array\<object\>  | Issue #3036. Initial-guess rules `[{"match": {process?, temperature_c?, supply_v?, params?}, "values": {node: volts}}]` selected per retained corner point and rendered as file-scope `.nodeset v(node)=volts` cards after the netlist `.include`; echoed as `nodeset` on each hinted corner report. Overlapping rules, a rule matching no retained point, an unsupported node spelling or a non-finite value are application errors (exit 1) before any run; an unknown node fails its corner with an `error` diagnostic; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `nodeset_unsupported_worker`. Unset or `[]`: no change. See "Initial-guess hints: `options.nodeset`" above. |
 | `options.initial_conditions` | array\<object\> | Issue #3881. Transient start states, same `[{match, values}]` rules as `options.nodeset`, rendered as file-scope `.ic v(node)=volts` cards plus `uic` on the `tran` command; echoed as `initial_conditions` on each affected corner report. Requires a single `tran` analysis; refused for `engine: "xyce"`; an off-host worker that does not echo the maps fails with `initial_conditions_unsupported_worker`. Unset or `[]`: no change. See "Transient start states" above. |
 | `options.measurement_cases` | array\<string\> | Issue #5731. Case scopes for templated `measurements[]` entries: every `{case}` occurrence in a templated entry's `name`/`spice`/`expr` is substituted with each scope in turn, expanding it into one ordinary measurement per case, each result carrying a `case` provenance field. Non-empty, unique strings matching `[A-Za-z0-9_]+`; a placeholder in any other field, a case list with no templated entry, a placeholder with no case list, and templated entries combined with `analysis_steps[]` are all request errors (exit 1) naming the offending field. Resolved client-side before dispatch — the forwarded document carries only the expanded plain measurements, so a `remote`/`batch` runner needs no new capability. Unset: no change. See "Measurement templates over a case list" above. |

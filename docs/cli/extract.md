@@ -4961,6 +4961,17 @@ R$2 MID_A OUT_A 289.2 res_generic_po L=6U W=1U
   case-insensitively and would report a false `net.merged`. Pair it with
   `options.flatten_layout` in `klt lvs` — see
   [`klt lvs`](lvs.md) (`options.flatten_layout`).
+  A flat `--parasitics` run that would *write* such a netlist fails instead
+  (exit 1, issue #7091), naming each colliding group: ngspice folds case,
+  so the two nets would become one node and their net-derived parasitic
+  cards (`RN1_t0` / `Rn1_t0`) would be rejected as duplicate devices —
+  regardless of which nets `--parasitics-net` / `--critical-net` select.
+  Nothing is written and an existing output file (including the default
+  `<input>.spice`) is left untouched; `klt pex` reports it as
+  `extraction failed` before any simulation. `--parasitics --no-netlist`
+  still returns the report with the warning, and a device-only extraction
+  still writes its netlist with the warning. Several labels on *one* net
+  (`A|a`) are not a collision.
 
 ### Flat vs hierarchical
 
@@ -5694,9 +5705,21 @@ per-net lumped model would produce.
     in a straight line. Terminals are this net's contact/via landings on the
     fragment, plus any edge where the fragment abuts a device body cut out of
     the conductor region (a transistor gate, a drawn resistor's marked body).
-    The path length `L` is then the fragment's extent along the axis joining
-    its two farthest-apart terminals and `A / L` its effective width, so
-    squares = `L² / A`. The smaller of the two measurements is used, so this
+    Terminals stay grouped by interface: each landing layer (contacts, the
+    via below, the via above) is one interface, and the fragment's cut faces
+    are another. When there are exactly two interfaces, each a straight row
+    (a cut face, or two or more landings), parallel, separated across their
+    common direction by more than either row's own scatter, and facing each
+    other along at least half the longer row, the current axis is the normal
+    between the two rows (#7028). A straight row can have up to one grid
+    diagonal of transverse scatter from rounding its landing centres.
+    Examples are a wide poly head contacted by
+    a row of licons opposite the resistor body, or a li1 pad joining a licon
+    row to a parallel mcon row. A 20 × 0.8 µm head reads 0.04 squares
+    whether it carries one centred contact or twenty along its width.
+    Otherwise the axis joins the fragment's two farthest-apart terminals. In
+    both cases the path length `L` is the fragment's extent along the axis
+    and `A / L` its effective width, so squares = `L² / A`. The smaller of the two measurements is used, so this
     can only ever remove a long-axis artefact, never add resistance the
     whole-fragment fit did not already charge.
 
@@ -5735,14 +5758,22 @@ per-net lumped model would produce.
   > with tap count even though the real resistance between two fixed points
   > does not. Across levels, two strapped layers joined at both ends are
   > charged as the sum of both, not their parallel combination, while two
-  > levels joined at a single landing correctly add. The true value depends
+  > levels joined at a single landing correctly add. A net routed as a tree
+  > is over-charged the same way: the total sums every branch in series,
+  > including stub arms that end on terminals carrying no DC current (e.g.
+  > MOS gates), so it overstates the trunk-plus-two-arms path between the
+  > current-carrying terminals. The true value depends
   > on which terminals carry current and on the boundary conditions, and a
   > net with three or more terminals has no single scalar. `--distributed-rc`
   > does **not** repair this: the ladder redistributes the *same*
   > `resistance_ohm` along the terminal order and conserves its total, so it
-  > inherits the bias. The planned fix is an opt-in terminal-aware resistance
-  > graph, specified (design only, not implemented) in Stage 3 of
-  > `docs/design/extract-fidelity-roadmap.md`.
+  > inherits the bias. The opt-in terminal-aware resistance graph
+  > ("Terminal-aware resistance graph" above, from Stage 3 of
+  > `docs/design/extract-fidelity-roadmap.md`) is the cross-check: it
+  > reports the per-terminal-pair path resistance.
+  > Only a two-terminal net gets a graph-sourced scalar; a net with three or
+  > more terminals keeps the legacy total and must be read pairwise through
+  > its `pair_resistance_ohm` matrix.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from
@@ -8050,7 +8081,13 @@ klt extract top.gds --deck sky130 --parasitics --parasitics-top-cell-only --form
 
 `resistance_ohm` is a series sum over a net's fragments (see "Squares are
 counted per connected fragment"); it cannot express parallel structure or
-the resistance *between two named terminals*. `--resistance-graph` (requires
+the resistance *between two named terminals*. Because the sum runs over
+**every** fragment of the net, a tree-routed net (one trunk, several stub
+arms to different terminals) is charged the sum of all arms — including
+arms that end on terminals carrying no DC current (e.g. MOS gates) — so the
+lumped total can overstate the two-terminal path by multiples; the
+`pair_resistance_ohm` matrix below is the cross-check for exactly that
+case. `--resistance-graph` (requires
 `--parasitics`) additionally builds the geometry-derived resistor graph of
 `docs/design/extract-fidelity-roadmap.md` Stage 3.D (graph builder
 `extract_resistance_graph.build_resistance_graph`, DC solve
