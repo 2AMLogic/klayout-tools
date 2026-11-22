@@ -17,14 +17,27 @@ from test_signoff_input_index_basis import _git, _git_checkout
 
 @pytest.mark.parametrize("gitignore", ["scratch/\n", ""])
 @pytest.mark.parametrize("command_backed", [False, True])
+@pytest.mark.parametrize("sample_form", ["file", "symlink", "directory_symlink"])
 def test_untracked_yield_samples_render_identically_present_and_absent(
-    tmp_path, monkeypatch, gitignore, command_backed
+    tmp_path, monkeypatch, gitignore, command_backed, sample_form
 ):
     repo = _git_checkout(tmp_path, gitignore=gitignore)
     monkeypatch.chdir(repo)
     samples = repo / "scratch" / "samples.json"
-    samples.parent.mkdir()
-    samples.write_text('{"measurements": []}\n')
+    committed = repo / "data" / "samples.json"
+    committed.parent.mkdir()
+    committed.write_text('{"measurements": []}\n')
+    _git(repo, "add", "data/samples.json")
+    if sample_form == "directory_symlink":
+        alias = samples.parent
+        alias.symlink_to("data", target_is_directory=True)
+    else:
+        samples.parent.mkdir()
+        alias = samples
+        if sample_form == "symlink":
+            alias.symlink_to("../data/samples.json")
+        else:
+            alias.write_bytes(committed.read_bytes())
     envelope = {**YIELD_PASS_ENVELOPE, "samples": "scratch/samples.json"}
     report = _write(repo, "yield.json", envelope)
     _git(repo, "add", "yield.json")
@@ -42,7 +55,7 @@ def test_untracked_yield_samples_render_identically_present_and_absent(
         monkeypatch.chdir(tmp_path)  # Only the producing command runs in repo.
 
     present = build_tier_report(manifest)
-    samples.unlink()
+    alias.unlink()
     absent = build_tier_report(manifest)
 
     assert json.dumps(present, sort_keys=True) == json.dumps(absent, sort_keys=True)
@@ -53,6 +66,25 @@ def test_untracked_yield_samples_render_identically_present_and_absent(
         "samples": "scratch/samples.json",
         "searched": [],
     }
+
+
+def test_yield_samples_require_each_symlink_in_a_tracked_chain(tmp_path, monkeypatch):
+    repo = _git_checkout(tmp_path)
+    monkeypatch.chdir(repo)
+    samples = repo / "samples.json"
+    samples.write_text('{"measurements": []}\n')
+    (repo / "first.json").symlink_to("second.json")
+    (repo / "second.json").symlink_to(samples.name)
+    report = _write(
+        repo, "yield.json", {**YIELD_PASS_ENVELOPE, "samples": "first.json"}
+    )
+    manifest = _manifest(evidence={"6": report})
+    _git(repo, "add", "samples.json", "first.json", "yield.json")
+    assert _item(build_tier_report(manifest), 6)["citation"]["content_hash"] is None
+    _git(repo, "add", "second.json")
+    assert _item(build_tier_report(manifest), 6)["citation"][
+        "content_hash"
+    ] == _hash_of(samples)
 
 
 @pytest.mark.parametrize("tracked_location", ["report", "cwd", "both"])

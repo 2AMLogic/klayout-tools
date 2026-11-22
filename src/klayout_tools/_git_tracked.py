@@ -125,6 +125,46 @@ def _tracked_files_under(root: str) -> frozenset[str] | None:
     return _TRACKED_FILES_CACHE[key]
 
 
+def _untracked_entry(path: str) -> bool:
+    """Check a physical directory entry against the index of its parent."""
+    root = find_repo_root(os.path.dirname(path))
+    if root is None:
+        return False
+    tracked = _tracked_files_under(root)
+    if tracked is None:
+        return False
+    relative = os.path.relpath(path, root)
+    return relative.replace(os.sep, "/") not in tracked
+
+
+def is_untracked_yield_sample(path: str) -> bool:
+    """Check the sample and the links a clone needs to reach it (#6139)."""
+    resolved = os.path.realpath(path)
+    if _untracked_entry(resolved):
+        return True
+    absolute = Path(path).absolute()
+    if str(absolute) == resolved:
+        return False
+    pending = [absolute]
+    visited: set[Path] = set()
+    while pending:
+        target = pending.pop()
+        for part in (target, *target.parents):
+            if not os.path.islink(part):
+                continue
+            link = Path(os.path.realpath(part.parent)) / part.name
+            if link in visited:
+                continue
+            visited.add(link)
+            if _untracked_entry(str(link)):
+                return True
+            try:
+                pending.append(link.parent / os.readlink(link))
+            except OSError:
+                continue
+    return False
+
+
 def is_untracked_working_tree_file(path: str) -> bool:
     """Whether ``path`` names a file inside a functioning git checkout
     whose index does not track it (issue #5857) -- gitignored scratch, a
@@ -135,20 +175,9 @@ def is_untracked_working_tree_file(path: str) -> bool:
     copy, a vendored tree), a ``.git`` entry with no functioning repository
     behind it, git absent from ``$PATH``, or a git failure. Callers keep
     their filesystem-presence behaviour in all of those, so grading over a
-    tree without VCS metadata is unchanged. Symlinks are resolved first:
-    the file that would be hashed is the file git is asked about, and the
-    containing checkout is found from that file's own directory, the way
-    :func:`~klayout_tools.env_provenance.find_repo_root` walks it."""
-    root = find_repo_root(os.path.dirname(os.path.realpath(path)))
-    if root is None:
-        return False
-    tracked = _tracked_files_under(root)
-    if tracked is None:
-        return False
-    relative = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
-    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
-        return False
-    return relative.replace(os.sep, "/") not in tracked
+    tree without VCS metadata is unchanged. The file whose bytes would be
+    hashed is the file git is asked about."""
+    return _untracked_entry(os.path.realpath(path))
 
 
 def repo_scoped_candidates(
