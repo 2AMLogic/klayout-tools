@@ -93,6 +93,31 @@ def test_failed_citation_keeps_its_reason_and_contributes_no_slices(tmp_path):
     }
 
 
+def test_failed_sim_preserves_derived_row_credit_without_claiming_slices(tmp_path):
+    measurements = [
+        _meas("voltage", "output", limits={"min": 1}, status="pass"),
+        _meas("division", "ratio", limits={"min": 1}, status="pass"),
+        _meas("settling", "settling", limits={"min": 1}, status="fail"),
+    ]
+    envelope = {**SIM_FAIL_ENVELOPE, "measurements": measurements}
+    citation = {
+        "file": _write(tmp_path, "mixed.json", envelope),
+        "rows": ["output", "ratio", "settling"],
+        "covers": {"ratio": ["N=4"]},
+    }
+    rows = [{"id": "output"}, {"id": "ratio", "extent": ["N=4"]}, {"id": "settling"}]
+
+    item = _item(_report(rows, citation))
+
+    assert item["reason"] == "check_failed"
+    assert item["detail"]["row_sources"] == {"output": "derived"}
+    assert item["detail"]["failed_rows"] == ["ratio", "settling"]
+    assert item["row_coverage"]["row_slices"]["ratio"] == {
+        "covered": [],
+        "missing": ["N=4"],
+    }
+
+
 @pytest.mark.parametrize("tag,covers", [("unrelated", True), ("ratio", False)])
 def test_citation_must_name_slices_and_be_credited_with_row(tmp_path, tag, covers):
     cite = _cite(_sim(tmp_path, "a.json", tag), "only")

@@ -209,6 +209,7 @@ from .gen import (
     _fixed_cut_side_um as _fixed_cut_side_um,
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
+from .gen_compose_dbu import DbuReconcileError, reconcile_block_dbu
 from .gen_compose_derived_frame import add_composed_frames as _framed
 from .gen_compose_draw import (
     _draw_routed_entry as _draw_routed_entry,
@@ -275,6 +276,7 @@ from .gen_compose_routing import route_two_pin as route_two_pin
 from .gen_compose_via_cuts import own_via_cut_clearance_reason, via_drop_cut_side_um
 from .gen_layer_params import mfg_grid_um
 from .pdk import PdkNotFoundError, find_pdk
+from .pdk_output_dbu import required_stream_dbu
 
 #: Contract identifier for the request envelope (spike section 2).
 REQUEST_SCHEMA = "klt.gen_compose.request/1"
@@ -3592,6 +3594,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return width
 
+    required_dbu = required_stream_dbu(pdk_info)
+
     @cache
     def _block_dbu(block_id: str) -> float:
         layout, _ = _load_block_cell(block_id, blocks[block_id])
@@ -3603,8 +3607,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
 
     @cache
     def _drawing_dbu() -> float:
-        # The writer reconciles every block onto the finest input grid.
-        return min(_block_dbu(block_id) for block_id in order)
+        # Snap landing pads and their block geometry on the writer's grid.
+        return required_dbu or min(_block_dbu(block_id) for block_id in order)
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -4455,6 +4459,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         landing_pad_size_um=landing_pad_size_um,
         intermediate_landing_pad_size_um=intermediate_landing_pad_size_um,
         boundary_bbox_um=boundary_bbox_um,
+        required_output_dbu_um=required_dbu,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -4604,62 +4609,17 @@ def _collect_matched_groups(
     ]
 
 
-#: Relative tolerance for :func:`_integer_dbu_ratio`'s float-division check.
-#: Every dbu value this module ever sees comes from ``1.0 / DATABASE
-#: MICRONS`` (an integer denominator, #1512) or a hardcoded decimal
-#: constant (``klt draw``'s ``0.001``), so a genuine integer ratio lands
-#: within float noise of the nearest whole number -- this tolerance is many
-#: orders of magnitude looser than that noise while still being far tighter
-#: than any *non*-integer ratio a real DATABASE MICRONS mismatch could
-#: produce (e.g. 1000 vs. 1500 -> ratio 1.5).
-_DBU_RATIO_TOLERANCE = 1e-6
-
-
-def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
-    """Whether ``coarse_dbu`` is an exact whole-number multiple of
-    ``fine_dbu`` -- i.e. every ``fine_dbu``-grid coordinate maps onto the
-    ``coarse_dbu`` grid with zero remainder -- returning that integer
-    multiplier, or ``None`` when it is not (issue #1514).
-
-    Order matters: this only ever answers "how many ``fine_dbu`` steps make
-    up one ``coarse_dbu`` step" -- callers must pass the larger dbu value as
-    ``coarse_dbu``. Scaling a block's own integer database-unit coordinates
-    *up* by this returned integer (coarser grid -> finer grid) is always
-    exact; the reverse direction (finer -> coarser) would require *dividing*
-    those coordinates, which is only exact when every single coordinate
-    happens to already be a multiple of the ratio -- not guaranteed for
-    arbitrary drawn geometry -- so this module never attempts it.
-    """
-    if fine_dbu <= 0:
-        return None
-    ratio = coarse_dbu / fine_dbu
-    nearest = round(ratio)
-    if nearest < 1:
-        return None
-    if abs(ratio - nearest) > _DBU_RATIO_TOLERANCE * max(1, nearest):
-        return None
-    return int(nearest)
-
-
 def _rescale_block_layout(
-    src_layout: Any, dbu: float, block_id: str, gds_path: str
+    src_layout: Any, src_cell: Any, dbu: float, block_id: str, gds_path: str
 ) -> str | None:
-    """Scale shapes and instances onto the output grid before polygonization."""
-    import klayout.db as kdb
-
+    """Reconcile the block before polygonizing its paths or copying its cell tree."""
     original_dbu = src_layout.dbu
-    if abs(original_dbu - dbu) <= 1e-12:
+    try:
+        ratio = reconcile_block_dbu(src_layout, src_cell, dbu)
+    except DbuReconcileError as exc:
+        raise GenComposeError(f"block '{block_id}': gds '{gds_path}' {exc}") from exc
+    if ratio == 1:
         return None
-    ratio = _integer_dbu_ratio(original_dbu, dbu)
-    if ratio is None:
-        raise GenComposeError(
-            f"block '{block_id}': gds '{gds_path}' has dbu={original_dbu}, "
-            f"which does not evenly divide the composed cell's dbu={dbu} "
-            "-- every block's dbu must be an exact integer multiple of "
-            "the finest block's own dbu to be losslessly reconciled"
-        )
-    src_layout.transform(kdb.ICplxTrans(float(ratio)))
-    src_layout.dbu = dbu
     return (
         f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
         f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
@@ -4709,13 +4669,17 @@ def _write_composed_gds(
     | None = None,
     intermediate_landing_pad_size_um: dict[Any, float] | None = None,
     boundary_bbox_um: dict[str, float] | None = None,
+    required_output_dbu_um: float | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
     routed metal. Returns ``(dbu, rescale_warnings)`` -- ``dbu`` is the
     composed layout's own dbu (:func:`compose` echoes it as the response's
-    ``dbu_um``, issue #1496), resolved as the *finest* dbu among all blocks
-    (see the reconciliation logic below, issue #1514); ``rescale_warnings``
+    ``dbu_um``, issue #1496), resolved as the PDK's required stream dbu when
+    ``required_output_dbu_um`` is given (issue #5721: the family's *declared*
+    requirement only, :func:`~klayout_tools.pdk_output_dbu.required_stream_dbu`
+    -- 0.001 for gf180mcu, ``None`` for every family with no declared entry),
+    else the *finest* dbu among all blocks (issue #1514); ``rescale_warnings``
     is one string per block whose own dbu differed and was rescaled onto it,
     which :func:`compose` folds into the response's top-level ``warnings``.
 
@@ -4824,15 +4788,17 @@ def _write_composed_gds(
     top = layout.create_cell(cell_name)
 
     # Read every block's own GDS once, up front (#1514). The composed
-    # layout's own dbu is resolved as the *finest* (smallest-valued) dbu
-    # among all blocks -- not simply the first block processed, as before
-    # #1514 -- so every coarser block's own dbu (expected, per DATABASE
-    # MICRONS convention, to be a whole-number multiple of the finest one)
-    # can be rescaled *up* onto it losslessly: multiplying already-integer
-    # database-unit coordinates by an exact integer factor is exact, whereas
-    # dividing a finer grid's coordinates *down* onto a coarser one is the
-    # direction that can silently drop precision, so that direction is never
-    # attempted -- see `_integer_dbu_ratio` below.
+    # layout's own dbu is the PDK's required stream dbu when one is declared
+    # (issue #5721 -- gf180mcu's native runset rejects any dbu but 0.001, so
+    # the composed stream must be written there even when every block's own
+    # stream is finer), else the *finest* (smallest-valued) dbu among all
+    # blocks (#1514) -- so every coarser block's own dbu (expected, per
+    # DATABASE MICRONS convention, to be a whole-number multiple of the
+    # finest one) can be rescaled *up* onto it losslessly, and a block
+    # *finer* than the target (only possible in the #5721 case) is
+    # rescaled *down* onto it -- but only after an actual grid-exactness
+    # measurement, never by assumption or silent rounding (see the
+    # reconciliation logic below).
     src_layouts: dict[str, Any] = {}
     for block_id in order:
         gds_path = blocks[block_id]["gds_path"]
@@ -4845,7 +4811,10 @@ def _write_composed_gds(
             ) from exc
         src_layouts[block_id] = src_layout
 
-    dbu = min(src_layouts[block_id].dbu for block_id in order)
+    if required_output_dbu_um is not None:
+        dbu = required_output_dbu_um
+    else:
+        dbu = min(src_layouts[block_id].dbu for block_id in order)
     layout.dbu = dbu
     dbu_rescale_warnings: list[str] = []
 
@@ -4854,10 +4823,6 @@ def _write_composed_gds(
         gds_path = block["gds_path"]
         src_layout = src_layouts[block_id]
 
-        warning = _rescale_block_layout(src_layout, dbu, block_id, gds_path)
-        if warning:
-            dbu_rescale_warnings.append(warning)
-
         src_cell_name = block["cell_name"]
         src_cell = src_layout.cell(src_cell_name)
         if src_cell is None:
@@ -4865,6 +4830,10 @@ def _write_composed_gds(
                 f"block '{block_id}': gds '{gds_path}' has no cell named "
                 f"'{src_cell_name}' (from its {_block_cell_name_source(block)})"
             )
+
+        warning = _rescale_block_layout(src_layout, src_cell, dbu, block_id, gds_path)
+        if warning:
+            dbu_rescale_warnings.append(warning)
 
         sub_cell = _create_placed_sub_cell(
             layout, block, block_id, src_cell_name, dbu_rescale_warnings

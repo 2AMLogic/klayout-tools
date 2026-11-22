@@ -36,18 +36,21 @@ def invalid_covers(
     return None
 
 
-def _passing_claims(
+def _row_claims(
     graded: list[Any], credited: dict[int, tuple[list[str] | None, bool]]
 ) -> dict[str, dict[str | None, str]]:
     """Row -> slice -> provenance. None stands for an unsliced row assertion."""
     claims: dict[str, dict[str | None, str]] = {}
     for spec, rows, grade in graded:
-        if grade[0] != "met":
-            continue
         member_rows, derived = credited.get(id(spec), (rows, False))
+        if grade[0] != "met" and not derived:
+            continue
+        # A failed simulation can prove an unsliced row through its checked
+        # measurements. Only a passing citation contributes configuration slices.
+        covers = spec.get("covers", {}) if grade[0] == "met" else {}
         for row in member_rows or []:
             sources = claims.setdefault(row, {})
-            for label in spec.get("covers", {}).get(row, [None]):
+            for label in covers.get(row, [None]):
                 if derived or label not in sources:
                     sources[label] = "derived" if derived else "asserted"
     return claims
@@ -63,7 +66,7 @@ def row_credits(
     A tagged measurement authenticates the row, while the citation declares the
     configuration labels. Preserve declaration order in every reported list.
     """
-    claims = _passing_claims(graded, credited)
+    claims = _row_claims(graded, credited)
     row_sources: dict[str, str] = {}
     slices: dict[str, Any] = {}
     partial: list[dict[str, Any]] = []
