@@ -4,8 +4,8 @@ size-ratchet ceiling -- the ``signoff_yield_disclosure`` precedent: pure
 functions over an envelope dict, importing nothing from the module they were
 split out of, re-imported there by name so ``signoff.<name>`` keeps resolving.
 
-Both are **reported, never graded on**: item 7's verdict is still
-``status == "pass"`` alone.
+Item 7 checks whether a passing runset leg carried parasitics. Its body-bias
+and substrate-return disclosures travel with the citation.
 """
 
 from __future__ import annotations
@@ -77,10 +77,10 @@ def _pex_engine_disclosure(
     quote.
 
     ``klt pex --engine klayout-runset`` extracts a device-level netlist with
-    **no parasitics** (``docs/cli/pex.md``, "Runset engine"), so its
-    ``delta[]`` rows are device-representation deltas, not parasitic ones: a
-    passing report does not by itself earn T1 item 7's intent. The envelope
-    says so in ``extraction.engine``/``parasitics_carried``/
+    **no parasitics** unless ``--deck`` attaches some (issue #6606), so its
+    ``delta[]`` rows are, absent them, device-representation deltas, not
+    parasitic ones: a passing report does not by itself earn T1 item 7's
+    intent. The envelope says so in ``extraction.engine``/``parasitics_carried``/
     ``params_not_carried``; this quotes them verbatim, never re-deriving them,
     so a reader of the citation sees the caveat beside the verdict.
 
@@ -94,8 +94,10 @@ def _pex_engine_disclosure(
     every curated-deck run, and every record committed before the route
     existed, which therefore renders exactly as it did before.
 
-    Grading policy for a parasitic-free leg is deliberately not decided here
-    (issue #6606): this is disclosure only.
+    Grading policy for a parasitic-free leg is **refused** (issue #6606
+    AC 4): :func:`parasitic_free_refusal` is the gate ``klt signoff``
+    consults, rendering item 7 ``"unmet"``/``no_parasitics`` -- this
+    function stays the disclosure half, quoted beside the verdict.
     """
     if kind != "pex":
         return None
@@ -103,8 +105,11 @@ def _pex_engine_disclosure(
     if not isinstance(extraction, dict) or not extraction.get("engine"):
         return None
     uncarried = extraction.get("params_not_carried")
+    corr = extraction.get("net_correspondence")
+    substrate = corr.get("substrate_return") if isinstance(corr, dict) else None
     return {
         "pex_extraction": {
+            **({"substrate_return": substrate} if isinstance(substrate, dict) else {}),
             "engine": extraction.get("engine"),
             "parasitics_carried": extraction.get("parasitics_carried"),
             "params_not_carried": (
@@ -112,3 +117,26 @@ def _pex_engine_disclosure(
             ),
         }
     }
+
+
+def parasitic_free_refusal(envelope: Mapping[str, Any]) -> str | None:
+    """The item-7 refusal reason for a pex envelope whose own extraction
+    disclosure says the extracted leg carried no parasitics (issue #6606
+    AC 4) -- ``"no_parasitics"``, or ``None`` when the leg carries them (or
+    makes no engine statement, which every curated-deck run does not).
+
+    Purely a read of the envelope's own ``extraction`` block, quoted from
+    the ``klt pex`` run that wrote it, never re-derived: a plain
+    ``--engine klayout-runset`` leg discloses ``parasitics_carried: false``
+    (its ``delta[]`` rows are device-representation deltas), while a merged
+    leg (``--deck <curated>``) flips the field to ``true`` exactly when the
+    net correspondence attached at least one parasitic card. An envelope
+    with no ``extraction.engine`` (every curated-deck run, and every record
+    predating the route) carries parasitics by construction and is never
+    refused here."""
+    extraction = envelope.get("extraction")
+    if not isinstance(extraction, dict) or not extraction.get("engine"):
+        return None
+    if extraction.get("parasitics_carried") is False:
+        return "no_parasitics"
+    return None

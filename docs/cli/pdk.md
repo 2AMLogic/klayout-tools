@@ -246,7 +246,12 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Matching files are merged into one
+  and both files' values. Every differing field between the first file and
+  the offending one is reported in the same error (up to 10, then a count of
+  the rest), long group values are shown around their first difference, and
+  a group renamed between files (`operating_conditions (typ)` vs
+  `operating_conditions (slow)`) is reported once as the same group under a
+  different name. Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized
@@ -259,7 +264,9 @@ directory itself, or a named subdirectory of it). When present it wins over
   `power_lut_template` groups are unioned by name (same name with different
   content is an error). A duplicate cell name is an error; the merged header
   is the first file's plus any templates it lacks; a one-element list equals
-  the string form.
+  the string form. The place-and-route timing sweep uses these corner keys in
+  descriptor order. Each list contributes one merged deck and a single report
+  entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
@@ -1118,9 +1125,10 @@ library's) to extract from the way `klt pdk cells` extracts from
 ## `klt pdk decks`
 
 Lists the KLayout DRC deck files a variant ships under
-`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`), and the LVS
+runsets under `libs.tech/klayout/lvs/` (or `tech/lvs/`), with the `-rd`
 globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
-exactly one of them (`is_default`); the siblings (for sky130A,
+exactly one DRC deck (`is_default`); the siblings (for sky130A,
 `sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
 sibling passed via `--deck-file` without the globals it gates on silently
 runs zero rules (`coverage_unknown`, issue #1302).
@@ -1157,21 +1165,40 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 }
 ```
 
-- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), `helper` (`*.rb.drc`,
   Ruby helper scripts that merely carry the `.drc` extension; listed but not
-  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
-  are not listed.
+  scanned, `globals: []`), or `lvs` (`*.lvs`, the directly-runnable LVS
+  runset). Other files in the directories (Python drivers, `*.lylvs`
+  wrappers, `rule_decks/` fragments) are not listed.
+- **LVS entries.** `decks[]` lists the DRC entries first, then one `kind:
+  "lvs"` entry per runset; `is_default` on an LVS entry marks the runset
+  `klt lvs --engine klayout-runset --pdk <variant>` runs, and is independent of
+  the DRC `is_default` (a variant can have an LVS default and no DRC one).
+  Exactly one entry carries it: it is the path the resolver returns, so an
+  alias symlink to that runset is listed but not flagged. A
+  caller that only wants DRC decks must filter on `kind`. `schema_version`
+  stays `1`: no existing field changed, and `kind` gained one member. LVS
+  globals are verdict-affecting (an unset `simplify`/`combine`/
+  `implicit_connect` yields a well-formed but wrong `mismatch`), so read the
+  defaults. The variables `klt lvs --engine klayout-runset` sets itself
+  (`input`, `schematic`, `report`, `top`, `topcell`) are not listed.
 - `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
   `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
   globals. A global assigned under `if not defined? $x`, `... unless defined?
-  $x` or `||=` is `required_by_caller: false` with its literal `default`;
-  any other `$name` mentioned outside a comment is `required_by_caller: true`.
-  Literal `require`/`load` includes are followed.
+  $x` or `||=` is `required_by_caller: false` with its literal `default`; any
+  other `$name` mentioned outside a comment is `required_by_caller: true`.
+  **LVS entries only** also detect a global read through a deck-level
+  `<helper>?($x)` / `<helper>?($x, default: V)` call (default `false` / `V`;
+  a receiver-qualified call such as `File.exist?($f)` is not a helper) or as
+  `CONST = $x || '<literal>'`, matched on the code before any trailing `#`
+  comment. DRC entries keep reporting those globals as required. Literal
+  `require`/`load` includes are followed.
 - **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
   proof a deck ignores a variable, and a defaulted global (e.g. `feol`
   defaulting to `"false"`) can still silently disable whole rule groups —
   read the defaults, not just the `required_by_caller` flag.
-- A variant with no `drc/` directory is a successful empty `decks` list.
+- A variant with neither a `drc/` nor an `lvs/` directory is a successful empty
+  `decks` list.
   Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`
@@ -1215,8 +1242,8 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
         { "family": "mos", "section": "ss", "skew": "skewed",
           "devices": [
             { "flavour": "03v3", "section": "ss", "skew": "skewed" },
-            { "flavour": "06v0", "section": "ss", "skew": "typical" },
-            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+            { "flavour": "06v0", "section": "ss", "skew": "param" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "param" }
           ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
@@ -1310,22 +1337,59 @@ itself against a release (the spike's own open question) is not built here.
 
 Family-level skew is classified **per curated family**: a family reported
 `"skewed"` means *some* of its devices moved off the typical section for that
-corner — not that *every* device did. gf180mcu's own deck, for example, leaves
-its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
-(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
-do skew, both inside the single curated `mos` family.
+corner — not that *every* device did. gf180mcu's own deck, for example, keeps
+its `nfet_06v0`/`pfet_06v0` flavors' *include tokens* pointing at the same
+`_t`-suffixed (typical-named) sub-library inside every corner's section while
+its `nfet_03v3`/`pfet_03v3` flavors switch to `_s`/`_f`-suffixed sub-libraries,
+both inside the single curated `mos` family. The tokens alone, however, do not
+decide what a flavour's model actually receives: each corner section also
+overrides `.param` values those `_t` sub-libraries **consume**, so a flavour
+whose tokens are unchanged can still be process-skewed (measured on the real
+gf180mcuD deck, 2026-11-15: 20 of each section's 22 `.param` values differ
+from `typical`'s, and the `06v0`/`06v0_nvt` sub-libraries consume them —
+issue #5663).
 
 To resolve that finer question, gf180mcu's `mos` section entries carry an
 additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
 device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
-`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
-against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
-`section`/`skew` are `null` for a flavour the typical corner has but the
-section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
-`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
-`complete` keep their meaning; other families and sky130 carry no `devices`.
-`klt sim` surfaces the unmoved flavours as
-[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens; tokens without a
+separable flavour — gf180mcuD's `fets_mm` mismatch lib, its `noise_corner`
+noise lib — are *not* device flavours and are not listed, issue #5663), each
+classified against that flavour's own typical-corner evidence:
+
+- `"skewed"` — the flavour's include tokens differ from its typical corner's
+  (token evidence always wins);
+- `"param"` — tokens identical, but at least one `.param` value that differs
+  from the typical section's is **consumed** by the flavour's own
+  sub-library. Attribution is by consumption: the differing `.param` names
+  are matched against the sub-library bodies the flavour's tokens point at.
+  Only when a flavour's sub-library body is not resolvable in the deck does
+  a name-prefix fallback (`nfet_06v0_vth0` → `06v0`) attribute instead;
+- `"typical"` — provably unmoved: identical tokens, and either no `.param`
+  differs from typical at all or the flavour's resolvable sub-libraries
+  consume none of the differing values;
+- `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
+  do differ, but the flavour's sub-library is unresolvable in the deck and
+  no differing `.param`'s name-prefix maps to it. `klt sim` reports these
+  under `environment.corner_coverage`'s `unknown_devices` key, never folded
+  into `unmoved_devices`;
+- `null` — the typical corner ships the flavour but the section does not.
+
+For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
+`06v0`/`06v0_nvt` as `"param"`. Family-level `skew` and `complete` keep their
+meaning; other families and sky130 carry no `devices`. `klt sim` surfaces the
+unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794-unknown_devices-issue-5663).
+
+**Schema note (issue #5663):** `devices[].skew` grows from
+`"typical" | "skewed" | null` to also report `"param"` and `"unknown"`, and
+`"typical"` narrows: the same deck now yields `"param"` where it wrongly
+yielded `"typical"` (the old answer was factually wrong about the deck — the
+sub-libraries provably consume the differing `.param` values). Per
+`docs/json-contract.md`'s pre-1.0 caveat this is a bug fix plus an additive
+value with **no `schema_version` bump** — the field's documented purpose
+("which device flavours each corner actually skews") is unchanged — but a
+consumer pinning on `"typical"` will see different output for the same PDK.
 
 ## `klt pdk em-limits`
 

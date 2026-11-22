@@ -41,3 +41,5 @@ options:
   --pdk PDK PDK variant to resolve (e.g. sky130A); overrides $PDK
   --pdk-root PDK_ROOT explicit PDK install root; overrides $PDK_ROOT and the search order
   --format {text,json} output format (default: text)
+  --check REPORT verify a previously committed 'klt sta --format json' report (REPORT) instead of running a fresh flow, against the request given positionally (issue #2224). Cheap mode (default): re-resolve and re-hash the request's geometry source (def/verilog) and liberty and compare against REPORT's recorded provenance.input .content_hash/provenance.deck.content_hash -- no OpenSTA run. Combine with --rerun for full mode. Exits 0 if still consistent, 3 if drifted -- see docs/cli/sta.md, '--check'
+  --rerun full mode for --check (issue #2224): re-run the sta flow the positional request declares and diff verdict- bearing fields against the committed report, excluding provenance.klt_version/klayout_version/pdk.version, engine_version, and run-scoped bookkeeping (see docs/cli/sta.md). Requires --check; a clean error (exit 1) otherwise
