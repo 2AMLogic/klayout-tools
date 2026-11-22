@@ -124,19 +124,18 @@ Emitted through the shared envelope (`docs/json-contract.md`).
 
 - `layer` is `null` for abutment violations, which also carry `lane` — the
   0-based index of the lane the violating pair/lane belongs to — and
-  `measured_um` / `expected_um`. For every `kind` the two are in one
-  comparable convention, so `measured_um - expected_um` is the deviation:
+  `measured_um` / `expected_um`. Schema v2 keeps the positive overlap
+  magnitude for a design with zero expected gap.
 
   | `kind` | `measured_um` | `expected_um` |
   | ------ | ------------- | ------------- |
-  | `gap`, `overlap` | the **signed seam gap** `next.low - prev.high` (negative: the placements overlap or share a seam) | the signed expected gap `pitch - width` |
+  | `gap`, `overlap` | the magnitude of the gap or overlap when `pitch == width`, otherwise the signed seam gap `next.low - prev.high` | the signed expected gap `pitch - width` |
   | `pitch` | the placements' advance `next.low - prev.low` | the declared pitch |
   | `length` | the lane's extent | `(count - 1) x pitch + width` |
   | `count` | the lane's placement count | `--count` |
 
-  The `description` is phrased off that deviation (`seam gap 1.0 um is 1.0 um
-  narrower than the 2.0 um expected from --pitch`), never as a negative gap or
-  overlap.
+  For a nonzero design gap, subtract `expected_um` from `measured_um` to get
+  the signed deviation. For a zero design gap, `kind` gives its direction.
 - `bbox` is in **micrometres**. Violations are sorted deterministically.
 
 Gate on `status`, not the exit code.

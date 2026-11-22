@@ -328,9 +328,7 @@ def _um(value: int, dbu: float) -> float:
 
 
 def _pair_box(kdb: Any, kind: str, prev: Any, nxt: Any, horizontal: bool) -> Any:
-    """Box to report for a pair violation: the seam strip between the two
-    placements (whichever side of each other they fall) across the array axis,
-    or their union for a ``pitch`` error."""
+    """Report the seam strip for a spacing error or the pair union for a pitch error."""
     if kind == "pitch":
         return prev + nxt
     a, b = sorted((_hi(prev, horizontal), _lo(nxt, horizontal)))
@@ -339,27 +337,25 @@ def _pair_box(kdb: Any, kind: str, prev: Any, nxt: Any, horizontal: bool) -> Any
     return kdb.Box(min(prev.left, nxt.left), a, max(prev.right, nxt.right), b)
 
 
-def _pair_text(kind: str, measured: int, expected: int, dbu: float) -> str:
+def _pair_report(
+    kind: str, measured: int, expected: int, dbu: float
+) -> tuple[str, float]:
     m, e = _um(measured, dbu), _um(expected, dbu)
     if kind == "pitch":
-        return f"placement advance {m} um != pitch {e} um"
+        return f"placement advance {m} um != pitch", m
+    if expected == 0:
+        return f"{abs(m)} um {kind} between consecutive placements", abs(m)
     off = _um(abs(measured - expected), dbu)
     side = "wider" if kind == "gap" else "narrower"
-    return f"seam gap {m} um is {off} um {side} than the {e} um expected from --pitch"
+    desc = f"seam gap {m} um is {off} um {side} than the {e} um expected from --pitch"
+    return desc, m
 
 
 def _classify_pair(
     gap: int, step: int, width: int, nxt_width: int, pitch: int, tol: int
 ) -> tuple[str, int, int] | None:
-    """Classify two consecutive placements (all in dbu): ``(kind, measured,
-    expected)``, or ``None`` when the pair matches the pitch within ``tol``.
-
-    ``gap``/``overlap``: ``measured`` and ``expected`` are both the *signed*
-    seam gap (expected = ``pitch - width``), so ``measured - expected`` is the
-    deviation and ``kind`` its direction (wider / narrower), not a physical
-    intersection. ``pitch`` (advance vs pitch) is the fallback when the
-    extents differ (a rotated placement); never both for one pair.
-    """
+    """Classify a seam in dbu. Equal widths use the signed actual and design
+    gaps. Unequal widths use the placement advance and declared pitch."""
     if width != nxt_width:
         return ("pitch", step, pitch) if abs(step - pitch) > tol else None
     expected = pitch - width
@@ -373,7 +369,7 @@ def _lane_findings(
     kdb: Any,
     lane: list[Any],
     unit: str,
-    index: int,
+    lane_label: str,
     horizontal: bool,
     pitch: int,
     tol: int,
@@ -385,9 +381,7 @@ def _lane_findings(
     lane = sorted(lane, key=lambda b: _lo(b, horizontal))
     out: list[tuple[str, str, Any, float, float]] = []
     if len(lane) != count:
-        desc = (
-            f"lane {index}: {len(lane)} placement(s) of {unit} found, expected {count}"
-        )
+        desc = f"{lane_label}{len(lane)} placement(s) of {unit} found, expected {count}"
         out.append(("count", desc, lane[0], float(len(lane)), float(count)))
     for prev, nxt in zip(lane, lane[1:], strict=False):
         plo, phi = _lo(prev, horizontal), _hi(prev, horizontal)
@@ -395,25 +389,25 @@ def _lane_findings(
         found = _classify_pair(nlo - phi, nlo - plo, phi - plo, nhi - nlo, pitch, tol)
         if found is not None:
             kind, measured, expected = found
+            description, reported = _pair_report(kind, measured, expected, dbu)
             out.append(
                 (
                     kind,
-                    _pair_text(kind, measured, expected, dbu),
+                    description,
                     _pair_box(kdb, kind, prev, nxt, horizontal),
-                    _um(measured, dbu),
+                    reported,
                     _um(expected, dbu),
                 )
             )
-    extent = _hi(lane[-1], horizontal) - _lo(lane[0], horizontal)
-    want = (count - 1) * pitch + _hi(lane[-1], horizontal) - _lo(lane[-1], horizontal)
+    extent = max(_hi(box, horizontal) for box in lane) - _lo(lane[0], horizontal)
+    width = _hi(lane[-1], horizontal) - _lo(lane[-1], horizontal)
+    want = (count - 1) * pitch + width
     if abs(extent - want) > tol:
         union = lane[0]
-        for b in lane[1:]:
-            union = union + b
-        desc = (
-            f"array length {_um(extent, dbu)} um != (count - 1) x pitch + width "
-            f"{_um(want, dbu)} um"
-        )
+        for box in lane[1:]:
+            union = union + box
+        formula = "count x pitch" if width == pitch else "(count - 1) x pitch + width"
+        desc = f"array length {_um(extent, dbu)} um != {formula} {_um(want, dbu)} um"
         out.append(("length", desc, union, _um(extent, dbu), _um(want, dbu)))
     return out
 
@@ -453,7 +447,15 @@ def _abutment_for_top(
         }
         for index, key in enumerate(sorted(lanes))
         for kind, desc, box, measured, expected in _lane_findings(
-            kdb, lanes[key], unit, index, horizontal, pitch, tol, count, dbu
+            kdb,
+            lanes[key],
+            unit,
+            f"lane {index}: " if len(lanes) > 1 else "",
+            horizontal,
+            pitch,
+            tol,
+            count,
+            dbu,
         )
     ]
     return out, len(lanes)

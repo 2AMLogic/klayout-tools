@@ -70,8 +70,8 @@ def test_abutment_overlap_and_count(tmp_path):
     kinds = {v["kind"] for v in r["violations"]}
     assert {"overlap", "count", "length"} <= kinds
     overlap = next(v for v in r["violations"] if v["kind"] == "overlap")
-    # pitch == width: expected gap 0, measured is the signed (negative) gap
-    assert overlap["measured_um"] == -1.0 and overlap["expected_um"] == 0.0
+    # Schema v2 reports a physical overlap at zero expected gap by its magnitude.
+    assert overlap["measured_um"] == 1.0 and overlap["expected_um"] == 0.0
 
 
 def test_abutment_tolerance_and_single_placement(tmp_path):
@@ -162,9 +162,7 @@ def test_abutment_grid_is_clean_per_lane(tmp_path):
 def test_abutment_derived_expected_gap(tmp_path, pitch, expected_gap, shift_last):
     """#5698 AC3: single rows at a declared pitch below or above the cell
     width are clean; a deviating pair reports ``expected_um`` = pitch - width
-    and ``measured_um`` in the same signed-gap convention, so their difference
-    is the real deviation whichever way the seam is off, and ``kind`` /
-    description name that direction (wider / narrower)."""
+    and the measured gap. The zero-gap case retains the legacy magnitude."""
     path = tmp_path / "row.gds"
     _write_row(path, pitch=pitch)
     r = run_array_check(str(path), cell="UNIT", pitch_um=pitch, count=4)
@@ -176,11 +174,17 @@ def test_abutment_derived_expected_gap(tmp_path, pitch, expected_gap, shift_last
     assert len(seams) == 1
     (seam,) = seams
     assert seam["expected_um"] == pytest.approx(expected_gap)
-    assert seam["measured_um"] == pytest.approx(expected_gap + shift_last)
-    assert seam["measured_um"] - seam["expected_um"] == pytest.approx(shift_last)
     assert seam["kind"] == ("gap" if shift_last > 0 else "overlap")
     assert seam["lane"] == 0
-    # readable prose: a signed deviation is never printed as a "-1.0 um gap"
+    if expected_gap == 0:
+        assert seam["measured_um"] == abs(shift_last)
+        assert (
+            seam["description"]
+            == f"1.0 um {seam['kind']} between consecutive placements"
+        )
+        return
+    assert seam["measured_um"] == pytest.approx(expected_gap + shift_last)
+    # A nonzero design seam is described by its deviation from the expected gap.
     side = "wider" if shift_last > 0 else "narrower"
     assert f"is {abs(shift_last)} um {side} than the" in seam["description"]
     assert "-1.0 um gap" not in seam["description"]
