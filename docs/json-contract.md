@@ -2567,16 +2567,14 @@ to **stderr**, with **stdout left empty**. This means a caller never needs to
 inspect stdout content to tell success from failure under `--format json`;
 the exit code alone is authoritative.
 
-**Warning delivery (issue #6935).** That error stderr carries the envelope
-*alone*: klt's human-readable `klt: warning:` lines (e.g. the engine-version
-mismatch advisory in the [shared `provenance` block](#shared-provenance-block))
-are deferred for the invocation and dropped when it ends in this envelope —
-whatever their wording or count — so a consumer that saves stderr as the
-error document parses it as exactly one JSON value, with no leading
-non-JSON lines to skip. Report-producing runs are unaffected: their
-warnings still go to stderr (stdout stays the pure payload) whatever the
-exit code — including a violations report's exit `3`. Under `--format
-text`, warnings print as they happen, ahead of the plain-text error line.
+**Warning delivery (issue #6935).** The CLI defers engine-version mismatch
+warnings (see [shared `provenance`](#shared-provenance-block)) and the
+`klt sim` advisories for ambiguous PDK installs and an ambient ngspice
+init file. When a command emits a JSON error, the CLI discards these
+warnings so the caller can parse the whole error stream as one JSON value.
+When a command produces a report, the CLI sends the warnings to stderr,
+including for a violations report with exit code `3`. Under `--format text`,
+the warnings print as they happen, ahead of the plain-text error line.
 
 ```json
 {
