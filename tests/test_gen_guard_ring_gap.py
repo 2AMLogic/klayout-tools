@@ -178,9 +178,9 @@ def sg13g2_pdk_root(tmp_path):
     return root
 
 
-def _sg13g2_mos_array_request(root, output, **params):
+def _sg13g2_ring_request(root, output, *, generator="mos_array", **params):
     return {
-        "generator": "mos_array",
+        "generator": generator,
         "pdk": {"variant": _SG13G2_VARIANT, "root": str(root)},
         "params": {"add_guard_ring": True, **params},
         "options": {"output": str(output)},
@@ -226,7 +226,7 @@ def test_sg13g2_mos_array_rejects_ring_gap_below_psd_minimum(
         ),
     ):
         generate(
-            _sg13g2_mos_array_request(
+            _sg13g2_ring_request(
                 sg13g2_pdk_root,
                 output,
                 flavor="nfet",
@@ -270,7 +270,7 @@ def test_sg13g2_mos_array_rejects_psd_notch_on_finer_output_dbu(
         ),
     ):
         generate(
-            _sg13g2_mos_array_request(
+            _sg13g2_ring_request(
                 sg13g2_pdk_root,
                 output,
                 flavor="nfet",
@@ -291,7 +291,7 @@ def test_sg13g2_mos_array_accepts_psd_boundary_on_finer_output_dbu(
     _write_sg13g2_tech_lef(sg13g2_pdk_root, 2000)
     output = tmp_path / "finer_dbu_ok.gds"
     report = generate(
-        _sg13g2_mos_array_request(
+        _sg13g2_ring_request(
             sg13g2_pdk_root,
             output,
             flavor="nfet",
@@ -317,7 +317,7 @@ def test_sg13g2_mos_array_accepts_ring_gap_at_psd_boundary(
 ):
     output = tmp_path / "psd_ok.gds"
     generate(
-        _sg13g2_mos_array_request(
+        _sg13g2_ring_request(
             sg13g2_pdk_root,
             output,
             flavor="nfet",
@@ -335,7 +335,7 @@ def test_sg13g2_mos_array_ringless_gap_params_still_accepted(tmp_path, sg13g2_pd
     not be rejected on the implant rule (#6790 control case)."""
     output = tmp_path / "ringless.gds"
     generate(
-        _sg13g2_mos_array_request(
+        _sg13g2_ring_request(
             sg13g2_pdk_root,
             output,
             flavor="nfet",
@@ -352,7 +352,7 @@ def test_sg13g2_mos_array_pfet_ring_gap_still_accepted(tmp_path, sg13g2_pdk_root
     legal (#6790 control case)."""
     output = tmp_path / "pfet_ring.gds"
     generate(
-        _sg13g2_mos_array_request(
+        _sg13g2_ring_request(
             sg13g2_pdk_root,
             output,
             flavor="pfet",
@@ -365,7 +365,7 @@ def test_sg13g2_mos_array_pfet_ring_gap_still_accepted(tmp_path, sg13g2_pdk_root
 
 def test_sg13g2_mos_array_closed_ring_still_accepted(tmp_path, sg13g2_pdk_root):
     output = tmp_path / "closed_ring.gds"
-    generate(_sg13g2_mos_array_request(sg13g2_pdk_root, output, flavor="nfet"))
+    generate(_sg13g2_ring_request(sg13g2_pdk_root, output, flavor="nfet"))
     assert run_drc(str(output), "sg13g2")["violations"] == []
 
 
@@ -384,19 +384,117 @@ def test_sg13g2_standalone_guard_ring_gap_still_accepted(tmp_path, sg13g2_pdk_ro
     assert run_drc(str(output), "sg13g2")["violations"] == []
 
 
-def test_gf180mcu_mos_array_ring_gap_not_newly_rejected(tmp_path, both_pdk_root):
-    """GF180 still accepts this gap. Issue #6827 tracks its pplus.space.1 violation."""
+def _gf180_mos_request(root, output, gap, flavor, *, ring=True, offset=0.0):
+    return {
+        "generator": "mos_array",
+        "pdk": {"variant": "gf180mcuD", "root": str(root)},
+        "params": {
+            "flavor": flavor,
+            "add_guard_ring": ring,
+            "ring_gap_side": "W",
+            "ring_gap_um": gap,
+            "ring_gap_offset_um": offset,
+        },
+        "options": {"output": str(output)},
+    }
+
+
+@pytest.mark.parametrize(
+    ("flavor", "rule"), [("nfet", "pplus.space.1"), ("pfet", "nplus.space.1")]
+)
+@pytest.mark.parametrize(
+    ("gap", "offset", "drawn"),
+    [(0.50, 0, 0.18), (0.60, 0, 0.28), (0.71, 0, 0.39), (0.715, 0.0025, 0.395)],
+)
+def test_gf180_mos_rejects_subrule_implant_gap(
+    tmp_path, both_pdk_root, gap, offset, drawn, flavor, rule
+):
     output = tmp_path / "gf180_mos.gds"
-    generate(
-        {
-            "generator": "mos_array",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                "add_guard_ring": True,
-                "ring_gap_side": "W",
-                "ring_gap_um": 0.5,
-            },
-            "options": {"output": str(output)},
-        }
-    )
+    with pytest.raises(GenError) as exc:
+        generate(_gf180_mos_request(both_pdk_root, output, gap, flavor, offset=offset))
+    assert f"{drawn:.3f} µm" in str(exc.value)
+    assert rule in str(exc.value)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("flavor", ["nfet", "pfet"])
+@pytest.mark.parametrize("gap", [0.715, 0.72, 1.00])
+def test_gf180_mos_accepts_clean_implant_gap(tmp_path, both_pdk_root, gap, flavor):
+    output = tmp_path / "gf180_mos.gds"
+    generate(_gf180_mos_request(both_pdk_root, output, gap, flavor))
+    assert run_drc(str(output), "gf180mcu")["violations"] == []
+
+
+def test_gf180_ringless_mos_accepts_small_gap(tmp_path, both_pdk_root):
+    output = tmp_path / "ringless.gds"
+    generate(_gf180_mos_request(both_pdk_root, output, 0.5, "nfet", ring=False))
     assert output.exists()
+
+
+@pytest.mark.parametrize(
+    ("side", "gap", "offset", "row_spacing", "drawn"),
+    [
+        ("W", 0.400, 0.0, 0.4, "0.040"),
+        ("S", 0.400, 0.0, 0.4, "0.040"),
+        ("W", 0.660, 0.0, 0.4, "0.300"),
+        ("W", 0.665, 0.0025, 0.4, "0.305"),
+        ("W", 0.665, 0.0, 0.405, "0.305"),
+    ],
+)
+def test_sg13g2_diff_pair_rejects_drawn_psd_notch_before_write(
+    tmp_path, sg13g2_pdk_root, side, gap, offset, row_spacing, drawn
+):
+    path = tmp_path / "pair.gds"
+    path.write_bytes(b"prior layout")
+    with pytest.raises(GenError) as error:
+        generate(
+            _sg13g2_ring_request(
+                sg13g2_pdk_root,
+                path,
+                generator="diff_pair",
+                ring_gap_side=side,
+                ring_gap_um=gap,
+                ring_gap_offset_um=offset,
+                row_spacing_um=row_spacing,
+            )
+        )
+    assert f"generator 'diff_pair': params.ring_gap_um={gap}" in str(error.value)
+    assert f"{drawn} µm pSD opening" in str(error.value)
+    assert "psd.space.1" in str(error.value)
+    assert path.read_bytes() == b"prior layout"
+
+
+@pytest.mark.parametrize(("side", "row_spacing"), [("W", 0.4), ("S", 0.405)])
+def test_sg13g2_diff_pair_accepts_exact_drawn_psd_minimum(
+    tmp_path, sg13g2_pdk_root, side, row_spacing
+):
+    path = tmp_path / "pair.gds"
+    generate(
+        _sg13g2_ring_request(
+            sg13g2_pdk_root,
+            path,
+            generator="diff_pair",
+            ring_gap_side=side,
+            ring_gap_um=0.665,
+            row_spacing_um=row_spacing,
+        )
+    )
+    assert _psd_opening_um(path, side) == pytest.approx(0.310)
+    assert all(
+        v["rule"] != "psd.space.1" for v in run_drc(str(path), "sg13g2")["violations"]
+    )
+
+
+def test_sg13g2_diff_pair_without_ring_accepts_small_gap(tmp_path, sg13g2_pdk_root):
+    path = tmp_path / "pair.gds"
+    generate(
+        _sg13g2_ring_request(
+            sg13g2_pdk_root,
+            path,
+            generator="diff_pair",
+            add_guard_ring=False,
+            ring_gap_side="W",
+            ring_gap_um=0.4,
+        )
+    )
+    assert run_drc(str(path), "sg13g2")["violations"] == []

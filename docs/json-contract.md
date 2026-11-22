@@ -777,6 +777,20 @@ ambient variable at worker preflight, so a successful capture can report
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
 (issue #5321).
 
+For a request that declares no `models.lib` because every selected section
+names its own library (issue #2522), that hash pair is `null` on both sides by
+construction, so `environment.remote` (and each `fleet[]` member) additionally
+gains `runner_corner_section_libs` (`[{name, sha256}]` or `null`) and —
+**only when the client or the runner reported per-section libraries** —
+`corner_section_libs_comparison` (`status` `match` / `mismatch` with `names` /
+`not_comparable` with `reason`), comparing by `(name, sha256)` pair
+membership. `models_lib_comparison` gains the `no_models_lib` reason for that
+case, previously reported as `runner_hash_unavailable`. A consumer that reads
+a reason string must treat the reason set as open. Additive fields and a new
+enum member on an existing optional field; no `schema_version` bump (issue
+#5457). Field-level record: [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment".
+
 `klt sim --backend batch --dry-run`'s `published_runner.images[]` entries
 (issue #5851) gain the additive `ngspice_version` and `pdk_snapshot` fields
 each AMI-manifest image publishes, `null` for a legacy entry — the same
@@ -1852,7 +1866,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 3 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1870,7 +1884,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
+| `functional-verification` | `info_path`, `options.trace.path` | 3 (`log_path` moved to the envelope table; the echoed inputs joined them in #5784) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 

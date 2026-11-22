@@ -335,7 +335,9 @@ def test_pad_boxes_use_the_pair_sized_override():
             "block_id": "a",
         }
     ]
-    baseline = pads._landing_and_widen_pad_boxes(drops, [], _MET1, None)
+    baseline = pads._landing_and_widen_pad_boxes(
+        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A"), 0.001
+    )
     assert baseline[0][2] == pytest.approx(
         (
             1.0 - _VIA_LANDING_SIZE_UM / 2,
@@ -345,7 +347,7 @@ def test_pad_boxes_use_the_pair_sized_override():
         )
     )
     overridden = pads._landing_and_widen_pad_boxes(
-        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A", 0.6)
+        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A", 0.6), 0.001
     )
     assert overridden[0][2] == pytest.approx((0.7, 0.7, 1.3, 1.3))
 

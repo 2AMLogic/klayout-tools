@@ -61,6 +61,8 @@ def test_fallback_landing_does_not_connect_distinct_nets(tmp_path, pdk_root, rev
         assert not result["unrouted_nets"]
     else:
         assert result["unrouted_nets"] == ["VDD"]
-        reason = statuses["VDD"]["legs"][0]["reason"]
+        leg = statuses["VDD"]["legs"][0]
+        assert leg["blocking_net"] == "SIG"
+        reason = leg["reason"]
         assert "cross-block fallback shares a conductive edge" in reason
         assert "already-routed net 'SIG'" in reason
