@@ -4002,9 +4002,7 @@ def _run_sim_corners(
 
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
-        # off-host "hosts exceeds the units to dispatch" refusal over an
-        # empty fleet. (`attach_job_id is None` keeps #5777's "attach never
-        # fans out" single-job path authoritative for every attach.)
+        # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
         corners_new, backend_engine_version, remote_environment = [], None, None
     elif hosts == 1 or attach_job_id is not None:  # #5777: attach never fans out
         corners_new, backend_engine_version, remote_environment = _BACKENDS[backend](
@@ -4024,12 +4022,14 @@ def _run_sim_corners(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
             **local_engine_kwargs,
-            # Issue #3896: a `max_units_per_job` split reroute keeps its shard
-            # map even without --resume (no checkpoint to take it from).
             **(
                 {
                     "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
                     "netlist_sha256": netlist_digests.sha256,
+                    "explicit_points": dispatch_points
+                    if len(dispatch_points) < len(corner_points)
+                    and attach_job_id is None
+                    else None,
                 }
                 if backend == "batch"
                 else {}
