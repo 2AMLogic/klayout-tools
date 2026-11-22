@@ -4925,9 +4925,46 @@ missing vector, or a failed solve still grades `error` even with
 byte-identical to before.
 
 `on_unreached` is rejected (exit `1`) on an `expr` or `crossings` measurement
-and for any value other than `"error"`/`"null"`. It is not applied to
-`analysis_steps[]` corners or the Xyce engine (those keep today's `error`).
+and for any value other than `"error"`/`"null"`. It is not applied to the
+Xyce engine (no ngspice `.meas` evidence to read).
 `"measurement_not_reached"` is also accepted in `options.fail_on_diagnostic`.
+
+### Step-scoped cards (`analysis_steps[].measurements[].spice`)
+
+A step-scoped `.meas` card gets the same opt-in
+([#7072](https://github.com/2AMLogic/klayout-tools/issues/7072)). `klt sim`
+evaluates the card as a `meas` control command right after that step's own
+analysis, so ngspice prints both evidence lines *after* the step's
+`klt_step_end` marker and before the next step's `klt_step_begin` — and the
+classification is scoped to exactly that log region, matched under the
+card's **local** name. Two steps may therefore reuse a local measurement
+name: a miss confirmed in one step's region never classifies the other
+step's card, and a sibling measurement in the same step is unaffected. The
+graded result carries the qualified name (`edge.missing`) with its `step`
+provenance field, `value: null`, `margin: null`, `status: "not_reached"`,
+and the same `measurement_not_reached` info diagnostic, top-level count,
+skipped-limit coverage and rollup semantics as the scalar form above —
+including `pass_partial` for a run that mixes checked bounds with unreached
+ones, and `not_checked` (exit `4`) when every requested bound was unreached.
+
+For `FIND … WHEN`, ngspice can report a missed crossing before it looks up
+the `FIND` operand. An opted-in card also requires evidence that the operand
+was available on that step's plot when the card ran. A missing or unsaved
+operand keeps the measurement at `error` and the CLI exits with `4`.
+
+What stays an error on the step path, even with the opt-in:
+
+- a step that failed or never ran (`step_failed`): its measurements keep
+  `status: "error"`, and a value is never read from a step that produced no
+  plot of its own;
+- a derived measurement (or a later step's `${...}` sweep window) reading
+  the unreached result: `derived_input_unavailable`, and the corner grades
+  `error` while the source keeps `not_reached`;
+- a `.meas` failure whose logged reason is anything other than
+  `out of interval`, an engine echo without the matching `failed!` line (or
+  vice versa), an error-severity engine diagnostic (diverged solve,
+  timeout, …), or a request without the opt-in — each keeps today's
+  `measurement` error and exit `4`.
 
 ## Measurements that are not `.meas` cards (`measurements[].expr`)
 
@@ -7135,7 +7172,11 @@ error, exit 1).
     read an **earlier** step's result as `<step>.<name>`.
   - `spice`: a `.meas` card whose type matches the step's `kind` and whose
     card name equals the measurement `name`. It runs as a `meas` control
-    command right after that step's analysis.
+    command right after that step's analysis. It may declare `on_unreached:
+    "null"`: a target the step's completed analysis never reaches then
+    grades `not_reached` under the qualified name, on evidence scoped to
+    that step's own log region — see
+    [Unreached `.meas` targets](#unreached-meas-targets-measurementson_unreached).
 
   Names follow the `expr` naming rule and are unique within the step. In the
   response, a step measurement is reported as `<step>.<name>` (e.g.
