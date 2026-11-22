@@ -36,7 +36,9 @@ from .extract_report import (
     _detect_split_net_labels,
     _detect_unbiased_pmos_body_nets,
     _split_net_label_warnings,
+    detect_case_colliding_net_names,
 )
+from .extract_spef import ExtractError
 from .extract_warnings import (
     ignored_layer_warnings,
     merged_net_label_warnings,
@@ -221,4 +223,31 @@ def build_detection_findings(
         single_terminal_nets=single_terminal_nets,
         ignored_layers=ignored_layers,
         device_recognition_only_layers=device_recognition_only_layers,
+    )
+
+
+def refuse_case_fold_nets(nets: list[dict[str, Any]], spice_output: bool) -> None:
+    """Refuse a persistent flat ``--parasitics`` SPICE write whose distinct
+    nets differ only by case (issue #7091).
+
+    ngspice and ``klt lvs`` read SPICE case-insensitively, so two distinct
+    nets ``N1``/``n1`` fold to one node (a silent short) and their
+    net-derived parasitic cards (``RN1_t0``/``Rn1_t0``) collide as duplicate
+    devices -- whether or not the RC selection covers them. ``nets`` is the
+    pre-injection ``nets[]`` (one row per distinct net, so labels repeated
+    on one net are already a single name such as ``A|a``). ``spice_output``
+    is ``parasitics and not no_netlist``: the device-only and report-only
+    paths keep the #4200 warning instead. Raises :class:`ExtractError`
+    before anything is injected or written.
+    """
+    groups = detect_case_colliding_net_names(n["name"] for n in nets)
+    if not spice_output or not groups:
+        return
+    named = "; ".join(", ".join(repr(name) for name in group) for group in groups)
+    raise ExtractError(
+        f"--parasitics: distinct nets differ only by case ({named}) -- a "
+        "case-insensitive SPICE reader (ngspice, `klt lvs`) would join them "
+        "into one node and reject their net-derived parasitic card names as "
+        "duplicates, so no netlist was written; relabel one net of each group "
+        "or use --no-netlist for the report only"
     )

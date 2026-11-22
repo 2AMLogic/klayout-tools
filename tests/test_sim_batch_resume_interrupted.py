@@ -4,6 +4,7 @@ single-job path (issue #5459); split from test_sim_batch.py to keep it small."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from helpers.subprocess_fakes import fake_completed
@@ -121,10 +122,13 @@ def _one_job_resume_fixture(tmp_path, monkeypatch, **batch):
         },
     }
 
+    netlist = _write_body(tmp_path)
+
     def run(*, resume=False):
         return sb._run_batch(
             corner_points=_corner_points(1),
-            netlist_path=str(_write_body(tmp_path)),
+            netlist_path=str(netlist),
+            netlist_sha256=hashlib.sha256(netlist.read_bytes()).hexdigest(),
             models_lib=None,
             analysis={"kind": "tran", "args": "1n 1u"},
             measurements_spec=_measurements_spec(),
@@ -235,6 +239,26 @@ def test_resume_still_reattaches_a_running_single_unit_job(tmp_path, monkeypatch
     assert len(_launches(runner)) == launches_before
     assert _codes(corners) == {"batch_poll_timeout"}
     assert _receipt_job_id(receipt_path) == attached
+
+
+def test_resume_submits_a_new_single_unit_job_after_the_deck_changes(
+    tmp_path, monkeypatch
+):
+    runner, run, receipt_path = _one_job_resume_fixture(tmp_path, monkeypatch)
+    run()
+    previous = json.loads(receipt_path.read_text())
+    launches_before = len(_launches(runner))
+    netlist = tmp_path / "body.spice"
+    netlist.write_text(netlist.read_text().replace("1k", "2k"))
+    new_digest = hashlib.sha256(netlist.read_bytes()).hexdigest()
+    assert new_digest != previous["netlist_sha256"]
+
+    corners, _, environment = run(resume=True)
+
+    assert not _codes(corners)
+    assert len(_launches(runner)) == launches_before + 1
+    assert environment["job_id"] != previous["job_id"]
+    assert json.loads(receipt_path.read_text())["netlist_sha256"] == new_digest
 
 
 def test_resume_reattaches_a_done_single_unit_job_without_relaunching(

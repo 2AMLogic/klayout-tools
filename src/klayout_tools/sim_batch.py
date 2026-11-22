@@ -2813,22 +2813,17 @@ def _write_batch_receipt(path: str, receipt: dict[str, Any]) -> None:
             pass
 
 
-def _manifest_difference(
-    stored_fingerprint: Any, fingerprint: str, stored_hosts: Any, hosts: int
-) -> str:
-    """Issue #4721: what a shard map refusal compared. ``hosts`` is named
-    outright; the fingerprint is one opaque hash of the units, seed, netlist
-    and settings, so it can only be reported as differing (with prefixes)."""
-    parts = []
-    if stored_hosts != hosts:
-        parts.append(f"hosts: map has {stored_hosts}, request has {hosts}")
-    if stored_fingerprint != fingerprint:
-        parts.append(
-            f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
-            f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
-            "settings, so which of those changed is not recoverable"
-        )
-    return "; ".join(parts)
+def _manifest_difference(stored_fingerprint: Any, fingerprint: str) -> str:
+    """What a shard map refusal compared: the fingerprint only (issue #6197;
+    the ``hosts`` arm was dead by construction -- #4821 made ``hosts`` not
+    identity, resume re-splits under the new count -- and it is one opaque
+    hash of the units, seed, netlist and settings, so it can only be reported
+    as differing, with prefixes)."""
+    return (
+        f"fingerprint: map {str(stored_fingerprint)[:12]}, request "
+        f"{fingerprint[:12]} -- one hash of units, seed, netlist and "
+        "settings, so which of those changed is not recoverable"
+    )
 
 
 class _ShardManifest:
@@ -2881,9 +2876,10 @@ class _ShardManifest:
         """Open the manifest for this run. Without ``resume`` any existing
         file is ignored (and overwritten by the first write). With ``resume``
         a missing file means nothing to re-attach to; an unreadable one, or
-        one written for a different request or shard count, raises
-        :class:`SimError` -- never a silent restart that would re-bill every
-        shard."""
+        one written for a different request, raises :class:`SimError` --
+        never a silent restart that would re-bill every shard (the shard
+        count is not compared, issue #4821: resume re-splits under the new
+        count)."""
         from .sim import SimError
 
         path = os.path.join(artifacts_dir, BATCH_SHARDS_FILENAME)
@@ -3157,26 +3153,17 @@ def _run_batch_job(
     attach: bool = False,
     now: Callable[[], str] = _utc_now,
     receipt_name: str | None = None,
+    netlist_sha256: str | None = None,
     on_phase: Callable[[str], None] | None = None,
     launch_if_unlaunched: bool = False,
     launch_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """Submit, wait for, and collect **one** batch job's worth of corners --
-    the shared body of the single-job ``batch`` backend (:func:`_run_batch`)
-    and one shard of a sharded run (:func:`_run_batch_fleet`).
+    """Submit and collect one corner job, either standalone or part of a fleet run.
 
-    ``explicit_points`` is threaded to
-    :func:`sim_remote._build_remote_request` so a shard's job runs exactly
-    its own slice (with already-derived Monte Carlo seeds) instead of
-    re-expanding the whole matrix on the job instance -- ``None`` (the
-    single-job case) forwards ``corners``/``monte_carlo`` unchanged, exactly
-    as ``_run_remote`` does.
-
-    Returns the same ``(corners, engine_version, remote_environment)``
-    triple every backend returns. A terminal job failure or a poll-budget
-    overrun returns *unrun corner reports* rather than raising; only a
-    transport failure (a failed upload/launch/collect, an unreadable report,
-    an undocumented status state) raises :class:`BatchError`.
+    Each shard supplies ``explicit_points`` (including derived Monte Carlo
+    seeds). A single job forwards the original corner matrix. Fleet failures
+    and poll timeouts yield unrun corner reports; transport errors raise
+    :class:`BatchError`.
 
     ``attach=True`` (issue #2978) resumes an *existing* ``job_id``: nothing
     is staged, submitted or launched -- the job must already have a
@@ -3260,8 +3247,7 @@ def _run_batch_job(
     _launch_noting_refusal(config, job_id, runner, notify, launch_kwargs)
     timestamps["client_launched_at"] = now()
     notify("launched")
-    # Issue #2978: name the job on stderr the moment it exists, so a caller
-    # killed by an outer wall-clock limit knows what it orphaned.
+    # Emit the job id before polling so an interrupted client can attach.
     sys.stderr.write(
         f"klt sim: batch job {job_id} launched; "
         f"re-attach with `klt sim <request> --backend batch --attach {job_id}`\n"
@@ -3271,7 +3257,9 @@ def _run_batch_job(
         artifacts_dir,
         BATCH_RECEIPT_FILENAME if receipt_name is None else receipt_name,
     )
-    receipt = sim_batch_receipt.new_receipt(config, job_id, request, corner_points)
+    receipt = sim_batch_receipt.new_receipt(
+        config, job_id, request, corner_points, netlist_sha256
+    )
     _write_batch_receipt(receipt_path, receipt)
     return _poll_and_collect(
         config=config,
@@ -3452,6 +3440,7 @@ def _run_batch(
     attach_job_id: str | None = None,
     collect_partial: bool = False,
     shard_fingerprint: str | None = None,
+    netlist_sha256: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``batch`` backend: submit the whole corner matrix to 2am's EDA
     batch fleet as one job and collect its report back out of S3.
@@ -3526,7 +3515,9 @@ def _run_batch(
             collect_partial=collect_partial,
         )
     if attach_job_id is not None:
-        sim_batch_receipt.check_attach_receipt(artifacts_dir, attach_job_id, request)
+        sim_batch_receipt.check_attach_receipt(
+            artifacts_dir, attach_job_id, request, netlist_sha256
+        )
         try:
             return _run_batch_job(
                 config=config,
@@ -3582,8 +3573,13 @@ def _run_batch(
         corners, engine_version, environment = _resume_or_submit_one_job(
             config=config,
             resume_grace_s=_RESUME_INTERRUPTED_GRACE_S,
+            netlist_sha256=netlist_sha256,
             resume_job_id=sim_batch_receipt.resumable_job_id(
-                artifacts_dir, request, len(corner_points), checkpoint is not None
+                artifacts_dir,
+                request,
+                len(corner_points),
+                checkpoint is not None,
+                netlist_sha256,
             ),
             corner_points=corner_points,
             netlist_path=netlist_path,

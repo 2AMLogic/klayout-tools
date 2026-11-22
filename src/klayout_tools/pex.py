@@ -1224,6 +1224,8 @@ _ERROR_STAGE_BY_CODE = {
     "timeout_budget_unreachable": "execute",
     "budget_exceeded": "execute",
     "pin_count_mismatch": "execute",
+    "pin_order_mismatch": "execute",
+    "flat_dut_mismatch": "execute",
     "lost_shard": "collect",
     "orphaned": "collect",
 }
@@ -1252,16 +1254,11 @@ def _side_error(
     code: str | None = None,
     measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``error`` object of an errored ``delta[]`` row (issue
-    #3062): ``side``, ``stage``, ``message`` and, when the source has one,
-    ``code`` -- taken from that side's corner ``diagnostics[]`` (first
-    error-severity entry), else from the caller-supplied ``message``/``code``
-    (a ``SimError``), never invented. ``remote`` carries the side's
-    ``environment.remote`` (the batch job id) when present.
-
-    When neither exists, the blamed side's ``measurement`` may carry the
-    ``message`` a ``--measure-command`` harness recorded (issue #4555); the
-    stage is then ``"execute"``."""
+    """Describe why a delta row errored (#3062). Read the corner's first
+    error diagnostic, falling back to its first diagnostic. A caller-supplied
+    failure can supply the message and code directly. Include the side's
+    remote job metadata when available. A measurement-harness message alone
+    is an execute-stage error (#4555)."""
     remote = None
     if sim_report is not None:
         remote = (sim_report.get("environment") or {}).get("remote")
@@ -1404,14 +1401,13 @@ def _build_delta_rows(
 
 
 def _static_extracted_failure(
-    pin_count_mismatch: dict[str, Any] | None,
-    flat_dut_mismatch: dict[str, Any] | None,
-) -> tuple[str, str | None] | None:
-    """``(message, code)`` for a statically detected extracted-side mismatch."""
-    static = pin_count_mismatch or flat_dut_mismatch
-    if static is None or not static.get("detail"):
-        return None
-    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
+    **mismatches: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Use the top-level mismatch name and detail for the skipped leg."""
+    for code, mismatch in mismatches.items():
+        if mismatch and mismatch.get("detail"):
+            return str(mismatch["detail"]), code
+    return None
 
 
 def _unextracted_delta_rows(
@@ -2599,10 +2595,10 @@ def run_pex(
     ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
     legacy scalar). ``extraction.resistance_graph`` echoes the request and one
     ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm}`` entry per net, only when the flag was given --
-    otherwise the report and netlist are byte-identical. Combining it with
-    ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
-    legacy scalar, so a critical net would mix resistance sources).
+    legacy_resistance_ohm, fallback_reason, terminals, pair_resistance_ohm}`` entry,
+    only when the flag was given -- otherwise the report and netlist are
+    byte-identical. Combining it with ``distributed_rc`` raises :class:`PexError`
+    (the ladder stays on the legacy scalar, so a critical net would mix sources).
 
     ``critical_net_all``/``critical_net_excludes`` (``klt pex
     --critical-net-pattern``/``--critical-net-all``/``--critical-net-exclude``,
@@ -3338,7 +3334,9 @@ def run_pex(
         if extracted_report is None:
             if extracted_failure is None:
                 extracted_failure = _static_extracted_failure(
-                    pin_count_mismatch, flat_dut_mismatch
+                    pin_count_mismatch=pin_count_mismatch,
+                    flat_dut_mismatch=flat_dut_mismatch,
+                    pin_order_mismatch=pin_order_mismatch,
                 )
             delta.extend(
                 _unextracted_delta_rows(
