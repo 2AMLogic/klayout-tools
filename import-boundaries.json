@@ -342,6 +342,7 @@
         "klayout_tools.functional_verification_pdk",
         "klayout_tools.functional_verification_results",
         "klayout_tools.functional_verification_run_inputs",
+        "klayout_tools.functional_verification_tools",
         "klayout_tools.functional_verification_run_results",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
@@ -622,6 +623,7 @@
         "klayout_tools.decks.sky130_lvt",
         "klayout_tools.decks.sky130_offgrid",
         "klayout_tools.decks.sky130_unmodeled",
+        "klayout_tools.liberty_header_diff",
         "klayout_tools.liberty_merge",
         "klayout_tools.pdk",
         "klayout_tools.pdk_ambiguity",
@@ -697,7 +699,8 @@
         "klayout_tools.place_and_route_sta",
         "klayout_tools.place_and_route_unconstrained",
         "klayout_tools.place_and_route_via_pad",
-        "klayout_tools.place_and_route_via_tip"
+        "klayout_tools.place_and_route_via_tip",
+        "klayout_tools.place_and_route_via_tip_repair"
       ]
     },
     "power": {
@@ -916,6 +919,7 @@
         "klayout_tools.sim_batch",
         "klayout_tools.sim_bin_range",
         "klayout_tools.sim_model_bins",
+        "klayout_tools.sim_model_digests",
         "klayout_tools.sim_batch_async",
         "klayout_tools.sim_batch_capacity_retry",
         "klayout_tools.sim_batch_capacity_watch",
@@ -929,6 +933,8 @@
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
+        "klayout_tools.sim_batch_corner_libs",
+        "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_plan",
@@ -991,6 +997,7 @@
         "klayout_tools.sim_plan",
         "klayout_tools.sim_plot",
         "klayout_tools.sim_portable",
+        "klayout_tools.sim_post_commands",
         "klayout_tools.sim_report_check",
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
