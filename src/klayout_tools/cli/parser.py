@@ -4199,20 +4199,12 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
-    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
-    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
-    # rather than here.
     erc_input_group = erc_parser.add_mutually_exclusive_group()
     erc_input_group.add_argument(
         "file",
         nargs="?",
         default=None,
-        help=(
-            "path to a routed GDSII or OASIS layout file. Required unless "
-            "--check is given (the input paths are then read from the "
-            "committed report instead)"
-        ),
+        help=("path to the routed GDSII or OASIS layout for an ERC run"),
     )
     erc_parser.add_argument(
         "spec",
@@ -4223,7 +4215,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section. Required unless --check is given"
+            "section. Required for an ERC run"
         ),
     )
     erc_parser.add_argument(
@@ -4335,6 +4327,11 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "consistent, 3 if drifted -- see docs/cli/erc.md, "
             "'--check / --rerun'"
         ),
+    )
+    erc_input_group.add_argument(
+        "--pnr-response",
+        metavar="RUN",
+        help="generate a Sky130 HD supply spec from a routed place-and-route response",
     )
     erc_input_group.add_argument(
         "--validate-spec",

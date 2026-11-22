@@ -2718,6 +2718,12 @@ plain string" for the full enumeration and rationale.
 | `warnings` | array\<string\> | Additive field (issue #2086). Non-fatal conditions a caller must see before trusting this run's numbers; `[]` when there are none, never `null`. Today's producers are the power-delivery audit, the layer-map caveat (issue #4481: `layer_map.resolution == "none"`) and the row-rail fallback caveat (issue #1985): a run with no `request.power` (0 tapcells, 0 PDN, 0 fillers), a run whose *supplied* `request.power` produced an incomplete grid, and a run whose `power.row_rail.emitted` is `true` all warn here — the first two quoting the measured counts, the third stating that the row-rail fallback's horizontal rails are not a complete PDN. This is a warning, not a refusal — `status` stays `"ok"` and the exit code stays `0`; the same strings are also written to **stderr** by the CLI in both `--format json` and `--format text`, so stdout stays a single parseable document. See "Measured power delivery" and "Row-rail fallback" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`, with `input.role: "netlist"` (issue #2027 — this verb pins the gate-level netlist it placed, never a layout stream). |
 
+For a Sky130 HD run with an explicit PDN, `power.library_rail_labels` maps
+the library's VPWR and VGND labels to the configured net names when the
+applied global-connect pin rules establish both bindings unambiguously.
+An inconclusive custom pattern yields `null`. This mapping lets
+`klt erc --pnr-response` generate supply aliases from a saved response.
+
 ## As-built netlist (`verilog_path`, issue #996)
 
 The `"route"` stage writes an OpenROAD `write_verilog` netlist to

@@ -3178,14 +3178,13 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    # Issue #2086's additive `power.placed` block is asserted separately
-    # below (tmp-path `def_path`); every other member is still pinned here.
     assert _power_without_placed(report) == {
         # issue #2123: an explicit `straps[]`/`connects[]` request is not a
         # preset run -- echoed as `None`, never a fabricated recipe name.
         "preset": None,
         "connects_overridden": False,
         "pdn": True,
+        "library_rail_labels": {"VPWR": "VDD", "VGND": "VSS"},
         "global_connect": True,
         "power_net": "VDD",
         "ground_net": "VSS",
