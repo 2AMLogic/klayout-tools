@@ -857,7 +857,7 @@
     },
     {
       "path": "tests/test_gen_compose.py",
-      "lines": 17469
+      "lines": 17460
     },
     {
       "path": "tests/test_gen_pdk_pcell.py",
