@@ -11,9 +11,8 @@ never a re-run with all exceptions dropped.
 Split from :mod:`klayout_tools._sta_multicycle` (which keeps the request
 validator, the selector grammar and the paired Tcl emitter -- the halves
 ``place_and_route`` #6923 reuses) for the per-file size ratchet, the same
-way :mod:`klayout_tools.post_route_sta_electrical` and friends were. Like
-them: a lazy ``PostRouteStaError`` import, and no import of
-``post_route_sta`` at module load."""
+way :mod:`klayout_tools.post_route_sta_electrical` and related helpers were.
+Request errors use the shared ``PostRouteStaError`` class."""
 
 from __future__ import annotations
 
@@ -28,13 +27,7 @@ from ._sta_multicycle import (
     without_script_lines,
 )
 from ._sta_request_diag import extract_block as _extract_block
-
-
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
-
+from .post_route_sta_errors import PostRouteStaError
 
 # --------------------------------------------------------------------------- #
 # Stdout parsing
@@ -321,7 +314,7 @@ def multicycle_corner_field(
     for entry in entries:
         index = entry["index"]
         if not (measurements[index]["setup"] or measurements[index]["hold"]):
-            raise _error(no_timed_path_error(entry))
+            raise PostRouteStaError(no_timed_path_error(entry))
     without: dict[int, dict[str, Any]] = {}
     for entry in entries:
         index = entry["index"]
@@ -350,7 +343,7 @@ def check_multicycle_errors(
         return
     errors = multicycle_request_error(stdout)
     if errors is not None:
-        raise _error(errors)
+        raise PostRouteStaError(errors)
 
 
 def multicycle_session_fields(

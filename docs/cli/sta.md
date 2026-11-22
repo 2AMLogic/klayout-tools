@@ -1280,7 +1280,7 @@ input exclusions are `constraints.false_path_from` (issue #2968, see "Timing
 exceptions"). Clock uncertainty is `constraints.clock_uncertainty_ns` (issue
 #4240, see "Clock uncertainty"). Ideal-clock slew is
 `constraints.clock_transition_ns` (see "Ideal-clock transition"). Register
-multicycle exceptions use `constraints.multicycle_paths` (see "Multicycle paths (`constraints.multicycle_paths`, issue #6921)"). For general `-to` or `-through` false paths, the caller
+multicycle exceptions use `constraints.multicycle_paths` (see issue #6921). For general `-to` or `-through` false paths, the caller
 would need full `read_sdc` support. To detect drift between a committed
 `.sdc` and the request, see "SDC drift check".
 

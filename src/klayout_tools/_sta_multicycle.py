@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._tcl import tcl_literal as _tcl_literal
+from .post_route_sta_errors import PostRouteStaError
 
 #: Entry keys: ``from``/``to``/``setup``/``hold`` required, ``through``
 #: optional. Anything else is a request error.
@@ -85,12 +86,6 @@ def _mcp_tag(index: int) -> str:
     return f" ;# klt mcp {index}"
 
 
-def _error(message: str) -> Exception:
-    from .post_route_sta import PostRouteStaError
-
-    return PostRouteStaError(message)
-
-
 # --------------------------------------------------------------------------- #
 # Request validation (pure Python, before any engine runs)
 # --------------------------------------------------------------------------- #
@@ -98,10 +93,10 @@ def _error(message: str) -> Exception:
 
 def _validate_selector(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
-        raise _error(f"{field} must be a non-empty selector string")
+        raise PostRouteStaError(f"{field} must be a non-empty selector string")
     bad = sorted(set(value) - _SELECTOR_CHARS)
     if bad:
-        raise _error(
+        raise PostRouteStaError(
             f"{field} is a malformed selector ({value!r}: disallowed "
             "character(s) "
             + " ".join(repr(ch) for ch in bad)
@@ -113,17 +108,17 @@ def _validate_selector(value: Any, field: str) -> str:
 
 def _validate_multiplier(value: Any, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise _error(f"{field} must be a positive integer (got {value!r})")
+        raise PostRouteStaError(f"{field} must be a positive integer (got {value!r})")
     return value
 
 
 def _validate_multicycle_entry(entry: Any, index: int) -> dict[str, Any]:
     field = f"constraints.multicycle_paths[{index}]"
     if not isinstance(entry, dict):
-        raise _error(f"{field} must be an object")
+        raise PostRouteStaError(f"{field} must be an object")
     unknown = sorted(set(entry) - set(MULTICYCLE_KEYS))
     if unknown:
-        raise _error(
+        raise PostRouteStaError(
             f"{field} has unknown key(s): "
             + ", ".join(unknown)
             + f" (allowed: {', '.join(MULTICYCLE_KEYS)})"
@@ -155,7 +150,9 @@ def validate_multicycle_paths(
     if value is None:
         return None
     if not isinstance(value, list):
-        raise _error("constraints.multicycle_paths must be a list of objects")
+        raise PostRouteStaError(
+            "constraints.multicycle_paths must be a list of objects"
+        )
     return [
         _validate_multicycle_entry(entry, i) for i, entry in enumerate(value)
     ] or None
@@ -329,23 +326,25 @@ def _validate_false_path_from(
     if value is None:
         return None
     if not isinstance(value, list):
-        raise _error(f"{field} must be a list of input port names")
+        raise PostRouteStaError(f"{field} must be a list of input port names")
     seen: set[str] = set()
     for port in value:
         if not isinstance(port, str) or not port or port != port.strip():
-            raise _error(
+            raise PostRouteStaError(
                 f"{field} entries must be non-empty port-name strings without "
                 f"leading/trailing whitespace (got {port!r})"
             )
         if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in port):
-            raise _error(f"{field} entry {port!r} contains a control character")
+            raise PostRouteStaError(
+                f"{field} entry {port!r} contains a control character"
+            )
         if port == clock_port:
-            raise _error(
+            raise PostRouteStaError(
                 f"{field} must not name the clock port {port!r} -- "
                 "a false path from the clock would untime every register"
             )
         if port in seen:
-            raise _error(f"{field} must not repeat a port ({port!r})")
+            raise PostRouteStaError(f"{field} must not repeat a port ({port!r})")
         seen.add(port)
     return list(value) or None
 
