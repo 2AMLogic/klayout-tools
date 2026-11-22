@@ -1559,6 +1559,14 @@ _PDK_RES_FLAVOR_DEVICE_CLASS: dict[str, dict[str, str]] = {
 }
 
 
+def resistor_flavor_for_class(family: str, device_class: str) -> str | None:
+    """Return the first material drawing this class, preferring the generic alias."""
+    for flavor, drawn_class in _PDK_RES_FLAVOR_DEVICE_CLASS.get(family, {}).items():
+        if drawn_class.casefold() == device_class.casefold():
+            return flavor
+    return None
+
+
 def _resolve_expected_device_class(
     generator: str, family: str, params: dict[str, Any]
 ) -> str | None:
@@ -1568,23 +1576,10 @@ def _resolve_expected_device_class(
     execute.py``'s silent-substitution guard, issue #1731) must treat as
     "cannot determine," never as "confirmed mismatch."
 
-    Only ``res_array`` is covered today -- its two independent
-    device-class selectors (``flavor`` for the poly-body case,
-    ``metal_level`` for the metal-body case, see :data:`_PDK_RES_FLAVOR_
-    DEVICE_CLASS`/:data:`_PDK_METAL_RES_DEVICE_CLASS`) are the exact
-    reproduction issue #1731 reports: a ``device_groups[]`` entry naming a
-    metal-resistor ``device_class`` but routed through ``res_array`` with no
-    explicit ``metal_level`` override silently draws the poly-body default
-    instead. Dispatched on ``generator`` by name (mirroring
-    :data:`_SIZE_PARAM_TARGETS`'s own per-generator dispatch shape in
-    ``layout_plan_execute.py``) so a future generator with its own
-    device-class-selecting param can add an entry here without restructuring
-    this function -- no other generator's request params currently select
-    between distinct recognised device classes the way ``res_array``'s do
-    (``mos_array``/``diff_pair``/``bjt_array``'s ``flavor`` selects a
-    transistor polarity or voltage variant, not a distinct LVS device class;
-    ``cap_array``'s density flavour is a ``deck_options`` extraction-side
-    concern, never a ``klt gen`` request param)."""
+    Only resistor arrays have class-selecting parameters. A nonzero
+    metal level selects a metal-body class, otherwise the flavor selects
+    the poly-body class. Other generators have no static prediction.
+    """
     if generator != "res_array":
         return None
     metal_level = params.get("metal_level", 0)
