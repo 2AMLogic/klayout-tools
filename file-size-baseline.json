@@ -805,7 +805,7 @@
     },
     {
       "path": "tests/test_drc_klayout_engine.py",
-      "lines": 3485
+      "lines": 3315
     },
     {
       "path": "tests/test_economy.py",
