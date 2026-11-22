@@ -940,6 +940,7 @@
         "klayout_tools.sim_batch_corner_libs",
         "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
+        "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
