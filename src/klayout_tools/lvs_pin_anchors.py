@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
+from .lvs_base import CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED
 from .lvs_mismatch import _make_compare_logger, _mismatch
 from .lvs_timeout import CompareTimeout
 
@@ -242,7 +243,6 @@ def _with_repeated_label_retry_disclosure(
         entry["details"]["repeated_label_pin_families"] = list(families)
         entry["description"] += "; " + note
         return anchor_warnings
-    from .lvs import CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED
 
     return [
         _mismatch(
@@ -402,7 +402,6 @@ def _top_level_pin_anchor_warnings(
             + " (BASE, BASE$1, ...) were NOT anchored because the $k pairing "
             "is extractor-order dependent and topology decides those nets"
         )
-    from .lvs import CATEGORY_TOPOLOGY_TOP_LEVEL_PINS_ANCHORED
 
     return [
         _mismatch(

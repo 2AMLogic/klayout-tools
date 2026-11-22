@@ -2037,7 +2037,7 @@ envelope's `error.code`.
 
 ### Schematic-only measurements
 
-An internal schematic node can disappear during extraction. Add `"sides": "schematic"` to its testbench measurement to retain the observation at each corner.
+An internal schematic node can disappear during extraction. Add `"sides": "schematic"` to its testbench measurement to retain the observation at each corner. An `intermediate: true` expression only defines a vector for later measurements, so it cannot declare `sides`.
 
 ```json
 {"name": "vref", "spice": ".meas tran vref FIND v(xdut.vref) AT=1u", "sides": "schematic"}

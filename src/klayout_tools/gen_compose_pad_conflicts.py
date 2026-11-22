@@ -73,7 +73,7 @@ def _leg_conflict_message(
     (issue #5803, beside the pad-vs-pitch rejection it now folds in): the
     #1057 overlap test, the #1386 spacing-aware test on the primary entry
     only (``check_spacing`` -- the #1913 intermediate/far pad entries are
-    compared overlap-only, #1680), each upgraded to consult
+    checked for electrical contact, #7024), each upgraded to consult
     :func:`_landing_pad_conflict_reason` first so a conflict at a landing
     pad names pad-vs-pitch instead of a generic backbone crossing. Returns
     ``None`` when neither test fires -- the caller keeps looping.
@@ -97,6 +97,12 @@ def _leg_conflict_message(
                 return reason
         return f"crosses already-routed net '{other_net}'"
     if not check_spacing:
+        # A shared edge conducts even when the polygon intersection has no area.
+        if (
+            cand_region.bbox().touches(other_region.bbox())
+            and not (cand_region.edges() & other_region.edges()).is_empty()
+        ):
+            return f"shares a conductive edge with already-routed net '{other_net}'"
         return None
     cand_spacing = spacing_lookup(cand_layer)
     if cand_spacing is None:

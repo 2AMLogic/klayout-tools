@@ -38,6 +38,9 @@ from __future__ import annotations
 import os
 from typing import Any, NamedTuple
 
+from .functional_verification_base import (
+    FunctionalVerificationError,
+)
 from .functional_verification_from_synthesize import _request_relative
 
 PDK_REQUEST_KEYS = ("variant", "root", "cell_library")
@@ -51,40 +54,35 @@ class PdkInput(NamedTuple):
     cell_library: str
 
 
-def _err_cls():
-    """The verb's error class. Annotated loosely (the class itself is a
-    ``Callable[..., Exception]``: its ``__init__`` takes the stable ``code``
-    keyword the named refusals below raise with)."""
-    from .functional_verification import FunctionalVerificationError
-
-    return FunctionalVerificationError
-
-
-def _err(message: str, *, code: str | None = None) -> Exception:
-    return _err_cls()(message, code=code)
-
-
 def validate_pdk_request_block(raw: Any, request_dir: str) -> PdkInput:
     """Validate ``request.pdk`` (``cell_library`` required; ``variant``/
     ``root`` optional) and resolve a relative ``root`` against
     ``request_dir`` -- the same base every other request path field uses."""
     if not isinstance(raw, dict):
-        raise _err(
+        raise FunctionalVerificationError(
             "request.pdk must be a JSON object "
             "{variant?, root?, cell_library} (cell_library required)"
         )
     unknown = sorted(set(raw) - set(PDK_REQUEST_KEYS))
     if unknown:
-        raise _err(f"request.pdk has unknown key(s): {', '.join(unknown)}")
+        raise FunctionalVerificationError(
+            f"request.pdk has unknown key(s): {', '.join(unknown)}"
+        )
     cell_library = raw.get("cell_library")
     if not isinstance(cell_library, str) or not cell_library:
-        raise _err("request.pdk.cell_library must be a non-empty string")
+        raise FunctionalVerificationError(
+            "request.pdk.cell_library must be a non-empty string"
+        )
     variant = raw.get("variant")
     if variant is not None and (not isinstance(variant, str) or not variant):
-        raise _err("request.pdk.variant must be a non-empty string or null")
+        raise FunctionalVerificationError(
+            "request.pdk.variant must be a non-empty string or null"
+        )
     root = raw.get("root")
     if root is not None and (not isinstance(root, str) or not root):
-        raise _err("request.pdk.root must be a non-empty string or null")
+        raise FunctionalVerificationError(
+            "request.pdk.root must be a non-empty string or null"
+        )
     resolved_root = (
         _request_relative(root, request_dir) if isinstance(root, str) else None
     )
@@ -113,7 +111,7 @@ def merge_pdk_input(
             return None
         return validate_pdk_request_block(raw, request_dir)
     if raw is None:
-        raise _err(
+        raise FunctionalVerificationError(
             "--pdk/--pdk-root given but the request has no pdk block -- "
             "request.pdk.cell_library is required to resolve cell models"
         )
@@ -166,7 +164,7 @@ def check_deck_cell_library(cell_library: str, report: dict[str, Any]) -> None:
         return
     if name == cell_library or name.startswith(cell_library + "__"):
         return
-    raise _err(
+    raise FunctionalVerificationError(
         f"request.pdk.cell_library '{cell_library}' does not match the "
         f"synthesize report's deck '{name}' (a deck name is "
         f"'<cell_library>__<corner>') -- the report's netlist instantiates "
@@ -183,7 +181,7 @@ def resolve_pdk_cell_models(pdk_input: PdkInput) -> tuple[list[str], dict[str, A
 
     return resolve_cell_models_for_cell_library(
         pdk_input.cell_library,
-        _err_cls(),
+        FunctionalVerificationError,
         variant=pdk_input.variant,
         root=pdk_input.root,
     )
@@ -201,14 +199,16 @@ def _resolve_defines(defines: Any) -> dict[str, str | None]:
     if defines is None:
         return {}
     if not isinstance(defines, dict):
-        raise _err(
+        raise FunctionalVerificationError(
             "request.options.defines must be a JSON object of string -> string|null"
         )
     for key, value in defines.items():
         if not isinstance(key, str) or not key:
-            raise _err("request.options.defines keys must be non-empty strings")
+            raise FunctionalVerificationError(
+                "request.options.defines keys must be non-empty strings"
+            )
         if value is not None and not isinstance(value, str):
-            raise _err(
+            raise FunctionalVerificationError(
                 f"request.options.defines[{key!r}] must be a string or null "
                 f"-- got a {type(value).__name__}"
             )
