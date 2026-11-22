@@ -5,8 +5,9 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
-    0 - every test passed (``status: "pass"``); under ``--mutations``, the
-        baseline passed and no valid proposal survived
+    0 - all input hashes matched under ``--check``, or every test passed in
+        a run (``status: "pass"``). Under ``--mutations``, the baseline passed
+        and no valid proposal survived
     1 - failed to run (bad request, unresolvable RTL source or testbench
         module, coverage requested on an engine that has none, missing
         cocotb/simulator install, build/elaboration error, simulator crash,
@@ -16,9 +17,9 @@ Exit codes (see ``docs/cli/functional-verification.md`` for the full table):
         outside ``request.sources``, the baseline itself failing (the
         mutation-testing "baseline-must-pass gate"), or every proposal
         ending up ``"rejected"``
-    3 - ran successfully, at least one test failed (``status: "fail"``);
-        under ``--mutations``, the baseline passed but at least one valid
-        proposal ``"survived"``
+    3 - input hashes drifted under ``--check``, or at least one test failed
+        in a run (``status: "fail"``). Under ``--mutations``, the baseline
+        passed but at least one valid proposal ``"survived"``
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand. This is the same 0/1/2/3 trichotomy ``klt drc`` uses,
 not ``klt sim``'s 3/4 split -- a cocotb regression has no "ran but part of
@@ -45,7 +46,8 @@ from ..functional_verification import (
     run_functional_verification,
     run_functional_verification_with_mutations,
 )
-from .output import emit_error, emit_success
+from ..functional_verification_check import check_functional_verification_report
+from .output import emit_error, emit_success, render_check_text
 
 EXIT_PASS = 0
 EXIT_TESTS_FAILED = 3
@@ -54,13 +56,37 @@ EXIT_TESTS_FAILED = 3
 def run(args: argparse.Namespace) -> int:
     mutations_path = getattr(args, "mutations", None)
     outdir = getattr(args, "outdir", None)
+    base_dir = getattr(args, "base_dir", None)
+    pdk_variant = getattr(args, "pdk", None)
+    pdk_root = getattr(args, "pdk_root", None)
     try:
+        if getattr(args, "check", None) is not None:
+            result = check_functional_verification_report(
+                args.check,
+                args.request,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+            )
+            emit_success(result, args.format, render_check_text)
+            return 0 if result["status"] == "match" else 3
         if mutations_path:
             report = run_functional_verification_with_mutations(
-                args.request, mutations_path, output_dir=outdir
+                args.request,
+                mutations_path,
+                output_dir=outdir,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
             )
         else:
-            report = run_functional_verification(args.request, output_dir=outdir)
+            report = run_functional_verification(
+                args.request,
+                output_dir=outdir,
+                base_dir=base_dir,
+                pdk_variant=pdk_variant,
+                pdk_root=pdk_root,
+            )
     except FunctionalVerificationError as exc:
         return emit_error(
             "functional-verification",

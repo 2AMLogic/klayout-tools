@@ -86,10 +86,15 @@ def validate(
             f'analysis.kind "ac" (got {analysis.get("kind")!r})'
         )
     if save_mode != "all":
+        corrected = json.dumps(
+            {"complex_vectors": list(vectors), "save_vectors": list(vectors)}
+        )
         raise SimError(
             "options.complex_vectors is incompatible with options.save_mode "
             f'"{save_mode}": klt cannot guarantee the declared vectors are '
-            "saved; omit options.save_mode"
+            "saved; omit options.save_mode. To limit the saved waveform to "
+            "selected signals, set options.save_vectors and include each "
+            f"requested complex vector there, e.g. options {corrected}"
         )
     _refuse_for_engine(engine)
     return tuple(vectors)

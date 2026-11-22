@@ -51,8 +51,9 @@ set -euo pipefail
 # shellcheck source=scripts/_install_common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/_install_common.sh"
 
-# Pinned release -- bump the tag, asset checksum, and CHANGELOG.md together
-# in the same change if this is ever refreshed. Fails closed on mismatch.
+# Pinned release -- bump the tag, asset checksum, and a changelog fragment
+# (`changelog.d/README.md`) together in the same change if this is ever
+# refreshed. Fails closed on mismatch.
 VERILATOR_VERSION="5.050"
 VERILATOR_TAG="v${VERILATOR_VERSION}"
 VERILATOR_ASSET_URL="https://github.com/verilator/verilator/archive/refs/tags/${VERILATOR_TAG}.tar.gz"
