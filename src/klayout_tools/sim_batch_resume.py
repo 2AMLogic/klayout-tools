@@ -26,7 +26,7 @@ from .sim_errors import SimError
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
 #: while the job may still be running (``sim_batch._unrun_corner_report``).
-_UNRUN_BATCH_CODES = frozenset(
+UNRUN_BATCH_CODES = frozenset(
     {
         "lost_shard",
         "batch_job_failed",
@@ -39,7 +39,7 @@ _UNRUN_BATCH_CODES = frozenset(
 
 def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
     """True when a corner report is a synthesized batch one (never ran)."""
-    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
+    return any(diag["code"] in UNRUN_BATCH_CODES for diag in corner["diagnostics"])
 
 
 def _record_batch_checkpoint(
