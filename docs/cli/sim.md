@@ -1594,14 +1594,13 @@ klt sim --batch-set a.json b.json c.json --max-in-flight 4 -o out/ --format json
   a replacement member is admitted only while no abandoned member still holds a
   `pending` job, so the set never holds more fleet capacity than
   `--max-in-flight × --max-concurrent-jobs` plus the abandoned members'
-  already-submitted jobs. If a held job never launches, the remaining unstarted
-  members become `not_launched` entries naming that job id (with no job ids of
-  their own) one more `--wait-for-capacity` window after the abandonment,
-  instead of being submitted -- but only once no live member remains to run
-  them ([#6278](https://github.com/2AMLogic/klayout-tools/issues/6278)):
-  while another started member is still running, its worker keeps draining the
-  unstarted members at the reduced concurrency rather than cutting them. Either
-  way the set then terminates.
+  already-submitted jobs. Each held job gets a full `--wait-for-capacity`
+  window starting at abandonment or at its acceptance, whichever came later
+  ([#6324](https://github.com/2AMLogic/klayout-tools/issues/6324)). Once
+  that window expires, a live member can still drain the queue at reduced
+  concurrency. When no live member remains, the unstarted members become
+  `not_launched` entries naming the held job, with no job IDs of their own
+  ([#6278](https://github.com/2AMLogic/klayout-tools/issues/6278)).
   An interrupt
   (`KeyboardInterrupt`/`SystemExit`) turns every unfinished member into a
   `set_interrupted` entry; the envelope and manifest are still written. Without
