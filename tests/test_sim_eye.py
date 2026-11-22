@@ -165,3 +165,19 @@ def test_refused_with_analysis_steps(tmp_path):
     )
     with pytest.raises(SimError, match="not supported with analysis_steps"):
         sim.run_sim(str(request))
+
+
+@pytest.mark.parametrize("code", sim_eye.ERROR_CODES)
+@pytest.mark.parametrize("save_mode", ["netlist", "all"])
+def test_eye_diagnostic_save_hint_only_for_missing_netlist_vector(code, save_mode):
+    outcome = sim_eye.EyeOutcome(error="eye detail", code=code)
+    result, diagnostics = sim._eye_measurement_result(
+        {"name": "opening"}, outcome, save_mode=save_mode
+    )
+    expected = f"[{code}] eye detail"
+    if code == "eye_vector_missing" and save_mode == "netlist":
+        expected += sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
+    assert result["status"] == "error"
+    assert diagnostics == [
+        {"severity": "error", "code": "measurement", "message": expected}
+    ]
