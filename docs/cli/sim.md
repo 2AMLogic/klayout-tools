@@ -1493,8 +1493,14 @@ Right after `launch` succeeds — before the first poll — the client writes
 `batch-receipt.json` into the artifacts directory (`options.artifacts_dir`,
 default `<request dir>/.klt/sim`; a sharded run writes
 `batch-receipt-<job-id>.json` per shard). It holds `job_id`,
-`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256` and
-`state`. `state` is `null` until the job reaches a terminal state, so a receipt
+`jobs_prefix`, `region`, `profile`, `launched_at` (UTC), `request_sha256`,
+`netlist_sha256` (present only when a netlist digest is recorded),
+`unit_count`, `units_sha256` and `state`. `unit_count` is the number of
+dispatched units ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
+`units_sha256` is the ordered digest over the dispatched units' corner ids,
+present only when every dispatched point carries one
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208)). `state` is
+`null` until the job reaches a terminal state, so a receipt
 that still has `state: null` means the client died (or timed out polling) while
 the job was in flight — the job id there is the one to look up before
 resubmitting. A receipt that cannot be written is a stderr warning, not a
@@ -1505,7 +1511,16 @@ an unsharded request, `--resume` re-attaches to the `job_id` the receipt
 records when its `request_sha256`, `unit_count`, and (when recorded)
 `netlist_sha256` match the run about to be
 dispatched ([#5350](https://github.com/2AMLogic/klayout-tools/issues/5350));
-any mismatch, or no receipt, submits afresh. A recorded job that has no usable
+any mismatch, or no receipt, submits afresh. When the run resumes a **partial
+slice** of the expanded grid -- a subset of the points dispatched as explicit
+points through the single-job path -- a fourth criterion applies: the
+receipt's `units_sha256` must equal that slice's ordered-unit digest, because
+the unit count alone cannot distinguish two same-sized slices
+([#7208](https://github.com/2AMLogic/klayout-tools/issues/7208), merged as PR
+#7228). A receipt written before that field carries no `units_sha256`: a
+whole-grid `--resume` of it still re-attaches, but a partial one is not
+re-attached -- the run submits afresh, a billable new job rather than a
+re-attach. A recorded job that has no usable
 result -- outputs gone, a terminally `failed` job, or one still `interrupted`
 after Spot reclaimed it -- is **submitted again under a new job id**, and the
 fresh launch rewrites `batch-receipt.json` with it
