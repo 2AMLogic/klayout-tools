@@ -216,6 +216,9 @@ def _declared(finder: Callable[[list[Any]], Any]) -> Callable[[dict[str, Any]], 
 _step_res_declared = _declared(sim_step_resolution.step_resolution_measurements)
 _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
     "analysis_steps": ((0, 7, 1), lambda r: r.get("analysis_steps") is not None),
+    # Added after v0.9.2. Development workers can share a release segment,
+    # so the runner-side preflight also checks for the regrade CLI option.
+    "_regrade": ((0, 9, 3), lambda r: r.get("_regrade") is not None),
     "transfer": ((0, 7, 1), _declared(sim_transfer_meas.transfer_measurements)),
     "snm": ((0, 7, 1), _declared(sim_snm_meas.snm_measurements)),
     "slope_band": (
@@ -290,6 +293,7 @@ _RUNNER_REQUEST_FEATURES: dict[str, tuple[tuple[int, int, int], Any]] = {
 #: refusal from after the grid ran to before anything is launched.
 _MANDATORY_RUNNER_FEATURES = frozenset(
     {
+        "_regrade",
         "transfer",
         "snm",
         "slope_band",

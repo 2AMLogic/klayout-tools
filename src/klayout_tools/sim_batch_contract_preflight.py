@@ -253,6 +253,14 @@ def _mandatory_feature_probe_shell(features: tuple[str, ...]) -> str:
         f'then mmiss="${{mmiss}}${{mmiss:+, }}{name}"; fi;'
         for name in features
     )
+    if "_regrade" in features:
+        # A pre-feature dev build can report the same release segment as a
+        # capable worker. Check the worker command before starting the grid.
+        checks += (
+            f' if [ "$mk" -ge {_feature_release_key("_regrade")} ] && '
+            '! klt sim --help 2>/dev/null | grep -F -- "--regrade" >/dev/null; '
+            'then mmiss="${mmiss}${mmiss:+, }_regrade"; fi;'
+        )
     names = ", ".join(features)
     return (
         "mmiss=; mr=${rv%%+*}; mr=${mr%%[!0-9.]*}; mr=${mr%.}; "

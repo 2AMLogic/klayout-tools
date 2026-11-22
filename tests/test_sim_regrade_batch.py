@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,49 @@ pytestmark = pytest.mark.usefixtures(
 )
 
 FAKE_BUCKET = "fake-batch-jobs-000000000000"
+
+
+@pytest.mark.parametrize(
+    ("version", "help_text", "expected"),
+    [
+        ("0.9.2", "--regrade REPORT", 87),
+        ("0.9.3.dev1", "--backend BACKEND", 87),
+        ("0.9.3.dev1", "--regrade REPORT", 0),
+    ],
+)
+def test_worker_preflight_checks_regrade_selection_before_simulation(
+    tmp_path, version, help_text, expected
+):
+    request = {"_regrade": {"select_corner_ids": ["slow"]}}
+    features = sb._request_features(request)
+    assert features == ["_regrade"]
+    assert sb._request_features({"options": {"tightened_rerun": {}}}) == []
+    assert sb._missing_runner_features(features, "0.9.2") == ["_regrade"]
+    worker = tmp_path / "klt"
+    worker.write_text(
+        f'#!/bin/sh\ncase "$*" in\n'
+        f'  --version) echo "klt {version}";;\n'
+        f'  "sim --help") echo "{help_text}";;\n'
+        "  *) exit 3;;\nesac\n"
+    )
+    worker.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"}
+    for prefix in (
+        sb.remote_feature_preflight(request),
+        sb._runner_preflight_script(
+            "0.9.3.dev1", enforce=False, required_features=tuple(features)
+        ),
+    ):
+        result = subprocess.run(
+            ["bash", "-c", prefix + "echo simulation-started"],
+            env={**environment, "EDA_OUTPUT_DIR": str(tmp_path)},
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == expected
+        assert ("simulation-started" in result.stdout) == (expected == 0)
+        if expected:
+            assert "_regrade" in result.stderr
 
 
 # Batch dispatch: a one-unit subset of a batch baseline stays on batch

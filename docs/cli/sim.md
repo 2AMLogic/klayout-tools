@@ -2240,6 +2240,7 @@ runner silently drops them ([#4212](https://github.com/2AMLogic/klayout-tools/is
 | `options.stage_model_inputs` | 0.7.0 |
 | `analysis_overrides` | 0.9.1 |
 | `analysis.op_check` | 0.9.2 |
+| `_regrade` | unreleased |
 | `analysis_steps[].measurements[]` (noise analysis `.meas` cards) | unreleased |
 | `measurements[].search` | unreleased |
 
@@ -8919,6 +8920,12 @@ $ klt sim request.json --regrade report.json \
   pinned from the source report), a batch runner too old to apply the
   selection, or a swept `corners.options` axis that already sets one of the
   tightened names — each is a named error, never a silent fallback.
+
+Batch and remote jobs carrying a regrade selection require a worker whose
+`klt sim --help` includes `--regrade`. A worker without it refuses the selection
+before running any corners. This also distinguishes development builds that
+share a release number. Declaring `options.tightened_rerun` on an ordinary
+first pass does not require this feature.
 
 `--regrade` composes with `--backend` (an override away from the source
 report's backend adds a `warnings[]` note that the record is not
