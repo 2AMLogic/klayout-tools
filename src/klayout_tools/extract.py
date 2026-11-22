@@ -2074,10 +2074,10 @@ def run_extract(
     ``False`` keeps the legacy-scalar netlist.
 
     ``resistance_graph_r_cut_ohm`` (``--resistance-graph-r-cut``, issue #2983)
-    sets the per-cut via/contact resistance (``0`` = ideal via) the decks
-    curate (``ParasiticsDeck.cuts``) but ``klt extract`` does not consume yet
-    (#3053). ``None`` (the default) keeps a cross-level landing
-    ``unsupported`` and on the legacy scalar; needs ``resistance_graph=True``.
+    overrides every landing's per-cut resistance (``0`` = ideal via).
+    ``None`` (the default) resolves each landing from the deck's nominal
+    per-cut tables (``ParasiticsDeck.cuts``/``.poly_contact``, issue #6917)
+    and keeps an uncurated landing ``unsupported`` on the legacy scalar.
 
     ``distributed_rc`` (``klt extract --distributed-rc``, issue #977, Epic
     #709 Phase 2b) replaces the single-lumped-element star/Gamma-shunt R/C
