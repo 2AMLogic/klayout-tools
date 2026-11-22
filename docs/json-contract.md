@@ -194,11 +194,21 @@ the message. No `schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s
 #5779): the device-multiplier lint's findings for instances whose vendor
 `mult` parameter and SPICE `m=` drive multiplier disagree on a subcircuit
 that declares `mult` but never forwards it to drive — a new finding class,
-warning-only. `findings` carry the instance, target subcircuit, both raw
-values and a note; a `note` (never an error) discloses instances whose
-subcircuit text is absent from the scanned include closure, `unevaluated`
-lists non-numeric `m=`/`mult=` values that cannot be compared, and
-`not_scanned` discloses closure parts that could not be read. The field is
+warning-only. Issue #6684 extends the scan from the netlist's own cards to
+DUT cards in the scanned `.include` closure. An included fragment inherits the
+scope of its include site. The scan covers calls inside parameterized DUTs
+and omits included calls between sky130 primitive-library members
+(`sky130_fd_pr__` caller and callee). A closure-file finding carries the
+additive `file` field (the repo-relative scanned-closure label), while a
+finding for the netlist's own card keeps the exact #5779 shape. `findings`
+carry the instance, target subcircuit, both raw
+values and a note; a `note` (never an error) discloses the netlist's own
+instances whose subcircuit text is absent from the scanned include
+closure, `unevaluated` lists the netlist's own non-numeric
+`m=`/`mult=` values that cannot be compared, and
+`not_scanned` discloses closure parts that could not be read — the
+`note`/`unevaluated` disclosures are scoped to the netlist's cards so an
+included library's parametric internals cannot add noise. The field is
 absent when there is nothing to disclose, the exit code and every existing
 field are unchanged, and the note recommends retaining both forms because
 some models use `mult` to scale Monte Carlo mismatch. No
@@ -523,6 +533,23 @@ so no `schema_version` bump. It varies run to run by nature, so `--check
 --rerun` excludes it (`VOLATILE_PROVENANCE_PATHS`). Progress lines for the same
 run go to stderr only; stdout stays the envelope.
 
+**`klt pex --engine klayout-runset` adds fields, never changes one** (issue
+#6559). The `extraction` block gains `engine`, `parasitics_carried`,
+`params_not_carried`, `device_counts` and `extra_circuits` — present **only**
+under that engine, so a default-engine envelope is byte-identical to before —
+and
+`body_bias.status` gains the value `"not_assessed"` (only ever emitted by that
+engine). `klt extract --engine klayout-runset` reports gain a top-level
+`params_not_carried` (`{class: [param, …]}`; `{}` when nothing is dropped),
+`instantiated_device_counts` (`{class: count}` across the instantiated
+hierarchy) and `extra_circuits` (`[circuit, …]`; `[]` when flat). Under that
+engine `klt pex`'s `extraction.device_counts`/`device_count` follow the
+instantiated hierarchy, which for a flat runset is the selected circuit's own
+count.
+Consumers that switch on `body_bias.status` already must tolerate an unknown
+value per the rule above. No `schema_version` bump on either verb. See
+[`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
+
 ## Requested-but-unperformed analysis
 
 When a request asks for an analysis or capability, its response must make
@@ -737,10 +764,39 @@ as a fallback. This field comes from the collected simulation report,
 independently of the preflight capture's `capture` status. Additive; no
 `schema_version` bump.
 
+The same worker block carries `threads_per_worker`, the positive integer pin
+from the worker report's `environment.threads_per_worker`. Each shard,
+including a recovered failed job, reports its own value. An unpinned run or
+a missing, legacy or malformed observation yields `null`. The client request
+cannot supply a missing value. The sibling `omp_num_threads` records the
+ambient variable at worker preflight, so a successful capture can report
+`omp_num_threads: null` alongside `threads_per_worker: 2`.
+
 `environment.remote` (and each `fleet[]` member) also gains the additive
 `runner_models_lib_sha256` (string or `null`) and `models_lib_comparison`
 (`status` `match` / `mismatch` / `not_comparable`); no `schema_version` bump
 (issue #5321).
+
+For a request that declares no `models.lib` because every selected section
+names its own library (issue #2522), that hash pair is `null` on both sides by
+construction, so `environment.remote` (and each `fleet[]` member) additionally
+gains `runner_corner_section_libs` (`[{name, sha256}]` or `null`) and —
+**only when the client or the runner reported per-section libraries** —
+`corner_section_libs_comparison` (`status` `match` / `mismatch` with `names` /
+`not_comparable` with `reason`), comparing by `(name, sha256)` pair
+membership. `models_lib_comparison` gains the `no_models_lib` reason for that
+case, previously reported as `runner_hash_unavailable`. A consumer that reads
+a reason string must treat the reason set as open. Additive fields and a new
+enum member on an existing optional field; no `schema_version` bump (issue
+#5457). Field-level record: [`docs/cli/sim.md`](cli/sim.md) "Worker-observed
+environment".
+
+`klt sim --backend batch --dry-run`'s `published_runner.images[]` entries
+(issue #5851) gain the additive `ngspice_version` and `pdk_snapshot` fields
+each AMI-manifest image publishes, `null` for a legacy entry — the same
+identities the new pre-submit `engine_version` pin refusal reads. No
+`schema_version` bump. See [`docs/cli/sim.md`](cli/sim.md)'s "`engine_version`
+pin (#5851)".
 
 **No bucket in batch reports (issue #3777).** `environment.remote` (and each
 `fleet[]` member) no longer carries `bucket` on any batch verb. The bucket name
@@ -967,6 +1023,41 @@ the right member even when two members under one path declare identical
 `argv`. Members are emitted in `name` order after benches sorted by path, so
 check order does not depend on inventory listing order. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "Several cold starts over one file".
+
+Issue #5563 adds the optional `resolved_from` field to an item-9 `pin` entry
+in `attestation.checks[]` when at least one pin in that check uses a reference.
+It maps each referenced leaf name (`name` or `revision` for the `pdk` role,
+the tool name for the `tools` role) to its declared `{"from", "key"}` object.
+On a passing check, the corresponding leaf in `value` holds the resolved
+string. A literal-only check omits `resolved_from`. This field is additive
+and requires no `schema_version` bump. See
+[A pin declared by the file that owns it (issue #5563)](cli/signoff.md#examples).
+
+Issue #5963 adds two additive, optional keys to a **file-backed**
+`evidence[]` entry of the `klt signoff --manifest` request (no
+`schema_version` bump; absent they change nothing): `artifact_manifest`
+(repo-relative path to a committed artifact-store `*.manifest.json`) and
+`artifact_member` (the manifest entry's `name`). For a `yield` entry whose
+samples document is not on disk, the grader takes the recorded `sha256` of
+the named member — `artifact_member`, else the entry whose `name` matches
+the report's own `samples` reference (exact, then a single basename match)
+— as the live hash the `content_hash` pin compares, reading only the
+committed manifest: no broker, no network, no subprocess, so the grade
+stays a pure function of the git tree. The citation discloses the basis
+(`content_hash_basis: "artifact_manifest"`, additive like issue #4893's
+`"evidence_file"`) and reports `input_verified: null` — the bytes were not
+re-hashed. A store-resolved hash never supplies a verdict (operator ruling
+2026-11-17, option `a`): the envelope itself stays committed and
+file-backed. An unreadable/invalid manifest, a missing, duplicate-named or
+basename-ambiguous member leaves the hash unresolved with a named reason in
+`content_hash_unresolved` (`manifest_unreadable`, `manifest_invalid`,
+`member_missing`, `duplicate_member`, or `ambiguous_member`). For any of
+these failures, a pinned unmet item carries the same object in
+`detail.content_hash_unresolved`. A non-string store-pin value or either
+store-pin key on a command-backed entry yields `invalid_evidence` for that
+item. A samples file present on disk always wins; entries that name no `artifact_manifest` are byte-identical to
+before. See [`docs/cli/signoff.md`](cli/signoff.md)'s "Citing an object in
+the artifact store".
 
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
@@ -1775,7 +1866,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `place-and-route` | `netlist` — the input netlist `provenance.input.content_hash` pins (additive, no bump) | 1 | #3751 |
 | `sta` | `def_path`, `verilog_path`, `spef_path` (`null` when the request does not use that input) | 2 | #2879 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
 | `sta` | `sdf` / `corners[].sdf` — a written output: the envelope plus `content_hash` (`null` unless `request.sdf: true`; additive, no bump) | 2 | #2886 |
-| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 2 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings) |
+| `functional-verification` | `environment.{results_xml,test_log,build_log}`, `environment.initial_state.runs[].results_xml`, `mutation_testing.results[].log_path` (`{path: null, scope: "absent"}` when there is none, e.g. `results_xml` on the Verilog-bench path; `--format text` still prints the real paths), and (schema_version 3, #5784) the echoed *inputs*: `environment.sdf.file`, `environment.initial_state.netlist`, and `environment.source_defines` — the last retyped from an absolute-path-keyed object to a list of `{"source": <envelope>, "defines": {...}}` (an envelope cannot be a JSON object key, and a source outside the repo has no path to key on; `[]` when absent). The `environment.{results_xml,test_log,build_log}` and `initial_state.runs[].results_xml` envelopes also carry an additive `sha256` (`sha256:<hex>` of the file as written, `null` when it was not produced, #4931). These fields and `environment.sources[]` use the repo containing the base for relative paths in the request. By default the base is the request file's directory, or the invoking directory for stdin and inline JSON, whose envelopes can therefore differ between invocations. `--base-dir` overrides either default. The same request file with its default base, or a fixed absolute `--base-dir`, keeps the classification repo stable. A relative `-o/--outdir` follows the invoking directory, so an artifact's path or scope can still change. If the base is outside every repo, present paths have scope `external` (#6762) | 3 | #4279 (moved from the plain-string table; schema-1 evidence carries absolute strings), #5784 (the echoed inputs; schema-2 evidence carries absolute strings) |
 | `array-check` | `file` (the hashed input layout) | 2 | #5788 |
 
 **Plain-string fields** — intentionally unchanged:
@@ -1793,7 +1884,7 @@ which reads the input field only (`signoff.py`'s `_INPUT_ARTIFACT_FIELDS`).
 | `layout-plan-check` | `gds_path` | 1 |
 | `lef-abstract` | `output`, `socket` | 2 |
 | `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
-| `functional-verification` | `info_path`, `options.trace.path` | 2 (`log_path` moved to the envelope table) |
+| `functional-verification` | `info_path`, `options.trace.path` | 3 (`log_path` moved to the envelope table; the echoed inputs joined them in #5784) |
 | `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
 | `characterize` | `liberty.path`, `liberty.roundtrip.probe_netlist`, `simulation.{testbench,request,report}`, `cells[].simulation.{testbench,request,report}`, `comparison.{ours,reference}` | 1 |
 
@@ -2031,33 +2122,53 @@ All eight share one contract:
   the recorded `content_hash`/`layout_sha256`, so a file that disagrees
   reports `drifted`. With no explicit input the behaviour is unchanged
   (additive; no `schema_version` bump, no new response field).
-- **An unresolvable input path is named, not silently `null` (issue #2595
-  for `lvs`, issue #6466 for `drc`; `erc` carries its own copy).** A
+- **An unresolvable input path is named, not silently `null` (issues #2595
+  for `lvs`, #6466 for `drc`, #6655 for `erc`).** A
   committed report that echoes an input back exactly
   as the request gave it re-hashes a *relative* echoed path against the
   **current working directory** of the `--check` invocation — a deliberate,
   shared convention, not an oversight, and unchanged here. Since #2659 above
-  this covers only `lvs`'s `reference` (and any pre-#2659 report's
-  bare-string field). But a path that resolves to no existing file
+  this covers only the echoes that are still a bare string: `erc`'s `spec`,
+  the `reference` and `deck_file` of a runset-engine `lvs` report, and any
+  pre-normalisation report's bare-string field. A non-runset `lvs` report
+  echoes its `reference` as the `{path, scope}` object, like its `layout`,
+  and `erc`'s `file` is that object too (#2703), so those re-anchor to the
+  repo root like `drc`'s `file`. But a
+  path that resolves to no existing file
   re-hashes to `null`, which alone reads as "the recorded hash moved". `klt
-  lvs --check` (its layout, reference and runset-deck lines) and `klt drc
+  lvs --check` (its layout, reference and runset-deck lines), `klt drc
   --check` (its `provenance.input.content_hash` line, on a top-level report
   and on each `reports.curated.`/`reports.native.` side of an `--engine both`
-  envelope) therefore attach an **additive, optional** `input_not_found`
-  block (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
-  `hint`) to such a `checks[]` entry; `expected`/`actual`/`match`/`status` are
+  envelope) and `klt erc --check` (its `provenance.input.content_hash` and
+  `provenance.spec.content_hash` lines) therefore attach an
+  **additive, optional** `input_not_found`
+  block to such a `checks[]` entry. The block has five keys on `drc` and
+  `erc` (`path`, `resolved`, `found_relative_to_report`, `resolved_against`,
+  `hint`); each of `lvs`'s three entries (layout, reference, runset deck)
+  adds a sixth, `resolved_repo_root` (#5845): the repo root a repo-scoped
+  echo resolved against, `null` for a bare-string echo or an explicit
+  override. `expected`/`actual`/`match`/`status` are
   unchanged, and the key is absent on a genuine content mismatch, on an
   echo that names no path (`scope: "external"`/`"absent"`, or no field) and
   on a path that resolves to an existing file. An explicit input override
-  (`klt drc <file> --check`, `klt lvs --layout`) still wins and is the path
-  diagnosed when *it* is missing. `klt drc --check`'s other echoed-path line,
-  `provenance.waivers.content_hash`, carries no such block (it is not routed
-  through the same resolution); its deck line has its own `deck_not_found`
-  block. Additive by the envelope
+  (`klt drc <file> --check`, `klt lvs --layout`/`--reference`) still wins and
+  is the path diagnosed when *it* is missing. `hint` is `null` unless the
+  input sits beside the report. When set, it always names the report's
+  directory to run `--check` from, and adds an "or pass …" clause only
+  where the verb has an override: `lvs`'s layout and reference and `drc`'s
+  input. `lvs`'s runset-deck line (`--deck-file` is refused with `--check`)
+  and both `erc --check` lines (`--check` is mutually exclusive with ERC's
+  positional inputs) have none, so their hints name only the report's
+  directory. `klt drc --check`'s other echoed-path line,
+  `provenance.waivers.content_hash`, and `klt erc --check`'s deck line carry
+  no such block (they are not routed through the same resolution; the deck
+  line resolves packaged decks by name, and DRC's deck line has its own
+  `deck_not_found` block). Additive by the envelope
   rules above — no `schema_version` bump, and a consumer that never reads the
   key sees the bytes it saw before. See
-  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`" and
-  [`cli/drc.md`](cli/drc.md).
+  [`cli/lvs.md`](cli/lvs.md)'s "`--check` / `--rerun`",
+  [`cli/drc.md`](cli/drc.md) and
+  [`cli/erc.md`](cli/erc.md).
 - **Tool identity is excluded from the diff**, and only tool identity:
   `provenance.klt_version`, `provenance.klayout_version`,
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
@@ -2124,11 +2235,13 @@ All eight share one contract:
   `spef_sta.spef_path`/`sdf_path`) to its file name on **both** sides
   before diffing. The identity check stays: a different file *name* drifts,
   and so does an artifact going `null` ↔ path (missing or newly appearing).
-  Message prose that embeds a path (`warnings[]`,
-  `power.placed.unavailable_reason`) is not reduced — scrub-shape drift
-  there remains visible, by design. The other flow verbs (`synthesize`) and
-  the analysis verbs (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed
-  this and are unchanged; a follow-up issue covers them if reproduced.
+  Message prose is not reduced, so it must not carry a path in the first
+  place: the DEF-derived `power.placed.unavailable_reason` strings (and the
+  `warnings[]` that quote them) name the DEF by file name only (issue
+  #6146), so a lint-clean envelope reproduces exactly. The other flow
+  verbs (`synthesize`) and the analysis verbs
+  (`drc`/`lvs`/`extract`/`equiv`/`erc`) have not needed this and are
+  unchanged; a follow-up issue covers them if reproduced.
 - **`klt signoff` excludes one more surface, and reports it separately**
   (issue #2526): the report's verbatim quotation of the checklist doc — each
   `items[]` entry's `title`/`text`/`notes`, and `source_doc_content_hash`.
@@ -2769,6 +2882,29 @@ report, so a reader can tell the two apart without looking at the argv.
 additive); it exists so a dry run states what it did not verify rather than
 letting a `"valid"` status imply more than it earned. See
 [`cli/pex.md`](cli/pex.md)'s "Validating an invocation without running it".
+
+### `klt pex --resistance-graph` echo fields (issue #5894)
+
+`extraction.resistance_graph.nets[]` entries — present only with
+`--resistance-graph` — additively gain `terminals` and `pair_resistance_ohm`,
+copied verbatim from `klt extract`'s per-net `resistance_graph`.
+`terminals` lists the sorted geometry-derived names available when the
+calculation stopped. A skipped net with one terminal retains that name.
+An unsupported solve can retain both terminal names, while a graph that
+failed before terminal discovery has an empty list.
+`pair_resistance_ohm` is the symmetric effective-resistance matrix. A
+solved matrix uses `null` for a disconnected pair. A `skipped` or
+`unsupported` net has an empty matrix (`[]`). This closes an honesty gap in the
+extraction-to-simulation loop: the lumped `resistance_ohm` a `legacy` net
+keeps is a series sum of *all* the net's fragments, so a tree-routed net's
+total overstates the terminal-to-terminal path (stub arms to terminals
+carrying no DC current are summed in), and nets with three or more terminals
+always keep `legacy` — the pair matrix is what a caller reads for the path
+resistance between two named terminals there. No existing field changes
+name, type or meaning, output without the flag stays byte-identical, so
+**no `schema_version` bump**. See [`cli/pex.md`](cli/pex.md) and
+[`cli/extract.md`](cli/extract.md)'s "Terminal-aware resistance graph"
+section.
 
 ### `klt corner-matrix check` coverage verdict (issue #5865)
 

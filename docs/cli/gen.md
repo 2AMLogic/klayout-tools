@@ -59,6 +59,10 @@ klt gen --pdk-pcell <library>/<cell> [--params <path-or-inline>] [--pdk <variant
   naming is part of `klt gen`'s documented output: a change to it is a
   CHANGELOG-recorded event, since structure names are written into the
   stream.
+  Under `--pdk-pcell` the child is **not** renamed: it keeps the vendor
+  PCell's own name (e.g. `cap_mim`), independent of `--cell-name`, so streams
+  generated under different `--cell-name`s share that child name (issue
+  #5933; pinned by `tests/test_gen_pdk_pcell_vendor_name.py`).
 - `-o`/`--output` — output GDS/OASIS path (default: `<cell_name>.gds`, written
   to the current directory). Format (`.gds`/`.oas`) is inferred from the
   extension, matching `klt render`'s auto-detection posture. The containing
@@ -895,6 +899,21 @@ draws a ring well: gf180mcu `medium_voltage` and sg13g2 `hv` PMOS ring variants
 stay clean on the curated decks (their real signoff Dualgate/ThickGateOx rules
 are not transcribed here and were *not* verified).
 
+**Marker and well past the ring's final Comp edge (issue #6503).** gf180mcu
+additionally resolves `voltage_flavor_ring_margin_um` (0.24 µm, the native
+runset's `DV.6`): the marker grows past the guard ring's *final*
+grid-snapped tap edge by that margin, and the ring's own
+well is grown off that same snapped edge by an MV-gated 0.16 µm
+(`DF.4d_MV`; a 3.3 V-only ring keeps the 0.15 µm default), so the native
+`gf180mcu.drc` runset's `DF.4d_MV`/`DV.6`/`DV.3`/`DV.7` and
+`nwell_OFFGRID` hold at every `ring_padding_um` — including the
+1.05–1.28 µm rule-swapping window a core-anchored marker used to produce.
+The same 0.16 µm well margin applies to ringless pfet tap pads: their
+NCOMP also lies under `Dualgate` and is subject to `DF.4d_MV`. Their well
+grows 0.01 µm per side; the core-anchored marker and the pads are unchanged.
+An nfet MV ring also gets the marker enclosure, but still draws no Nwell.
+Other families and requests without `voltage_flavor` are unchanged.
+
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
 `add_guard_ring` composes `guard_ring`'s ring-drawing (`ring_gap_side`/
@@ -996,7 +1015,7 @@ with their `.drc.json` reports checked in alongside).
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 | `add_guard_ring` | bool | `false`           | Enclose the array in an automatically-sized tap/guard ring (issue #1493) — see above. Unlike `diff_pair`'s own param of the same name, defaults to `false`. |
 | `ring_gap_side` | string | `""`              | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
-| `ring_gap_um`  | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_um`  | double | `0.0`              | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. On `ihp-sg13g2` (nfet) the *drawn* pSD opening — the requested gap snapped to the manufacturing grid on the PCell's own drawing grid, then inset by the tap-ring implant margin at each cut face — must additionally clear the deck's `psd.space.1` (0.31 µm). Near ~0.67 µm the outcome depends on where the cut faces snap (offset 0: `0.66` draws 0.300 µm and is rejected, `0.665` draws 0.310 µm and is accepted), so a request is rejected exactly when its drawn opening is below the rule, with the drawn opening and the rule named (issue #6790). On gf180mcu MOS arrays, the drawn guard-ring implant opening must clear 0.40 µm for both NFETs (`pplus.space.1`) and PFETs (`nplus.space.1`). Each side extends the implant 0.16 µm into the cut. With the default gf180mcuD geometry, a centered 0.715 µm west cut leaves 0.400 µm. A 0.0025 µm offset leaves 0.395 µm and fails the check (issue #6827). |
 | `ring_gap_offset_um` | double | `0.0`         | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um` | double | `0.5`            | Padding between the array's own shared-footprint box (`well_box_um`) and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. |
 | `interior_channel_um` | double | `0.0`         | Extra gap (µm) reserved between adjacent rows/columns, on top of the fixed inter-device spacing, so an interior unit device's pin has a navigable path to the array's edge (issue #1531). Must be `>= 0`. `0.0` (the default) is a strict no-op — byte-for-byte identical geometry to every request that predates this param. A positive value widens `row_pitch`/`col_pitch` by that amount and reports the resulting inter-row/inter-column gap bands in the response's `navigable_regions` field (`{"x0_um", "y0_um", "x1_um", "y1_um"}` rectangles). `klt gen-compose` (issue #1835) subtracts a block's own declared `navigable_regions` from its obstacle bbox before its own overlap check runs, so a `waypoints_um` backbone that stays inside the declared channel is no longer rejected as crossing its own block. |
@@ -1133,25 +1152,43 @@ NPC`, so without it Magic sees no resistor at all (an independent Magic
 cover the whole unit, end heads included, at `0.2`/`0.11`/`0.095` µm
 enclosure (`rpm.3`, `rpm.4`, and the 0.095 µm with which `sky130A.tech`'s
 own `cifoutput` grows NPC around the resistor), so adjacent units' masks
-abut and merge. With that, Magic's `extract all` + `ext2spice` recognises
-the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's own
-`drc(full)` still reports, on these cells, `licon.1c`'s "poly contact extends
-poly resistor by < 2.16um" and `rpm.1`'s minimum RPM/URPM width: the
-generator's heads are not drawn to the foundry cell's head geometry, and
-`klt drc --deck sky130` does not check those rules (see `docs/cli/drc.md`,
-"Precision-poly-resistor head rules are not checked"). That head-geometry
-attribution is measured, not assumed (2026-11-15: Magic 8.3.683, open_pdks
-sky130A `c6d73a35f524`, klt `0.9.3.dev3+gd5d57daf9a14`): forcing the marker
-to a uniform 0.2 µm on all four sides (`spacing_um` <= 0.4) leaves the
-`rpm.1` verdict unchanged, while sweeping only the head length clears it —
-`rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean from 2.08 µm — so
-the marker overhang is ruled out and the head-length fix is tracked in
-#5704. (The duplicated `poly.2` reports — "Distance between precision
-resistors < 0.21um" and "poly spacing < 0.21um" — seen on a standalone unit
-at klt 0.8.0 do not reproduce at klt `0.9.3.dev3`, so they are not
-tracked.) So the `high`/`xhigh` output is recognised by Magic but is
-**not** Magic-DRC-clean; use `klt drc --engine klayout` for the independent
-check. A reporter also saw Magic
+abut and merge. The contacted end heads themselves are drawn **2.16 µm**
+long along the current-flow axis (issue #5704): `sky130A.tech`'s DRC
+demands `extend xpc/a xhrpoly,uhrpoly 2160` — "poly contact extends poly
+resistor by < 2.16um" (`licon.1c + li.5`, one violation per short head,
+under Magic's default `drc(fast)` style as well as `drc(full)`) — and
+2.16 µm is exactly what the foundry's own cells draw
+(`res_to_endcont 1.985` + `end_contact_size/2` 0.095 + `poly_surround`
+0.08). The generator resolves this from a per-(PDK, flavor) table with no
+new request parameter, so a unit's total length grows by
+2 × (2.16 − 0.39) = 3.54 µm versus releases before this change; the
+recognised body span (and so the extracted `L`/`R`), the 0.19 × 2.0 µm
+licon slots and the pad height are unchanged. With that, Magic's `extract
+all` + `ext2spice` recognises
+the cell as `sky130_fd_pr__res_high_po_<w>` / `res_xhigh_po_<w>`. Magic's
+own DRC no longer reports the head-extension rule on these cells —
+verified live (2026-11-17, Magic 8.3.683, open_pdks `c6d73a35f524`): the
+reproducer cell below reported `licon.1c + li.5` twice per unit before the
+change and `No errors found.` after, under both `drc(fast)` and
+`drc(full)`, for both flavours; `rpm.1`'s minimum-width report cleared in
+the same run (that marker rule is tracked separately by issue #5659). That
+head-geometry attribution was measured, not assumed (2026-11-15: Magic
+8.3.683, open_pdks sky130A `c6d73a35f524`, klt `0.9.3.dev3+gd5d57daf9a14`):
+forcing the marker to a uniform 0.2 µm on all four sides (`spacing_um` <=
+0.4) left the `rpm.1` verdict unchanged, while sweeping only the head
+length cleared it — `rpm.1` gone from a 1.50 µm head, fully `drc(full)`-clean
+from 2.08 µm. (The duplicated `poly.2` reports, “Distance between precision
+resistors < 0.21um” and “poly spacing < 0.21um”, were length-specific in
+the 2026-11-18 measurements for #6706. With Magic 8.3.683, open_pdks
+sky130A `c6d73a35f524`, and klt `0.9.3.dev1789` and `0.9.3.dev1792`,
+a `length_um: 9.765` body fired both rules for both `high` and `xhigh`.
+The 9.77 and 10.0 µm bodies drew no `poly.2` report. A half-grid regrid
+at the odd multiple of 5 nm is an **unverified** explanation. Magic also
+printed “Input off lambda grid by 1/2” for the two clear lengths. Only
+these three lengths were measured. The finding stays with the odd-5 nm
+case below unless another length class reproduces it.) `klt drc --deck sky130` does not check the head rules (see
+`docs/cli/drc.md`, "Precision-poly-resistor head rules are not checked"),
+so use `klt drc --engine klayout` for the independent check. A reporter also saw Magic
 (10 nm input scale) extract a body whose length is an odd multiple of 5 nm
 (e.g. `length_um: 9.765`) as a generic `res_high_po` with both terminals
 on one net when its left edge sat on the 10 nm grid, and correctly when
@@ -2016,10 +2053,11 @@ above for why, and the hand-drawn-recipe workaround.
 | `splits`           | int    | `2`     | Interleaved sub-instances per device (cross-quad splits). Must be `>= 1`. Every column holds one `Q1` and one `Q2` sub-instance at the same x, at any `splits` — see "Both legs share one x column per terminal" above before floorplanning a one-column-per-net grid around this generator. |
 | `add_guard_ring`   | bool   | `true`  | Enclose the pair in an automatically-sized guard ring. |
 | `ring_gap_side`    | string | `""`    | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
-| `ring_gap_um`      | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. |
+| `ring_gap_um`      | double | `0.0`   | Length of that opening along its side (µm). Required (`>= 0.4`) with `ring_gap_side`, `0` otherwise. On `ihp-sg13g2` an NFET ring must leave a drawn pSD opening of at least 0.310 µm (`psd.space.1`). With default geometry a centered 0.665 µm west gap meets the rule. A 0.0025 µm offset moves the cut faces and leaves only 0.305 µm after snapping. |
 | `ring_gap_offset_um` | double | `0.0` | Slide the opening off its side's midpoint (µm) — e.g. onto the row of device ports a route needs to reach. |
 | `ring_padding_um`  | double | `0.5`   | Padding between the device core and the guard ring's inner edge (µm), when `add_guard_ring` is set. Must be `>= 0`. Widening this grows the band between the outermost active edge and the ring — the only room available for a gate contact's routing stub (issue #484). |
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
+| `pitch_x_um`       | double | `0.0`   | Override the inter-unit column pitch (µm) between adjacent sub-instances of a row (issue #5764). Must be `>= 0`. `0.0` (the default) means no override — byte-for-byte identical geometry to every request that predates this param. The default pitch is already the legal minimum (unit extent + the fixed `0.4` µm same-layer spacing), so an override can only *widen* it: a value below that minimum is **clamped up** to it, never emitted as DRC-violating geometry. When it is set, `drc_hints.pitch` reports `col_pitch_um` (effective), `min_col_pitch_um` and `pitch_x_clamped`, and a clamp adds a `warnings` entry. The override scales every column of *both* rows by the same step, so the legs' shared-x-column common-centroid property (above) is preserved. This is the room a [`gen-compose`](gen-compose.md) route needs for its own port stub plus via-drop landing pads when it wires two different nets to adjacent units of one row — on gf180mcu the default gap leaves ~0.19 µm where the deck demands 0.28 µm. |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
 | `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"`/`"lvt"` resolve on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |

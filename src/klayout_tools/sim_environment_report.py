@@ -5,12 +5,12 @@
 ``environment`` block from a long ordered sequence of contributions. Most of
 them already came from small, individually testable ``*_environment(...)``
 helpers -- :func:`~klayout_tools.sim._portable_environment`,
-:func:`~klayout_tools.sim._corner_coverage_environment`,
 :func:`~klayout_tools.sim_param_file.param_file_environment` and friends --
 but eleven were still written inline in the sweep function's epilogue, as a
 flat append-point that every feature needing to disclose something extended
 in place. This module holds those eleven, in the same shape the pattern
-already used:
+already used. The corner coverage helper shares the PDK's per-flavour
+classification with the sweep report (#5663).
 
 * each takes only the two-to-five values it actually needs, never the
   sweep function's ambient locals;
@@ -39,11 +39,14 @@ from . import device_multiplier_lint, env_provenance
 from . import sim_staging as sim_staging
 from ._batch_common import apply_unrun_signal
 from ._provenance import sha256_file
+from .pdk import PdkNotFoundError, list_corners
 
 __all__ = [
+    "ModelInputDigests",
     "NetlistDigests",
     "backend_environment",
     "budget_environment",
+    "corner_coverage_environment",
     "device_multiplier_environment",
     "fail_fast_probe_environment",
     "monte_carlo_environment",
@@ -79,6 +82,77 @@ def netlist_closure_environment(
         }
     except sim_staging.IncludeStagingError as exc:
         return {"netlist_closure_error": str(exc)}
+
+
+def _corner_process_sections(corner_points: list[Any]) -> list[str]:
+    """List process sections in sweep order for coverage and Monte Carlo reports."""
+    return [
+        name
+        for point in corner_points
+        for name in (
+            point.process_sections
+            if point.process_sections is not None
+            else ([point.process] if point.process else [])
+        )
+    ]
+
+
+def corner_coverage_environment(
+    request: dict[str, Any], corner_points: list[Any]
+) -> dict[str, Any]:
+    """Report typical and unknown device flavours at requested non-typical corners.
+
+    Use :func:`klayout_tools.pdk.list_corners`'s classification (#3794, #5663).
+    Each section lists proven typical flavours in ``unmoved_devices`` and
+    inconclusive ones in ``unknown_devices``. Omit empty lists, empty sections,
+    and the whole fragment when no PDK data or reportable sections remain.
+    """
+    models = request.get("models") or {}
+    if not (models.get("pdk") or models.get("pdk_root")):
+        return {}
+    process_sections = list(dict.fromkeys(_corner_process_sections(corner_points)))
+    if not process_sections:
+        return {}
+    try:
+        report = list_corners(variant=models.get("pdk"), root=models.get("pdk_root"))
+    except PdkNotFoundError:
+        return {}
+    by_corner = {entry["corner"]: entry for entry in report["corners"]}
+    entries: list[dict[str, Any]] = []
+    for name in process_sections:
+        corner = by_corner.get(name)
+        if corner is None:
+            continue
+        devices = [
+            device
+            for section in corner["sections"]
+            for device in section.get("devices", [])
+        ]
+        if not devices:
+            continue
+        entry = _corner_coverage_entry(name, devices)
+        if entry is not None:
+            entries.append(entry)
+    if not entries:
+        return {}
+    return {"corner_coverage": {"pdk": report["pdk"], "sections": entries}}
+
+
+def _corner_coverage_entry(
+    name: str, devices: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """One ``corner_coverage.sections[]`` row, or ``None`` when it must be
+    omitted (the typical section, or nothing to report either way)."""
+    unmoved = [d["flavour"] for d in devices if d["skew"] == "typical"]
+    unknown = [d["flavour"] for d in devices if d["skew"] == "unknown"]
+    if name == "typical" or not (unmoved or unknown):
+        return None
+    entry: dict[str, Any] = {"process": name}
+    if unmoved:
+        entry["unmoved_devices"] = unmoved
+    if unknown:
+        entry["unknown_devices"] = unknown
+    return entry
 
 
 @dataclass(frozen=True)
@@ -152,6 +226,56 @@ class NetlistDigests:
         block = provenance.get("input")
         if block is not None and self.sha256 is not None:
             block["content_hash"] = f"sha256:{self.sha256}"
+
+
+def _capture_model_files(paths: tuple[str, ...]) -> tuple[tuple[str, str | None], ...]:
+    return tuple((path, sha256_file(path)) for path in paths)
+
+
+def _model_file_entries(
+    files: tuple[tuple[str, str | None], ...], *, repo_root: str | None
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": os.path.basename(path),
+            **env_provenance.repo_relative_path(path, repo_root=repo_root),
+            "sha256": digest,
+        }
+        for path, digest in files
+    ]
+
+
+@dataclass(frozen=True)
+class ModelInputDigests:
+    """Client-side model hashes captured in load order before dispatch (#6508)."""
+
+    models_lib_sha256: str | None
+    osdi_preload: tuple[tuple[str, str | None], ...]
+    corner_section_libs: tuple[tuple[str, str | None], ...]
+
+    @classmethod
+    def capture(
+        cls,
+        models_lib: str | None,
+        osdi_preload: tuple[str, ...],
+        corner_section_libs: tuple[str, ...],
+    ) -> ModelInputDigests:
+        return cls(
+            sha256_file(models_lib),
+            _capture_model_files(osdi_preload),
+            _capture_model_files(corner_section_libs),
+        )
+
+    def environment(self, *, repo_root: str | None) -> dict[str, list[dict[str, Any]]]:
+        """Report OSDI files in load order and section libraries in first-use order."""
+        return {
+            key: _model_file_entries(files, repo_root=repo_root)
+            for key, files in (
+                ("osdi_preload", self.osdi_preload),
+                ("corner_section_libs", self.corner_section_libs),
+            )
+            if files
+        }
 
 
 def netlist_source_environment(netlist_source: Any) -> dict[str, Any]:
@@ -330,12 +454,19 @@ def device_multiplier_environment(
     lint's findings for this run's netlist -- warning-only, never a failing
     exit.
 
-    Instance cards of the netlist are checked against the device
-    subcircuit texts of the scanned ``.include`` closure (the same shared
-    ``sim_staging`` resolver every other disclosure here uses), so a net
-    carrying ``mult=6`` and no ``m=`` against a subcircuit that declares
-    ``mult`` but never forwards it is named instead of silently simulating
-    1x. Additive/optional: ``{}`` -- the key absent -- when there is
+    Instance cards are read from the netlist and included DUT files (issue
+    #6684). Included calls between sky130 primitive-library devices are
+    model internals. Other calls inherit their include site's scope. The shared
+    ``sim_staging`` resolver supplies the full closure for checking each
+    card, and a card resolves its callee from its own enclosing
+    subcircuits outward, so a net carrying
+    ``mult=6`` and no ``m=`` against a subcircuit that declares ``mult``
+    but never forwards it is named instead of silently simulating 1x. A
+    finding from a closure file carries that file's repo-relative label as
+    ``file``; a top-level finding keeps the pre-#6684 shape, and the
+    ``note``/``unevaluated`` disclosures cover the netlist's own cards
+    only (a PDK library's parametric internals must not add noise).
+    Additive/optional: ``{}`` -- the key absent -- when there is
     nothing to say (no checkable instance, or every checked pair agrees).
     A closure that cannot be resolved or read is disclosed through the
     lint's ``note`` (instances whose subcircuit text is missing) and
@@ -346,41 +477,11 @@ def device_multiplier_environment(
             netlist_text = handle.read()
     except (OSError, UnicodeDecodeError):
         return {}
-    try:
-        staged = sim_staging.stage_netlist(
-            netlist_path,
-            netlist_staged_name="netlist.cir",
-            roots=sim_staging.host_resolved_roots(request or {}),
-        )
-        closure_paths = []
-        for item in staged.files:
-            source = item.source_path or item.local_path
-            # stage_netlist always sets one of the two (source_path whenever
-            # content rewrote the file, local_path otherwise).
-            assert source is not None
-            closure_paths.append(source)
-        not_scanned = [
-            {"target": target, "reason": reason}
-            for target, reason in staged.host_resolved_detail
-        ]
-    except sim_staging.IncludeStagingError:
-        closure_paths = []
-        not_scanned = [{"target": "<include closure>", "reason": "unresolved"}]
-    closure_texts: list[str] = [netlist_text]
-    for path in closure_paths:
-        # Labels follow the scanned-closure convention (issue #2928):
-        # repo-relative, never an absolute external path.
-        info = env_provenance.repo_relative_path(path, repo_root=repo_root)
-        label = info.get("path") or (
-            f"<{info.get('scope', 'external')}>/{os.path.basename(path)}"
-        )
-        try:
-            with open(path, encoding="utf-8") as handle:
-                closure_texts.append(handle.read())
-        except (OSError, UnicodeDecodeError):
-            not_scanned.append({"target": label, "reason": "unreadable"})
-    cards = device_multiplier_lint.instance_cards(netlist_text)
-    subckts = device_multiplier_lint.collect_subckts(closure_texts)
+    root_name = "netlist.cir"
+    sources, not_scanned = _multiplier_sources(
+        root_name, netlist_path, netlist_text, request, repo_root
+    )
+    cards, subckts = device_multiplier_lint.scan_closure(root_name, sources)
     report = device_multiplier_lint.instance_report(cards, subckts)
     has_content = (
         bool(report["findings"]) or "note" in report or "unevaluated" in report
@@ -396,3 +497,50 @@ def device_multiplier_environment(
             file=sys.stderr,
         )
     return {"device_multiplier": report}
+
+
+def _multiplier_sources(
+    root_name: str,
+    netlist_path: str,
+    netlist_text: str,
+    request: dict[str, Any],
+    repo_root: str | None,
+) -> tuple[dict[str, tuple[str, str | None]], list[dict[str, str]]]:
+    """Pair each staged text with its original report label. Rewritten include
+    targets are the edges between these texts, including in nested fragments."""
+    sources: dict[str, tuple[str, str | None]] = {root_name: (netlist_text, None)}
+    try:
+        staged = sim_staging.stage_netlist(
+            netlist_path,
+            netlist_staged_name=root_name,
+            roots=sim_staging.host_resolved_roots(request or {}),
+        )
+    except sim_staging.IncludeStagingError:
+        return sources, [{"target": "<include closure>", "reason": "unresolved"}]
+
+    not_scanned = [
+        {"target": target, "reason": reason}
+        for target, reason in staged.host_resolved_detail
+    ]
+    if staged.netlist.content is not None:
+        sources[root_name] = (staged.netlist.content, None)
+    netlist_real = os.path.realpath(netlist_path)
+    for item in staged.includes:
+        path = item.source_path or item.local_path
+        assert path is not None
+        if os.path.realpath(path) == netlist_real:
+            continue
+        info = env_provenance.repo_relative_path(path, repo_root=repo_root)
+        label = info.get("path") or (
+            f"<{info.get('scope', 'external')}>/{os.path.basename(path)}"
+        )
+        text = item.content
+        if text is None:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                not_scanned.append({"target": label, "reason": "unreadable"})
+                continue
+        sources[item.staged_name] = (text, label)
+    return sources, not_scanned

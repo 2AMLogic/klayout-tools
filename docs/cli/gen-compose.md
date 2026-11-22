@@ -116,7 +116,9 @@ cleanly.
     override (issue #5803).** Every via-drop draws a square landing pad on
     each of its `landing_layers` — on the sky130 curated deck a fixed 0.42 µm
     square (sized from the contact-enclosure convention), grown per
-    `(landing, via)` pair by the area/enclosure floors #2072/#2074 added, and
+    `(landing, via)` pair by the area/enclosure floors #2072/#2074 added
+    (and, on gf180mcuC/D top metal, by the native `MT.1`/`MT.4` floors
+    #6612/#6645 — see "Via-drop routing" below), and
     independent of `routing.width_um`. A generator whose terminals are pitched
     tighter than that footprint cannot be landed on independently — exactly
     the compatibility wall #5803 records. This field sets the pad side from
@@ -128,12 +130,33 @@ cleanly.
     the same size drawing inserts. Omitting it keeps the default pads
     byte-for-byte unchanged. If a pad overlaps another net on an intermediate
     or far layer of a via stack, the rejection names the pad footprint,
-    terminal pitch, this override, and the deck's spacing rule when available.
+    terminal pitch, this override (and, for an intermediate ladder pad,
+    `routing.minimal_ladder` below), and the deck's spacing rule when
+    available.
     A pad that violates spacing on the route layer without overlapping gets
     the same diagnostic. A literal overlap on the route layer reports
     `crosses already-routed net` even when it involves a pad. For example,
     a pad can cross the other net's wire while the terminal pads are clear
     of each other.
+  - **`routing.minimal_ladder` is the opt-in minimal-ladder mode (issue
+    #6058).** A multi-hop via-drop ladder draws a landing pad on *every*
+    plane it crosses; by default every one of them is at least the fixed
+    0.42 µm contact-derived baseline, even where the deck's own rules for
+    that `(landing, via)` pair would allow less. With this flag set, the
+    pads on the ladder's **intermediate** planes — every level between the
+    backbone's plane and the pin's own layer — resolve to their own
+    per-pair floors (area, width, plain enclosure, and two-adjacent-edges
+    enclosure), dropping the baseline; the two terminal pads per endpoint
+    keep today's sizing. On the sky130 curated deck that shrinks a met1
+    intermediate pad over via1 from 0.42 µm to 0.32 µm
+    (`met1.enclosing_adjacent.via.1`), enough to route a neighbour past the
+    ladder where the default pads violate `met1.space.1`. Checks measure
+    the shrunk footprints, the composed output passes the same curated
+    deck, and a pair the deck gives no enclosure rule for keeps the
+    baseline (never shrunk on missing information). Mutually exclusive
+    with `routing.landing_pad_size_um`. See the field table above for the
+    pitch arithmetic and the deck/stack assumptions behind the quoted
+    numbers.
 - **Declare-only connectivity (no `routing`, #1188)** — `routing` is
   optional: omitting it (or passing `{}`) with a non-empty `connectivity[]`
   still validates every net's `{block, port}` pins against the referenced
@@ -1339,16 +1362,24 @@ the met4 pad to 1.18 µm (0.8 + 2 × 0.19), while met5's 2 µm area floor
 already exceeds its 1.42 µm enclosure floor (0.8 + 2 × 0.31). Missing
 enclosure rules leave the existing baseline and area floors intact.
 On gf180mcuC/D the top-metal pad is additionally floored to 0.44 µm
-(#6612): the native metaltop deck both 5LM variants select enforces
-`MT.1` width ≥ 0.44 µm on Metal5, a rule the curated deck cannot express
-(its `metal5.width.1` is 0.28 µm and its `metaltop.width.1` sits on
-MetalTop, a layer no 5LM composition draws), so that one floor is keyed
-by variant instead of resolved from the deck. The floor shapes the drawn
-pads (it composes into the same per-pair floor as the area and enclosure
-rules) and the landing search's reserved footprint alike. Because it is
+(#6612) and 0.75 µm (#6645): the native metaltop deck both 5LM variants
+select enforces `MT.1` width ≥ 0.44 µm and `MT.4` area ≥ 0.5625 µm² on
+Metal5 — rules the curated deck cannot express (its `metal5.width.1` is
+0.28 µm, its `metaltop.width.1` sits on MetalTop, a layer no 5LM
+composition draws, and `MT.4` is not transcribed at all), so those two
+floors are keyed
+by variant instead of resolved from the deck. The area floor is the
+binding one: its 0.75 µm square side subsumes `MT.1`'s 0.44 µm, and an
+isolated top-metal landing pad — the exact geometry #6645 reproduced
+routing two coincident lower-metal ports through `top_metal` — drawn at
+the width-only floor was 0.1936 µm², below `MT.4`. The floors shape the
+drawn pads (they compose into the same per-pair floor as the area and
+enclosure rules) and the landing search's reserved footprint alike.
+Because they are
 part of the resolved per-pair floor, a `routing.landing_pad_size_um`
-override below 0.44 µm on gf180mcuC/D Metal5 is rejected up front as an
-application error naming `MT.1` (native runset, 9K/11K), like any other
+override below 0.75 µm on gf180mcuC/D Metal5 is rejected up front as an
+application error naming `MT.4` (native runset, 9K/11K) — the binding,
+largest floor — like any other
 below-deck-floor override.
 Pads round outward onto the output grid, preserving their margin against
 the rounded via cut as well as their minimum size.
@@ -2167,6 +2198,7 @@ exit codes).
 | `routing.cross_block_layer_role` | string | Optional (issue #1168). A *second* layer role, resolved the same way as `routing.layer_role`, that a same-block self-net leg falls back to when it would otherwise short across another of that block's own pads on `routing.layer_role` (the exact rejection "Bussing this net across the block would draw a silent short" names as the fix) — see "Cross-block bus routing (`routing.cross_block_layer_role`, #1168)" below. Must resolve to a distinct layer connectable to `routing.layer_role` by some via-drop ladder in the resolved PDK family's own metals/vias stack (an application error, exit 1, otherwise; issue #1567 lifted the earlier single-via-hop-only restriction here). Every other net in the same request is unaffected — this is a per-leg fallback, not a whole-composition layer switch like selecting `routing.layer_role: "metal2"` directly. Configuring it also arms the same-block multi-self-net detour retry (#1393, "More than one same-block self-net per block" below), which is what lets a *second* self-net on the same block route when its own fixed-shape backbone would collide with the first's, and (issue #1680) the general route-vs-route collision retry — any leg, same-block or inter-block, rejected for crossing a *different* net's already-accepted route is retried once with `routing.layer_role`/`routing.cross_block_layer_role` swapped before the net is failed outright. Either retry can land a leg back on the primary `routing.layer_role`, so read the drawn geometry rather than assuming a leg's layer. |
 | `routing.cross_block_width_um` | number | Optional (issue #1620). The width a leg draws at once it actually falls back to `routing.cross_block_layer_role` — independent of `routing.width_um`, so naming a cross-block layer with a stricter deck minimum never forces the *primary* plane's own routing wider than requested. Defaults to `routing.cross_block_layer_role`'s own deck minimum-width rule when omitted; when given, must be `> 0` and floored the same way `routing.width_um` is against `routing.layer_role` (an application error, exit 1, naming this field, the offending value, and the resolved deck's own rule id and threshold). Ignored (and meaningless) without `routing.cross_block_layer_role` also configured. |
 | `routing.landing_pad_size_um` | number | Optional (issue #5803). The side (µm) of the square landing pad every via-drop draws on each of its `landing_layers`, replacing the fixed 0.42 µm baseline (sized from the contact-enclosure convention) — the knob that reconciles a generator's terminal pitch with the composer's pad footprint. Must be `> 0`. Each drawn `(landing layer, via layer)` pair's own deck floor — the pad layer's minimum-area side and the via side plus twice its enclosing-margin rule, the same floors #2072/#2074 grow the default pads with — is checked against the override once routing has resolved which pairs this request actually draws: an override below a pair's floor is an application error (exit 1) naming the binding rule id and threshold (a smaller pad would be a guaranteed `klt drc` violation, so it is never silently grown back). Where the floors allow it, pads draw at exactly the override, and the route-vs-route collision checks measure the same footprint the drawing inserts. Omitting it changes nothing (default pads, byte-for-byte). |
+| `routing.minimal_ladder` | boolean | Optional (issue #6058), default `false`. Shrinks a multi-hop via-drop ladder's **intermediate** hop pads — the pads on metal levels the ladder merely passes through, neither the backbone's own plane nor the pin's own layer — from the fixed 0.42 µm baseline to each pair's own deck floor: the pad layer's minimum-area side, its minimum-width rule, and the via side plus twice *both* the pair's plain enclosure margin and its two-adjacent-edges enclosure margin. On sky130A that floors a met1 pad over via1 at 0.32 µm (`met1.enclosing_adjacent.via.1`: 0.15 µm cut + 2×0.085 µm) where the baseline drew 0.42 µm. The two **terminal** pads of each endpoint (its port's own layer and the leg's route layer) keep today's sizing, and a pair whose deck declares no enclosure rule keeps the baseline (no information justifies shrinking). The route-vs-route collision checks measure the same shrunk footprints drawing inserts (checks and drawn output cannot disagree), and `klt drc` on the composed output stays clean: the floors are read from the same curated deck. **Minimum compatible terminal pitch**: for two equal square pads of side *s* on a layer whose same-layer spacing rule is *d* (axis-aligned, edge to edge), the layer-local pitch is *s + d* — e.g. two 0.320 µm met1 squares against sky130A's `met1.space.1` (0.140 µm) need ≥ 0.460 µm centre-to-centre. A ladder deposits pads on *every* plane it crosses, so derive a route's real bound from the largest `pad side + spacing` on any plane the two routes share — intermediate pads at their minimal-ladder floors, terminal pads at the (unchanged) baseline or override, arrays adding `(max(rows, cols) − 1) × pitch`. Assumptions behind the quoted numbers: sky130A curated deck, single cuts (no `access.via_array`), sky130's li1→met5 metals stack. Cannot be combined with `routing.landing_pad_size_um` (they select two different pad-sizing policies; setting both is an application error, exit 1, naming both fields). `false`/omitted is byte-for-byte today's output. |
 | `options.cell_name`/`options.output` | string | Same semantics as `klt gen`'s own `options` fields — see [`docs/cli/gen.md`](gen.md). `cell_name` defaults to `"gen_compose_0"`; `output` defaults to `"<cell_name>.gds"`. |
 | `options.boundary` | object | Optional (#3998). `{"bbox_um": {"x0", "y0", "x1", "y1"}}` draws exactly one rectangle on layer 235/4 (`prBoundary.boundary`, shared by sky130 and gf180mcu) in the top cell. The extent is exactly the caller-given `bbox_um`, never derived from the placed content (containment is advisory, not enforced). Density decks (e.g. `gf180mcu_density.lydrc`) need this layer to evaluate their whole-design ratios; without it they silently check nothing. Invalid (`boundary` not an object, missing/non-numeric corner, `x1 <= x0` or `y1 <= y0`) is an application error (exit 1). Omitted or `null`: output is unchanged. Example: `"options": {"cell_name": "chip_top", "output": "chip_top.gds", "boundary": {"bbox_um": {"x0": 0, "y0": 0, "x1": 2000, "y1": 2000}}}`. |
 

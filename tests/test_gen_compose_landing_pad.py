@@ -1,6 +1,7 @@
-"""Request-level landing-pad size override and pad-vs-pitch rejection (#5803).
+"""Request-level landing-pad size override and pad-vs-pitch rejection (#5803),
+plus the opt-in minimal-ladder mode (#6058).
 
-Covers the two mechanisms issue #5803 landed:
+Covers the three mechanisms:
 
 * ``routing.landing_pad_size_um`` -- a request-level pad side replacing the
   fixed ``_VIA_LANDING_SIZE_UM`` baseline, validated against each drawn
@@ -9,7 +10,12 @@ Covers the two mechanisms issue #5803 landed:
   threaded into the collision-check footprints so checks match drawing;
 * the named pad-vs-pitch rejection -- a conflict whose geometry is a
   landing pad reports the pad footprint vs the neighbouring terminal's
-  pitch (and the deck's spacing rule), not a generic backbone crossing.
+  pitch (and the deck's spacing rule), not a generic backbone crossing;
+* ``routing.minimal_ladder`` (#6058) -- intermediate via-drop ladder pads
+  sized at their own per-pair enclosure/area floors instead of the
+  contact-derived baseline, with the two terminal pads, the mode-off
+  output, the collision-check footprints and the drawing loop all kept in
+  agreement.
 """
 
 import klayout.db as kdb
@@ -32,7 +38,8 @@ _LI1 = (67, 20)
 _MET1 = (68, 20)
 _MET2 = (69, 20)
 _CONTACT = (66, 44)
-_VIA1 = (67, 44)
+_MCON = (67, 44)
+_VIA1 = (68, 44)
 
 
 def _routed_drops(*pairs):
@@ -100,9 +107,11 @@ def test_override_replaces_the_baseline_where_floors_allow(pdk_root):
 
 
 def test_override_below_the_deck_floor_names_the_binding_rule(pdk_root):
-    geometry = _routed_drops((_MET1, _VIA1))
+    # (met1, mcon): the area rule binds (the enclosure margin over the
+    # generic cut side stays under met1.area.1's 0.2881um side).
+    geometry = _routed_drops((_MET1, _MCON))
     floor, floors = layer_rules._landing_pad_floor_um(
-        "sky130A", _MET1, _VIA1, via_drop_cut_side_um("sky130A", _VIA1)
+        "sky130A", _MET1, _MCON, via_drop_cut_side_um("sky130A", _MCON)
     )
     rule_id = max(floors, key=lambda f: f[1])[0]
     with pytest.raises(GenComposeError) as excinfo:
@@ -301,7 +310,9 @@ def test_pad_boxes_use_the_pair_sized_override():
             "block_id": "a",
         }
     ]
-    baseline = pads._landing_and_widen_pad_boxes(drops, [], _MET1, None)
+    baseline = pads._landing_and_widen_pad_boxes(
+        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A"), 0.001
+    )
     assert baseline[0][2] == pytest.approx(
         (
             1.0 - _VIA_LANDING_SIZE_UM / 2,
@@ -311,7 +322,7 @@ def test_pad_boxes_use_the_pair_sized_override():
         )
     )
     overridden = pads._landing_and_widen_pad_boxes(
-        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A", 0.6)
+        drops, [], _MET1, pads._make_landing_pad_side_um("sky130A", 0.6), 0.001
     )
     assert overridden[0][2] == pytest.approx((0.7, 0.7, 1.3, 1.3))
 
@@ -431,3 +442,30 @@ def test_override_below_the_deck_floor_rejects_the_request_up_front(pdk_root, tm
         _compose_mos_array(pdk_root, tmp_path, routing)
     assert "routing.landing_pad_size_um" in str(excinfo.value)
     assert "requires >=" in str(excinfo.value)
+
+
+def test_mode_rejects_a_non_boolean_value(pdk_root, tmp_path):
+    routing = {
+        "layer_role": "metal2",
+        "width_um": 0.3,
+        "minimal_ladder": "yes",
+        "_per_net": {"S": None},
+    }
+    with pytest.raises(GenComposeError, match="must be a boolean"):
+        _compose_mos_array(pdk_root, tmp_path, routing)
+
+
+def test_mode_is_rejected_together_with_the_override(pdk_root, tmp_path):
+    routing = {
+        "layer_role": "metal2",
+        "width_um": 0.3,
+        "minimal_ladder": True,
+        "landing_pad_size_um": 0.6,
+        "_per_net": {"S": None},
+    }
+    with pytest.raises(GenComposeError) as excinfo:
+        _compose_mos_array(pdk_root, tmp_path, routing)
+    message = str(excinfo.value)
+    assert "request.routing.minimal_ladder" in message
+    assert "request.routing.landing_pad_size_um" in message
+    assert "cannot be combined" in message

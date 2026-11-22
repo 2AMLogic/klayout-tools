@@ -183,6 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
+from functools import cache
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -209,6 +210,15 @@ from .gen import (
 )
 from .gen_compose_boundary import draw_pins_and_boundary, parse_boundary
 from .gen_compose_derived_frame import add_composed_frames as _framed
+from .gen_compose_draw import (
+    _draw_routed_entry as _draw_routed_entry,
+)
+from .gen_compose_draw import (
+    _insert_via_cuts as _insert_via_cuts,
+)
+from .gen_compose_ladder_floors import (
+    _resolve_intermediate_landing_pad_sizes as _resolve_intermediate_landing_pad_sizes,
+)
 from .gen_compose_landing_pads import (
     _landing_and_widen_pad_boxes,
     _leg_conflict_message,
@@ -231,11 +241,9 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
-    _drop_array_extra_um,
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
-    _polyline_midpoint_um,
     _port_own_layer,
     _resolve_cross_block_route_layer,
     _resolve_label_layer,
@@ -248,6 +256,9 @@ from .gen_compose_routing import (
 from .gen_compose_routing import _cleanup_points as _cleanup_points
 from .gen_compose_routing import _endpoint_stub_widen_um as _endpoint_stub_widen_um
 from .gen_compose_routing import _pin_ref as _pin_ref
+from .gen_compose_routing import (
+    _polyline_midpoint_um as _polyline_midpoint_um,
+)
 from .gen_compose_routing import _resolve_via_drop_layer as _resolve_via_drop_layer
 from .gen_compose_routing import (
     _segment_bbox_interior_overlap_um as _segment_bbox_interior_overlap_um,
@@ -261,7 +272,6 @@ from .gen_compose_routing import (
 from .gen_compose_routing import manhattan_backbone as manhattan_backbone
 from .gen_compose_routing import route_two_pin as route_two_pin
 from .gen_compose_via_cuts import (
-    landing_pad_half_dbu,
     own_via_cut_clearance_reason,
     via_drop_cut_side_um,
 )
@@ -3251,6 +3261,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     cross_block_width_um: float | None = None
     # routing.landing_pad_size_um (issue #5803): None keeps the pre-#5803 pads.
     landing_pad_override_um = None
+    # routing.minimal_ladder (issue #6058): False keeps every pad at today's
+    # sizing; True sizes a ladder's intermediate hop pads at their own
+    # per-pair enclosure/area floors (see _resolve_intermediate_landing_pad_
+    # sizes). The two fields select competing pad-sizing policies and are
+    # rejected together below.
+    minimal_ladder = False
     side_for_pair = _make_landing_pad_side_um(pdk_info["variant"])
     if connectivity and not declare_only:
         layer_role = routing.get("layer_role")
@@ -3301,9 +3317,35 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         landing_pad_override_um = _parse_landing_pad_override(
             routing.get("landing_pad_size_um"), "request.routing.landing_pad_size_um"
         )
+        raw_minimal_ladder = routing.get("minimal_ladder")
+        if raw_minimal_ladder is not None:
+            if not isinstance(raw_minimal_ladder, bool):
+                raise GenComposeError(
+                    "request.routing.minimal_ladder must be a boolean when given"
+                )
+            minimal_ladder = raw_minimal_ladder
+        if minimal_ladder and landing_pad_override_um is not None:
+            # Issue #6058: the two fields are competing pad-sizing policies
+            # -- the override replaces the fixed baseline for *every* pad,
+            # the mode drops the baseline from *intermediate* pads only --
+            # so honouring both would silently pick one per hop. Name both
+            # fields and let the caller choose.
+            raise GenComposeError(
+                "request.routing.minimal_ladder and "
+                "request.routing.landing_pad_size_um select two different "
+                "pad-sizing policies and cannot be combined -- "
+                "minimal_ladder sizes a ladder's intermediate hop pads at "
+                "their own per-pair enclosure/area floors while keeping "
+                "the terminal pads, landing_pad_size_um replaces the fixed "
+                "baseline for every pad; set one or the other"
+            )
         if landing_pad_override_um is not None:  # baseline resolver when absent
             side_for_pair = _make_landing_pad_side_um(
                 pdk_info["variant"], landing_pad_override_um
+            )
+        elif minimal_ladder:
+            side_for_pair = _make_landing_pad_side_um(
+                pdk_info["variant"], minimal_ladder=True
             )
 
         cross_layer_role = routing.get("cross_block_layer_role")
@@ -3403,19 +3445,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # from route_layer). So this cache is keyed by (block_id, layer) instead,
     # read lazily the same way, and reused by every leg that drops onto the
     # same block/layer pair.
-    own_block_layer_geometry_cache: dict[
-        tuple[str, tuple[int, int]], dict[str, Any] | None
-    ] = {}
-
+    @cache
     def _own_block_layer_geometry(
-        block_id: str, layer: tuple[int, int]
+        block_id: str, layer: tuple[int, int], dbu: float | None = None
     ) -> dict[str, Any] | None:
-        key = (block_id, layer)
-        if key not in own_block_layer_geometry_cache:
-            own_block_layer_geometry_cache[key] = read_block_layer_geometry(
-                block_id, blocks[block_id], offsets_um[block_id], layer
-            )
-        return own_block_layer_geometry_cache[key]
+        return read_block_layer_geometry(
+            block_id, blocks[block_id], offsets_um[block_id], layer, dbu
+        )
 
     # --- Per-net/per-leg routing-plane override (#1655) ----------------------
     # `routing.layer_role` resolves ONE plane for the whole composition, so a
@@ -3558,34 +3594,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return width
 
-    # dbu for the route-vs-route collision check below (#1057), read lazily
-    # (only once connectivity[] actually has a net to check) from any one
-    # block's own GDS -- this pre-flight check only ever compares continuous
-    # micron-space geometry quantized at *some* fine resolution, so any
-    # single block's own dbu is precise enough to reuse here even though (as
-    # of #1514) it need not be identical to every other block's dbu, nor to
-    # the composed layout's own dbu `_write_composed_gds` resolves below
-    # (the finest dbu across all blocks, reconciling any coarser block onto
-    # it) -- a difference of, at most, one block's own dbu step is far below
-    # any DRC-relevant tolerance.
-    _route_dbu_cache: list[float] = []
+    @cache
+    def _block_dbu(block_id: str) -> float:
+        layout, _ = _load_block_cell(block_id, blocks[block_id])
+        return float(layout.dbu)
 
     def _route_dbu() -> float:
-        if not _route_dbu_cache:
-            import klayout.db as kdb
+        # Route-vs-route spacing retains its historical first-block grid.
+        return _block_dbu(order[0])
 
-            probe_block_id = order[0]
-            probe_gds_path = blocks[probe_block_id]["gds_path"]
-            probe_layout = kdb.Layout()
-            try:
-                probe_layout.read(probe_gds_path)
-            except Exception as exc:  # klayout raises RuntimeError for bad paths
-                raise GenComposeError(
-                    f"block '{probe_block_id}': could not read gds_path "
-                    f"'{probe_gds_path}': {exc}"
-                ) from exc
-            _route_dbu_cache.append(probe_layout.dbu)
-        return _route_dbu_cache[0]
+    @cache
+    def _drawing_dbu() -> float:
+        # The writer reconciles every block onto the finest input grid.
+        return min(_block_dbu(block_id) for block_id in order)
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -4007,15 +4028,21 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # The box collection lives in :func:`_landing_and_widen_pad_boxes`
             # (issue #5803: shared with the pad-vs-pitch message path).
             pad_boxes = _landing_and_widen_pad_boxes(
-                via_drops, stub_widen, layer, side_for_pair
+                via_drops,
+                stub_widen,
+                layer,
+                side_for_pair,
+                _drawing_dbu() if via_drops else _route_dbu(),
             )
 
-            for pad_layer, block_id, box, _drop in pad_boxes:
+            for pad_layer, block_id, box, drop in pad_boxes:
                 pad_spacing = _min_spacing_um_for_layer(pad_layer)
                 if pad_spacing is None:
                     continue
                 pad_spacing_um, pad_rule_id = pad_spacing
-                pad_geometry = _own_block_layer_geometry(block_id, pad_layer)
+                pad_geometry = _own_block_layer_geometry(
+                    block_id, pad_layer, _drawing_dbu() if drop is not None else None
+                )
                 if pad_geometry is None:
                     continue
                 violation_um = _pad_self_notch_violation_um(
@@ -4401,6 +4428,20 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         via_drop_size_um,
         override_um=landing_pad_override_um,
     )
+    # routing.minimal_ladder (issue #6058): the intermediate hop pads of the
+    # drawn ladders, sized at their own per-pair enclosure/area floors
+    # without the contact-derived baseline -- the same per-pair distinction
+    # ``side_for_pair`` already applied to the collision-check footprints
+    # above, resolved once more here for drawing so the two cannot disagree
+    # (#1197). ``None`` with the mode off: drawing reads only
+    # ``landing_pad_size_um`` and is byte-for-byte the pre-#6058 output.
+    intermediate_landing_pad_size_um = (
+        _resolve_intermediate_landing_pad_sizes(
+            routed_geometry, pdk_info["variant"], via_drop_size_um
+        )
+        if minimal_ladder
+        else None
+    )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
         order,
@@ -4414,6 +4455,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
         landing_pad_size_um=landing_pad_size_um,
+        intermediate_landing_pad_size_um=intermediate_landing_pad_size_um,
         boundary_bbox_um=boundary_bbox_um,
     )
     warnings.extend(dbu_rescale_warnings)
@@ -4601,27 +4643,30 @@ def _integer_dbu_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     return int(nearest)
 
 
-def _insert_via_cuts(
-    shapes: Any, drop: dict[str, Any], cx: int, cy: int, half: int, dbu: float
-) -> None:
-    """Draw a via-drop's cut(s) centred on ``(cx, cy)`` (dbu): one square, or
-    -- when ``drop["array"]`` is set by a label-derived port's
-    ``access.via_array`` (#2927) -- the rows x cols array at its deck pitch."""
+def _rescale_block_layout(
+    src_layout: Any, dbu: float, block_id: str, gds_path: str
+) -> str | None:
+    """Scale shapes and instances onto the output grid before polygonization."""
     import klayout.db as kdb
 
-    array = drop.get("array")
-    if not array:
-        shapes.insert(kdb.Box(cx - half, cy - half, cx + half, cy + half))
-        return
-    pitch = int(round(array["pitch_um"] / dbu))
-
-    def axis(count: int) -> list[int]:
-        return [int(round((i - (count - 1) / 2.0) * pitch)) for i in range(count)]
-
-    for dy in axis(array["rows"]):
-        for dx in axis(array["cols"]):
-            x, y = cx + dx, cy + dy
-            shapes.insert(kdb.Box(x - half, y - half, x + half, y + half))
+    original_dbu = src_layout.dbu
+    if abs(original_dbu - dbu) <= 1e-12:
+        return None
+    ratio = _integer_dbu_ratio(original_dbu, dbu)
+    if ratio is None:
+        raise GenComposeError(
+            f"block '{block_id}': gds '{gds_path}' has dbu={original_dbu}, "
+            f"which does not evenly divide the composed cell's dbu={dbu} "
+            "-- every block's dbu must be an exact integer multiple of "
+            "the finest block's own dbu to be losslessly reconciled"
+        )
+    src_layout.transform(kdb.ICplxTrans(float(ratio)))
+    src_layout.dbu = dbu
+    return (
+        f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
+        f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
+        f"(exact integer ratio {ratio})"
+    )
 
 
 def _create_placed_sub_cell(
@@ -4650,136 +4695,6 @@ def _create_placed_sub_cell(
     return sub_cell
 
 
-def _draw_routed_entry(
-    layout: Any,
-    top: Any,
-    route: dict[str, Any],
-    dbu: float,
-    route_layer: tuple[int, int] | None = None,
-    label_layer: tuple[int, int] | None = None,
-    via_drop_size_um: dict[tuple[int, int], float] | None = None,
-    landing_pad_size_um: dict[Any, float] | None = None,
-) -> None:
-    """Draw one ``routed_geometry`` entry into ``top`` (the per-route half of
-    :func:`_write_composed_gds`, shared with ``klt route``)."""
-    import klayout.db as kdb
-
-    points = route["points_um"]
-    if not points or len(points) < 2:
-        return
-    entry_route_layer = route.get("route_layer", route_layer) or route_layer
-    assert entry_route_layer is not None  # route_layer or the entry's own
-    entry_label_layer = route.get("label_layer", label_layer)
-    layer_index = layout.layer(entry_route_layer[0], entry_route_layer[1])
-    path_points = [
-        kdb.Point(int(round(x / dbu)), int(round(y / dbu))) for (x, y) in points
-    ]
-    width_dbu = int(round(route["width_um"] / dbu))
-    top.shapes(layer_index).insert(kdb.Path(path_points, width_dbu))
-
-    # `label` is False for every leg of a multi-leg (bundle) net after
-    # its first (#1073): the legs are one conductor, so one kdb.Text
-    # names it -- exactly as a two-pin net's single path gets exactly
-    # one label. Absent/True keeps the pre-#1073 one-label-per-entry
-    # behaviour for any other caller.
-    if entry_label_layer is not None and route.get("label", True):
-        lx_um, ly_um = _polyline_midpoint_um(points)
-        label_point = kdb.Point(int(round(lx_um / dbu)), int(round(ly_um / dbu)))
-        top.shapes(layout.layer(entry_label_layer[0], entry_label_layer[1])).insert(
-            kdb.Text(route["net"], kdb.Trans(label_point))
-        )
-
-    # Via-drops (#454; generalized to a multi-hop ladder by issue
-    # #1567): each entry drops one via hop at exactly the target
-    # pin's own position -- a via square on `via_layer`, plus a
-    # landing-pad square on *both* of that hop's own
-    # `landing_layers` (_VIA_LANDING_SIZE_UM, independent of the
-    # route's own trace width) so the via's enclosure requirement
-    # holds regardless of how thin routing.width_um is. A single-hop
-    # drop's two `landing_layers` are exactly (this leg's own
-    # effective layer, the pin's own layer) -- the pre-#1567 shape --
-    # and the backbone's own Path already terminates exactly at this
-    # same point (manhattan_backbone's endpoints are the raw pin
-    # positions), so the landing pad always overlaps -- and merges
-    # with -- the trace. A multi-hop ladder instead carries one
-    # `via_drops` entry per hop, all at the identical (x, y): drawing
-    # each one exactly the same way as the single-hop case builds
-    # the full stack -- the backbone's own landing pad from the first
-    # hop, the pin's own landing pad from the last hop, and one
-    # shared landing pad per intermediate level in between (drawn
-    # twice, once by each of its two neighbouring hops, at the same
-    # position with each hop's required side; the squares merge).
-    #
-    # The via square's own side (#1501) is looked up per `via_layer`
-    # in `via_drop_size_um` -- resolved by `compose()` against the
-    # same curated deck `klt drc` judges the drawn square with --
-    # falling back to the PDK-independent `_VIA_DROP_SIZE_UM`
-    # constant for any layer the caller didn't resolve a floor for
-    # (an unresolvable PDK family, or a pre-#1501 caller that never
-    # populates `via_drop_size_um` at all).
-    #
-    # Each landing pad's own side (#2072/#2074) is looked up per
-    # (landing layer, via layer) in `landing_pad_size_um`, resolved
-    # against the area floor and this hop's via-enclosure rule. Fall back
-    # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
-    # layer the caller didn't resolve a floor for. A hop's two
-    # `landing_layers` can therefore draw two *differently*-sized
-    # squares at the identical (x, y) -- e.g. a met2 pad at the
-    # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
-    # clear `met3.area.1` -- since each layer's own area minimum is
-    # independent of its neighbour's.
-    for drop in route.get("via_drops", []):
-        via_pair = drop["via_layer"]
-        via_layer_index = layout.layer(via_pair[0], via_pair[1])
-        cx = int(round(drop["x_um"] / dbu))
-        cy = int(round(drop["y_um"] / dbu))
-        via_size_um = (via_drop_size_um or {}).get(via_pair, _VIA_DROP_SIZE_UM)
-        via_half_dbu = int(round((via_size_um / 2.0) / dbu))
-        # #2927: a label-derived port's `access.via_array` draws a
-        # rows x cols cut array centred on the pin; pads below grow
-        # to enclose it.
-        _insert_via_cuts(top.shapes(via_layer_index), drop, cx, cy, via_half_dbu, dbu)
-        array_extra_um = _drop_array_extra_um(drop)
-        for landing_pair in drop.get("landing_layers", ()):
-            landing_size_um = (landing_pad_size_um or {}).get(
-                (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
-            ) + array_extra_um
-            # Outward rounding keeping the *rounded* via's margin; the
-            # access search sizes its pad with the same helper (#6572).
-            landing_half_dbu = landing_pad_half_dbu(landing_size_um, via_size_um, dbu)
-            landing_box = kdb.Box(
-                cx - landing_half_dbu,
-                cy - landing_half_dbu,
-                cx + landing_half_dbu,
-                cy + landing_half_dbu,
-            )
-            top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
-                landing_box
-            )
-
-    # Stub-widen (#496): each entry (route_two_pin's own
-    # _endpoint_stub_widen_um) re-draws the backbone's own first
-    # segment out of one endpoint -- from that pin's exact position,
-    # `length_um` along its own `direction_deg`, exactly the same
-    # span the narrow backbone above already covers -- at the pin's
-    # own reported `width_um` instead of the route's. Drawn on this
-    # entry's own effective layer, the same layer/cell the
-    # backbone's own Path is already on, so it merges into one shape
-    # with both the backbone and (when the pin's own pad is also on
-    # that layer, which is the only case this fires for -- see the
-    # docstring) the block's own pad underneath.
-    for widen in route.get("stub_widen", []):
-        cx = int(round(widen["x_um"] / dbu))
-        cy = int(round(widen["y_um"] / dbu))
-        half_dbu = int(round((widen["width_um"] / 2.0) / dbu))
-        length_dbu = int(round(widen["length_um"] / dbu))
-        if widen["direction_deg"] == 90:
-            widen_box = kdb.Box(cx - half_dbu, cy, cx + half_dbu, cy + length_dbu)
-        else:  # 270
-            widen_box = kdb.Box(cx - half_dbu, cy - length_dbu, cx + half_dbu, cy)
-        top.shapes(layer_index).insert(widen_box)
-
-
 def _write_composed_gds(
     blocks: dict[str, dict[str, Any]],
     order: list[str],
@@ -4794,6 +4709,7 @@ def _write_composed_gds(
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
     landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float]
     | None = None,
+    intermediate_landing_pad_size_um: dict[Any, float] | None = None,
     boundary_bbox_um: dict[str, float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
@@ -4940,34 +4856,9 @@ def _write_composed_gds(
         gds_path = block["gds_path"]
         src_layout = src_layouts[block_id]
 
-        if abs(src_layout.dbu - dbu) > 1e-12:
-            # #1514: klt draw (always 0.001) and pre-#1512 `klt gen` output
-            # composed against a #1512-and-later `klt gen` block resolved
-            # against a finer-grid PDK (e.g. gf180mcu's 0.0005) used to hit
-            # a hard refusal here. Reconcile it instead, whenever the ratio
-            # is an exact integer, by rescaling this block's geometry onto
-            # `dbu` -- the same scale/transform pattern `_merge_gds_view`
-            # (place_and_route.py) already uses for the analogous DEF/LEF
-            # merge problem (#1090). `kdb.Layout.transform()` rescales every
-            # shape *and* every instance array vector in the layout, so a
-            # block's own internal hierarchy (and any array pitch inside it)
-            # survives the rescale intact.
-            ratio = _integer_dbu_ratio(src_layout.dbu, dbu)
-            if ratio is None:
-                raise GenComposeError(
-                    f"block '{block_id}': gds '{gds_path}' has dbu={src_layout.dbu}, "
-                    f"which does not evenly divide the composed cell's dbu={dbu} "
-                    "-- every block's dbu must be an exact integer multiple of "
-                    "the finest block's own dbu to be losslessly reconciled"
-                )
-            original_dbu = src_layout.dbu
-            src_layout.transform(kdb.ICplxTrans(float(ratio)))
-            src_layout.dbu = dbu
-            dbu_rescale_warnings.append(
-                f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
-                f"dbu={original_dbu} onto the composed cell's dbu={dbu} "
-                f"(exact integer ratio {ratio})"
-            )
+        warning = _rescale_block_layout(src_layout, dbu, block_id, gds_path)
+        if warning:
+            dbu_rescale_warnings.append(warning)
 
         src_cell_name = block["cell_name"]
         src_cell = src_layout.cell(src_cell_name)
@@ -5048,6 +4939,7 @@ def _write_composed_gds(
                 label_layer,
                 via_drop_size_um,
                 landing_pad_size_um,
+                intermediate_landing_pad_size_um,
             )
 
     draw_pins_and_boundary(top, layout, pin_placements, boundary_bbox_um)

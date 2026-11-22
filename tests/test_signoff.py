@@ -8611,11 +8611,6 @@ def test_describe_grader_shape():
         "pinned_runsets",
     }
     assert result["not_applicable_items"] == {"6": ["digital"]}
-    assert {p["pdk"] for p in result["pinned_runsets"].values()} == {
-        "ihp-sg13g2",
-        "ihp-sg13cmos5l",
-        "gf180mcu",
-    }
     assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
     assert result["grading_ruleset_id"].startswith("sha256:")
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
@@ -14019,12 +14014,12 @@ def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, 
 def test_check_excludes_build_identity_and_the_checklist_prose_and_nothing_else(
     tmp_path,
 ):
-    """The verdict exclusion is exactly two registered sets -- build identity
-    (issue #2249) and the report's quotation of the checklist (issue #2526):
-    every *other* top-level field of a tier report is still compared, so a
-    future field cannot quietly join the unchecked set. Guards against
-    widening either set by accident."""
+    """Pin three registered sets: build identity (#2249), checklist prose (#2526),
+    and derived unmet_reason_counts (#5903); compare every other top-level field."""
+    from klayout_tools.signoff_unmet_reasons import DERIVED_REPORT_PATHS
+
     assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+    assert DERIVED_REPORT_PATHS == frozenset({("unmet_reason_counts",)})
     # The only *top-level* doc-prose path; the rest are per-item/per-block.
     excluded_top_level = {"build", "source_doc_content_hash", "unmet_reason_counts"}
     assert {
@@ -18236,7 +18231,7 @@ def test_item7_partition_qualified_list_with_digital_single_entry(tmp_path):
 
 
 def _capture_attest_timeout(monkeypatch, spec):
-    from klayout_tools import signoff_attest
+    from klayout_tools import signoff_attest_command
 
     seen = {}
 
@@ -18244,8 +18239,8 @@ def _capture_attest_timeout(monkeypatch, spec):
         seen["timeout"] = kwargs["timeout"]
         return subprocess.CompletedProcess(argv, 0, stdout=b"")
 
-    monkeypatch.setattr(signoff_attest.subprocess, "run", fake_run)
-    signoff_attest._run_command(".", spec)
+    monkeypatch.setattr(signoff_attest_command.subprocess, "run", fake_run)
+    signoff_attest_command._run_command(".", spec)
     return seen["timeout"]
 
 

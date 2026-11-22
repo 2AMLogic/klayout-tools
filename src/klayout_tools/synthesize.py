@@ -260,10 +260,11 @@ from ._verilog_params import (
 )
 from ._yosys_error_messages import _synthesis_error_message
 from .equiv import EquivError, run_equiv
+from .equiv_verdict import require_equivalence
 from .evidence_canonicalize import rerun_result_for
 from .liberty_compare import LibertyCompareError, parse_liberty_text
 from .pdk_cells import resolve_liberty_for_cell_library
-from .request_paths import RequestPaths
+from .request_paths import RequestPaths, resolve_readable_files
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
@@ -1876,50 +1877,14 @@ def _verify_synthesis_equivalence(
             f"equivalence check against source RTL could not be completed: {exc}"
         ) from exc
 
-    status = equiv_report["status"]
-    if status != "equivalent":
-        raise SynthesizeError(_equivalence_failure_message(status, equiv_report))
-
-    return {
-        "status": status,
-        "engine": equiv_report["engine"],
-        "engine_version": equiv_report["engine_version"],
-        "timeout_s": equiv_report["timeout_s"],
-        "elapsed_s": equiv_report["elapsed_s"],
-        "artifacts": equiv_report["artifacts"],
-    }
-
-
-def _equivalence_failure_message(status: str, equiv_report: dict[str, Any]) -> str:
-    """An actionable :class:`SynthesizeError` message for a non-
-    ``"equivalent"`` ``klt equiv`` verdict against a just-produced netlist
-    -- names the diverging outputs for a proven ``"counterexample"``, or the
-    first diagnostic for an ``"inconclusive"`` (timeout) verdict."""
-    log_path = equiv_report.get("artifacts", {}).get("log_path")
-    if status == "counterexample":
-        counterexample = equiv_report.get("counterexample") or {}
-        diverging = counterexample.get("diverging_outputs") or []
-        confirmed = counterexample.get("confirmed_by_simulation")
-        detail = (
-            f"diverging outputs: {', '.join(diverging)}"
-            if diverging
-            else "no diverging outputs reported"
-        )
-        message = (
-            "synthesized netlist is NOT equivalent to its source RTL "
-            f"(klt equiv reported 'counterexample'; {detail}; "
-            f"confirmed_by_simulation={confirmed})"
-        )
-    else:
-        diagnostics = equiv_report.get("diagnostics") or []
-        detail = diagnostics[0]["message"] if diagnostics else "no diagnostic detail"
-        message = (
-            "equivalence check against source RTL did not reach a verdict "
-            f"(klt equiv reported '{status}'): {detail}"
-        )
-    if log_path:
-        message += f" -- see {log_path} for the full proof"
-    return message
+    return require_equivalence(
+        equiv_report,
+        error_cls=SynthesizeError,
+        counterexample_prefix=(
+            "synthesized netlist is NOT equivalent to its source RTL"
+        ),
+        no_verdict_prefix="equivalence check against source RTL",
+    )
 
 
 def _run_timing_restructuring(
@@ -2055,20 +2020,13 @@ def _resolve_sources(sources: Any, request_dir: str) -> list[str]:
     if not all(isinstance(entry, str) and entry for entry in sources):
         raise SynthesizeError("request.sources entries must be non-empty strings")
 
-    resolved: list[str] = []
-    for entry in sources:
-        path = _rpath(entry, request_dir, "request.sources entry")
-        if not os.path.isfile(path):
-            raise SynthesizeError(f"RTL source not found: {entry}")
-        try:
-            with open(path, "rb"):
-                pass
-        except OSError as exc:
-            raise SynthesizeError(
-                f"could not read RTL source '{entry}': {exc}"
-            ) from exc
-        resolved.append(os.path.abspath(path))
-    return resolved
+    return resolve_readable_files(
+        sources,
+        request_dir,
+        SynthesizeError,
+        field="request.sources entry",
+        noun="RTL source",
+    )
 
 
 def _validate_macros(macros: Any, request_dir: str) -> list[dict[str, Any]]:
@@ -3127,11 +3085,9 @@ def _run_yosys(
         _write_yosys_log(script_path, "", str(exc))
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
-        _write_yosys_log(script_path, exc.stdout, exc.stderr)
+        log_path = _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
-            f"yosys did not complete within {timeout_s}s (script "
-            f"'{script_path}') -- process killed (a run hung on yosys-abc's "
-            "stdout has its abc child killed with the whole process group)"
+            ytimeout.timeout_message(timeout_s, script_path, log_path, exc.stdout)
         ) from exc
 
     _write_yosys_log(script_path, completed.stdout, completed.stderr)
@@ -3143,7 +3099,7 @@ def _run_yosys(
 
 def _write_yosys_log(
     script_path: str, stdout: str | bytes | None, stderr: str | bytes | None
-) -> None:
+) -> str:
     """Keep both streams next to every executed script, including failed trials."""
 
     def text(stream: str | bytes | None) -> str:
@@ -3151,10 +3107,12 @@ def _write_yosys_log(
             return stream.decode("utf-8", errors="replace")
         return stream or ""
 
+    log_path = os.path.splitext(script_path)[0] + ".log"
     _write_text_file(
-        os.path.splitext(script_path)[0] + ".log",
+        log_path,
         f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
     )
+    return log_path
 
 
 def _submodule_key(

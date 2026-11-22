@@ -787,8 +787,11 @@ exits `0` and writes a well-formed, *empty* `.lyrdb` report — a false
 `"status": "clean"` verdict indistinguishable from a genuinely clean layout.
 `--deck-var` is opt-in and additive: omitting it leaves the zero-config
 `input`/`report`-only invocation unchanged, so a self-contained deck (e.g.
-sky130A's `sky130A.lydrc`) needs no new flag. A value missing the `=`
-separator is a clean error (exit 1). `--deck-var` is a klayout-engine-only
+sky130A's `sky130A.lydrc`) needs no new flag. An entry missing the `=`
+separator, or with a blank name (`=v`), is a clean error (exit 1); whitespace
+around the name and value is stripped, a later repeat of a name wins, and only
+the first `=` splits (issue #6738 -- the same parser `klt lvs` and `klt
+extract` use). `--deck-var` is a klayout-engine-only
 flag — passing it alongside `--engine curated` (the default) is silently
 ignored, not rejected, the same treatment `--deck-file`/`--timeout-s`
 already get for that engine mismatch.
@@ -1217,6 +1220,40 @@ Its via-level containment rules already report a fully orphan via:
 M1 and LISD/LIG. (A hand-drawn `V1` with no `M1`/`M2` nearby reports
 `V1.AUX.1` under `--engine klayout`.) The per-side `*.EN.*` rules there only
 measure a margin on vias that already land, so they need no flag.
+
+#### Verifying "zero new findings" for a `require_containment` opt-in (issue #6174)
+
+Every `require_containment` opt-in (#5883 family: #5737 sky130, #5915 gf180mcu,
+#5916 sg13g2) is gated on "zero new findings on the existing corpus". (asap7 sits
+under the same #5883 umbrella but needs no opt-in -- see above -- so the recipe
+reaches it only when a new asap7 rule is added.)
+That corpus is **two** trees, and `tests/corpus/<pdk>/` alone is the smaller
+one for most PDKs (`tests/corpus/` has no sg13g2 tree at all, yet the repo
+tracks ten real sg13g2 layouts). Enumerate both:
+
+```bash
+ls tests/corpus/<pdk>/                                  # fixture corpus
+git ls-files 'blocks/<prefix>*/output/*.gds*'           # mirrored block layouts
+```
+
+`<prefix>` is the PDK's block-directory prefix, which is not always the PDK
+name: `sg13g2-` (and `sg13cmos5l-` for the sg13cmos5l deck), `gf180-` plus the
+`gf180mcu_fd_sc_mcu*` cells, `sky130-` plus the `sky130_fd_sc_hd__*` cells,
+`asap7-`. Run `git ls-files 'blocks/*/output/*.gds*'` unfiltered and read the
+directory names if in doubt. Then run `run_drc(path, "<pdk>")` on every layout
+at the merge base and at the PR head, and report **any layout whose
+`rule_counts` changed**, naming the rule and the before/after count.
+
+Pre-existing violations are baseline, not new findings: the `blocks/` layouts
+are snapshots mirrored from the downstream canary repos by
+`.github/workflows/refresh-canaries.yml` and several are known-violating, so
+nothing gates on their DRC status. Only the delta attributable to the new rule
+counts, and a delta there is evidence to triage (a true positive belongs
+upstream in the canary repo, not in a waiver here), not an automatic blocker.
+Worked example: opting sg13g2 in (PR #6065) added `metal2.enclosing.via1.1: 0
+-> 12` on `blocks/sg13g2-bandgap/output/bandgap_amp.gds` only; all 12 are true
+positives (250 x 250 dbu Via1 centred on a Metal2 boundary, half outside) and
+the other nine sg13g2 layouts were unchanged.
 
 ### Sized/derived-layer rules (`DerivedLayer`)
 
@@ -1817,10 +1854,34 @@ Comparison is by **region, not by rule id or count**: zero vs non-zero plus
 bbox overlap (the precedent is `docs/design/magic-oracle.md`), so 1 vs 2
 markers over the same spot agree. Only rules an explicit mapping group pairs
 up (`drc_crosscheck.RULE_MAPPING`, curated rule ids ↔ native RDB categories)
-are compared. **The shipped mapping is empty**: a wrong pairing manufactures
+are compared. **The shipped mapping is minimal**: a wrong pairing manufactures
 false agreement or disagreement, so groups are added one at a time with a
-verified equivalence. Until then every real run is `not_comparable`, and the
-per-engine reports are the useful output.
+verified equivalence. It currently carries exactly one group, for `gf180mcu`:
+curated `comp.enclosing.contact.1` ↔ native `CO.4` (verified 2026-11-16, issue
+#5720: both engines flagged the same 16 contact-enclosure markers in the same
+cell, overlapping exactly). Deliberately *absent*: `comp.width.mv.1` ↔
+`DF.1a_MV` — since #5719 both sides exclude the `mvsd`/`mvpsd`-marked LDMOS
+drains, but by different mechanisms: the PDK deck by boolean clip
+(`comp_56v.not(mvsd.or(mvpsd))`), the curated rule by `DerivedLayer`'s
+whole-polygon context stage. The two therefore still diverge on a polygon
+straddling a marker boundary (dropped whole here, clipped remainder there —
+a documented modelling divergence, see `decks/gf180mcu.py`), so the pair is
+an unverified divergence, not the verified equivalence a mapping group
+requires. Every rule outside
+a group is `unmapped`, and an unmapped rule can never produce `agree_*` — so a
+real gf180mcu run still reports `not_comparable` (with the contact-enclosure
+group's own verdict under `groups`), and the per-engine reports remain the
+complete picture.
+
+When `comparison.state` is `not_comparable`, `comparison.reason` (issue #5720,
+optional, absent on every other state) names which of three causes applied,
+most-fundamental first:
+
+| `comparison.reason` | Meaning |
+|---|---|
+| `mapping_empty` | no group is defined for this deck at all — no comparison was attempted |
+| `group_not_covered` | a defined group's rules did not all run on both sides (a `groups[].state` of `not_covered`) |
+| `unmapped_rules_ran` | every defined group was covered, but rules outside the mapping ran on either side (`unmapped.curated` / `unmapped.native` non-empty) |
 
 | `comparison.state` | Meaning |
 |---|---|
@@ -1940,17 +2001,21 @@ and the 2.16 µm poly-contact-extension that `sky130A.tech`'s DRC reports as
 "poly contact extends poly resistor by < 2.16um"), nor `rpm.1`'s minimum
 mask width. `licon.1`'s own 0.17 µm minimum is merely exempted for these
 licons by an approximation (see the `licon1.width.1` note below), not
-replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell therefore
-reads `clean` here while the PDK's own Magic `drc(full)` still reports those
-head rules; a `klt drc --deck sky130` pass is not evidence the heads meet
-them. Both `licon.1c` and `rpm.1` are head-geometry-derived — measured
-2026-11-15 (Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
-`0.9.3.dev3+gd5d57daf9a14`), a uniform 0.2 µm marker (`spacing_um` <= 0.4)
-leaves `rpm.1` unchanged while head length alone clears it — so the marker
-overhang is ruled out and the head-length fix is tracked in #5704. `klt
-drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the independent
-check. This gap is documentation-only: no field of the JSON `coverage`
-object changes.
+replaced by `licon.1b/c`. A `klt gen res_array` `high`/`xhigh` cell reads
+`clean` here, and since issue #5704 the generator also draws its end heads
+to the 2.16 µm extension — the two verdicts no longer disagree on that rule
+for generated cells (verified live, 2026-11-17: the pre-#5704 cell reported
+`licon.1c + li.5` under Magic `drc(fast)`/`drc(full)` while this deck said
+`clean`; the fixed cell reports `No errors found.` under both). Both
+`licon.1c` and `rpm.1` were head-geometry-derived — measured 2026-11-15
+(Magic 8.3.683, open_pdks sky130A `c6d73a35f524`, klt
+`0.9.3.dev3+gd5d57daf9a14`): a uniform 0.2 µm marker (`spacing_um` <= 0.4)
+left `rpm.1` unchanged while head length alone cleared it. For
+arbitrary layout a `klt drc --deck sky130` pass still is not evidence the
+heads meet `licon.1b/c` — the deck has no such rule;
+`klt drc --engine klayout` (the PDK's own `sky130A_mr.drc`) is the
+independent check. This gap is documentation-only: no field of the JSON
+`coverage` object changes.
 
 Nine of these rules approximate official rules our engine cannot transcribe
 literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
@@ -3428,6 +3493,29 @@ Follow-up acceptance criteria if the missing definitions are established
    single standard cells carry no tap, so the check needs the placed-row
    context (`TAPCELL_WITH_FILLER`) rather than a per-cell run.
 
+### Markers on preset PDN geometry (`V4.M4.EN.1`, `V4.M5.EN.2`, `M5.AUX.1`)
+
+On a block routed by `klt place-and-route` with `power.preset: "asap7sc7p5t"`,
+some markers of these three rules can come from the PDN, not the router or
+the cells. Attribute a marker to the PDN only after it lands on matching
+`SPECIALNETS` geometry in the routed DEF; the rule id alone does not say where
+a marker came from. The preset's M2–M5 via stack uses the tech LEF's wide
+`V4` bar, which has zero `M4` enclosure, so `V4` cuts on the M5 straps can
+miss the 11 nm opposite-side enclosure (`V4.M4.EN.1`, `V4.M5.EN.2`). The
+request has no control for this; [#6909](https://github.com/2AMLogic/klayout-tools/issues/6909)
+tracks the repair. For `M5.AUX.1`, check whether the marker sits on an M5
+strap edge in the routed DEF's `SPECIALNETS`. Strap edges move with the
+snapped core origin. In the committed
+`tests/fixtures/place_and_route_drcfill/routed.def` (1000 units per µm, first
+`ROW` at x = 1026 nm), both 216 nm M5 stripes have edges 6 nm off the 24 nm
+grid: 1230/1446 nm (centre 1338) and 1758/1974 nm (centre 1866). To move the
+straps, replace `power.preset` with its explicit `power.straps` and
+`power.connects` (the two forms are mutually exclusive) and adjust the M5
+entry's `power.straps[].offset_um`. The deck still reports every such marker;
+nothing here is a waiver. Measurements and the recipe are under
+[Platform PDN presets](place-and-route.md#platform-pdn-presets-powerpreset-issue-2123)
+in the `klt place-and-route` guide.
+
 ### Shipped standard cells
 
 The pinned shipped cells are the acceptance gate for every rule the deck
@@ -3562,6 +3650,35 @@ placed more than once is **not conflated**: each placement's violations fall
 inside only that placement's world bounding box, so they attribute to the
 correct occurrence — the shared `source_cell`/`source_path` name the reused
 definition, while the distinct `bbox` locates the specific placement.
+
+**Grid markers (`check: "ongrid"`) are attributed by geometry, not by
+bounding box** (issue #6447). `ongrid` runs on the *merged* layer, so when a
+top-level shape overlaps a child on the same layer, the union gains
+T-vertices on the child's boundary — and a marker there can sit inside a
+child that drew nothing off-grid. For a native (non-derived) physical-layer
+`ongrid` marker, `klt drc` instead looks at the source shapes on the rule's
+layer at that exact point, in the checked cell's coordinates (so an
+off-grid *placement* offset counts, and a clean cell moved off-grid by its
+transform is the owner of the edges it contributes). Each offending axis
+needs a source edge through the point at that coordinate — a horizontal
+edge supplies Y, a vertical edge supplies X. The marker is attributed to a
+child only when that evidence names **exactly one placement** (placements
+are told apart by transform, not by cell name):
+
+- `source_cell`/`source_path` are `null` for a marker owed to top-level
+  geometry, so a waiver for the clean child cannot hide it;
+- they are also `null` when an offending axis has no source edge,
+  when two placements both supply an edge there (overlapping or
+  duplicated placements, or an edge from one placement crossing a
+  coordinate from another), or when a diagonal edge passes through the point
+  — the owner is then unproven, and no bounding-box fallback is applied;
+- otherwise they carry the owning placement's cell and instance path as
+  usual, including for a child's own corners and for a T-vertex where the
+  child's edge supplies the offending coordinate.
+
+Detection is unchanged — the same markers are reported at the same
+coordinates; only who they are filed under differs. Spacing, enclosure and
+other rule kinds, and derived-layer rules, keep the bounding-box rule above.
 
 These two fields are **purely additive** to the JSON contract — the existing
 `cell` field keeps its meaning (the top cell) and the sort key is unchanged
@@ -3866,7 +3983,7 @@ zero-violation case (where `drc__error__count` is `0`).
 | `check`       | string               | The check kind (`"width"`, `"space"`, `"enclosing"`, `"net_space"`, etc.). For `"enclosing"`/`"enclosed"`, `check` does not distinguish a marginal-distance violation from a zero-overlap escape violation — both are reported under the same `check` string; see "`\"enclosing\"`/`\"enclosed\"` also catch zero-overlap escapes" above. |
 | `layer`       | string               | The deck's own layer name (e.g. sky130's `"poly.drawing"` or gf180mcu's `"Poly2"`) if the deck names the layer, else `"<layer>/<datatype>"`. |
 | `cell`        | string               | Name of the top cell the violation was found under. (The check is flattened per top cell — see "Limitation: whole-layout, flattened" — so this is always a top cell, never a sub-instance.) |
-| `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). See "Per-instance attribution" below. |
+| `source_cell` | string \| null       | Cell-definition name of the *innermost placed instance* whose bounding box fully contains this violation's `bbox` — the originating standard cell for a hierarchical, machine-generated layout. `null` when the violation is contained in no single instance: top-level geometry, or a `bbox` that straddles an instance boundary (a violation *between* two placements belongs to neither). For a native physical-layer `ongrid` marker the owner is the one placement whose own source edges supply the offending coordinate, else `null` — never a mere bounding-box match. See "Per-instance attribution" below. |
 | `source_path` | array\<string\> \| null | The instance chain from the top cell's direct child down to `source_cell` (inclusive), e.g. `["block_a", "sky130_fd_sc_hd__inv_2"]`; a single-element list for a directly-placed leaf. `null` exactly when `source_cell` is `null`. |
 | `bbox`        | object (dbu ints)    | `{"left", "bottom", "right", "top"}`, in database units.                     |
 | `polygon`     | array\<[x,y]\> \| null | Vertices in database units, or `null` if the check produced a degenerate edge pair that could not be converted to a polygon. A marker whose hull is zero-area — every vertex collinear on the failing edge, which a total-deficit edge pair produces (e.g. an `enclosing` violation where the enclosed edge is exactly coincident with the enclosing edge, zero extension) — is reported as a 2-point segment `[min, max]` spanning the failing edge's full extent, not as the self-touching quad the hull literally is. |
@@ -4264,11 +4381,19 @@ Regenerated deterministically from each rule's own `layer`/`other_layer`/
 `threshold_dbu` via `tests/golden_deck/generate_golden_deck.py` — see
 `tests/golden_deck/README.md` for the manifest schema, the regeneration
 workflow, and the sky130 native-deck (`--engine klayout`) cross-check
-results this issue ran against a real `sky130A.lydrc`. gf180mcu's own
-`--engine klayout` cross-check remains deferred as of issue #904 (its
-native *DRC* deck still has no single runnable file — matching this
-section's existing "no single runnable native deck" limitation above), even
-though its golden-pair manifest now covers all 44 of its `DrcRule` entries
+results this issue ran against a real `sky130A.lydrc`. gf180mcu's
+golden-pair-vs-native-deck cross-check tier itself remains sky130-only
+(deferred as of issue #904), but its original premise is stale
+(corrected 2026-11-16, issue #5720): the claim that gf180mcu's native *DRC*
+deck "has no single runnable file" no longer holds — since issue #4002 the
+PDK ships one family main script, `tech/drc/gf180mcu.drc`, which
+`klt drc --engine klayout|both --pdk <variant>` resolves
+(`native_deck.kind: pdk_main_script`), and a live `--engine both` run on
+`gf180mcuA` has since driven both engines to completion on the same layout
+(issue #5720; its curated-vs-native comparison is `drc_crosscheck`'s, not
+this manifest tier's). The tier deferral now reflects only that nobody has
+wired the manifest fixtures through the native engine for gf180mcu —
+even though its golden-pair manifest covers all 44 of its `DrcRule` entries
 (issue #904, extended by #1110) — the manifest and coverage/curated-engine tiers are complete
 for gf180mcu, only the native-DRC-deck cross-check tier is sky130-only.
 gf180mcu's *LVS* device-extraction rules are cross-checked against a real,

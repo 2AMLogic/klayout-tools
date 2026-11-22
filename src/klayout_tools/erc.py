@@ -42,7 +42,6 @@ and the JSON contract.
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Any
 
@@ -69,6 +68,7 @@ from ._report_verify import (
     resolve_committed_path,
 )
 from ._report_verify import load_committed_report as _load_committed_report
+from ._report_verify_hints import input_hash_check
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .coverage_work import coverage_work_count
 from .decks import (
@@ -3060,10 +3060,8 @@ def run_erc(
     )
     erc_findings.extend(connectivity_findings)
 
-    # The tie graph (issue #2169): a second extraction (only when `ties[]` is
-    # declared) adding each tie's tap conductor to the same stackup/vias. Kept
-    # separate so no `ties[]` declaration can reach `gates[]`, the antenna
-    # ratios, or the `nets[]` findings already computed.
+    # Extract the tap conductors in a separate graph (#2169) so ties cannot
+    # affect gates, antenna ratios or the net findings already computed.
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3077,6 +3075,7 @@ def run_erc(
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
         substrate_outcome = run_substrate_pass(
             layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            common_native_substrate=spec.get("common_native_substrate", False),
             tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,
@@ -3393,36 +3392,6 @@ def run_erc(
 # --------------------------------------------------------------------------- #
 
 
-def _input_hash_check(
-    field: str, expected: str | None, echoed: Any, report_path: str
-) -> dict[str, Any]:
-    """One :func:`~klayout_tools._report_verify.hash_check` entry for an input
-    path the committed report echoes back (``file``/``spec``).
-
-    Hashes via :func:`~klayout_tools._provenance.content_hash` because the
-    recorded ``provenance.*.content_hash`` values are ``sha256:``-prefixed
-    (``klt lvs``'s ``environment.*_sha256`` are bare, which is why its
-    ``_input_hash_check`` cannot be reused). An echoed path naming no existing
-    file gets the same ``input_not_found`` block ``klt lvs --check`` attaches
-    (issue #2595), so ``actual: null`` is not mistaken for a moved hash.
-    """
-    path = echoed if isinstance(echoed, str) and echoed else None
-    check = hash_check(field, expected, content_hash(path))
-    if path is None or os.path.isfile(path):
-        return check
-    found_relative_to_report: str | None = None
-    if not os.path.isabs(path):
-        candidate = os.path.join(os.path.dirname(os.path.abspath(report_path)), path)
-        if os.path.isfile(candidate):
-            found_relative_to_report = os.path.abspath(candidate)
-    check["input_not_found"] = {
-        "path": path,
-        "resolved": os.path.abspath(path),
-        "found_relative_to_report": found_relative_to_report,
-    }
-    return check
-
-
 def check_erc_report(report_path: str) -> dict[str, Any]:
     """``klt erc --check`` (cheap mode, issue #3060): verify a previously
     committed ``klt erc --format json`` report at ``report_path`` still
@@ -3436,8 +3405,14 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
     missing recorded hash fails the check.
 
     Relative echoed paths are re-hashed relative to the current working
-    directory -- the same convention (and the same ``input_not_found``
-    diagnostic) ``klt lvs --check`` uses.
+    directory -- the same convention ``klt lvs --check`` uses -- and an
+    echoed path that names no existing file carries the additive
+    ``input_not_found`` block ``klt drc``/``klt lvs`` attach (issue #6655):
+    the five keys ``path``/``resolved``/``found_relative_to_report``/
+    ``resolved_against``/``hint`` (``klt lvs`` adds a sixth,
+    ``resolved_repo_root``, which ERC does not emit), with the hint naming
+    only the report's directory, because ``--check`` is mutually exclusive
+    with the positional inputs and so offers no override flag to name.
 
     The result additionally carries the informational ``advisories`` list
     (klt/klayout version drift) ``klt lvs --check`` emits; it never affects
@@ -3450,17 +3425,27 @@ def check_erc_report(report_path: str) -> dict[str, Any]:
 
     committed = _load_committed_report(report_path, ErcError)
     checks = [
-        _input_hash_check(
+        # Issue #6655: the shared input_hash_check, so an echoed `file`/`spec`
+        # naming no existing file carries the five-key `input_not_found`
+        # block `klt drc` attaches (`klt lvs`'s adds `resolved_repo_root`,
+        # via `include_repo_root`, which ERC leaves off). `override_hint=None`:
+        # `--check` is mutually exclusive with the positional inputs, so
+        # there is no override flag for the hint to name.
+        input_hash_check(
             "provenance.input.content_hash",
             get_path(committed, ("provenance", "input", "content_hash")),
-            resolve_committed_path(committed.get("file"), report_path=report_path),
+            committed.get("file"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
-        _input_hash_check(
+        input_hash_check(
             "provenance.spec.content_hash",
             get_path(committed, ("provenance", "spec", "content_hash")),
             committed.get("spec"),
             report_path,
+            hasher=content_hash,
+            override_hint=None,
         ),
     ]
     deck = get_path(committed, ("provenance", "deck"))

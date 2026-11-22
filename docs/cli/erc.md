@@ -669,6 +669,13 @@ draws that the spec never declared" below.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
+- `common_native_substrate` (optional boolean, default `false`) — set to
+  `true` to assert that substrate taps outside drawn wells reach the same
+  native body, `vsubs`. Use this when the deck cannot establish substrate
+  isolation and the layout has a common substrate. The pass requires
+  qualifying drawn taps. A drawn well still owns its taps. A deck with an
+  isolation layer uses its measured islands. Declaring both a common native
+  substrate and any non-empty `ties[].isolation_boxes` is a spec error.
 - `ties_disclosure` (optional object, default `null`, issue #2234) — a
   top-level statement that this run declares no tap, and why:
   - `reason` (string, required, non-empty) — free-text explanation, e.g.
@@ -886,7 +893,7 @@ it can be trusted depends on
 isolation (deep n-well / isolated p-well), which is **decidable or
 disclosed**: the substrate check is *evaluated* when isolation is derived
 (the deck declares a `substrate_isolation` layer), asserted
-(`ties[].isolation_boxes`), or provably absent; otherwise `erc_coverage.inapplicable` carries
+(`ties[].isolation_boxes` or `common_native_substrate: true`), or provably absent; otherwise `erc_coverage.inapplicable` carries
 `{"id": "erc.supply_short", "reason": "substrate_isolation_undecidable",
 "missing": [...]}` and no pass is claimed. The earlier
 `substrate_continuity_not_modelled` reason is retired.
@@ -909,8 +916,14 @@ attribution at all — is recorded in `provenance.klt_version`.
 | gf180mcu | `DNWELL` 12/0 (deck `substrate_isolation`) | always; islands derived (`vsubs_iso<n>`) | — |
 | sky130 | `dnwell` 64/18 (deck `substrate_isolation`, #5344) | always; a `dnwell` island counts only when an n-well ring closes it, otherwise it stays on shared `vsubs` | — |
 | sg13g2 / sg13cmos5l | `nbulay` 32/0 (deck `substrate_isolation`, #5345) | always; an `nbulay` island counts only when an `nwell` (31/0) ring closes it (#5359), otherwise it stays on shared `vsubs` | — |
-| asap7 | none | `ties[].isolation_boxes` asserts them | the cells draw no substrate/well tie: nothing to join through |
-| no `--deck` | unknown | `ties[].isolation_boxes` asserts them | the family is unknown, so isolation cannot be measured |
+| asap7 | none | the spec declares isolation boxes or a common native substrate | the report identifies missing qualifying tap geometry or, when taps are present, missing isolation information |
+| no `--deck` | unknown | the spec declares isolation boxes or a common native substrate | the family is unknown, so isolation cannot be measured |
+
+When the common-substrate assertion enables the check, the report records
+`provenance.common_native_substrate: true` and includes
+`erc.supply_short.substrate` in both `erc_coverage.checked` and
+`erc_coverage.checked_by_assertion`. Omitted, null and empty
+`ties[].isolation_boxes` supply no isolation assertion.
 
 `ties[].isolation_boxes` bodies are reported as `isolation_box[l,b,r,t]` in
 `provenance.substrate_bodies`, the measured effect of each assertion (bodies
@@ -3244,7 +3257,17 @@ compares them with `provenance.input.content_hash` and
 run used `--deck`), with no ERC engine run. A report that recorded no hash is
 `drifted`, never a false pass. Relative echoed paths resolve against the
 current working directory; an echoed path that names no file carries an
-`input_not_found` block on its `checks[]` entry, as in `klt lvs --check`.
+`input_not_found` block on its `checks[]` entry, the shared diagnostic `klt
+drc --check` and `klt lvs --check` attach: five keys (`path`, `resolved`,
+`found_relative_to_report`, `resolved_against`, `hint`), exactly `klt drc
+--check`'s set. (`klt lvs --check`'s three entries add a sixth,
+`resolved_repo_root`, which ERC does not emit.) Because `--check` is
+mutually exclusive with the positional inputs, `klt erc` offers no
+input-override flag, so the `hint` names only the report's directory to run
+`--check` from -- no "or pass …" clause, as for `klt lvs --check`'s runset
+deck and unlike its layout and reference or `klt drc --check`'s input. The
+deck line (`provenance.deck.content_hash`, `--deck` runs) carries no such
+block; it resolves packaged decks by name.
 
 ```json
 {

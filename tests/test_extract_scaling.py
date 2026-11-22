@@ -14,11 +14,15 @@ The test times the two recognition paths directly -- in-process, over the
 synthetic flat array below at two sizes -- because an end-to-end wall-time
 ratio also sees KLayout's own C++ net clustering (superlinear at high
 device counts in every version, v0.5.0 included) and shared-CI contention.
-On the pre-fix tree the 800/200 ratio of this block measured ~16x
-(quadratic); the bulk-island-set rewrite holds it near 1. The bound 6
-leaves jitter headroom while still tripping any return to per-island,
-per-layer full-layout scans. Full-run wall times per size are recorded in
-the PR, not asserted here.
+Before the fix, recognition took 15.9x as long at 1600 cells as at 400
+cells (quadratic growth). Linear growth predicts 4x. After the bulk-island-set
+rewrite, six runs measured 3.1x to 5.1x. The 9x bound allows for timing
+jitter and still catches the original per-island, per-layer scans. Full-run
+wall times per size are recorded in PR #6072.
+
+The second test (issue #6527) pins result identity, not timing: with the
+gf180mcu MOS-cap marker drawn, the resolver's per-layer ``touching()``
+memo must return exactly what an unmemoised reference computes.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import time
 import klayout.db as kdb
 
 from klayout_tools._layout import region as _region
-from klayout_tools.decks import get_extraction_deck
+from klayout_tools.decks import ExtractionDeck, get_extraction_deck
 from klayout_tools.extract import _detect_unsupported_devices, _resolve_mos_capacitors
 
 # gf180mcu extraction-deck layers (decks/gf180mcu.py's EXTRACTION_DECK).
@@ -101,7 +105,8 @@ def _recognition_seconds(n_cells: int) -> float:
     """Seconds the issue #5807 recognition paths take over an ``n_cells``
     array: the MOS-capacitor resolver plus the unsupported-device diagnostic
     that re-runs it and the flavour-recognised-islands sweep. The minimum of
-    two runs, so a shared host's contention on one sample cannot inflate the
+    five runs (issue #3610's sampling posture; two was too few, issue
+    #6502), so a shared host's contention on one sample cannot inflate the
     ratio."""
     deck = get_extraction_deck("gf180mcu")
     layout = _flat_mos_array(n_cells)
@@ -110,7 +115,7 @@ def _recognition_seconds(n_cells: int) -> float:
     poly = _region(layout, top, deck.poly)
     nwell = _region(layout, top, deck.nwell)
     best = None
-    for _ in range(2):
+    for _ in range(5):
         start = time.perf_counter()
         capacitors, remaining, _recognised, _dropped = _resolve_mos_capacitors(
             layout, top, deck, active, poly, nwell, kdb.Region()
@@ -129,12 +134,120 @@ def _recognition_seconds(n_cells: int) -> float:
 def test_device_recognition_scales_linearly_on_flat_arrays():
     quarter = _recognition_seconds(400)
     full = _recognition_seconds(1600)
-    # 4x the layout must not cost ~16x the recognition block: linear growth
-    # is 4x and the per-island loops this guards against were quadratic
-    # (~16x here, measured) before issue #5807's bulk-island-set rewrite --
-    # bound 6 sits between the two with jitter headroom on both sides.
-    assert full / quarter <= 6.0, (
+    # With five runs per size, PR #6889 measured 4.40x and 5.48x after the
+    # fix and 12.73x on the pre-fix tree (9aff912a9).
+    assert full / quarter <= 9.0, (
         f"device recognition grew {full / quarter:.2f}x for a 4x-larger "
         "flat array (near-linear expected; per-island, per-layer "
         "full-layout scans regressed superlinearly before issue #5807)"
     )
+
+
+_MOS_CAP_MK = (166, 5)  # gf180mcu MOS-cap marker: the marker-rich path
+
+
+def _marker_rich_array(n_cells: int) -> kdb.Layout:
+    """``_flat_mos_array`` with MOS_CAP_MK drawn over the whole array, so
+    ``_resolve_mos_capacitors`` runs its full entry loop (the plain fixture
+    above never draws the marker, so the empty-marker short-circuit skips
+    it and ``touching`` is never called -- issue #6527's path)."""
+    layout = _flat_mos_array(n_cells)
+    top = layout.top_cell()
+    cells_x = int(n_cells**0.5)
+    cells_y = (n_cells + cells_x - 1) // cells_x
+    top.shapes(layout.layer(*_MOS_CAP_MK)).insert(
+        kdb.Box(0, 0, round(cells_x * _CELL_W * 1000), round(cells_y * _CELL_H * 1000))
+    )
+    return layout
+
+
+def _same_region(a: kdb.Region, b: kdb.Region) -> bool:
+    """Geometric equality -- ``kdb.Region`` has no value-equality ``==``."""
+    return (a - b).is_empty() and (b - a).is_empty()
+
+
+def _unmemoised_mos_cap_claims(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    active: kdb.Region,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+) -> tuple[dict[int, kdb.Region], kdb.Region]:
+    """The ``_resolve_mos_capacitors`` claim loop exactly as before issue
+    #6527: every ``touching()`` call recomputes its ``interacting()`` and
+    the well complement is rebuilt per entry. The differential oracle for
+    the memoised resolver -- kept here so a cache bug cannot hide behind
+    the production implementation it is meant to check."""
+    layers: dict[tuple[int, int], kdb.Region] = {}
+
+    def region_of(layer: tuple[int, int]) -> kdb.Region:
+        if layer not in layers:
+            layers[layer] = _region(layout, top_cell, layer)
+        return layers[layer]
+
+    islands = active.merged()
+    gated = islands.interacting(poly & islands)
+    in_well = islands.interacting(nwell)
+
+    def touching(layer: tuple[int, int]) -> kdb.Region:
+        region = region_of(layer)
+        return kdb.Region() if region.is_empty() else islands.interacting(region)
+
+    claimed: dict[int, kdb.Region] = {}
+    taken = kdb.Region()
+    for index, entry in enumerate(deck.mos_capacitors):
+        if region_of(entry.marker).is_empty():
+            continue  # no marker shapes: this entry can claim no island
+        candidates = gated & touching(entry.marker) & touching(entry.implant)
+        for layer in entry.requires:
+            candidates &= touching(layer)
+        for layer in entry.excludes:
+            candidates -= touching(layer)
+        candidates &= in_well if entry.in_well else islands - in_well
+        candidates -= taken
+        if not candidates.is_empty():
+            claimed[index] = candidates
+            taken += candidates
+    return claimed, islands - taken
+
+
+def test_mos_cap_resolver_marker_rich_results_unchanged_by_memo():
+    """Issue #6527: memoizing ``touching()`` per layer and hoisting the well
+    complement out of the entry loop must not move a single polygon -- the
+    same entries claim the same islands against an unmemoised reference
+    over the same marker-rich fixture."""
+    deck = get_extraction_deck("gf180mcu")
+    layout = _marker_rich_array(100)
+    top = layout.top_cell()
+    active = _region(layout, top, deck.active)
+    poly = _region(layout, top, deck.poly)
+    nwell = _region(layout, top, deck.nwell)
+    capacitors, remaining, recognised, dropped = _resolve_mos_capacitors(
+        layout, top, deck, active, poly, nwell, kdb.Region()
+    )
+    claimed, ref_remaining = _unmemoised_mos_cap_claims(
+        layout, top, deck, active, poly, nwell
+    )
+    assert _same_region(remaining, ref_remaining)
+    ref_recognised = kdb.Region()
+    for island in claimed.values():
+        ref_recognised += island
+    assert _same_region(recognised, ref_recognised)
+    # The marker-rich path engaged: the substrate NMOS entry claims the
+    # NPLUS islands and the in-well PMOS entry the PPLUS ones (issue #6527's
+    # measured baseline: entries [0, 2] claim, remaining is empty).
+    assert sorted(claimed) == [0, 2]
+    assert [entry.name for entry, _, _ in capacitors] == [
+        "cap_nmos_03v3",
+        "cap_pmos_03v3",
+    ]
+    assert remaining.is_empty()
+    assert dropped == 0  # no dummy marker in this fixture
+    for (entry, gate, source_drain), index in zip(
+        capacitors, sorted(claimed), strict=True
+    ):
+        island = claimed[index]
+        assert entry is deck.mos_capacitors[index]
+        assert _same_region(gate, island & poly)
+        assert _same_region(source_drain, island - poly)

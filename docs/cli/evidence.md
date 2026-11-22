@@ -153,6 +153,9 @@ higher level.
 
 - `literal`, `record`, `pointer` (RFC 6901 JSON pointer) are required; `doc`
   limits where the literal must appear (default: any `--docs` file).
+  Array indexes are plain digits without a leading zero (`/0`, never `/01`
+  or `/-1`); the empty pointer cites the whole record, a lone `/` the
+  empty-string key.
 - `corner` selects the `result.corners[]` entry with that `corner_id` and makes
   `pointer` relative to it; without it the pointer is relative to the record.
 - A pointer to a list needs `agg` (`min`|`max`). Numbers are multiplied by
@@ -201,8 +204,10 @@ byte-identical (CRLF docs keep CRLF). The spec is JSON, one entry per `id`:
 
 A cell is a literal string/number or `{record, pointer}`: `record` is a JSON
 file relative to `ROOT` (it must stay inside `ROOT`; for legacy `.md` records
-point at the `.json` twin) and `pointer` an RFC 6901 JSON pointer. Column
-`format` is `str` (default), `int`, or `{:.Nf}`. `|` in cell text is escaped.
+point at the `.json` twin) and `pointer` an RFC 6901 JSON pointer -- array
+indexes are plain digits without a leading zero (`/0`, never `/01` or `/-1`),
+the empty pointer renders the whole record, a lone `/` the empty-string key.
+Column `format` is `str` (default), `int`, or `{:.Nf}`. `|` in cell text is escaped.
 
 Idempotent. `--check` writes nothing and exits 1 naming each stale
 `doc#id`. Output (`--format json`): `{schema_version: 1, status:

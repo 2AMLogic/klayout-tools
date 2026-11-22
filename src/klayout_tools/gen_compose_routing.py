@@ -88,6 +88,9 @@ from .gen import RING_SIDE_DIRECTIONS, _pdk_family
 from .gen_compose_landing_pads import (
     _drawn_leg_intermediate_pad_regions as _drawn_leg_intermediate_pad_regions,
 )
+from .gen_compose_landing_pads import (
+    _marked_via_drop_entry as _marked_via_drop_entry,
+)
 from .gen_compose_layer_rules import (
     _landing_pad_side_um_for_layer as _landing_pad_side_um_for_layer,
 )
@@ -318,7 +321,7 @@ def _resolve_via_drop_layer(
                     "land a contact on"
                 )
             contact_hop: _ViaDropHop = (deck.contact, port_layer, deck.metals[0])
-            ladder = [contact_hop]
+            contact_ladder = [contact_hop]
             for via_index in range(0, route_idx):
                 if via_index >= len(deck.vias):
                     return None, (
@@ -329,14 +332,14 @@ def _resolve_via_drop_layer(
                         f"metals[{route_idx}]) and this pin's own diffusion "
                         "layer (reached via deck.contact)"
                     )
-                ladder.append(
+                contact_ladder.append(
                     (
                         deck.vias[via_index],
                         deck.metals[via_index],
                         deck.metals[via_index + 1],
                     )
                 )
-            return tuple(ladder), None
+            return tuple(contact_ladder), None
         # Any other non-metals-stack, non-diffusion-class role (no current
         # `klt gen` generator reports a port this way, but a deck may model
         # such a layer) keeps the pre-#454 behavior: drawn directly on
@@ -1683,6 +1686,7 @@ def read_block_layer_geometry(
     block: dict[str, Any],
     offset_um: dict[str, float],
     layer: tuple[int, int],
+    target_dbu: float | None = None,
 ) -> dict[str, Any] | None:
     """Read ``block``'s **drawn** shapes on ``layer`` into the composed frame.
 
@@ -1690,10 +1694,8 @@ def read_block_layer_geometry(
     geometry on the ``(layer, datatype)`` pair the route is drawn on, mirrored/
     rotated per the block's own ``orientation`` (#1166) and translated by the
     block's placed ``offset_um``, in integer database units -- or ``None``
-    when the block draws nothing there. The same ``kdb.Trans`` (mirror-then-
-    translate) is applied here as :func:`_write_composed_gds` applies to this
-    block's actual cell instance, so this obstacle geometry always agrees
-    with what the composed GDS actually draws.
+    when the block draws nothing there. With ``target_dbu``, scale the block
+    and snap its placement on the output grid just as the GDS writer does.
 
     This is the one place this module looks at a block's *shapes* rather than
     at its ``generator_report``. It exists because a ``klt gen`` port's
@@ -1709,28 +1711,28 @@ def read_block_layer_geometry(
     """
     import klayout.db as kdb
 
-    from .gen_compose import _ORIENTATION_KDB_ARGS, _load_block_cell
+    from .gen_compose import (
+        _ORIENTATION_KDB_ARGS,
+        _load_block_cell,
+        _rescale_block_layout,
+    )
 
     src_layout, src_cell = _load_block_cell(block_id, block)
 
-    dbu = src_layout.dbu
+    dbu = target_dbu or src_layout.dbu
     layer_index = src_layout.find_layer(layer[0], layer[1])
     if layer_index is None:
         return None
 
+    _rescale_block_layout(src_layout, dbu, block_id, block["gds_path"])
     region = kdb.Region(src_cell.begin_shapes_rec(layer_index))
     region.merge()
     if region.is_empty():
         return None
     rot, mirrx = _ORIENTATION_KDB_ARGS[block.get("orientation", "none")]
-    region.transform(
-        kdb.Trans(
-            rot,
-            mirrx,
-            int(round(offset_um["x"] / dbu)),
-            int(round(offset_um["y"] / dbu)),
-        )
-    )
+    ox = round(offset_um["x"] / dbu)
+    oy = round(offset_um["y"] / dbu)
+    region.transform(kdb.Trans(rot, mirrx, ox, oy))
     return {"region": region, "dbu": dbu}
 
 
@@ -1821,7 +1823,9 @@ def _drawn_leg_footprint_region(
 
     for drop in via_drops:
         if side_for_pair is not None and route_layer is not None:
-            side_um = side_for_pair(route_layer, drop["via_layer"])
+            # The drop rides along (#6058): the resolver, not the caller,
+            # classifies this landing from the drop's own marking.
+            side_um = side_for_pair(route_layer, drop["via_layer"], drop)
         else:
             side_um = _VIA_LANDING_SIZE_UM
         landing_half_dbu = int(
@@ -3215,24 +3219,17 @@ def _resolve_via_drops(
                 # (``landing_layers``) -- :func:`_write_composed_gds` draws a
                 # via square plus a landing pad on each of those two layers
                 # per entry, so a multi-level drop is just N single-level
-                # drops stacked at the identical (x, y).
-                for via_layer, metal_a, metal_b in ladder:
-                    drop_array = _drop_array(port, via_layer)
+                # drops stacked at the identical (x, y). Since #6058 each
+                # entry also records its terminal landings.
+                for hop in ladder:
                     via_drops.append(
-                        {
-                            "x_um": pos[0],
-                            "y_um": pos[1],
-                            "via_layer": via_layer,
-                            "landing_layers": (metal_a, metal_b),
-                            **({"array": drop_array} if drop_array else {}),
-                            # block_id (#1520): which endpoint's own block
-                            # this drop's landing pad lands on -- lets a
-                            # caller-side conflict check (compose()'s own
-                            # _leg_conflict) test the pad against *that*
-                            # block's own drawn geometry, not just against
-                            # other already-accepted nets.
-                            "block_id": pin["block"],
-                        }
+                        _marked_via_drop_entry(
+                            pos,
+                            (port_layer, effective_route_layer),
+                            hop,
+                            _drop_array(port, hop[0]),
+                            pin["block"],
+                        )
                     )
     return via_drops, None
 
@@ -3721,9 +3718,11 @@ def route_two_pin(
     "channel_track": int, "reason": str | None}`` (a rejected leg omits
     ``width_um``/``channel_track``, nothing having been drawn for it).
     ``via_drops`` is a list of ``{"x_um", "y_um", "via_layer",
-    "landing_layers", "block_id"}`` entries (empty unless a drop was
-    resolved; one entry per via *hop* since #1567), consumed by
-    :func:`_write_composed_gds`. ``stub_widen`` (#496, see
+    "landing_layers", "terminal_landing_layers", "block_id"}`` entries
+    (empty unless a drop was resolved; one entry per via *hop* since
+    #1567; ``terminal_landing_layers`` since #6058 -- the subset of that
+    hop's ``landing_layers`` that are terminal planes for this endpoint),
+    consumed by :func:`_write_composed_gds`. ``stub_widen`` (#496, see
     :func:`_endpoint_stub_widen_um`) is a list of ``{"x_um", "y_um",
     "direction_deg", "length_um", "width_um"}`` entries -- one per endpoint
     whose own pad is wider than ``width_um`` and faces north/south.
