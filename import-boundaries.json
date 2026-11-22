@@ -22,6 +22,13 @@
         "klayout_tools.cli.parser_artifact"
       ]
     },
+    "cell-hash": {
+      "kind": "verb",
+      "description": "CLI for the canonical geometry digest of a named cell.",
+      "modules": [
+        "klayout_tools.cli.cell_hash_cmd"
+      ]
+    },
     "cells": {
       "kind": "verb",
       "description": "`klt cells` implementation: core modules plus CLI adapter.",
@@ -335,6 +342,7 @@
         "klayout_tools.functional_verification_pdk",
         "klayout_tools.functional_verification_results",
         "klayout_tools.functional_verification_run_inputs",
+        "klayout_tools.functional_verification_tools",
         "klayout_tools.functional_verification_run_results",
         "klayout_tools.functional_verification_sdf",
         "klayout_tools.functional_verification_sdf_internal_bus",
@@ -690,7 +698,8 @@
         "klayout_tools.place_and_route_sta",
         "klayout_tools.place_and_route_unconstrained",
         "klayout_tools.place_and_route_via_pad",
-        "klayout_tools.place_and_route_via_tip"
+        "klayout_tools.place_and_route_via_tip",
+        "klayout_tools.place_and_route_via_tip_repair"
       ]
     },
     "power": {
@@ -922,6 +931,8 @@
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
         "klayout_tools.sim_batch_features",
+        "klayout_tools.sim_batch_corner_libs",
+        "klayout_tools.sim_batch_engine_build",
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_job_timeout",
         "klayout_tools.sim_batch_plan",
@@ -1244,6 +1255,11 @@
       "consumer": "arith_gen",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
+    },
+    {
+      "consumer": "cell-hash",
+      "exporter": "cli-infra",
+      "reason": "The cell-hash command uses the shared text and JSON output helpers."
     },
     {
       "consumer": "cells",
