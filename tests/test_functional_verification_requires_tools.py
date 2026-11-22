@@ -28,7 +28,12 @@ from test_functional_verification import (
 def _make_tool(bindir: Path, name: str, version_line: str, rc: int = 0) -> Path:
     bindir.mkdir(exist_ok=True)
     path = bindir / name
-    path.write_text(f"#!/bin/sh\necho '{version_line}'\nexit {rc}\n", encoding="utf-8")
+    path.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = "--version" || exit 2\n'
+        f"echo\necho '{version_line}' >&2\nexit {rc}\n",
+        encoding="utf-8",
+    )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
@@ -123,6 +128,26 @@ def test_present_tools_are_echoed_and_path_from_request_env_is_used(
             "sha256": _sha(tool),
         }
     ]
+
+
+@pytest.mark.parametrize(
+    "script",
+    ["#!/bin/sh\nexit 0\n", "#!/missing-klt-test-interpreter\n"],
+    ids=["silent", "missing-interpreter"],
+)
+def test_unavailable_tool_banner_preserves_executable_details(tmp_path, script):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    tool = bindir / "sail"
+    tool.write_text(script, encoding="utf-8")
+    tool.chmod(0o755)
+    request = _request(tmp_path, bindir, [{"name": "sail", "version": "0.19"}])
+    with pytest.raises(FunctionalVerificationError) as error:
+        run_functional_verification(request)
+    assert error.value.code == "missing_tool"
+    (unmet,) = error.value.details["unmet_tools"]
+    assert unmet["found"] == {"path": str(tool), "version": None, "sha256": _sha(tool)}
+    assert unmet["reason"] == "version '0.19' not in --version output"
 
 
 @pytest.mark.parametrize("omitted", [True, False])
