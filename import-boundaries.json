@@ -2249,6 +2249,12 @@
       "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
     },
     {
+      "consumer": "klayout_tools.formal",
+      "exporter": "klayout_tools._provenance",
+      "symbol": "_combined_content_hash",
+      "reason": "_provenance is the documented PDK-resolution/provenance carve-out (docs/module-ownership.md)."
+    },
+    {
       "consumer": "klayout_tools.functional_verification_run_inputs",
       "exporter": "klayout_tools._provenance",
       "symbol": "_combined_content_hash",
