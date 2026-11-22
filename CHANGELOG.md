@@ -654,7 +654,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   tech-LEF truth a DEF reader must use (`klt place-and-route` keeps reading
   DEFs at it). `gen-compose` targeting gf180mcu coarsens a finer
   (0.0005 `place-and-route`-style) block onto `0.001` — but only after
-  measuring every polygon vertex, text position and instance/array vector in
+  measuring every polygon vertex, stored path parameter, text position/size
+  and instance/array vector in
   the block against the target grid (`kdb.Region.grid_check`, the `ongrid`
   primitive): an off-grid coordinate raises `GenComposeError` naming the
   block, the layer and one offending coordinate, writing no output — never a

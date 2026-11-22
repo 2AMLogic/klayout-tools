@@ -276,3 +276,152 @@ def test_exact_path_coarsening_preserves_drawn_region_and_extensions(
     rescaled = shape.path.transformed(kdb.ICplxTrans(2))
     assert (kdb.Region(path.polygon()) ^ kdb.Region(rescaled.polygon())).is_empty()
     assert (rescaled.bgn_ext, rescaled.end_ext) == (12, 20)
+
+
+def _compose_single_external_cell(tmp_path, pdk_root, source_gds, output_gds):
+    return compose(
+        {
+            "pdk": {"variant": "gf180mcuD", "root": str(pdk_root)},
+            "blocks": [
+                {
+                    "id": "macro",
+                    "cell": {"gds_path": str(source_gds), "cell_name": "macro_top"},
+                }
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["macro"],
+                "origins_um": {"macro": {"x": 0.0, "y": 0.0}},
+            },
+            "options": {"cell_name": "composed", "output": str(output_gds)},
+        }
+    )
+
+
+def test_near_integer_dbu_ratio_is_refused_while_exact_reciprocal_round_trips(
+    tmp_path, both_pdk_root
+):
+    """A near-integer ratio such as ``0.001 / 0.0003333333 == 3.0000003`` would
+    turn a 30,000,000-dbu (9,999.999 um) box into 10,000,000 dbu at 0.001 um
+    (10,000.000 um); only true stream/float noise around ``1 / 3000`` is
+    accepted as exact integer ratio 3."""
+    import klayout.db as kdb
+
+    near_gds = tmp_path / "near_third.gds"
+    near = kdb.Layout()
+    near.dbu = 0.0003333333
+    near.create_cell("macro_top").shapes(near.layer(34, 0)).insert(
+        kdb.Box(0, 0, 30_000_000, 3_000)
+    )
+    near.write(str(near_gds))
+
+    refused_out = tmp_path / "refused.gds"
+    refused_out.write_bytes(b"untouched")
+    with pytest.raises(GenComposeError, match=r"'macro'.*does not evenly divide"):
+        _compose_single_external_cell(tmp_path, both_pdk_root, near_gds, refused_out)
+    assert refused_out.read_bytes() == b"untouched"
+
+    exact_gds = tmp_path / "exact_third.gds"
+    exact = kdb.Layout()
+    exact.dbu = 1.0 / 3000.0
+    exact.create_cell("macro_top").shapes(exact.layer(34, 0)).insert(
+        kdb.Box(0, 0, 30_000_000, 3_000)
+    )
+    exact.write(str(exact_gds))
+
+    ok_out = tmp_path / "ok.gds"
+    report = _compose_single_external_cell(tmp_path, both_pdk_root, exact_gds, ok_out)
+    assert report["dbu_um"] == pytest.approx(0.001)
+    assert any("exact integer ratio 3" in w for w in report["warnings"])
+
+    written = kdb.Layout()
+    written.read(str(ok_out))
+    assert written.dbu == pytest.approx(0.001)
+    [shape] = list(written.cell("macro__macro_top").shapes(written.layer(34, 0)).each())
+    assert shape.box.width() == 10_000_000
+    assert shape.box.width() * written.dbu == pytest.approx(10_000.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("near_dbu", [0.0009999999998, 0.0010000000002])
+def test_near_equal_dbu_outside_float_noise_is_refused(
+    tmp_path, both_pdk_root, near_dbu
+):
+    """The ratio-1 early return must use the same stream/float-noise bound as
+    the coarsening ratio check rather than accepting a distinct dbu such as
+    ``0.0009999999998`` silently."""
+    import klayout.db as kdb
+
+    src_gds = tmp_path / "near_one.gds"
+    lay = kdb.Layout()
+    lay.dbu = near_dbu
+    lay.create_cell("macro_top").shapes(lay.layer(34, 0)).insert(
+        kdb.Box(0, 0, 1000, 1000)
+    )
+    lay.write(str(src_gds))
+
+    output = tmp_path / "out.gds"
+    output.write_bytes(b"untouched")
+    with pytest.raises(GenComposeError, match=r"'macro'.*does not evenly divide"):
+        _compose_single_external_cell(tmp_path, both_pdk_root, src_gds, output)
+    assert output.read_bytes() == b"untouched"
+
+
+def test_stream_encoding_noise_at_ratio_1_composes_without_warning(
+    tmp_path, both_pdk_root
+):
+    """GDSII hex-float vs OASIS IEEE-754 encoding of ``1 / 9000`` differs by
+    ~1 ULP (~1.2e-16 relative); composing the two at ratio 1 succeeds with no
+    rescale warning."""
+    import klayout.db as kdb
+
+    gds_path = tmp_path / "a.gds"
+    oas_path = tmp_path / "b.oas"
+    for path, cell_name in ((gds_path, "cell_a"), (oas_path, "cell_b")):
+        lay = kdb.Layout()
+        lay.dbu = 1.0 / 9000.0
+        lay.create_cell(cell_name).shapes(lay.layer(67, 20)).insert(
+            kdb.Box(0, 0, 9000, 9000)
+        )
+        lay.write(str(path))
+
+    out = tmp_path / "composed.oas"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "blocks": [
+                {"id": "a", "cell": {"gds_path": str(gds_path), "cell_name": "cell_a"}},
+                {"id": "b", "cell": {"gds_path": str(oas_path), "cell_name": "cell_b"}},
+            ],
+            "placement": {"strategy": "row", "order": ["a", "b"], "spacing_um": 1.0},
+            "options": {"cell_name": "composed", "output": str(out)},
+        }
+    )
+    assert not any("rescaled" in w for w in report["warnings"]), report["warnings"]
+
+
+def test_coarsening_validates_stored_text_size_and_preserves_on_grid_height(
+    tmp_path, both_pdk_root
+):
+    """An on-grid text anchor with an odd ``Text.size`` (101 dbu = 50.5 nm at
+    0.0005 um) would round to 51 dbu (51 nm) at 0.001 um; the gate refuses
+    naming block, layer, and size while leaving destination untouched, and
+    preserves an on-grid size (100 dbu = 50 nm -> 50 dbu at 0.001 um)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "out.gds"
+    output.write_bytes(b"existing output")
+    off_grid_label = kdb.Text("NET", kdb.Trans(0, False, 0, 0), 101, 0)
+    with pytest.raises(GenComposeError, match=r"'macro'.*layer 34/0.*text size 101"):
+        _compose_fine_macro(tmp_path, both_pdk_root, [off_grid_label])
+    assert output.read_bytes() == b"existing output"
+
+    output.unlink()
+    on_grid_label = kdb.Text("NET", kdb.Trans(0, False, 0, 0), 100, 0)
+    _compose_fine_macro(tmp_path, both_pdk_root, [on_grid_label])
+    written = kdb.Layout()
+    written.read(str(output))
+    assert written.dbu == pytest.approx(0.001)
+    [shape] = list(written.cell("macro__macro_top").shapes(written.layer(34, 0)).each())
+    assert shape.is_text()
+    assert shape.text.size == 50
+    assert shape.text.size * written.dbu == pytest.approx(0.050)

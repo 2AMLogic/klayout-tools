@@ -29,17 +29,37 @@ class DbuReconcileError(Exception):
     (this module does not import those names -- they live above it)."""
 
 
+#: Relative tolerance for stream-dbu equality and exact integer-ratio checks.
+#: GDSII encodes ``UNITS`` as 8-byte excess-64 base-16 floats (53--56
+#: significand bits) and OASIS encodes ``1 / dbu`` as IEEE-754 binary64
+#: (53 bits, ``eps ≈ 2.22e-16``), so a round-tripped ``1 / N`` dbu drifts by
+#: at most a few ULPs (~1e-15). ``1e-14`` absorbs stream-encoding and float
+#: division noise while shifting even ``2**31 - 1`` dbu by ``< 3e-5`` dbu --
+#: rejecting near-integers such as ``0.0003333333`` vs ``0.001`` (``1e-7``)
+#: and near-equals such as ``0.0009999999998`` vs ``0.001`` (``2e-10``).
+_STREAM_DBU_REL_TOL = 1e-14
+
+
+def dbu_matches(a: float, b: float) -> bool:
+    """Whether two positive DBUs agree up to stream-encoding / float noise."""
+    if a <= 0 or b <= 0:
+        return False
+    return abs(a - b) <= _STREAM_DBU_REL_TOL * max(a, b)
+
+
 def _integer_ratio(coarse_dbu: float, fine_dbu: float) -> int | None:
     """Whether ``coarse_dbu`` is an exact whole-number multiple of
-    ``fine_dbu`` -- returning that integer multiplier, or ``None`` when it is
-    not (issue #1514)."""
-    if fine_dbu <= 0:
+    ``fine_dbu`` up to stream-encoding / floating-point noise -- returning
+    that integer multiplier, or ``None`` when it is not (issues #1514/#5721)."""
+    if fine_dbu <= 0 or coarse_dbu <= 0:
         return None
     ratio = coarse_dbu / fine_dbu
     nearest = round(ratio)
     if nearest < 1:
         return None
-    if abs(ratio - nearest) > 1e-6 * max(1, nearest):
+    if abs(coarse_dbu - nearest * fine_dbu) > _STREAM_DBU_REL_TOL * max(
+        coarse_dbu, nearest * fine_dbu
+    ):
         return None
     return int(nearest)
 
@@ -116,30 +136,48 @@ def _path_off_grid(path: Any, ratio: int) -> str | None:
     return None
 
 
+def _text_off_grid(text: Any, ratio: int) -> str | None:
+    """Check the text anchor and explicit size that KLayout scales."""
+    if text.x % ratio or text.y % ratio:
+        return f"coordinate ({text.x}, {text.y})"
+    if text.size % ratio:
+        return f"text size {text.size}"
+    return None
+
+
+def _single_stored_shape_offender(
+    shape: Any, cell_name: str, layer_label: str, ratio: int
+) -> tuple[str, str] | None:
+    """Check one shape's stored fields that a polygon Region view omits."""
+    if shape.is_path():
+        detail = _path_off_grid(shape.path, ratio)
+        if detail:
+            return (f"a path on layer {layer_label} in cell '{cell_name}'", detail)
+    elif shape.is_text():
+        text = shape.text
+        detail = _text_off_grid(text, ratio)
+        if detail:
+            return (
+                f"text '{text.string}' in cell '{cell_name}' on layer {layer_label}",
+                detail,
+            )
+    return None
+
+
 def _stored_shape_offender(
     layout: Any, cells: list[Any], ratio: int
 ) -> tuple[str, str] | None:
-    """Inspect path parameters and text anchors, which a polygon view loses."""
+    """Inspect path parameters and text anchors/sizes, which a polygon view loses."""
     for cell in cells:
         for layer_index in layout.layer_indexes():
             info = layout.get_info(layer_index)
+            layer_label = f"{info.layer}/{info.datatype}"
             for shape in cell.shapes(layer_index).each():
-                if shape.is_path():
-                    detail = _path_off_grid(shape.path, ratio)
-                    if detail:
-                        return (
-                            f"a path on layer {info.layer}/{info.datatype} "
-                            f"in cell '{cell.name}'",
-                            detail,
-                        )
-                elif shape.is_text():
-                    text = shape.text
-                    if text.x % ratio or text.y % ratio:
-                        return (
-                            f"text '{text.string}' in cell '{cell.name}' on "
-                            f"layer {info.layer}/{info.datatype}",
-                            f"coordinate ({text.x}, {text.y})",
-                        )
+                offender = _single_stored_shape_offender(
+                    shape, cell.name, layer_label, ratio
+                )
+                if offender is not None:
+                    return offender
     return None
 
 
@@ -170,7 +208,9 @@ def _instance_vector_offender(
     return None
 
 
-def _assert_grid_exact(layout: Any, top_cell: Any, ratio: int) -> None:
+def _assert_grid_exact(
+    layout: Any, top_cell: Any, ratio: int, target_dbu: float | None = None
+) -> None:
     """Raise :class:`DbuReconcileError` unless everything ``copy_tree`` will
     carry out of ``top_cell``'s cell tree lies exactly on the coarser grid
     the composed cell is written at -- every coordinate a multiple of
@@ -190,7 +230,7 @@ def _assert_grid_exact(layout: Any, top_cell: Any, ratio: int) -> None:
         if offender is None:
             continue
         what, detail = offender
-        composed_dbu_um = layout.dbu * ratio
+        composed_dbu_um = target_dbu if target_dbu is not None else layout.dbu * ratio
         raise DbuReconcileError(
             f"cannot be composed at the required dbu={composed_dbu_um}: "
             f"{what} carries {detail} dbu, which is not on the "
@@ -217,6 +257,9 @@ def reconcile_block_dbu(src_layout: Any, top_cell: Any, target_dbu: float) -> in
     ratio raises without touching the layout.
     """
     original_dbu = src_layout.dbu
+    if dbu_matches(original_dbu, target_dbu):
+        src_layout.dbu = target_dbu
+        return 1
     if original_dbu > target_dbu:
         ratio = _integer_ratio(original_dbu, target_dbu)
         if ratio is None:
@@ -229,7 +272,7 @@ def reconcile_block_dbu(src_layout: Any, top_cell: Any, target_dbu: float) -> in
         import klayout.db as kdb
 
         src_layout.transform(kdb.ICplxTrans(float(ratio)))
-    elif original_dbu < target_dbu:
+    else:
         ratio = _integer_ratio(target_dbu, original_dbu)
         if ratio is None:
             raise DbuReconcileError(
@@ -239,11 +282,9 @@ def reconcile_block_dbu(src_layout: Any, top_cell: Any, target_dbu: float) -> in
                 "the ratio is an exact integer and every coordinate lies on "
                 "that coarser grid"
             )
-        _assert_grid_exact(src_layout, top_cell, ratio)
+        _assert_grid_exact(src_layout, top_cell, ratio, target_dbu)
         import klayout.db as kdb
 
         src_layout.transform(kdb.ICplxTrans(1.0 / float(ratio)))
-    else:
-        return 1
     src_layout.dbu = target_dbu
     return ratio

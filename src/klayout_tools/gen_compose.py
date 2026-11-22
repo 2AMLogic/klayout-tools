@@ -4616,12 +4616,12 @@ def _rescale_block_layout(
 ) -> str | None:
     """Reconcile the block before polygonizing its paths or copying its cell tree."""
     original_dbu = src_layout.dbu
-    if abs(original_dbu - dbu) <= 1e-12:
-        return None
     try:
         ratio = reconcile_block_dbu(src_layout, src_cell, dbu)
     except DbuReconcileError as exc:
         raise GenComposeError(f"block '{block_id}': gds '{gds_path}' {exc}") from exc
+    if ratio == 1:
+        return None
     return (
         f"block '{block_id}' gds '{gds_path}' was rescaled from its own "
         f"dbu={original_dbu} onto the composed cell's dbu={dbu} "

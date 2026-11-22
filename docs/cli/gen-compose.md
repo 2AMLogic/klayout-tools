@@ -2088,7 +2088,8 @@ response's `warnings[]` naming the block, its own original `dbu`, the
   required-stream-dbu case): dividing coordinates is exact only when every
   coordinate is already a multiple of the ratio, so the block is **measured
   first** — every polygon vertex (via the same `grid_check` primitive the
-  DRC engine's `ongrid` checks use), every text position, and every instance
+  DRC engine's `ongrid` checks use), every stored path parameter, every text
+  position and explicit size, and every instance
   displacement/array step vector across the block's whole cell tree. A block
   that passes is rescaled exactly; one that fails raises `GenComposeError`
   naming the block, the offending layer (or text/instance vector) and one
