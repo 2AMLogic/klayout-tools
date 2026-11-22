@@ -10,8 +10,8 @@ Merge rule: the header (text before the first ``cell (``) comes from the first
 file and must agree with the rest field by field -- whitespace, lexical
 comments, the ``library (<name>)`` name and the free-text ``date``,
 ``revision`` and ``comment`` attributes are ignored; any other difference
-(units, operating conditions, ``default_*``, ...) is an error naming the
-conflicting field and both values, with one exception (issue #6940): when
+(units, operating conditions, ``default_*``, ...) reports every
+conflicting field and both values (issue #7011). One exception (issue #6940): when
 each file declares a single ``operating_conditions`` group that its own
 ``default_operating_conditions`` selects and the group bodies agree, the
 group's *name* alone may differ -- the merged header keeps the first
@@ -32,6 +32,7 @@ import os
 import re
 import tempfile
 
+from .liberty_header_diff import header_mismatch
 from .liberty_scan import (
     _find_matching,
     _find_terminator,
@@ -144,7 +145,9 @@ def _collect(paths: list[str], texts: list[str]) -> tuple[str, list[str], list[s
                 retained,
                 single_condition=first_condition_count == condition_count == 1,
             )
-            _compare_headers(first_path, first_fields, path, other_fields)
+            mismatch = header_mismatch(first_path, first_fields, path, other_fields)
+            if mismatch:
+                raise LibertyMergeError(mismatch)
         for name, raw in file_templates:
             tnorm = _normalize_header(raw)
             known = templates.get(name)
@@ -331,16 +334,12 @@ def _reconcile_conditions(
         return first, other
     a = _local_condition(first)
     b = _local_condition(other)
-    if a is None or b is None or a[1] == b[1]:
+    if a is None or b is None or a[1] == b[1] or a[2] != b[2]:
         return first, other
-    if a[2] != b[2]:
-        raise LibertyMergeError(
-            f"cannot merge: 'operating_conditions({a[1]})' differs: {_clip(a[2])} "
-            f"in '{first_path}', {_clip(b[2])} in '{path}'"
-        )
     if _references_condition(retained, b[1]):
+        detail = header_mismatch(first_path, first, path, other)
         raise LibertyMergeError(
-            f"cannot merge: '{path}' references operating condition '{b[1]}' "
+            f"{detail}\n'{path}' references operating condition '{b[1]}' "
             f"outside its header, but the merged header keeps only "
             f"'{first_path}' spelling '{a[1]}'"
         )
@@ -349,34 +348,6 @@ def _reconcile_conditions(
         {k: v for k, v in first.items() if k not in drop},
         {k: v for k, v in other.items() if k not in drop},
     )
-
-
-def _compare_headers(
-    first_path: str, first: dict[str, str], path: str, other: dict[str, str]
-) -> None:
-    """Raise :class:`LibertyMergeError` on the first header field that
-    differs; a field present in one header and absent from the other is
-    reported as missing rather than as a value difference."""
-    for key, value in first.items():
-        if key not in other:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' present in '{first_path}', missing in '{path}'"
-            )
-        if other[key] != value:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' differs: {_clip(value)} in "
-                f"'{first_path}', {_clip(other[key])} in '{path}'"
-            )
-    for key in other:
-        if key not in first:
-            raise LibertyMergeError(
-                f"cannot merge: '{key}' missing in '{first_path}', present in '{path}'"
-            )
-
-
-def _clip(value: str, limit: int = 80) -> str:
-    """Value truncated so an error message stays readable."""
-    return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
 def _extract_templates(header: str) -> tuple[str, list[tuple[str, str]]]:

@@ -9,6 +9,7 @@ CI), not part of the `klt` CLI.
 scripts/
   README.md                    # this file
   deploy-site.sh                # build site/ (Vite + React) and deploy site/dist/ to Cloudflare Pages
+  assemble-asap7-pdk-root.py     # generate an audited ASAP7 descriptor root
   fetch-pdks.sh                  # pinned fetch of lambdapdk open PDK data into pdks/
   fetch-ihp-sg13g2.sh            # pinned fetch of IHP-Open-PDK into pdks/ so `klt pdk` resolves a real SG13G2 install (#522)
   fetch-ihp-sg13cmos5l.sh        # pinned, checksum-verified fetch of the IHP-Open-PDK ihp-sg13cmos5l/ subtree into pdks/ so `klt pdk` resolves a real sg13cmos5l install (#1929)
@@ -82,6 +83,14 @@ what lands where.
 ```
 scripts/fetch-pdks.sh
 ```
+
+## `assemble-asap7-pdk-root.py`
+
+Builds an ASAP7 root from an initialized upstream checkout. It stages the
+physical views, checks and merges the selected Liberty files, and records
+source commits and file hashes. Run
+`uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"`.
+[Selection and output details](../docs/cli/pdk.md#assembling-an-asap7-root)
 
 ## `fetch-cell-netlists.sh`
 

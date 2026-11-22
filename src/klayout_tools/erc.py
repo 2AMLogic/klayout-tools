@@ -2353,28 +2353,10 @@ def _extract_connectivity(
     with ``devices[]`` omitted, ``device_cuts`` is empty and every region
     below is the raw drawn layer, exactly as before.
 
-    **A declared well is never a conductor here (issue #2169).** The
-    previous model registered the whole ``well_layer`` region, self-
-    connected it (``l2n.connect(well_region)``) and connected it to the tap
-    layer, which made a blanket well -- one plan-view polygon spanning
-    whole standard-cell rows -- conduct to *every* shape that merely
-    overlapped it, not only to the shapes actually tied to it. On a routed
-    design that collapsed the entire layout into one or two electrical
-    islands: a false ``erc.supply_short`` between VDD and VSS, and a
-    ``gates[]`` list collapsed to a single entry (which silently invalidated
-    every antenna ratio in the same report).
-
-    Instead, a tie contributes exactly one conductor: its **tap sites** --
-    ``tap_layer`` intersected with every ``tap_requires`` layer (the
-    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as), further
-    intersected with the union of ``tap_boxes`` when the spec asserts them
-    (issue #2234), and then clipped to the well itself, since a tap is by
-    definition inside the well it taps. Those sites are wired up to
-    ``connect_to``'s ``stackup`` region exactly as before, so a tap still
-    reaches (or fails to reach) the declared supply net through real
-    routing. The well contributes only *where the taps are*, never across
-    its own extent, and taps in the same well are not shorted to each other
-    through it.
+    Each tie registers the full derived tap conductor (tap diffusion narrowed
+    by its markers and boxes, clipped to its well). The well itself supplies
+    only a boundary. A contact-qualified tie reaches its stackup role at cuts
+    overlapping both conductors. A tie with no named via connects by overlap.
 
     **A well need not be drawn at all (issue #2255).** A tie declaring
     ``well_layer: null`` + ``well_boxes`` -- a native-substrate block, whose
@@ -2423,6 +2405,7 @@ def _extract_connectivity(
         via_region = _cut_device_bodies(
             _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
         )
+        regions[via["name"]] = via_region
         l2n.register(via_region, via["name"])
         l2n.connect(via_region)
         role_a, role_b = via["between"]
@@ -2481,7 +2464,18 @@ def _extract_connectivity(
         tap_sites = (tap_region & well_region).merged()
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
-        l2n.connect(tap_sites, regions[tie["connect_to"]])
+        target = regions[tie["connect_to"]]
+        if tie["through"] is None:
+            l2n.connect(tap_sites, target)
+        else:
+            # Keep each whole cut that lands on both sides. A cut landing only
+            # on the other endpoint of the declared via cannot tie this role.
+            contacts = (
+                regions[tie["through"]].overlapping(target).overlapping(tap_sites)
+            )
+            l2n.register(contacts)
+            l2n.connect(tap_sites, contacts)
+            l2n.connect(contacts, target)
         tie_layers.append(
             {
                 **tie,
@@ -2572,7 +2566,7 @@ def _parse_erc_spec(spec_path: str) -> tuple[Any, ...]:
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path, stackup_names)
-    ties = _validate_ties(spec, spec_path, stackup_names)
+    ties = _validate_ties(spec, spec_path, stackup_names, vias)
     # `ties` first, deliberately: #2541's `undeclared_classes` is validated
     # against the declared tie names, so a spec that declares and discloses
     # the same class is rejected as the self-contradiction it is.
@@ -3060,10 +3054,8 @@ def run_erc(
     )
     erc_findings.extend(connectivity_findings)
 
-    # The tie graph (issue #2169): a second extraction (only when `ties[]` is
-    # declared) adding each tie's tap conductor to the same stackup/vias. Kept
-    # separate so no `ties[]` declaration can reach `gates[]`, the antenna
-    # ratios, or the `nets[]` findings already computed.
+    # Extract the tap conductors in a separate graph (#2169) so ties cannot
+    # affect gates, antenna ratios or the net findings already computed.
     degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
     well_asserted_ties: set[str] = set()
@@ -3077,6 +3069,7 @@ def run_erc(
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
         substrate_outcome = run_substrate_pass(
             layout=layout, top_cell=top_cell, deck=deck_obj, deck_name=deck,
+            common_native_substrate=spec.get("common_native_substrate", False),
             tie_l2n=tie_l2n,
             tie_circuit=tie_circuit, tie_layers=tie_layers, nets_decl=nets_decl,
             degenerate_ties=degenerate_ties, erc_findings=erc_findings,

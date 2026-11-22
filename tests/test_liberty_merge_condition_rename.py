@@ -191,6 +191,32 @@ def test_max_transition_conflict_still_refuses_with_rename(tmp_path):
     assert "groupA.lib" in msg and "groupB.lib" in msg
 
 
+@pytest.mark.parametrize("dangling", [False, True])
+def test_refused_rename_keeps_the_other_header_differences(tmp_path, dangling):
+    a = _write(tmp_path, "first.lib", _lib("A"))
+    b = _write(
+        tmp_path,
+        "other.lib",
+        _lib(
+            "B",
+            condition="typ25",
+            max_trans="4.0",
+            temperature="25.0" if dangling else "85.0",
+            body_extra="  scaled_cell (INV_B, typ25) {}" if dangling else "",
+        ),
+    )
+    with pytest.raises(liberty_merge.LibertyMergeError) as exc:
+        liberty_merge.merge_liberty([a, b])
+    message = str(exc.value)
+    assert "default_max_transition" in message
+    assert "same group, different name" in message
+    assert "default_operating_conditions" in message
+    if dangling:
+        assert "references operating condition 'typ25'" in message
+    else:
+        assert "body also differs" in message
+
+
 def test_body_reference_to_renamed_condition_refuses(tmp_path):
     a = _write(tmp_path, "groupA.lib", _lib("A"))
     b = _write(
