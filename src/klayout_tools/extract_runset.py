@@ -83,10 +83,7 @@ from typing import Any
 from . import env_provenance
 from ._provenance import build_provenance, sha256_file
 
-# This module is the engine's public face: `extract.py` and `cli/extract_cmd.py`
-# import every one of these from here, so the two sibling modules below stay an
-# internal split (file-size ratchet, `scripts/README.md`) rather than a second
-# import surface callers have to know about.
+# Re-export flags used by the extraction and CLI entry points.
 from .extract_runset_flags import (
     DEFAULT_ENGINE as DEFAULT_ENGINE,
 )

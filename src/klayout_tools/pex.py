@@ -2590,8 +2590,8 @@ def run_pex(
     echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
     values -- only when a cap was given) and one ``{net, net_id,
     resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
-    fallback_reason, terminals, pair_resistance_ohm}`` entry per net, only when the flag was given --
-    otherwise the report and netlist are byte-identical. Combining it with
+    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
+    the graph flag, the report and netlist are byte-identical. Combining it with
     ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
     legacy scalar, so a critical net would mix resistance sources).
 
