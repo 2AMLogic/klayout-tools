@@ -130,7 +130,11 @@ from .signoff_derived_rows import (
 # `signoff.<name>` keeps resolving exactly as it did before the split; the
 # `X as X` form marks the ones with no call site left in this module as
 # deliberate re-exports rather than dead imports.
-from .signoff_details import _DETAIL_BUILDERS, _drc_rule_selection_detail
+from .signoff_details import (
+    _DETAIL_BUILDERS,
+    _drc_rule_selection_detail,
+    synthesis_disclosure,
+)
 
 # The `drc --engine both` (cross-check) envelope projection (issue #5815):
 # rewriting the cross-check shape into the single-engine `drc` envelope the
@@ -298,6 +302,7 @@ from .signoff_yield_disclosure import (
 from .signoff_yield_disclosure import (
     _yield_sample_size_rollup as _yield_sample_size_rollup,
 )
+from .synthesize_abc import unmapped_comb_cells
 
 __all__ = [
     "SignoffError",
@@ -2807,12 +2812,15 @@ _PASSING_STATUS_BY_KIND: dict[str, str] = {
 
 
 def _synthesize_structural_clean(envelope: Mapping[str, Any]) -> bool:
-    """Whether a `klt synthesize` response's ``structural`` block reports no
-    unexpected latch, combinational loop or multiply-driven net (issue
-    #4015). A missing or non-integer count fails closed."""
+    """Grade structural defects and residual logic in custom ABC mappings."""
     structural = envelope.get("structural")
     if not isinstance(structural, dict):
         return False
+    mapping = envelope.get("synthesis")
+    if isinstance(mapping, dict) and mapping.get("abc_script") is not None:
+        counts = envelope.get("instance_counts_by_type")
+        if not isinstance(counts, dict) or unmapped_comb_cells(counts):
+            return False
     return all(
         type(structural.get(key)) is int and structural[key] == 0
         for key in ("unexpected_latches", "comb_loops", "multi_driven")
@@ -3018,9 +3026,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind == "erc":
         passed = _erc_passed(envelope)
     elif kind == "synthesize":
-        # Issue #4015: `status` is only ever "ok" (a failed run raises
-        # `SynthesizeError`), so the structural netlist counts are the
-        # real verdict.
+        # Grade the saved netlist counts even when synthesis reported success.
         passed = envelope.get("status") == "ok" and _synthesize_structural_clean(
             envelope
         )
@@ -6130,25 +6136,19 @@ def _citation_pointer(spec: Mapping[str, Any]) -> dict[str, Any]:
 def _citation(
     resolution: dict[str, Any], *, runset_rehash_unverifiable: bool = False
 ) -> dict[str, Any]:
-    """Build a ``"met"`` item's ``citation`` block from a
-    :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
-    docstring for what each field means."""
+    """Build a met item's citation from its resolved evidence."""
     citation: dict[str, Any] = {
         "file": resolution["file"],
         "command": resolution["command"],
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
-        # Issue #2196: was that `content_hash` checked against the input artifact
-        # itself, or only against the envelope's own claim? Always present --
-        # including the `None` ("nothing was re-hashed") case, the one this
-        # field exists to stop being silent. See the "Input-artifact
-        # verification" docstring section; never consulted by any grading rule.
+        # Whether the input artifact was checked against its envelope (#2196).
+        # None records that no artifact was re-hashed.
         "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
-    # Issue #6403: a declared pathless `content_hash` binds nothing -- disclose
-    # that beside the unchanged `null` ({} -- no key -- otherwise).
+    citation.update(synthesis_disclosure(resolution["kind"], resolution["envelope"]))
     citation.update(declared_hash_unbound_disclosure(resolution))
     # Issue #5815: the RFC 6901 `pointer` carried -- additive, never graded.
     citation.update(_citation_pointer(resolution["spec"]))

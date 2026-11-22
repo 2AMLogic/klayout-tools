@@ -424,6 +424,7 @@
         "klayout_tools.gen_compose_layer_rules",
         "klayout_tools.gen_compose_pad_conflicts",
         "klayout_tools.gen_compose_plane_change",
+        "klayout_tools.gen_compose_plane_climb",
         "klayout_tools.gen_compose_port_access",
         "klayout_tools.gen_compose_port_request",
         "klayout_tools.gen_compose_routing",
@@ -1115,6 +1116,7 @@
         "klayout_tools.restructure",
         "klayout_tools.sta",
         "klayout_tools.synthesize",
+        "klayout_tools.synthesize_abc",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
         "klayout_tools.synthesize_driving_cell",
@@ -1790,6 +1792,11 @@
       "reason": "Issue #2839: T1 item 11 re-grades a cited klt socket-check envelope's power_ports facts with the verb's own public grading function (grade_power_ports/assess_power_port), so the verb and signoff can never disagree about edge accessibility."
     },
     {
+      "consumer": "signoff",
+      "exporter": "synthesize",
+      "reason": "Signoff checks a custom ABC mapping's recorded cell types with the same predicate used by synthesis (#6915)."
+    },
+    {
       "consumer": "sim",
       "exporter": "cli-infra",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
@@ -2382,6 +2389,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_reject_unknown_keys",
       "reason": "Request-shape validation helper shared with _devices (issue #3466); promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.synthesize_abc",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_reject_unknown_keys",
+      "reason": "Validate the synthesis subobject with the same request-key rules as its parent (issue #6915)."
     },
     {
       "consumer": "klayout_tools.synthesize",
