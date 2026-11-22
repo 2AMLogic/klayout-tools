@@ -1432,17 +1432,12 @@ def resolve_device_bindings(
     capacitor class the deck declares, plus a bindable bipolar class, plus a
     bindable junction-diode class (issue #5491).
 
-    ``deck`` is the deck object (duck-typed: its ``nfet_class``/``pfet_class``,
-    ``mos_flavours``, ``resistors``, ``capacitors``, ``bipolars`` and
-    ``diodes`` attributes are read) -- kept a parameter rather than an import so this
-    module stays free of a ``decks`` dependency.
+    The caller supplies the deck's device declarations, including its MiM and
+    MOS capacitor classes. The capacitor table names the available subcircuits.
 
-    Raises :class:`ModelBindingError` (via :func:`resolve_mos_model_table`)
-    when ``pdk_variant``'s family has no curated MOS entry for ``deck_name`` --
-    the same up-front deck/PDK-mismatch guard #209 already had. A *recognised*
-    device class with no curated binding of its own (today: only gf180mcu's
-    ``bjt``) is left out of the map, so the writer keeps its bare primitive
-    card -- a documented carve-out, never a silent wrong subcircuit call.
+    A deck/PDK family mismatch raises :class:`ModelBindingError`. A class
+    without a curated binding keeps its primitive card, including GF180's
+    bipolar class and the four deep-n-well MOS capacitor classes.
 
     Each MOS ``DeviceBinding``'s ``flavour_subckts`` (issue #1111) is
     populated from ``_MOS_MODEL_FLAVOURS`` for every ``deck.mos_flavours``
@@ -1507,7 +1502,10 @@ def resolve_device_bindings(
 
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family), {})
     cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("L", "W"))
-    for capacitor in getattr(deck, "capacitors", ()):
+    for capacitor in (
+        *getattr(deck, "capacitors", ()),
+        *getattr(deck, "mos_capacitors", ()),
+    ):
         subckt = cap_table.get(capacitor.name)
         if subckt is None:
             continue

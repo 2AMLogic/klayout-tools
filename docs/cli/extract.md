@@ -3273,6 +3273,15 @@ is not a terminal, as in the runset). `params` are the gate region's `area_um2`
 `A` and `P` as `klt extract`. `klt deck devices --deck gf180mcu` lists the
 twelve classes (`kind: "mos_capacitor"`).
 
+With a resolved GF180 PDK, extraction writes the eight plain and `_b`
+classes as calls to their bias-dependent PDK subcircuits. The gate is the
+first pin and the strapped source/drain is the second. For example, the
+0.8 × 2.0 µm gate above emits
+`X$1 G SD cap_nmos_03v3_b c_length=2U c_width=0.8U`. The four `_dn`
+classes have no dedicated PDK subcircuit and keep their fixed-value `C`
+cards. Extraction without a selected PDK also writes fixed-value cards.
+In both cases the report's `c_f` is the nominal area-based capacitance.
+
 Approximations versus the runset: an island overlapping any `moscap_exclude`
 marker (resistor, ESD, SAB, `RES_MK`, `DIODE_MK`, `DRC_BJT`, native, `efuse_mk`,
 `plfuse`, `mvsd`/`mvpsd`, LDMOS, Schottky; the runset's `lvs_source` is not
