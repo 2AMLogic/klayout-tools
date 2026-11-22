@@ -3009,6 +3009,7 @@ forward regardless (a `diode_insertion` remedy):
 | ---------------- | --------------- | ------------------------------------------------------------------------------------------------ |
 | `schema_version` | integer         | `2` (issue #2703: `file` became a `{path, scope}` envelope; 1 → 2). Every Phase 1b/1c field was added additively (see "Phase scope" above). |
 | `file`           | object          | (issue #2703) The input layout as `{path, scope}`: `scope: "repo"` with a repo-relative `path`, or `scope: "external"` with `path: null` outside any repo (the absolute path is never emitted). `--check`/`--rerun` still accept a schema-1 bare string. |
+| `top`            | string          | Name of the cell ERC analysed, including an automatically selected top. |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
 | `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
@@ -3295,7 +3296,7 @@ differences between the report and the running build. It is informational: it
 never affects `status` or the exit code.
 
 **Full mode (`--rerun`)** re-runs ERC from the report's echoed
-`file`/`spec`/`pdk`/`findings_only`/`antenna_tables_omitted` (and
+`file`/`spec`/`pdk`/`top`/`findings_only`/`antenna_tables_omitted` (and
 `provenance.deck.name`, when there is one) and diffs the fresh report against the committed one, excluding
 `provenance.klt_version`, `provenance.klt_git_commit`,
 `provenance.klt_reinstall_spec`, `provenance.klayout_version` and
@@ -3318,10 +3319,9 @@ When rerunning an earlier ERC report with a build that emits counted antenna
 records, the coverage lists may differ in representation. The rerun diff
 reports that change even when the antenna verdicts agree.
 
-**Known limitation:** `--top` is not echoed in the ERC report, so `--rerun`
-cannot replay it and always runs with no top selected. A layout with more than
-one top cell then fails with the ordinary ambiguous-top-cell error (exit 1).
-Use cheap `--check` for such a report.
+Earlier reports without `top` replay using automatic cell selection.
+A single-top stream can still match. Replaying an older report against a
+multi-top stream requires a new report that records the selected cell.
 
 **Exit codes:** `0` — `status: "match"`; `3` — `status: "drifted"`; `1` —
 failed to verify (missing/invalid report, or the rerun itself errored); `2` —

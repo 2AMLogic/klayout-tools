@@ -1568,6 +1568,7 @@ def run_lvs(
         combine_per_circuit_warnings,
         layout_circuit_names,
         finfet_bulk_records,
+        layout_known_limit_counts,
     ) = layout_stage
 
     ref_stage = _read_reference_stage(
@@ -1582,18 +1583,11 @@ def run_lvs(
         power_only_pruning_warnings,
         combine_per_circuit_warnings,
     )
-    reference_netlist_path = ref_stage.reference_netlist_path
-    reference_form = ref_stage.reference_form
     anchor_top_level_pins = ref_stage.anchor_top_level_pins
     power_connectivity = ref_stage.power_connectivity
     reference_device_bulk = ref_stage.reference_device_bulk
-    reference_pdk_info = ref_stage.reference_pdk_info
-    reference_pin_order_sources = ref_stage.reference_pin_order_sources
     reference_placeholder_classes = ref_stage.reference_placeholder_classes
-    reference_gate_level_case_folds = ref_stage.reference_gate_level_case_folds
     supply_universe = ref_stage.supply_universe
-    unresolved_subckt_call_findings = ref_stage.unresolved_subckt_call_findings
-    reference_pin_order_files = ref_stage.reference_pin_order_files
     reference_netlist = ref_stage.reference_netlist
 
     (
@@ -1613,7 +1607,7 @@ def run_lvs(
         opts,
         flatten_warnings,
         power_connectivity,
-        reference_form,
+        ref_stage.reference_form,
     )
 
     bulk_warnings: list[dict[str, Any]] = []
@@ -2014,13 +2008,19 @@ def run_lvs(
         power_only_pruning_warnings=power_only_pruning_warnings,
         family_findings=family_findings,
         gate_level_port_alias_warnings=gate_level_port_alias_warnings,
-        reference_gate_level_case_folds=reference_gate_level_case_folds,
+        reference_gate_level_case_folds=ref_stage.reference_gate_level_case_folds,
         layout_pin_renames=layout_pin_renames,
         supply_findings=supply_findings,
-        unresolved_subckt_call_findings=unresolved_subckt_call_findings,
+        unresolved_subckt_call_findings=ref_stage.unresolved_subckt_call_findings,
     )
     note_known_limit(
-        mismatches, opts.finfet_layout, status, reference_spec, layout_spec
+        mismatches,
+        opts.finfet_layout,
+        status,
+        reference_spec,
+        layout_spec,
+        layout_counts=layout_known_limit_counts,
+        reference_counts=ref_stage.reference_known_limit_counts,
     )
 
     return assemble_lvs_report(
@@ -2036,12 +2036,12 @@ def run_lvs(
         layout_circuit=layout_circuit,
         layout_abstracted_cells=layout_abstracted_cells,
         reference_circuit=reference_circuit,
-        reference_form=reference_form,
+        reference_form=ref_stage.reference_form,
         reference_spec=reference_spec,
-        reference_pdk_info=reference_pdk_info,
-        reference_pin_order_sources=reference_pin_order_sources,
-        reference_pin_order_files=reference_pin_order_files,
-        reference_netlist_path=reference_netlist_path,
+        reference_pdk_info=ref_stage.reference_pdk_info,
+        reference_pin_order_sources=ref_stage.reference_pin_order_sources,
+        reference_pin_order_files=ref_stage.reference_pin_order_files,
+        reference_netlist_path=ref_stage.reference_netlist_path,
         extracted_netlist_path=extracted_netlist_path,
         equivalent_pins_applied=equivalent_pins_applied,
         constant_bindings=constant_bindings,

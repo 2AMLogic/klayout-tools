@@ -183,7 +183,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Callable
-from functools import cache
+from functools import cache, partial
 from typing import Any
 
 from . import gen_compose_port_request as _pr
@@ -191,13 +191,7 @@ from ._jsonnum import is_finite_number, is_int
 from ._layout import write_layout
 from ._paths import _load_request_json, _resolve_relative
 from ._provenance import build_provenance, layout_geometry_digest
-from .decks import (
-    ExtractionDeck,
-    UnknownDeckError,
-    get_deck,
-    get_extraction_deck,
-    get_nominal_dbu,
-)
+from .decks import ExtractionDeck, get_extraction_deck
 from .gen import (
     CONTACT_SIZE_UM,
     ENCLOSURE_MARGIN_UM,
@@ -226,6 +220,7 @@ from .gen_compose_landing_pads import (
     _make_landing_pad_side_um,
     _parse_landing_pad_override,
 )
+from .gen_compose_layer_rules import _is_gf180_9k_11k_top, _route_spacing_rule
 from .gen_compose_plane_change import RouteConflict, _blocking_net_field
 from .gen_compose_port_access import derive_label_ports, parse_ports_from_labels
 
@@ -3548,7 +3543,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 block_id: str, _cache=cache, _layer=layer
             ) -> dict[str, dict[str, Any] | None]:
                 if block_id not in _cache:
-                    _cache[block_id] = _own_block_layer_geometry(block_id, _layer)
+                    _cache[block_id] = _own_block_layer_geometry(
+                        block_id, _layer, _drawing_dbu()
+                    )
                 return _cache
 
             _override_geometry_fetchers[layer] = _fetch
@@ -3601,14 +3598,30 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         layout, _ = _load_block_cell(block_id, blocks[block_id])
         return float(layout.dbu)
 
-    def _route_dbu() -> float:
-        # Route-vs-route spacing retains its historical first-block grid.
-        return _block_dbu(order[0])
-
     @cache
     def _drawing_dbu() -> float:
         # Snap landing pads and their block geometry on the writer's grid.
         return required_dbu or min(_block_dbu(block_id) for block_id in order)
+
+    def _leg_regions(
+        points: list[tuple[float, float]],
+        width: float,
+        drops: list[dict[str, Any]],
+        stub_widen: list[dict[str, Any]],
+        layer: tuple[int, int] | None,
+    ) -> dict[tuple[int, int] | None, Any]:
+        """Use the same drawn footprint to check a candidate and to register it."""
+        dbu = _drawing_dbu()
+        side, cut = side_for_pair.drawn_side, side_for_pair.via_side_um
+        regions = {
+            layer: _drawn_leg_footprint_region(
+                points, width, drops, stub_widen, dbu, layer, side, cut
+            )
+        }
+        regions.update(
+            _drawn_leg_intermediate_pad_regions(drops, dbu, layer, side, cut).items()
+        )
+        return regions
 
     nets: list[dict[str, Any]] = []
     unrouted_nets: list[str] = []
@@ -3648,49 +3661,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         tuple[str, frozenset[tuple[str, str]], tuple[int, int] | None, Any]
     ] = []
 
-    # Minimum same-layer spacing cache (issue #1386): looked up at most once
-    # per distinct effective route layer actually used, from the *same*
-    # curated DRC deck `klt drc --deck <family>` runs -- never a second,
-    # private threshold table. Feeds both the spacing-aware route-vs-route
-    # half of `_leg_conflict` below and its own-block pad self-notch check
-    # (#1520, added later in the same function): #1057's original
-    # route-vs-route check only ever
-    # caught a literal footprint *overlap*, which is a strict subset of what
-    # a same-layer minimum-spacing rule (e.g. sky130's `li1.space.1`/
-    # `met1.space.1`) actually forbids -- two legs whose footprints never
-    # touch can still sit closer together than that rule allows, and #1057
-    # reported both `routed: true` for it. A layer with no matching `"space"`
-    # rule in the resolved deck (or an unresolvable PDK family) caches
-    # ``None`` and this check degrades to exactly its pre-#1386 overlap-only
-    # behaviour for that layer.
-    _min_spacing_um_cache: dict[tuple[int, int], tuple[float, str] | None] = {}
-
-    def _min_spacing_um_for_layer(
-        layer: tuple[int, int] | None,
-    ) -> tuple[float, str] | None:
-        if layer is None:
-            return None
-        if layer not in _min_spacing_um_cache:
-            try:
-                family = _pdk_family(pdk_info["variant"])
-                deck_rules = get_deck(family)
-                nominal_dbu_um = get_nominal_dbu(family)
-            except (GenError, UnknownDeckError):
-                _min_spacing_um_cache[layer] = None
-                return None
-            best: tuple[float, str] | None = None
-            for rule in deck_rules:
-                if (
-                    rule.check == "space"
-                    and rule.layer == layer
-                    and rule.other_layer is None
-                    and rule.derived_layer is None
-                ):
-                    threshold_um = rule.threshold_dbu * nominal_dbu_um
-                    if best is None or threshold_um > best[0]:
-                        best = (threshold_um, rule.id)
-            _min_spacing_um_cache[layer] = best
-        return _min_spacing_um_cache[layer]
+    _min_spacing_um_for_layer = partial(_route_spacing_rule, pdk_info["variant"])
 
     _snap_routed_ports_to_grid(
         connectivity,
@@ -3711,13 +3682,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # net that names no layer_role of its own routes byte-identically to
         # how it did before this field existed -- including keeping the
         # `routing.cross_block_layer_role` fallback. A net that *does* name
-        # one routes on that plane instead, and the automatic cross-block
-        # fallback no longer applies to it: the caller has taken explicit
-        # control of this net's plane, and silently retrying it on a second,
-        # request-level plane it never asked for would make the drawn layer
-        # unpredictable (and is ill-defined when the two name one metal).
-        # The per-leg escape hatch (`legs[].layer_role`) is how a net that
-        # genuinely needs two planes says so explicitly.
+        # one routes on that plane instead, and no automatic fallback applies
+        # to it (cross-block, or the #6920 plane climb): the caller took
+        # explicit control of the plane (`legs[].layer_role` says two).
         net_where = f"request.connectivity[{net_index}] (net '{net_label}')"
         net_layer_role = entry.get("layer_role")
         net_route_layer = route_layer
@@ -3726,6 +3693,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         net_cross_geometry_for = _cross_block_geometry_for
         net_cross_width_um = cross_block_width_um
         net_width_um = width_um
+        # #6920 plane climb: off when this net named its own plane (#1655).
+        net_auto_climb = net_layer_role is None
         if not declare_only:
             if net_layer_role is not None:
                 net_route_layer = _resolve_override_layer(
@@ -3838,6 +3807,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             via_drops: list[dict[str, Any]],
             stub_widen: list[dict[str, Any]],
             layer: tuple[int, int] | None,
+            *,
+            candidate_width_um: float | None = None,
             _net_pin_set: frozenset[tuple[str, str]] = net_pin_set,
             _net_layer_widths: dict[tuple[int, int], float] = net_layer_widths,
             _net_width_um: float = net_width_um,
@@ -3884,21 +3855,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             same as it always excluded a single-hop drop's *far* (port-side)
             pad.
 
-            Those intermediate pads are *not* left unchecked, though (issue
-            #1913): :func:`_drawn_leg_intermediate_pad_regions` returns them
-            separately, keyed by each pad's own layer, and ``layer_checks``
-            below folds each one in as a further ``(layer, region,
-            check_spacing=False)`` entry -- compared against
-            ``accepted_route_regions`` for a literal overlap the same way as
-            the primary entry, just keyed to a different layer. This is the
-            only place that *can* catch a short living entirely on a plane
-            neither net's own primary layer names: two shapes that overlap
-            on one physical layer merge into a single polygon in the
-            composed GDS, which is a short, not a spacing violation, so
-            `klt drc` -- however complete its rule deck -- has nothing to
-            flag there. (The own-block pad self-notch check below, #1520, is
-            a distinct, narrower case: the *same* block's own other geometry
-            on a pad's layer, not a different net's.)
+            Intermediate and far pads are compared on their own physical
+            layers. Extraction can merge nets through one of these pads
+            even when their backbones lie on different metals.
 
             Intermediate entries skip the *spacing* half of the check
             (``check_spacing=False``) that the primary entry still runs --
@@ -3918,6 +3877,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             already-accepted net whose own primary-layer geometry merely
             passes nearby, not through, that fixed point.
 
+            Automatic climbs and GF180 9K/11K top-metal landings also
+            check intermediate and far pads for spacing.
+
             A literal positive-area overlap is still always rejected first
             (mirrors check 4's "positive area only, not a mere edge touch"
             rule: a ``kdb.Region`` boolean AND between two backbones already
@@ -3934,42 +3896,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             this check could not see. A layer with no known ``"space"`` rule
             keeps the overlap-only test (#6961: verdict is a ``RouteConflict``).
             """
-            # candidate_width_um (#1620): this candidate's own drawn width --
-            # cross_block_width_um when it resolved on cross_route_layer,
-            # this net's own width otherwise -- so the compared footprint
-            # matches what _write_composed_gds actually draws for it, not the
-            # primary plane's width for a leg that never drew on that plane.
-            # `net_layer_widths` (#1655) generalises that to whichever plane
-            # this net (or one of its own legs) actually named.
-            candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
-            region = _drawn_leg_footprint_region(
-                points_um,
-                candidate_width_um,
-                via_drops,
-                stub_widen,
-                _route_dbu(),
-                layer,
-                side_for_pair,
+            # A new automatic via ladder must clear other nets on every plane.
+            automatic = candidate_width_um is not None
+            if candidate_width_um is None:
+                candidate_width_um = _net_layer_widths.get(layer, _net_width_um)
+            layer_regions = _leg_regions(
+                points_um, candidate_width_um, via_drops, stub_widen, layer
             )
-            # layer_checks (#1913): the primary (layer, region) entry (with
-            # its own spacing check, exactly as before), plus one further
-            # overlap-only entry per additional layer this leg's via-drop
-            # ladder lands an intermediate/far pad on -- see this closure's
-            # own docstring above. Empty from
-            # `_drawn_leg_intermediate_pad_regions` when `layer` is `None`:
-            # every pad is already folded into `region` itself in that case
-            # (the pre-#1567 conservative fallback), so there is nothing
-            # left to separate out.
-            layer_checks: list[tuple[tuple[int, int] | None, Any, bool]] = [
-                (layer, region, True)
-            ]
-            if layer is not None:
-                layer_checks.extend(
-                    (pad_layer, pad_region, False)
-                    for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                        via_drops, _route_dbu(), layer, side_for_pair
-                    ).items()
-                )
             for (
                 other_net,
                 other_pins,
@@ -3978,7 +3911,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             ) in accepted_route_regions:
                 if _net_pin_set & other_pins:
                     continue  # shared pin -- an intended merge, not a short
-                for cand_layer, cand_region, check_spacing in layer_checks:
+                for cand_layer, cand_region in layer_regions.items():
                     if (
                         cand_layer is not None
                         and other_layer is not None
@@ -3995,10 +3928,12 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         other_net,
                         cand_region,
                         other_region,
-                        _route_dbu(),
+                        _drawing_dbu(),
                         side_for_pair,
                         _min_spacing_um_for_layer,
-                        check_spacing=check_spacing,
+                        check_spacing=automatic
+                        or cand_layer == layer
+                        or _is_gf180_9k_11k_top(pdk_info["variant"], cand_layer),
                     )
                     if message is not None:
                         return RouteConflict(message, other_net)  # #6961
@@ -4034,7 +3969,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 stub_widen,
                 layer,
                 side_for_pair,
-                _drawing_dbu() if via_drops else _route_dbu(),
+                _drawing_dbu(),
             )
 
             for pad_layer, block_id, box, drop in pad_boxes:
@@ -4088,10 +4023,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # half of this very function (overlap-only -> spacing-rule aware),
             # applied to the route-vs-own-block case, and it reuses the same
             # `_min_spacing_um_for_layer` deck lookup rather than a second,
-            # private threshold. Scoped to the blocks *this net's own pins sit
-            # on* -- the blocks a leg is guaranteed to draw an approach stub
-            # inside, and the ones check 5 deliberately funds an allowance for;
-            # every other block stays check 5's business. Deliberately *not*
+            # private threshold. Ordinary legs check their endpoint blocks.
+            # Climbs check every block on the candidate plane. Deliberately *not*
             # restricted to `blocks[].cell` blocks the way #1527's own-block
             # escape check is: that scoping exists because an *overlap* with a
             # `generator_report` block's unreported-but-legitimate geometry
@@ -4106,8 +4039,16 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
             if own_spacing is not None and layer is not None:
                 own_spacing_um, own_rule_id = own_spacing
-                for block_id in sorted({block for block, _port in _net_pin_set}):
-                    own_geometry = _own_block_layer_geometry(block_id, layer)
+                # An automatic climb can approach metal in any placed cell.
+                checked_blocks = (
+                    blocks.keys()
+                    if automatic
+                    else {block for block, _port in _net_pin_set}
+                )
+                for block_id in sorted(checked_blocks):
+                    own_geometry = _own_block_layer_geometry(
+                        block_id, layer, _drawing_dbu()
+                    )
                     if own_geometry is None:
                         continue
                     violation_um = _leg_block_spacing_violation_um(
@@ -4172,6 +4113,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
                 grid_um=net_grid_um,
+                pdk_variant=pdk_info["variant"],
+                auto_plane_climb=net_auto_climb,
+                width_aware_conflict=_leg_conflict,
+                landing_pad_side=side_for_pair.drawn_side,
+                route_dbu=_drawing_dbu,
             )
             notes.extend(_offgrid_leg_notes(net_label, result["legs"], net_grid_um))
         # landed_on_block (issue #2210): computed once per leg, outside the
@@ -4272,40 +4218,17 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             # instead). Falls back to width_um for a leg that predates this
             # field (defensive; every leg compose() produces itself sets it).
             leg_width_um = leg.get("width_um", net_width_um)
-            accepted_route_regions.append(
-                (
-                    net_label,
-                    net_pin_set,
-                    leg_route_layer,
-                    _drawn_leg_footprint_region(
-                        leg["points_um"],
-                        leg_width_um,
-                        leg["via_drops"],
-                        leg["stub_widen"],
-                        _route_dbu(),
-                        leg_route_layer,
-                        side_for_pair,
-                    ),
-                )
+            regions = _leg_regions(
+                leg["points_um"],
+                leg_width_um,
+                leg["via_drops"],
+                leg["stub_widen"],
+                leg_route_layer,
             )
-            # Intermediate/far via-drop landing pads (issue #1913): the
-            # complement `_drawn_leg_footprint_region` excludes above --
-            # a multi-hop ladder's pad on a layer *other* than this leg's own
-            # `leg_route_layer` -- fed into `accepted_route_regions` too, one
-            # entry per additional layer, keyed to that pad's own layer. A
-            # later net's `_leg_conflict` call compares its own drawn
-            # footprint against these the same way it compares against any
-            # other accepted entry, which is what lets it catch a short that
-            # lives entirely on a plane neither net's own primary layer
-            # names (invisible to `klt drc` by construction -- see
-            # `_leg_conflict`'s own docstring).
-            if leg_route_layer is not None:
-                for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
-                    leg["via_drops"], _route_dbu(), leg_route_layer, side_for_pair
-                ).items():
-                    accepted_route_regions.append(
-                        (net_label, net_pin_set, pad_layer, pad_region)
-                    )
+            accepted_route_regions.extend(
+                (net_label, net_pin_set, layer, region)
+                for layer, region in regions.items()
+            )
             leg_label_layer = _label_layer_for(leg_route_layer)
             routed_geometry.append(
                 {
@@ -4357,9 +4280,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             min_spacing_for_layer=lambda layer: (
                 _min_spacing_um_for_layer(layer) or (None,)
             )[0],
-            block_geometry=_own_block_layer_geometry,
+            block_geometry=partial(_own_block_layer_geometry, dbu=_drawing_dbu()),
             routed_regions=accepted_route_regions,
-            dbu=_route_dbu(),
+            dbu=_drawing_dbu(),
         )
     pin_placements, response_pins = _label_promoted_pins(
         promoted_pins,

@@ -3470,11 +3470,11 @@ source/drain nets and the same `L`, summing `nfin`, `w_um` and `fingers`.
 That is the only combination performed. Series stacks stay as drawn.
 
 **Polarity, body, connectivity.** Polarity comes from `Nselect`/`Pselect`
-(12/0, 13/0), not from the well. The ASAP7 cells draw no substrate or well
-tie (the CDL simply ties bulk to `VSS`/`VDD`). So the NMOS bulk is the
-synthesized `vsubs` global, and the PMOS bulk is the well net, named by
-its `well pin` text (1/251). Neither is joined to a metal supply of the same
-name, and a `warnings[]` entry says so. Diffusion reaches `LISD` (17/0) only
+(12/0, 13/0). NMOS bulk is the synthesized `vsubs` global. PMOS bulk follows
+the drawn well, named by its `well pin` text (1/251). N-selected active inside
+the well forms a tap. A complete contact path connects that well island to
+metal. Without the path, even a rail bearing the same label remains separate.
+Diffusion reaches `LISD` (17/0) only
 through the `SDT` source/drain trench (88/0). `LIG` (16/0) lands on the gate
 (after `GCut` 10/0 is subtracted). `LIG` and `LISD` conduct where they
 overlap. `V0` (18/0) joins both to `M1`, and `V1`..`V8` climb to `M9`. The

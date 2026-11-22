@@ -552,7 +552,7 @@ application error naming the instance and cell, never a silent skip.
   rails float on internal nets under other names proves nothing about
   the top-level grid). The derived block keeps the block's usual key
   set; `klt signoff` item 11 grades it exactly as a stub-form `"match"`.
-- **Tap-less blocks.** ASAP7 cells draw no taps, so the CDL bulk (`VSS` /
+- **Tap-less blocks.** In ASAP7 logic cells without taps, the CDL bulk (`VSS` /
   `VDD`) has no counterpart in the layout and the compare mismatches on the
   bulk nets. Grade such a block with `options.finfet_bulk` (see below); the
   tie is a disclosed `device.finfet_bulk_tied` warning, so a `match` reached
@@ -560,11 +560,12 @@ application error naming the instance and cell, never a silent skip.
 
 #### Bulk policy (`options.finfet_bulk`): opt-in and disclosed
 
-ASAP7 standard cells draw **no substrate or well taps**, while the reference
-CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. The extractor therefore
-gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. By
-default `klt lvs` does **not** bridge that gap: such a cell mismatches and
-nothing is tied silently.
+The reference CDL ties NMOS bulk to `VSS` and PMOS bulk to `VDD`. Extraction
+gives NMOS a synthesized `vsubs` bulk net and PMOS the drawn well net. Where
+an ASAP7 TAPCELL abuts the logic cell's well, N-selected active in that well
+can reach a routed M1 supply through SDT, LISD and V0. The PMOS bulk then
+shares the physical rail in the extracted netlist. A tapless logic cell
+retains separate well and rail nets and mismatches the CDL by default.
 
 `options.finfet_bulk` opts in to a comparison-side assumption:
 
@@ -641,9 +642,10 @@ suspecting extraction.
   `N declared pin names ... matched no promoted net in the layout: IN, OUT`
   (pinned in `test_declared_pins_do_not_create_pins_but_name_the_missing_labels`).
   Read that warning as "the labels are missing", not as a layout verdict.
-- **A well label and a rail label with one name stay two nets** at extraction
-  (`VDD` and `VDD$1`); `finfet_bulk` is what ties them for the compare, in
-  each cell, before the flatten.
+- **Each well island needs a complete tap path to the rail.** Matching labels
+  alone leave a tapless well and rail as separate nets (`VDD` and `VDD$1`).
+  For such a layout, `finfet_bulk` can tie them per cell before flattening
+  for comparison.
 - **M2 is `20/0`, M3 is `30/0`** in this deck, with V1 at `21/0`; a wire
   drawn on the wrong layer number is invisible to extraction.
 
@@ -687,6 +689,39 @@ changes `status`: the cell stays `mismatch`, and the real `device.unmatched` /
 `net.unmatched` errors are still reported. The list is
 `KNOWN_UNSUPPORTED_ASAP7_CELLS` in `klayout_tools/lvs_known_limits.py`, pinned to the
 corpus by the tests.
+
+**Block-level compares (issue #6931).** The single-cell warning above fires
+only when the compared *top* is itself one of the 17 cells -- exactly where
+the top name already tells the reader which cell is involved. A block-level
+compare (a routed design whose top *instantiates* the cells) gets the same
+never-silent disclosure for every pinned master it instantiates: on a
+mismatching FinFET compare, `klt lvs` intersects the instantiated masters of
+**both** sides with the pinned list and adds one `topology.known_limitation`
+warning per instantiated master (`side: "both"`), in canonical master-name
+order:
+
+- `details` carries `{"cell", "limitation", "layout_count",
+  "reference_count"}`. The counts are per side and stay separate: two layout
+  placements and three reference calls to the same master yield one warning
+  with `layout_count: 2, reference_count: 3`. A master seen on only one side
+  still gets a warning (the other count is `0`).
+- Counts are taken beneath each selected top while the hierarchy is still
+  available (before `options.flatten_layout`/`options.flatten_reference`
+  collapse it, and before the extraction-side per-cell circuits are merged),
+  multiplying through wrapper multiplicity: a wrapper placed twice around one
+  pinned leaf counts 2. A pinned master that is only *declared* -- a library
+  `.subckt` with no caller, or a GDS cell never placed under the top --
+  contributes no instances and emits nothing.
+- Circuit names are matched case-insensitively (the SPICE reader upper-cases
+  every `.subckt`/`X` name) and reported in the canonical library spelling.
+- The warning discloses a **possible contributor** to the block mismatch,
+  nothing more: it does not change `status`, does not suppress or explain away
+  any `device.unmatched`/`net.unmatched` error, and says nothing about *why
+  the rest of the block* mismatches. A matching compare, a non-FinFET compare,
+  or a block containing only supported masters emits none. What the warning
+  establishes is attribution, not a verdict: residual mismatches beyond the
+  named cells are still the reader's to bisect (the cell-level bisect recipe
+  above remains the path).
 
 Corpus tests live in `tests/test_asap7_finfet.py` (unit tests in `tests/test_lvs_known_limits.py`); they skip with an
 explicit reason when the pinned PDK is not fetched and write only to temp
@@ -4286,6 +4321,31 @@ never silently indistinguishable from one reached against the netlist's
 original hierarchy — the same transparency precedent
 `device.parameter_tolerated`/`device.bulk_reconciled` establish for their own
 opt-in normalisations.
+
+#### `topology.known_limitation`: a pinned unsupported ASAP7 RVT cell participated in the compare (issues #4819, #6931)
+
+Two shapes, both `severity: "warning"` and both emitted only on a
+**mismatching FinFET compare** (`layout.deck` is a FinFET deck and `status`
+is `"mismatch"` — never on a `"match"`, an inconclusive/timeout compare, or a
+planar deck):
+
+- **Single cell (issue #4819):** the compared top itself is one of the 17
+  pinned cells. `side` is `"layout"`; `details` is `{"cell", "limitation"}`
+  with no count keys. See "Pinned ASAP7 RVT corpus" above for the limitation
+  kinds and why the verdict stays `mismatch`.
+- **Block level (issue #6931):** one entry per pinned master *instantiated*
+  beneath either selected top, in canonical master-name order. `side` is
+  `"both"`; `details` adds `layout_count`/`reference_count` — the per-side
+  instance counts taken beneath each selected top while the hierarchy was
+  still available (before either side's optional flatten), multiplying
+  through wrapper placements. A master only declared (never called or placed)
+  emits nothing.
+
+The block-level entry attributes a **possible contributor** to the mismatch;
+it never changes `status`, never suppresses an underlying error, and never
+asserts the named cells are the *whole* story — residual mismatches still
+need the cell-level bisect. `category_counts["topology.known_limitation"]`
+equals the number of emitted entries of either shape.
 
 #### `topology.hierarchy_mismatch`: the two sides sit at different hierarchy levels (issues #4548, #5756)
 
