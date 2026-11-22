@@ -177,7 +177,7 @@ def _collect_resume_entry(
         return None
     points = [by_id[unit] for unit in unit_ids]
     try:
-        corners, engine_version, environment = sim_batch._run_batch_job(
+        result = sim_batch._run_batch_job(
             config=config,
             job_id=job_id,
             corner_points=points,
@@ -191,6 +191,9 @@ def _collect_resume_entry(
             explicit_points=points,
             request_dir=request_dir,
             attach=True,
+        )
+        corners, engine_version, environment = sim_batch._require_shard_environment(
+            result
         )
     except sim_batch.BatchError as exc:
         print(
