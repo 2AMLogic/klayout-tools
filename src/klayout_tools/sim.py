@@ -96,6 +96,7 @@ from . import _spice_number as spice_number
 from . import (
     env_provenance,
     output_lock,
+    sim_ac_waveform,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -8227,18 +8228,8 @@ def _run_corner(
     if aborted_diagnostic is not None:
         diagnostics.append(aborted_diagnostic)
 
-    # A recovered `singular_matrix`/`nonconvergence` classification (the
-    # engine's own stepping-recovery narration -- routine noise on the way
-    # to a *successful* analysis, not evidence the run failed) does not
-    # count as fatal on its own: downgrade its severity in place before
-    # computing the corner's aggregate status. See
-    # `_recovered_from_stepping` and issue #205;
-    # `timeout`/`netlist`/`measurement`/`no_such_vector`/`unknown` are never
-    # downgraded.
-    # Xyce (issue #2016) gets the same rule against its own abort trailer:
-    # its Amesos "numerically singular matrix, returning zero" warnings can
-    # narrate intermediate solver trouble on a run that ultimately produced
-    # every requested measurement.
+    # Both engines may narrate failed stepping attempts on the path to a
+    # successful solve. Only these two codes are eligible for recovery.
     # Issue #2492: sampled *before* the downgrade immediately below, on the
     # diagnostic's `code` rather than its severity. A caller who listed
     # `singular_matrix` is saying they distrust exactly the case the
@@ -8250,7 +8241,7 @@ def _run_corner(
     )
 
     waveform_complete = _capture_only_waveform_complete(
-        measurements_spec, raw_path, diagnostics, analysis
+        measurements_spec, raw_path, diagnostics, analysis, engine, log_text
     )
 
     if _recovered_from_stepping(
@@ -8260,7 +8251,9 @@ def _run_corner(
         aborted_re=aborted_re,
         waveform_complete=waveform_complete,
     ):
-        _downgrade_stepping_diagnostics(diagnostics, bool(measurements_spec))
+        _downgrade_stepping_diagnostics(
+            diagnostics, bool(measurements_spec), analysis["kind"]
+        )
 
     status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
@@ -10664,11 +10657,8 @@ def _recovered_from_stepping(
     means the analysis never produced a trustworthy result and the
     classification stays fatal.
 
-    A corner with no ``measurements[]`` (a waveform-capture-only request,
-    issue #3246) has no measurement to check; its independent signal is
-    ``waveform_complete`` -- the captured ``tran`` waveform reached the
-    analysis stop time (:func:`_waveform_reached_tran_window`). Without it
-    such a corner is never considered recovered.
+    For a capture-only request, the original waveform can establish that the
+    transient reached its stop time or ngspice completed the AC sweep.
     """
     if not measurements_spec:
         return waveform_complete and not aborted_re.search(log_text)
@@ -10720,14 +10710,10 @@ def _capture_only_waveform_complete(
     raw_path: str | None,
     diagnostics: list[dict[str, Any]],
     analysis: dict[str, Any],
+    engine: str,
+    log_text: str,
 ) -> bool:
-    """Issue #3246: for a waveform-capture-only ``tran`` request (no
-    ``measurements[]``) the captured waveform is the independent completion
-    signal. Parse the rawfile -- only when a ``singular_matrix`` /
-    ``nonconvergence`` diagnostic makes it matter -- and report whether it
-    reached the transient stop time. A truncated/unparseable rawfile stays
-    fatal (``False``).
-    """
+    """Check the original waveform only when it could explain stepping recovery."""
     if (
         measurements_spec
         or raw_path is None
@@ -10737,6 +10723,11 @@ def _capture_only_waveform_complete(
         or not os.path.isfile(raw_path)
     ):
         return False
+    if analysis["kind"] == "ac" and engine == "ngspice":
+        rows = _DATA_ROWS_RE.findall(log_text)
+        return sim_ac_waveform.complete(
+            raw_path, analysis.get("args", ""), rows[0] if len(rows) == 1 else None
+        )
     try:
         waveform = parse_ascii_rawfile(raw_path)
     except (SimError, ValueError):
@@ -10745,7 +10736,7 @@ def _capture_only_waveform_complete(
 
 
 def _downgrade_stepping_diagnostics(
-    diagnostics: list[dict[str, Any]], has_measurements: bool
+    diagnostics: list[dict[str, Any]], has_measurements: bool, analysis_kind: str
 ) -> None:
     """Downgrade recovered ``singular_matrix``/``nonconvergence`` diagnostics
     to warnings; a capture-only corner also gets the reason appended."""
@@ -10753,9 +10744,13 @@ def _downgrade_stepping_diagnostics(
         if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
             diagnostic["severity"] = "warning"
             if not has_measurements:
+                reached = (
+                    "completed the AC sweep"
+                    if analysis_kind == "ac"
+                    else "reached the transient stop time"
+                )
                 diagnostic["message"] += (
-                    " (treated as recovered: the captured waveform "
-                    "reached the transient stop time)"
+                    f" (treated as recovered: the captured waveform {reached})"
                 )
 
 
