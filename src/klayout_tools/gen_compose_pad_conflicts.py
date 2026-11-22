@@ -249,11 +249,9 @@ def _drawn_pad_side_um(
     ``pad_layer`` (the message path of issue #5803's pad-vs-pitch
     rejection).
 
-    The collision *checks* keep the fixed-baseline footprint when the
-    request sets no ``routing.landing_pad_size_um`` (the #2072/#1501
-    scoping trade-off, deliberately unchanged here) -- but the message
-    must report the size the composed GDS will really carry, area and
-    enclosure floors included, or it understates the conflict it names. A
+    Without an override the routing spacing pre-checks use the fixed
+    baseline. This diagnostic and the own-block self-notch check use the
+    drawn size, including the area and enclosure floors. A
     ``minimal_ladder`` intermediate landing (issue #6058) is the one pad
     whose drawn side *excludes* the fixed baseline: the resolver built
     with the mode answers its per-pair floor directly, so report that
