@@ -114,8 +114,7 @@ are `null` (mirroring `stddev: null` for `n < 2` in `klt sim`) and `status` is:
 | `non_convergence` | The iteration failed to converge. |
 | `no_samples` | No usable samples. |
 
-A corner with such a status is still a successful run (exit `0`); the caller
-reads `fit.status`.
+Without declared limits a degenerate corner still exits `0`. Its `fit.status` explains the result.
 
 ### `goodness_of_fit`
 
@@ -143,6 +142,39 @@ reaches `RATE` at `mu ± sigma · Phi⁻¹(1 − RATE)`.
 An `extrapolated: true` stimulus is a model extrapolation from the normal-CDF
 assumption, not something the sample count resolves; treat it accordingly.
 
+## Grading a fitted spread or margin
+
+Either records-document form accepts an optional top-level `limits` object.
+For example, a campaign can require a fitted spread of at most 1.6 mV and a
+measured separation of at least six fitted standard deviations.
+
+```json
+{
+  "sigma_max": 1.6,
+  "margin": {"separation": 10.0, "multiple": 6, "source": "offset-study/worst-separation"}
+}
+```
+
+Place this object under `"limits"` and include either check or both. Express
+`sigma_max` and `separation` in stimulus units. Both must be finite and
+nonnegative. The multiple must be finite and positive. The source names the
+measurement supplying the separation. Confidence applies to the fit,
+conditional on that supplied separation.
+
+Each corner compares the unrounded upper profile-likelihood bound at the
+requested confidence. The maximum passes when `sigma_ci.upper <= sigma_max`.
+The margin passes when `separation >= multiple * sigma_ci.upper`. With a
+point estimate of 1.188 and a 95% upper bound of 1.547, a maximum of 1.3
+fails and a maximum of 1.6 passes. For a six-sigma margin, a separation of
+8 fails and 10 passes.
+
+Each graded corner reports `checks` keyed by declaration name and a
+`verdict`. Each check includes its operands, `sigma_ci_upper` and its
+verdict. A degenerate fit or open upper bound yields `insufficient_evidence`
+with a reason. The top-level `status` combines all corners. Failure takes
+precedence over insufficient evidence, which takes precedence over a pass.
+An empty campaign with declared limits yields insufficient evidence.
+
 ## Numerics
 
 - `log Phi` uses `erfc` in the body and an asymptotic series below −20 σ, and
@@ -159,6 +191,8 @@ assumption, not something the sample count resolves; treat it accordingly.
 
 | Exit code | Meaning |
 | --- | --- |
-| `0` | Every corner reported (including corners with a non-`ok` `fit.status`). |
+| `0` | All declared limits pass, or no limits were declared. |
 | `1` | The records document is missing, unreadable or malformed, or an option is invalid (`--confidence` outside (0, 1), `--target-error-rate` outside (0, 0.5), `value` records without `--threshold`). JSON error envelope on stderr under `--format json`; stdout empty. |
 | `2` | Usage error (argparse). |
+| `3` | At least one declared check failed. |
+| `4` | The available evidence cannot establish every declared limit, and no check failed. |

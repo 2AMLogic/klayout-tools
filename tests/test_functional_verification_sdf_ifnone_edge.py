@@ -27,31 +27,19 @@ pin) is untouched.
 from __future__ import annotations
 
 import json
-import shutil
 import types
 from pathlib import Path
 
 import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
+from helpers.tool_probes import SKIP_NO_COCOTB, SKIP_NO_ICARUS
 from klayout_tools import functional_verification as fv
 from klayout_tools import functional_verification_sdf as fvs
 from klayout_tools.functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
 )
-
-
-def _have_cocotb() -> bool:
-    try:
-        import cocotb_tools.runner  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
-HAVE_COCOTB = _have_cocotb()
-HAVE_ICARUS = shutil.which("iverilog") is not None
 
 _RESULTS_XML = """\
 <testsuites name="results">
@@ -513,8 +501,8 @@ def test_stubbed_sdf_interconnect_mode_never_reaches_the_ifnone_pass(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_real_icarus_sdf_drops_ifnone_edge_modpath_iopaths(tmp_path):
     """The load-bearing regression for issue #2885, end to end against the
     real toolchain: before the fix this raised `FunctionalVerificationError`
@@ -546,8 +534,8 @@ def test_integration_real_icarus_sdf_drops_ifnone_edge_modpath_iopaths(tmp_path)
     assert sdf["dropped"]["iopath_ifnone_edge_modpath"]["arcs"] == _EXPECTED_ARCS
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 @pytest.mark.parametrize("corner", ["min", "typ", "max"])
 def test_integration_real_icarus_sdf_ifnone_edge_drop_applies_at_every_corner(
     tmp_path, corner
@@ -567,8 +555,8 @@ def test_integration_real_icarus_sdf_ifnone_edge_drop_applies_at_every_corner(
     )
 
 
-@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
-@pytest.mark.skipif(not HAVE_ICARUS, reason="iverilog is not installed on this machine")
+@SKIP_NO_COCOTB
+@SKIP_NO_ICARUS
 def test_integration_real_icarus_sdf_mismatched_iopath_still_fails_loud(tmp_path):
     """The exemption is bounded by the model, not by the diagnostic text: an
     IOPATH onto a pin the XOR model declares no path for at all still reaches
