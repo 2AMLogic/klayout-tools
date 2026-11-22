@@ -9697,18 +9697,21 @@ measurement that produced no value, or that trailer, keeps
 `singular_matrix`/`nonconvergence` at `severity: "error"` and the corner at
 `status: "error"`, exactly as before.
 
-A waveform-capture-only request (no `measurements[]`, issue #3246) has no
-measurement to confirm completion, so the captured waveform is the recovery
-basis instead: for a `tran` analysis with `options.waveforms: true`, the
-downgrade applies when the trailer is absent *and* the parsed waveform's last
-time point reaches the `tran` stop time (the second `analysis.args` token). A
-missing or truncated waveform, an unparseable `args`, or any non-`tran`
-analysis keeps the diagnostic at `severity: "error"`. When the waveform was
-the basis, the downgraded diagnostic's `message` says so. Declaring a dummy
-completion measurement is no longer needed to get this behavior.
-`options.fail_on_diagnostic` is unaffected (it matches on `code`).
-`netlist`/`timeout`/`measurement`/`unknown`/`timestep_too_small` are never
-downgraded.
+For waveform capture without `measurements[]`, the original `waveform.raw`
+can establish that the analysis completed. A transient must reach the stop
+time in `analysis.args`. For ngspice AC, the frequency samples must cover the
+requested linear, decade or octave grid. For example, `oct 3 10 850` ends at
+approximately 806.35 Hz. For logarithmic grids, the check uses the length of
+ngspice’s original frequency vector, including any extra points selected by
+the effective `reltol`. It works with or without `complex_vectors`.
+A missing, unreadable, wrong-axis or truncated waveform leaves the stepping
+errors fatal. The abort trailer also keeps them fatal.
+
+The warning message identifies the completed analysis. Other errors, including
+a missing requested vector, still fail the corner. The `netlist`, `timeout`,
+`measurement`, `unknown`, and `timestep_too_small` errors remain fatal. An
+explicit `options.fail_on_diagnostic` selection still grades an otherwise
+recovered corner as inconclusive.
 
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`
