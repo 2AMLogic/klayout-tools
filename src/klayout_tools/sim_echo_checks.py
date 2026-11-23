@@ -124,3 +124,53 @@ def _require_supply_echo(
             echo_unsupported_message("supply_v", problem, env),
             code=SUPPLY_PRECISION_UNSUPPORTED_WORKER_CODE,
         )
+
+
+NODESET_UNSUPPORTED_WORKER_CODE = "nodeset_unsupported_worker"
+
+
+def _require_nodeset_echo(
+    points: list[CornerPoint],
+    corners: list[dict[str, Any]],
+    *,
+    backend: str = "remote",
+    label: str = "options.nodeset",
+    attr: str = "nodeset",
+    code: str = NODESET_UNSUPPORTED_WORKER_CODE,
+) -> None:
+    """Fail the request when an off-host worker did not honor
+    ``options.nodeset`` (issue #3036) -- or, with ``label``/``attr``/``code``
+    of ``options.initial_conditions``, that field (issue #3881).
+
+    A worker built before the field ignores the hints and would report a
+    passing, unhinted solve; one that supports it echoes each point's
+    ``nodeset`` in its corner report, which is compared with what was
+    dispatched. Independent of any version check, so it also catches a
+    same-release runner image built before the feature landed.
+    """
+    if backend not in _OFFHOST_BACKENDS or not any(getattr(p, attr) for p in points):
+        return
+    problem: str | None = None
+    if len(corners) != len(points):
+        problem = (
+            f"it returned {len(corners)} corner report(s) for "
+            f"{len(points)} dispatched point(s)"
+        )
+    else:
+        for point, corner in zip(points, corners, strict=True):
+            expected = getattr(point, attr)
+            if (corner.get(attr) or type(expected)()) != expected:
+                problem = (
+                    f"corner {point.corner_id!r} came back with {attr} "
+                    f"{corner.get(attr)!r}, expected {expected!r}"
+                )
+                break
+    if problem is not None:
+        raise SimError(
+            f"the remote/batch worker did not honor {label} -- "
+            f"{problem}. A worker built before the field ignores it and "
+            "would solve without the requested initial values; update the "
+            "runner image to this klt release, or use a local backend. No "
+            "result was reported",
+            code=code,
+        )
