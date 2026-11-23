@@ -8628,66 +8628,16 @@ def _crossings_measurement_result(
     return result, grading_diagnostics
 
 
-def _cycle_mean_measurement_result(
+def _vector_measurement_result(
     spec: dict[str, Any],
-    outcome: sim_cycle_mean.CycleMeanOutcome | None,
+    outcome: Any,
     *,
     save_mode: str,
+    key: str,
+    default_reason: str | None = None,
+    report_with_spec: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``cycle_mean`` measurement's response entry (issue #2947).
-
-    ``value`` is the time-weighted mean, graded through
-    :func:`_grade_measurement_value` like any scalar; the window rides the
-    additive ``cycle_mean`` sibling. A failure is ``status: "error"``,
-    ``value: null`` and a ``code: "measurement"`` diagnostic whose message
-    starts with a stable ``[<reason>]`` token (one of
-    :data:`klayout_tools.sim_cycle_mean.ERROR_CODES`), so the existing
-    ``diagnostics[].code`` vocabulary is unchanged."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.mean is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no cycle_mean value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "cycle_mean_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "cycle_mean_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(spec, outcome.mean)
-    result = {
-        "name": name,
-        "value": outcome.mean,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "cycle_mean": outcome.report(),
-    }
-    return result, grading_diagnostics
-
-
-def _vector_measurement_result(
-    spec: dict[str, Any], outcome: Any, *, save_mode: str, key: str
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Response entry for an eye, step-resolution, or settled measurement; the
+    """Response entry for a vector measurement with a coded diagnostic; the
     detail rides the additive ``key`` sibling. A failure is ``status:
     "error"`` with a ``[<reason>]``-prefixed ``measurement`` diagnostic."""
     name = spec["name"]
@@ -8699,7 +8649,9 @@ def _vector_measurement_result(
             else f"measurement '{name}' produced no {key} value"
         )
         missing = f"{key}_vector_missing"
-        reason = outcome.code if outcome is not None and outcome.code else missing
+        reason = (
+            (outcome.code if outcome is not None else None) or default_reason or missing
+        )
         if save_mode == "netlist" and reason == missing:
             message += SAVE_MODE_NETLIST_NO_VALUE_HINT
         result = {"name": name, "value": None, "unit": unit}
@@ -8715,74 +8667,28 @@ def _vector_measurement_result(
         spec, outcome.value
     )
     result = {"name": name, "value": outcome.value, "unit": unit}
-    result.update(status=m_status, margin=margin, **{key: outcome.report()})
+    detail = outcome.report(spec) if report_with_spec else outcome.report()
+    result.update(status=m_status, margin=margin, **{key: detail})
     return result, grading_diagnostics
 
 
-#: Per-kind builders; ``settled`` value 1.0/0.0 = (not) settled.
+#: Per-kind builders (#4773, #4780); ``settled`` value 1.0/0.0 = (not) settled.
 _eye_measurement_result = functools.partial(_vector_measurement_result, key="eye")
+_cycle_mean_measurement_result = functools.partial(
+    _vector_measurement_result, key="cycle_mean"
+)
+_tian_measurement_result = functools.partial(
+    _vector_measurement_result,
+    key="tian",
+    default_reason="tian_pass_missing",
+    report_with_spec=True,
+)
 _step_resolution_measurement_result = functools.partial(
     _vector_measurement_result, key="step_resolution"
 )
 _settled_measurement_result = functools.partial(
     _vector_measurement_result, key="settled"
 )
-
-
-def _tian_measurement_result(
-    spec: dict[str, Any],
-    outcome: sim_tian.TianOutcome | None,
-    *,
-    save_mode: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """One ``tian`` measurement's response entry (issue #3160).
-
-    ``value`` is the metric, graded through :func:`_grade_measurement_value`
-    like any scalar; the request echo rides the additive ``tian`` sibling. A
-    failure is ``status: "error"``, ``value: null`` (so it can never pass a
-    limit) with a ``code: "measurement"`` diagnostic whose message starts with
-    a ``[<reason>]`` token from :data:`klayout_tools.sim_tian.ERROR_CODES`."""
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no tian value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "tian_pass_missing"
-        )
-        if save_mode == "netlist" and reason == "tian_vector_missing":
-            message += SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        return result, [
-            {
-                "severity": "error",
-                "code": "measurement",
-                "message": f"[{reason}] {message}",
-            }
-        ]
-    m_status, margin, grading_diagnostics = _grade_measurement_value(
-        spec, outcome.value
-    )
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "tian": outcome.report(spec),
-    }
-    return result, grading_diagnostics
 
 
 def _energy_measurement_result(
