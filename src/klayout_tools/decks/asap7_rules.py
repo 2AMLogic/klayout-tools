@@ -105,9 +105,8 @@ def _sadp_metal_family(layer: str, t1: str, t2: str) -> tuple[Asap7Rule, ...]:
         Asap7Rule(
             f"{layer}.W.3",
             t1,
-            "even multiples are enumerated up to the W.2 maximum, measured "
-            f"per polygon across the track; wider shapes are reported by "
-            f"{layer}.W.2 only",
+            "even multiples are enumerated up to the W.2 maximum, measured per "
+            f"polygon across the track; wider shapes are reported by {layer}.W.2 only",
         ),
         Asap7Rule(f"{layer}.W.5", t1),
         Asap7Rule(f"{layer}.S.1", t1),
