@@ -3352,7 +3352,7 @@ edge-pairing `W.3` check that #7339 has replaced. Its request and GDS were
 never committed, so those two remain unattributed. Re-measured 2026-11-23
 (issue #7526): a seven-inverter chain routed as above, with an explicit
 24 µm core at a 0.96 µm origin (ASAP7 cells `f970bd3`, klayout-tools
-`d429a3407`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12), reported
+`5634acd86`, OpenROAD `26Q3-1510-g6cb3f2b704`, KLayout 0.30.12), reported
 **zero** `M5.W.3` from both the pre-#7339 deck and the current deck on the
 same GDS, with 445 `V4.M4.EN.1` and 20 `V4.M5.EN.2` markers, so it is not
 the original geometry. Its only minimum-width `M5` shapes are three pin
