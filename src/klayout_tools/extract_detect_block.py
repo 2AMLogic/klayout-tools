@@ -15,16 +15,13 @@ report is assembled.
 block did. ``DetectionFindings`` is a :class:`typing.NamedTuple` so the call
 site can keep unpacking the results into the same local names it used before.
 
-``_fixed_value_capacitor_note``/``_fixed_value_capacitor_classes`` still live
-in ``extract.py`` and are imported inside the function body: ``extract.py``
-imports this module at its top level, so a module-level ``from .extract
-import ...`` would be a circular import. Everything else comes from
-``extract_report.py``/``extract_warnings.py``, neither of which reaches back
-into ``extract.py``.
+This stage owns the fixed-value capacitor findings and reads the remaining
+findings from the report and warning helpers.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 from .extract_report import (
@@ -75,7 +72,6 @@ def build_detection_findings(
     model_bindings: Any,
     warnings: Any,
 ) -> DetectionFindings:
-    from .extract import _fixed_value_capacitor_classes, _fixed_value_capacitor_note
 
     # Nets whose KLayout-assigned name is a multi-label merge (issue #470):
     # `Net.expanded_name()` joins every distinct label found on one
@@ -251,3 +247,40 @@ def refuse_case_fold_nets(nets: list[dict[str, Any]], spice_output: bool) -> Non
         "duplicates, so no netlist was written; relabel one net of each group "
         "or use --no-netlist for the report only"
     )
+
+
+def _fixed_value_capacitor_classes(
+    deck: Any,
+    device_counts: Mapping[str, int],
+    model_bindings: Mapping[str, Any] | None,
+) -> list[tuple[str, int]]:
+    """``(class, count)`` for every extracted MiM capacitor class that is
+    written as a fixed-value ``C`` card rather than a ``--pdk`` subcircuit
+    call (issue #3090): no ``--pdk`` at all, or a class with no curated
+    ``_CAPACITOR_MODEL_TABLE`` binding."""
+    bound = model_bindings or {}
+    return [
+        (capacitor.name, device_counts[capacitor.name])
+        for capacitor in deck.capacitors
+        if device_counts.get(capacitor.name, 0) > 0 and capacitor.name not in bound
+    ]
+
+
+def _fixed_value_capacitor_note(classes: Sequence[tuple[str, int]]) -> list[str]:
+    """The one-line statement (``warnings[]`` entry / ``--parasitics`` header
+    comment) that these capacitors are fixed values PDK corners cannot move,
+    as a zero- or one-element list (empty when ``classes`` is empty)."""
+    if not classes:
+        return []
+    total = sum(count for _, count in classes)
+    names = ", ".join(f"'{name}'" for name, _ in classes)
+    device_word = "capacitor" if total == 1 else "capacitors"
+    return [
+        f"{total} drawn {device_word} ({names}) written as a fixed-value "
+        "'C' card (the deck's nominal area+perimeter value) -- PDK process "
+        "corners (e.g. mimcap_ff/mimcap_ss) do not apply to it, so "
+        "schematic-vs-extracted deltas at non-typical corners include a "
+        "capacitor-corner term; pass --pdk to bind the PDK capacitor "
+        "subcircuit instead. See docs/cli/extract.md's 'SPICE model binding' "
+        "section."
+    ]
