@@ -645,7 +645,14 @@
     },
     {
       "deck": "extraction",
-      "content_hash": "sha256:74861cdb0935d89bcab8324f74eb7e8ae89df093476b1fc4519c68d6c7544d75",
+      "content_hash": "sha256:cf93eb6edec18675499f73122af046176a25abf698f990926776d6784f91a689",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
+      "deck": "extraction_inductor",
+      "content_hash": "sha256:976683df4066f074a974dcdf22014c0e29865bb6a632c33490292417ad292663",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
@@ -715,7 +722,7 @@
     },
     {
       "deck": "sg13g2",
-      "content_hash": "sha256:eaaf298957eeced674e4030635c66ba6bdee98adde15fe36203ba047fd7b0669",
+      "content_hash": "sha256:e5459fe971c6c008d99bd59da48f6dc87cdb6d601ce7aabcc755fa134c19da20",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
@@ -723,6 +730,13 @@
     {
       "deck": "sg13g2_cont_grid",
       "content_hash": "sha256:f2f64345b2b1702d8d5118dbf96c3d4fb2e1f88c57a4d1e6d31924038e785ed6",
+      "git_tag": "v0.10.0",
+      "git_commit": null,
+      "package_version": "0.10.0"
+    },
+    {
+      "deck": "sg13g2_inductor",
+      "content_hash": "sha256:3e826a3e1513acda5a0a07113da064c6a0c4bfe3c4a95ac32f8c17452791e781",
       "git_tag": "v0.10.0",
       "git_commit": null,
       "package_version": "0.10.0"
