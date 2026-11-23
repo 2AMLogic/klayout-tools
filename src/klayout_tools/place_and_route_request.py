@@ -425,10 +425,9 @@ class PlaceAndRouteError(Exception):
     exception is raised only when a run fails to reach the stage it was
     actually asked to reach.
 
-    ``code``, ``job_id`` and ``details`` are optional and set only by the
-    ``batch`` backend (issue #3518, mirroring ``NetlistError``): a
-    machine-readable ``error.code`` for the CLI's error envelope, the batch
-    job id, and extra structured envelope fields.
+    Optional fields carry a machine-readable ``code``, a batch ``job_id``
+    and structured ``details``, such as congestion evidence from a failed
+    local route.
     """
 
     def __init__(
