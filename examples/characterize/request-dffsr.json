@@ -1,0 +1,77 @@
+{
+  "cell": {
+    "name": "dffsr_demo",
+    "netlist": "dffsr.spice",
+    "clock_pin": "CLK",
+    "pins": [
+      {
+        "name": "CLK",
+        "direction": "input"
+      },
+      {
+        "name": "D",
+        "direction": "input"
+      },
+      {
+        "name": "R",
+        "direction": "input"
+      },
+      {
+        "name": "S",
+        "direction": "input"
+      },
+      {
+        "name": "Q",
+        "direction": "output",
+        "function": "D"
+      },
+      {
+        "name": "QN",
+        "direction": "output",
+        "function": "!D"
+      }
+    ],
+    "power_pins": {
+      "vdd": "VDD",
+      "gnd": "VSS"
+    },
+    "area": 36.0,
+    "async_pins": [
+      {
+        "pin": "R",
+        "kind": "clear",
+        "active": "low"
+      },
+      {
+        "pin": "S",
+        "kind": "preset",
+        "active": "low"
+      }
+    ]
+  },
+  "corner": {
+    "name": "tt_1p80V_25C",
+    "process": "tt",
+    "supply_v": 1.8,
+    "temperature_c": 25
+  },
+  "grid": {
+    "input_transition_ns": [
+      0.02,
+      0.24
+    ],
+    "output_load_pf": [
+      0.005,
+      0.03
+    ]
+  },
+  "models": {
+    "lib": "models.lib"
+  },
+  "library": {
+    "name": "characterize_dffsr_demo_tt_1p80V_25C"
+  },
+  "options": {
+    "timeout_s": 900
+  }
+}
