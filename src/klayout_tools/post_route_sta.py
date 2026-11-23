@@ -269,6 +269,7 @@ from ._openroad_engine import (
     container_runtime_hint,
     write_sdf_line,
 )
+from ._openroad_mount_hint import mount_namespace_hint
 from ._paths import (
     _count_spef_nets_annotated,
     _load_request_json,
@@ -307,6 +308,7 @@ from ._sta_period_maps import (
 from ._sta_request_diag import (
     KNOWN_REQUEST_FIELDS,
     SPEF_NAME_MISMATCH_HINT,
+    SPEF_SKIP_DRIVER_ONLY,
 )
 from ._sta_request_diag import SPEF_MISSING_NETS_BEGIN as _SPEF_MISSING_NETS_BEGIN
 from ._sta_request_diag import SPEF_MISSING_NETS_END as _SPEF_MISSING_NETS_END
@@ -331,6 +333,7 @@ from .post_route_sta_electrical import (
     _parse_electrical_check,
     _parse_electrical_slack_check,
 )
+from .post_route_sta_errors import PostRouteStaError as PostRouteStaError
 from .post_route_sta_instance_paths import (
     _instance_check_lines,
     _instance_path_lines,
@@ -540,18 +543,6 @@ _INPUT_PORT_DIRECTIONS = ("input", "inout", "bidirect")
 _OUTPUT_PORT_DIRECTIONS = ("output", "inout", "bidirect")
 #: Issue #3042: ``constraints.report_ports`` accepts a port of any direction.
 _ANY_PORT_DIRECTIONS = ("input", "output", "inout", "bidirect")
-
-
-class PostRouteStaError(Exception):
-    """Raised when a standalone STA run cannot be completed: a missing/
-    malformed request file, an unresolvable DEF/``pdk.cell_library``/
-    ``corner``/LEF/SPEF, a missing clock constraint, or an OpenROAD engine
-    error.
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other ``klt`` verb's own module-specific
-    error class (``PlaceAndRouteError``, ``SynthesizeError``, ...).
-    """
 
 
 def load_request(request_path: str) -> dict[str, Any]:
@@ -1383,7 +1374,7 @@ def _run_corner_session(
             raise PostRouteStaError(_port_check_error_message(port_errors))
         if completed.returncode != 0:
             raise PostRouteStaError(
-                _engine_error_message(completed, verilog_mode=not has_def)
+                _engine_error_message(completed, pdk_info, verilog_mode=not has_def)
             )
 
         metrics = _read_metrics(metrics_path)
@@ -3397,24 +3388,12 @@ def _constraint_completeness_lines() -> list[str]:
 
 
 def _spef_net_check_lines(net_names: list[str]) -> list[str]:
-    """The net-name-correlation sanity check (``place_and_route.py``'s
-    ``_spef_sta_script_lines`` docstring explains the rationale in full):
-    a caller-supplied ``spef`` has the identical name-mismatch risk a
-    ``klt extract --parasitics``-produced one does, so this reuses the same
-    two-directional (SPEF-side / design-side) measurement, run **before**
-    ``read_spef`` so an uncaught Tcl error partway through that call cannot
-    also silently skip this check.
+    """Correlate SPEF names with the linked design before reading parasitics.
 
-    ``net_names`` must already be *unescaped* (real design spelling, e.g.
-    ``a[10]``/``u_sub/net``, not SPEF's ``a\\[10\\]``/``u_sub\\/net``) --
-    :func:`_spef_net_names` guarantees this. ``get_full_name`` (design side)
-    never returns SPEF's backslash-escaped spelling, so a still-escaped
-    ``klt_spef_have`` key would silently fail to match any design net whose
-    name contains a SPEF-reserved character (issue #1422).
-
-    Also collects a capped sample (:data:`_SPEF_MISSING_NETS_SAMPLE_LIMIT`)
-    of design-side net names that fail to correlate, so a caller can see
-    *which* nets are missing rather than only the aggregate counts."""
+    ``net_names`` uses the unescaped design spelling returned by
+    :func:`_spef_net_names` and OpenSTA's ``get_full_name`` (issue #1422).
+    The SPEF side counts every listed name found in the design. The design
+    side skips only proven driver-only nets and samples missing names (#6970)."""
     return [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -3429,6 +3408,7 @@ def _spef_net_check_lines(net_names: list[str]) -> list[str]:
         "set klt_design_missing {}",
         f"set klt_design_missing_limit {_SPEF_MISSING_NETS_SAMPLE_LIMIT}",
         "foreach klt_design_net [get_nets -quiet *] {",
+        *SPEF_SKIP_DRIVER_ONLY,
         "    incr klt_design_total",
         "    if {[info exists klt_spef_have([get_full_name $klt_design_net])]} {",
         "        incr klt_design_annotated",
@@ -3958,23 +3938,17 @@ def _spef_name_map(text: str) -> dict[str, str]:
 
 
 def _engine_error_message(
-    completed: _OpenRoadResult, *, verilog_mode: bool = False
+    completed: _OpenRoadResult,
+    pdk_info: dict[str, Any] | None = None,
+    *,
+    verilog_mode: bool = False,
 ) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
-    Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
-    over a bare ``Error:`` trailer line, mirroring
-    ``place_and_route.py``'s own ``_engine_error_message`` (minus that
-    function's route-stage-only ``DRT-0305`` diagnosis, which cannot occur
-    here -- this verb never runs TritonRoute).
-
-    :func:`~klayout_tools._openroad_engine.container_runtime_hint` is
-    appended as a further ``--`` clause when the captured output shows the
-    engine never really ran at all because its container runtime was
-    unreachable (issue #2632) -- the same append-a-recognized-hint structure
-    ``place_and_route.py`` already uses for ``_mount_namespace_hint`` (issue
-    #1868). A failure carrying neither signature keeps exactly its previous
-    message."""
+    Prefer a bracketed OpenROAD error over a bare Tcl error, as place-and-route
+    does. Append a container runtime or mount hint when the output supports it.
+    The mount hint uses the resolved PDK root when the unreadable path is a
+    PDK asset. The raw diagnostic remains available in either case."""
     bracket_lines: list[str] = []
     bare_error_lines: list[str] = []
     for stream in (completed.stdout or "", completed.stderr or ""):
@@ -3997,6 +3971,9 @@ def _engine_error_message(
     hint = container_runtime_hint(completed)
     if hint is not None:
         message = f"{message} -- {hint}"
+    mount_hint = mount_namespace_hint(completed, pdk_info)
+    if mount_hint is not None:
+        message = f"{message} -- {mount_hint}"
     # Issue #2635: `ORD-2013` names the instance and the LEF master but
     # nothing about which request field would have supplied it -- the one
     # failure mode a caller with a hard macro and no `request.macros` entry

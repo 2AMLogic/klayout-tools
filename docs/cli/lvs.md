@@ -625,6 +625,29 @@ hierarchical compare still does not match (sub-cell circuits are not paired
 with differently-named reference `.SUBCKT`s), so the flattened recipe is the
 supported path.
 
+##### Diagnosing missing layout port names
+
+When `counts.pins.layout` is smaller than expected, inspect `warnings` and
+`ignored_layers`. Inline extraction uses the effective deck, including any
+`layout.label_layers` overrides. If the selected top cell has text but none
+on a pin-label layer, `warnings` lists the layer/datatype pairs where text
+was actually drawn. For example, a SKY130 layout whose li1 labels are on
+67/10 can select that purpose with `"label_layers": {"metal0": [67, 10]}`.
+Text inside an instance does not establish that the top cell has port text.
+
+`ignored_layers` uses the same `{layer, datatype, shapes}` rows and
+stream-wide shape counts as `klt extract`. With a pre-extracted
+`layout.netlist`, both extraction diagnostic arrays are empty.
+
+`pin_set_difference` compares the named ports of the selected top circuits
+in both input forms. It folds case and applies the same gate-level reference
+port aliases used in comparison. `layout_only_pins` and
+`reference_only_pins` each show up to 20 names. Their `_count` fields give
+the full totals and their `_truncated` flags indicate an incomplete sample.
+A layout pin named for the extraction deck’s synthesized substrate appears
+under `deck_synthesized_layout_pins`. These fields describe name coverage
+independently of the topology verdict.
+
 ##### Routed multi-cell blocks (issue #4610)
 
 Measured on `tests/test_asap7_routed_block.py`: two abutted `INVx1` cells
@@ -851,7 +874,12 @@ convenience (issue #4605): an *unquoted* path is rewritten to a single-quoted
 absolute path before reading (a relative path resolves against the reference
 file's directory), because KLayout's SPICE reader would otherwise truncate it
 at a `-`. Already-quoted paths are untouched and the file on disk is never
-modified. `.include` targets are not followed for subcircuit-name detection.
+modified. With a deck, the KLayout engine follows nested `.include` and
+`.inc` directives in both the layout and reference netlists when resolving
+drawn-resistor and MoM-capacitor X cards. A matching `.SUBCKT` definition
+takes precedence over device recovery. An X card with no matching definition
+still recovers as a device of its deck class. The simulation-form and
+unresolved-call diagnostics scan the top-level text.
 
 The reference (and any pre-extracted layout) netlist must use the same
 **schematic-equivalent** device form `klt extract` writes: a plain element

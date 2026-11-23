@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .pex_errors import PexError
+from .sim_errors import SimError
 
 #: File name of the submit manifest, written under the pex artifact root.
 MANIFEST_NAME = "pex-submit.json"
@@ -73,7 +74,6 @@ def validate_capacity_wait(capacity_wait_s: float | None, backend: str | None) -
     resolver ``klt sim`` applies per leg."""
     if capacity_wait_s is None:
         return
-    from .sim import SimError
     from .sim_batch import resolve_capacity_wait_s
 
     try:
@@ -217,8 +217,6 @@ class AsyncLegs:
         **kwargs: Any,
     ) -> dict[str, Any]:
         """One leg. Blocking mode is exactly the plain ``run_sim`` call."""
-        from .sim import SimError
-
         if self.mode is None:
             return run_sim(request_path, artifacts_dir=artifacts_dir, **kwargs)
         if self.mode == "attach":

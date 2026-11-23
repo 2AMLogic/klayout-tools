@@ -1412,20 +1412,18 @@ classified against that flavour's own typical-corner evidence:
 
 - `"skewed"` — the flavour's include tokens differ from its typical corner's
   (token evidence always wins);
-- `"param"` — tokens identical, but at least one `.param` value that differs
-  from the typical section's is **consumed** by the flavour's own
-  sub-library. Attribution is by consumption: the differing `.param` names
-  are matched against the sub-library bodies the flavour's tokens point at.
-  Only when a flavour's sub-library body is not resolvable in the deck does
-  a name-prefix fallback (`nfet_06v0_vth0` → `06v0`) attribute instead;
-- `"typical"` — provably unmoved: identical tokens, and either no `.param`
-  differs from typical at all or the flavour's resolvable sub-libraries
-  consume none of the differing values;
-- `"unknown"` — undecidable (issue #5663): identical tokens, `.param` values
-  do differ, but the flavour's sub-library is unresolvable in the deck and
-  no differing `.param`'s name-prefix maps to it. `klt sim` reports these
-  under `environment.corner_coverage`'s `unknown_devices` key, never folded
-  into `unmoved_devices`;
+- `"param"` — with identical tokens, a visible use of a differing parameter
+  in any referenced sub-library establishes skew. The scanner matches both
+  the include file and the named section to the deck it read. If some bodies
+  remain unresolved and none of the visible bodies consumes a differing
+  parameter, a matching parameter prefix (such as `nfet_06v0_vth0` for
+  `06v0`) also establishes skew.
+- `"typical"` — identical tokens and either no differing parameters or a
+  complete set of referenced bodies that consume none of those parameters.
+- `"unknown"` — parameters differ and the available bodies and parameter
+  prefixes leave the flavour undecided. Ambiguous parameter assignments
+  also give this result. `klt sim` lists these devices under
+  `environment.corner_coverage.unknown_devices`.
 - `null` — the typical corner ships the flavour but the section does not.
 
 For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
