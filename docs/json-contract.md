@@ -593,6 +593,26 @@ Consumers that switch on `body_bias.status` already must tolerate an unknown
 value per the rule above. No `schema_version` bump on either verb. See
 [`docs/cli/pex.md`](cli/pex.md)'s "Runset engine".
 
+## Same-name response field on two verbs: `cell_exclusions`
+
+`klt synthesize` and `klt place-and-route` both report a `cell_exclusions`
+block for cell exclusions, and deliberately differ in **presence** (issue
+#7388): synthesize's is always present (issue #2382), while place-and-route's
+appears only when the request supplied `library.dont_use` — the safer
+additive choice for a verb whose whole block describes a request-supplied
+list. Within the block, the shared keys mean the same thing on both verbs,
+including `validated`: `true` when each requested pattern was matched
+against the resolved Liberty's cell names, `null` when that cell list could
+not be established and the zero-match check was skipped — the check-performed
+disclosure of the "Requested-but-unperformed analysis" rule below, so a
+caller mirroring one `dont_use` list between the two verbs gets the same
+signal from each. (`validated` cannot take the third value it can on
+synthesize, "nothing to check": place-and-route validates the request list
+non-empty before emitting the block.) Synthesize additionally reports `mode`
+and `engine_supports_dont_use`, which have no place-and-route analogue.
+Per-verb details: [`docs/cli/synthesize.md`](cli/synthesize.md) and
+[`docs/cli/place-and-route.md`](cli/place-and-route.md).
+
 ## Requested-but-unperformed analysis
 
 When a request asks for an analysis or capability, its response must make
