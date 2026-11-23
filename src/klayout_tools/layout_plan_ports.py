@@ -12,10 +12,18 @@ import re
 from typing import Any
 
 from ._jsonnum import is_number
-from .gen import GenError
-from .gen_layer_params import resistor_flavor_for_class
-from .pdk import PdkNotFoundError, find_pdk
-from .pdk_families import pdk_variant_family
+from .layout_plan_flavors import (
+    _MOS_FLAVOR_GENERATORS as _MOS_FLAVOR_GENERATORS,
+)
+from .layout_plan_flavors import (
+    apply_derived_flavors as apply_derived_flavors,
+)
+from .layout_plan_flavors import (
+    apply_mos_flavor as apply_mos_flavor,
+)
+from .layout_plan_flavors import (
+    apply_resistor_flavor as apply_resistor_flavor,
+)
 
 
 def device_owned_port_names(ports: list[dict[str, Any]], suffix: str) -> list[str]:
@@ -168,52 +176,6 @@ def diff_pair_leg_error(
                     "docs/cli/layout-plan-execute.md)."
                 )
     return None
-
-
-def apply_resistor_flavor(
-    group: dict[str, Any],
-    params: dict[str, Any],
-    pdk_spec: dict[str, Any],
-    family: str | None,
-) -> list[str]:
-    """Select the first mapped device class and disclose mixed materials."""
-    if (
-        group["generator"] != "res_array"
-        or "flavor" in params
-        or "metal_level" in params
-    ):
-        return []
-    if family is None:
-        try:
-            variant = (
-                pdk_spec.get("variant")
-                or find_pdk(root=pdk_spec.get("root"))["variant"]
-            )
-        except PdkNotFoundError as exc:
-            raise GenError(str(exc)) from exc
-        family = pdk_variant_family(variant)
-    selected = []
-    for device in group["devices"]:
-        flavor = resistor_flavor_for_class(family, device["device_class"])
-        if flavor is not None and flavor not in selected:
-            selected.append(flavor)
-    if not selected:
-        return []
-    first = selected[0]
-    warnings = []
-    group_label = f"device_groups (id '{group['id']}')"
-    if first != "generic":
-        params["flavor"] = first
-        warnings.append(
-            f"{group_label}: derived params.flavor='{first}' "
-            "from the declared resistor class"
-        )
-    if len(selected) > 1:
-        warnings.append(
-            f"{group_label}: devices disagree on resistor flavor "
-            f"({', '.join(selected)}). Using '{first}'"
-        )
-    return warnings
 
 
 def extract_raw_params_by_id(request: dict[str, Any]) -> dict[str, dict[str, Any]]:

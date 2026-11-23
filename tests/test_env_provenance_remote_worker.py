@@ -1,6 +1,12 @@
 """Remote worker_environment exemption in the absolute-path lint (#5133)."""
 
+import json
+
+import pytest
+
 from klayout_tools import env_provenance as ep
+from klayout_tools.cli import main
+from klayout_tools.pex_sim_evidence import project_testbench_sides
 
 
 def _worker_env_block():
@@ -56,3 +62,66 @@ def test_lint_remote_worker_environment_absent_capture_is_clean():
         }
     }
     assert ep.find_absolute_path_fields(payload) == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_pex_side_observations_lint_clean_at_the_cli(tmp_path, capsys, stream):
+    worker = _worker_env_block()
+    single = {"environment": {"remote": {"worker_environment": worker}}}
+    fleet = {"environment": {"remote": {"fleet": [{"worker_environment": worker}]}}}
+    report = {
+        "testbenches": [
+            project_testbench_sides(single, fleet),
+            project_testbench_sides(fleet, single),
+        ]
+    }
+    path = tmp_path / "pex.json"
+    path.write_text(json.dumps(report))
+    args = [
+        "env-provenance",
+        "lint-envelope",
+        str(path),
+        "--format",
+        "json",
+        "--allow-prefix",
+        "/usr/bin",
+        "--allow-prefix",
+        "/usr/local/bin",
+    ]
+    if stream:
+        args.append("--json-stream")
+        path.write_text(json.dumps(single) + "\n" + json.dumps(report))
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["finding_count"] == 0
+
+
+def test_pex_exemption_is_limited_to_worker_observation_subtrees():
+    root = {"pdk": {"root": "/opt/pdk"}}
+    remote = {"worker_environment": root, "workdir": "/host/jobs"}
+    side = {
+        "environment": {"remote": remote, "client_ngspice_binary": "/host/bin/ngspice"},
+        "worker_environment": root,
+    }
+    bench = {
+        "sides": {
+            "schematic": side,
+            "other": {"environment": {"remote": {"worker_environment": root}}},
+        },
+        "environment": {"remote": {"worker_environment": root}},
+    }
+    dotted_key = "testbenches.0.sides.schematic.environment.remote.worker_environment"
+    report = {
+        "testbenches": [bench],
+        "layout": {"path": "/client/design.gds"},
+        dotted_key: "/client/elsewhere",
+    }
+    assert {f["field"] for f in ep.find_absolute_path_fields(report)} == {
+        "testbenches.0.sides.schematic.environment.remote.workdir",
+        "testbenches.0.sides.schematic.environment.client_ngspice_binary",
+        "testbenches.0.sides.schematic.worker_environment.pdk.root",
+        "testbenches.0.sides.other.environment.remote.worker_environment.pdk.root",
+        "testbenches.0.environment.remote.worker_environment.pdk.root",
+        "layout.path",
+        dotted_key,
+    }
+    assert len(ep.find_absolute_path_fields({"testbenches": {"0": bench}})) == 6

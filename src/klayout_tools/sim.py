@@ -574,6 +574,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_predated",
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
+        sim_spiceinit.BATCH_INIT_UNVERIFIED,
         # Report-level (top-level `diagnostics[]`, issue #4097): an off-host
         # `measurements[].expr` produced no value; the runner may predate it.
         "expr_runner_may_predate",
@@ -3883,20 +3884,9 @@ def _run_sim_corners(
             "fraction": probe_result["estimated_fraction"],
         }
 
-    # The engine seam (issue #2016) rides along to the local backends only:
-    # `remote`/`batch` run whatever their provisioned box/job ships (the
-    # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
-    # above anyway), so the kwarg would be dead weight there. `ngspice_binary`
-    # (issue #2423), `fail_on_diagnostic` (issue #2492) and `ngspice_init`
-    # (issue #2520) ride along the same way and for the same reason: an
-    # off-host shard re-invokes `klt sim` on a *different* host, which
-    # resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`,
-    # `options.fail_on_diagnostic` (grading its own corners inconclusive
-    # there -- passing this process's resolved value would double-grade, so
-    # the CLI overrides are local-backend-only, like `--fail-fast-probe`)
-    # and `options.ngspice_init` (writing its own `.spiceinit`) fresh from
-    # the forwarded request document -- this process's own resolution
-    # describes only this host.
+    # Off-host workers resolve the engine, diagnostic policy and ngspice init
+    # from their staged request. These local kwargs describe the client host.
+    # Forwarding the resolved fail_on_diagnostic policy would grade those corners twice.
     # `request_dir` (issue #2668) rides along to the off-host backends only:
     # it is where `options.stage_model_inputs` resolves model sources from.
     # Issue #3052: the run-wide substitution roots for `options.portable_artifacts`;
@@ -4416,8 +4406,11 @@ def _run_sim_corners(
 
     _attach_timeout_budget_hint(environment, corners, timeout_s)
 
-    # Issues #2901, #5061: lifted out of `environment.remote` to the top level.
-    remote_diagnostics = pop_remote_diagnostics(environment.get("remote"))
+    remote = environment.get("remote")
+    remote_diagnostics = pop_remote_diagnostics(remote)
+    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
+        backend, engine, ngspice_init_lines, remote
+    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4467,7 +4460,12 @@ def _run_sim_corners(
     }
     netlist_digests.pin_provenance_input(report["provenance"])
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
-    diag_candidates = (*remote_diagnostics, bin_diagnostic, save_diagnostic)
+    diag_candidates = (
+        *remote_diagnostics,
+        init_diagnostic,
+        bin_diagnostic,
+        save_diagnostic,
+    )
     if top_diags := [d for d in diag_candidates if d]:
         report["diagnostics"] = top_diags
     _attach_runner_hints(report, measurements_spec, corners, backend=backend)

@@ -28,6 +28,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   probe). Verbs hidden from `klt --help` are hidden here too; nested
   subcommands are not listed. `--format text`, `klt --version`, and
   `schema_version` are unchanged.
+- `klt lvs` adds the warning category `hints.layout_short_nets_applied`
+  for each layout-side net group joined at the caller’s request (#5632).
 
 - **Fixed** (#5663): `klt pdk corners`' `devices[].skew` and `klt sim`'s
   `environment.corner_coverage` no longer claim a device flavour sits at its
