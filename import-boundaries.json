@@ -189,6 +189,7 @@
         "klayout_tools.drc_klayout_rdb_values",
         "klayout_tools.drc_report_check",
         "klayout_tools.drc_rerun_replay",
+        "klayout_tools.drc_sg13g2_implant",
         "klayout_tools.drc_text_exempt"
       ]
     },
@@ -300,9 +301,11 @@
         "klayout_tools.extract_finfet",
         "klayout_tools.extract_flavour",
         "klayout_tools.extract_fragment_resistance",
+        "klayout_tools.extract_graph_ports",
         "klayout_tools.extract_mos_capacitor",
         "klayout_tools.extract_hierarchy",
         "klayout_tools.extract_inductors",
+        "klayout_tools.extract_parasitic_body",
         "klayout_tools.extract_parasitics",
         "klayout_tools.extract_parasitics_block",
         "klayout_tools.extract_parasitics_slim",
@@ -352,7 +355,6 @@
       "kind": "verb",
       "description": "`klt functional_verification` implementation: core modules plus CLI adapter.",
       "modules": [
-        "klayout_tools._artifact_envelope",
         "klayout_tools.cli.functional_verification_cmd",
         "klayout_tools.cli.parser_functional_verification",
         "klayout_tools.functional_verification",
@@ -373,6 +375,7 @@
         "klayout_tools.functional_verification_sdf_instance",
         "klayout_tools.functional_verification_sdf_rename",
         "klayout_tools.functional_verification_sdf_steps",
+        "klayout_tools.functional_verification_search_path",
         "klayout_tools.functional_verification_verilog_top"
       ]
     },
@@ -638,6 +641,8 @@
       "modules": [
         "klayout_tools.cli.pdk_cmd",
         "klayout_tools.cli.pdk_expect",
+        "klayout_tools.cli.pdk_osdi_cmd",
+        "klayout_tools.pdk_osdi",
         "klayout_tools.decks",
         "klayout_tools.decks.asap7",
         "klayout_tools.decks.asap7_rules",
@@ -738,6 +743,7 @@
         "klayout_tools.place_and_route_pdn_fit",
         "klayout_tools.place_and_route_pin_conductor",
         "klayout_tools.place_and_route_pin_connectivity",
+        "klayout_tools.place_and_route_power_stack",
         "klayout_tools.place_and_route_pins",
         "klayout_tools.place_and_route_portable",
         "klayout_tools.place_and_route_rerun",
@@ -827,6 +833,7 @@
       "modules": [
         "klayout_tools",
         "klayout_tools._annotation",
+        "klayout_tools._artifact_envelope",
         "klayout_tools._batch_collect",
         "klayout_tools._batch_common",
         "klayout_tools._check_result",
@@ -848,6 +855,7 @@
         "klayout_tools._power_activity",
         "klayout_tools._request_fields",
         "klayout_tools._provenance",
+        "klayout_tools.ngspice_build",
         "klayout_tools._report_verify",
         "klayout_tools._report_verify_diff",
         "klayout_tools._report_verify_exclude",
@@ -878,6 +886,7 @@
         "klayout_tools.metrics",
         "klayout_tools.op_sanity",
         "klayout_tools.op_sanity_diagnostics",
+        "klayout_tools.op_sanity_pdk",
         "klayout_tools.output_lock",
         "klayout_tools.request_paths",
         "klayout_tools.resistor_mesh",
@@ -943,6 +952,7 @@
         "klayout_tools.signoff_power_delivery_substrate",
         "klayout_tools.signoff_power_delivery_tie_coverage",
         "klayout_tools.signoff_repin",
+        "klayout_tools.signoff_row_extent",
         "klayout_tools.signoff_runset",
         "klayout_tools.signoff_spec_row_table",
         "klayout_tools.signoff_sta_constraints",
@@ -964,7 +974,9 @@
         "klayout_tools.cli.sim_job_text",
         "klayout_tools.cli.sim_measurement_text",
         "klayout_tools.cli.sim_merge_cmd",
+        "klayout_tools.cli.sim_op_lint_text",
         "klayout_tools.cli.sim_pdk_text",
+        "klayout_tools.cli.sim_regrade_cmd",
         "klayout_tools.cli.sim_report_out",
         "klayout_tools.cli.sim_plan_cmd",
         "klayout_tools._meas_lint",
@@ -992,6 +1004,7 @@
         "klayout_tools.sim_batch_contract_worker",
         "klayout_tools.sim_batch_reattach",
         "klayout_tools.sim_ac_waveform",
+        "klayout_tools.sim_batch_history",
         "klayout_tools.sim_batch_resume",
         "klayout_tools.sim_batch_shards",
         "klayout_tools.sim_batch_unstarted",
@@ -1001,6 +1014,7 @@
         "klayout_tools.sim_batch_hints",
         "klayout_tools.sim_batch_log",
         "klayout_tools.sim_batch_job_timeout",
+        "klayout_tools.sim_batch_knobs",
         "klayout_tools.sim_batch_plan",
         "klayout_tools.sim_batch_observer",
         "klayout_tools.sim_batch_receipt",
@@ -1070,6 +1084,8 @@
         "klayout_tools.sim_process_legs",
         "klayout_tools.sim_provenance",
         "klayout_tools.sim_raw",
+        "klayout_tools.sim_regrade",
+        "klayout_tools.sim_regrade_run",
         "klayout_tools.sim_remote",
         "klayout_tools.sim_request_overrides",
         "klayout_tools.sim_save_diagnostic",
@@ -1148,6 +1164,8 @@
         "klayout_tools._sta_clock_uncertainty",
         "klayout_tools._sta_generated_clocks",
         "klayout_tools._sta_io_delay_clock",
+        "klayout_tools._sta_multicycle",
+        "klayout_tools.post_route_sta_multicycle",
         "klayout_tools._sta_period_maps",
         "klayout_tools._sta_request_diag",
         "klayout_tools._sta_sdc_check",
@@ -1184,10 +1202,12 @@
         "klayout_tools.synthesize_abc_stages",
         "klayout_tools.synthesize_abc_timing",
         "klayout_tools.synthesize_arithmetic",
+        "klayout_tools.synthesize_constrained_timing",
         "klayout_tools.synthesize_driving_cell",
         "klayout_tools.synthesize_library_hint",
         "klayout_tools.synthesize_memory",
         "klayout_tools.synthesize_netlist_normalize",
+        "klayout_tools.synthesize_script",
         "klayout_tools.synthesize_timeout",
         "klayout_tools.synthesize_x_scan"
       ]
@@ -1277,6 +1297,11 @@
     }
   },
   "allowed_group_edges": [
+    {
+      "consumer": "pdk",
+      "exporter": "env_provenance",
+      "reason": "PDK OSDI identity uses repo_root_for and repo_relative_path to emit the same portable path and scope as simulation model evidence (#6904)."
+    },
     {
       "consumer": "extract",
       "exporter": "lvs",
@@ -1924,6 +1949,11 @@
     },
     {
       "consumer": "synthesize",
+      "exporter": "sta",
+      "reason": "Issue #6924: validate synthesis multicycle entries with the shared STA grammar and run standalone Verilog-mode STA on the mapped netlist before restructuring."
+    },
+    {
+      "consumer": "synthesize",
       "exporter": "arith_gen",
       "reason": "Existing public cross-verb call at policy seed (issue #2767); review before adding more."
     },
@@ -2084,8 +2114,8 @@
     },
     {
       "consumer": "em",
-      "exporter": "functional_verification",
-      "reason": "`klt em` emits mesh/spec/report/log artifact envelopes through the shared _artifact_envelope helper."
+      "exporter": "env_provenance",
+      "reason": "`klt em` discovers the request's repository root to anchor retained artifact paths."
     }
   ],
   "shared_private_permissions": [
@@ -2700,6 +2730,12 @@
       "exporter": "klayout_tools._paths",
       "symbol": "_load_request_json",
       "reason": "Issue #5616: loads the em request with the same error handling as sim/corner_matrix; promote to a public name when _paths is next reworked."
+    },
+    {
+      "consumer": "klayout_tools.sim_regrade_run",
+      "exporter": "klayout_tools._paths",
+      "symbol": "_resolve_relative",
+      "reason": "Issue #6778: the derived regrade request rewrites its path-bearing refs absolute against the original request's directory, the same helper sim.py itself imports; promote to a public name with the other _paths importers."
     }
   ],
   "legacy_exceptions": {
@@ -3069,6 +3105,12 @@
         "exporter": "klayout_tools.sim",
         "symbol": "_supply_alter_lines",
         "reason": "op-lint emits `alter` lines for supply rails with the same helper the sweep uses (issue #3624); remove by making the symbol public or moving it to a shared module."
+      },
+      {
+        "consumer": "klayout_tools.op_sanity",
+        "exporter": "klayout_tools.sim_request_overrides",
+        "symbol": "_with_pdk_root_override",
+        "reason": "Reviewed (issue #5751): op-lint folds a `--pdk-root` pin through the same helper the graded sim path uses so both paths resolve the pin by one rule and cannot drift; promote to a public name when sim_request_overrides is next reworked."
       },
       {
         "consumer": "klayout_tools.pdk_pcell",

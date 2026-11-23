@@ -162,6 +162,7 @@ primary clock’s ideal slew during analysis.
 | `constraints.report_ports` | list of strings \| omitted | Additive field (issue #3042). Literal port names (one scalar port or one bus bit such as `data[3]`) whose **own** worst setup and hold path is reported as `port_paths`, alongside the global `worst_*_path`. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown and ambiguous names are request errors. Any direction is allowed. Omitted or `[]` emits nothing. See "Per-port path queries" below. |
 | `constraints.report_path_stages` | boolean \| omitted | Additive field (issue #5783). `true` makes each `worst_setup_path` / `worst_hold_path` record also carry a `stages` block — that one path's own per-stage `{pin, cell, incr_ns, path_ns}` table (launch-to-capture order), so a failing path can be split for retiming from the committed record instead of endpoints-and-a-total. Works in both `def` and `verilog` modes, per corner on a `pdk.corners` response. Omitted or `false` emits no Tcl and leaves the response byte-identical. Any non-boolean value is a request error. See "Per-stage delay breakdown" below. |
 | `constraints.false_path_from` | list of strings \| omitted | Additive field (issue #2968). Literal **input** port names (one scalar port or one bus bit such as `cfg[3]`) excluded from timing with `set_false_path -from [get_ports <port>]`, emitted after the I/O-delay lines in every analysed corner. Use it for quasi-static configuration inputs whose paths are not real datapaths and would otherwise dominate WNS/TNS and the `worst_*_path` records. Same key rules as the per-port delay maps: no wildcards, whole buses or Tcl. Entries must be unique non-empty strings; the clock port, unknown, ambiguous and output-only names are request errors (`constraints.false_path_from rejected: ...`). `inout` ports are allowed. Omitted or `[]` emits nothing and the generated Tcl is byte-identical to before. The applied list is echoed as `false_path_from`. See "Timing exceptions" below. |
+| `constraints.multicycle_paths` | array\<object\> \| omitted | Additive field (issue #6921). List of `{from, to, setup, hold, through?}` entries declaring a setup/hold multiplier pair on a selected set of register-to-register paths, emitted as paired `set_multicycle_path <setup> -setup` / `<hold> -hold` over the identical `-from/-through/-to` selection in every analyzed corner, after the I/O delays and before every report command. `from`/`to` name register instances or pins, `through` names pins; each is one bounded selector string over letters, digits, `_ . / [ ] * ?` (`*`/`?` wildcards, literal bus brackets, never Tcl). `setup`/`hold` are positive integers. Roles are resolved with the engine against the linked design (an instance is a register when the engine's own liberty pin data says it has a clock pin); a selector matching nothing, an unclocked register, an unknown key, a boolean/non-integer/non-positive multiplier or a malformed selector is a request error (exit 1) naming the entry index, as is a selection whose objects have no timed path between them. Each entry's response record carries the with/without measurement — see "Multicycle paths" below. Omitted or `[]` emits nothing and the generated Tcl is byte-identical to before. Not supported: generated clocks (#6925), case analysis and wider false-path forms (#6926), hold-only or setup-only entries, list-valued selectors. |
 | `constraints.wire_load_model` / `.wire_load_mode` | string \| omitted | (Issue #1825.) **Only valid in `verilog` mode** — a request error otherwise. Drives OpenSTA's own `set_wire_load_model`/`set_wire_load_mode`, the parasitics-estimate mechanism for a from-scratch netlist session that has no placement or routing to estimate from. See "From-scratch netlist input" below. |
 | `constraints.propagated_clock` | boolean \| omitted | Additive field (issue #2739). **`def` mode only.** `true` marks the request's created clock propagated (`set_propagated_clock`) in every analyzed corner, so hold/removal checks include the DEF's clock-tree insertion delay and skew (and, with a caller-supplied `spef`, its clock-net RC) — the timing a routed post-CTS design actually meets. Omitted or `false` (the default) keeps the **ideal** SDC-only clock this command has always timed — byte-for-byte the pre-#2739 behavior — so existing requests' numbers never change. Any non-boolean value is a request error; `true` together with `verilog` is a request error (a linked netlist has no placed clock tree to propagate through). Meaningful only for a **post-CTS** DEF: a pre-CTS DEF propagates through plain wires and reports ~zero insertion delay — the response's `clock_propagation` evidence block is what says what propagation actually reached (see "Propagated-clock timing" below). |
 | `constraints.power_activity` | object \| omitted | Additive field (issue #3744). `{"activity": <number >= 0>, "duty": <number in [0, 1]>}`, each key optional but at least one required. Emits `set_power_activity -global -activity <a> -duty <d>` before `report_power_metric` in every analyzed corner (`def` and `verilog` mode), so `estimated_power_mw` reflects that switching activity instead of OpenSTA's built-in default. Omitted (the default) emits nothing — the generated script and every number are unchanged. A boolean, negative or non-finite value, `duty` outside `[0, 1]`, an empty object, an unknown key or a non-object is a request error (exit 1) raised before the engine runs. Not VCD/SAIF input; the response's `power_basis` records what was applied. |
@@ -313,6 +314,7 @@ bump. Reports without the field still verify, and `--check` treats
 | `port_paths` | object \| omitted | Additive field (issue #3042), present only when `constraints.report_ports` is given — on the single-corner response and on every `corners[]` entry. `{"<port>": {"direction", "setup", "hold"}}` in request order; `setup`/`hold` are path records of the `worst_*_path` shape. See "Per-port path queries" below. |
 | `instance_paths` | object \| omitted | Additive field (issue #5754), present only when `constraints.report_instances` is given — on the single-corner response and on every `corners[]` entry. `{"<instance>": {"into": {"setup", "hold"}, "out_of": {"setup", "hold"}}}` in request order; the four records per instance are path records of the `worst_*_path` shape (`consistent_with_aggregate` always `null`). `into` is the worst path arriving at the instance's input pins; `out_of` is the worst path launching from its output pins. Output size is bounded by `entries × 4` records, never by design size or the instance's pin count. See "Per-instance path queries" below. |
 | `false_path_from` | array \| omitted | Additive field (issue #2968), present only when `constraints.false_path_from` is given: the exclusion list that was applied, in request order. On a multi-corner response it is hoisted to the top level (it is the same for every corner), not repeated in `corners[]`. |
+| `multicycle_paths` | array \| omitted | Additive field (issue #6921), present only when non-empty `constraints.multicycle_paths` was given — per `corners[]` entry on a multi-corner response (each corner's own sessions measured it), not hoisted. One record per request entry, in request order: `{index, from, through, to, setup, hold, matched_endpoints, setup_slack_ns: {with, without}, hold_slack_ns: {with, without}}`. Slacks are ns, worst of the **selected paths** only, `with` = all entries applied, `without` = one extra session with this entry omitted and every other entry kept (the unambiguous baseline). `matched_endpoints` counts the distinct endpoint pins the with-run timed. An unmeasurable side is `null` plus a `reason` key — never the global WNS and never `0`. See "Multicycle paths" below. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `power_basis` | object | Additive field (issue #3744), present on the single-corner response and on every `corners[]` entry. What `estimated_power_mw` was computed under: `activity_source` (`"engine_default"` — no `constraints.power_activity`, OpenSTA's built-in default applied — or `"global"`), `activity` / `duty` (the requested numbers, `null` when not given — never a guessed engine default), and `parasitics` (`"spef_annotated"` when that session read a SPEF, else `"estimate_only"`). |
@@ -561,7 +563,9 @@ are unconstrained, so the block is `"incomplete"` and `timing_status` is
 
 ### Timing exceptions
 
-The current request accepts `constraints.false_path_from`. For example,
+For register-to-register setup and hold exceptions, see [Multicycle paths](#multicycle-paths-constraintsmulticycle_paths-issue-6921).
+
+The request accepts `constraints.false_path_from` for input-port exclusions. For example,
 `"false_path_from": ["cfg_mode", "cfg[3]"]` excludes paths starting at the
 scalar input `cfg_mode` or bit 3 of `cfg`, to **every** destination. Each name
 must identify one literal input or bidirectional port. The primary clock port
@@ -1324,9 +1328,9 @@ Per-port delay maps are covered in the next section (issue #2740). Static
 input exclusions are `constraints.false_path_from` (issue #2968, see "Timing
 exceptions"). Clock uncertainty is `constraints.clock_uncertainty_ns` (issue
 #4240, see "Clock uncertainty"). Ideal-clock slew is
-`constraints.clock_transition_ns` (see "Ideal-clock transition"). A full caller-supplied SDC passthrough
-(`read_sdc`, which would also cover multicycle paths and `-to`/`-through`
-false paths) is still **not** in scope; to detect drift between a committed
+`constraints.clock_transition_ns` (see "Ideal-clock transition"). Register
+multicycle exceptions use `constraints.multicycle_paths` (see issue #6921). For general `-to` or `-through` false paths, the caller
+would need full `read_sdc` support. To detect drift between a committed
 `.sdc` and the request, see "SDC drift check".
 
 **Detect the sentinel mechanically.** Independent of any constraint the caller
@@ -1736,7 +1740,8 @@ data hold path and is what `into.hold` reports, under its own
   `worst_*_path` does not mean every port was constrained.
 - **Exception limits.** The request supports literal input-port exclusions.
   Mode values, destination pins, through pins and pin patterns are outside
-  that contract. Multicycle paths are also unsupported. When `sdc_check`
+  that contract. Register multicycle exceptions have their own selectors in
+  `constraints.multicycle_paths`. When `sdc_check`
   reads `set_case_analysis`, `set_false_path -to` or `set_false_path -through`,
   it lists each command and its source line in `sdc_drift.unchecked`. The
   supplied SDC is comparison data only. The JSON request supplies the timing
@@ -1781,6 +1786,83 @@ hold value. The response's `clock_uncertainty` block says whether any
 uncertainty was applied, so a slack computed with the assumption is
 distinguishable from one computed without it. Not supported: inter-clock
 uncertainty, multiple clocks, per-corner values.
+
+## Multicycle paths (`constraints.multicycle_paths`, issue #6921)
+
+A design whose registers advance on sequenced enables has same-enable
+feedback paths that close in N cycles, not one. Without this field `klt
+sta` can only express the single-cycle interpretation of every
+register-to-register path, which is pessimistic for exactly those paths.
+`constraints.multicycle_paths` declares a setup/hold multiplier pair on a
+selected path set, applies it in every analyzed corner, and reports what it
+bought on exactly those paths — with and without the entry:
+
+```json
+"constraints": {"clock_port": "clk", "clock_period_ns": 2.0,
+                "multicycle_paths": [
+                  {"from": "ff_fb", "to": "ff_fb", "setup": 4, "hold": 3}
+                ]}
+```
+
+emits, in every analyzed corner and in both input modes, the pair
+
+```tcl
+set_multicycle_path 4 -setup -from <selection> -to <selection> ;# klt mcp 0
+set_multicycle_path 3 -hold  -from <selection> -to <selection> ;# klt mcp 0
+```
+
+over the **identical** resolved selection (the trailing comment is the
+marker the per-entry baseline session is derived from, not caller input).
+
+**Selectors.** `from`/`to` name register instances or pins (`ff_fb`,
+`ff_fb/Q`, `ff_?/D`); `through` names pins. Each is one non-empty string
+over `letters digits _ . / [ ] * ?` — `*` and `?` are the only wildcards,
+`[` and `]` are literal (a bus bit is written `q[0]`, never a character
+class), and anything else (whitespace, `{ } ; $ \ "`, a leading `-`) is a
+malformed-selector request error. Selectors are quoted as data; they are
+never Tcl. Roles are resolved **with the engine** against the linked
+design: an instance is a register when the engine's own liberty pin data
+says it has a clock pin, an unclocked register is one whose clock pins
+carry no clock, and a selector that matches no register or pin (`through`:
+no pin) is a request error — each naming the entry index, before any
+timing is reported. A selection whose objects exist but have **no timed
+path between them** is likewise a request error: an exception must select
+at least one timed path, never a silent no-op.
+
+**The hold convention.** `hold` is the SDC `-hold` multiplier, counted back
+from the setup capture edge. The standard pairing keeps the hold check at
+the single-cycle edge: `setup: 4, hold: 3` gives the capture flop four
+periods for setup while hold is still checked at the launch edge, so the
+recorded hold slacks with and without the entry are equal (that is what the
+pinned engine reports, and what the shipped test asserts).
+
+**The measurement.** For each entry, in every corner, the response's
+`multicycle_paths[]` record carries:
+
+- `matched_endpoints` — the count of distinct endpoint pins the session
+  actually timed through the selection (a defined count, never `null`);
+- `setup_slack_ns` / `hold_slack_ns` — each `{"with": ..., "without":
+  ...}`, the worst slack (ns) of the **selected paths only**: `with` from
+  the session that applied every entry, `without` from one extra session
+  with this entry's two `set_multicycle_path` lines removed and **every
+  other entry kept in place** (the unambiguous baseline — with multiple
+  entries, a `without` number is never a re-run with all exceptions
+  dropped, and never the global WNS). An unmeasurable side is `null` and
+  adds a `reason` key to the record — never `0`.
+
+The same corner, clocks and every other constraint apply to both runs; the
+cost is one extra engine session per entry per corner.
+
+**Completeness is untouched.** `constraint_completeness` keeps counting
+unconstrained endpoints and unclocked registers exactly as without the
+field: an exception never converts an unconstrained endpoint to constrained
+or an unclocked register to clocked, and an omitted or empty list leaves
+both the generated Tcl and the response byte-identical to a request without
+the field.
+
+Not supported: generated clocks (#6925), case analysis, `-to`/`-through`
+false-path forms and list-valued selectors (#6926), hold-only or
+setup-only entries, per-corner multiplier values.
 
 ## Timing derate (`constraints.timing_derate`, issue #7014)
 
@@ -2181,8 +2263,9 @@ invocation ID, script filename/hash, normalized script/metrics/log paths,
 process outcome/return code, and `retention_errors`. New paths use
 `{path, scope}` envelopes (as, since schema 2 / issue #2879, are
 `def_path`, `verilog_path`, and `spef_path`). Log `repo` paths resolve from
-the invoking repository root; the input-path fields resolve from the root of
-the repository containing the request file. For withheld `external` paths, find
+the repository containing the request file (#6764) — the same root the
+input-path fields use, never the invoking directory, so one request yields
+one committed report from any cwd. For withheld `external` paths, find
 `openroad-logs/<invocation_id>/` beside the generated script in the request's
 `.klt/sta/` directory.
 

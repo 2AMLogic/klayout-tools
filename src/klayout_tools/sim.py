@@ -87,6 +87,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -96,6 +97,7 @@ from . import (
     env_provenance,
     output_lock,
     sim_ac_waveform,
+    sim_batch_history,
     sim_batch_resume,
     sim_commands,
     sim_complex_vectors,
@@ -158,14 +160,15 @@ from . import sim_post_commands as sim_post_commands
 from . import sim_provenance as sim_provenance
 from . import sim_save_diagnostic as sim_save_diagnostic
 from . import sim_staging as sim_staging
-from ._jsonnum import is_finite_number, is_int, is_number
+from ._jsonnum import is_finite_number, is_number
 from ._paths import (
     _load_request_json,
     _resolve_relative,
     resolve_tool_binary,
     validate_request_shape,
 )
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import sha256_file as sha256_file
 from ._spice_text import circuit_lines
 from ._spice_text import logical_lines as _spice_text_logical_lines
 from ._text import line_containing as _line_containing
@@ -178,6 +181,13 @@ from .coverage import (
     work_id,
 )
 from .metrics import is_registered
+from .ngspice_build import ENGINE_BANNER_MAX
+from .ngspice_build import (
+    engine_version as _extract_engine_version,
+)
+from .ngspice_build import (
+    probe_engine_build as _probe_engine_build,
+)
 from .pdk import PdkNotFoundError, find_pdk, variant_dir_of
 from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
@@ -227,7 +237,14 @@ from .sim_checkpoint import (  # noqa: F401 -- keep runner checkpoint imports wo
     _load_checkpoint,
     restore_checkpoint,
 )
-from .sim_convergence_retry import is_retryable_convergence_failure, note_not_retried
+from .sim_convergence_retry import (
+    DEFAULT_CONVERGENCE_RETRY as DEFAULT_CONVERGENCE_RETRY,
+)
+from .sim_convergence_retry import (
+    _validate_convergence_retry,
+    is_retryable_convergence_failure,
+    note_not_retried,
+)
 
 #: Moved to the ``sim_corner_*`` modules (issue #5428) so this module stays
 #: under its per-file size ratchet; re-exported here -- self-aliased where
@@ -326,6 +343,7 @@ from .sim_analysis_overrides import (  # isort: skip
 )
 
 #: Moved to `sim_validate.py` / `sim_errors.py` (issue #3689); re-exported self-aliased.
+from . import sim_regrade
 from .sim_errors import SimError as SimError
 from .sim_measurement_grading import _INCONCLUSIVE_STATUS as _INCONCLUSIVE_STATUS
 
@@ -574,6 +592,7 @@ DIAGNOSTIC_CODES: frozenset[str] = frozenset(
         "batch_runner_request_feature_unverified",
         "batch_runner_version_mismatch",
         sim_spiceinit.BATCH_INIT_UNVERIFIED,
+        sim_spiceinit.MODEL_SELECTION_INIT_HINT,
         # Off-host expression diagnostics use the recorded runner identity.
         "expr_runner_may_predate",
         "expr_no_value",
@@ -1902,68 +1921,6 @@ def _portable_substitutions(
             entry["models_lib_sha256"] = models_lib_sha256
         out.append(entry)
     return out
-
-
-#: ``options.retry_on_convergence_error`` (issue #2973): the solver options a
-#: retried unit runs with when the object form leaves a key out. ``gear``
-#: integration and a looser ``reltol`` are the standard first remedies for
-#: ngspice's "time step too small".
-DEFAULT_CONVERGENCE_RETRY: dict[str, Any] = {
-    "max_attempts": 1,
-    "reltol": 0.003,
-    "method": "gear",
-}
-_CONVERGENCE_RETRY_METHODS = ("trap", "gear")
-
-
-def _validate_convergence_retry(value: Any) -> dict[str, Any] | None:
-    """Validate and normalise ``options.retry_on_convergence_error`` (issue
-    #2973).
-
-    ``None``/absent/``false`` -> ``None``: no retry, today's behaviour
-    exactly. ``true`` -> :data:`DEFAULT_CONVERGENCE_RETRY`. An object may set
-    ``max_attempts`` (integer >= 1), ``reltol`` (number in ``(0, 1)``) and
-    ``method`` (``"trap"``/``"gear"``); omitted keys take the default and an
-    unknown key is an application error (``SimError``) rather than a silent
-    no-op, like :func:`_validate_fail_on_diagnostic`.
-    """
-    if value is None or value is False:
-        return None
-    if value is True:
-        return dict(DEFAULT_CONVERGENCE_RETRY)
-    if not isinstance(value, dict):
-        raise SimError(
-            "options.retry_on_convergence_error must be a boolean or an object "
-            'like {"max_attempts": 1, "reltol": 0.003, "method": "gear"}'
-        )
-    unknown = sorted(set(value) - set(DEFAULT_CONVERGENCE_RETRY))
-    if unknown:
-        raise SimError(
-            "options.retry_on_convergence_error has unknown key(s): "
-            f"{', '.join(unknown)} (known: {', '.join(DEFAULT_CONVERGENCE_RETRY)})"
-        )
-    resolved = {**DEFAULT_CONVERGENCE_RETRY, **value}
-    attempts = resolved["max_attempts"]
-    if not is_int(attempts) or attempts < 1:
-        raise SimError(
-            "options.retry_on_convergence_error.max_attempts must be an integer >= 1"
-        )
-    reltol = resolved["reltol"]
-    if (
-        isinstance(reltol, bool)
-        or not isinstance(reltol, (int, float))
-        or not 0 < reltol < 1
-    ):
-        raise SimError(
-            "options.retry_on_convergence_error.reltol must be a number "
-            "between 0 and 1 (exclusive)"
-        )
-    if resolved["method"] not in _CONVERGENCE_RETRY_METHODS:
-        raise SimError(
-            "options.retry_on_convergence_error.method must be one of: "
-            + ", ".join(_CONVERGENCE_RETRY_METHODS)
-        )
-    return resolved
 
 
 def _resolve_convergence_retry(
@@ -3356,6 +3313,15 @@ def _prepare_sim_request(
             monte_carlo_info["k_sigma"] = k_sigma
         monte_carlo_info.update(_mc_window_scope_echo(monte_carlo_spec, window_scope))
 
+    # Issue #6778: a `--regrade` second pass rides this same request -- the
+    # internal `_regrade` field selects the re-run units (after this
+    # module's own expansion, so corner identities and Monte Carlo seeds are
+    # preserved), `options.tightened_rerun` is validated on every run, and a
+    # request without either returns the expansion unchanged.
+    corner_points = sim_regrade.prepare_regrade(
+        corner_points, request, analysis, engine
+    )
+
     # Issue #2995: per-instance mismatch gating. Validated before any probe or
     # backend dispatch; the gated netlist copy is what local backends run.
     dispatch_netlist_path, monte_carlo_info = _maybe_gate_instances(
@@ -3995,6 +3961,18 @@ def _run_sim_corners(
             shard_fingerprint=_checkpoint_fingerprint(**fingerprint_inputs),
         )
 
+    shard_fingerprint = (
+        _checkpoint_fingerprint(**fingerprint_inputs) if backend == "batch" else None
+    )
+    history = sim_batch_history.begin(
+        artifacts_dir,
+        shard_fingerprint,
+        request,
+        hosts,
+        bool(resume),
+        bool(pre_completed),
+        attach_job_id,
+    )
     if not dispatch_points and backend in _OFFHOST_BACKENDS and attach_job_id is None:
         # Issue #5775: an all-covered resume dispatches nothing -- never the
         # off-host "hosts exceeds the units to dispatch" refusal over an empty fleet.
@@ -4019,7 +3997,7 @@ def _run_sim_corners(
             **local_engine_kwargs,
             **(
                 {
-                    "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                    "shard_fingerprint": shard_fingerprint,
                     "netlist_sha256": netlist_digests.sha256,
                     "explicit_points": dispatch_points
                     if len(dispatch_points) < len(corner_points)
@@ -4046,7 +4024,7 @@ def _run_sim_corners(
         # already ran instead of paying for them again.
         shard_kwargs: dict[str, Any] = (
             {
-                "shard_fingerprint": _checkpoint_fingerprint(**fingerprint_inputs),
+                "shard_fingerprint": shard_fingerprint,
                 "resume": bool(resume),
             }
             if backend == "batch"
@@ -4116,31 +4094,17 @@ def _run_sim_corners(
     _require_options_echo(
         dispatch_points, corners_new, backend=backend, env=remote_environment
     )
+    # Issue #6778: a runner that predates `--regrade` ignores the request's
+    # selection field and runs the whole matrix -- refuse that by id.
+    sim_regrade.require_regrade_echo(request, dispatch_points, corners_new, backend)
     _record_batch_checkpoint(checkpoint, backend, corners_new, backend_engine_version)
     remote_environment = sim_batch_resume.merge_resume_environment(
         harvested_env, remote_environment
     )
 
-    if resume:
-        # Reassemble the full corner list in the request's own order: a
-        # corner is either freshly run just now (`corners_new`) or reused
-        # verbatim from a matching checkpoint (`pre_completed`) -- every
-        # `corner_points` entry is in exactly one of the two (see
-        # `dispatch_points` above). Lost batch shards synthesize unrun reports
-        # per point, so every dispatched point still has a report.
-        new_by_id = {corner["corner_id"]: corner for corner in corners_new}
-        corners = [
-            new_by_id[point.corner_id]
-            if point.corner_id in new_by_id
-            else pre_completed[point.corner_id]
-            for point in corner_points
-        ]
-    else:
-        # The exact pre-#473 assignment -- `corners_new` is already the
-        # full, correctly-ordered report for every backend (including
-        # `remote`, whose corners this process never reconciles against a
-        # local `CornerPoint` list).
-        corners = corners_new
+    corners = sim_batch_resume.reassemble_corners(
+        bool(resume), corner_points, corners_new, pre_completed
+    )
     _attach_meas_lint(corners, analysis, measurements_spec)
     engine_version = (
         backend_engine_version
@@ -4187,6 +4151,9 @@ def _run_sim_corners(
     # field) -- see docs/cli/sim.md's report schema.
     diagnostic_counts = _diagnostic_counts(corners)
 
+    remote_environment = sim_batch_history.finish(
+        history, remote_environment, corners, len(corner_points)
+    )
     sharded_attach = attach_job_id is not None and attach_job_id.endswith(".json")
     if (
         backend == "batch"
@@ -4376,6 +4343,11 @@ def _run_sim_corners(
     # Additive/optional (issue #2973): the resolved retry policy, only when
     # `options.retry_on_convergence_error` opted in.
     environment.update(_convergence_retry_environment(convergence_retry))
+    # Issue #6778: the declared tightened-rerun settings (present in both
+    # passes) and, for a regrade run itself, the applied selection.
+    environment.update(
+        sim_regrade.regrade_environment_entries(request, analysis, engine)
+    )
     environment.update(
         sim_env_report.budget_environment(
             budget_s,
@@ -4402,9 +4374,6 @@ def _run_sim_corners(
 
     remote = environment.get("remote")
     remote_diagnostics = pop_remote_diagnostics(remote)
-    init_diagnostic = sim_spiceinit.batch_init_diagnostic(
-        backend, engine, ngspice_init_lines, remote
-    )
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -4456,7 +4425,9 @@ def _run_sim_corners(
     # Additive/optional (#2901 runner feature, #4976 bin-range preflight).
     diag_candidates = (
         *remote_diagnostics,
-        init_diagnostic,
+        sim_spiceinit.report_init_diagnostic(
+            backend, engine, ngspice_init_lines, remote, corners
+        ),
         bin_diagnostic,
         save_diagnostic,
     )
@@ -4713,7 +4684,7 @@ _KNOWN_REQUEST_KEYS = frozenset(
         " confidence corners decks engine engine_version exclude"
         " expect_netlist_identity measurements models monte_carlo netlist"
         " netlist_overrides netlist_source options remote schema"
-        " schema_version target_ci_halfwidth _explicit_points"
+        " schema_version target_ci_halfwidth _explicit_points _regrade"
     ).split()
     + [sim_staging.STAGED_MODEL_INPUTS_FIELD, sim_stimulus.REQUEST_KEY]
 )
@@ -5995,34 +5966,100 @@ def _run_local(
     stimulus_lines: tuple[str, ...] = (),
     threads_per_worker: int | None = None,
     pdk_root: str | None = None,
+    parallel: bool = False,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The ``local`` backend: run each expanded corner sequentially in-process.
+    """The ``local`` backend -- and, since issue #6896, the one shared local
+    entry point both local backends bind their corner runner at.
 
-    This is the unit a backend implements -- given the expanded corner list
-    plus the already-resolved netlist/model paths and run options, return
-    ``(per_corner_reports, engine_version, remote_environment)``. For the
-    default case (no ``deadline``/``initial_ppid``/``checkpoint``/
-    ``probe_abort``) this intentionally reproduces the original in-line loop
-    byte-for-byte (same ordering, same ``engine_version`` last-writer-wins
-    tracking) so the report JSON and on-disk artifacts are unchanged from
-    before the backend seam existed. ``max_workers``/``request`` are
-    accepted for signature parity with the other backends (every entry in
-    :data:`_BACKENDS` is called with the same keyword set) but are
-    meaningless for a sequential local runner, so both are ignored here; the
-    third return value is always ``None`` (only ``remote`` populates it).
+    The per-sweep values are bound **once** here, into ``run_corner(point)``
+    -- the single keyword forwarding into :func:`_run_corner_with_retry`, so
+    adding a simulator option is one forwarding change for both local
+    modes. ``parallel=False`` (the default) runs each corner sequentially
+    on the calling thread via :func:`_run_local_corners_sequentially`;
+    ``parallel=True`` (forwarded by :func:`_run_local_parallel`) fans them
+    across a bounded local pool via :func:`_run_local_corners_pooled`.
+
+    This is the unit a backend implements: given the expanded corner list
+    plus the resolved netlist/model paths and run options, return
+    ``(per_corner_reports, engine_version, remote_environment)``. Each
+    scheduler reproduces the original in-line loop byte-for-byte (same
+    ordering, same ``engine_version`` last-writer-wins tracking);
+    ``request`` and (unless ``parallel=True``) ``max_workers`` are
+    parity-only (see :data:`_BACKENDS`) and ignored.
+    """
+    del request  # unused by either local scheduling strategy, see docstring
+
+    def run_corner(point: CornerPoint) -> tuple[dict[str, Any], str | None]:
+        return _run_corner_with_retry(
+            point=point,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            timeout_s=timeout_s,
+            keep_artifacts=keep_artifacts,
+            want_waveforms=want_waveforms,
+            artifacts_dir=artifacts_dir,
+            engine=engine,
+            ngspice_binary=ngspice_binary,
+            fail_on_diagnostic=fail_on_diagnostic,
+            ngspice_init=ngspice_init,
+            osdi_preload=osdi_preload,
+            save_mode=save_mode,
+            save_vectors=save_vectors,
+            complex_vectors=complex_vectors,
+            waveform_max_bytes=waveform_max_bytes,
+            waveform_decimate=waveform_decimate,
+            ngspice_options=ngspice_options,
+            convergence_retry=convergence_retry,
+            portable_roots=portable_roots,
+            stimulus_lines=stimulus_lines,
+            threads_per_worker=threads_per_worker,
+            pdk_root=pdk_root,
+        )
+
+    schedule = (
+        _run_local_corners_pooled if parallel else _run_local_corners_sequentially
+    )
+    corners, engine_version = schedule(
+        run_corner,
+        corner_points=corner_points,
+        measurements_spec=measurements_spec,
+        max_workers=max_workers,
+        deadline=deadline,
+        initial_ppid=initial_ppid,
+        checkpoint=checkpoint,
+        probe_abort=probe_abort,
+    )
+    return corners, engine_version, None
+
+
+def _run_local_corners_sequentially(
+    run_corner: Callable[[CornerPoint], tuple[dict[str, Any], str | None]],
+    *,
+    corner_points: list[CornerPoint],
+    measurements_spec: list[dict[str, Any]],
+    max_workers: int | None,
+    deadline: float | None,
+    initial_ppid: int | None,
+    checkpoint: _Checkpoint | None,
+    probe_abort: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local`` scheduling strategy: call ``run_corner`` (the runner
+    :func:`_run_local` bound once for the whole sweep, issue #6896) with
+    each corner in list order, on the calling thread.
 
     ``deadline``/``initial_ppid`` (issue #473) are checked before *starting*
     each corner: once either fires, every remaining corner is reported via
     :func:`_unrun_corner_report` (``budget_exceeded``/``orphaned``) instead
     of being run -- a corner already in flight is never interrupted (there
     is only ever one, for this sequential backend). ``checkpoint``, when
-    given, records each corner as it completes so a later ``--resume`` run
-    does not recompute it.
+    given, records each corner as it completes for a later ``--resume``.
 
     ``probe_abort`` (issue #1694, the two-pass probe model's fail-fast half
     -- see ``_run_fail_fast_probe`` and docs/design/sim-corner-reached-s.md)
     is the ``{"code", "message", "reached_s", "fraction"}`` decision ``run_sim``
-    already made *before* calling this backend at all: when given, **every**
+    already made *before* calling the backend at all: when given, **every**
     corner in ``corner_points`` is reported unrun via
     :func:`_unrun_corner_report` with that code/message/estimate, and no
     ``ngspice`` process is ever spawned for this sweep -- the whole point of
@@ -6030,7 +6067,7 @@ def _run_local(
     real corner (not just the ones after some in-flight budget/orphan check)
     burns its own ``options.timeout_s``.
     """
-    del max_workers, request  # unused: sequential local run, see docstring
+    del max_workers  # unused: sequential local run, see docstring
     engine_version: str | None = None
     corners: list[dict[str, Any]] = []
     stop_reason: str | None = None
@@ -6060,39 +6097,13 @@ def _run_local(
                 )
             )
             continue
-        result, version = _run_corner_with_retry(
-            point=point,
-            netlist_path=netlist_path,
-            models_lib=models_lib,
-            analysis=analysis,
-            measurements_spec=measurements_spec,
-            timeout_s=timeout_s,
-            keep_artifacts=keep_artifacts,
-            want_waveforms=want_waveforms,
-            artifacts_dir=artifacts_dir,
-            engine=engine,
-            ngspice_binary=ngspice_binary,
-            fail_on_diagnostic=fail_on_diagnostic,
-            ngspice_init=ngspice_init,
-            osdi_preload=osdi_preload,
-            save_mode=save_mode,
-            save_vectors=save_vectors,
-            complex_vectors=complex_vectors,
-            waveform_max_bytes=waveform_max_bytes,
-            waveform_decimate=waveform_decimate,
-            ngspice_options=ngspice_options,
-            convergence_retry=convergence_retry,
-            portable_roots=portable_roots,
-            stimulus_lines=stimulus_lines,
-            threads_per_worker=threads_per_worker,
-            pdk_root=pdk_root,
-        )
+        result, version = run_corner(point)
         corners.append(result)
         if version is not None:
             engine_version = version
         if checkpoint is not None:
             checkpoint.record(point.corner_id, result, version)
-    return corners, engine_version, None
+    return corners, engine_version
 
 
 def _host_max_workers_cap() -> int | None:
@@ -6206,46 +6217,25 @@ def _resolve_max_workers(max_workers: int | None) -> int:
     return max_workers
 
 
-def _run_local_parallel(
+def _run_local_corners_pooled(
+    run_corner: Callable[[CornerPoint], tuple[dict[str, Any], str | None]],
     *,
     corner_points: list[CornerPoint],
-    netlist_path: str,
-    models_lib: str | None,
-    analysis: dict[str, Any],
     measurements_spec: list[dict[str, Any]],
-    timeout_s: float,
-    keep_artifacts: bool,
-    want_waveforms: bool,
-    artifacts_dir: str,
     max_workers: int | None,
-    request: dict[str, Any],
-    deadline: float | None = None,
-    initial_ppid: int | None = None,
-    checkpoint: _Checkpoint | None = None,
-    probe_abort: dict[str, Any] | None = None,
-    engine: str = "ngspice",
-    ngspice_binary: str | None = None,
-    fail_on_diagnostic: tuple[str, ...] = (),
-    ngspice_init: tuple[str, ...] = (),
-    osdi_preload: tuple[str, ...] = (),
-    save_mode: str = DEFAULT_SAVE_MODE,
-    save_vectors: tuple[str, ...] = (),
-    complex_vectors: tuple[str, ...] = (),
-    waveform_max_bytes: int | None = DEFAULT_WAVEFORM_MAX_BYTES,
-    waveform_decimate: int | None = None,
-    ngspice_options: dict[str, Any] | None = None,
-    convergence_retry: dict[str, Any] | None = None,
-    portable_roots: sim_portable.Roots | None = None,
-    stimulus_lines: tuple[str, ...] = (),
-    threads_per_worker: int | None = None,
-    pdk_root: str | None = None,
-) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
-    """The ``local-parallel`` backend: fan the expanded corner list across a
-    bounded local worker pool.
+    deadline: float | None,
+    initial_ppid: int | None,
+    checkpoint: _Checkpoint | None,
+    probe_abort: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """The ``local-parallel`` scheduling strategy: fan the expanded corner
+    list across a bounded local worker pool, submitting ``run_corner`` (the
+    runner :func:`_run_local` bound once for the whole sweep, issue #6896)
+    and the corner's point to the pool.
 
     Corners share nothing -- each is a pure function of netlist + models +
     corner (see this module's docstring and #253/#168) -- so this is a
-    :class:`~concurrent.futures.ThreadPoolExecutor` pool over :func:`_run_corner`
+    :class:`~concurrent.futures.ThreadPoolExecutor` pool over ``run_corner``
     (a thread, not a process, pool: the actual work is the ``ngspice``
     subprocess call, which releases the GIL for the duration of the wait, so
     threads give the same concurrency as processes here without the
@@ -6254,17 +6244,12 @@ def _run_local_parallel(
     same order after every future completes, regardless of completion order
     -- the acceptance criterion that this backend's report is order-identical
     to ``local`` for the same request. ``engine_version`` is derived the same
-    "last non-``None`` wins, in corner-list order" way ``local`` computes it,
-    for the same reason: deterministic given a deterministic corner list,
-    independent of which corner's process happened to finish last.
-
-    A failing/erroring corner is reported exactly as :func:`_run_corner`
-    reports it (that function never raises) and does not abort any sibling
-    corner -- each future is independent.
-
-    ``request`` is accepted for signature parity with the other backends
-    (only ``remote`` reads it) and ignored; the third return value is always
-    ``None`` here.
+    "last non-``None`` wins, in corner-list order" way the sequential
+    scheduler computes it, for the same reason: deterministic given a
+    deterministic corner list, independent of which corner's process
+    happened to finish last. A failing/erroring corner is reported exactly
+    as ``run_corner`` reports it (:func:`_run_corner` never raises) and
+    does not abort any sibling corner -- each future is independent.
 
     **Pool size and the host cap.** ``max_workers`` (the request's
     ``options.max_workers``, or ``--max-workers``) sizes the pool; when it is
@@ -6291,12 +6276,11 @@ def _run_local_parallel(
     still in flight at that moment.
 
     ``probe_abort`` (issue #1694): identical contract to
-    :func:`_run_local`'s own ``probe_abort`` -- when given, ``stop_reason``
-    starts pre-set to its code, so ``_fill`` never submits a single corner
-    to the pool and every corner in ``corner_points`` comes back through
-    :func:`_unrun_corner_report` with that code/message/estimate.
+    :func:`_run_local_corners_sequentially`'s own -- when given,
+    ``stop_reason`` starts pre-set to its code, so ``_fill`` never
+    submits a single corner to the pool and every corner comes back
+    through :func:`_unrun_corner_report` with that code/message/estimate.
     """
-    del request  # unused: local-parallel needs no request-level context
     resolved_workers = _resolve_max_workers(max_workers)
 
     total = len(corner_points)
@@ -6332,34 +6316,7 @@ def _run_local_parallel(
                 and _stopped() is None
             ):
                 point = corner_points[next_index]
-                future = pool.submit(
-                    _run_corner_with_retry,
-                    point=point,
-                    netlist_path=netlist_path,
-                    models_lib=models_lib,
-                    analysis=analysis,
-                    measurements_spec=measurements_spec,
-                    timeout_s=timeout_s,
-                    keep_artifacts=keep_artifacts,
-                    want_waveforms=want_waveforms,
-                    artifacts_dir=artifacts_dir,
-                    engine=engine,
-                    ngspice_binary=ngspice_binary,
-                    fail_on_diagnostic=fail_on_diagnostic,
-                    ngspice_init=ngspice_init,
-                    osdi_preload=osdi_preload,
-                    save_mode=save_mode,
-                    save_vectors=save_vectors,
-                    complex_vectors=complex_vectors,
-                    waveform_max_bytes=waveform_max_bytes,
-                    waveform_decimate=waveform_decimate,
-                    ngspice_options=ngspice_options,
-                    convergence_retry=convergence_retry,
-                    portable_roots=portable_roots,
-                    stimulus_lines=stimulus_lines,
-                    threads_per_worker=threads_per_worker,
-                    pdk_root=pdk_root,
-                )
+                future = pool.submit(run_corner, point)
                 in_flight[future] = next_index
                 next_index += 1
 
@@ -6398,7 +6355,18 @@ def _run_local_parallel(
         corners.append(corner)
         if version is not None:
             engine_version = version
-    return corners, engine_version, None
+    return corners, engine_version
+
+
+def _run_local_parallel(
+    **kwargs: Any,
+) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
+    """The ``local-parallel`` backend: :func:`_run_local` with
+    ``parallel=True`` (issue #6896 hoisted the shared signature and
+    corner-argument binding there); the pool itself is
+    :func:`_run_local_corners_pooled`.
+    """
+    return _run_local(parallel=True, **kwargs)
 
 
 #: Backend registry: name -> implementation. Membership is validated against
@@ -6415,8 +6383,6 @@ _BACKENDS = {
 # --------------------------------------------------------------------------- #
 # Per-corner ngspice invocation
 # --------------------------------------------------------------------------- #
-
-_ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 
 
 _WAVEFORM_KEYWORDS = frozenset(
@@ -8827,10 +8793,7 @@ def _write_xyce_deck(
         handle.write("\n".join(lines) + "\n")
 
 
-#: Bound on the recorded ``--version`` banner; matches the worker capture's
-#: ``WORKER_CAPTURE_BANNER_MAX`` so the two sides compare like for like.
-_ENGINE_BANNER_MAX = 2000
-_ENGINE_BANNER_TIMEOUT_S = 10
+_ENGINE_BANNER_MAX = ENGINE_BANNER_MAX
 
 
 def _engine_build_with_comparison(
@@ -8848,66 +8811,6 @@ def _engine_build_with_comparison(
         attach_engine_build_comparison(remote_environment, engine_build)
         attach_staged_model_comparison(remote_environment, staged_model_inputs, request)
     return engine_build
-
-
-def _probe_engine_build(ngspice_binary: str | None) -> dict[str, Any] | None:
-    """The local ngspice build identity (issue #3095) -- ``--version`` banner plus
-    binary sha256 -- probed once per sweep into ``environment.engine_build`` on
-    ``local`` reports, ``client_engine_build`` off-host (#5566 rewrites ``engine_build``
-    to the worker's). ``engine_version`` is the major version only and two builds of one
-    major can differ in options (FFTW vs. padded FFT). ``None`` for engines without a
-    probe (xyce). A failed probe never fails the run; ``probe`` / ``reason`` say why."""
-    if ngspice_binary is None:
-        return None
-    build: dict[str, Any] = {
-        "version_banner": None,
-        "binary_sha256": None,
-        "probe": "ok",
-        "reason": None,
-    }
-    try:
-        build["binary_sha256"] = sha256_file(ngspice_binary)
-    except OSError:
-        pass
-    try:
-        proc = subprocess.run(
-            [ngspice_binary, "--version"],
-            capture_output=True,
-            text=False,
-            timeout=_ENGINE_BANNER_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        build.update(
-            probe="timeout", reason=f"--version exceeded {_ENGINE_BANNER_TIMEOUT_S}s"
-        )
-        return build
-    except Exception as exc:  # the probe must never fail the sweep
-        build.update(probe="error", reason=f"could not run --version: {exc}"[:200])
-        return build
-    raw = proc.stdout or proc.stderr or b""
-    text: str = (
-        raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-    )[: _ENGINE_BANNER_MAX * 4]
-    banner = "".join(ch if (ch >= " " or ch in "\n\t") else "?" for ch in text).strip()[
-        :_ENGINE_BANNER_MAX
-    ]
-    if proc.returncode != 0 or not banner:
-        build.update(
-            probe="error",
-            reason=(
-                f"--version exited {proc.returncode}"
-                if proc.returncode != 0
-                else "--version printed no banner"
-            ),
-        )
-        return build
-    build["version_banner"] = banner
-    return build
-
-
-def _extract_engine_version(stdout: str) -> str | None:
-    match = _ENGINE_VERSION_RE.search(stdout or "")
-    return match.group(1) if match else None
 
 
 # --------------------------------------------------------------------------- #
