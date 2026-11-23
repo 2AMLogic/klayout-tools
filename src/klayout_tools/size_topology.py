@@ -18,31 +18,24 @@ from __future__ import annotations
 import math
 import os
 import re
-import tempfile
 from typing import Any
 
 from . import env_provenance
 from ._jsonnum import is_number
 from ._provenance import build_provenance
-from .pdk import PdkNotFoundError, find_pdk
-from .sim import SimError, _resolve_models_lib
 from .size import (
     _JOINT_WIDTH_STEP_EPS,
     _OP_PARAM_KEYS,
     _OP_PARAMS,
     _OP_VALUE_RE,
     _TOPOLOGY_ROLE_KIND,
-    DEFAULT_GM_ID_TOLERANCE,
     DEFAULT_MAX_JOINT_ITERATIONS,
-    DEFAULT_SWEEP_POINTS,
     DEFAULT_TIMEOUT_S,
     MIN_JOINT_ITERATIONS,
-    MIN_SWEEP_POINTS,
     SCHEMA_VERSION,
     SUPPORTED_TOPOLOGIES,
     TOPOLOGY_ROLES,
     SizeError,
-    _cleanup_dir,
     _corner_label,
     _corner_public,
     _find_bracket,
@@ -53,8 +46,11 @@ from .size import (
     _op_point_from_confirmed,
     _parse_corner,
     _parse_device,
+    _parse_sweep_settings,
     _require_positive_number,
+    _resolve_size_models,
     _run_sweep,
+    _size_work_dir,
 )
 
 # --------------------------------------------------------------------------- #
@@ -304,37 +300,10 @@ def _run_topology_size(
     targets = _parse_topology_targets(request.get("target"), topology)
     bias = _parse_topology_bias(request.get("bias"))
 
-    models = request.get("models") or {}
-    try:
-        models_lib = _resolve_models_lib(models, request_dir)
-    except SimError as exc:
-        raise SizeError(str(exc)) from exc
-
-    provenance_pdk: dict[str, Any] | None = None
-    if models.get("pdk") or models.get("pdk_root"):
-        try:
-            provenance_pdk = find_pdk(
-                variant=models.get("pdk"), root=models.get("pdk_root")
-            )
-        except PdkNotFoundError:
-            provenance_pdk = None
-
-    tolerance = request.get("tolerance") or {}
-    gm_id_rel_tol = tolerance.get("gm_id_rel", DEFAULT_GM_ID_TOLERANCE)
-    gm_id_rel_tol = _require_positive_number(
-        gm_id_rel_tol, "request.tolerance.gm_id_rel"
-    )
+    models_lib, provenance_pdk = _resolve_size_models(request, request_dir)
+    gm_id_rel_tol, sweep_points = _parse_sweep_settings(request)
 
     options = request.get("options") or {}
-    sweep_points = options.get("sweep_points", DEFAULT_SWEEP_POINTS)
-    if (
-        isinstance(sweep_points, bool)
-        or not isinstance(sweep_points, int)
-        or sweep_points < MIN_SWEEP_POINTS
-    ):
-        raise SizeError(
-            f"request.options.sweep_points must be an integer >= {MIN_SWEEP_POINTS}"
-        )
     max_joint_iterations = _parse_max_joint_iterations(options)
 
     timeout_s = timeout_s if timeout_s is not None else options.get("timeout_s")
@@ -345,68 +314,119 @@ def _run_topology_size(
     if artifacts_dir is None:
         artifacts_dir = os.path.join(request_dir, ".klt", "size")
 
-    if keep_artifacts:
-        work_dir = artifacts_dir
-        os.makedirs(work_dir, exist_ok=True)
-    else:
-        work_dir = tempfile.mkdtemp(prefix="klt-size-topology-")
+    with _size_work_dir(keep_artifacts, artifacts_dir) as work_dir:
+        vcm_v = bias["vcm_v"]
+        resolved_vcm_v = vcm_v if vcm_v is not None else corner["vdd_v"] / 2
+        bias_echo = {"vcm_v": resolved_vcm_v, "vout_v": None, "vtail_v": None}
 
-    resolved_vcm_v = bias["vcm_v"] if bias["vcm_v"] is not None else corner["vdd_v"] / 2
-    bias_echo = {"vcm_v": resolved_vcm_v, "vout_v": None, "vtail_v": None}
-
-    provenance = build_provenance(
-        deck_name=os.path.basename(models_lib),
-        deck_path=models_lib,
-        pdk=provenance_pdk,
-    )
-    environment: dict[str, Any] = {
-        "engine": "ngspice",
-        "engine_version": None,
-        # Issue #1274 -- see `run_size`'s own `environment` block.
-        "models_lib": env_provenance.repo_relative_path(
-            models_lib, repo_root=repo_root
-        ),
-    }
-
-    def _finish(payload: dict[str, Any]) -> dict[str, Any]:
-        if keep_artifacts:
-            payload["environment"]["artifacts_dir"] = work_dir
-        else:
-            _cleanup_dir(work_dir)
-        return payload
-
-    # ---- Phase A: characterize each role's own gm/Id(W) curve ------------ #
-    #
-    # One diode-connected width sweep per role, at that role's nominal
-    # current -- the same single ngspice invocation per sweep single-device
-    # mode uses (see the "Two-invocation-per-request design" docstring
-    # section). These curves are what the joint solve inverts to turn a
-    # measured in-circuit gm/Id error into a width correction, without
-    # paying an extra ngspice invocation per correction step.
-    nominal_currents = _topology_nominal_currents(budget)
-    curves: dict[str, list[dict[str, Any]]] = {}
-    for role in TOPOLOGY_ROLES:
-        device = devices[role]
-        w_grid = _log_space(device["w_min_um"], device["w_max_um"], sweep_points)
-        points, version, log_path, diagnostic = _run_sweep(
-            device=device,
-            corner=corner,
-            target={"id_a": nominal_currents[role], "gm_id": targets[role]["gm_id"]},
-            models_lib=models_lib,
-            w_values=w_grid,
-            work_dir=work_dir,
-            deck_name=f"{role}_sweep.cir",
-            log_name=f"{role}_sweep.log",
-            timeout_s=timeout_s,
+        provenance = build_provenance(
+            deck_name=os.path.basename(models_lib),
+            deck_path=models_lib,
+            pdk=provenance_pdk,
         )
-        if version is not None:
-            environment["engine_version"] = version
-        valid = [
-            p for p in points if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
-        ]
-        for point in valid:
-            point["gm_id"] = abs(point["gm_s"]) / abs(point["id_a"])
-        if len(valid) < 2:
+        environment: dict[str, Any] = {
+            "engine": "ngspice",
+            "engine_version": None,
+            # Issue #1274 -- see `run_size`'s own `environment` block.
+            "models_lib": env_provenance.repo_relative_path(
+                models_lib, repo_root=repo_root
+            ),
+        }
+
+        def _finish(payload: dict[str, Any]) -> dict[str, Any]:
+            if keep_artifacts:
+                payload["environment"]["artifacts_dir"] = work_dir
+            return payload
+
+        # ---- Phase A: characterize each role's own gm/Id(W) curve ------------ #
+        #
+        # One diode-connected width sweep per role, at that role's nominal
+        # current -- the same single ngspice invocation per sweep single-device
+        # mode uses (see the "Two-invocation-per-request design" docstring
+        # section). These curves are what the joint solve inverts to turn a
+        # measured in-circuit gm/Id error into a width correction, without
+        # paying an extra ngspice invocation per correction step.
+        nominal_currents = _topology_nominal_currents(budget)
+        curves: dict[str, list[dict[str, Any]]] = {}
+        for role in TOPOLOGY_ROLES:
+            device = devices[role]
+            w_grid = _log_space(device["w_min_um"], device["w_max_um"], sweep_points)
+            points, version, log, diagnostic = _run_sweep(
+                device=device,
+                corner=corner,
+                target={
+                    "id_a": nominal_currents[role],
+                    "gm_id": targets[role]["gm_id"],
+                },
+                models_lib=models_lib,
+                w_values=w_grid,
+                work_dir=work_dir,
+                deck_name=f"{role}_sweep.cir",
+                log_name=f"{role}_sweep.log",
+                timeout_s=timeout_s,
+            )
+            if version is not None:
+                environment["engine_version"] = version
+            valid = [
+                p
+                for p in points
+                if p["gm_s"] is not None and p["id_a"] not in (None, 0.0)
+            ]
+            for point in valid:
+                point["gm_id"] = abs(point["gm_s"]) / abs(point["id_a"])
+            if len(valid) < 2:
+                return _finish(
+                    _topology_error_payload(
+                        topology=topology,
+                        corner=corner,
+                        budget=budget,
+                        bias=bias_echo,
+                        targets=targets,
+                        devices=devices,
+                        gm_id_rel_tol=gm_id_rel_tol,
+                        environment=environment,
+                        provenance=provenance,
+                        reason=(
+                            f"the '{role}' role's characterization sweep did not "
+                            "return usable operating-point data for at least 2 of "
+                            "the swept widths"
+                            + (f": {diagnostic}" if diagnostic else "")
+                            + (f" (see sweep log: {log})" if keep_artifacts else "")
+                        ),
+                    )
+                )
+            curves[role] = sorted(valid, key=lambda p: p["w_um"])
+
+        # ---- Phase B: joint solve on the assembled topology ------------------ #
+        widths_um: dict[str, float] = {}
+        feasible: dict[str, bool] = {}
+        feasibility_notes: dict[str, str] = {}
+        for role in TOPOLOGY_ROLES:
+            w_um, role_feasible, note = _invert_curve(
+                curves[role], targets[role]["gm_id"]
+            )
+            widths_um[role] = w_um
+            feasible[role] = role_feasible
+            feasibility_notes[role] = note
+
+        solve = _run_joint_solve(
+            devices=devices,
+            curves=curves,
+            widths_um=widths_um,
+            targets=targets,
+            corner=corner,
+            budget=budget,
+            vcm_v=resolved_vcm_v,
+            models_lib=models_lib,
+            work_dir=work_dir,
+            timeout_s=timeout_s,
+            gm_id_rel_tol=gm_id_rel_tol,
+            max_iterations=max_joint_iterations,
+        )
+        if solve["engine_version"] is not None:
+            environment["engine_version"] = solve["engine_version"]
+
+        if solve["final"] is None:
             return _finish(
                 _topology_error_payload(
                     topology=topology,
@@ -418,131 +438,78 @@ def _run_topology_size(
                     gm_id_rel_tol=gm_id_rel_tol,
                     environment=environment,
                     provenance=provenance,
-                    reason=(
-                        f"the '{role}' role's characterization sweep did not "
-                        "return usable operating-point data for at least 2 of "
-                        "the swept widths"
-                        + (f": {diagnostic}" if diagnostic else "")
-                        + (f" (see sweep log: {log_path})" if keep_artifacts else "")
-                    ),
+                    reason=solve["diagnostic"] or "the joint topology solve failed",
+                    joint_solve=solve["report"],
                 )
             )
-        curves[role] = sorted(valid, key=lambda p: p["w_um"])
 
-    # ---- Phase B: joint solve on the assembled topology ------------------ #
-    widths_um: dict[str, float] = {}
-    feasible: dict[str, bool] = {}
-    feasibility_notes: dict[str, str] = {}
-    for role in TOPOLOGY_ROLES:
-        w_um, role_feasible, note = _invert_curve(curves[role], targets[role]["gm_id"])
-        widths_um[role] = w_um
-        feasible[role] = role_feasible
-        feasibility_notes[role] = note
+        final = solve["final"]
+        widths_um = final["widths_um"]
+        bias_echo = {
+            "vcm_v": resolved_vcm_v,
+            "vout_v": final["nodes"].get("out"),
+            "vtail_v": final["nodes"].get("tail"),
+        }
 
-    solve = _run_joint_solve(
-        devices=devices,
-        curves=curves,
-        widths_um=widths_um,
-        targets=targets,
-        corner=corner,
-        budget=budget,
-        vcm_v=resolved_vcm_v,
-        models_lib=models_lib,
-        work_dir=work_dir,
-        timeout_s=timeout_s,
-        gm_id_rel_tol=gm_id_rel_tol,
-        max_iterations=max_joint_iterations,
-    )
-    if solve["engine_version"] is not None:
-        environment["engine_version"] = solve["engine_version"]
-
-    if solve["final"] is None:
-        return _finish(
-            _topology_error_payload(
-                topology=topology,
-                corner=corner,
-                budget=budget,
-                bias=bias_echo,
-                targets=targets,
-                devices=devices,
-                gm_id_rel_tol=gm_id_rel_tol,
-                environment=environment,
-                provenance=provenance,
-                reason=solve["diagnostic"] or "the joint topology solve failed",
-                joint_solve=solve["report"],
-            )
+        device_results = _build_topology_device_results(
+            devices=devices,
+            widths_um=widths_um,
+            targets=targets,
+            budget=budget,
+            points=final["points"],
+            feasible=feasible,
+            feasibility_notes=feasibility_notes,
+            gm_id_rel_tol=gm_id_rel_tol,
+            corner=corner,
+            sweep_points=sweep_points,
+            iterations_run=solve["report"]["iterations_run"],
         )
 
-    final = solve["final"]
-    widths_um = final["widths_um"]
-    bias_echo = {
-        "vcm_v": resolved_vcm_v,
-        "vout_v": final["nodes"].get("out"),
-        "vtail_v": final["nodes"].get("tail"),
-    }
-
-    device_results = _build_topology_device_results(
-        devices=devices,
-        widths_um=widths_um,
-        targets=targets,
-        budget=budget,
-        points=final["points"],
-        feasible=feasible,
-        feasibility_notes=feasibility_notes,
-        gm_id_rel_tol=gm_id_rel_tol,
-        corner=corner,
-        sweep_points=sweep_points,
-        iterations_run=solve["report"]["iterations_run"],
-    )
-
-    measured = _measured_bias(final["points"], budget)
-    control_status = [
-        entry["status"]
-        for entry in device_results.values()
-        if entry["is_control"] and entry["status"] != "error"
-    ]
-    all_feasible = all(feasible.values())
-    status = (
-        "pass"
-        if (
+        measured = _measured_bias(final["points"], budget)
+        control_status = [
+            entry["status"]
+            for entry in device_results.values()
+            if entry["is_control"] and entry["status"] != "error"
+        ]
+        all_feasible = all(feasible.values())
+        all_pass = (
             all_feasible and control_status and all(s == "pass" for s in control_status)
         )
-        else "fail"
-    )
+        status = "pass" if all_pass else "fail"
 
-    return _finish(
-        {
-            "schema_version": SCHEMA_VERSION,
-            "status": status,
-            "topology": topology,
-            "corner": _corner_public(corner),
-            "budget": {**budget, "measured": measured},
-            "bias": bias_echo,
-            "roles": {
-                role: {
-                    "w_um": widths_um[role],
-                    "l_um": devices[role]["l_um"],
-                    "target_gm_id": targets[role]["gm_id"],
-                    "control_instance": _ROLE_CONTROL_INSTANCE[role],
-                    "feasible": feasible[role],
-                }
-                for role in TOPOLOGY_ROLES
-            },
-            "devices": device_results,
-            "tolerance": {"gm_id_rel": gm_id_rel_tol},
-            "joint_solve": solve["report"],
-            "method": _topology_method(
-                topology=topology,
-                solve_report=solve["report"],
-                widths_um=widths_um,
-                feasible=feasible,
-                feasibility_notes=feasibility_notes,
-                sweep_points=sweep_points,
-            ),
-            "environment": environment,
-            "provenance": provenance,
-        }
-    )
+        return _finish(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "status": status,
+                "topology": topology,
+                "corner": _corner_public(corner),
+                "budget": {**budget, "measured": measured},
+                "bias": bias_echo,
+                "roles": {
+                    role: {
+                        "w_um": widths_um[role],
+                        "l_um": devices[role]["l_um"],
+                        "target_gm_id": targets[role]["gm_id"],
+                        "control_instance": _ROLE_CONTROL_INSTANCE[role],
+                        "feasible": feasible[role],
+                    }
+                    for role in TOPOLOGY_ROLES
+                },
+                "devices": device_results,
+                "tolerance": {"gm_id_rel": gm_id_rel_tol},
+                "joint_solve": solve["report"],
+                "method": _topology_method(
+                    topology=topology,
+                    solve_report=solve["report"],
+                    widths_um=widths_um,
+                    feasible=feasible,
+                    feasibility_notes=feasibility_notes,
+                    sweep_points=sweep_points,
+                ),
+                "environment": environment,
+                "provenance": provenance,
+            }
+        )
 
 
 def _topology_nominal_currents(budget: dict[str, Any]) -> dict[str, float]:

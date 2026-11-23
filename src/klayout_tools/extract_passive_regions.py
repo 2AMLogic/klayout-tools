@@ -9,6 +9,9 @@ capacitor top-plate-via overlap exclusion (:func:`_capacitor_top_via_overlap_reg
 and the MoM (finger) capacitor device class and extractor
 (:data:`MOM_FEED_TOKENS`, :func:`mom_capacitor_device_class`,
 :func:`_build_mom_capacitor_extractor`, and their feed / metal-range helpers).
+:func:`_resistor_body_region` itself (and the split-terminal geometry behind
+``ResistorDevice.anode_marker``) now lives in
+:mod:`klayout_tools.extract_split_terminal`, re-exported here unchanged.
 
 This is a move, not a rewrite: every function body is unchanged. Dependencies
 are imported from their defining modules (deck types from
@@ -29,93 +32,56 @@ from typing import TYPE_CHECKING, Any
 
 from ._layout import region as _region
 from .decks import CapacitorDevice, ExtractionDeck, ResistorDevice
+from .extract_base import MOM_FEED_DOUBLE as MOM_FEED_DOUBLE
+from .extract_base import MOM_FEED_NONE as MOM_FEED_NONE
+from .extract_base import MOM_FEED_SAME as MOM_FEED_SAME
+from .extract_base import MOM_FEED_TOKENS as MOM_FEED_TOKENS
+from .extract_base import MOM_FEED_UNMEASURED as MOM_FEED_UNMEASURED
 from .extract_cap_top_plate import capacitor_top_region
 from .extract_spef import ExtractError
+from .extract_split_terminal import resistor_body_region as _resistor_body_region
+from .extract_split_terminal import split_terminal_regions, subtract_dummy
 
 if TYPE_CHECKING:
     import klayout.db as kdb
 
 
-def _resistor_body_region(
+def _sever_terminal_enclosure_bands(
     layout: kdb.Layout,
-    top_cell: kdb.Cell,
-    resistor: ResistorDevice,
-    base: kdb.Region | None = None,
-    heads: kdb.Region | None = None,
-) -> kdb.Region:
-    """The recognised device-body region for one :class:`ResistorDevice`
-    entry against this layout: ``body & marker``, narrowed by ``requires``
-    (every layer must also cover it) and ``excludes`` (each subtracted) --
-    see :class:`ResistorDevice`'s own docstring.
+    recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]],
+    bases: dict[tuple[int, int], kdb.Region],
+) -> None:
+    """Cut enclosure-band flanks from terminal and connectivity regions (#5889).
 
-    Factored out of :func:`_resolve_resistors`'s own inline computation
-    (issue #2204) so ``erc.py``'s deck-driven device-body auto-detection
-    computes the *exact same* region this deck's own extraction recognises
-    a resistor body as, rather than a second, potentially drifting
-    reimplementation -- the issue's own "Marker-to-role mapping" design
-    note's explicit requirement ("the same one `klt extract` uses").
+    Keep band conductor within one enclosure width of conductor outside
+    the band (crossing leads and real shorts stay connected).
 
-    ``base`` is the conductor region to intersect the marker against.
-    :func:`_resolve_resistors` passes its own (possibly black-box-masked)
-    ``poly``/``active``/metal region here, so this refactor changes nothing
-    about its result. Omitted (the default, every caller outside the main
-    extraction pipeline), this recomputes ``resistor.body`` fresh via
-    :func:`_region` -- there is no black-box masking to inherit outside
-    ``run_extract``'s own pipeline.
-
-    For a ``topology="abutting_heads"`` entry (issue #2679) the region is
-    instead ``marker & requires - excludes`` restricted to components that
-    touch the head conductor (``heads``, defaulting to the entry's
-    ``terminal``/``body`` layer) in two or more
-    separate regions; ``extract`` and ``erc`` share this one definition.
-
-    Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
-    drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
-    own "no PDK marker drawn" convention.
-    """
-    if resistor.topology == "abutting_heads":
-        # Issue #2679: the marker *is* the resistive body (sg13g2 polyres);
-        # `base` is only the head conductor it abuts.
-        body = _region(layout, top_cell, resistor.marker)
-    else:
-        if base is None:
-            base = _region(layout, top_cell, resistor.body)
-        body = base & _region(layout, top_cell, resistor.marker)
-    for layer in resistor.requires:
-        body = body & _region(layout, top_cell, layer)
-    for layer in resistor.excludes:
-        body = body - _region(layout, top_cell, layer)
-    if resistor.topology == "abutting_heads":
-        if heads is None:
-            heads = _region(
-                layout,
-                top_cell,
-                resistor.terminal if resistor.terminal is not None else resistor.body,
-            )
-        body = _bodies_with_two_heads(body, heads)
-    return body
-
-
-def _bodies_with_two_heads(body: kdb.Region, heads: kdb.Region) -> kdb.Region:
-    """Keep only the connected components of ``body`` that touch ``heads``
-    (abutting or overlapping) in at least two separate head regions.
-
-    The head regions are first reduced to ``heads - body`` so a head that
-    merely overlaps the body (a continuous bar) is judged by the pieces left
-    on either side of it, then merged; each surviving component needs two
-    distinct such pieces touching it. A missing head, or a head separated by
-    a gap, leaves fewer than two and the component is not a resistor.
+    The caller has already removed the bodies from ``bases``, so a sized
+    body's conductor overlap is just the drawn enclosure band; each cut
+    uses the same pre-cut conductor (nearby bodies can share the poly as
+    a series lead) and, at local cost (#6493), only the whole conductor
+    polygons interacting with ``ring.sized(2 * enc_dbu)`` (#6688, no clipping).
     """
     import klayout.db as kdb
 
-    merged = body.merged()
-    outer = (heads - merged).merged()
-    kept = kdb.Region()
-    for component in merged.each():
-        comp = kdb.Region(component)
-        if outer.interacting(comp).count() >= 2:
-            kept += comp
-    return kept
+    severed_by_layer: dict[tuple[int, int], kdb.Region] = {}
+    for spec, body, terminal_layer in recognised:
+        if spec.terminal_enclosure_um <= 0.0:
+            continue
+        conductor = bases[terminal_layer]
+        enc_dbu = max(1, int(round(spec.terminal_enclosure_um / layout.dbu)))
+        layer_severed = severed_by_layer.setdefault(terminal_layer, kdb.Region())
+        # Per-component rings preserve the series lead between nearby bodies.
+        for component in body.merged().each():
+            ring = kdb.Region(component).sized(enc_dbu)
+            local = conductor.interacting(ring.sized(2 * enc_dbu))
+            band = local & ring
+            if band.is_empty():
+                continue
+            layer_severed += band - (local - ring).sized(enc_dbu)
+    for layer, severed in severed_by_layer.items():
+        if not severed.is_empty():
+            bases[layer] = bases[layer] - severed
 
 
 def _resolve_resistors(
@@ -127,7 +93,14 @@ def _resolve_resistors(
     metals: list[kdb.Region],
     dummy: kdb.Region,
 ) -> tuple[
-    list[tuple[ResistorDevice, kdb.Region, kdb.Region]],
+    list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            kdb.Region,
+            tuple[kdb.Region, kdb.Region] | None,
+        ]
+    ],
     kdb.Region,
     kdb.Region,
     list[kdb.Region],
@@ -136,51 +109,21 @@ def _resolve_resistors(
 ]:
     """Resolve the deck's drawn-resistor declarations against this layout.
 
-    Returns ``(resistors, poly, active, metals, poly_candidate_bodies,
-    dummy_devices_dropped)`` where ``resistors`` is one ``(spec,
-    body_region, terminal_region)`` triple per *recognised* device class and
-    the three conductor regions are the deck's originals with every
-    recognised resistor body **subtracted** -- so the caller's connectivity
-    graph (and its MOS gate/source-drain split) sees the resistor's heads as
-    ordinary conductor and the resistive segment as a hole, instead of one
-    continuous short (see :class:`~klayout_tools.decks.ResistorDevice`).
+    Return ``(resistors, poly, active, metals, poly_candidate_bodies,
+    dummy_devices_dropped)``. Each resistor tuple contains its spec, body,
+    terminals and ``split``: ``(anode, cathode)`` for an ``anode_marker``
+    entry (#4312, whose whole scope is cut from the conductor), else
+    ``None``. The conductor regions have recognised bodies removed and
+    declared enclosure bands severed. The connectivity graph uses these
+    same regions, including for the MOS gate/source-drain split.
+    A body or terminal layer outside the deck conductors raises
+    :class:`ExtractError`.
 
-    A resistor body is ``body_layer & marker & all(requires) - any(excludes)``
-    (or, for a ``topology="abutting_heads"`` spec, issue #2679, ``marker &
-    all(requires) - any(excludes)`` kept only where it touches two separate
-    terminal-layer heads -- see :func:`_resistor_body_region`). A spec
-    whose body region comes out empty on this layout (the common case -- no
-    PDK resistor marker drawn anywhere) is dropped entirely and
-    subtracts nothing, so extraction of a resistor-free layout is bit-for-bit
-    what it was before this feature existed.
-
-    ``dummy`` is the deck's optional dummy-device marker region (see
-    ``ExtractionDeck.dummy``, issue #295) -- possibly empty when the deck
-    declares no ``dummy`` layer or the layout draws no such geometry.
-    Mirroring the MOS gate-suppression idiom in ``_extract_netlist``, a
-    resistor body's *candidate* region (after ``requires``/``excludes`` but
-    before the ``dummy`` cut) has ``dummy`` subtracted before it is handed
-    off as a recognised device: any *connected component* of the candidate
-    fully consumed by ``dummy`` is dropped outright (counted into
-    ``dummy_devices_dropped``, issue #462) rather than registered as a
-    device, while a component only partially covered survives as a clean
-    geometric cut -- the same all-or-nothing distinction the MOS path
-    already makes. Whatever ``dummy`` removes from a candidate body is *not*
-    subtracted from the caller's conductor region, so it stays present as
-    ordinary conductor, exactly like a suppressed MOS gate's poly.
-
-    ``poly_candidate_bodies`` is the union of every *candidate* body region
-    (post ``requires``/``excludes``, but **before** the ``dummy`` cut) whose
-    ``spec.body`` is the deck's ``poly`` layer -- used by
-    :func:`_detect_unmodelled_poly_bodies` to recognise a fully
-    dummy-suppressed poly resistor's own footprint as "claimed" (so it is
-    never misflagged as an unmodelled-device gap, issue #462), distinct from
-    the narrower post-dummy body carried in ``resistors`` itself.
-
-    Raises :class:`ExtractError` for a deck-authoring mistake (a ``body``/
-    ``terminal`` layer that is not one of the deck's own conductor layers),
-    since the terminal region must be a layer the connectivity graph already
-    carries.
+    Subtract the optional dummy marker from each candidate body, counting
+    fully covered components as dropped (#462). Dummy-covered areas stay
+    ordinary conductor. Return the union of pre-dummy poly candidates as
+    well so the unmodelled-device check counts their footprints as claimed,
+    including when the dummy marker covers an entire candidate.
     """
     import klayout.db as kdb
 
@@ -202,7 +145,14 @@ def _resolve_resistors(
                 "of the deck's conductor layers (active/poly/metals)"
             ) from None
 
-    recognised: list[tuple[ResistorDevice, kdb.Region, tuple[int, int]]] = []
+    recognised: list[
+        tuple[
+            ResistorDevice,
+            kdb.Region,
+            tuple[int, int],
+            tuple[kdb.Region, kdb.Region, kdb.Region] | None,
+        ]
+    ] = []
     poly_candidate_bodies = kdb.Region()
     dummy_devices_dropped = 0
     for spec in deck.resistors:
@@ -210,9 +160,16 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = _resistor_body_region(
-            layout, top_cell, spec, base=base, heads=bases[terminal_layer]
-        )
+        split = None
+        if spec.anode_marker is not None:
+            scope, body, anode, cathode = split_terminal_regions(
+                layout, top_cell, spec, base
+            )
+            split = (scope, anode, cathode)
+        else:
+            body = _resistor_body_region(
+                layout, top_cell, spec, base=base, heads=bases[terminal_layer]
+            )
         if body.is_empty():
             continue
         if spec.body == deck.poly:
@@ -221,16 +178,33 @@ def _resolve_resistors(
             for component in body.merged().each():
                 if (kdb.Region(component) - dummy).is_empty():
                     dummy_devices_dropped += 1
-            body = body - dummy
+            body, split = subtract_dummy(body, split, dummy)
         if body.is_empty():
             continue
-        recognised.append((spec, body, terminal_layer))
+        recognised.append((spec, body, terminal_layer, split))
 
-    for spec, body, _terminal_layer in recognised:
-        bases[spec.body] = bases[spec.body] - body
+    for spec, body, _terminal_layer, split in recognised:
+        bases[spec.body] = bases[spec.body] - (body if split is None else split[0])
+
+    # A split-terminal body has no enclosure band: its scope is already cut.
+    _sever_terminal_enclosure_bands(
+        layout,
+        [
+            (spec, body, layer)
+            for spec, body, layer, split in recognised
+            if split is None
+        ],
+        bases,
+    )
 
     resistors = [
-        (spec, body, bases[terminal_layer]) for spec, body, terminal_layer in recognised
+        (
+            spec,
+            body,
+            bases[terminal_layer] if split is None else split[1] | split[2],
+            None if split is None else (split[1], split[2]),
+        )
+        for spec, body, terminal_layer, split in recognised
     ]
     return (
         resistors,
@@ -629,27 +603,6 @@ def _exclude_capacitor_top_via_overlap(
         for index, region in enumerate(vias)
     ]
 
-
-#: ``FEED`` parameter codes (issue #2445) -- the ``cap_cmomi`` PCell's
-#: feed-structure variant carried through a KLayout ``DeviceParameterDefinition``
-#: (a ``double``) as a small integer enum, mapped back to the upstream
-#: ``.subckt``'s own ``none``/``same``/``double`` token only when a card is
-#: written (:data:`MOM_FEED_TOKENS`, consumed by ``pdk_models.py``) and when
-#: ``devices[].feed`` is reported. ``0`` is **not** a variant: it is the
-#: class's own default and means "this side never measured/stated the feed"
-#: (the same sentinel role ``0`` plays for ``MMIN``/``MMAX``, issue #2435),
-#: so an unrecognised port layout is left off the card rather than guessed
-#: at. The codes are deliberately *not* the ``.lib``'s own ``none/same/double
-#: -> 0/1/2`` numbering, precisely so ``0`` stays free for "unmeasured".
-MOM_FEED_UNMEASURED = 0
-MOM_FEED_NONE = 1
-MOM_FEED_SAME = 2
-MOM_FEED_DOUBLE = 3
-MOM_FEED_TOKENS: dict[int, str] = {
-    MOM_FEED_NONE: "none",
-    MOM_FEED_SAME: "same",
-    MOM_FEED_DOUBLE: "double",
-}
 
 #: Device-class names whose upstream ``.subckt`` declares a ``feed``
 #: parameter. Exactly ``cap_cmomi`` -- ``cap_cmomf`` has no ``feed`` at all

@@ -9,18 +9,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from .gen_base import GenError
+
 
 def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mark: Any):
     """MOS-capacitor marker ``LayerInfo`` (issue #3283), or ``None``.
 
     Raises ``GenError`` when the family declares no marker layer or ``w_um``
-    is below the deck's COMP min width for the selected oxide.
+    is below the binding COMP min-width floor. Two floors apply and the larger
+    binds: the deck's COMP min width for the selected oxide
+    (``_mos_cap_min_width_um``) and the width rule scoped to COMP under the
+    MOS-capacitor marker (``_moscap_marker_min_width_um``; gf180mcu
+    ``comp.width.moscap.1`` / ``DF.1c``, 1.0 um, issue #6170).
     """
     if not params.get("mos_cap"):
         return None
     import klayout.db as kdb
 
-    from .gen import GenError
     from .gen_layer_params import _PDK_MOS_CAP_MARK_LAYERS, _mos_cap_min_width_um
 
     pair = _PDK_MOS_CAP_MARK_LAYERS.get(family)
@@ -31,13 +36,52 @@ def resolve_mos_cap_mark(family: str, params: dict[str, Any], voltage_flavor_mar
             "declared for it)"
         )
     floor = _mos_cap_min_width_um(family, voltage_flavor_mark)
+    marker_floor = _moscap_marker_min_width_um(family, pair)
+    # Take the larger floor. Today the marker floor wins on every declared
+    # family (gf180mcu: 1.0 um vs. 0.22/0.30 um), so the oxide floor never
+    # binds; it is kept deliberately for a future family whose marker rule is
+    # looser than its oxide rule -- do not drop it as dead code.
+    if marker_floor is not None and (floor is None or marker_floor[0] > floor[0]):
+        floor = marker_floor
     if floor is not None and params["w_um"] < floor[0]:
         raise GenError(
             f"generator 'mos_array': params.w_um must be >= {floor[0]} for "
             f"a MOS capacitor on '{family}' (deck rule '{floor[1]}', the "
-            "minimum COMP width for the selected oxide)"
+            "minimum COMP width for the selected oxide or under the "
+            "MOS-capacitor marker)"
         )
     return kdb.LayerInfo(*pair)
+
+
+def _moscap_marker_min_width_um(
+    family: str, marker: tuple[int, int]
+) -> tuple[float, str] | None:
+    """``(min COMP width in um, deck rule id)`` of the family's width rule
+    scoped to ``COMP`` under the MOS-capacitor ``marker`` (gf180mcu ``DF.1c``),
+    or ``None``. Issue #6170: the channel is ``w_um`` wide, so no S/D geometry
+    can make a narrower capacitor pass this rule -- the floor is the rule's."""
+    from .decks import UnknownDeckError, get_deck, get_nominal_dbu
+    from .gen_layer_params import _PDK_ROLE_LAYERS
+
+    try:
+        rules = get_deck(family)
+        dbu_um = get_nominal_dbu(family)
+    except UnknownDeckError:
+        return None
+    active = _PDK_ROLE_LAYERS[family]["active"]
+    hits = [
+        r
+        for r in rules
+        if r.check == "width"
+        and r.layer == active
+        and not r.other_layer
+        and r.derived_layer is not None
+        and r.derived_layer.intersect_with == marker
+    ]
+    if not hits:
+        return None
+    rule = max(hits, key=lambda r: r.threshold_dbu)
+    return round(rule.threshold_dbu * dbu_um, 6), rule.id
 
 
 def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
@@ -45,7 +89,6 @@ def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
     is the ``w_um`` floor (below the generator-side enclosed-contact floor)."""
     if not params.get("dogbone_terminals") or params.get("mos_cap"):
         return
-    from .gen import GenError
     from .gen_layer_params import _PDK_ROLE_LAYERS, _deck_min_width_um
 
     active_layer = _PDK_ROLE_LAYERS[family]["active"]
@@ -68,7 +111,6 @@ def check_dogbone_width(family: str, params: dict[str, Any]) -> None:
 def validate_mos_array_width(params: dict[str, Any]) -> None:
     """Generator-side ``w_um`` floor for ``mos_array`` (moved from
     ``gen_describe`` for the file-size ratchet)."""
-    from .gen import GenError
     from .gen_describe import UNIT_MIN_W_UM
 
     if params["mos_cap"]:

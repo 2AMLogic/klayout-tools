@@ -70,6 +70,10 @@ from pathlib import Path
 
 import pytest
 
+from helpers.place_and_route_merge import (
+    _skipped_power_stack_repair,
+    _skipped_via_pad_trim,
+)
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
@@ -82,6 +86,7 @@ from klayout_tools.place_and_route import (
     load_request,
     run_place_and_route,
 )
+from klayout_tools.place_and_route_deck_warnings import tap_distance_warning
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
@@ -436,7 +441,7 @@ def test_load_request_rejects_unknown_top_level_key(tmp_path, key):
 def test_load_request_accepts_comment_and_every_allowed_key(tmp_path):
     from klayout_tools.place_and_route import _ALLOWED_REQUEST_KEYS
 
-    assert len(_ALLOWED_REQUEST_KEYS) == 26
+    assert len(_ALLOWED_REQUEST_KEYS) == 27
     request = _base_request(_comment="note", schema="klt.place_and_route.request/1")
     for key in _ALLOWED_REQUEST_KEYS:
         request.setdefault(key, {} if key in ("backend", "batch", "outputs") else 1)
@@ -2600,8 +2605,8 @@ def _stub_openroad_success(
             # docstring.
             return fake_completed(stdout=f"{version} \n")
         assert cmd[0] == "openroad"
-        metrics_path = cmd[4]
-        script_path = cmd[5]
+        metrics_path = cmd[-2]
+        script_path = cmd[-1]
         if script_path.endswith("_route_corners.tcl"):
             # The post-route corner-sweep script (issue #949,
             # `_corner_sweep_script_lines`) -- a second, standalone OpenROAD
@@ -3178,14 +3183,13 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    # Issue #2086's additive `power.placed` block is asserted separately
-    # below (tmp-path `def_path`); every other member is still pinned here.
     assert _power_without_placed(report) == {
         # issue #2123: an explicit `straps[]`/`connects[]` request is not a
         # preset run -- echoed as `None`, never a fabricated recipe name.
         "preset": None,
         "connects_overridden": False,
         "pdn": True,
+        "library_rail_labels": {"VPWR": "VDD", "VGND": "VSS"},
         "global_connect": True,
         "power_net": "VDD",
         "ground_net": "VSS",
@@ -3686,14 +3690,14 @@ def _stub_openroad_success_with_post_route_spef(
     base_fake_run = place_and_route.subprocess.run
 
     def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(
             "_route_spef.tcl"
         ):
             return base_fake_run(cmd, **kwargs)
 
         # Stand in for the script's own `write_sdf` call (issue #1002): read
         # the generated Tcl back and honour (or deliberately ignore) it.
-        script_text = Path(cmd[5]).read_text()
+        script_text = Path(cmd[-1]).read_text()
         write_sdf_lines = [
             line for line in script_text.splitlines() if line.startswith("write_sdf")
         ]
@@ -3704,7 +3708,7 @@ def _stub_openroad_success_with_post_route_spef(
             if writes_sdf:
                 Path(write_sdf_lines[0].split()[-1]).write_text("(DELAYFILE)\n")
 
-        metrics_path = cmd[4]
+        metrics_path = cmd[-2]
         with open(metrics_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
@@ -3875,9 +3879,9 @@ def _replay_check_family_capture(monkeypatch, scenario: str, *, script_suffix: s
 
     def fake_run(cmd, **kwargs):
         completed = base_fake_run(cmd, **kwargs)
-        if cmd[:2] == ["openroad", "-version"] or not cmd[5].endswith(script_suffix):
+        if cmd[:2] == ["openroad", "-version"] or not cmd[-1].endswith(script_suffix):
             return completed
-        region = _replayed_violation_region(scenario, Path(cmd[5]).read_text())
+        region = _replayed_violation_region(scenario, Path(cmd[-1]).read_text())
         return fake_completed(
             returncode=completed.returncode,
             stdout=_with_replayed_violations(completed.stdout, region),
@@ -4061,7 +4065,7 @@ def _overlay_real_def_pins(monkeypatch, *, def_pins_text: str) -> None:
     def fake_run(cmd, **kwargs):
         result = base_fake_run(cmd, **kwargs)
         if cmd[:2] != ["openroad", "-version"]:
-            script_path = cmd[5]
+            script_path = cmd[-1]
             if not script_path.endswith("_route_corners.tcl"):
                 def_path = _script_write_def_path(script_path)
                 if def_path is not None:
@@ -4779,12 +4783,12 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "floorplan":
             checkpoint_out = _script_write_db_path(script_path)
             Path(checkpoint_out).write_text("fake odb\n")
-            with open(cmd[4], "w", encoding="utf-8") as handle:
+            with open(cmd[-2], "w", encoding="utf-8") as handle:
                 json.dump(_STAGE_METRICS["floorplan"], handle)
             return fake_completed(returncode=0)
         return fake_completed(
@@ -5029,13 +5033,13 @@ def test_power_audit_specialnets_count_must_match_its_header():
 
 
 def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
-    """End to end: the truncated DEF above must not satisfy the
-    complete-grid gate. Every count is `null`, `status` is `"unknown"`,
-    and the run is warned about rather than silently passing."""
-    def_path = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
-
-    placed = power_audit.audit_power_delivery(
-        def_path=def_path,
+    """End to end: the truncated DEF must not satisfy the complete-grid gate
+    (counts `null`, `status` `"unknown"`, the run warned), and that gate's
+    prose names the DEF by file name, never its host path (issue #6146)."""
+    unreadable = str(tmp_path / "gone.def")  # never written
+    truncated = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
+    no_components = _write(tmp_path / "empty.def", "VERSION 5.8 ;\nEND DESIGN\n")
+    kwargs = dict(
         unavailable_reason=None,
         tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
         endcap_master=None,
@@ -5044,25 +5048,25 @@ def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_p
         ground_net="VGND",
         expect_fillers=True,
     )
-
-    assert placed["evidence"] == "unavailable"
-    assert placed["status"] == "unknown"
-    assert placed["special_nets"] is None
-    assert placed["tapcells"] is None
-    assert "SPECIALNETS" in placed["unavailable_reason"]
-    assert power_audit.power_delivery_warnings(placed, power_requested=True)
-
-    # The same DEF with its final record terminated *is* a measurement --
-    # the gate rejects truncation, not this grid.
+    for def_path in (unreadable, truncated, no_components):
+        placed = power_audit.audit_power_delivery(def_path=def_path, **kwargs)
+        assert placed["evidence"] == "unavailable"
+        assert placed["status"] == "unknown"
+        assert placed["special_nets"] is None
+        assert placed["tapcells"] is None
+        assert placed["def_path"] == def_path  # field keeps the full path (#6146)
+        prose = [placed["unavailable_reason"]]
+        prose += power_audit.power_delivery_warnings(placed, power_requested=True)
+        prose += power_audit.power_delivery_warnings(placed, power_requested=False)
+        for text in prose:
+            assert str(tmp_path) not in text, text
+        assert f"'{os.path.basename(def_path)}'" in placed["unavailable_reason"]
+        if def_path == truncated:  # the truncated case alone names this gate
+            assert "SPECIALNETS" in placed["unavailable_reason"]
+            assert power_audit.power_delivery_warnings(placed, power_requested=True)
+    # The same DEF with its final record terminated *is* a measurement.
     complete = power_audit.audit_power_delivery(
-        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF),
-        unavailable_reason=None,
-        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
-        endcap_master=None,
-        filler_masters=("sky130_fd_sc_hd__fill_1",),
-        power_net="VPWR",
-        ground_net="VGND",
-        expect_fillers=True,
+        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF), **kwargs
     )
     assert complete["evidence"] == "def"
     assert complete["status"] == "complete"
@@ -6146,6 +6150,7 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "max_capacitance_violation_count": 2,
             "max_transition_violation_count_vs_library": 3,
             "max_capacitance_violation_count_vs_library": 2,
+            "library_limit_report_path": report["library_limit_report_path"],
         }
     ]
 
@@ -6505,8 +6510,8 @@ def test_engine_error_message_flags_readable_file_openroad_cannot_read(tmp_path)
 def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     tmp_path, monkeypatch
 ):
-    """Issue #4191: a readable path outside the invocation directory gets the
-    `$PWD`/`$PDK_ROOT`/`$TMPDIR` mount rule and the common-ancestor advice."""
+    """Issue #4191 (rule extended by #5626): a readable path outside the
+    invocation directory gets the mount rule and common-ancestor advice."""
     cwd = tmp_path / "work"
     cwd.mkdir()
     outside = tmp_path / "elsewhere" / "macro.lef"
@@ -6521,7 +6526,7 @@ def test_engine_error_message_names_mount_rule_for_path_outside_cwd(
     message = place_and_route._engine_error_message("floorplan", completed)
 
     assert f"'{outside}' is outside the invocation directory" in message
-    assert "$PWD, $PDK_ROOT and $TMPDIR (plus /tmp when $TMPDIR differs)" in message
+    assert "(plus /tmp when $TMPDIR differs) and the klt cache root" in message
     assert "common ancestor" in message
 
     inside = cwd / "macro.lef"
@@ -6635,7 +6640,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-1080-gab6fd26351 \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         stage = _stage_from_script_path(script_path)
         if stage == "route":
             return fake_completed(
@@ -6643,7 +6648,7 @@ def test_stubbed_route_stage_drt_0305_surfaces_the_hint(tmp_path, monkeypatch):
             )
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS[stage], handle)
         return fake_completed(returncode=0)
 
@@ -6661,7 +6666,7 @@ def test_stubbed_missing_metrics_output(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             return fake_completed(stdout="26Q3-771-gdeadbeef \n")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
         return fake_completed(returncode=0)  # no metrics file written
@@ -6694,10 +6699,10 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["openroad", "-version"]:
             raise FileNotFoundError("openroad vanished")
-        script_path = cmd[5]
+        script_path = cmd[-1]
         checkpoint_out = _script_write_db_path(script_path)
         Path(checkpoint_out).write_text("fake odb\n")
-        with open(cmd[4], "w", encoding="utf-8") as handle:
+        with open(cmd[-2], "w", encoding="utf-8") as handle:
             json.dump(_STAGE_METRICS["floorplan"], handle)
         return fake_completed(returncode=0)
 
@@ -7893,7 +7898,7 @@ def test_corner_sweep_script_defines_every_shipped_corner(tmp_path, monkeypatch)
 
 def test_corner_sweep_excludes_ccsnoise_variant(tmp_path, monkeypatch):
     """A `_ccsnoise` `.lib` view must not reach `define_corners`/
-    `read_liberty` -- see `pdk.list_lib_corners`'s own docstring for the
+    `read_liberty` -- see `pdk_cells.list_lib_corners`'s own docstring for the
     live-verified `STA-1140` collision this avoids (issue #949)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     install_root = tmp_path / "install"
@@ -7966,11 +7971,9 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
-            # Issue #2357: the library-only counterpart -- also 0/0 here,
-            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
-            # was given for this request.
             "max_transition_violation_count_vs_library": 0,
             "max_capacitance_violation_count_vs_library": 0,
+            "library_limit_report_path": None,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -8059,9 +8062,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
-        # Issue #2357: the library-only counterpart, also 0/0 here.
         "max_transition_violation_count_vs_library": 0,
         "max_capacitance_violation_count_vs_library": 0,
+        "library_limit_report_path": None,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)
@@ -8696,20 +8699,13 @@ def test_merge_def_to_gds_success(tmp_path):
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("sky130A"),
+        "power_stack_repair": _skipped_power_stack_repair("sky130A"),
+        "pin_conductor": {
+            "status": "skipped",
+            "reason": "no layer map resolved",
+            "layers": [],
+        },
     }
-
-
-def _skipped_via_pad_trim(variant: str) -> dict:
-    """Issue #4495: off ASAP7 both halves of the via-pad pass are a *named*
-    no-op: the GDS is untouched and `tip_check` reports the skip, not a clean."""
-    s = {
-        "status": "skipped",
-        "reason": f"PDK family of '{variant}' is not ASAP7; no-op",
-    }
-    counts = {"cells_touched": 0, "pads_trimmed": 0, "pads_shrunk": 0, "pads_left": 0}
-    tip = {"violations": 0, "via_pad_violations": 0, "rules": []}
-    tip |= {"router_fill_violations": 0, "router_fill_scan": None}
-    return {**s, **counts, "layers": [], "tip_check": {**s, **tip}}
 
 
 def test_merge_def_to_gds_is_byte_reproducible_across_runs(tmp_path):
@@ -8825,6 +8821,9 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
             "unrepaired": [],
         },
         "via_pad_trim": _skipped_via_pad_trim("gf180mcuC"),
+        "power_stack_repair": _skipped_power_stack_repair("gf180mcuC"),
+        # Issue #5700: no dual-purpose (split NET / PIN) layer in this map.
+        "pin_conductor": {"status": "unchanged", "layers": []},
     }
 
 
@@ -9281,7 +9280,7 @@ def test_merge_def_to_gds_without_fix_logs_dbu_mismatch_warning(
         out_path=str(out_path),
     )
     captured = capfd.readouterr()
-    assert "DEF UNITS does not match reader DBU" in captured.out
+    assert captured.out == "" and "DEF UNITS does not match reader DBU" in captured.err
     # Falls back to KLayout's own default rather than crashing (issue
     # #1032's second acceptance criterion) -- the merge still completes.
     assert out_path.is_file()
@@ -9928,22 +9927,15 @@ def _write_li1_pin_def(path: Path) -> None:
     )
 
 
-def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path):
-    """Issue #2473, measured end to end through the real DEF->GDS merge: a
-    DEF `PINS` port declared on `li1` lands its rectangle on li1's
-    LEFPIN/PIN purpose (67/16) and its pin-name text on 67/5, with **no**
-    li1 conductor (67/20) under either -- so the label names no net and the
-    declared port promotes to no top-level pin at all (`pin_count: 0` here).
-
-    `klt extract --def-pins` now reports that as an `error`-severity
-    `def_pin_promotion` finding naming the offending layer/datatype and the
-    declared-vs-promoted disparity, instead of leaving it to a prose warning
-    nobody downstream reads: `klt drc` has no rule against a label over no
-    conductor, and `klt lvs` still reports `"match"` for a layout missing
-    top-level pins (see `tests/test_lvs.py`'s
-    `test_missing_top_level_pin_alone_still_reports_match`). The request-time
-    guard in `_validate_io` stops a *new* run from reaching this state; this
-    test covers a layout that already exists."""
+def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path, monkeypatch):
+    """Legacy layouts with li1 pins only on 67/16 must still report the
+    #2473 extraction error. Disable #5700's conductor staging to reproduce
+    that old merge output; keep the real geometry and diagnostic assertions.
+    """
+    monkeypatch.setattr(
+        "klayout_tools.place_and_route_gds_merge._stage_pin_conductor_layer_map",
+        lambda map_path, staged_path: {"status": "unchanged", "layers": []},
+    )
     inputs = _tie_cell_merge_inputs(tmp_path)
     def_path = tmp_path / "design.def"
     _write_li1_pin_def(def_path)
@@ -10628,11 +10620,10 @@ def _run_preset_pdn_integration(
     at all -- only `{"preset": ...}` -- and return the report.
 
     This is the automated form of this issue's "a preset-driven run reaches
-    `power.placed.status == "complete"` and `warnings == []` under
-    #2086/#2122's audit on a real toolchain run (not a stub), for each
-    supported library" acceptance criterion. The two assertions that
-    criterion names are made by each caller below, so a failure names the
-    library it happened on.
+    `power.placed.status == "complete"` with no #2086/#2122 audit warning on
+    a real toolchain run (not a stub), for each supported library"
+    acceptance criterion. Each caller below makes both assertions (a
+    gf180mcu caller expects the #7311 tap-distance entry and nothing else).
     """
     root, variant = variant_gate
     monkeypatch.setenv("PDK_ROOT", root)
@@ -10743,7 +10734,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(
@@ -10785,7 +10776,7 @@ def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch)
     )
     assert report["power"]["placed"]["status"] == "complete"
     assert report["power"]["placed"]["missing"] == []
-    assert report["warnings"] == []
+    assert report["warnings"] == [tap_distance_warning(100, 15, None)]
 
 
 @pytest.mark.skipif(

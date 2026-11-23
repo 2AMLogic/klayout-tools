@@ -39,9 +39,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from . import sim_raw, sim_slope_band
+from . import sim_measurement_kind, sim_raw, sim_slope_band
 from .sim_errors import SimError
 from .sim_forms import other_forms, validate_exclusive_form
+from .sim_measurement_grading import _vector_measurement_result
 
 #: Reason tokens a failed ``slope_band`` entry's diagnostic message leads with.
 ERROR_CODES = (
@@ -75,7 +76,7 @@ _FORMS = other_forms("slope_band")
 
 def is_slope_band(spec: dict[str, Any]) -> bool:
     """Whether a ``measurements[]`` entry is declared with ``slope_band``."""
-    return spec.get("slope_band") is not None
+    return sim_measurement_kind.declares(spec, "slope_band")
 
 
 def slope_band_measurements(
@@ -212,22 +213,16 @@ def validate_slope_band_context(
     declared = slope_band_measurements(measurements_spec)
     if not declared:
         return
-    kind = str(analysis.get("kind", "")).lower()
-    if kind != "dc":
-        raise SimError(
-            f"measurement '{declared[0]['name']}' declares 'slope_band', which "
-            f"reduces a swept transfer curve and so requires analysis.kind "
-            f'"dc" (got {analysis.get("kind")!r})'
-        )
-    seen: set[str] = set()
-    for spec in measurements_spec:
-        key = str(spec.get("name")).lower()
-        if key in seen:
-            raise SimError(
-                f"duplicate measurement name '{spec.get('name')}': names must "
-                "be unique when measurements[] declares a slope_band entry"
-            )
-        seen.add(key)
+    sim_measurement_kind.require_analysis_kind(
+        declared,
+        analysis,
+        form="slope_band",
+        required="dc",
+        explanation="reduces a swept transfer curve",
+    )
+    sim_measurement_kind.require_unique_measurement_names(
+        measurements_spec, form="a slope_band entry"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +231,7 @@ def validate_slope_band_context(
 
 
 def rawfile_path(corner_dir: str, index: int) -> str:
-    return os.path.join(corner_dir, f"slope_band_{index}.raw")
+    return sim_measurement_kind.rawfile_path(corner_dir, "slope_band", index)
 
 
 def control_lines(
@@ -381,43 +376,6 @@ def slope_band_measurement_result(
     failure is ``status: "error"``, ``value: null`` (so it can never pass a
     limit) with a ``code: "measurement"`` diagnostic whose message starts with
     a ``[<reason>]`` token from :data:`ERROR_CODES`."""
-    from . import sim as _sim
-
-    name = spec["name"]
-    unit = spec.get("unit")
-    if outcome is None or outcome.value is None:
-        message = (
-            outcome.error
-            if outcome is not None and outcome.error is not None
-            else f"measurement '{name}' produced no slope_band value"
-        )
-        reason = (
-            outcome.code
-            if outcome is not None and outcome.code is not None
-            else "slope_band_vector_missing"
-        )
-        if save_mode == "netlist" and reason == "slope_band_vector_missing":
-            message += _sim.SAVE_MODE_NETLIST_NO_VALUE_HINT
-        result = {
-            "name": name,
-            "value": None,
-            "unit": unit,
-            "status": "error",
-            "margin": None,
-        }
-        diagnostic = {
-            "severity": "error",
-            "code": "measurement",
-            "message": f"[{reason}] {message}",
-        }
-        return result, [diagnostic]
-    m_status, margin, grading = _sim._grade_measurement_value(spec, outcome.value)
-    result = {
-        "name": name,
-        "value": outcome.value,
-        "unit": unit,
-        "status": m_status,
-        "margin": margin,
-        "slope_band": outcome.report(spec),
-    }
-    return result, grading
+    return _vector_measurement_result(
+        spec, outcome, save_mode=save_mode, key="slope_band", report_with_spec=True
+    )

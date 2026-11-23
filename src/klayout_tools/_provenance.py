@@ -25,12 +25,9 @@ installed, no deck involved) are ``null`` -- never fabricated.
 
 This module also owns the single ``sha256_file`` implementation the verbs
 share (previously copy-pasted in ``sim.py``, ``extract.py``, and ``lvs.py``),
-plus ``_yosys_version``/``_combined_content_hash`` (previously copy-pasted --
-and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
-#1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
-WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
-leaving ``equiv.py``'s independent error-formatting function without it;
-issue #2453 narrowed it for scripts under the host temp dir).
+plus ``_yosys_version``/``_combined_content_hash`` (issue #1112) and
+``wasi_sandbox_hint_if_applicable`` (issues #1755/#1368; #2453 narrowed
+it to scripts under the host temp dir).
 
 Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
 (issue #2065) -- a *layout-aware* digest for reports that pin the input streams
@@ -46,6 +43,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
+from types import EllipsisType
 from typing import Any
 
 from . import build_identity
@@ -703,6 +701,8 @@ def _deck_block(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     path_envelope: Mapping[str, Any] | None = None,
+    *,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash, released}``;
     ``None`` when no rule/model deck was involved (e.g. LVS against a
@@ -768,14 +768,18 @@ def _deck_block(
     identity. Omitted when ``None``, so every other verb's block is
     byte-identical.
 
-    All three keys are omitted entirely when there is nothing to record --
-    a deck that declares no selectable option and a caller that passed none
-    -- keeping the block byte-identical to before these parameters existed
-    for every call site that does not pass them.
+    A deck with no declared or supplied options omits the option keys.
     """
     if name is None:
         return None
-    deck_hash = content_hash(path)
+    if deck_sha256 is ...:
+        from ._deck_hash import source_file_hash
+        from .decks import deck_source_path
+
+        builtin = path and os.path.abspath(path) == deck_source_path(name)
+        deck_hash = source_file_hash(path) if builtin else content_hash(path)
+    else:
+        deck_hash = f"sha256:{deck_sha256}" if deck_sha256 is not None else None
     block: dict[str, Any] = {
         "name": name,
         "content_hash": deck_hash,
@@ -843,13 +847,9 @@ def deck_identity(name: str) -> dict[str, Any]:
     ``provenance.deck.content_hash`` is the identity that actually pins a
     run's rule set, but obtaining it used to require *running a check* (and
     therefore having some layout handy to run it against). This is the same
-    block a report would carry for ``name``, computed the only way that can
-    stay honest: by calling :func:`_deck_block` itself, so the answer cannot
-    drift from what a real run records.
+    block a report carries for ``name``, computed by :func:`_deck_block`.
 
-    Raises :class:`UnknownProvenanceDeckError` for a name no deck registers --
-    without which :func:`~klayout_tools.decks.deck_source_path` would happily
-    import and hash any sibling module of the deck package.
+    Raises :class:`UnknownProvenanceDeckError` for an unregistered name.
     """
     from .decks import deck_names, deck_source_path
 
@@ -874,21 +874,19 @@ def build_provenance(
     deck_options: Mapping[str, str] | None = None,
     resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
+    klayout_version_override: str | None = None,
+    klayout_version_override_active: bool = False,
     deck_path_envelope: Mapping[str, Any] | None = None,
+    deck_sha256: str | None | EllipsisType = ...,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
 
-    ``deck_name``/``deck_path`` identify the rule (or model) deck a run used
-    and the file whose content is hashed to pin it; pass both ``None`` when no
-    deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
-    dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``input_path`` is the single input artifact a verb ran
-    against; when given, its content hash is recorded as ``provenance.input``
-    (``{content_hash, role}``, mirroring ``deck``) so a stale committed
-    report is a one-line diff against a freshly computed hash. Pass ``None``
-    (the default) only when the verb genuinely has no single input stream to
-    pin. A verb that pins its input under a *verb-specific* key of its own is
-    **not** such a case: ``klt lvs`` carries
+    ``deck_name`` and ``deck_path`` identify the rule or model deck. Omit
+    ``deck_sha256`` to hash it now, or supply the captured digest (including
+    ``None``). ``pdk`` is a ``find_pdk`` result or ``None``. ``input_path``
+    designates the artifact in ``provenance.input``. Pass ``None``
+    only when the verb has no single input stream. A verb that pins its
+    input under a *verb-specific* key still has one: ``klt lvs`` carries
     ``environment.layout_sha256``/``reference_sha256`` and was originally
     (issue #331) left with ``input: null`` on exactly that reasoning, but
     ``klt signoff --manifest``'s staleness gate reads
@@ -934,6 +932,9 @@ def build_provenance(
     not every ``build_provenance`` caller. A ``True`` result also prints a
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
+    ``klayout_version_override`` (+ ``..._active``, issue #5660) repopulates
+    ``klayout_version`` from the binary that ran the deck (``--engine klayout``
+    sites); the wheel's version moves to ``klayout_module_version``.
     """
     if input_role not in INPUT_ROLES:
         raise ValueError(
@@ -941,6 +942,8 @@ def build_provenance(
             f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
         )
     actual_klayout_version = _klayout_version()
+    if klayout_version_override_active:
+        actual_klayout_version = klayout_version_override
     git_commit, reinstall_spec = _klt_build_handle()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
@@ -956,30 +959,25 @@ def build_provenance(
             deck_options,
             resolve_deck_options,
             deck_path_envelope,
+            deck_sha256=deck_sha256,
         ),
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
-        # Build-time-recorded only -- deliberately *not*
-        # `build_identity.klayout_version_expected()`'s live-checkout
-        # fallback, which shells out to `git` (issue #1490). That fallback is
-        # fine as a one-shot cost for `klt version --format json`; calling it
-        # from every `klt drc`/`klt lvs` run would add a subprocess call to
-        # every single report on a dev/editable install, and no
-        # `uv tool install ... @<sha>` install (the reproducibility scenario
-        # this field exists for) is ever editable -- `hatch_build.py` always
-        # records `KLAYOUT_VERSION_EXPECTED` for that install path, so the
-        # live probe would only ever fire for a case this field need not
-        # cover. An editable/dev checkout with no build-time record simply
-        # reports `klayout_version_mismatch: False` ("no confirmed
-        # mismatch"), matching `_klayout_version_mismatch`'s documented
-        # "unresolvable renders as False" rule.
+        # Build-time-recorded only -- deliberately *not* the live-checkout
+        # `git` fallback of `build_identity.klayout_version_expected()`
+        # (issue #1490): it is fine as a one-shot cost for `klt version`,
+        # but every `klt drc`/`klt lvs` report would gain a subprocess call
+        # on a dev/editable install -- and no `uv tool install ... @<sha>`
+        # install (the case this field exists for) is ever editable. With
+        # no build-time record the field reports `False`, matching
+        # `_klayout_version_mismatch`'s "unresolvable renders as False" rule.
         expected_klayout_version = build_identity._recorded_klayout_version_expected()
         mismatch = _klayout_version_mismatch(
             actual_klayout_version, expected_klayout_version
         )
         block["klayout_version_mismatch"] = mismatch
-        if mismatch:
+        if mismatch and not klayout_version_override_active:
             _warn_klayout_version_mismatch(
                 actual_klayout_version,
                 expected_klayout_version,
@@ -988,4 +986,6 @@ def build_provenance(
                 # gains no probe (issue #5601).
                 reinstall_spec,
             )
+    if klayout_version_override_active:
+        block["klayout_module_version"] = _klayout_version()
     return block

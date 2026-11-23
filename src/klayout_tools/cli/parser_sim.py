@@ -89,8 +89,11 @@ def add_sim_parser(
         help=(
             "with --batch-set, re-submit a request refused for fleet capacity "
             "(batch_no_capacity / batch_concurrency_cap) up to N more times "
-            "with doubling backoff (default: 0, off); other failures are "
-            "never retried (issue #3520)"
+            "with doubling backoff; on a sharded single request, re-run the "
+            "shards lost to a capacity refusal in up to N more passes once "
+            "the other shards finish, each with a fresh --wait-for-capacity "
+            "budget (default: 0, off); other failures are never retried "
+            "(issues #3520, #5567)"
         ),
     )
     sim_parser.add_argument(
@@ -119,10 +122,13 @@ def add_sim_parser(
         default=None,
         help=(
             "read one batch job's state by id (one status.json read; "
-            "state `pending` before the instance writes one) and exit. The "
-            "positional request supplies the bucket/region/profile. Submits "
-            "and launches nothing. Unit counts are not published by the "
-            "fleet and are not reported. See docs/cli/sim.md."
+            "state `pending` before the instance writes one) and exit. "
+            "The positional request, when given, supplies the "
+            "bucket/region/profile; without one they resolve from the "
+            "KLT_BATCH_* environment and the fleet batch-fleet.env "
+            "(issue #5810). Submits and launches nothing. Unit counts "
+            "are not published by the fleet and are not reported. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -294,10 +300,12 @@ def add_sim_parser(
             "request's own `options.resume` when given. For a `decks` "
             "request, skips each unit whose <outdir>/<id>/unit.json "
             "completion record still matches and verifies (local, "
-            "local-parallel, batch). With --batch-set, forwarded to every "
-            "request: a sharded request re-attaches to the shard jobs "
-            "recorded in its own directory and resubmits only the lost "
-            "ones. See docs/cli/sim.md."
+            "local-parallel, batch). On a sharded `batch` run, first "
+            "harvests the retained shard map (batch-shards.json): shards "
+            "whose jobs already finished are collected, and only the "
+            "unlaunched/unfinished/failed ones are submitted again. With "
+            "--batch-set, forwarded to every request the same way. See "
+            "docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
@@ -418,6 +426,47 @@ def add_sim_parser(
         ),
     )
     _add_format_arg(sim_parser)
+    sim_parser.add_argument(
+        "--regrade",
+        dest="regrade",
+        metavar="REPORT",
+        default=None,
+        help=(
+            "re-run only the check-failing points of this same request with "
+            "the tightened solver settings it declares in "
+            "options.tightened_rerun (issue #6778): REPORT is the first "
+            "pass's committed report, --check-id names the failed check and "
+            "--corner selects the affected corner ids from it. Returns a "
+            "companion record holding both attempts' values; the tightened "
+            "observation carries the grade, and a timeout or unusable "
+            "re-run grades unresolved, never pass. A batch baseline "
+            "dispatches the subset on batch even for one unit. See "
+            "docs/cli/sim.md 'Tightened re-run of check-failing points'."
+        ),
+    )
+    sim_parser.add_argument(
+        "--check-id",
+        dest="check_id",
+        metavar="ID",
+        default=None,
+        help=(
+            "with --regrade: the identifier of the failed checker that "
+            "selected the units (recorded per re-run unit; the chip's own "
+            "checker re-grades the tightened observations)"
+        ),
+    )
+    sim_parser.add_argument(
+        "--corner",
+        dest="corners",
+        action="append",
+        metavar="CORNER_ID",
+        default=None,
+        help=(
+            "with --regrade: one corners[].corner_id from the source report "
+            "to re-run tightened (repeatable; each unit is dispatched "
+            "exactly once; zero --corner flags submits zero jobs)"
+        ),
+    )
     sim_parser.add_argument(
         "--check",
         dest="check",

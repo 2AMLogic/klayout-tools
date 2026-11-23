@@ -8,13 +8,13 @@ at ``Layout.add_pcell_variant`` time. This module is where those copies live
 once each; a factory declares them by calling the helper for its cluster at
 the position the first removed declaration occupied.
 
-Every param declared by a helper here is a member of
-``klayout_tools.gen._HIDDEN_PARAMS`` -- the set ``klt gen --list`` filters out
-of its emitted ``params`` array and the request validator rejects from caller
-input -- so neither the shared description text nor the helper call's position
-inside ``__init__`` is observable through the JSON contract. Public params
-must stay declared inline in their factory: their descriptions and array
-position are the contract.
+Every param declared by a helper here is declared ``hidden=True``
+(issue #6757) -- invisible to ``klt gen --list``'s emitted ``params`` array
+and rejected from caller input by the request validator -- so neither the
+shared description text nor the helper call's position inside ``__init__``
+is observable through the JSON contract. Public params must stay declared
+inline in their factory: their descriptions and array position are the
+contract.
 
 Helpers take the declaration object and the ``klayout.db`` module as plain
 ``Any`` arguments (and never import ``klayout.db`` at module scope) so a
@@ -37,12 +37,14 @@ def declare_cut_and_metal_params(pcell: Any, kdb: Any) -> None:
         pcell.TypeLayer,
         "Contact drawing layer",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "metal_layer",
         pcell.TypeLayer,
         "Local routing metal drawing layer",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     # Fixed drawn side of every cut on contact_layer (issue #2585) --
     # harness-computed by `_cut_fixed_size_um` from the resolved PDK
@@ -55,6 +57,7 @@ def declare_cut_and_metal_params(pcell: Any, kdb: Any) -> None:
         "down to on the resolved PDK family -- 0.0 leaves the "
         "generator's own cut size unchanged",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "mfg_grid_um",
@@ -63,6 +66,7 @@ def declare_cut_and_metal_params(pcell: Any, kdb: Any) -> None:
         "snapped onto (issue #2648) -- 0.0 leaves cut positions "
         "unchanged",
         default=0.0,
+        hidden=True,
     )
 
 
@@ -75,12 +79,14 @@ def declare_tap_and_well_layers(pcell: Any, kdb: Any) -> None:
         pcell.TypeLayer,
         "Substrate/well tap drawing layer",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "well_layer",
         pcell.TypeLayer,
         "Well drawing layer (only used when well_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
 
 
@@ -93,6 +99,7 @@ def declare_well_present(pcell: Any) -> None:
         pcell.TypeBoolean,
         "Whether well_layer is a real, DRC-checked layer for the resolved PDK",
         default=False,
+        hidden=True,
     )
 
 
@@ -111,6 +118,7 @@ def declare_ring_implant_params(pcell: Any, kdb: Any) -> None:
         "every edge of it (only used when add_guard_ring and "
         "ring_implant_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "ring_implant_present",
@@ -118,6 +126,7 @@ def declare_ring_implant_params(pcell: Any, kdb: Any) -> None:
         "Whether the resolved PDK needs an implant mask to recognise "
         "the guard ring's own shape (see _ring_tap_implant_layer)",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "ring_implant_margin_um",
@@ -126,6 +135,7 @@ def declare_ring_implant_params(pcell: Any, kdb: Any) -> None:
         "ring's own band on every edge (only used when "
         "ring_implant_present)",
         default=0.0,
+        hidden=True,
     )
 
 
@@ -139,6 +149,7 @@ def declare_ring_well_margin(pcell: Any, default_margin_um: float) -> None:
         "Harness-resolved nwell enclosure of the n-tap guard ring "
         "(see _PDK_RING_WELL_MARGIN_UM)",
         default=default_margin_um,
+        hidden=True,
     )
 
 
@@ -151,12 +162,14 @@ def declare_mos_stack_params(pcell: Any, kdb: Any) -> None:
         pcell.TypeLayer,
         "Active/diffusion drawing layer",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "poly_layer",
         pcell.TypeLayer,
         "Poly gate drawing layer",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "contact_gate_offset_um",
@@ -164,6 +177,7 @@ def declare_mos_stack_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved extra S/D-contact-to-gate offset floor "
         "(see _PDK_CONTACT_GATE_EXTRA_OFFSET_UM)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "bottom_endcap_um",
@@ -171,6 +185,7 @@ def declare_mos_stack_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved gate-stripe bottom-edge endcap extension "
         "(see _PDK_GATE_BOTTOM_ENDCAP_UM)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "top_endcap_um",
@@ -178,12 +193,14 @@ def declare_mos_stack_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved gate-stripe top-edge endcap neck "
         "(see _PDK_GATE_TOP_ENDCAP_UM)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "sd_implant_layer",
         pcell.TypeLayer,
         "Source/drain implant drawing layer (only used when sd_implant_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
 
 
@@ -200,6 +217,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "Whether sd_implant_layer is a real layer this PDK family "
         "needs over each unit device's own active body",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "sd_implant_margin_um",
@@ -208,6 +226,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "beyond each unit device's own active box (only used when "
         "sd_implant_present)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "sd_implant_min_space_um",
@@ -216,6 +235,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "drain implant shapes; closer ones are merged (only used "
         "when sd_implant_present)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "gate_pad_clearance_um",
@@ -223,12 +243,14 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved clearance the gate-poly landing pad keeps "
         "off the diffusion edge (see _PDK_GATE_PAD_ACTIVE_CLEARANCE_UM)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "npc_layer",
         pcell.TypeLayer,
         "npc drawing layer (only used when npc_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "npc_present",
@@ -236,6 +258,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "Whether npc_layer is a real layer this PDK family needs "
         "over each poly-contact licon",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "npc_margin_um",
@@ -243,6 +266,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved margin npc grows beyond each poly-contact "
         "licon (only used when npc_present)",
         default=0.0,
+        hidden=True,
     )
     pcell.param(
         "npc_min_space_um",
@@ -250,6 +274,7 @@ def declare_mos_array_extra_params(pcell: Any, kdb: Any) -> None:
         "Harness-resolved minimum npc spacing; closer shapes merge "
         "(only used when npc_present)",
         default=0.0,
+        hidden=True,
     )
 
 
@@ -264,6 +289,7 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
         "Whether voltage_flavor_mark_layer is a real layer resolved "
         "for params.voltage_flavor on this PDK family",
         default=False,
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_extra_mark_layer",
@@ -272,6 +298,7 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
         "(sky130 native-Vt: lvtn alongside hvi; only used when "
         "voltage_flavor_extra_mark_present)",
         default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
     pcell.param(
         "voltage_flavor_extra_mark_present",
@@ -279,7 +306,41 @@ def declare_voltage_flavor_mark_params(pcell: Any, kdb: Any) -> None:
         "Whether voltage_flavor_extra_mark_layer is a real layer "
         "resolved for params.voltage_flavor on this PDK family",
         default=False,
+        hidden=True,
     )
+    pcell.param(
+        "voltage_flavor_well_over_mark",
+        pcell.TypeBoolean,
+        "Extend the PFET nwell to the voltage marker box for HV-well enclosure",
+        default=False,
+        hidden=True,
+    )
+
+
+def declare_guard_ring_voltage_flavor_params(pcell: Any, kdb: Any) -> None:
+    """Declare ``guard_ring``'s optional ``voltage_flavor`` marker (issue
+    #6025): the request param, its harness-resolved layer and the shared
+    ``*_present`` flags. The marker covers the ring's well tie."""
+    pcell.param(
+        "voltage_flavor",
+        pcell.TypeString,
+        "Optional medium-voltage/thick-oxide device-class marker drawn "
+        "over the ring's well tie (needs add_well on a PDK family that "
+        "checks a well): '' (default, no marker) or a name the resolved "
+        "PDK family's role-layer table recognises (e.g. 'hvi' on "
+        "sky130). A name the family doesn't recognise draws nothing and "
+        "is reported via drc_hints.notes, never silently dropped",
+        default="",
+    )
+    pcell.param(
+        "voltage_flavor_mark_layer",
+        pcell.TypeLayer,
+        "Harness-resolved marker layer for params.voltage_flavor "
+        "(only used when voltage_flavor_mark_present)",
+        default=kdb.LayerInfo(0, 0),
+        hidden=True,
+    )
+    declare_voltage_flavor_mark_params(pcell, kdb)
 
 
 def declare_dummy_marker_params(pcell: Any) -> None:
@@ -293,6 +354,41 @@ def declare_dummy_marker_params(pcell: Any) -> None:
         "Whether dummy_layer is a real layer this PDK's extraction "
         "deck declares (see ExtractionDeck.dummy)",
         default=False,
+        hidden=True,
+    )
+
+
+def declare_mos_well_tie_params(pcell: Any, kdb: Any) -> None:
+    """Declare ``mos_array``'s own well-tie plumbing (the ``pfet``-flavour
+    counterpart of ``well_island``'s own declarations, issue #1421): the
+    implant layer + present flag tracking the well-tap pad, and the label
+    layer its fixed net-name text is drawn on. Harness-computed from the
+    resolved PDK family, never part of the request schema."""
+    pcell.param(
+        "well_tap_implant_layer",
+        pcell.TypeLayer,
+        "Well-tie implant layer drawn over the well-tap pad (only "
+        "used when flavor is 'pfet', well_present, and "
+        "well_tap_implant_present)",
+        default=kdb.LayerInfo(0, 0),
+        hidden=True,
+    )
+    pcell.param(
+        "well_tap_implant_present",
+        pcell.TypeBoolean,
+        "Whether the resolved PDK needs an implant mask to recognise "
+        "a tap pad on the shared active role as a well tie",
+        default=False,
+        hidden=True,
+    )
+    pcell.param(
+        "metal_label_layer",
+        pcell.TypeLayer,
+        "Label layer the well-tap pad's fixed net-name text is drawn "
+        "on (only used when well_tap_implant_present and "
+        "metal_label_present)",
+        default=kdb.LayerInfo(0, 0),
+        hidden=True,
     )
 
 
@@ -305,6 +401,7 @@ def declare_metal_label_present(pcell: Any) -> None:
         pcell.TypeBoolean,
         "Whether metal_label_layer is a real label layer for the resolved PDK",
         default=False,
+        hidden=True,
     )
 
 
@@ -316,4 +413,20 @@ def declare_vpp_gds_path(pcell: Any) -> None:
         pcell.TypeString,
         "Resolved PDK GDS holding the cell (harness-computed)",
         default="",
+        hidden=True,
+    )
+
+
+def union_box(
+    box: tuple[float, float, float, float],
+    other: tuple[float, float, float, float] | None,
+) -> tuple[float, float, float, float]:
+    """Bounding box of ``box`` and ``other`` (``other=None`` returns ``box``)."""
+    if other is None:
+        return box
+    return (
+        min(box[0], other[0]),
+        min(box[1], other[1]),
+        max(box[2], other[2]),
+        max(box[3], other[3]),
     )

@@ -6,7 +6,7 @@ was built from, and whether that commit is this version's release tag
 version this build/commit was tested against (issue #1490).
 
 ```
-klt version [--format text|json]
+klt version [--format text|json] [--require COMMAND[,COMMAND]...]
 klt --version            # same one-line string as `klt version --format text`
 ```
 
@@ -85,7 +85,11 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   "reinstall_spec": "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@4f1c8a9b2d3e5f60718293a4b5c6d7e8f9a0b1c2",
   "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
-  "klayout_version_expected": "0.30.10"
+  "klayout_version_expected": "0.30.10",
+  "commands": [
+    {"name": "arith-gen", "summary": "…"},
+    {"name": "…", "summary": "…"}
+  ]
 }
 ```
 
@@ -151,6 +155,31 @@ PEP 610 file in the installed `.dist-info` directory for URL/VCS installs).
   build/commit was tested against, or `null` when unresolvable (a build made
   before this field existed, or a checkout with no reachable `uv.lock`). See
   "Pinning the KLayout engine version" below.
+- `commands` (issue #7324) — the top-level verbs this install provides, as
+  one `{"name", "summary"}` object per verb, sorted by `name` (`summary` is
+  the verb's one-line `klt --help` description). A version pin answers
+  *which release* is installed; this field answers the other half of a
+  toolchain pin check — *is it complete* (a partial/aborted install, a wheel
+  built without an optional extra, a locally patched checkout can all be the
+  right version yet miss commands). Read it instead of scraping `klt --help`,
+  which couples a probe to argparse's formatting and breaks silently toward
+  an empty command set on drift:
+
+  ```bash
+  klt version --format json | jq -e '.commands[].name | select(. == "drc")'
+  ```
+
+  Derived from the live parser's `<command>` choices, so the list cannot
+  drift from what `klt <cmd>` actually accepts; a verb hidden from
+  `klt --help` (`help=argparse.SUPPRESS`) is hidden here too. Top-level
+  verbs only — nested subcommands (`klt pdk find`, `klt deck …`) are not
+  listed. Additive; `schema_version` stays `1`, and `--format text` still
+  prints only the one-line version string.
+- `required_commands` (issue #7331) — present **only** when `--require` is
+  passed: `{"required": [...], "missing": [...]}`, the requested top-level
+  verbs (de-duplicated, input order) and the subset this install does not
+  provide. Additive; `schema_version` stays `1`. See "Requiring commands:
+  `--require`" below.
 
 **`version`/`git_commit`/`git_tag`/`dirty`/`is_release` identify the
 *install*, not only the commit it came from** — two byte-legitimate installs
@@ -159,9 +188,82 @@ of the same pinned `<sha>` can report different values for all five (issue
 fresh re-render; see "These fields describe the install, not only the commit"
 under "Gating a build before doing work" below.
 
-Always exits `0`. Identifying the running build cannot fail — an
-unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
-`is_release: null`, never as an error.
+Without `--require`, always exits `0`. Identifying the running build cannot
+fail — an unrecoverable identity is reported as `X.Y.Z.dev0+unknown` with
+`is_release: null`, never as an error. With `--require`, exits `3` when a
+required verb is missing (next section); the report is still emitted.
+
+## Requiring commands: `--require` (issue #7331)
+
+`commands` answers "what does this install provide?"; `--require` turns that
+answer into a gate for a consumer that knows which verbs it invokes. A value
+is one top-level verb or a comma-separated list, and the flag repeats:
+
+```
+klt version --require drc,lvs --require deck --format json
+```
+
+The normal payload is emitted as usual, plus one additive field that is
+present **only** when `--require` is passed:
+
+```json
+"required_commands": {
+  "required": ["drc", "lvs", "deck"],
+  "missing": []
+}
+```
+
+`required` is the requested names, de-duplicated and in input order;
+`missing` is the subset this install does not provide, in the same order.
+
+A name is looked up in `commands`, so the comparison is against the live
+parser's top-level verbs, never against `--help` text. Only a listed
+top-level verb satisfies it: a nested subcommand (`pdk find`) and a verb
+hidden from `klt --help` both count as missing. **An unknown name is the
+signal, not a usage error** — `--require nonesuch` is accepted by the parser
+and reported in `missing`, because "this install lacks that verb" is exactly
+what the flag exists to report. The one exception is a value that names
+nothing at all (empty, or only commas and whitespace): that is a usage error
+(exit `2`, no report), since a gate that checks nothing must not pass
+silently.
+
+**Exit codes.** `0` when every required name is provided, **`3`** otherwise —
+the same "ran fine, the answer is no" convention as `klt pdk cells --supply`
+and `klt drc` finding violations, so the documented payload is still on
+stdout. On exit `3`, stderr carries one line naming the missing commands
+and, when `reinstall_spec` is not `null`, the command that re-obtains the
+running build:
+
+```
+klt: missing required command(s): nonesuch
+klt: this build can be reinstalled with: uvx --from "klayout-tools==X.Y.Z" klt ...
+```
+
+That command re-obtains *this* build. It is the fix for a partial or aborted
+install — the right version, missing commands; if the build simply predates
+the verb, install a release that provides it instead. A build with
+`reinstall_spec: null` (dirty tree, no recorded commit) prints no second
+line but still exits `3`. `--format text` still prints only the one-line
+version string; the gate speaks through stderr and the exit code.
+
+### The two-command pin check
+
+A consumer that pins `klt` chains two existing verbs instead of scraping
+`--help` or writing its own preflight:
+
+```bash
+klt version --require drc,lvs --format json \
+  && klt pdk check --pdk sky130A --expect-version <open_pdks sha> --format json
+```
+
+The first fails (exit `3`) unless the install provides every verb the
+consumer invokes — and its `is_release`/`git_commit` fields say which build
+answered; the second fails unless the PDK install is present, unbroken and at
+the pinned revision (exit `4` for broken symlinks, `6` for a version
+mismatch — see [`pdk.md`](pdk.md)). `klt version` deliberately reads no pin
+file, because every consumer's pin document has its own format and each
+extracts its command list to pass as `--require`; and it carries no
+PDK-asset flags, because that check already belongs to `klt pdk check`.
 
 ## Reproducing a recorded pin (issue #3985)
 
@@ -342,6 +444,10 @@ klt version --format json     | jq -e '.is_release == true'
 klt deck hash --deck sky130 --format json \
   | jq -e '.content_hash == "sha256:<the hash your evidence was produced against>"'
 ```
+
+To gate on command presence as well, add `--require drc,lvs` to the first
+line (exit `3` on a miss) — see "Requiring commands: `--require`" above for
+the two-command pin check it forms with `klt pdk check`.
 
 `provenance.klt_version` in a report carries the same build identity as
 `version` above (issue #2090) — see

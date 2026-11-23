@@ -7,31 +7,17 @@ block and records a ``constraints.report_ports`` request emits (issue
 
 Split out of :mod:`klayout_tools.post_route_sta` to keep that module under its
 file-size ceiling, the same way :mod:`klayout_tools.post_route_sta_electrical`
-was (issues #3005, #5241). ``post_route_sta`` re-imports every name here, so
-existing ``post_route_sta._parse_worst_path_rows`` etc. references keep
-working.
-
-The Tcl that produces these blocks (``_worst_path_lines`` and
-``_port_path_lines``) stays in ``post_route_sta`` with the rest of the
-generated script; only the markers they print and the parsers that read them
-live here.
+was (issues #3005, #5241). The Tcl producers are
+:func:`~klayout_tools.post_route_sta_stages._worst_path_lines` and
+:func:`~klayout_tools.post_route_sta._port_path_lines`. This module defines
+the markers they emit and parses the rows between them.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-
-def _extract_block(text: str, begin: str, end: str) -> str | None:
-    """The text between the ``begin``/``end`` markers, or ``None`` when either
-    marker is absent (same contract as ``post_route_sta._extract_block``)."""
-    try:
-        start_idx = text.index(begin) + len(begin)
-        stop_idx = text.index(end, start_idx)
-    except ValueError:
-        return None
-    return text[start_idx:stop_idx]
-
+from ._sta_request_diag import extract_block as _extract_block
 
 #: Issue #2740: brackets the per-path-group worst setup/hold path records
 #: (:func:`_worst_path_lines`), one

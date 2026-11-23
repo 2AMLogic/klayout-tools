@@ -330,14 +330,38 @@ def test_liberty_matching_headers_output_unchanged(tmp_path, monkeypatch):
     assert merged == expected
 
 
-def test_liberty_conflicting_template_refused(tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="template 'd' differs"):
-        _merge_g2(
-            tmp_path,
-            monkeypatch,
-            _tpl_header("d", body="7"),
-            _tpl_header("d", body="9"),
-        )
+def test_liberty_unused_template_keeps_first_index(tmp_path, monkeypatch):
+    # Issue #7533: no table references the template, so nothing can inherit
+    # the ambiguous index and the merge keeps the first file's definition.
+    merged = _merge_g2(
+        tmp_path,
+        monkeypatch,
+        _tpl_header("d", body="7"),
+        _tpl_header("d", body="9"),
+    )
+    assert merged.count('lu_table_template ("d")') == 1
+    assert 'index_1 ("7")' in merged
+    assert 'index_1 ("9")' not in merged
+    assert all(f"cell ({c})" in merged for c in "AC")
+
+
+_TABLE_CELL = (
+    "  cell ({c}) {{ pin (Y) {{ timing () {{\n"
+    '    cell_rise (d) {{ values ("1"); }}\n'
+    "  }} }} }}\n"
+)
+
+
+def test_liberty_conflicting_template_inherited_axis_refused(tmp_path, monkeypatch):
+    # Issue #7533: a table that names the template but supplies no index_1 of
+    # its own would silently take whichever grid the merge kept, so refuse.
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    for name, cell, body in (("g1", "A", "7"), ("g2", "C", "9")):
+        text = _tpl_header("d", body=body) + _TABLE_CELL.format(c=cell) + "}\n"
+        (root / "d" / f"{name}.lib").write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError, match="template 'd' differs.*inherits index_1"):
+        pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
 
 
 def test_liberty_non_template_difference_with_templates_refused(tmp_path, monkeypatch):
@@ -365,3 +389,74 @@ def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
     (root / "d" / "g2.lib").write_text(_lib("B"), encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate cell 'B'"):
         pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+
+
+_OC_HEADER = (
+    'library (x) {{\n  time_unit : "1ps";\n'
+    "  operating_conditions ({n}) {{\n"
+    "    process : 1.0;\n    temperature : 25;\n    voltage : 0.7;\n  }}\n"
+    "  default_operating_conditions : {n};\n"
+)
+
+
+def test_liberty_list_condition_rename_merges(tmp_path, monkeypatch):
+    # Issue #6940: members whose only header difference is the local name of
+    # the single operating condition each selects as its default.
+    root = _views_tree(tmp_path, monkeypatch)
+    info = pdk.find_pdk(root=str(root))
+    (root / "d" / "g1.lib").write_text(
+        _lib("A", "B", header=_OC_HEADER.format(n="tt_n")), encoding="utf-8"
+    )
+    (root / "d" / "g2.lib").write_text(
+        _lib("C", header=_OC_HEADER.format(n="tt_n_rvt")), encoding="utf-8"
+    )
+    path, _ = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    merged = open(path, encoding="utf-8").read()
+    assert "operating_conditions (tt_n)" in merged
+    assert "default_operating_conditions : tt_n;" in merged
+    assert "tt_n_rvt" not in merged
+    assert all(f"cell ({c})" in merged for c in "ABC")
+
+
+def _dm_lib(default: str, cell: str, *, output_limit: str | None = None) -> str:
+    """A one-output-cell ``.lib`` whose header pins ``default_max_transition``
+    (issue #6933); the output carries an explicit limit only when asked."""
+    limit = f"      max_transition : {output_limit};\n" if output_limit else ""
+    return (
+        'library (x) {\n  time_unit : "1ps";\n'
+        f"  default_max_transition : {default};\n"
+        f"  cell ({cell}) {{\n    pin (Y) {{\n"
+        '      direction : "output";\n'
+        f"{limit}      max_capacitance : 1;\n    }}\n  }}\n}}\n"
+    )
+
+
+def test_liberty_default_transition_conflict_context_and_scalar_recovery(
+    tmp_path, monkeypatch
+):
+    """The descriptor resolver keeps the library/corner context around the
+    enriched default_max_transition refusal, and the documented recovery --
+    a single prepared .lib on the scalar path -- resolves through it."""
+    root = _views_tree(tmp_path, monkeypatch)
+    (root / "d" / "g1.lib").write_text(_dm_lib("320", "A"), encoding="utf-8")
+    (root / "d" / "g2.lib").write_text(_dm_lib("4000", "C"), encoding="utf-8")
+    info = pdk.find_pdk(root=str(root))
+    with pytest.raises(ValueError) as exc:
+        pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    msg = str(exc.value)
+    assert "cannot merge 'lib' corner 'tt'" in msg
+    assert "'default_max_transition' differs" in msg
+    assert "g1.lib" in msg and "g2.lib" in msg
+    assert "cell 'C' output 'Y' in" in msg and "limited by 4000" in msg
+    assert "liberty.<cell_library>.<corner>" in msg
+
+    (root / "d" / "prepared.lib").write_text(
+        _dm_lib("320", "A", output_limit="4000"), encoding="utf-8"
+    )
+    desc = json.loads((root / "klt-pdk.json").read_text(encoding="utf-8"))
+    desc["liberty"]["lib"]["tt"] = "d/prepared.lib"
+    (root / "klt-pdk.json").write_text(json.dumps(desc), encoding="utf-8")
+    info = pdk.find_pdk(root=str(root))
+    path, corner = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    assert path == str(root / "d" / "prepared.lib")
+    assert corner == "tt"

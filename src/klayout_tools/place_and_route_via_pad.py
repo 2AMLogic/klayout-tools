@@ -17,7 +17,9 @@ A pad that protrudes past the wire is shrunk to the via cut(s) it lands plus
 region. A shrink is kept only when, in every placement, the shrunk pad still
 touches the wire wherever the original pad did; otherwise the pad is left
 alone. Without a cut layer in the layer map, or with no cut under the pad,
-nothing is shrunk.
+nothing is shrunk. The separate M1 extension pass measures complete facing
+sides of placed V1 pads and can add metal along them when a local clearance
+and connectivity check succeeds. Its count refers to placed pairs.
 
 The returned report carries a ``tip_check`` sub-object
 (:mod:`~klayout_tools.place_and_route_via_tip`): what the packaged deck's own
@@ -62,6 +64,7 @@ from typing import Any
 from .pdk_families import pdk_variant_family
 from .place_and_route_def_drcfill import scan_def_drcfill
 from .place_and_route_via_tip import check_via_pad_tips
+from .place_and_route_via_tip_repair import repair_m1_landing_pairs
 
 _ASAP7_FAMILY = "asap7"
 
@@ -361,6 +364,10 @@ def trim_via_pads(
         variant=variant,
         lef_to_gds=lef_to_gds,
     )
+    if pdk_variant_family(variant) == _ASAP7_FAMILY:
+        report["m1_landing_pairs_extended"] = repair_m1_landing_pairs(
+            kdb, layout, top_cell, lef_to_gds, report=report
+        )
     drcfill_regions, drcfill_scan = _drcfill_regions(
         kdb, variant=variant, def_path=def_path, dbu_um=layout.dbu
     )

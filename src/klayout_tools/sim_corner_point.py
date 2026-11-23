@@ -12,10 +12,11 @@ Every public name here is re-exported from ``klayout_tools.sim``, so
 
 from __future__ import annotations
 
-import math
 import re
+from collections.abc import Callable
 from typing import Any
 
+from ._jsonnum import is_finite_number
 from .sim_echo_messages import zipped_length_message
 from .sim_errors import SimError
 from .sim_slug import _readable_slug, _slugify_corner_id
@@ -175,17 +176,25 @@ class CornerPoint:
         ``process`` defaults to ``"default"`` when the request declares no
         process axis. Multiple supply rails (an extension beyond the spike's
         single-``vdd`` example) are joined ``key=value`` pairs, sorted by key
-        for determinism.
+        for determinism. Each rail value is spelled ``.3f`` when that
+        spelling round-trips and at full precision otherwise (issue #5870 --
+        see :func:`_format_supply_value`), so two declared points whose rail
+        values differ only below three decimals keep distinct IDs and
+        distinct artifact directories.
         """
         process_label = self.process if self.process is not None else "default"
         if not self.supply_v:
             supply_label = "novdd"
         elif len(self.supply_v) == 1:
             (value,) = self.supply_v.values()
-            supply_label = f"{value:.3f}V"
+            supply_label = f"{_format_supply_value(value)}V"
         else:
             supply_label = (
-                "_".join(f"{k}={v:.3f}" for k, v in sorted(self.supply_v.items())) + "V"
+                "_".join(
+                    f"{k}={_format_supply_value(v)}"
+                    for k, v in sorted(self.supply_v.items())
+                )
+                + "V"
             )
         temp_label = _format_number(self.temperature_c)
         base = f"{process_label}/{supply_label}/{temp_label}C"
@@ -257,6 +266,30 @@ def _format_param_value(value: int | float) -> str:
     return repr(_normalize_param_value(value))
 
 
+def _supply_value_needs_full_precision(value: int | float) -> bool:
+    """True when ``value`` differs from its legacy three-decimal supply
+    spelling, i.e. :func:`_format_supply_value` falls back to the round-trip
+    form to keep the point's :attr:`CornerPoint.corner_id` distinct
+    (issue #5870). This is what the off-host echo check gates on: a grid
+    with no such value cannot tell a legacy-``.3f`` runner image apart from
+    an updated one, and is not gated."""
+    spelled = f"{float(value):.3f}"
+    return float(spelled) != float(value)
+
+
+def _format_supply_value(value: int | float) -> str:
+    """Corner-ID text of one swept ``supply_v`` rail value (issue #5870): the
+    legacy ``.3f`` spelling when it round-trips, else the shortest round-trip
+    decimal (:func:`_format_param_value` -- the rule ``corners.params`` set
+    in #3035), so two points whose rail values differ only below three
+    decimals keep distinct IDs instead of silently sharing one artifact
+    directory. Every supply value exactly representable at three decimals
+    keeps its byte-identical legacy label."""
+    if _supply_value_needs_full_precision(value):
+        return _format_param_value(value)
+    return f"{float(value):.3f}"
+
+
 def _normalize_param_value(value: int | float) -> int | float:
     """The scalar a parameter coordinate is carried as everywhere (report,
     wire, deck): an integer when the value is integral, else the float."""
@@ -273,11 +306,7 @@ def _format_params_label(params: dict[str, int | float]) -> str:
 
 
 def _validate_param_scalar(value: Any, where: str) -> int | float:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-    ):
+    if not is_finite_number(value):
         raise SimError(f"{where} must be a finite number (booleans excluded)")
     return _normalize_param_value(value)
 
@@ -299,17 +328,20 @@ def _validate_param_name(name: Any, where: str) -> str:
     return lowered
 
 
-def _normalize_param_row(
-    raw: Any, where: str, supply_v: dict[str, Any] | None = None
+def _normalize_numeric_row(
+    raw: Any,
+    where: str,
+    *,
+    validate_name: Callable[[Any, str], str],
+    supply_v: dict[str, Any] | None = None,
 ) -> dict[str, int | float]:
-    """One scalar ``{name: value}`` parameter row (a report/wire ``params``
-    map), validated and normalized; ``supply_v`` names may not repeat."""
+    """Normalize a wire row, reserving supplied rail names on the params axis."""
     if not isinstance(raw, dict):
         raise SimError(f"{where} must be an object mapping names to numbers")
     row: dict[str, int | float] = {}
     supply_names = {str(key).lower() for key in (supply_v or {})}
     for name, value in raw.items():
-        lowered = _validate_param_name(name, where)
+        lowered = validate_name(name, where)
         if lowered in row:
             raise SimError(f"{where} declares {lowered!r} more than once")
         if lowered in supply_names:
@@ -363,44 +395,53 @@ def _bind_temperature_param(
     return dict(sorted(bound.items()))
 
 
-def _expand_param_axis(
-    corners_spec: dict[str, Any],
-) -> list[dict[str, int | float]]:
-    """The zipped ``corners.params`` rows (issue #3035), or ``[{}]`` for a
-    request with no parameter axis. Names zip by index; every array must be
-    nonempty and the same length; duplicate normalized rows are rejected."""
-    spec = corners_spec.get("params")
-    if spec is None or spec == {}:
-        return [{}]
-    if not isinstance(spec, dict):
-        raise SimError(
-            "corners.params must be an object mapping parameter names to "
-            "equal-length arrays of numbers"
-        )
-    columns: dict[str, list[int | float]] = {}
-    for name, values in spec.items():
-        lowered = _validate_param_name(name, "corners.params")
-        if lowered in columns:
-            raise SimError(
-                f"corners.params declares {lowered!r} more than once "
-                "(names are case-insensitive)"
-            )
-        if not isinstance(values, list) or not values:
-            raise SimError(f"corners.params.{name} must be a nonempty array of numbers")
-        columns[lowered] = [
-            _validate_param_scalar(value, f"corners.params.{name}[{i}]")
-            for i, value in enumerate(values)
-        ]
-    if len({len(values) for values in columns.values()}) != 1:
-        raise SimError(zipped_length_message("corners.params", columns))
+def _check_param_supply_columns(names: set[str], corners_spec: dict[str, Any]) -> None:
     supply_names = {str(key).lower() for key in (corners_spec.get("supply_v") or {})}
-    clash = sorted(set(columns) & supply_names)
+    clash = sorted(names & supply_names)
     if clash:
         raise SimError(
             f"corners.params name {clash[0]!r} is also a corners.supply_v key: "
             "a name may be in only one of the two maps (supply_v addresses a "
             "source with `alter`, params address a .param)"
         )
+
+
+def _expand_numeric_axis(
+    corners_spec: dict[str, Any],
+    *,
+    key: str,
+    noun: str,
+    validate_name: Callable[[Any, str], str],
+    check_columns: Callable[[set[str], dict[str, Any]], None] | None = None,
+) -> list[dict[str, int | float]]:
+    """Zip case-insensitive numeric columns into distinct, name-sorted rows."""
+    where = f"corners.{key}"
+    spec = corners_spec.get(key)
+    if spec is None or spec == {}:
+        return [{}]
+    if not isinstance(spec, dict):
+        raise SimError(
+            f"{where} must be an object mapping {noun} names to "
+            "equal-length arrays of numbers"
+        )
+    columns: dict[str, list[int | float]] = {}
+    for name, values in spec.items():
+        lowered = validate_name(name, where)
+        if lowered in columns:
+            raise SimError(
+                f"{where} declares {lowered!r} more than once "
+                "(names are case-insensitive)"
+            )
+        if not isinstance(values, list) or not values:
+            raise SimError(f"{where}.{name} must be a nonempty array of numbers")
+        columns[lowered] = [
+            _validate_param_scalar(value, f"{where}.{name}[{i}]")
+            for i, value in enumerate(values)
+        ]
+    if len({len(values) for values in columns.values()}) != 1:
+        raise SimError(zipped_length_message(where, columns))
+    if check_columns is not None:
+        check_columns(set(columns), corners_spec)
     count = len(next(iter(columns.values())))
     rows = [
         dict(sorted((name, values[i]) for name, values in columns.items()))
@@ -410,6 +451,6 @@ def _expand_param_axis(
     for row in rows:
         label = _format_params_label(row)
         if label in seen:
-            raise SimError(f"corners.params declares the row {label!r} twice")
+            raise SimError(f"{where} declares the row {label!r} twice")
         seen.add(label)
     return rows

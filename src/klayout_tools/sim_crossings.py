@@ -33,27 +33,33 @@ over the series (``crossings.reduce``: period, cycle-to-cycle, TIE) live in
 Response shape (additive, no ``schema_version`` bump)
 -----------------------------------------------------
 The measurement's ``value`` stays a **number**: the count of crossings found
-inside the window (before the ``max`` cap), so ``limits``/``plausible_range``
-grade it like any scalar (e.g. ``limits.min: 40`` = "at least 40 edges"), the
-Monte Carlo statistics and coverage layers need no change, and an unaware
-consumer of ``value`` keeps reading a number. The series rides a new sibling
-``crossings`` object on that ``corners[].measurements[]`` entry only, present
-only when the series was extracted -- the same "new optional member, absent
-when not applicable" rule ``docs/json-contract.md`` records for additive
-fields.
+inside the window (before the ``max`` cap) -- or, with ``crossings.value_from``
+(#6913), the selected period/frequency reduction -- so ``limits``/
+``plausible_range`` grade it like any scalar (e.g. ``limits.min: 40`` =
+"at least 40 edges"), the Monte Carlo statistics and coverage layers need no
+change, and an unaware consumer of ``value`` keeps reading a number. The
+series rides a new sibling ``crossings`` object on that
+``corners[].measurements[]`` entry only, present only when the series was
+extracted -- the same "new optional member, absent when not applicable" rule
+``docs/json-contract.md`` records for additive fields.
 """
 
 from __future__ import annotations
 
-import math
 import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import sim_measurement_kind, sim_supply_relative, sim_window
-from ._jsonnum import is_number
-from .sim_crossings_reduce import reduce_crossings, validate_reduce
+from . import sim_crossings_dc, sim_measurement_kind, sim_supply_relative, sim_window
+from ._jsonnum import is_finite_number
+from .sim_crossings_reduce import (
+    graded_value_from,
+    reduce_crossings,
+    validate_reduce,
+    validate_value_from,
+)
 from .sim_errors import SimError
+from .sim_raw import parse_ascii_rawfile
 
 #: The ``crossings.edge`` values: a rising crossing, a falling one, or both.
 CROSSING_EDGES = ("rise", "fall", "either")
@@ -65,7 +71,9 @@ MAX_CROSSINGS_CAP = 100_000
 
 #: Keys a ``crossings`` object may carry. Anything else is refused by name
 #: (a typo'd ``form``/``tmax`` must not silently widen the window).
-_ALLOWED_KEYS = frozenset({"signal", "level", "edge", "from", "to", "max", "reduce"})
+_ALLOWED_KEYS = frozenset(
+    {"signal", "level", "edge", "from", "to", "max", "reduce", "value_from"}
+)
 
 #: Prefix of the ngspice vector each crossings measurement is bound to in the
 #: generated deck -- never a caller-visible name.
@@ -114,12 +122,13 @@ def validate_crossings_spec(name: Any, body: Any) -> None:
         )
     _validate_max(name, body.get("max"))
     validate_reduce(name, body.get("reduce"))
-    start = sim_window.window_bound(name, body, "from", form="crossings")
-    stop = sim_window.window_bound(name, body, "to", form="crossings")
+    validate_value_from(name, body.get("value_from"))
+    start = sim_window.window_bound(name, body, "from", form="crossings", axis="axis")
+    stop = sim_window.window_bound(name, body, "to", form="crossings", axis="axis")
     if start is not None and stop is not None and stop < start:
         raise SimError(
-            f"measurement '{name}': crossings.to ({stop!r} s) is before "
-            f"crossings.from ({start!r} s)"
+            f"measurement '{name}': crossings.to ({stop!r}) is before "
+            f"crossings.from ({start!r})"
         )
 
 
@@ -139,36 +148,43 @@ def _validate_signal(name: Any, signal: Any) -> None:
 
 
 def _validate_level(name: Any, level: Any) -> None:
-    if (
-        not isinstance(level, (int, float))
-        or isinstance(level, bool)
-        or not math.isfinite(level)
-    ):
+    if not is_finite_number(level):
         raise SimError(
             f"measurement '{name}': crossings.level is required and must be "
             f"a finite number in the signal's own unit (got {level!r})"
         )
 
 
-def is_sampled_offset(level: Any) -> bool:
-    """Whether ``level`` is the sampled-offset form ``{sample_at, offset}``
-    (issue #4813): the signal's own value at a time, plus an offset."""
-    return isinstance(level, dict) and ("sample_at" in level or "offset" in level)
-
-
 def _validate_sampled_offset(name: Any, level: dict[str, Any]) -> None:
     where = f"measurement '{name}': crossings.level"
-    if set(level) != {"sample_at", "offset"}:
+    keys = set(level)
+    if keys not in (sim_crossings_dc.OFFSET_KEYS, sim_crossings_dc.FRACTION_KEYS):
         raise SimError(
-            f"{where} sampled-offset form takes exactly the keys "
+            f"{where} sampled form takes exactly the keys "
             '"sample_at" and "offset", e.g. {"sample_at": "50n", '
-            f'"offset": -0.9}} (got keys {sorted(level)})'
+            '"offset": -0.9} (or, on a dc sweep, "sample_at" and '
+            f'"fraction") (got keys {sorted(level)})'
         )
-    sim_window.window_bound(
-        name, level, "sample_at", form="crossings", field="level.sample_at"
+    at = sim_window.window_bound(
+        name,
+        level,
+        "sample_at",
+        form="crossings",
+        field="level.sample_at",
+        axis="axis",
     )
+    if at is None:
+        raise SimError(
+            f"{where}.sample_at is required -- the abscissa the signal is "
+            "sampled at, e.g. "
+            '{"sample_at": "50n", "offset": -0.9} ({"sample_at": 1.0, '
+            '"fraction": 0.99} on a dc sweep)'
+        )
+    if "fraction" in level:
+        sim_crossings_dc.validate_fraction(name, level)
+        return
     offset = level["offset"]
-    if not is_number(offset) or not math.isfinite(offset):
+    if not is_finite_number(offset):
         raise SimError(
             f"{where}.offset must be a finite number in the signal's own "
             f"unit (got {offset!r})"
@@ -180,7 +196,7 @@ def _validate_crossings_level(name: Any, level: Any) -> None:
     sampled-offset level (issue #4813), or (issue #3918) a
     ``{frac_of, fraction}`` fraction of a ``corners.supply_v`` key resolved per
     corner. Whether the key exists is checked once the corners are known."""
-    if is_sampled_offset(level):
+    if sim_crossings_dc.is_sampled_offset(level):
         _validate_sampled_offset(name, level)
         return
     if not sim_supply_relative.is_supply_relative(level):
@@ -199,7 +215,9 @@ def validate_supply_relative_levels(
     ``frac_of`` key one of the corners' ``supply_v`` maps does not carry."""
     for spec in crossings_measurements(measurements_spec):
         level = spec["crossings"].get("level")
-        if not sim_supply_relative.is_supply_relative(level):
+        if sim_crossings_dc.is_sampled_offset(
+            level
+        ) or not sim_supply_relative.is_supply_relative(level):
             continue
         for supply_v in supply_maps:
             try:
@@ -228,18 +246,24 @@ def _validate_max(name: Any, value: Any) -> None:
 def validate_crossings_context(
     measurements_spec: list[dict[str, Any]], analysis: dict[str, Any]
 ) -> None:
-    """A crossings series is a transient-time quantity: refuse it for any
-    other ``analysis.kind`` up front, by name."""
+    """A crossings series is a transient-time quantity (or, issue #5703, a
+    dc-sweep abscissa): refuse it for any other ``analysis.kind`` up front, by
+    name."""
     declared = crossings_measurements(measurements_spec)
     if not declared:
         return
-    sim_measurement_kind.require_analysis_kind(
-        declared,
-        analysis,
-        form="crossings",
-        required="tran",
-        explanation="returns threshold-crossing *times*",
-    )
+    kind = str(analysis.get("kind", "")).lower()
+    if sim_crossings_dc.is_dc(kind):
+        sim_crossings_dc.validate_dc_context(declared, analysis)
+        return
+    if kind != "tran":
+        raise SimError(
+            f"measurement '{declared[0]['name']}' declares 'crossings', which "
+            "returns threshold-crossing *times* (tran) or sweep abscissae (dc) "
+            f'and so requires analysis.kind "tran" or "dc" (got '
+            f"{analysis.get('kind')!r})"
+        )
+    sim_crossings_dc.validate_tran_only_levels(declared, kind)
 
 
 # --------------------------------------------------------------------------- #
@@ -289,6 +313,17 @@ class CrossingsOutcome:
     resolved_level: float | None = None
     #: ``crossings.reduce`` results, set only when requested.
     reductions: dict[str, Any] | None = None
+    #: Graded value chosen by ``crossings.value_from`` (#6913); None = default.
+    selected_value: float | None = None
+    #: True for a dc sweep (issue #5703): ``times`` then holds sweep
+    #: abscissae and the graded value is the first one, not the count.
+    sweep_axis: bool = False
+
+    def graded_value(self) -> float:
+        """Count (tran), first abscissa (dc), or a ``value_from`` reduction."""
+        if self.selected_value is not None:
+            return self.selected_value
+        return self.times[0] if self.sweep_axis else self.total
 
     def report(self) -> dict[str, Any]:
         """The response's ``crossings`` object for this measurement."""
@@ -297,6 +332,14 @@ class CrossingsOutcome:
             "edges": list(self.edges),
             "truncated": self.truncated,
         }
+        if self.sweep_axis:
+            # Sweep abscissae are not times: name them, keep the count.
+            out = {
+                "abscissae": out["times"],
+                "edges": out["edges"],
+                "count": self.total,
+                "truncated": self.truncated,
+            }
         if self.resolved_level is not None:
             out["level"] = self.resolved_level
         if self.reductions is not None:
@@ -358,37 +401,11 @@ def _interpolate(
     return t0 + (level - y0) * (t1 - t0) / (y1 - y0)
 
 
-def _resolve_sampled_offset(
-    name: Any, level: dict[str, Any], scale: list[float], values: list[float]
-) -> float:
-    """``signal(sample_at) + offset``, the sample linearly interpolated between
-    its two bracketing points. Raises ``ValueError`` (message = the
-    measurement diagnostic) when ``sample_at`` is outside the simulated range."""
-    at = sim_window.window_bound(
-        name, level, "sample_at", form="crossings", field="level.sample_at"
-    )
-    assert at is not None  # validated as required before any run
-    count = min(len(scale), len(values))
-    if count == 0 or not scale[0] <= at <= scale[count - 1]:
-        span = f"[{scale[0]!r}, {scale[count - 1]!r}] s" if count else "empty"
-        raise ValueError(
-            f"measurement '{name}': crossings.level.sample_at ({at!r} s) is "
-            f"outside the simulated time range {span}"
-        )
-    sampled = values[count - 1]
-    for index in range(1, count):
-        if at <= scale[index]:
-            t0, t1 = scale[index - 1], scale[index]
-            y0, y1 = values[index - 1], values[index]
-            sampled = y1 if t1 == t0 else y0 + (y1 - y0) * (at - t0) / (t1 - t0)
-            break
-    return sampled + float(level["offset"])
-
-
 def extract_corner_crossings(
     measurements_spec: list[dict[str, Any]],
     corner_dir: str,
     supply_v: dict[str, Any] | None = None,
+    kind: Any = "tran",
 ) -> dict[int, CrossingsOutcome]:
     """``{position in measurements_spec: outcome}`` for every crossings entry
     of one finished corner (``supply_v``: its supply map, which a
@@ -397,7 +414,7 @@ def extract_corner_crossings(
     or missing rawfile becomes that measurement's own ``error``."""
 
     def extract(spec: dict[str, Any], raw_path: str) -> CrossingsOutcome:
-        return _extract_one(spec, raw_path, supply_v)
+        return _extract_one(spec, raw_path, supply_v, kind)
 
     return sim_measurement_kind.extract_indexed(
         measurements_spec,
@@ -409,10 +426,11 @@ def extract_corner_crossings(
 
 
 def _extract_one(
-    spec: dict[str, Any], raw_path: str, supply_v: dict[str, Any] | None = None
+    spec: dict[str, Any],
+    raw_path: str,
+    supply_v: dict[str, Any] | None = None,
+    kind: Any = "tran",
 ) -> CrossingsOutcome:
-    from .sim import SimError, parse_ascii_rawfile
-
     body = spec["crossings"]
     signal = body["signal"]
     if not os.path.isfile(raw_path):
@@ -440,37 +458,41 @@ def _extract_one(
             )
         )
     name = spec["name"]
-    raw_level = body["level"]
-    resolved_level: float | None = None
-    if is_sampled_offset(raw_level):
-        try:
-            resolved_level = _resolve_sampled_offset(
-                name,
-                raw_level,
-                [point[0] for point in points],
-                [point[1] for point in points],
-            )
-        except ValueError as exc:
-            return CrossingsOutcome(error=str(exc))
-    elif sim_supply_relative.is_supply_relative(raw_level):
-        try:
-            resolved_level = sim_supply_relative.resolve(
-                raw_level, f"measurement '{name}': crossings.level", supply_v
-            )
-        except sim_supply_relative.SupplyRelativeError as exc:
-            return CrossingsOutcome(error=str(exc))
+    sweep = sim_crossings_dc.is_dc(kind)
+    resolved_level, error = sim_crossings_dc.resolve_level(
+        name, body, points, supply_v, sweep
+    )
+    if error is not None:
+        return CrossingsOutcome(error=error)
     outcome = find_crossings(
         [point[0] for point in points],
         [point[1] for point in points],
-        resolved_level if resolved_level is not None else float(raw_level),
+        resolved_level if resolved_level is not None else float(body["level"]),
         edge=body.get("edge", "rise"),
         start=sim_window.window_bound(name, body, "from", form="crossings"),
         stop=sim_window.window_bound(name, body, "to", form="crossings"),
         max_count=body.get("max") or DEFAULT_MAX_CROSSINGS,
     )
     outcome.resolved_level = resolved_level
-    if body.get("reduce"):
+    if sweep:
+        outcome.sweep_axis = True
+        if not outcome.times:
+            return CrossingsOutcome(
+                error=sim_crossings_dc.no_crossing_message(
+                    name,
+                    resolved_level if resolved_level is not None else body["level"],
+                    body.get("edge", "rise"),
+                )
+            )
+    value_from = body.get("value_from")
+    names = set(body.get("reduce") or ()) | ({"period"} if value_from else set())
+    if names:
         outcome.reductions = reduce_crossings(
-            outcome.times, body.get("edge", "rise"), body["reduce"]
+            outcome.times, body.get("edge", "rise"), sorted(names)
         )
+    if value_from is not None:
+        selected, reason = graded_value_from(name, outcome.reductions, value_from)
+        if reason is not None:
+            return CrossingsOutcome(error=reason)
+        outcome.selected_value = selected
     return outcome

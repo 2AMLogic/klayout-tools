@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +17,27 @@ from klayout_tools.decks import (
     get_deck,
 )
 from klayout_tools.decks import sg13g2_cont_grid as sg13g2_cont_grid_module
-from klayout_tools.decks.history import deck_info
+from klayout_tools.decks.history import deck_info, deck_rules
+
+
+def _deck_doc_example(command: str) -> dict:
+    doc = Path(__file__).resolve().parents[1] / "docs/cli/deck.md"
+    context = f"docs/cli/deck.md: klt deck {command} example"
+    section = re.search(
+        rf"^## `klt deck {re.escape(command)}`[ \t]*\n(.*?)(?=^## |\Z)",
+        doc.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"{context}: missing section heading"
+    block = re.search(
+        r"^```json[ \t]*\n(.*?)^```[ \t]*$",
+        section[1],
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert block is not None, f"{context}: missing fenced JSON block"
+    example = json.loads(block[1])
+    assert isinstance(example, dict), f"{context}: expected a JSON object"
+    return example
 
 
 def _help(capsys: pytest.CaptureFixture[str], *argv: str) -> str:
@@ -52,6 +74,76 @@ def test_deck_info_provides() -> None:
             assert get_deck(name)
 
 
+def test_deck_info_enforced_rule_count_agrees_with_deck_rules() -> None:
+    """`deck info`'s ``enforced_rule_count`` is the same count ``klt deck
+    rules`` reports, for every curated deck (#5843) -- and present-but-null
+    (never 0, never omitted) for a deck without a curated table. Loops every
+    registered deck so the two surfaces cannot drift apart on a PDK bump."""
+    by_name = {d["deck"]: d for d in deck_info()["decks"]}
+    for name, entry in by_name.items():
+        if "curated_drc" in entry["provides"]:
+            assert entry["enforced_rule_count"] == len(deck_rules(name)["rules"])
+        else:
+            assert "enforced_rule_count" in entry
+            assert entry["enforced_rule_count"] is None
+
+
+def test_deck_info_documented_example_matches_gf180mcu() -> None:
+    doc = Path(__file__).resolve().parents[1] / "docs/cli/deck.md"
+    context = "docs/cli/deck.md: klt deck info example"
+    section = re.search(
+        r"^## `klt deck info`[ \t]*\n(.*?)(?=^## |\Z)",
+        doc.read_text(encoding="utf-8"),
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert section is not None, f"{context}: missing section heading"
+    block = re.search(
+        r"^```json[ \t]*\n(.*?)^```[ \t]*$",
+        section[1],
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert block is not None, f"{context}: missing fenced JSON block"
+    try:
+        payload = json.loads(block[1])
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"{context}: invalid JSON ({exc})")
+
+    live = deck_info("gf180mcu")
+    assert isinstance(payload, dict), f"{context}: expected a JSON object"
+    assert payload.get("schema_version") == live["schema_version"], (
+        f"{context}: schema_version differs from deck_info()"
+    )
+    decks = payload.get("decks")
+    assert isinstance(decks, list) and len(decks) == 1, (
+        f"{context}: expected one entry in decks"
+    )
+    example = decks[0]
+    actual = live["decks"][0]
+    assert isinstance(example, dict) and example.get("deck") == actual["deck"], (
+        f"{context}: expected the gf180mcu deck entry"
+    )
+    assert example.get("content_hash") == "sha256:...", (
+        f"{context}: content_hash must use the sha256:... placeholder"
+    )
+    for field in ("device_classes", "unmodeled_rules", "provides"):
+        values = example.get(field)
+        assert isinstance(values, list) and all(
+            isinstance(value, str) for value in values
+        ), f"{context}: {field} must be a list of strings"
+        missing = set(values).difference(actual[field])
+        assert not missing, f"{context}: gf180mcu {field} missing {sorted(missing)}"
+    assert "released" in example and example["released"] is actual["released"], (
+        f"{context}: released differs from deck_info()"
+    )
+    assert "release" in example and example["release"] == actual["release"], (
+        f"{context}: release differs from deck_info()"
+    )
+    assert (
+        "enforced_rule_count" in example
+        and example["enforced_rule_count"] == actual["enforced_rule_count"]
+    ), f"{context}: enforced_rule_count differs from deck_info()"
+
+
 def test_asap7_rejected_with_route_hint() -> None:
     with pytest.raises(UnknownDeckError, match=r"--engine klayout --deck-file"):
         get_deck("asap7")
@@ -66,6 +158,36 @@ def test_deck_rules_asap7_exits_1(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["deck", "rules", "--deck", "asap7", "--format", "json"]) == 1
     captured = capsys.readouterr()
     assert "--engine klayout --deck-file" in captured.out + captured.err
+
+
+def test_deck_hash_documented_example_matches_sky130(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    example = _deck_doc_example("hash")
+    assert main(["deck", "hash", "--deck", "sky130", "--format", "json"]) == 0
+    actual = json.loads(capsys.readouterr().out)
+
+    assert example.pop("content_hash", None) == "sha256:..."
+    assert example == {field: actual[field] for field in ("schema_version", "deck")}
+
+
+def test_deck_rules_documented_example_matches_sky130(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    example = _deck_doc_example("rules")
+    rule_id = "poly.width.1"
+    args = ["deck", "rules", "--deck", "sky130", "--rule", rule_id, "--format", "json"]
+    assert main(args) == 0
+    actual = json.loads(capsys.readouterr().out)
+
+    assert example.pop("content_hash", None) == "sha256:..."
+    (example_rule,) = example.pop("rules")
+    fields = ("schema_version", "deck", "nominal_dbu_um")
+    assert example == {field: actual[field] for field in fields}
+
+    (actual_rule,) = actual["rules"]
+    assert example_rule["id"] == actual_rule["id"] == rule_id
+    assert example_rule == {field: actual_rule[field] for field in example_rule}
 
 
 #: deck -> the exact `DrcRule.scope` token set its rules declare (issue

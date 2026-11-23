@@ -48,6 +48,7 @@ unit, so that rule would make the setting a no-op.
 
 from __future__ import annotations
 
+import functools
 import os
 import shlex
 import subprocess
@@ -78,6 +79,7 @@ from .netlist import (
     _write_output,
 )
 from .netlist_batch_select import _relative_symbol_dirs, _select_files
+from .netlist_instances import instances_payload
 from .netlist_paths import (
     _rewrite_runner_paths,
     fold_continuations,
@@ -95,11 +97,10 @@ BACKEND_ENV = "KLT_NETLIST_BACKEND"
 #: Values ``--backend`` / ``$KLT_NETLIST_BACKEND`` accept.
 SUPPORTED_BACKENDS = ("local", "batch")
 
-#: Cap on the **uncompressed** total size of the git-tracked files uploaded
-#: as the job's input tree (64 MiB). Schematics, symbols and an ``xschemrc``
-#: are small; a tree above this almost always means the root also covers
-#: layouts or other large tracked artifacts, so the fix is a narrower
-#: ``--batch-root``, not a bigger upload.
+#: Cap on the **uncompressed** total size of the git-tracked files uploaded as the job's
+#: input tree (64 MiB). Schematics, symbols and an ``xschemrc`` are small; a tree above
+#: this almost always means the root also covers layouts or other large tracked
+#: artifacts, so the fix is a narrower ``--batch-root``, not a bigger upload.
 MAX_BATCH_TREE_BYTES = 64 * 1024 * 1024
 
 #: The single input the job receives under ``inputs/``.
@@ -450,27 +451,6 @@ def _resolve_config(pdk: str, timeout_s: float) -> sim_batch.BatchConfig:
     )
 
 
-def _job_failure(
-    *,
-    job_id: str,
-    status: dict[str, Any],
-    runner_error: dict[str, Any] | None,
-    note: str,
-    stderr_tail: str = "",
-    harness_log: str | None = None,
-) -> NetlistError:
-    return _batch_common.job_failure(
-        job_id=job_id,
-        status=status,
-        runner_error=runner_error,
-        note=note,
-        stderr_tail=stderr_tail,
-        harness_log=harness_log,
-        err_cls=NetlistError,
-        no_fallback=_NO_FALLBACK,
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Collected output
 # --------------------------------------------------------------------------- #
@@ -592,7 +572,11 @@ def _collect(
         runner=runner,
         err_cls=NetlistError,
         no_fallback=_NO_FALLBACK,
-        job_failure=_job_failure,
+        job_failure=functools.partial(
+            _batch_common.job_failure,
+            err_cls=NetlistError,
+            no_fallback=_NO_FALLBACK,
+        ),
     )
 
 
@@ -608,8 +592,7 @@ def _payload(
     symbol_path: Sequence[str] = (),
     canonical_wrap: bool = False,
 ) -> dict[str, Any]:
-    """The ``schema_version: 1`` payload, from the runner's report plus
-    ``environment.remote``; writes ``output`` unless ``check``."""
+    """The ``schema_version: 1`` payload from the runner's report; writes ``output``."""
     payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "schematic": schematic,
@@ -617,6 +600,7 @@ def _payload(
         "mode": "check" if check else "generate",
         # ``symbol_path``: the root-relative list the client forwarded.
         "xschem": {**report["xschem"], "symbol_path": list(symbol_path)},
+        **instances_payload(data),
     }
     for key in ("pdk", "block"):
         if isinstance(report.get(key), dict):
