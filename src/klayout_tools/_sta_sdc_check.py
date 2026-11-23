@@ -337,8 +337,8 @@ def _compare_delays(commands, cmd, scalar, per_port, clock_port, out):
                 (port, side, expected_clock), seen.get((None, side, expected_clock))
             )
             if not _same(got, want):
-                if got is None and ((port, side) in covered or (None, side) in covered):
-                    continue  # seen under another clock: drift reported above
+                if got is None and (port, side) in covered:
+                    continue  # the explicit port line already reported clock drift
                 out.append(_mismatch(cmd, port, got, want, bound=side))
 
 
