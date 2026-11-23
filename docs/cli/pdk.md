@@ -246,7 +246,21 @@ directory itself, or a named subdirectory of it). When present it wins over
   `date`, `revision` and `comment` attributes are ignored; every other header
   field must match exactly, and a difference (units, operating conditions,
   `default_max_transition`, ...) is an error naming the conflicting field
-  and both files' values. Matching files are merged into one
+  and both files' values. Every differing field between the first file and
+  the offending one is reported in the same error (up to 10, then a count of
+  the rest), long group values are shown around their first difference, and
+  a group renamed between files (`operating_conditions (typ)` vs
+  `operating_conditions (slow)`) is reported once as the same group under a
+  different name.
+  A differing `default_max_transition` is refused
+  with an explanation: an output pin without its own `max_transition` is
+  limited by its source library's default. The error names a cell and output
+  that inherit that limit when it finds one. To use the files together,
+  supply a single plain `.lib` that preserves each output's original
+  effective limit and set `liberty.<cell_library>.<corner>` to its
+  root-relative path (a prepared cell group can carry an explicit pin
+  `max_transition` wherever changing the shared header would otherwise
+  change that output's limit). Matching files are merged into one
   content-addressed `.lib` under `$KLT_CACHE_DIR` (default
   `~/.cache/klt/liberty-merged`, never inside the PDK tree), and klt hands
   that single path to Yosys/OpenROAD/OpenSTA. A containerized
@@ -259,7 +273,9 @@ directory itself, or a named subdirectory of it). When present it wins over
   `power_lut_template` groups are unioned by name (same name with different
   content is an error). A duplicate cell name is an error; the merged header
   is the first file's plus any templates it lacks; a one-element list equals
-  the string form.
+  the string form. The place-and-route timing sweep uses these corner keys in
+  descriptor order. Each list contributes one merged deck and a single report
+  entry. Select keys with `pdk.sweep_corners`, or pass `[]` to skip the sweep.
 - `views` (optional) maps `cell_library` → `{"cell_lef": path, "tech_lef":
   {"min"|"nom"|"max": path}, "gds": path}` (every key optional) for trees that
   do not use the open_pdks `lef/`, `techlef/`, `gds/` naming. `klt
@@ -276,6 +292,50 @@ directory itself, or a named subdirectory of it). When present it wins over
 ship Liberty only as `.7z`; extract it in the pinned flow (or a fetch script)
 and point the descriptor at the plain `.lib`. When the mapped file is missing but
 a sibling `.7z` exists, the error says so.
+
+#### Assembling an ASAP7 root
+
+From a klayout-tools checkout, initialize the two data submodules in an
+[ASAP7 checkout](https://github.com/The-OpenROAD-Project/asap7).
+Install 7-Zip (`7zz` or `7z` on PATH) for the upstream Liberty archives.
+
+```sh
+git -C "$ASAP7" submodule update --init asap7sc7p5t_28 asap7_pdk_r1p7
+uv run python scripts/assemble-asap7-pdk-root.py --asap7 "$ASAP7" -o "$ROOT"
+uv run klt pdk find --pdk asap7 --pdk-root "$ROOT" --format json
+```
+
+Choose a new output directory. The script publishes it after checking every
+requested Liberty group and physical view. Its default selection is RVT at TT.
+For several threshold voltages and corners, append `--vt RVT LVT --corner TT SS`.
+The other supported selections are `SLVT`, `SRAM` and the fast corner `FF`.
+For each selected flavour, use the library key `asap7sc7p5t_rvt`,
+`asap7sc7p5t_lvt`, `asap7sc7p5t_slvt` or `asap7sc7p5t_sram` and the uppercase
+corner key in requests. Pass the same root to synthesis, place-and-route and STA.
+
+Under `libs/<library>/`, `lef/`, `techlef/`, `gds/` and `lib/` hold regular
+files. `klayout/tech/asap7.map` is the upstream APR layer map.
+`klt-pdk-sources.json` records the superproject and two submodule commits,
+SHA-256 digests of every consumed input (including the compressed archives),
+every published view and the descriptor. It records working-tree bytes, so a
+local edit remains distinguishable at the same checkout commit.
+
+The upstream SIMPLE files have a 4000 ps default maximum transition while
+the other cell groups specify 320 ps. The assembler writes an explicit
+4000 ps limit on each SIMPLE signal pin that inherited it, then sets the
+shared library default to 320 ps. Existing pin limits and timing tables are
+preserved. The sidecar counts newly explicit limits. The shared Liberty
+merger checks the remaining headers, cell names and timing-table templates.
+
+At ASAP7 commit `d24f8b857ff74cf5b21ab18a7e1b11a3954c449b`, the
+RVT SIMPLE file labelled FF declares the TT operating conditions. Selecting
+RVT/FF there produces a header mismatch and leaves the output unpublished.
+When a checkout includes the corrected `250407` RVT SIMPLE FF file, the
+assembler aligns its operating-condition name and adds the reference
+library's unused input/output voltage declarations. The corrected file and SEQ
+reuse template names for different timing tables, so its templates and their
+references receive unique names. Table contents, pin data and operating
+conditions are preserved. The sidecar records each name change.
 
 See [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md)
 for the SG13G2→CMOS5L differences (metal stack, capacitors, devices,
@@ -1118,9 +1178,10 @@ library's) to extract from the way `klt pdk cells` extracts from
 ## `klt pdk decks`
 
 Lists the KLayout DRC deck files a variant ships under
-`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`) and the `-rd`
+`libs.tech/klayout/drc/` (or the flat-install `tech/drc/`), and the LVS
+runsets under `libs.tech/klayout/lvs/` (or `tech/lvs/`), with the `-rd`
 globals each one consumes. `klt drc --engine klayout --pdk <variant>` runs
-exactly one of them (`is_default`); the siblings (for sky130A,
+exactly one DRC deck (`is_default`); the siblings (for sky130A,
 `sky130A_mr.drc`, the "maximal rules" runset) are otherwise invisible, and a
 sibling passed via `--deck-file` without the globals it gates on silently
 runs zero rules (`coverage_unknown`, issue #1302).
@@ -1157,21 +1218,40 @@ sky130A_mr.drc   drc             beol, feol, floating_met, offgrid, seal*, sram_
 }
 ```
 
-- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), or `helper` (`*.rb.drc`,
+- `kind` — `lydrc` (`*.lydrc`), `drc` (`*.drc`), `helper` (`*.rb.drc`,
   Ruby helper scripts that merely carry the `.drc` extension; listed but not
-  scanned, `globals: []`). Other files in the directory (e.g. Python drivers)
-  are not listed.
+  scanned, `globals: []`), or `lvs` (`*.lvs`, the directly-runnable LVS
+  runset). Other files in the directories (Python drivers, `*.lylvs`
+  wrappers, `rule_decks/` fragments) are not listed.
+- **LVS entries.** `decks[]` lists the DRC entries first, then one `kind:
+  "lvs"` entry per runset; `is_default` on an LVS entry marks the runset
+  `klt lvs --engine klayout-runset --pdk <variant>` runs, and is independent of
+  the DRC `is_default` (a variant can have an LVS default and no DRC one).
+  Exactly one entry carries it: it is the path the resolver returns, so an
+  alias symlink to that runset is listed but not flagged. A
+  caller that only wants DRC decks must filter on `kind`. `schema_version`
+  stays `1`: no existing field changed, and `kind` gained one member. LVS
+  globals are verdict-affecting (an unset `simplify`/`combine`/
+  `implicit_connect` yields a well-formed but wrong `mismatch`), so read the
+  defaults. The variables `klt lvs --engine klayout-runset` sets itself
+  (`input`, `schematic`, `report`, `top`, `topcell`) are not listed.
 - `globals` — name-sorted. `$input`, `$report` (supplied by `klt`) and
   `$top_cell` (read under `if $input`) are never listed, nor are Ruby's own
   globals. A global assigned under `if not defined? $x`, `... unless defined?
-  $x` or `||=` is `required_by_caller: false` with its literal `default`;
-  any other `$name` mentioned outside a comment is `required_by_caller: true`.
-  Literal `require`/`load` includes are followed.
+  $x` or `||=` is `required_by_caller: false` with its literal `default`; any
+  other `$name` mentioned outside a comment is `required_by_caller: true`.
+  **LVS entries only** also detect a global read through a deck-level
+  `<helper>?($x)` / `<helper>?($x, default: V)` call (default `false` / `V`;
+  a receiver-qualified call such as `File.exist?($f)` is not a helper) or as
+  `CONST = $x || '<literal>'`, matched on the code before any trailing `#`
+  comment. DRC entries keep reporting those globals as required. Literal
+  `require`/`load` includes are followed.
 - **This is a heuristic line scan, not a Ruby parser.** A missing entry is not
   proof a deck ignores a variable, and a defaulted global (e.g. `feol`
   defaulting to `"false"`) can still silently disable whole rule groups —
   read the defaults, not just the `required_by_caller` flag.
-- A variant with no `drc/` directory is a successful empty `decks` list.
+- A variant with neither a `drc/` nor an `lvs/` directory is a successful empty
+  `decks` list.
   Library: `klayout_tools.pdk.drc_decks(variant, root)`.
 
 ## `klt pdk corners`
@@ -1215,8 +1295,8 @@ sf        no        mos=skewed bjt=- diode=- resistor=- mim_cap=- mos_cap=-
         { "family": "mos", "section": "ss", "skew": "skewed",
           "devices": [
             { "flavour": "03v3", "section": "ss", "skew": "skewed" },
-            { "flavour": "06v0", "section": "ss", "skew": "typical" },
-            { "flavour": "06v0_nvt", "section": "ss", "skew": "typical" }
+            { "flavour": "06v0", "section": "ss", "skew": "param" },
+            { "flavour": "06v0_nvt", "section": "ss", "skew": "param" }
           ] },
         { "family": "bjt", "section": "bjt_ss", "skew": "param" },
         { "family": "diode", "section": "diode_ss", "skew": "param" },
@@ -1310,22 +1390,57 @@ itself against a release (the spike's own open question) is not built here.
 
 Family-level skew is classified **per curated family**: a family reported
 `"skewed"` means *some* of its devices moved off the typical section for that
-corner — not that *every* device did. gf180mcu's own deck, for example, leaves
-its `nfet_06v0`/`pfet_06v0` MOSFET flavors bound to the same `_t`-suffixed
-(typical) model inside every corner while its `nfet_03v3`/`pfet_03v3` flavors
-do skew, both inside the single curated `mos` family.
+corner — not that *every* device did. gf180mcu's own deck, for example, keeps
+its `nfet_06v0`/`pfet_06v0` flavors' *include tokens* pointing at the same
+`_t`-suffixed (typical-named) sub-library inside every corner's section while
+its `nfet_03v3`/`pfet_03v3` flavors switch to `_s`/`_f`-suffixed sub-libraries,
+both inside the single curated `mos` family. The tokens alone, however, do not
+decide what a flavour's model actually receives: each corner section also
+overrides `.param` values those `_t` sub-libraries **consume**, so a flavour
+whose tokens are unchanged can still be process-skewed (measured on the real
+gf180mcuD deck, 2026-11-15: 20 of each section's 22 `.param` values differ
+from `typical`'s, and the `06v0`/`06v0_nvt` sub-libraries consume them —
+issue #5663).
 
 To resolve that finer question, gf180mcu's `mos` section entries carry an
 additive `devices` list (issue #3794) — one `{flavour, section, skew}` per
 device flavour (`03v3`, `06v0`, `06v0_nvt`, …, derived from the section's
-`.lib '<file>' <model>_<flavour>_<suffix>` include tokens), each classified
-against that flavour's own typical-corner include set (`"skewed"`/`"typical"`;
-`section`/`skew` are `null` for a flavour the typical corner has but the
-section does not). For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as
-`"skewed"` and `06v0`/`06v0_nvt` as `"typical"`. Family-level `skew` and
-`complete` keep their meaning; other families and sky130 carry no `devices`.
-`klt sim` surfaces the unmoved flavours as
-[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794).
+`.lib '<file>' <model>_<flavour>_<suffix>` include tokens; tokens without a
+separable flavour — gf180mcuD's `fets_mm` mismatch lib, its `noise_corner`
+noise lib — are *not* device flavours and are not listed, issue #5663), each
+classified against that flavour's own typical-corner evidence:
+
+- `"skewed"` — the flavour's include tokens differ from its typical corner's
+  (token evidence always wins);
+- `"param"` — with identical tokens, a visible use of a differing parameter
+  in any referenced sub-library establishes skew. The scanner matches both
+  the include file and the named section to the deck it read. If some bodies
+  remain unresolved and none of the visible bodies consumes a differing
+  parameter, a matching parameter prefix (such as `nfet_06v0_vth0` for
+  `06v0`) also establishes skew.
+- `"typical"` — identical tokens and either no differing parameters or a
+  complete set of referenced bodies that consume none of those parameters.
+- `"unknown"` — parameters differ and the available bodies and parameter
+  prefixes leave the flavour undecided. Ambiguous parameter assignments
+  also give this result. `klt sim` lists these devices under
+  `environment.corner_coverage.unknown_devices`.
+- `null` — the typical corner ships the flavour but the section does not.
+
+For gf180mcuD, `ff`/`ss`/`fs`/`sf` report `03v3` as `"skewed"` and
+`06v0`/`06v0_nvt` as `"param"`. Family-level `skew` and `complete` keep their
+meaning; other families and sky130 carry no `devices`. `klt sim` surfaces the
+unmoved flavours as
+[`environment.corner_coverage`](sim.md#environmentcorner_coverage-issue-3794-unknown_devices-issue-5663).
+
+**Schema note (issue #5663):** `devices[].skew` grows from
+`"typical" | "skewed" | null` to also report `"param"` and `"unknown"`, and
+`"typical"` narrows: the same deck now yields `"param"` where it wrongly
+yielded `"typical"` (the old answer was factually wrong about the deck — the
+sub-libraries provably consume the differing `.param` values). Per
+`docs/json-contract.md`'s pre-1.0 caveat this is a bug fix plus an additive
+value with **no `schema_version` bump** — the field's documented purpose
+("which device flavours each corner actually skews") is unchanged — but a
+consumer pinning on `"typical"` will see different output for the same PDK.
 
 ## `klt pdk em-limits`
 
@@ -1928,6 +2043,61 @@ follows the same shape and raises `PdkNotFoundError` when no PDK install
 resolves at all — a variant shipping no `libs_ref` asset, or one whose
 libraries ship no `techlef/` directory at all, returns an empty
 `sources`/`layers`/`disagreements` result rather than raising.
+
+### Stream vs. tech-LEF dbu resolution (`resolve_output_dbu` vs. `resolve_pdk_dbu`, issue #5721)
+
+Two further library functions answer the database-unit question, and they are
+deliberately **two** functions, because a PDK can legitimately carry two
+different dbu answers:
+
+```python
+from klayout_tools.pdk import resolve_pdk_dbu
+from klayout_tools.pdk_output_dbu import required_stream_dbu, resolve_output_dbu
+
+info = find_pdk(variant="gf180mcuA")
+
+resolve_pdk_dbu(info)  # 0.0005 -- the tech LEF's DATABASE MICRONS 2000 truth
+resolve_output_dbu(info)  # 0.001  -- the dbu a *stream for* this PDK must be at
+required_stream_dbu(info)  # 0.001 for gf180mcu; None when the family declares none
+```
+
+- **`resolve_pdk_dbu(pdk_info)`** is the tech LEF's `DATABASE MICRONS` truth
+  — the finest value declared across the family-wide `libs.ref/*/techlef/`
+  set, or `None` (never an exception) when nothing readable declares one. It
+  is what a DEF *reader* must be configured with: a DEF's coordinates for
+  gf180mcu are in 1/2000 µm units, and re-interpreting them at another dbu
+  moves geometry. `klt place-and-route`'s DEF→GDS merge uses it, unchanged
+  by #5721.
+- **`resolve_output_dbu(pdk_info)`** is "what dbu a GDS/OASIS stream *for*
+  this PDK must be written at": the family's entry in
+  `_REQUIRED_STREAM_DBU_UM` when it declares one — **gf180mcu, the only
+  entry today: `0.001`**, because the family's native DRC runset enforces an
+  exact-equality `DBU` rule (`rule_decks/geom.rb`:
+  `extent.output('DBU', ...) if dbu != 0.001`) that rejects a 0.0005 stream
+  whole-cell — falling through to `resolve_pdk_dbu` for every family with no
+  declared requirement, and returning `None` exactly where `resolve_pdk_dbu`
+  would. `klt gen` writes at it (see
+  [`gen.md`](gen.md)'s "Output database unit (dbu)"), where the fall-through
+  reproduces the pre-#5721 stream byte-for-byte.
+- **`required_stream_dbu(pdk_info)`** is that answer's narrower half: only a
+  *declared* requirement, `None` with no fall-through. `klt gen-compose`
+  resolves its composed-dbu target with it, because compose's own fallback
+  when no requirement is declared is the *finest block's* dbu (issue #1514)
+  — falling through to the tech LEF there would silently replace that
+  refinement target for every family whose install ships a readable tech
+  LEF (see [`gen-compose.md`](gen-compose.md)'s "Reconciling mismatched
+  `dbu`s").
+
+Why the two disagree on gf180mcu and both are still kept: the tech LEF's
+`DATABASE MICRONS 2000` is LEF headroom nothing in the install uses (every
+GDS the gf180mcu install itself ships is at 0.001, and so is the runset's own
+rule), while its DEFs really are authored in 1/2000 µm units. Collapsing the
+answers into one function — e.g. reusing the curated deck's
+`get_nominal_dbu` — would make the next PDK's requirement unexpressible
+(that helper means "the dbu klt's deck transcribed thresholds against", and
+it raises for families whose packaged deck legitimately wants a finer dbu,
+e.g. asap7). Keep writing streams at `resolve_output_dbu` and reading DEFs
+at `resolve_pdk_dbu`.
 
 ## Exit codes and errors
 

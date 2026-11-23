@@ -253,7 +253,7 @@ def test_resume_harvest_without_a_map_is_a_noop(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("empty_environment", [None, {}])
 @pytest.mark.parametrize("all_empty", [False, True])
-def test_resume_harvest_preserves_shards_without_provenance(
+def test_resume_harvest_requires_a_remote_block_before_reusing_measurements(
     tmp_path, monkeypatch, empty_environment, all_empty
 ):
     _, request, payload = _harvest_fixture(tmp_path, monkeypatch)
@@ -269,11 +269,20 @@ def test_resume_harvest_preserves_shards_without_provenance(
     monkeypatch.setattr(sb, "_run_batch_job", collect)
     corners, version, environment = _harvest(tmp_path, request)
 
+    if empty_environment is None:
+        if all_empty:
+            assert (corners, version, environment) == ([], None, None)
+        else:
+            assert len(corners) == 6
+            assert [entry["job_id"] for entry in environment["fleet"]] == [
+                entry["job_id"] for entry in payload["shards"][1:]
+            ]
+        return
     assert len(corners) == 10
     assert version == "46"
     fleet = environment["fleet"]
     assert len(fleet) == 3
-    expected = None if empty_environment is None else {"resumed": True}
+    expected = {"resumed": True}
     assert fleet[0] == expected
     if all_empty:
         assert fleet == [expected] * 3

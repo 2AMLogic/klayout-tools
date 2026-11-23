@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sys
 from typing import Any
+
+from . import _warn
 
 #: ``source`` values. ``runner`` is for off-host backends: the init file is
 #: resolved by the worker, which this client cannot observe.
@@ -117,7 +118,7 @@ def warning_for(block: dict[str, Any] | None, *, declared: bool) -> str | None:
 def warn(block: dict[str, Any] | None, *, declared: bool) -> None:
     message = warning_for(block, declared=declared)
     if message is not None:
-        print(message, file=sys.stderr)
+        _warn.warn(message)
 
 
 def record(

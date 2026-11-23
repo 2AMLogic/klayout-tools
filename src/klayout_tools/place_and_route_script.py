@@ -15,11 +15,13 @@ import re
 from typing import Any
 
 from . import place_and_route_clock as _vclk
+from ._dont_use import effective_patterns
 from ._openroad_engine import _timing_violation_report_lines
 from ._tcl import tcl_literal as _tcl_literal
 from .place_and_route_hints import make_tracks_lines as _make_tracks_lines
 from .place_and_route_macro_halo import merge_macro_margins
 from .place_and_route_pins import pin_constraint_lines
+from .place_and_route_power_pins import applied_power_pins
 from .place_and_route_reports import detailed_route_lines, routing_completeness_lines
 from .place_and_route_request import PlaceAndRouteError
 from .place_and_route_unconstrained import (
@@ -535,8 +537,6 @@ def _power_delivery_lines(
     (``define_pdn_grid -macro``) are deliberately out of scope for this v1
     -- see the module docstring.
     """
-    from .place_and_route import _POWER_PIN_PATTERNS
-
     power_net = power["power_net"]
     ground_net = power["ground_net"]
 
@@ -547,12 +547,7 @@ def _power_delivery_lines(
         cell_library, power.get("tapcell_distance_um"), library
     )
 
-    pin_patterns = (
-        library["power_pins"]
-        if library is not None and "power_pins" in library
-        else _POWER_PIN_PATTERNS[cell_library]
-    )
-    for net_role, pin_pattern, is_primary in pin_patterns:
+    for net_role, pin_pattern, is_primary in applied_power_pins(cell_library, library):
         net = power_net if net_role == "power" else ground_net
         flag = ""
         if is_primary:
@@ -887,19 +882,12 @@ def _row_rail_lines(cell_library: str) -> list[str]:
     ]
 
 
-def _dont_use_lines(cell_library: str) -> list[str]:
-    """``set_dont_use`` lines for ``cell_library`` (issue #2378).
-
-    Reuses the same per-library table ``klt synthesize`` hands to ABC
-    (:data:`~klayout_tools.synthesize._ABC_DONT_USE_GLOBS`) so both commands
-    agree on the usable cell set. Each glob is brace-quoted (Tcl-safe: the
-    ``*``/``?``/``[]`` metacharacters reach OpenROAD's own pattern matcher
-    unexpanded). A library with no entry emits nothing.
-    """
-    from .synthesize import _ABC_DONT_USE_GLOBS
-
+def _dont_use_lines(
+    cell_library: str, library: dict[str, Any] | None = None
+) -> list[str]:
+    """Brace-quote the patterns so Tcl passes them unchanged to OpenROAD."""
     return [
-        f"set_dont_use {{{glob}}}" for glob in _ABC_DONT_USE_GLOBS.get(cell_library, ())
+        f"set_dont_use {{{glob}}}" for glob in effective_patterns(cell_library, library)
     ]
 
 
@@ -1076,7 +1064,7 @@ def _stage_script_lines(
     # the first resizer-driven step (`global_placement -timing_driven`,
     # `repair_*`, CTS, hold repair), and is re-emitted in every fresh OpenROAD
     # process rather than relying on any checkpoint to carry it.
-    lines += _dont_use_lines(cell_library)
+    lines += _dont_use_lines(cell_library, library)
     lines += _clock_lines(clock_port, clock_period_ns)
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout

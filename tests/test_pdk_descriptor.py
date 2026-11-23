@@ -365,3 +365,47 @@ def test_liberty_header_mismatch_and_duplicate(tmp_path, monkeypatch):
     (root / "d" / "g2.lib").write_text(_lib("B"), encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate cell 'B'"):
         pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+
+
+def _dm_lib(default: str, cell: str, *, output_limit: str | None = None) -> str:
+    """A one-output-cell ``.lib`` whose header pins ``default_max_transition``
+    (issue #6933); the output carries an explicit limit only when asked."""
+    limit = f"      max_transition : {output_limit};\n" if output_limit else ""
+    return (
+        'library (x) {\n  time_unit : "1ps";\n'
+        f"  default_max_transition : {default};\n"
+        f"  cell ({cell}) {{\n    pin (Y) {{\n"
+        '      direction : "output";\n'
+        f"{limit}      max_capacitance : 1;\n    }}\n  }}\n}}\n"
+    )
+
+
+def test_liberty_default_transition_conflict_context_and_scalar_recovery(
+    tmp_path, monkeypatch
+):
+    """The descriptor resolver keeps the library/corner context around the
+    enriched default_max_transition refusal, and the documented recovery --
+    a single prepared .lib on the scalar path -- resolves through it."""
+    root = _views_tree(tmp_path, monkeypatch)
+    (root / "d" / "g1.lib").write_text(_dm_lib("320", "A"), encoding="utf-8")
+    (root / "d" / "g2.lib").write_text(_dm_lib("4000", "C"), encoding="utf-8")
+    info = pdk.find_pdk(root=str(root))
+    with pytest.raises(ValueError) as exc:
+        pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    msg = str(exc.value)
+    assert "cannot merge 'lib' corner 'tt'" in msg
+    assert "'default_max_transition' differs" in msg
+    assert "g1.lib" in msg and "g2.lib" in msg
+    assert "cell 'C' output 'Y' in" in msg and "limited by 4000" in msg
+    assert "liberty.<cell_library>.<corner>" in msg
+
+    (root / "d" / "prepared.lib").write_text(
+        _dm_lib("320", "A", output_limit="4000"), encoding="utf-8"
+    )
+    desc = json.loads((root / "klt-pdk.json").read_text(encoding="utf-8"))
+    desc["liberty"]["lib"]["tt"] = "d/prepared.lib"
+    (root / "klt-pdk.json").write_text(json.dumps(desc), encoding="utf-8")
+    info = pdk.find_pdk(root=str(root))
+    path, corner = pdk_cells._descriptor_liberty(info, "lib", None, ValueError)
+    assert path == str(root / "d" / "prepared.lib")
+    assert corner == "tt"

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
+from .gen_base import GenError
 from .gen_describe import _bjt_array_describe
 from .gen_layer_params import _bjt_layer_params, _pdk_family
 
@@ -43,8 +44,6 @@ _TEXT_LAYER = (63, 0)
 
 def resolve_flavor(flavor: str) -> str:
     """Return the canonical request flavor for ``flavor`` ('' = default)."""
-    from .gen import GenError
-
     if not flavor:
         return DEFAULT_HBT_FLAVOR
     for key in HBT_FLAVOR_CELLS:
@@ -79,8 +78,6 @@ def load_hbt(
     empty cell -- when the stream or the cell is missing/unreadable.
     """
     import klayout.db as kdb
-
-    from .gen import GenError
 
     flavor = resolve_flavor(flavor)
     cell_name = HBT_FLAVOR_CELLS[flavor]
@@ -201,8 +198,6 @@ def bjt_array_layer_params(
 ) -> dict[str, Any]:
     """``bjt_array`` layer-params hook. sg13g2 draws no base layers (the PDK
     cell is placed instead); ``flavor`` is rejected on every other family."""
-    from .gen import GenError
-
     if _pdk_family(pdk_info["variant"]) == "sg13g2":
         return {}
     if params.get("flavor"):

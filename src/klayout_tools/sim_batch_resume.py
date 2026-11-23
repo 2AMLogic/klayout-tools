@@ -21,11 +21,12 @@ from typing import Any
 
 from . import sim_batch
 from .sim_batch_shards import mismatch_error, shard_map_mismatch
+from .sim_errors import SimError
 
 #: Diagnostic codes of a ``batch`` corner that never ran: a lost Spot shard,
 #: a job that failed or was stopped by the harness, or a poll that gave up
 #: while the job may still be running (``sim_batch._unrun_corner_report``).
-_UNRUN_BATCH_CODES = frozenset(
+UNRUN_BATCH_CODES = frozenset(
     {
         "lost_shard",
         "batch_job_failed",
@@ -38,7 +39,7 @@ _UNRUN_BATCH_CODES = frozenset(
 
 def _is_unrun_batch_corner(corner: dict[str, Any]) -> bool:
     """True when a corner report is a synthesized batch one (never ran)."""
-    return any(diag["code"] in _UNRUN_BATCH_CODES for diag in corner["diagnostics"])
+    return any(diag["code"] in UNRUN_BATCH_CODES for diag in corner["diagnostics"])
 
 
 def _record_batch_checkpoint(
@@ -99,8 +100,6 @@ def _load_resume_shard_map(
     different fingerprint/request, refuses with
     :data:`sim_batch.BATCH_SHARD_MANIFEST_CODE` -- never a silent attach of
     stale results."""
-    from .sim import SimError
-
     if not os.path.isfile(path):
         return None
     try:
@@ -177,7 +176,7 @@ def _collect_resume_entry(
         return None
     points = [by_id[unit] for unit in unit_ids]
     try:
-        corners, engine_version, environment = sim_batch._run_batch_job(
+        result = sim_batch._run_batch_job(
             config=config,
             job_id=job_id,
             corner_points=points,
@@ -191,6 +190,9 @@ def _collect_resume_entry(
             explicit_points=points,
             request_dir=request_dir,
             attach=True,
+        )
+        corners, engine_version, environment = sim_batch._require_shard_environment(
+            result
         )
     except sim_batch.BatchError as exc:
         print(

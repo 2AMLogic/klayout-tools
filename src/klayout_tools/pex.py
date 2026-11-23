@@ -243,6 +243,7 @@ from .pex_body_bias import (  # noqa: F401 -- re-exported, see pex_body_bias
     TIE_SOURCE_DECLARED,
     _body_bias_report,
 )
+from .pex_errors import PexError as PexError
 from .pex_netlist_text import (
     _device_model_counts,
     _dut_declares_a_circuit,
@@ -253,7 +254,10 @@ from .pex_netlist_text import (
     _reference_is_hierarchical,
     _subckt_interfaces,
 )
-from .pex_resistance_graph import _resistance_graph_echo
+from .pex_resistance_graph import (
+    _reject_resistance_graph_with_distributed_rc,
+    _resistance_graph_echo,
+)
 from .sim import SimError, load_request, run_sim
 from .spice_flatten import SpiceFlattenError, flatten_spice
 
@@ -325,27 +329,6 @@ MEASURE_COMMAND_TIMEOUT_S = 1800.0
 #: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
 #: measurement, so :func:`_row_status` needs no command-mode special case.
 _MEASUREMENT_STATUSES = ("pass", "fail", "error")
-
-
-class PexError(Exception):
-    """Raised when a `klt pex` run cannot be completed: a bad testbench
-    request, a testbench with no `.include`/`.inc` DUT reference, testbenches
-    that reference different schematic netlists, or a failure in the
-    extraction/simulation steps this command drives (wrapping the original
-    :class:`~klayout_tools.extract.ExtractError` /
-    :class:`~klayout_tools.sim.SimError`).
-
-    The CLI turns this into a clean stderr message + exit code 1, never a
-    traceback -- matching every other `klt` verb's error contract.
-
-    ``code`` is an optional machine-readable classification emitted as the
-    error envelope's ``error.code`` (``docs/json-contract.md``); ``None``
-    (every pre-#2889 error) keeps the envelope byte-identical.
-    """
-
-    def __init__(self, message: str, *, code: str | None = None) -> None:
-        super().__init__(message)
-        self.code = code
 
 
 def _validate_tie_nets(
@@ -1224,6 +1207,8 @@ _ERROR_STAGE_BY_CODE = {
     "timeout_budget_unreachable": "execute",
     "budget_exceeded": "execute",
     "pin_count_mismatch": "execute",
+    "pin_order_mismatch": "execute",
+    "flat_dut_mismatch": "execute",
     "lost_shard": "collect",
     "orphaned": "collect",
 }
@@ -1252,16 +1237,11 @@ def _side_error(
     code: str | None = None,
     measurement: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The additive ``error`` object of an errored ``delta[]`` row (issue
-    #3062): ``side``, ``stage``, ``message`` and, when the source has one,
-    ``code`` -- taken from that side's corner ``diagnostics[]`` (first
-    error-severity entry), else from the caller-supplied ``message``/``code``
-    (a ``SimError``), never invented. ``remote`` carries the side's
-    ``environment.remote`` (the batch job id) when present.
-
-    When neither exists, the blamed side's ``measurement`` may carry the
-    ``message`` a ``--measure-command`` harness recorded (issue #4555); the
-    stage is then ``"execute"``."""
+    """Describe why a delta row errored (#3062). Read the corner's first
+    error diagnostic, falling back to its first diagnostic. A caller-supplied
+    failure can supply the message and code directly. Include the side's
+    remote job metadata when available. A measurement-harness message alone
+    is an execute-stage error (#4555)."""
     remote = None
     if sim_report is not None:
         remote = (sim_report.get("environment") or {}).get("remote")
@@ -1404,14 +1384,13 @@ def _build_delta_rows(
 
 
 def _static_extracted_failure(
-    pin_count_mismatch: dict[str, Any] | None,
-    flat_dut_mismatch: dict[str, Any] | None,
-) -> tuple[str, str | None] | None:
-    """``(message, code)`` for a statically detected extracted-side mismatch."""
-    static = pin_count_mismatch or flat_dut_mismatch
-    if static is None or not static.get("detail"):
-        return None
-    return str(static["detail"]), "pin_count_mismatch" if pin_count_mismatch else None
+    **mismatches: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """Use the top-level mismatch name and detail for the skipped leg."""
+    for code, mismatch in mismatches.items():
+        if mismatch and mismatch.get("detail"):
+            return str(mismatch["detail"]), code
+    return None
 
 
 def _unextracted_delta_rows(
@@ -1422,6 +1401,7 @@ def _unextracted_delta_rows(
     failure_message: str | None = None,
     failure_code: str | None = None,
     device_only_leg: bool = False,
+    schematic_probes: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Delta rows for a testbench whose *extracted* side never produced a
     response at all (issue #1030's pin-count mismatch, surfaced as a
@@ -1438,6 +1418,8 @@ def _unextracted_delta_rows(
     for corner in schematic_report["corners"]:
         for measurement in corner["measurements"]:
             name = measurement["name"]
+            if name in schematic_probes:
+                continue
             row = {
                 **pex_sim_evidence.delta_labels(testbench, spec_row_prefix, name),
                 "corner_id": corner["corner_id"],
@@ -1472,6 +1454,7 @@ def _build_coverage(
     """Comparison coverage counts only rows with two comparable measurements."""
     checked = []
     skipped = []
+    inapplicable = []
     for row_index, row in enumerate(delta):
         # `row_index` (this row's own position in the report's `delta` list)
         # scopes the identity -- `spec_row` is a *display* label
@@ -1481,7 +1464,11 @@ def _build_coverage(
         # would otherwise collide as one "unique" work identity for two
         # genuinely separate comparisons.
         identity = work_id("comparison", row_index, row["corner_id"], row["spec_row"])
-        if row["status"] in {"pass", "fail"}:
+        if row.get("extracted_status") == "skipped":
+            inapplicable.append(
+                {"id": identity, "reason": "schematic_only_measurement"}
+            )
+        elif row["status"] in {"pass", "fail"}:
             checked.append(identity)
         else:
             skipped.append({"id": identity, "reason": "unavailable_comparison"})
@@ -1497,6 +1484,7 @@ def _build_coverage(
         **build_check_coverage(
             checked=checked,
             skipped=skipped,
+            inapplicable=inapplicable,
             nothing_checked_reasons=[REASON_NO_DELTA_ROWS] if not delta else None,
         ),
     }
@@ -2157,6 +2145,7 @@ def _prepare_dut_swapped_request(
     swapped_request["netlist"] = swapped_body_path
     if side in ("extracted", "device-only"):
         swapped_request["netlist_source"] = "extracted"
+        pex_sim_evidence.schematic_probes(swapped_request, omit=True)
 
     swapped_request_path = os.path.join(work_dir, f"{label}.{side}-request.json")
     with open(swapped_request_path, "w", encoding="utf-8") as handle:
@@ -2361,18 +2350,6 @@ def _device_only_parity(
     }
 
 
-def _reject_resistance_graph_with_distributed_rc(
-    resistance_graph: bool, distributed_rc: bool
-) -> None:
-    """Issue #4037: the ladder keeps the legacy per-level resistance."""
-    if resistance_graph and distributed_rc:
-        raise PexError(
-            "--resistance-graph cannot be combined with --distributed-rc: the "
-            "ladder keeps the legacy per-level resistance, so a critical net "
-            "would mix resistance sources"
-        )
-
-
 def _extract_device_only_leg(
     device_only_leg: bool,
     extracted_netlist_path: str,
@@ -2522,6 +2499,7 @@ def run_pex(
     distributed_rc: bool = False,
     resistance_graph: bool = False,
     resistance_graph_r_cut_ohm: float | None = None,
+    resistance_graph_caps: Mapping[str, int] | None = None,
     parasitic_variants: Sequence[str] | None = None,
     substrate_tie_ohms: float | None = None,
     mom_rlc_net: str | None = None,
@@ -2592,15 +2570,18 @@ def run_pex(
     extracted-side testbench (and the resulting `delta[]` rows) reflect it.
     ``None``/empty (the default) skips it entirely -- byte-identical to
     before this feature existed. ``critical_net_patterns``/
-    ``resistance_graph``/``resistance_graph_r_cut_ohm`` (``klt pex
-    --resistance-graph [--resistance-graph-r-cut OHM]``, issue #4037) forward
-    to ``klt extract``'s terminal-aware resistance graph and make the
-    extracted netlist use each ``resistance_source == "graph"`` net's
-    ``selected_resistance_ohm`` as its lumped R (``legacy`` nets keep the
-    legacy scalar). ``extraction.resistance_graph`` echoes the request and one
-    ``{net, net_id, resistance_source, selected_resistance_ohm,
-    legacy_resistance_ohm}`` entry per net, only when the flag was given --
-    otherwise the report and netlist are byte-identical. Combining it with
+    ``resistance_graph``/``resistance_graph_r_cut_ohm``/``resistance_graph_caps``
+    (``klt pex --resistance-graph [--resistance-graph-r-cut OHM]
+    [--resistance-graph-max-* N]``, issues #4037, #6964) forward to ``klt
+    extract``'s terminal-aware resistance graph and make the extracted netlist
+    use each ``resistance_source == "graph"`` net's ``selected_resistance_ohm``
+    as its lumped R (``legacy`` nets keep the legacy scalar). The caps raise
+    the graph builder's per-net size limits. ``extraction.resistance_graph``
+    echoes the request (``r_cut_ohm``, plus ``caps`` -- all four effective
+    values -- only when a cap was given) and one ``{net, net_id,
+    resistance_source, selected_resistance_ohm, legacy_resistance_ohm,
+    fallback_reason, terminals, pair_resistance_ohm}`` entry per net. Without
+    the graph flag, the report and netlist are byte-identical. Combining it with
     ``distributed_rc`` raises :class:`PexError` (the ladder stays on the
     legacy scalar, so a critical net would mix resistance sources).
 
@@ -2793,10 +2774,10 @@ def run_pex(
     ``device_cards_match``. Without it the report is byte-identical.
     Incompatible with ``measure_command`` (:class:`PexError`).
 
-    **``runset`` (issue #6559)** swaps the curated-deck extraction for ``klt
-    extract --engine klayout-runset`` (``deck_name`` is then ``None``): a
-    device-level leg with **no parasitics**, reported in ``extraction.engine``/
-    ``parasitics_carried``/``params_not_carried`` (see :mod:`.pex_runset`).
+    **``runset`` (issues #6559/#6606)** swaps the curated-deck extraction for
+    ``klt extract --engine klayout-runset``: no parasitics when ``deck_name`` is
+    ``None``, else that curated deck's parasitics attached by net correspondence;
+    ``extraction.engine``/``parasitics_carried`` say which (see :mod:`.pex_runset`).
     ``None`` -- the curated route -- leaves the envelope byte-identical.
 
     **Output-directory ownership (issue #2770).** The run owns its artifact
@@ -2851,72 +2832,48 @@ def run_pex(
         os.path.dirname(os.path.abspath(layout_path))
     )
 
+    # Validate side selectors on every testbench before running extraction.
+    requests = [_load_testbench_request(path) for path in testbench_paths]
+    probe_names = [pex_sim_evidence.schematic_probes(request) for request in requests]
+
     try:
-        extract_report = run_extract(
+        # Issue #6559/#6606: the engine dispatch (curated / runset / the
+        # `--deck`-under-runset merged route) and the option mapping live in
+        # `pex_runset.run_extract_leg` -- the module that owns them.
+        extract_report = pex_runset.run_extract_leg(
             layout_path,
             deck_name,
+            runset=runset,
             output=output,
             top=top,
             pdk_variant=pdk_variant,
             pdk_root=pdk_root,
-            # Issue #6559: the runset engine has no parasitics; every other
-            # option passes through and is refused by name by `run_extract`.
-            parasitics=runset is None,
-            # Issue #1558: `--deck-option`/`--pins` passthrough. `None` for
-            # both whenever the flags were never given, which is the exact
-            # `run_extract` call this module made before they existed.
-            deck_options=deck_options,
-            declared_pins=declared_pins,
-            # Issue #2854: `--rename-declared-pins` passthrough. `False`
-            # whenever the flag was never given, which is the exact
-            # `run_extract` call this module made before it existed.
-            rename_declared_pins=rename_declared_pins,
-            tie_declared_pins=tie_declared_pins,
-            # Issue #2686: `--label-layer` passthrough. `None` when the flag
-            # was never given -- the exact `run_extract` call made before it.
             label_layers=label_layers,
             device_models=device_models,
+            deck_options=deck_options,
+            declared_pins=declared_pins,
+            rename_declared_pins=rename_declared_pins,
+            tie_declared_pins=tie_declared_pins,
             critical_nets=critical_nets,
             critical_net_patterns=critical_net_patterns,
             critical_net_all=critical_net_all,
             critical_net_excludes=critical_net_excludes,
             distributed_rc=distributed_rc,
-            # Issue #4037: `False`/`None` whenever the flags were never given,
-            # which is the exact `run_extract` call made before they existed.
             resistance_graph=resistance_graph,
             resistance_graph_r_cut_ohm=resistance_graph_r_cut_ohm,
-            emit_selected_resistance=resistance_graph,
+            resistance_graph_caps=resistance_graph_caps,
             parasitic_variants=parasitic_variants,
             substrate_tie_ohms=substrate_tie_ohms,
             mom_rlc_net=mom_rlc_net,
             mom_rlc_resistance_ohm=mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=mom_rlc_inductance_nh,
-            **pex_runset.extract_options(runset),
         )
     except ExtractError as exc:
         raise PexError(f"extraction failed: {exc}") from exc
 
-    # Issue #1525: `run_extract`'s own `netlist_path` field echoes `-o`/
-    # `--output` back exactly as the caller spelled it (relative stays
-    # relative) -- fine for `klt extract`'s own standalone report (still
-    # resolves against this process's cwd, which never changes), but this
-    # module bakes the same string *verbatim, as text* into the generated
-    # extracted-side testbench's `.include` line (`_prepare_extracted_request`
-    # -> `_rewrite_dut_include`). That testbench is then handed to `run_sim`,
-    # whose per-corner `ngspice -b` invocation resolves a relative `.include`
-    # against the *including file's own directory* (a corner-scoped
-    # subdirectory nested under `work_dir`/`--outdir`), not this process's
-    # cwd -- so a relative `netlist_path` resolves correctly only by
-    # coincidence (`work_dir` happening to equal the caller's cwd). Resolving
-    # to an absolute path here, once, immediately after extraction and before
-    # `work_dir` is even computed (so still unambiguously relative to the
-    # caller's own invocation cwd), makes the `.include` line resolve
-    # correctly regardless of `-o`/`--outdir`'s own relative/absolute shape.
-    # `env_provenance.repo_relative_path` (issue #1261) still renders this run's
-    # own `netlist`/`reference_netlist` JSON fields as repo-relative
-    # `{path, scope}` -- an absolute `extracted_netlist_path` does not leak
-    # into this module's user-facing report.
+    # Use an absolute DUT include: each swapped bench runs in a corner workdir.
+    # The report's scoped paths are produced separately from these engine paths.
     extracted_netlist_path = os.path.abspath(extract_report["netlist_path"])
 
     device_only_netlist_path, device_only_parity = _extract_device_only_leg(
@@ -2983,39 +2940,20 @@ def run_pex(
     # simulates -- so the digests describe the files this run used.
     input_identity: list[dict[str, Any]] = []
 
-    # Issue #2478: in `--measure-command` mode there is no testbench at all,
-    # so the loop below is a no-op (`testbench_paths` is validated empty
-    # above) and the schematic DUT is the caller's own `--reference-netlist`
-    # instead of a `.include` target. It still has to *be* a DUT: the same
-    # `_dut_declares_a_circuit` check testbench mode applies to its
-    # `.include` target (Gap 1, issue #1255) applies here for the same
-    # reason -- a `reference_netlist` naming a parameter/corner file with no
-    # circuit of its own would make the schematic leg (and therefore every
-    # `delta[]` row) meaningless while the report still looked like a real
-    # comparison.
-    # Issue #5477: `--extract-only` may now carry one too, for the same
-    # "it still has to *be* a DUT" reason (see `run_pex`). Testbench mode
-    # never reaches here with a reference (`_validate_measure_mode` rejects
-    # it), so this one condition covers both modes that can supply one.
+    # Command and extraction-only modes can supply a schematic DUT directly.
     measured_reference_netlist = (
         _resolve_measured_reference(reference_netlist)
         if reference_netlist is not None
         else None
     )
 
-    # First pass: resolve every testbench's `.include`d DUT reference and
-    # validate them *before* running any simulation at all (extraction has
-    # already run above, but every `klt sim` call is comparatively
-    # expensive) -- a testbench with no `.include` directive, or a set of
-    # testbenches that disagree on which schematic DUT they reference, is
-    # reported as a fast, cheap error rather than only surfacing after every
-    # testbench has already been simulated on both sides.
+    # Check every DUT include before simulation. A missing include or testbenches
+    # pointing at different DUTs must fail before launching any measurement leg.
     for index, testbench_path in enumerate(testbench_paths):
         label = f"{index:02d}-{os.path.splitext(os.path.basename(testbench_path))[0]}"
         labels.append(label)
 
-        request = _load_testbench_request(testbench_path)
-
+        request = requests[index]
         request_dir = os.path.dirname(os.path.abspath(testbench_path))
         schematic_body_path = _resolve_relative(request["netlist"], request_dir)
         if not os.path.isfile(schematic_body_path):
@@ -3346,10 +3284,23 @@ def run_pex(
 
         stem = os.path.splitext(os.path.basename(testbench_path))[0]
         spec_row_prefix = None if single_testbench else stem
+        probes = probe_names[index]
+        delta.extend(
+            pex_sim_evidence.schematic_probe_rows(
+                probes,
+                schematic_report,
+                extracted_report,
+                testbench=stem,
+                prefix=spec_row_prefix,
+                device_only_leg=device_only_leg,
+            )
+        )
         if extracted_report is None:
             if extracted_failure is None:
                 extracted_failure = _static_extracted_failure(
-                    pin_count_mismatch, flat_dut_mismatch
+                    pin_count_mismatch=pin_count_mismatch,
+                    flat_dut_mismatch=flat_dut_mismatch,
+                    pin_order_mismatch=pin_order_mismatch,
                 )
             delta.extend(
                 _unextracted_delta_rows(
@@ -3358,6 +3309,7 @@ def run_pex(
                     schematic_report=schematic_report,
                     failure_message=extracted_failure[0] if extracted_failure else None,
                     failure_code=extracted_failure[1] if extracted_failure else None,
+                    schematic_probes=probes,
                     device_only_leg=device_only_leg,
                 )
             )
@@ -3423,7 +3375,10 @@ def run_pex(
                 ),
                 "corner_count": extracted_report["corner_count"],
                 "measurement_names": [
-                    m["name"] for m in extracted_report["measurements"]
+                    m["name"]
+                    for m in (schematic_report if probes else extracted_report)[
+                        "measurements"
+                    ]
                 ],
                 **pex_sim_evidence.project_testbench_sides(
                     schematic_report, extracted_report
@@ -3545,7 +3500,9 @@ def run_pex(
             **(
                 {
                     "resistance_graph": _resistance_graph_echo(
-                        parasitics, resistance_graph_r_cut_ohm
+                        parasitics,
+                        resistance_graph_r_cut_ohm,
+                        resistance_graph_caps,
                     )
                 }
                 if resistance_graph

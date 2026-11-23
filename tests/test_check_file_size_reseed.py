@@ -107,6 +107,27 @@ def test_reseed_to_comparison_tree_size_passes(repo):
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("base_lines", [600, 650], ids=["pr-growth", "inherited"])
+def test_mismatched_size_points_to_the_pr_comparison(repo, base_lines):
+    path = "src/big.py"
+    base = _commit(
+        repo,
+        {path: _big(base_lines), "file-size-baseline.json": _baseline_doc({path: 600})},
+        "base",
+    )
+    _stage(repo, {path: _big(650)})
+
+    result = _run(repo, "--comparison-rev", base)
+
+    assert result.returncode == 1
+    assert (
+        "src/big.py: ledger (600 lines) must equal file size (650 lines)"
+        in result.stderr
+    )
+    assert "base and merge" in result.stderr and "checkout log" in result.stderr
+    assert ("grew to 650" in result.stderr) == (base_lines == 600)
+
+
 def test_reseed_ceiling_above_comparison_tree_size_fails(repo):
     comparison = _lagging_baseline_repo(repo)
     _stage(repo, {"file-size-baseline.json": _baseline_doc({"src/big.py": 700})})

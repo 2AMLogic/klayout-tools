@@ -1,0 +1,1 @@
+- `klt cell-hash --cell NAME LAYOUT` prints the canonical geometry digest for a foundry-cell exception from a standalone or embedded cell in a GDSII or OASIS layout. (#6946)

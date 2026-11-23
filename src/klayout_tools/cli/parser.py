@@ -14,11 +14,11 @@ from .. import (
 )
 from ..equiv import SUPPORTED_ENGINES as SUPPORTED_EQUIV_ENGINES
 from ..equiv import SUPPORTED_SIM_BACKENDS
-from ..extract_parasitics import parse_parasitic_variants
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
     array_check_cmd,
+    cell_hash_cmd,
     cells_cmd,
     clip_cmd,
     corner_matrix_cmd,
@@ -72,9 +72,11 @@ from . import (
     yield_sensitivity_cmd,
     yield_threshold_cmd,
 )
+from ._arg_types import _parasitic_variant_arg
 from ._argv_flags import _REQUEST_ARGV_FLAG_EXCLUDE as _REQUEST_ARGV_FLAG_EXCLUDE
 from ._argv_flags import _record_request_argv_flags as _record_request_argv_flags
 from ._argv_flags import _require_one_input as _require_one_input
+from ._deck_hash_parser_args import add_expect_deck_hash_arg
 from ._doc_paths import DocArgumentParser
 from ._drc_parser_args import add_klayout_app_args, add_rule_listing_args
 from ._lvs_parser_args import add_lvs_parser
@@ -106,13 +108,6 @@ def _add_format_arg(
     to override for the few subcommands with non-standard format options.
     """
     parser.add_argument("--format", choices=list(choices), default="text", help=help)
-
-
-def _parasitic_variant_arg(value: str) -> str:
-    """argparse ``type=`` for ``--parasitic-variant`` (issue #3056): a value
-    outside the closed grammar is a usage error (exit 2)."""
-    parse_parasitic_variants([value], argparse.ArgumentTypeError)
-    return value
 
 
 def _drc_deck_names_str() -> str:
@@ -231,14 +226,13 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", metavar="<command>")
 
     _add_layers_parser(subparsers)
-
     _add_stats_parser(subparsers)
     add_diff_parser(subparsers, _add_format_arg)
 
     add_economy_parser(subparsers, _add_format_arg)
 
     _add_cells_parser(subparsers)
-
+    cell_hash_cmd.add_parser(subparsers, _add_format_arg)
     _add_clip_parser(subparsers)
     add_components_parser(subparsers, _add_format_arg)
 
@@ -352,7 +346,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_yield_parser(subparsers)
 
     _add_yield_samples_parser(subparsers)
-    _add_yield_csv_parser(subparsers)
+    yield_csv_cmd.add_parser(subparsers, _add_format_arg)
 
     _add_yield_campaign_parser(subparsers)
 
@@ -429,8 +423,7 @@ def _add_sta_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     sta_parser.add_argument("request", help="path to a klt sta request JSON file")
     _add_pdk_args(sta_parser)
-    _add_format_arg(sta_parser)
-    sta_parser.set_defaults(func=sta_cmd.run)
+    sta_cmd.configure(sta_parser, _add_format_arg, _add_flow_verify_args)
 
 
 def _add_eval_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -629,9 +622,9 @@ def _add_report_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Read one or more `klt` JSON envelope files (or '-' for stdin) "
             "and render them into a single combined report. Each envelope's "
-            "kind (a klt drc/lvs-style violations/mismatches report, a klt "
-            "layout-metrics-style key-metrics report, or a captured error "
-            "envelope) is detected from its own JSON structure, per "
+            "kind (a klt drc/lvs-style report, a klt sim/yield-style "
+            "measurements rollup, a klt layout-metrics-style report, or a "
+            "captured error envelope) is detected from its own JSON structure, per "
             "docs/json-contract.md -- not hardcoded per verb. "
             "`--format github-summary` emits GitHub Flavored Markdown "
             "suitable for `$GITHUB_STEP_SUMMARY`. See docs/cli/report.md."
@@ -1073,79 +1066,6 @@ def _add_yield_threshold_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(parser)
     parser.set_defaults(func=yield_threshold_cmd.run)
-
-
-def _add_yield_csv_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``yield-csv`` verb (issue #2931).
-
-    Derives a `klt yield` sample-set document from a long-format per-draw
-    Monte Carlo CSV (one row per draw) so a non-`klt sim` harness needs no
-    bespoke converter. Pure transformation; needs no native extension.
-    """
-    parser = subparsers.add_parser(
-        "yield-csv",
-        help="per-draw Monte Carlo CSV -> a `klt yield` sample-set document",
-        description=(
-            "Derive a `klt yield` sample-set document from a long-format "
-            "per-draw Monte Carlo CSV: one measurement per --group-by value, "
-            "samples from --value. Rows whose --status-col is not --pass-value, "
-            "and passing rows with an empty/non-numeric/non-finite value, count "
-            "as errored. The --format json output is the sample-set document "
-            "(plus a `derivation` block with the CSV path and SHA-256 hash); "
-            "redirect it to a file and pass that to `klt yield`. See "
-            "docs/cli/yield.md's 'Deriving a sample set from a per-draw CSV'."
-        ),
-    )
-    parser.add_argument("csv", help="path to the per-draw CSV (UTF-8, header row)")
-    parser.add_argument(
-        "--group-by",
-        dest="group_by",
-        required=True,
-        metavar="COL",
-        help="column whose distinct values each become one measurement",
-    )
-    parser.add_argument(
-        "--value", required=True, metavar="COL", help="column holding the draw's value"
-    )
-    parser.add_argument(
-        "--status-col",
-        dest="status_col",
-        default=None,
-        metavar="COL",
-        help="column holding the draw's status (requires --pass-value)",
-    )
-    parser.add_argument(
-        "--pass-value",
-        dest="pass_value",
-        default=None,
-        metavar="V",
-        help="status value marking a good draw; any other value counts errored",
-    )
-    parser.add_argument(
-        "--draw-col",
-        dest="draw_col",
-        default=None,
-        metavar="COL",
-        help="draw-index column; a repeated (group, draw) pair is rejected",
-    )
-    parser.add_argument(
-        "--unit", default=None, help="unit recorded on each measurement"
-    )
-    parser.add_argument(
-        "--min", type=float, default=None, help="limits.min per measurement"
-    )
-    parser.add_argument(
-        "--max", type=float, default=None, help="limits.max per measurement"
-    )
-    parser.add_argument(
-        "--target-yield",
-        dest="target_yield",
-        type=float,
-        default=None,
-        help="limits.target_yield per measurement",
-    )
-    _add_format_arg(parser)
-    parser.set_defaults(func=yield_csv_cmd.run)
 
 
 def _add_yield_campaign_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2136,7 +2056,7 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(synthesize_parser)
-    synthesize_parser.set_defaults(func=synthesize_cmd.run)
+    synthesize_cmd.configure(synthesize_parser)  # --yosys-timeout-s + func=run
 
 
 def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -2264,7 +2184,7 @@ def _add_flow_verify_args(
             "provenance.klt_version/klayout_version/pdk.version, "
             "engine_version, and run-scoped bookkeeping (see "
             f"{docs}). Requires --check; a clean error (exit 1) otherwise"
-            + (f" {rerun_extra}" if rerun_extra else "")
+            + (f". {rerun_extra}" if rerun_extra else "")
         ),
     )
 
@@ -2560,14 +2480,14 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
     decks_parser = pdk_sub.add_parser(
         "decks",
-        help="list the KLayout DRC decks a PDK ships and the -rd globals each reads",
+        help="list a PDK's KLayout DRC decks/LVS runsets and their -rd globals",
         description=(
-            "List the `.lydrc`/`.drc` KLayout DRC deck files under the "
-            "resolved variant's libs.tech/klayout/drc, which one `klt drc "
-            "--pdk` runs (`is_default`), and a best-effort static scan of the "
-            "`-rd` globals each consumes (`required_by_caller`, `default`). "
-            "Use it to pick a sibling deck for `klt drc --deck-file` and the "
-            "`--deck-var` flags it needs."
+            "List the `.lydrc`/`.drc` KLayout DRC decks and `.lvs` LVS runsets "
+            "(kind `lvs`) under the resolved variant's libs.tech/klayout, which "
+            "one `klt drc`/`klt lvs --pdk` runs (`is_default`), and a static "
+            "scan of the `-rd` globals each consumes (`required_by_caller`, "
+            "`default`). Use it to pick a sibling deck for `klt drc --deck-file` "
+            "and the `--deck-var` flags it needs; filter on `kind` for DRC only."
         ),
     )
     _add_pdk_args(
@@ -3492,6 +3412,7 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "with the layout. See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
+    add_expect_deck_hash_arg(drc_parser)
     drc_parser.add_argument(
         "--allow-missing-host-tools",
         dest="allow_missing_host_tools",
@@ -4200,20 +4121,12 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "the JSON contract."
         ),
     )
-    # `file`/`spec` (positional) and `--check` (issue #3060) are mutually
-    # exclusive input sources, as in `klt lvs`. `file` and `spec` are optional
-    # positionals, so "neither given" is enforced in `erc_cmd.run` (exit 1)
-    # rather than here.
     erc_input_group = erc_parser.add_mutually_exclusive_group()
     erc_input_group.add_argument(
         "file",
         nargs="?",
         default=None,
-        help=(
-            "path to a routed GDSII or OASIS layout file. Required unless "
-            "--check is given (the input paths are then read from the "
-            "committed report instead)"
-        ),
+        help=("path to the routed GDSII or OASIS layout for an ERC run"),
     )
     erc_parser.add_argument(
         "spec",
@@ -4224,7 +4137,7 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "mapping GDS layer/datatype pairs to fabrication-order "
             'conductor roles -- stackup[0] sets "role": "gate" -- and '
             "an optional 'vias' array -- see docs/cli/erc.md's 'Spec file' "
-            "section. Required unless --check is given"
+            "section. Required for an ERC run"
         ),
     )
     erc_parser.add_argument(
@@ -4336,6 +4249,11 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "consistent, 3 if drifted -- see docs/cli/erc.md, "
             "'--check / --rerun'"
         ),
+    )
+    erc_input_group.add_argument(
+        "--pnr-response",
+        metavar="RUN",
+        help="generate a Sky130 HD supply spec from a routed place-and-route response",
     )
     erc_input_group.add_argument(
         "--validate-spec",
