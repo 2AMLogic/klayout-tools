@@ -6470,9 +6470,10 @@ sim` reduces it in Python once every corner has reported:
   an older runner image does not know the form). The client reduces once the
   corners are back, so no runner upgrade is needed.
 - **Out of scope.** Arbitrary cross-corner expressions, reductions across
-  separate requests or benches (#6969; `klt sim-merge` does not re-derive),
-  Monte Carlo statistics (#6968), and per-corner intra-waveform reductions
-  (#6913).
+  separate requests or benches (#6969), Monte Carlo statistics (#6968), and
+  per-corner intra-waveform reductions (#6913). `klt sim-merge` does not
+  re-derive: it refuses a report that carries a `derive` entry, since the
+  entry rolled up over no corner would read as a pass (#7225).
 
 ## Eye / phase-fold measurement (`measurements[].eye`)
 
