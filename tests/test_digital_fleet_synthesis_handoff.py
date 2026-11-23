@@ -35,7 +35,7 @@ def test_fleet_handoff_uses_one_current_isolated_synthesis(tmp_path, monkeypatch
         assert netlist.is_file()  # The synthesis gate must already have run.
         assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", observed[-1]["run_id"])
         assert netlist.parent.name == observed[-1]["run_id"]
-        return {"stage_reached": "route", "die_area_um2": 100.0}
+        return {"status": "ok", "stage_reached": "route", "die_area_um2": 100.0}
 
     monkeypatch.setattr(evaluate, "run_synthesize", record_synthesis)
     monkeypatch.setattr(evaluate, "run_place_and_route", route)
