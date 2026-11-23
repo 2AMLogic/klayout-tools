@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from klayout_tools.coverage import work_id
 from klayout_tools.signoff import build_tier_report
 from test_signoff import (
     ERC_BOX_SELECTED_WELL_CLASS_SPEC,
@@ -240,3 +241,37 @@ def test_item_11_tie_coverage_gate_preserves_the_legacy_no_coverage_block_path(
     )
 
     assert _item_11(result)["status"] == "met"
+
+
+@pytest.mark.parametrize(
+    ("name_field", "identity"),
+    [({}, "tie1"), ({"name": None}, "None"), ({"name": 3}, "3"), ({"name": ""}, "")],
+)
+@pytest.mark.parametrize("covered", [False, True])
+def test_item_11_checks_the_producers_tie_identity(
+    tmp_path, name_field, identity, covered
+):
+    first, second = ERC_BOX_SELECTED_WELL_CLASS_SPEC["ties"]
+    second = {key: value for key, value in second.items() if key != "name"}
+    spec = {
+        **ERC_BOX_SELECTED_WELL_CLASS_SPEC,
+        "ties": [first, {**second, **name_field}],
+    }
+    checked = [work_id("erc.missing_tie", first["name"])]
+    if covered:
+        checked.append(work_id("erc.missing_tie", identity))
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(checked=checked, missing_tie_checked=True),
+    }
+    evidence = _power_delivery_evidence(
+        tmp_path, kind="analog", erc_envelope=envelope, erc_spec=spec
+    )
+    item = _item_11(
+        build_tier_report(_manifest(kind="analog", evidence={"11": evidence}))
+    )
+    if covered:
+        assert item["status"] == "met"
+    else:
+        assert item["reason"] == "tie_coverage_incomplete"
+        assert item["detail"] == {"ties_unchecked": [identity]}

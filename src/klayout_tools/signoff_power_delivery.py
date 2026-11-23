@@ -507,11 +507,9 @@ def _erc_supply_spec(
         # pinned by the hash check above, which is what makes the
         # work-identity comparison trustworthy.
         "tie_names": [
-            entry["name"]
-            for entry in tie_entries
+            str(entry.get("name", f"tie{index}"))  # erc_spec._validate_ties
+            for index, entry in enumerate(tie_entries)
             if isinstance(entry, dict)
-            and isinstance(entry.get("name"), str)
-            and entry["name"]
         ],
         # Issue #2234: the spec's own `ties_disclosure.reason`, read purely
         # for a human-readable `detail` when item 11 renders one of the
