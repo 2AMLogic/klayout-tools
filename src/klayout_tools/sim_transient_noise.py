@@ -7,7 +7,7 @@ contains. This module owns everything ``klt sim`` says or does about them:
   ``environment.transient_noise`` / ``environment.monte_carlo`` disclosures
   built from the scan;
 * ``options.transient_noise_seed`` (#5772): validation, the ``setseed N``
-  control line, the checkpoint-fingerprint key and the off-host echo check.
+  control line and the off-host echo check.
 
 Split out of ``sim`` so the per-file size ratchet
 (``scripts/check_file_size_baseline.py``) holds; ``sim`` re-imports the names
@@ -23,6 +23,7 @@ import sys
 from typing import Any
 
 from . import sim_steps
+from ._spice_text import logical_lines
 from .sim_errors import SimError
 
 _NOISE_SOURCE_RE = re.compile(r"\b(trnoise|trrandom)\s*\(", re.IGNORECASE)
@@ -122,11 +123,9 @@ def _noise_sources_in_text(netlist_text: str) -> list[tuple[str, str]]:
     """``(lower-cased name, keyword)`` of every independent ``V*``/``I*``
     source declaring a ``trnoise``/``trrandom`` waveform (issue #2963),
     including inside ``.subckt`` bodies. Lexical, via
-    ``sim._logical_netlist_lines``."""
-    from ._spice_text import logical_lines as _logical_netlist_lines
-
+    the shared SPICE logical-line parser."""
     found: list[tuple[str, str]] = []
-    for line in _logical_netlist_lines(netlist_text):
+    for line in logical_lines(netlist_text):
         if line[0].lower() not in ("v", "i"):
             continue
         match = _NOISE_SOURCE_RE.search(line)

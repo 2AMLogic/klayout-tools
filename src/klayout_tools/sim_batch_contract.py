@@ -175,11 +175,7 @@ REQUEST_FEATURE_MIN_RUNNER_VERSION: dict[str, str | None] = {
     # older runner would drop the measurement). Untagged; its runner-side
     # detector is the "search" row of _RUNNER_REQUEST_FEATURES.
     "measurements[].search": None,
-    # options.transient_noise_seed (#5772), untagged: an older runner would
-    # silently drop the option and return unpinned transient-noise streams
-    # under a seed declaration. No pre-launch detector -- the post-run
-    # `check_transient_noise_seed_echo` on the collected report is the
-    # enforcement, and it fails the run by name.
+    # #5772: verify the seed in the collected report until a runner release is tagged.
     "options.transient_noise_seed": None,
     # Lossless supply corner_id spelling (#5870), 2026-11-16, after v0.9.0:
     # a supply_v rail value finer than three decimals is spelled at full
