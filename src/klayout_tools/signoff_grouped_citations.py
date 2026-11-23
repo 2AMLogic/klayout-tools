@@ -25,6 +25,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .signoff_base import _citation_label
+from .signoff_multi_member import with_member_coverage
+from .signoff_unmet_reasons import _REASON_INVALID_EVIDENCE
+
 
 def normalize_evidence_groups(raw: Any) -> list[list[dict[str, Any]]] | None:
     """Normalize a **compound** item's manifest entry (issue #2025, T1 item
@@ -152,7 +156,6 @@ def grade_power_delivery_groups(
     facts about a proven grid), and the item-level ``citation`` is the
     leading group's -- the contract every pre-existing consumer reads.
     """
-    from .signoff import _citation_label
     from .signoff_power_delivery import _grade_power_delivery
 
     graded = [
@@ -213,7 +216,6 @@ def grade_grouped_power_delivery(
     (issue #5031; :data:`~klayout_tools.signoff_multi_member.MEMBER_COUNT_ITEMS`
     includes item 11's grouped form).
     """
-    from .signoff import _REASON_INVALID_EVIDENCE, with_member_coverage
     from .signoff_power_delivery import _grade_power_delivery
 
     groups = normalize_evidence_groups(raw_entry)

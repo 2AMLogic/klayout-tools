@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 from ._layout import complement_well_tie as _complement_well_tie
 from ._layout import region as _region
 from .decks import ExtractionDeck
+from .extract_abstract_pin_join import AbstractPinJoins, tied_instances
 from .extract_spef import ExtractError
 from .lef_header import read_lef_macro_pin_ports
 from .pdk import load_gds_to_lef_layer_map, resolve_klayout_layer_map
@@ -1338,11 +1339,13 @@ def _def_net_name_probes(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     metal_layers: tuple[tuple[int, int] | None, ...],
+    *,
+    all_islands: bool = False,
 ) -> dict[str, list[tuple[int, kdb.Point]]]:
-    """Per distinct DEF net name (:data:`_DEF_NET_NAME_PROPERTY_ID`), up to
-    :data:`_DEF_NET_NAME_PROBE_CANDIDATES` ``(metal_index, point)`` probe
-    candidates taken from ``top_cell``'s own routed-metal shapes carrying that
-    name, **plus** the same shapes one level down in each of ``top_cell``'s
+    """Collect ``(metal_index, point)`` probes for each DEF name. Abstract pin
+    joins request all islands. Ordinary naming uses the first
+    :data:`_DEF_NET_NAME_PROBE_CANDIDATES` candidates. Both read the top
+    cell's labelled routed-metal shapes and the same shapes in each of its
     direct child cell instances (issue #951, extended for composed macros by
     issue #1689). ``metal_layers`` is ``deck.metals`` -- the same ``(layer,
     datatype)`` list :func:`_extract_netlist` builds its flattened
@@ -1434,7 +1437,7 @@ def _def_net_name_probes(
                 iterator.next()
                 continue
             candidates = probes.setdefault(net_name, [])
-            if len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
+            if not all_islands and len(candidates) >= _DEF_NET_NAME_PROBE_CANDIDATES:
                 iterator.next()
                 continue
             box = shape.bbox().transformed(iterator.trans())
@@ -1474,7 +1477,7 @@ def _apply_def_net_name_overrides(
     unresolved: list[str] = []
     for def_name, candidates in probes.items():
         net = None
-        for metal_index, point in candidates:
+        for metal_index, point in candidates[:_DEF_NET_NAME_PROBE_CANDIDATES]:
             if metal_index >= len(metals):
                 continue
             net = l2n.probe_net(metals[metal_index], point)
@@ -1629,6 +1632,9 @@ def _probe_abstract_pin_net(
     l2n: kdb.LayoutToNetlist,
     points: list[tuple[kdb.Point, str | None]],
     probe_layers: list[tuple[str, kdb.Region]],
+    joins: AbstractPinJoins,
+    instance: str,
+    pin: str,
 ) -> kdb.Net | None:
     """The best-resolved net across every candidate access point for one
     abstracted-cell pin (issue #1181).
@@ -1676,17 +1682,15 @@ def _probe_abstract_pin_net(
     resolved primary candidate; see :func:`_abstract_pin_net_score` for the
     full derivation of both reported impossible bindings.
     """
-    best_net: kdb.Net | None = None
-    best_score: tuple[int, int] | None = None
+    candidates: dict[int, kdb.Net] = {}
     for point, role in points:
         net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
-        if net is None:
-            continue
-        score = _abstract_pin_net_score(net)
-        if best_score is None or score > best_score:
-            best_net = net
-            best_score = score
-    return best_net
+        if net is not None:
+            candidates.setdefault(net.cluster_id, net)
+    winner = max(candidates.values(), key=_abstract_pin_net_score, default=None)
+    if winner is not None:
+        joins.record(instance, pin, winner, candidates)
+    return winner
 
 
 def _tied_abstract_pin_warning(
@@ -1910,6 +1914,7 @@ def _wire_abstract_cells(
     ) = None,
     global_net_ports_by_cell: dict[int, int] | None = None,
     lef_layer_roles: dict[str, str] | None = None,
+    def_probes: dict[str, list[tuple[int, kdb.Point]]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
@@ -2011,7 +2016,8 @@ def _wire_abstract_cells(
 
     report: list[dict[str, Any]] = []
     warnings: list[str] = []
-    tied: list[tuple[str, str, str, list[str], int]] = []
+    joins = AbstractPinJoins()
+    wired: list[tuple[kdb.SubCircuit, dict[str, int]]] = []
 
     for cell_index, transforms in grouped.items():
         cell = layout.cell(cell_index)
@@ -2076,13 +2082,7 @@ def _wire_abstract_cells(
         for index, trans in enumerate(transforms):
             instance_name = _sanitize_instance_name(f"{cell.name}_{index}")
             subcircuit = top_circuit.create_subcircuit(black_box_circuit, instance_name)
-            # Grouped by the resolved net's `expanded_name()` (unique per net
-            # within `top_circuit`, and stable for an unnamed net's `$<n>`
-            # placeholder) so the post-wiring self-check below can spot two
-            # separately declared pins of one instance landing on one net --
-            # issue #1366's single observable signature for both of its
-            # reported impossible bindings.
-            pins_by_net: dict[str, list[str]] = {}
+            wired.append((subcircuit, pin_ids))
             for pin_name, points in pins:
                 global_points = [(trans * point, role) for point, role in points]
                 # A LEF-merged substrate pin is the cell's body, not a point
@@ -2092,7 +2092,9 @@ def _wire_abstract_cells(
                 net = (
                     _substrate_net(top_circuit, deck)
                     if pin_name in substrate_pins
-                    else _probe_abstract_pin_net(l2n, global_points, probe_layers)
+                    else _probe_abstract_pin_net(
+                        l2n, global_points, probe_layers, joins, instance_name, pin_name
+                    )
                 )
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
@@ -2103,16 +2105,6 @@ def _wire_abstract_cells(
                         "any parent net"
                     )
                 subcircuit.connect_pin(pin_ids[pin_name], net)
-                pins_by_net.setdefault(net.expanded_name(), []).append(pin_name)
-            for net_name, pin_names in pins_by_net.items():
-                if len(pin_names) > 1:
-                    # `len(pins)` is this instance's *declared* pin count (every
-                    # instance of one cell type shares the resolved pin list),
-                    # i.e. the denominator `_collapsed_abstract_pin_warning`
-                    # measures the dominant net's share against -- issue #2695.
-                    tied.append(
-                        (instance_name, cell.name, net_name, pin_names, len(pins))
-                    )
 
         report.append(
             {
@@ -2124,6 +2116,9 @@ def _wire_abstract_cells(
             }
         )
 
+    joins.read_def_names(l2n, probe_layers, def_probes or {})
+    warnings.extend(joins.apply(top_circuit))
+    tied = tied_instances(wired)
     warnings.extend(_tied_abstract_pin_warning(tied))
     warnings.extend(_collapsed_abstract_pin_warning(tied))
     report.sort(key=lambda entry: entry["cell"])

@@ -17,12 +17,13 @@ and ``signoff_fleet_check.py`` owns the ``--check`` drift comparison of a
 committed report against a fresh one (issue #2249).
 
 Everything this module needs back from ``signoff.py``
-(:class:`SignoffError`, :func:`build_tier_report`, the fleet-envelope
-schema version and build identity) is imported into the function that
-needs it -- deferred into each function body, not at module level,
-because ``signoff.py`` imports this module at its own top level (the
-same circular-import hazard ``signoff_power_delivery.py`` documents for
-its own back-references into ``signoff.py``).
+(:func:`build_tier_report`, the build identity) is imported into the
+function that needs it -- deferred into each function body, not at module
+level, because ``signoff.py`` imports this module at its own top level
+(the same circular-import hazard ``signoff_power_delivery.py`` documents
+for its own back-references into ``signoff.py``). The error contract, the
+fleet-envelope schema version and the JSON reader come from the
+:mod:`.signoff_base` leaf (issue #7371), imported at module level.
 """
 
 from __future__ import annotations
@@ -31,6 +32,11 @@ from pathlib import Path
 from typing import Any
 
 from .design_evidence_tiers import doc_source_label
+from .signoff_base import (
+    FLEET_REPORT_SCHEMA_VERSION,
+    SignoffError,
+    _read_json_source,
+)
 
 # The per-block blocker reduction and the ``--check`` drift comparison
 # live in the sibling modules below; both are re-imported here *by name*
@@ -269,12 +275,7 @@ def build_fleet_report(
     so it aborts the whole roll-up rather than rendering that one block as
     silently unmet.
     """
-    from .signoff import (
-        FLEET_REPORT_SCHEMA_VERSION,
-        SignoffError,
-        _build_identity,
-        build_tier_report,
-    )
+    from .signoff import _build_identity, build_tier_report
 
     if not isinstance(fleet, dict):
         raise SignoffError(
@@ -390,8 +391,6 @@ def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, 
     from, or ``None`` for an inline manifest object. Raises
     :class:`SignoffError` if ``raw_entry`` is neither a string nor a JSON
     object, or a string entry cannot be read/parsed as JSON."""
-    from .signoff import SignoffError, _read_json_source
-
     if isinstance(raw_entry, dict):
         return None, raw_entry
     if isinstance(raw_entry, str):
