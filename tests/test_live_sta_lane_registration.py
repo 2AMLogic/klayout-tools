@@ -12,9 +12,8 @@ over.
 
 These tests close that gap from the ordinary `test` job, without openroad:
 
-1. **Registration** -- every `test*` function in `tests/` whose source
-   references the live gate (`_live_sky130_env` / `_LIVE_ONLY`) carries the
-   `live_openroad` mark on the collected function object.
+1. **Registration** -- live-gated test functions and Test-class methods
+   carry the `live_openroad` mark on the function or its collecting class.
 2. **Non-vacuity** -- the shared gate names still exist and the decorator
    still applies both the marker and the skipif, so a rename that silently
    emptied the scan in (1) fails loudly here instead of passing vacuously.
@@ -52,28 +51,73 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 GATE_NAMES = ("_live_sky130_env", "_LIVE_ONLY")
 
 
-def _live_gated_tests() -> dict[str, tuple[str, int]]:
-    """Map ``"<module>.<test>"`` -> file:line for every live-gated test.
+def _references_gate(nodes: list[ast.AST]) -> bool:
+    """Walk a single collection scope, excluding separately defined helpers."""
+    pending = list(nodes)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Name) and node.id in GATE_NAMES:
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in GATE_NAMES:
+            return True
+        pending.extend(ast.iter_child_nodes(node))
+    return False
 
-    The scan is AST-based (no import needed to *find* candidates): a test
-    function counts when its decorators or body reference either gate name.
-    A module that merely imports `_live_sky130_env` for a helper does not
-    count; only `test*` functions do.
-    """
-    gated: dict[str, tuple[str, int]] = {}
-    for path in sorted(TESTS_DIR.glob("test_*.py")):
-        # This guard's own tests reference the gate names to check them;
-        # they are not live tests (they must run in the ordinary job).
+
+def _gated_functions(nodes, *, prefix="", class_gated=False):
+    for node in nodes:
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and node.name.startswith("test"):
+            if class_gated or _references_gate([*node.decorator_list, *node.body]):
+                yield prefix + node.name, node.lineno
+
+
+def _live_gated_tests(directory: Path = TESTS_DIR) -> dict[str, tuple[str, int]]:
+    """Map collected function and method names to the locations using a live gate."""
+    gated = {}
+    for path in sorted(directory.glob("test_*.py")):
         if path.name == Path(__file__).name:
             continue
         tree = ast.parse(path.read_text())
+        functions = list(_gated_functions(tree.body))
         for node in tree.body:
-            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test")):
-                continue
-            source = ast.unparse(node)
-            if any(name in source for name in GATE_NAMES):
-                gated[f"{path.stem}.{node.name}"] = (str(path), node.lineno)
+            if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                functions.extend(
+                    _gated_functions(
+                        node.body,
+                        prefix=node.name + ".",
+                        class_gated=_references_gate(
+                            [*node.decorator_list, *node.body]
+                        ),
+                    )
+                )
+        for name, line in functions:
+            gated[f"{path.stem}.{name}"] = (str(path), line)
     return gated
+
+
+def _unmarked_gated_tests(gated):
+    unmarked = []
+    for node_id in sorted(gated):
+        module, *qualname = node_id.split(".")
+        owner = importlib.import_module(module)
+        marks = set()
+        for name in qualname:
+            owner = getattr(owner, name, None)
+            if owner is None:
+                break
+            declared = getattr(owner, "pytestmark", [])
+            if not isinstance(declared, (list, tuple)):
+                declared = [declared]
+            marks.update(mark.name for mark in declared)
+        if owner is None:
+            unmarked.append(f"{node_id}: not found after import")
+        elif "live_openroad" not in marks:
+            unmarked.append(f"{node_id}: gate present but live_openroad mark missing")
+    return unmarked
 
 
 def test_every_live_gated_test_carries_the_live_openroad_mark():
@@ -86,17 +130,7 @@ def test_every_live_gated_test_carries_the_live_openroad_mark():
     assert len(files) >= 3, (
         f"expected the live gate to span several files, found {sorted(files)}"
     )
-    unmarked = []
-    for node_id in sorted(gated):
-        module_name, func_name = node_id.split(".", 1)
-        module = importlib.import_module(module_name)
-        func = getattr(module, func_name, None)
-        if func is None:
-            unmarked.append(f"{node_id}: not found after import")
-            continue
-        marks = {mark.name for mark in getattr(func, "pytestmark", [])}
-        if "live_openroad" not in marks:
-            unmarked.append(f"{node_id}: gate present but live_openroad mark missing")
+    unmarked = _unmarked_gated_tests(gated)
     assert not unmarked, (
         "live-gated tests without the live_openroad mark never run in any "
         "lane (issue #7541):\n  " + "\n  ".join(unmarked)
@@ -157,6 +191,15 @@ def _live_lane_run_commands() -> list[str]:
     return [line.strip() for line in code.replace("\\\n", " ").splitlines()]
 
 
+_EXPLICIT_TEST_NODE = re.compile(r"tests/\S+\.py::\w")
+
+
+def test_node_id_check_allows_workflow_annotations():
+    assert not _EXPLICIT_TEST_NODE.search("echo ::group::Tests")
+    assert not _EXPLICIT_TEST_NODE.search("echo ::notice::collected")
+    assert _EXPLICIT_TEST_NODE.search("pytest tests/test_sta.py::TestSTA::test_live")
+
+
 def test_the_live_lane_selects_by_marker_and_not_by_node_ids():
     commands = _live_lane_run_commands()
     pytest_cmds = [c for c in commands if re.search(r"\bpytest\b", c)]
@@ -190,9 +233,9 @@ def test_the_live_lane_selects_by_marker_and_not_by_node_ids():
         assert '"${nodes[@]}"' in cmd, (
             f"the live run does not consume the derived node IDs: {cmd!r}"
         )
-    # No hand-listed node IDs anywhere in the step (the #7541 drift).
+    # GitHub workflow annotations may also contain double colons.
     for cmd in commands:
-        assert not re.search(r"tests/\S+\.py::\w", cmd), (
+        assert not _EXPLICIT_TEST_NODE.search(cmd), (
             "the live lane lists explicit node IDs; every unlisted live "
             f"test runs in no lane again (issue #7541): {cmd!r}"
         )
@@ -248,3 +291,53 @@ def test_the_scan_still_finds_the_tests_the_lane_was_filed_over():
         "test_post_route_sta_instance_paths_run.test_live_engine_report_instances",
     ):
         assert anchor in gated
+
+
+def test_class_and_method_gates_match_their_runtime_marks(tmp_path, monkeypatch):
+    module = "test_live_registration_fixture"
+    (tmp_path / f"{module}.py").write_text("""
+import pytest
+_live_sky130_env = lambda: False
+_LIVE_ONLY = pytest.mark.skipif(not _live_sky130_env(), reason="fixture")
+
+class TestMethods:
+    def test_unmarked(self):
+        _live_sky130_env()
+
+    @pytest.mark.live_openroad
+    def test_marked(self):
+        _live_sky130_env()
+
+    def test_ordinary(self):
+        def test_helper():
+            _live_sky130_env()
+
+@_LIVE_ONLY
+@pytest.mark.live_openroad
+class TestClassGate:
+    def test_inherits(self):
+        pass
+
+class TestBodyGate:
+    pytestmark = pytest.mark.skipif(not _live_sky130_env(), reason="fixture")
+    def test_unmarked(self):
+        pass
+
+class Uncollected:
+    @_LIVE_ONLY
+    def test_helper(self):
+        pass
+""")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    found = _live_gated_tests(tmp_path)
+    expected = (
+        "TestMethods.test_unmarked",
+        "TestMethods.test_marked",
+        "TestClassGate.test_inherits",
+        "TestBodyGate.test_unmarked",
+    )
+    assert set(found) == {f"{module}.{name}" for name in expected}
+    assert _unmarked_gated_tests(found) == [
+        f"{module}.{name}: gate present but live_openroad mark missing"
+        for name in ("TestBodyGate.test_unmarked", "TestMethods.test_unmarked")
+    ]
